@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Download every piece of public material the graded corpus is built from.
+#
+# Nothing downloaded here is committed to this repository. The corpus is rebuilt
+# from these sources on demand, which keeps the repository small and satisfies the
+# share alike licences of the Wikipedia text by attribution rather than by
+# redistribution.
+#
+# Sources and licences:
+#   English and Simple English Wikipedia, CirrusSearch dumps      CC BY-SA 4.0
+#   tokio, vuejs/core, react, symfony                             MIT
+#   pandas                                                        BSD 3 Clause
+#   hugo, moby, airflow                                           Apache 2.0
+#   GitHub issue threads from those repositories                  factual metadata
+#
+# The CirrusSearch dumps are used rather than the page dumps because they already
+# contain plain text and an array of section headings, so no wikitext has to be
+# parsed.
+set -euo pipefail
+
+RAW="${RAW:-$HOME/.cache/rust-db-corpus/raw}"
+DERIVED="${DERIVED:-$HOME/.cache/rust-db-corpus/derived}"
+DUMP_DATE="${DUMP_DATE:-20251222}"
+# Long articles wanted from the English dump. It is 43 GB, far too large to
+# download, so it is streamed and the reader stops once it has this many.
+ENWIKI_ARTICLES="${ENWIKI_ARTICLES:-60000}"
+
+# Some networks reject a request without a browser user agent.
+UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+BASE="https://dumps.wikimedia.org/other/cirrussearch/$DUMP_DATE"
+
+REPOS=(
+  "tokio-rs/tokio"      # Rust
+  "pandas-dev/pandas"   # Python
+  "vuejs/core"          # TypeScript
+  "gohugoio/hugo"       # Go
+  "apache/airflow"      # Python
+  "facebook/react"      # JavaScript
+  "moby/moby"           # Go
+  "symfony/symfony"     # PHP
+)
+
+mkdir -p "$RAW/repos" "$DERIVED"
+cd "$RAW"
+
+echo "== Wikipedia dumps =="
+# The Simple English dumps are small enough to keep whole. The content dump gives
+# the articles; the general dump gives the Talk pages, which are the only real
+# threaded conversation in any of these sources.
+for name in content general; do
+  file="simplewiki-$DUMP_DATE-cirrussearch-$name.json.gz"
+  if [ ! -s "$file" ]; then
+    echo "downloading $file"
+    curl --fail --location --silent --show-error --max-time 3000 \
+      -A "$UA" -o "$file" "$BASE/$file"
+  fi
+  ln -sf "$file" "simplewiki-$name.json.gz"
+done
+
+echo "== source repositories =="
+for repo in "${REPOS[@]}"; do
+  name="$(basename "$repo")"
+  if [ ! -d "repos/$name" ]; then
+    echo "cloning $repo"
+    git clone --depth 1 --single-branch --quiet "https://github.com/$repo.git" "repos/$name"
+  fi
+done
+
+echo "== issue threads =="
+# Bounded rather than paginated to the end. These repositories hold tens of
+# thousands of issues and the corpus needs about two thousand, so fetching every
+# page would spend hundreds of API requests for nothing.
+if ! command -v gh > /dev/null; then
+  echo "gh is not installed; skipping issues. Install it and rerun to build the ticket shaped source." >&2
+else
+  for repo in "${REPOS[@]}"; do
+    name="$(basename "$repo")"
+    out="issues-$name.json"
+    if [ ! -s "$out" ]; then
+      echo "fetching issues for $repo"
+      : > "$out"
+      for page in 1 2 3 4 5 6; do
+        gh api "repos/$repo/issues?state=all&per_page=100&sort=created&direction=desc&page=$page" \
+          >> "$out" 2>/dev/null || break
+      done
+    fi
+  done
+fi
+
+echo "== extracting =="
+python3 "$(dirname "$0")/extract-wikipedia.py" "$RAW" "$DERIVED"
+
+# The English dump is streamed and the reader stops early, so only the first part
+# of the 43 GB file is ever transferred.
+if [ ! -s "$DERIVED/enwiki-articles.jsonl" ]; then
+  echo "streaming $ENWIKI_ARTICLES articles from the English dump"
+  curl --fail --location --silent --show-error --max-time 3000 \
+    -A "$UA" "$BASE/enwiki-$DUMP_DATE-cirrussearch-content.json.gz" \
+    | python3 "$(dirname "$0")/extract-wikipedia.py" - "$DERIVED" \
+        --name enwiki-articles.jsonl --min-chars 3000 --limit "$ENWIKI_ARTICLES" || true
+fi
+
+python3 "$(dirname "$0")/extract-github.py" "$RAW" "$DERIVED"
+
+echo
+echo "the public material is in $DERIVED"
+echo "next: rustdb-bench synth-build, then synth-check, then synth-embed"

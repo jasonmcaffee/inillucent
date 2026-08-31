@@ -1,0 +1,15 @@
+# Build output.
+/target/
+
+# The corpus and its vectors. Both are large and both are rebuilt from public
+# sources by scripts/fetch-public-corpus.sh, so neither belongs in the repository.
+# Keeping the text out also means the share alike licences of the Wikipedia
+# material are satisfied by attribution rather than by redistribution.
+*.cache
+*.vectors
+corpus.jsonl
+/index.rustdb/
+
+# Editor and operating system noise.
+.DS_Store
+/.quill/
