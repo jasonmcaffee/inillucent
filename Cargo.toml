@@ -24,5 +24,9 @@ pgvector = { version = "0.4", features = ["postgres"] }
 # rather than linking it, because ort's system linking strategy wants a static
 # library and Homebrew ships only a dylib. It also avoids ort's own binary
 # download, whose build script does not compile in this workspace.
-ort = { version = "2.0.0-rc.10", default-features = false, features = ["ndarray", "std", "load-dynamic"] }
+# "cuda" adds the CUDA execution provider, which is what lets a whole corpus be
+# embedded on a GPU rather than on the processor. It changes no linkage: the EP is
+# registered through onnxruntime.dll at run time like everything else under
+# load-dynamic, so a machine without CUDA still builds and runs on the CPU.
+ort = { version = "2.0.0-rc.10", default-features = false, features = ["ndarray", "std", "load-dynamic", "cuda"] }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }

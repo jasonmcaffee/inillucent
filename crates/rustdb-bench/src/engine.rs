@@ -202,6 +202,10 @@ pub struct PgVectorEngine {
     /// Candidates drawn from each side before fusion. 50, the same number rust-db
     /// draws, so neither engine is handed a larger pool than the other.
     candidates: usize,
+    /// How the two lists are combined. The SAME method rust-db uses, because a
+    /// fusion the baseline was denied would make the hybrid family measure ranking
+    /// policy rather than retrieval. The harness sets it on both engines together.
+    fusion: Fusion,
 }
 
 impl PgVectorEngine {
@@ -212,7 +216,14 @@ impl PgVectorEngine {
             mode,
             name: mode.label().to_string(),
             candidates: 50,
+            fusion: Fusion::default(),
         })
+    }
+
+    /// Sets the fusion method, so the harness can hand both engines the same one.
+    /// @param fusion - the method to use in `hybrid_search`
+    pub fn set_fusion(&mut self, fusion: Fusion) {
+        self.fusion = fusion;
     }
 
     /// Runs `pg_session_settings` for the query about to be issued. `SET LOCAL`
@@ -236,7 +247,7 @@ impl PgVectorEngine {
     /// filter at all, which is what the SQL does, while `is_empty` only asks
     /// whether the field is absent. Deriving the answer from `where_clause` means
     /// the two cannot disagree.
-    fn has_predicate_beyond_deleted(filter: &Filter) -> bool {
+    pub fn has_predicate_beyond_deleted(filter: &Filter) -> bool {
         Self::where_clause(filter, 2).0 != DELETED_ONLY
     }
 
@@ -405,47 +416,7 @@ impl SearchEngine for PgVectorEngine {
     ) -> Result<Vec<Hit>> {
         let vector_hits = self.vector_search(query_vector, filter, self.candidates)?;
         let lexical_hits = self.lexical_search(query, filter, self.candidates)?;
-
-        // Reciprocal Rank Fusion with the same constants rust-db uses, over keys
-        // rather than internal ordinals.
-        let mut scores: HashMap<String, f32> = HashMap::new();
-        for (rank, h) in vector_hits.iter().enumerate() {
-            *scores.entry(h.key.clone()).or_insert(0.0) += 1.0 / (60.0 + rank as f32 + 1.0);
-        }
-        for (rank, h) in lexical_hits.iter().enumerate() {
-            *scores.entry(h.key.clone()).or_insert(0.0) += 1.0 / (60.0 + rank as f32 + 1.0);
-        }
-        let mut all: Vec<Hit> = scores
-            .into_iter()
-            .map(|(key, score)| Hit { key, score })
-            .collect();
-        all.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.key.cmp(&b.key))
-        });
-
-        // The key already carries the document, so the cap needs no extra query.
-        let mut per_doc: HashMap<String, usize> = HashMap::new();
-        let mut out = Vec::with_capacity(k);
-        for hit in all {
-            let doc = hit
-                .key
-                .split_once('#')
-                .map(|(d, _)| d.to_string())
-                .unwrap_or_default();
-            let used = per_doc.entry(doc).or_insert(0);
-            if *used >= PER_DOC_CAP {
-                continue;
-            }
-            *used += 1;
-            out.push(hit);
-            if out.len() >= k {
-                break;
-            }
-        }
-        Ok(out)
+        Ok(fuse_keyed(&vector_hits, &lexical_hits, self.fusion, k, PER_DOC_CAP))
     }
 }
 
@@ -456,6 +427,13 @@ pub struct RustDbEngine {
     pub keys: Vec<String>,
     pub name: String,
     pub ef_search: Option<usize>,
+    /// Traversal width for a query that carries a predicate. The baseline is given a
+    /// wider budget on a filtered query than on an unfiltered one — `hnsw.ef_search`
+    /// 400 against 100 — because a filtered scan has to walk past the rows the
+    /// predicate rejects. rust-db is given the same asymmetry, so the filtered family
+    /// compares two engines that were allowed to look equally hard rather than one
+    /// that was allowed to look four times harder.
+    pub filtered_ef_search: Option<usize>,
     /// Key back to chunk ordinal. Without it the correctness and invariant
     /// scenarios scan every one of the corpus keys per returned row, which costs more than
     /// every query in the suite put together.
@@ -469,7 +447,20 @@ impl RustDbEngine {
             .enumerate()
             .map(|(i, k)| (k.clone(), i as u32))
             .collect();
-        RustDbEngine { index, keys, name, ef_search, ordinal_of }
+        RustDbEngine { index, keys, name, ef_search, filtered_ef_search: ef_search, ordinal_of }
+    }
+
+    /// The traversal width for one query: the filtered budget when the predicate
+    /// restricts anything, the unfiltered one otherwise.
+    /// @param filter - the predicate this query carries
+    fn budget_for(&self, filter: &Filter) -> Option<usize> {
+        // The same test the PostgreSQL side uses to decide its own session settings, so
+        // the two engines widen their search on exactly the same queries.
+        if PgVectorEngine::has_predicate_beyond_deleted(filter) {
+            self.filtered_ef_search
+        } else {
+            self.ef_search
+        }
     }
 
     fn key(&self, chunk: u32) -> String {
@@ -490,7 +481,7 @@ impl SearchEngine for RustDbEngine {
         let compiled = self.index.compile(filter);
         Ok(self
             .index
-            .vector_search(query, &compiled, k, self.ef_search)
+            .vector_search(query, &compiled, k, self.budget_for(filter))
             .into_iter()
             .map(|n| Hit {
                 key: self.key(n.chunk),
@@ -522,7 +513,7 @@ impl SearchEngine for RustDbEngine {
         let compiled = self.index.compile(filter);
         Ok(self
             .index
-            .hybrid_search(query, query_vector, &compiled, k, self.ef_search)
+            .hybrid_search(query, query_vector, &compiled, k, self.budget_for(filter))
             .into_iter()
             .map(|h| Hit {
                 key: self.key(h.chunk),
@@ -548,6 +539,97 @@ pub fn exhaustive_reference(
         .into_iter()
         .map(|n| engine.keys[n.chunk as usize].clone())
         .collect()
+}
+
+/// Fuses two keyed result lists with the same three methods `rank::fuse` offers.
+///
+/// `rank::fuse` works over chunk ordinals and reads the document from a `Store`,
+/// which the PostgreSQL engine does not have; its keys are `document#index`, so
+/// the document is the part before the hash and the per document cap needs no
+/// extra query. The arithmetic is otherwise identical, deliberately: the two
+/// engines have to be fused the same way or the hybrid family stops being a
+/// measurement of retrieval.
+/// @param vector_hits - the vector side, score already a similarity
+/// @param lexical_hits - the lexical side, score already ascending-is-better
+/// @param fusion - the method, the same one rust-db is using
+/// @param k - how many hits to return
+/// @param per_doc_cap - most chunks kept from any one document
+pub fn fuse_keyed(
+    vector_hits: &[Hit],
+    lexical_hits: &[Hit],
+    fusion: Fusion,
+    k: usize,
+    per_doc_cap: usize,
+) -> Vec<Hit> {
+    fn scale(values: &[f32], how: Fusion) -> Vec<f32> {
+        if values.is_empty() {
+            return Vec::new();
+        }
+        match how {
+            Fusion::Convex { .. } => {
+                let max = values.iter().cloned().fold(f32::MIN, f32::max);
+                if !(max > f32::EPSILON) {
+                    return vec![0.0; values.len()];
+                }
+                values.iter().map(|v| (v / max).clamp(0.0, 1.0)).collect()
+            }
+            _ => {
+                let min = values.iter().cloned().fold(f32::MAX, f32::min);
+                let max = values.iter().cloned().fold(f32::MIN, f32::max);
+                let span = max - min;
+                if span <= f32::EPSILON {
+                    return vec![1.0; values.len()];
+                }
+                values.iter().map(|v| (v - min) / span).collect()
+            }
+        }
+    }
+
+    let mut scores: HashMap<String, f32> = HashMap::new();
+    match fusion {
+        Fusion::ReciprocalRank { k: rrf_k } => {
+            for (rank, h) in vector_hits.iter().enumerate() {
+                *scores.entry(h.key.clone()).or_insert(0.0) += 1.0 / (rrf_k + rank as f32 + 1.0);
+            }
+            for (rank, h) in lexical_hits.iter().enumerate() {
+                *scores.entry(h.key.clone()).or_insert(0.0) += 1.0 / (rrf_k + rank as f32 + 1.0);
+            }
+        }
+        Fusion::NormalizedScore { vector_weight } | Fusion::Convex { vector_weight } => {
+            let v: Vec<f32> = vector_hits.iter().map(|h| h.score).collect();
+            let l: Vec<f32> = lexical_hits.iter().map(|h| h.score).collect();
+            for (h, s) in vector_hits.iter().zip(scale(&v, fusion)) {
+                *scores.entry(h.key.clone()).or_insert(0.0) += vector_weight * s;
+            }
+            for (h, s) in lexical_hits.iter().zip(scale(&l, fusion)) {
+                *scores.entry(h.key.clone()).or_insert(0.0) += (1.0 - vector_weight) * s;
+            }
+        }
+    }
+
+    let mut all: Vec<Hit> = scores.into_iter().map(|(key, score)| Hit { key, score }).collect();
+    all.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.key.cmp(&b.key))
+    });
+
+    let mut per_doc: HashMap<String, usize> = HashMap::new();
+    let mut out = Vec::with_capacity(k);
+    for hit in all {
+        let doc = hit.key.split_once('#').map(|(d, _)| d.to_string()).unwrap_or_default();
+        let used = per_doc.entry(doc).or_insert(0);
+        if *used >= per_doc_cap {
+            continue;
+        }
+        *used += 1;
+        out.push(hit);
+        if out.len() >= k {
+            break;
+        }
+    }
+    out
 }
 
 /// Fuse with an explicit method, used by the scenario that grades the two fusion

@@ -15,6 +15,7 @@ mod metrics;
 mod queryset;
 mod report;
 mod scenarios;
+mod tune;
 mod synth;
 
 use std::path::PathBuf;
@@ -22,6 +23,8 @@ use std::time::Instant;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use rustdb_core::embed_onnx::Device;
+use rustdb_core::rank::Fusion;
 
 /// The synthetic corpus database. `synth-load` creates and fills it, so this
 /// default works for anybody who has run the setup steps in the README.
@@ -72,6 +75,15 @@ enum Command {
         model_dir: String,
         #[arg(long, default_value = "model.onnx")]
         model_file: String,
+        /// Processors the corpus is embedded on, comma separated: `cpu`, `cuda`,
+        /// `cuda:1`, or several. Two cards halve the wall clock; each holds its own
+        /// copy of the weights, so they do not contend the way two CPU sessions do.
+        #[arg(long, default_value = "cpu")]
+        devices: String,
+        /// Batches handed to each device between synchronisations. Only matters with
+        /// more than one device, where too small a window leaves the faster card idle.
+        #[arg(long, default_value_t = 8)]
+        window_batches: usize,
         #[arg(long, default_value_t = 16)]
         batch: usize,
         /// Chunks between progress lines.
@@ -123,11 +135,53 @@ enum Command {
         model_dir: String,
         #[arg(long, default_value = "model.onnx")]
         model_file: String,
+        /// Processor the queries are embedded on: `cpu`, `cuda` or `cuda:N`.
+        #[arg(long, default_value = "cpu")]
+        device: String,
         /// Chunks re-embedded and compared, spread across the whole corpus.
         #[arg(long, default_value_t = 200)]
         samples: usize,
         #[arg(long, default_value_t = 16)]
         batch: usize,
+    },
+    /// Sweep the ranking settings over ONE index build.
+    ///
+    /// `grade` rebuilds the index for every run and takes twenty minutes; nothing
+    /// swept here needs a new index, so this asks the same graph a few hundred more
+    /// questions instead. Use it to choose a default, then confirm it with `grade`.
+    Tune {
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long, default_value_t = 30)]
+        per_source: usize,
+        #[arg(long, default_value = DEFAULT_MODEL_DIR)]
+        model_dir: String,
+        #[arg(long, default_value = "model.onnx")]
+        model_file: String,
+        /// Processor the queries are embedded on: `cpu`, `cuda` or `cuda:N`.
+        #[arg(long, default_value = "cpu")]
+        device: String,
+        /// Lexical coverage exponents to try, comma separated.
+        #[arg(long, default_value = "0,0.5,1,1.5,2")]
+        coverages: String,
+        /// Vector weights to try for the two score based fusions, comma separated.
+        #[arg(long, default_value = "0.3,0.5,0.7,0.8,0.9")]
+        weights: String,
+        /// Lexical proximity weights to try, comma separated.
+        #[arg(long, default_value = "0,0.25,0.5,0.75,1")]
+        proximities: String,
+        /// Whether a query term also matches the terms it prefixes: `true`, `false`
+        /// or both, comma separated.
+        #[arg(long, default_value = "true,false")]
+        prefixes: String,
+        /// Whether the count of matched query terms outranks the score: `true`,
+        /// `false` or both, comma separated.
+        #[arg(long, default_value = "true,false")]
+        tiers: String,
+        /// Added to the query set seeds, so a setting can be chosen on queries the
+        /// graded run will not use. 0 uses the same queries `grade` does.
+        #[arg(long, default_value_t = 100)]
+        seed_offset: u64,
     },
     /// Run the full graded suite and write the score card.
     Grade {
@@ -146,10 +200,88 @@ enum Command {
         /// parent directory instead.
         #[arg(long, default_value = "rust-db-scorecard.md")]
         out: PathBuf,
+        /// Processor the queries are embedded on: `cpu`, `cuda` or `cuda:N`.
+        #[arg(long, default_value = "cpu")]
+        device: String,
+        /// How the vector and lexical lists are combined: `rrf`, `minmax` or
+        /// `convex`. Applied to BOTH engines, so the hybrid family stays a
+        /// measurement of retrieval rather than of ranking policy.
+        #[arg(long, default_value = "minmax")]
+        fusion: String,
+        /// Weight on the vector side for the two score based fusions.
+        #[arg(long, default_value_t = 0.35)]
+        vector_weight: f32,
+        /// Exponent on the share of the query a lexical hit contains. rust-db only:
+        /// PostgreSQL already requires every term, so it has nothing to weight.
+        #[arg(long, default_value_t = 3.0)]
+        lexical_coverage: f32,
+        /// How much of a lexical score is scaled by how tightly the matched query
+        /// terms sit together. rust-db only: `ts_rank_cd` already does this.
+        #[arg(long, default_value_t = 1.0)]
+        lexical_proximity: f32,
+        /// Whether a query term also matches the terms it prefixes.
+        #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+        lexical_prefix: bool,
+        /// Whether the count of matched query terms outranks the score.
+        #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+        lexical_tier: bool,
         /// Skip the two pgvector configurations, for iterating on rust-db alone.
         #[arg(long, default_value_t = false)]
         rustdb_only: bool,
     },
+}
+
+/// Parses a comma separated device list into the devices the embedder opens a
+/// session on, rejecting an empty list rather than silently embedding on nothing.
+/// @param text - the value of --devices, e.g. "cuda:0,cuda:1"
+fn parse_devices(text: &str) -> Result<Vec<Device>> {
+    let devices: Vec<Device> = text
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(Device::parse)
+        .collect::<Result<_>>()?;
+    anyhow::ensure!(!devices.is_empty(), "--devices named no device");
+    Ok(devices)
+}
+
+/// Parses a fusion name into the method the engines are given.
+/// @param name - `rrf`, `minmax` or `convex`
+/// @param vector_weight - the weight on the vector side, ignored by `rrf`
+fn parse_fusion(name: &str, vector_weight: f32) -> Result<Fusion> {
+    Ok(match name.trim().to_ascii_lowercase().as_str() {
+        "rrf" => Fusion::ReciprocalRank { k: rustdb_core::rank::RRF_K },
+        "minmax" => Fusion::NormalizedScore { vector_weight },
+        "convex" => Fusion::Convex { vector_weight },
+        other => anyhow::bail!("unknown fusion {other}, expected rrf, minmax or convex"),
+    })
+}
+
+/// Parses a comma separated list of booleans.
+/// @param text - e.g. "true,false"
+fn parse_bools(text: &str) -> Result<Vec<bool>> {
+    let values: Vec<bool> = text
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<bool>().map_err(|e| anyhow::anyhow!("{s} is not true or false: {e}")))
+        .collect::<Result<_>>()?;
+    anyhow::ensure!(!values.is_empty(), "the list named no values");
+    Ok(values)
+}
+
+/// Parses a comma separated list of numbers, rejecting an empty list rather than
+/// silently sweeping nothing.
+/// @param text - e.g. "0,0.5,1"
+fn parse_floats(text: &str) -> Result<Vec<f32>> {
+    let values: Vec<f32> = text
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<f32>().map_err(|e| anyhow::anyhow!("{s} is not a number: {e}")))
+        .collect::<Result<_>>()?;
+    anyhow::ensure!(!values.is_empty(), "the list named no values");
+    Ok(values)
 }
 
 /// Expand a leading `~/` so a default path can name the home directory.
@@ -184,9 +316,10 @@ fn main() -> Result<()> {
         Command::SynthCheck { corpus, per_source } => {
             synth::check(&corpus, per_source)?;
         }
-        Command::SynthEmbed { corpus, model_dir, model_file, batch, report_every } => {
+        Command::SynthEmbed { corpus, model_dir, model_file, batch, report_every, devices, window_batches } => {
             let dir = expand_home(&model_dir)?;
-            synth::embed(&corpus, &cli.cache, &dir, &model_file, batch, report_every)?;
+            let devices = parse_devices(&devices)?;
+            synth::embed(&corpus, &cli.cache, &dir, &model_file, batch, report_every, &devices, window_batches)?;
         }
         Command::SynthLoad { corpus, no_indexes } => {
             let chunks = synth::read_corpus(&corpus)?;
@@ -283,10 +416,28 @@ fn main() -> Result<()> {
                 );
             }
         }
-        Command::EmbedCheck { model_dir, model_file, samples, batch } => {
+        Command::EmbedCheck { model_dir, model_file, samples, batch, device } => {
             let dir = expand_home(&model_dir)?;
             let c = corpus::load_cache(&cli.cache)?;
-            embedcheck::run(&c, &dir, &model_file, samples, batch)?;
+            embedcheck::run(&c, &dir, &model_file, samples, batch, Device::parse(&device)?)?;
+        }
+        Command::Tune { limit, per_source, model_dir, model_file, device, coverages, weights, proximities, prefixes, tiers, seed_offset } => {
+            let c = corpus::load_cache(&cli.cache)?;
+            let dir = expand_home(&model_dir)?;
+            tune::run(
+                &c,
+                limit,
+                per_source,
+                &dir,
+                &model_file,
+                Device::parse(&device)?,
+                &parse_floats(&coverages)?,
+                &parse_floats(&weights)?,
+                &parse_floats(&proximities)?,
+                &parse_bools(&prefixes)?,
+                &parse_bools(&tiers)?,
+                seed_offset,
+            )?;
         }
         Command::Grade {
             limit,
@@ -295,6 +446,13 @@ fn main() -> Result<()> {
             model_file,
             out,
             rustdb_only,
+            fusion,
+            vector_weight,
+            lexical_coverage,
+            lexical_proximity,
+            lexical_prefix,
+            lexical_tier,
+            device,
         } => {
             let c = corpus::load_cache(&cli.cache)?;
             let dir = expand_home(&model_dir)?;
@@ -306,6 +464,12 @@ fn main() -> Result<()> {
                 &model_file,
                 &cli.database_url,
                 rustdb_only,
+                Device::parse(&device)?,
+                parse_fusion(&fusion, vector_weight)?,
+                lexical_coverage,
+                lexical_proximity,
+                lexical_prefix,
+                lexical_tier,
             )?;
             let markdown = report::render(&card);
             std::fs::write(&out, markdown)?;

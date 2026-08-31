@@ -4,6 +4,7 @@
 //! engine, and reports the number it measured rather than the number that would
 //! be convenient.
 
+use rustdb_core::embed_onnx::Device;
 use std::collections::HashSet;
 use std::time::Instant;
 
@@ -24,6 +25,13 @@ use crate::metrics::{
 };
 use crate::queryset::{self, GradedQuery};
 use crate::report::{BuildFacts, GateResult, Measure, MetricRow, Scenario, ScoreCard};
+
+/// Traversal width rust-db uses on a filtered query, matched to the `hnsw.ef_search`
+/// the well configured baseline uses on one. It also moves the cost model's crossover:
+/// exhaustive search is chosen below `sqrt(ef_search * 32 * chunks)`, which at 400 on
+/// this corpus is 48,672 chunks, so the second largest source is scanned exactly
+/// instead of walked approximately.
+const FILTERED_EF_SEARCH: usize = 400;
 
 const RUSTDB: &str = "rust-db";
 const SOURCES: &[&str] = &["confluence", "github", "slack", "jira", "figma", "miro"];
@@ -134,22 +142,22 @@ fn keys_of(hits: &[crate::engine::Hit]) -> Vec<String> {
 
 /// Map string keys to dense ordinals so the metric functions, which work on u32,
 /// can be shared between the two engines.
-struct KeySpace {
+pub struct KeySpace {
     ids: std::collections::HashMap<String, u32>,
 }
 
 impl KeySpace {
-    fn new() -> Self {
+    pub fn new() -> Self {
         KeySpace { ids: std::collections::HashMap::new() }
     }
-    fn id(&mut self, key: &str) -> u32 {
+    pub fn id(&mut self, key: &str) -> u32 {
         let next = self.ids.len() as u32;
         *self.ids.entry(key.to_string()).or_insert(next)
     }
-    fn ids_of(&mut self, keys: &[String]) -> Vec<u32> {
+    pub fn ids_of(&mut self, keys: &[String]) -> Vec<u32> {
         keys.iter().map(|k| self.id(k)).collect()
     }
-    fn set_of(&mut self, keys: &[String]) -> HashSet<u32> {
+    pub fn set_of(&mut self, keys: &[String]) -> HashSet<u32> {
         keys.iter().map(|k| self.id(k)).collect()
     }
 }
@@ -163,12 +171,34 @@ pub fn grade(
     model_file: &str,
     database_url: &str,
     rustdb_only: bool,
+    device: Device,
+    fusion: Fusion,
+    lexical_coverage: f32,
+    lexical_proximity: f32,
+    lexical_prefix: bool,
+    lexical_tier: bool,
 ) -> Result<ScoreCard> {
     eprintln!("building the rust-db index");
     let (index, keys, stats, build_seconds) = build_index(corpus, limit, true)?;
     eprintln!("  built in {build_seconds:.1}s");
 
     let mut rustdb = RustDbEngine::new(index, keys.clone(), RUSTDB.to_string(), Some(128));
+    // The same asymmetry the well configured baseline is given: a wider traversal on
+    // a filtered query, because a filtered walk has to step past everything the
+    // predicate rejects. pgvector gets hnsw.ef_search 400 filtered against 100
+    // unfiltered; without this rust-db was walking a quarter as wide on the one
+    // family that is entirely about filtered search.
+    rustdb.filtered_ef_search = Some(FILTERED_EF_SEARCH);
+    // Both engines get the same ranking policy. Only the lexical coverage is
+    // one-sided, and only because PostgreSQL already has what it buys: to_tsquery
+    // joins the terms with `&`, so every row it returns contains all of them.
+    // rust-db scores any term, which returns far more rows, and the exponent is
+    // what stops the extra rows outranking the complete ones.
+    rustdb.index.set_lexical_coverage(lexical_coverage);
+    rustdb.index.set_lexical_proximity(lexical_proximity);
+    rustdb.index.set_lexical_prefix(lexical_prefix);
+    rustdb.index.set_lexical_tier(lexical_tier);
+    rustdb.index.set_fusion(fusion);
 
     // Query sets. Generated from the same slice of the corpus the index holds.
     let n = limit.unwrap_or(corpus.len()).min(corpus.len());
@@ -189,9 +219,9 @@ pub fn grade(
 
     eprintln!("embedding queries with the in process model from {model_dir}");
     let identity_texts: Vec<String> = identity.iter().map(|q| q.text.clone()).collect();
-    let identity_vectors = queryset::embed_queries(model_dir, model_file, &identity_texts)?;
+    let identity_vectors = queryset::embed_queries(model_dir, model_file, &identity_texts, device)?;
     let heading_texts: Vec<String> = headings.iter().map(|q| q.text.clone()).collect();
-    let heading_vectors = queryset::embed_queries(model_dir, model_file, &heading_texts)?;
+    let heading_vectors = queryset::embed_queries(model_dir, model_file, &heading_texts, device)?;
     eprintln!("  embedded {} queries", identity_vectors.len() + heading_vectors.len());
 
     let mut engines: Vec<String> = vec![RUSTDB.to_string()];
@@ -207,6 +237,12 @@ pub fn grade(
         engines.push(PgMode::WellConfigured.label().to_string());
         Some(PgVectorEngine::connect(database_url, PgMode::WellConfigured)?)
     };
+
+    // The baseline is fused the same way, so the hybrid family measures retrieval
+    // rather than which engine was handed the better ranking policy.
+    for engine in [pg_default.as_mut(), pg_well_configured.as_mut()].into_iter().flatten() {
+        engine.set_fusion(fusion);
+    }
 
     let mut scenarios = Vec::new();
 
@@ -755,10 +791,15 @@ fn fusion_methods(
     let filter = Filter::default();
     let mut rows = Vec::new();
 
+    // The methods that are actually a choice for this engine, including the one it now
+    // defaults to, so the family says why the default is the default rather than
+    // comparing two settings nobody ships.
     let candidates: Vec<(String, Fusion)> = vec![
         ("Reciprocal Rank Fusion, k = 60".to_string(), Fusion::ReciprocalRank { k: 60.0 }),
-        ("normalized score, vector weight 0.5".to_string(), Fusion::NormalizedScore { vector_weight: 0.5 }),
-        ("normalized score, vector weight 0.7".to_string(), Fusion::NormalizedScore { vector_weight: 0.7 }),
+        ("min-max, vector weight 0.35 (default)".to_string(), Fusion::NormalizedScore { vector_weight: 0.35 }),
+        ("min-max, vector weight 0.5".to_string(), Fusion::NormalizedScore { vector_weight: 0.5 }),
+        ("min-max, vector weight 0.7".to_string(), Fusion::NormalizedScore { vector_weight: 0.7 }),
+        ("convex, vector weight 0.35".to_string(), Fusion::Convex { vector_weight: 0.35 }),
     ];
 
     let mut ndcg = Vec::new();

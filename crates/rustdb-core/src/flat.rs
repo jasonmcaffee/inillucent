@@ -40,6 +40,17 @@ pub fn search(
 
 /// Exhaustive top k using an arbitrary scorer, so the exhaustive path is
 /// available over int8 codes as well as full precision vectors.
+///
+/// The candidates are reduced to the best `k` as they are produced rather than
+/// collected and sorted. On a source predicate that is the difference between
+/// sorting every passing chunk and sorting `k` per thread: the slack predicate
+/// passes 17,642 chunks and only 50 are wanted, so a full sort spent most of its
+/// time ordering rows nobody would ever read.
+/// @param scorer - full precision vectors, or the int8 codes
+/// @param store - the chunk metadata the filter reads
+/// @param filter - the compiled predicate
+/// @param query - the query vector, already normalized
+/// @param k - how many neighbours to return
 pub fn search_with<S: Scorer + Sync>(
     scorer: &S,
     store: &Store,
@@ -52,6 +63,7 @@ pub fn search_with<S: Scorer + Sync>(
     }
     let trivial = filter.is_trivial();
     let n = store.n_chunks();
+    let score = |chunk: u32| Neighbour { chunk, distance: scorer.distance(chunk, query) };
 
     // When the predicate names sources, the store can list their chunks, so the
     // scan visits those instead of testing every chunk in the corpus. The
@@ -59,79 +71,133 @@ pub fn search_with<S: Scorer + Sync>(
     // constrains labels or a timestamp stays correct.
     if let Some(groups) = filter.candidate_chunks(store) {
         let total: usize = groups.iter().map(|g| g.len()).sum();
-        let mut all: Vec<Neighbour> = if total > PARALLEL_ABOVE {
+        if total > PARALLEL_ABOVE {
             // Parallelise over the chunks, not over the groups. A single source
             // predicate produces exactly one group, so splitting the work by
             // group leaves the whole scan on one thread. Measured: doing it by
             // group took 5.08 ms on the slack predicate where doing it by chunk
             // takes 1.67 ms.
-            groups
+            return groups
                 .par_iter()
                 .flat_map(|g| g.par_iter().copied())
                 .filter(|chunk| filter.passes(*chunk, store))
-                .map(|chunk| Neighbour {
-                    chunk,
-                    distance: scorer.distance(chunk, query),
-                })
-                .collect()
-        } else {
-            let mut v = Vec::with_capacity(total);
-            for chunk in groups.iter().flat_map(|g| g.iter().copied()) {
-                if filter.passes(chunk, store) {
-                    v.push(Neighbour {
-                        chunk,
-                        distance: scorer.distance(chunk, query),
-                    });
-                }
+                .map(score)
+                .fold(|| TopK::new(k), TopK::pushed)
+                .reduce(|| TopK::new(k), TopK::merged)
+                .finish();
+        }
+        let mut top = TopK::new(k);
+        for chunk in groups.iter().flat_map(|g| g.iter().copied()) {
+            if filter.passes(chunk, store) {
+                top.push(score(chunk));
             }
-            v
-        };
-        all.sort_by(|a, b| {
-            a.distance
-                .partial_cmp(&b.distance)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(a.chunk.cmp(&b.chunk))
-        });
-        all.truncate(k);
-        return all;
+        }
+        return top.finish();
     }
 
     // The scan is the query path for a selective predicate, not only a test
     // reference, so it is worth spreading across cores. Every chunk is
-    // independent, and the sort below restores a single deterministic order, so
-    // parallelism changes the speed and not the answer.
-    let mut all: Vec<Neighbour> = if n > PARALLEL_ABOVE {
-        (0..n as u32)
+    // independent, and the ordering below restores a single deterministic order,
+    // so parallelism changes the speed and not the answer.
+    if n > PARALLEL_ABOVE {
+        return (0..n as u32)
             .into_par_iter()
             .filter(|chunk| trivial || filter.passes(*chunk, store))
-            .map(|chunk| Neighbour {
-                chunk,
-                distance: scorer.distance(chunk, query),
-            })
-            .collect()
-    } else {
-        let mut v: Vec<Neighbour> = Vec::with_capacity(filter.pass_count());
-        for chunk in 0..n as u32 {
-            if !trivial && !filter.passes(chunk, store) {
-                continue;
-            }
-            v.push(Neighbour {
-                chunk,
-                distance: scorer.distance(chunk, query),
-            });
+            .map(score)
+            .fold(|| TopK::new(k), TopK::pushed)
+            .reduce(|| TopK::new(k), TopK::merged)
+            .finish();
+    }
+    let mut top = TopK::new(k);
+    for chunk in 0..n as u32 {
+        if !trivial && !filter.passes(chunk, store) {
+            continue;
         }
-        v
-    };
-
-    all.sort_by(|a, b| {
-        a.distance
-            .partial_cmp(&b.distance)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then(a.chunk.cmp(&b.chunk))
-    });
-    all.truncate(k);
-    all
+        top.push(score(chunk));
+    }
+    top.finish()
 }
+
+/// The best `k` neighbours seen so far, in the order the scan wants them out:
+/// ascending distance, ascending chunk identifier on a tie.
+///
+/// A max heap keyed on that order would be the textbook structure. This keeps a
+/// buffer instead and reduces it when it fills, because the cut off after the
+/// first reduction rejects almost every later candidate with a single float
+/// comparison, and the occasional `select_nth_unstable` is linear. It also gives
+/// the same answer whatever order the candidates arrive in, which matters: the
+/// parallel scan does not fix the order, and two runs disagreeing on equally
+/// distant chunks would read as a recall difference that is really a coincidence.
+struct TopK {
+    k: usize,
+    /// Filled to `2k` before being reduced back to `k`, so the reduction is paid
+    /// once per `k` candidates rather than once per candidate.
+    buffer: Vec<Neighbour>,
+    /// The worst distance currently kept, once the buffer has overflowed at least
+    /// once. Everything worse than this is rejected without being stored.
+    cutoff: f32,
+    full: bool,
+}
+
+/// Ascending distance, ascending chunk identifier on a tie.
+fn nearer(a: &Neighbour, b: &Neighbour) -> std::cmp::Ordering {
+    a.distance
+        .partial_cmp(&b.distance)
+        .unwrap_or(std::cmp::Ordering::Equal)
+        .then(a.chunk.cmp(&b.chunk))
+}
+
+impl TopK {
+    fn new(k: usize) -> TopK {
+        TopK { k, buffer: Vec::with_capacity(2 * k.max(1)), cutoff: f32::INFINITY, full: false }
+    }
+
+    fn push(&mut self, n: Neighbour) {
+        // Equal to the cutoff is still kept: the tie break is on the chunk
+        // identifier, and a lower identifier at the same distance wins.
+        if self.full && n.distance > self.cutoff {
+            return;
+        }
+        self.buffer.push(n);
+        if self.buffer.len() >= 2 * self.k.max(1) {
+            self.reduce();
+        }
+    }
+
+    /// `push`, by value, for `Iterator::fold`.
+    fn pushed(mut self, n: Neighbour) -> TopK {
+        self.push(n);
+        self
+    }
+
+    fn reduce(&mut self) {
+        if self.buffer.len() <= self.k {
+            return;
+        }
+        self.buffer.select_nth_unstable_by(self.k - 1, nearer);
+        self.buffer.truncate(self.k);
+        self.cutoff = self
+            .buffer
+            .iter()
+            .map(|n| n.distance)
+            .fold(f32::NEG_INFINITY, f32::max);
+        self.full = true;
+    }
+
+    fn merged(mut self, other: TopK) -> TopK {
+        for n in other.buffer {
+            self.push(n);
+        }
+        self
+    }
+
+    fn finish(mut self) -> Vec<Neighbour> {
+        self.buffer.sort_by(nearer);
+        self.buffer.truncate(self.k);
+        self.buffer
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -337,5 +403,55 @@ mod tests {
             hits.iter().map(|h| h.chunk).collect::<Vec<_>>(),
             vec![0, 1, 2]
         );
+    }
+
+    /// The reduce-as-you-go top k has to agree with sorting everything, including
+    /// on ties, or a speed change would read as a recall change on the score card.
+    #[test]
+    fn top_k_agrees_with_sorting_every_candidate() {
+        use rand::rngs::StdRng;
+        use rand::{Rng, SeedableRng};
+        let mut rng = StdRng::seed_from_u64(7);
+        for k in [1usize, 3, 17, 50] {
+            for n in [0usize, 1, 5, 300, 5000] {
+                // Distances drawn from a small set, so ties are common rather than rare.
+                let candidates: Vec<Neighbour> = (0..n as u32)
+                    .map(|chunk| Neighbour { chunk, distance: rng.gen_range(0..7) as f32 * 0.25 })
+                    .collect();
+
+                let mut sorted = candidates.clone();
+                sorted.sort_by(nearer);
+                sorted.truncate(k);
+
+                let mut top = TopK::new(k);
+                for c in &candidates {
+                    top.push(*c);
+                }
+                assert_eq!(top.finish(), sorted, "k={k} n={n}");
+            }
+        }
+    }
+
+    /// Merging two partial results is the parallel scan's reduction step, and it has
+    /// to give the same answer as one thread having seen everything.
+    #[test]
+    fn merging_two_partial_results_matches_one_pass() {
+        let candidates: Vec<Neighbour> = (0..200u32)
+            .map(|chunk| Neighbour { chunk, distance: ((chunk * 37) % 100) as f32 / 100.0 })
+            .collect();
+        let k = 10;
+        let mut whole = TopK::new(k);
+        for c in &candidates {
+            whole.push(*c);
+        }
+        let mut left = TopK::new(k);
+        for c in &candidates[..90] {
+            left.push(*c);
+        }
+        let mut right = TopK::new(k);
+        for c in &candidates[90..] {
+            right.push(*c);
+        }
+        assert_eq!(left.merged(right).finish(), whole.finish());
     }
 }

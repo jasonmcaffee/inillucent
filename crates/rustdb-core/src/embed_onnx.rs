@@ -18,6 +18,47 @@ use tokenizers::Tokenizer;
 use crate::distance::normalize;
 use crate::embed::{document_prefix, query_prefix, Embedder};
 
+/// Which processor runs the model.
+///
+/// The default is the processor, which is what the engine shipped with and what
+/// a machine with no CUDA install can do. `Cuda` names a specific card, so a box
+/// with two of them can run one embedder per card and halve the wall clock of a
+/// corpus embedding run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Device {
+    /// ONNX Runtime's default CPU execution provider.
+    Cpu,
+    /// The CUDA execution provider, pinned to one card by its ordinal.
+    Cuda(i32),
+}
+
+impl Device {
+    /// Parses `cpu`, `cuda` (card 0) or `cuda:N`.
+    /// @param text - the device name as written on a command line
+    pub fn parse(text: &str) -> Result<Device> {
+        let text = text.trim().to_ascii_lowercase();
+        if text == "cpu" {
+            return Ok(Device::Cpu);
+        }
+        if text == "cuda" {
+            return Ok(Device::Cuda(0));
+        }
+        if let Some(rest) = text.strip_prefix("cuda:") {
+            let id: i32 = rest.parse().with_context(|| format!("{rest} is not a card ordinal"))?;
+            return Ok(Device::Cuda(id));
+        }
+        anyhow::bail!("unknown device {text}, expected cpu, cuda or cuda:N")
+    }
+
+    /// A short label for progress output.
+    pub fn label(&self) -> String {
+        match self {
+            Device::Cpu => "cpu".to_string(),
+            Device::Cuda(id) => format!("cuda:{id}"),
+        }
+    }
+}
+
 /// How to turn token vectors into one embedding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pooling {
@@ -50,6 +91,23 @@ pub struct OnnxOptions {
     /// which is a single thread and leaves most of the machine idle. Embedding a
     /// whole corpus is the case where this matters.
     pub intra_threads: Option<usize>,
+    /// Which processor runs the model.
+    pub device: Device,
+    /// Ceiling on `texts in a batch x longest sequence in it, squared`.
+    ///
+    /// Attention allocates one score per pair of positions per head, so its
+    /// memory grows with the SQUARE of the sequence length, not with the token
+    /// count. `batch_size` alone therefore does not bound it: 64 texts at the
+    /// 1900 token limit asks for 64 x 12 x 1900^2 x 4 bytes, which is 11.1 GB and
+    /// is exactly the allocation that failed 45% of the way through a corpus. At
+    /// the default this is 3.1 GB for the attention scores, so several sessions
+    /// fit on one card at once.
+    pub max_batch_cells: usize,
+    /// Ceiling on the device memory arena, in bytes, per session. `None` lets it
+    /// grow without bound, which is fine for one session and is not fine for two
+    /// on one card: the first grows into all the free memory and the second then
+    /// cannot allocate its attention buffer.
+    pub device_memory_limit: Option<usize>,
 }
 
 impl Default for OnnxOptions {
@@ -61,6 +119,9 @@ impl Default for OnnxOptions {
             pooling: Pooling::Mean,
             batch_size: 16,
             intra_threads: None,
+            device: Device::Cpu,
+            max_batch_cells: 24_000_000,
+            device_memory_limit: None,
         }
     }
 }
@@ -95,6 +156,26 @@ impl OnnxEmbedder {
                 .with_intra_threads(threads)
                 .map_err(|e| anyhow::anyhow!("setting the ONNX intra operator thread count: {e}"))?;
         }
+        if let Device::Cuda(device_id) = options.device {
+            preload_cuda_dylibs();
+            // error_on_failure, deliberately. ort's default is to log the failure and
+            // fall back to the processor, which is the worst outcome available here: an
+            // embedding run meant to take an hour silently becomes one that takes a day,
+            // and nothing in the output says why.
+            builder = builder
+                .with_execution_providers([ort::ep::CUDA::default()
+                    .with_device_id(device_id)
+                    // Extend the arena by exactly what was asked for. The default
+                    // rounds up to the next power of two, which on a card holding
+                    // two sessions means the first one reserves memory it never
+                    // uses and the second one fails on an allocation that would
+                    // have fitted.
+                    .with_arena_extend_strategy(ort::ep::ArenaExtendStrategy::SameAsRequested)
+                    .with_memory_limit(options.device_memory_limit.unwrap_or(usize::MAX))
+                    .build()
+                    .error_on_failure()])
+                .map_err(|e| anyhow::anyhow!("registering the CUDA execution provider on card {device_id}: {e}"))?;
+        }
         let session = builder
             .commit_from_file(&model_path)
             .with_context(|| format!("loading {}", model_path.display()))?;
@@ -119,30 +200,62 @@ impl OnnxEmbedder {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        // Every sequence in a batch is padded to the longest one in it, so mixing
-        // a 6 character chunk with a 6000 character chunk makes the short one cost
-        // as much as the long one. Grouping texts of similar length into the same
-        // batch removes that waste. The results are put back into the caller's
-        // order, so this is invisible from outside.
-        let mut order: Vec<usize> = (0..texts.len()).collect();
-        order.sort_by_key(|&i| texts[i].len());
+        // Tokenized once, up front, for two reasons. Every sequence in a batch is
+        // padded to the longest one in it, so mixing a 6 character chunk with a
+        // 6000 character one makes the short one cost as much as the long one, and
+        // grouping by length removes that waste. And the batches have to respect a
+        // memory ceiling that depends on the true token count rather than on the
+        // character count, which only the tokenizer knows.
+        let encodings = self
+            .tokenizer
+            .encode_batch(texts.to_vec(), true)
+            .map_err(|e| anyhow::anyhow!("tokenizing: {e}"))?;
+        let lengths: Vec<usize> = encodings
+            .iter()
+            .map(|e| e.get_ids().len().min(self.options.max_tokens).max(1))
+            .collect();
 
         let mut out: Vec<Vec<f32>> = vec![Vec::new(); texts.len()];
-        for group in order.chunks(self.options.batch_size) {
-            let batch: Vec<String> = group.iter().map(|&i| texts[i].clone()).collect();
-            for (&i, v) in group.iter().zip(self.run_batch(&batch)?) {
-                out[i] = v;
-            }
+        for batch in plan_batches(&lengths, self.options.batch_size, self.options.max_batch_cells) {
+            self.run_group(&batch, &encodings, &mut out)?;
         }
         Ok(out)
     }
 
+    /// Runs one batch of already tokenized texts and writes each vector back into
+    /// the caller's slot.
+    /// @param batch - indices into `encodings`, all of a similar length
+    /// @param encodings - the tokenizer output for the whole call
+    /// @param out - the result vector, indexed the same way
+    fn run_group(
+        &self,
+        batch: &[usize],
+        encodings: &[tokenizers::Encoding],
+        out: &mut [Vec<f32>],
+    ) -> Result<()> {
+        let picked: Vec<&tokenizers::Encoding> = batch.iter().map(|&i| &encodings[i]).collect();
+        for (&i, v) in batch.iter().zip(self.run_encodings(&picked)?) {
+            out[i] = v;
+        }
+        Ok(())
+    }
+
+    /// Tokenizes and runs one batch with no length grouping. Kept for the tests,
+    /// which hand it a handful of short strings where grouping changes nothing.
+    #[cfg(test)]
     fn run_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         let encodings = self
             .tokenizer
             .encode_batch(texts.to_vec(), true)
             .map_err(|e| anyhow::anyhow!("tokenizing: {e}"))?;
+        let borrowed: Vec<&tokenizers::Encoding> = encodings.iter().collect();
+        self.run_encodings(&borrowed)
+    }
 
+    fn run_encodings(&self, encodings: &[&tokenizers::Encoding]) -> Result<Vec<Vec<f32>>> {
+        if encodings.is_empty() {
+            return Ok(Vec::new());
+        }
         // Truncate to the configured bound, then pad every sequence in the batch
         // to the longest one, because the model takes a rectangular tensor.
         let lengths: Vec<usize> = encodings
@@ -150,7 +263,7 @@ impl OnnxEmbedder {
             .map(|e| e.get_ids().len().min(self.options.max_tokens))
             .collect();
         let width = lengths.iter().copied().max().unwrap_or(1).max(1);
-        let batch = texts.len();
+        let batch = encodings.len();
 
         let mut ids = vec![0i64; batch * width];
         let mut mask = vec![0i64; batch * width];
@@ -176,7 +289,7 @@ impl OnnxEmbedder {
                 "attention_mask" => Value::from_array(([batch, width], mask.clone()))?,
                 "token_type_ids" => Value::from_array(([batch, width], types))?,
             ])
-            .context("running the model")?;
+            .with_context(|| format!("running the model on {batch} texts of {width} tokens"))?;
 
         let (shape, data) = outputs["last_hidden_state"]
             .try_extract_tensor::<f32>()
@@ -218,6 +331,68 @@ impl OnnxEmbedder {
         }
         Ok(result)
     }
+}
+
+/// Groups texts into batches that are cheap to run and small enough to fit.
+///
+/// Two constraints, and only the first is obvious. Every sequence in a batch is
+/// padded to the longest one in it, so texts of a similar length belong together;
+/// that is what the sort is for. And attention allocates one score per pair of
+/// positions per head, so the memory a batch needs grows with the SQUARE of its
+/// longest sequence — `batch_size` alone does not bound it, and 64 texts at 1,900
+/// tokens asks for 11.1 GB in one allocation.
+///
+/// A batch that would exceed the cell budget is closed early. A single text that
+/// exceeds it on its own is still run: refusing it would drop a chunk from the
+/// corpus, and one long sequence alone is the smallest that allocation can be.
+/// @param lengths - token count per text, already truncated to the model bound
+/// @param batch_size - most texts in one batch
+/// @param max_cells - ceiling on `texts in the batch x longest, squared`
+fn plan_batches(lengths: &[usize], batch_size: usize, max_cells: usize) -> Vec<Vec<usize>> {
+    let mut order: Vec<usize> = (0..lengths.len()).collect();
+    order.sort_by_key(|&i| lengths[i]);
+
+    let mut batches: Vec<Vec<usize>> = Vec::new();
+    let mut batch: Vec<usize> = Vec::with_capacity(batch_size.max(1));
+    let mut widest = 0usize;
+    for &i in &order {
+        let width = widest.max(lengths[i]);
+        let cells = (batch.len() + 1).saturating_mul(width).saturating_mul(width);
+        let full = batch.len() >= batch_size.max(1) || (!batch.is_empty() && cells > max_cells);
+        if full {
+            batches.push(std::mem::take(&mut batch));
+            widest = 0;
+        }
+        widest = widest.max(lengths[i]);
+        batch.push(i);
+    }
+    if !batch.is_empty() {
+        batches.push(batch);
+    }
+    batches
+}
+
+/// Loads the CUDA and cuDNN shared libraries before the execution provider asks
+/// for them, so the EP finds them without their directories being on PATH.
+///
+/// The directories come from `RUSTDB_CUDA_BIN` and `RUSTDB_CUDNN_BIN`. With
+/// neither set nothing is preloaded and the EP falls back to the usual search
+/// order, which is what a machine with CUDA already on PATH wants. Runs once:
+/// ort's preloader intentionally leaks its handles, so repeating it per session
+/// would leak per session.
+fn preload_cuda_dylibs() {
+    use std::sync::OnceLock;
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        let cuda = std::env::var("RUSTDB_CUDA_BIN").ok().map(PathBuf::from);
+        let cudnn = std::env::var("RUSTDB_CUDNN_BIN").ok().map(PathBuf::from);
+        if cuda.is_none() && cudnn.is_none() {
+            return;
+        }
+        if let Err(e) = ort::ep::cuda::preload_dylibs(cuda.as_deref(), cudnn.as_deref()) {
+            eprintln!("warning: preloading the CUDA libraries failed: {e}");
+        }
+    });
 }
 
 /// Layer normalisation with no learned scale or shift: subtract the mean, divide
@@ -418,5 +593,70 @@ mod tests {
     fn an_empty_input_returns_an_empty_result() {
         let e = embedder_or_skip!(OnnxOptions::default());
         assert!(e.embed_documents(&[]).unwrap().is_empty());
+    }
+
+    /// The batch planner is the thing that stopped a whole corpus run dying 45% of
+    /// the way through, so its two constraints are worth asserting directly.
+    #[test]
+    fn batches_respect_the_count_and_the_attention_budget() {
+        // Long sequences: the cell budget binds long before the count does.
+        let lengths = vec![1900usize; 64];
+        let batches = plan_batches(&lengths, 64, 24_000_000);
+        assert!(batches.len() > 1, "64 sequences of 1900 tokens must not be one batch");
+        for b in &batches {
+            let width = b.iter().map(|&i| lengths[i]).max().unwrap();
+            assert!(b.len() * width * width <= 24_000_000 || b.len() == 1);
+            assert!(b.len() <= 64);
+        }
+
+        // Short sequences: the count binds and the budget never does.
+        let short = vec![8usize; 500];
+        let batches = plan_batches(&short, 16, 24_000_000);
+        assert_eq!(batches.len(), 500 / 16 + usize::from(500 % 16 != 0));
+        assert!(batches.iter().all(|b| b.len() <= 16));
+    }
+
+    /// Every text has to be embedded exactly once, whatever the batching does. A
+    /// planner that dropped one would pair every later vector with the wrong chunk.
+    #[test]
+    fn every_text_lands_in_exactly_one_batch() {
+        let lengths: Vec<usize> = (0..311).map(|i| 1 + (i * 37) % 2000).collect();
+        let batches = plan_batches(&lengths, 32, 24_000_000);
+        let mut seen: Vec<usize> = batches.iter().flatten().copied().collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..lengths.len()).collect::<Vec<_>>());
+    }
+
+    /// A single sequence too large for the budget is still run rather than dropped:
+    /// refusing it would silently remove a chunk from the corpus.
+    #[test]
+    fn one_oversized_text_is_still_given_a_batch() {
+        let batches = plan_batches(&[4000], 32, 1_000);
+        assert_eq!(batches, vec![vec![0]]);
+    }
+
+    /// Texts of a similar length share a batch, because every sequence is padded to
+    /// the longest one in it and mixing lengths pays for padding.
+    #[test]
+    fn batches_group_texts_of_a_similar_length() {
+        let lengths = vec![1000, 5, 1000, 5, 1000, 5];
+        let batches = plan_batches(&lengths, 3, usize::MAX);
+        for b in &batches {
+            let widths: Vec<usize> = b.iter().map(|&i| lengths[i]).collect();
+            assert!(widths.iter().all(|w| *w == widths[0]), "mixed lengths in one batch: {widths:?}");
+        }
+    }
+
+    /// `cuda:N` is how a caller names a card, and a name that is not a device has to
+    /// be refused rather than silently becoming the processor.
+    #[test]
+    fn devices_parse_from_their_names() {
+        assert_eq!(Device::parse("cpu").unwrap(), Device::Cpu);
+        assert_eq!(Device::parse("cuda").unwrap(), Device::Cuda(0));
+        assert_eq!(Device::parse("CUDA:1").unwrap(), Device::Cuda(1));
+        assert_eq!(Device::parse(" cuda:3 ").unwrap(), Device::Cuda(3));
+        assert!(Device::parse("gpu").is_err());
+        assert!(Device::parse("cuda:x").is_err());
+        assert_eq!(Device::Cuda(1).label(), "cuda:1");
     }
 }

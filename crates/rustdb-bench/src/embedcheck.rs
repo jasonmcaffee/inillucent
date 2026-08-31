@@ -20,7 +20,7 @@
 use anyhow::{Context, Result};
 use rustdb_core::distance::dot;
 use rustdb_core::embed::Embedder;
-use rustdb_core::embed_onnx::{OnnxEmbedder, OnnxOptions};
+use rustdb_core::embed_onnx::{Device, OnnxEmbedder, OnnxOptions};
 
 use crate::corpus::Corpus;
 use crate::metrics::percentile;
@@ -54,6 +54,7 @@ pub fn run(
     model_file: &str,
     samples: usize,
     batch_size: usize,
+    device: Device,
 ) -> Result<()> {
     println!("model: {model_dir}/{model_file}");
     println!("cache: {} chunks at {} dimensions", corpus.len(), corpus.dims);
@@ -83,7 +84,7 @@ pub fn run(
     let embedder = OnnxEmbedder::open_model(
         model_dir,
         model_file,
-        OnnxOptions { batch_size, ..Default::default() },
+        OnnxOptions { batch_size, device, ..Default::default() },
     )
     .context("loading the ONNX model. Is ORT_DYLIB_PATH set?")?;
 

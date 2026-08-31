@@ -5,6 +5,7 @@
 //! which is what lets the score card attribute a difference to the index rather
 //! than to the model.
 
+use rustdb_core::embed_onnx::{Device, OnnxEmbedder, OnnxOptions};
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
@@ -225,14 +226,13 @@ pub fn heading_queries(
 /// against each other: mean cosine 0.9860 over 200 chunks, with identical
 /// success@1 and success@10 across 120 queries, so the substitution does not move
 /// the scores.
-pub fn embed_queries(model_dir: &str, model_file: &str, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+pub fn embed_queries(model_dir: &str, model_file: &str, texts: &[String], device: Device) -> Result<Vec<Vec<f32>>> {
     use rustdb_core::embed::Embedder;
-    use rustdb_core::embed_onnx::{OnnxEmbedder, OnnxOptions};
 
     if texts.is_empty() {
         return Ok(Vec::new());
     }
-    let embedder = OnnxEmbedder::open_model(model_dir, model_file, OnnxOptions::default())
+    let embedder = OnnxEmbedder::open_model(model_dir, model_file, OnnxOptions { device, ..Default::default() })
         .context("opening the ONNX embedder for the query set. Is ORT_DYLIB_PATH set?")?;
     let cleaned: Vec<String> = texts.iter().map(|t| sanitize(t)).collect();
     // `embed_documents` would apply the document prefix; a query needs the query
