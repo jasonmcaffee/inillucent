@@ -1,0 +1,853 @@
+{
+  "corpus_chunks": 186786,
+  "corpus_documents": 39366,
+  "dimensions": 768,
+  "engines": [
+    "rust-db",
+    "pgvector (extension defaults)",
+    "pgvector (correctly configured)"
+  ],
+  "scenarios": [
+    {
+      "name": "Approximation accuracy against exhaustive cosine",
+      "rationale": "Exhaustive cosine over the whole corpus defines the exact answer, so this is the measure of how much the graph gives up for its speed. It is reported for rust-db only: the same question cannot be asked of pgvector without reading its index internals, and pgvector's own accuracy against exact search is a property of the same HNSW algorithm at the same parameters. A figure well below what HNSW should reach at m = 16 and ef_construction = 64 would indicate a graph defect rather than a tuning choice.",
+      "rows": [
+        {
+          "label": "all sources, no predicate (180 queries)",
+          "metric": "recall@10",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 0.9027774333953857
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "all sources, no predicate (180 queries)",
+          "metric": "recall@50",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 0.8992221355438232
+            }
+          ],
+          "higher_is_better": true
+        }
+      ],
+      "gate": null
+    },
+    {
+      "name": "The ef_search tradeoff",
+      "rationale": "`ef_search` is how wide the traversal keeps its candidate list, and it is the one knob a caller turns. Accuracy is measured against exhaustive cosine over the whole corpus, latency alongside it, so the default rust-db ships is a choice with a table behind it. The columns are settings, not engines.",
+      "rows": [
+        {
+          "label": "no predicate",
+          "metric": "recall@10",
+          "measures": [
+            {
+              "engine": "ef_search = 64",
+              "value": 0.9100000262260437
+            },
+            {
+              "engine": "ef_search = 128",
+              "value": 0.9325000047683716
+            },
+            {
+              "engine": "ef_search = 256",
+              "value": 0.9824999570846558
+            },
+            {
+              "engine": "ef_search = 512",
+              "value": 0.9899999499320984
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "no predicate",
+          "metric": "vector search p50 ms",
+          "measures": [
+            {
+              "engine": "ef_search = 64",
+              "value": 0.468625
+            },
+            {
+              "engine": "ef_search = 128",
+              "value": 0.742375
+            },
+            {
+              "engine": "ef_search = 256",
+              "value": 1.216417
+            },
+            {
+              "engine": "ef_search = 512",
+              "value": 2.079
+            }
+          ],
+          "higher_is_better": false
+        }
+      ],
+      "gate": null
+    },
+    {
+      "name": "Filtered vector search, per source",
+      "rationale": "An application with one search tool per source filters on `source` on every call, so this is the common case rather than a corner case. pgvector applies the filter after the index scan and the initial scan yields only `hnsw.ef_search` candidates, so a query restricted to a minority source can come back empty. rust-db expands nodes that fail the predicate but admits only nodes that pass, so the walk continues until it has found enough passing chunks. Two numbers are reported per source: how many rows came back at all, and whether they were the right ones, measured against exhaustive cosine over the same passing set.",
+      "rows": [
+        {
+          "label": "source = confluence (93813 chunks, rust-db path: graph)",
+          "metric": "rows returned of 50 requested",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 50.0
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 30.84000015258789
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 50.0
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "source = confluence (93813 chunks, rust-db path: graph)",
+          "metric": "recall@10 within the filter",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 0.9919999837875366
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.7039999961853027
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 0.9719999432563782
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "source = github (47497 chunks, rust-db path: graph)",
+          "metric": "rows returned of 50 requested",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 32.47999954223633
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 4.639999866485596
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 29.200000762939453
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "source = github (47497 chunks, rust-db path: graph)",
+          "metric": "recall@10 within the filter",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 0.3799999952316284
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.07599999755620956
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 0.335999995470047
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "source = slack (17616 chunks, rust-db path: exhaustive)",
+          "metric": "rows returned of 50 requested",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 50.0
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 1.7999999523162842
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 50.0
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "source = slack (17616 chunks, rust-db path: exhaustive)",
+          "metric": "recall@10 within the filter",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 1.0
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.040000006556510925
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 0.6159999370574951
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "source = jira (11145 chunks, rust-db path: exhaustive)",
+          "metric": "rows returned of 50 requested",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 50.0
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 1.7599999904632568
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 24.040000915527344
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "source = jira (11145 chunks, rust-db path: exhaustive)",
+          "metric": "recall@10 within the filter",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 1.0
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.04399999976158142
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 0.18000000715255737
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "source = figma (9091 chunks, rust-db path: exhaustive)",
+          "metric": "rows returned of 50 requested",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 50.0
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.3199999928474426
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 50.0
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "source = figma (9091 chunks, rust-db path: exhaustive)",
+          "metric": "recall@10 within the filter",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 1.0
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.03200000151991844
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 1.0
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "source = miro (7351 chunks, rust-db path: exhaustive)",
+          "metric": "rows returned of 50 requested",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 50.0
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.6000000238418579
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 50.0
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "source = miro (7351 chunks, rust-db path: exhaustive)",
+          "metric": "recall@10 within the filter",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 1.0
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.06000000610947609
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 0.8759999871253967
+            }
+          ],
+          "higher_is_better": true
+        }
+      ],
+      "gate": null
+    },
+    {
+      "name": "Filter correctness",
+      "rationale": "Checks that every row an engine returns actually satisfies the predicate it was given, across single source, several sources, timestamp, label overlap, a combination, and a value the corpus does not contain. This gates rather than scores.",
+      "rows": [],
+      "gate": {
+        "passed": true,
+        "detail": "2367 returned rows across 11 filter shapes, every one satisfying its predicate"
+      }
+    },
+    {
+      "name": "Lexical retrieval",
+      "rationale": "PostgreSQL full text search joins query terms with `&` through `to_tsquery`, so a chunk must contain every term, and ranks with `ts_rank_cd`, which has no document length normalization and no term frequency saturation. Joining the terms with `|` instead would return more rows and has not been measured. rust-db scores any term with BM25, which returns partial matches and weights rare terms above common ones. The natural language set is drawn from document headings, which read like questions; the identifier set is rare literal tokens, where a lexical index should be at its strongest and where exact matching matters most.",
+      "rows": [
+        {
+          "label": "natural language, from headings",
+          "metric": "success@10",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 0.6888889074325562
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.699999988079071
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "natural language, from headings",
+          "metric": "mean reciprocal rank",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 0.5262022018432617
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.5773569941520691
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "natural language, from headings",
+          "metric": "rows returned of 50",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 50.0
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 14.38888931274414
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "identifiers, rare literal tokens",
+          "metric": "success@10",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 0.46666666865348816
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.18888889253139496
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "identifiers, rare literal tokens",
+          "metric": "mean reciprocal rank",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 0.42138510942459106
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.1518518477678299
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "identifiers, rare literal tokens",
+          "metric": "rows returned of 50",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 39.53333282470703
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 3.077777862548828
+            }
+          ],
+          "higher_is_better": true
+        }
+      ],
+      "gate": null
+    },
+    {
+      "name": "Hybrid retrieval, whole pipeline",
+      "rationale": "Both sides, fused, capped at two chunks per document, truncated to ten. This is the only family that grades fusion, and it is the closest measure of what a person asking a question actually experiences. success@1 is the strictest: it asks whether the right document is the first thing returned.",
+      "rows": [
+        {
+          "label": "document identity, title as query",
+          "metric": "nDCG@10",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 0.9007933139801025
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.7778663039207458
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 0.8059406876564026
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "document identity, title as query",
+          "metric": "success@1",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 0.8055555820465088
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.7388888597488403
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 0.7777777910232544
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "document identity, title as query",
+          "metric": "success@10",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 1.0
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.8388888835906982
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 0.855555534362793
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "document identity, title as query",
+          "metric": "mean reciprocal rank",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 0.8809876441955566
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.7783951759338379
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 0.8074294924736023
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "natural language, heading as query",
+          "metric": "nDCG@10",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 0.40708258748054504
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.5572731494903564
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 0.5667678117752075
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "natural language, heading as query",
+          "metric": "success@1",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 0.2666666805744171
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.3888888955116272
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 0.3888888955116272
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "natural language, heading as query",
+          "metric": "success@10",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 0.6333333253860474
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.7444444298744202
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 0.7444444298744202
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "natural language, heading as query",
+          "metric": "mean reciprocal rank",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 0.35852736234664917
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.5138359665870667
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 0.5230511426925659
+            }
+          ],
+          "higher_is_better": true
+        }
+      ],
+      "gate": null
+    },
+    {
+      "name": "Fusion methods compared",
+      "rationale": "Reciprocal Rank Fusion keeps only position and discards score magnitude, which makes it robust across two scoring scales that are not comparable but blind to how good the top hit actually was. Normalized score fusion keeps the magnitude. This family decides which one rust-db should default to on this corpus, rather than inheriting the choice. The columns here are fusion methods, not engines.",
+      "rows": [
+        {
+          "label": "document identity",
+          "metric": "nDCG@10",
+          "measures": [
+            {
+              "engine": "Reciprocal Rank Fusion, k = 60",
+              "value": 0.9007933139801025
+            },
+            {
+              "engine": "normalized score, vector weight 0.5",
+              "value": 0.9384948015213013
+            },
+            {
+              "engine": "normalized score, vector weight 0.7",
+              "value": 0.8381150364875793
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "document identity",
+          "metric": "success@1",
+          "measures": [
+            {
+              "engine": "Reciprocal Rank Fusion, k = 60",
+              "value": 0.8055555820465088
+            },
+            {
+              "engine": "normalized score, vector weight 0.5",
+              "value": 0.8777777552604675
+            },
+            {
+              "engine": "normalized score, vector weight 0.7",
+              "value": 0.7833333611488342
+            }
+          ],
+          "higher_is_better": true
+        }
+      ],
+      "gate": null
+    },
+    {
+      "name": "Quantization and the Matryoshka ladder",
+      "rationale": "Two independent levers for memory. int8 scalar quantization keeps all 768 dimensions and spends one byte each; Matryoshka truncation keeps full precision on fewer dimensions. Qdrant reports int8 costing under 1% accuracy and binary quantization degrading below roughly 1000 dimensions, which is why binary is not offered here at 768. These are the measured numbers on this corpus, not the vendor's. The columns are configurations of rust-db, not engines. This family builds eleven separate indexes, so it runs on an evenly strided sample of the corpus rather than all of it; the sample size is in the row label.",
+      "rows": [
+        {
+          "label": "against the 768 dimension f32 exact ranking, 25000 chunks",
+          "metric": "recall@10",
+          "measures": [
+            {
+              "engine": "64 dims, f32",
+              "value": 0.33000001311302185
+            },
+            {
+              "engine": "64 dims, int8",
+              "value": 0.33000001311302185
+            },
+            {
+              "engine": "128 dims, f32",
+              "value": 0.4800000786781311
+            },
+            {
+              "engine": "128 dims, int8",
+              "value": 0.48500004410743713
+            },
+            {
+              "engine": "256 dims, f32",
+              "value": 0.5899999737739563
+            },
+            {
+              "engine": "256 dims, int8",
+              "value": 0.5899999737739563
+            },
+            {
+              "engine": "512 dims, f32",
+              "value": 0.7450000047683716
+            },
+            {
+              "engine": "512 dims, int8",
+              "value": 0.7450000047683716
+            },
+            {
+              "engine": "768 dims, f32",
+              "value": 0.9600000381469727
+            },
+            {
+              "engine": "768 dims, int8",
+              "value": 0.9600000381469727
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "storage",
+          "metric": "bytes per vector",
+          "measures": [
+            {
+              "engine": "64 dims, f32",
+              "value": 256.0
+            },
+            {
+              "engine": "64 dims, int8",
+              "value": 68.0
+            },
+            {
+              "engine": "128 dims, f32",
+              "value": 512.0
+            },
+            {
+              "engine": "128 dims, int8",
+              "value": 132.0
+            },
+            {
+              "engine": "256 dims, f32",
+              "value": 1024.0
+            },
+            {
+              "engine": "256 dims, int8",
+              "value": 260.0
+            },
+            {
+              "engine": "512 dims, f32",
+              "value": 2048.0
+            },
+            {
+              "engine": "512 dims, int8",
+              "value": 516.0
+            },
+            {
+              "engine": "768 dims, f32",
+              "value": 3072.0
+            },
+            {
+              "engine": "768 dims, int8",
+              "value": 772.0
+            }
+          ],
+          "higher_is_better": false
+        }
+      ],
+      "gate": null
+    },
+    {
+      "name": "Latency",
+      "rationale": "Wall clock per query, measured inside the calling process after a warmup pass, reported as median and 95th percentile because a mean hides the tail people notice. rust-db pays no network cost because it is a library, while pgvector pays a loopback round trip. That is a genuine difference in the deployed system, but it is not a difference in index quality, so read this alongside the accuracy families rather than instead of them.",
+      "rows": [
+        {
+          "label": "no predicate",
+          "metric": "vector search p50 ms",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 0.629458
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 1.577
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 2.557583
+            }
+          ],
+          "higher_is_better": false
+        },
+        {
+          "label": "no predicate",
+          "metric": "vector search p95 ms",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 1.161375
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 3.0080419999999997
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 4.296666
+            }
+          ],
+          "higher_is_better": false
+        },
+        {
+          "label": "source = slack",
+          "metric": "vector search p50 ms",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 1.5584170000000002
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 1.436958
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 58.170333
+            }
+          ],
+          "higher_is_better": false
+        },
+        {
+          "label": "source = slack",
+          "metric": "vector search p95 ms",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 2.728042
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 2.6666670000000003
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 107.117
+            }
+          ],
+          "higher_is_better": false
+        }
+      ],
+      "gate": null
+    },
+    {
+      "name": "Invariants",
+      "rationale": "Properties that have to hold regardless of accuracy: the same query gives the same answer, no document contributes more chunks than the cap allows, soft deleted content never surfaces, and a degenerate query returns nothing rather than failing.",
+      "rows": [],
+      "gate": {
+        "passed": true,
+        "detail": "determinism, the per document cap, soft delete exclusion, stopword only and empty and oversized queries, and k = 0 all behave as specified"
+      }
+    }
+  ],
+  "build": [
+    {
+      "engine": "rust-db",
+      "chunks": 186786,
+      "documents": 39366,
+      "build_seconds": 170.809811167,
+      "graph_layers": 4,
+      "graph_edges": 6175920,
+      "lexical_terms": 512045,
+      "lexical_postings": 11727421,
+      "vector_megabytes": 573.806592,
+      "quantized_megabytes": 144.198792
+    }
+  ],
+  "caveats": [
+    "Every number is measured on the synthetic corpus this repository builds, with one embedding model. The suite is reusable against another corpus, but these numbers describe this one. The corpus reproduces the size, the per source split, the chunk length distribution and the ingestion ordering of the private corpus this engine was first graded on; retrieval difficulty is not identical, because encyclopedia articles are not the same material as one company's pages.",
+    "Document identity ground truth uses a document's own title as the query. Titles share vocabulary with their own bodies, which flatters lexical retrieval. It flatters both engines equally, so the comparison holds even though the absolute figure is optimistic.",
+    "Both engines are graded on the same vectors: the corpus is embedded once and the identical bytes are written to the cache rust-db reads and to the PostgreSQL column pgvector reads. A score difference therefore cannot come from the embedding model. The `embed-check` command verifies that pairing by re-embedding a sample and comparing against what is stored.",
+    "Latency is measured inside the calling process. rust-db pays no network cost because it is a library; pgvector pays a loopback round trip. That is a real difference in the deployed system rather than a measurement artefact, but it is not a difference in index quality."
+  ],
+  "generated_at": "at unix time 1788139066"
+}
