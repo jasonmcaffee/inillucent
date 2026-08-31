@@ -18,12 +18,23 @@
 # parsed.
 set -euo pipefail
 
+# Resolved before the cd below. `dirname "$0"` afterwards would be relative to
+# $RAW, so a relative invocation could not find the extract scripts.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 RAW="${RAW:-$HOME/.cache/rust-db-corpus/raw}"
 DERIVED="${DERIVED:-$HOME/.cache/rust-db-corpus/derived}"
 DUMP_DATE="${DUMP_DATE:-20251222}"
 # Long articles wanted from the English dump. It is 43 GB, far too large to
 # download, so it is streamed and the reader stops once it has this many.
 ENWIKI_ARTICLES="${ENWIKI_ARTICLES:-60000}"
+# The extract scripts run under whichever interpreter this box calls Python. A
+# Windows install provides "python" and no "python3", so the name is resolved
+# rather than hard coded.
+PYTHON="${PYTHON:-}"
+if [ -z "$PYTHON" ]; then
+  if command -v python3 > /dev/null; then PYTHON=python3; else PYTHON=python; fi
+fi
 
 # Some networks reject a request without a browser user agent.
 UA='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -54,7 +65,13 @@ for name in content general; do
     curl --fail --location --silent --show-error --max-time 3000 \
       -A "$UA" -o "$file" "$BASE/$file"
   fi
-  ln -sf "$file" "simplewiki-$name.json.gz"
+  # A stable name the extract script reads. Symlinks are not universally
+  # available (Git Bash on Windows makes one the reader cannot open), so fall
+  # back to a copy when the link does not resolve.
+  ln -sf "$file" "simplewiki-$name.json.gz" 2>/dev/null || true
+  if [ ! -s "simplewiki-$name.json.gz" ]; then
+    ln -f "$file" "simplewiki-$name.json.gz" 2>/dev/null || cp -f "$file" "simplewiki-$name.json.gz"
+  fi
 done
 
 echo "== source repositories =="
@@ -70,25 +87,29 @@ echo "== issue threads =="
 # Bounded rather than paginated to the end. These repositories hold tens of
 # thousands of issues and the corpus needs about two thousand, so fetching every
 # page would spend hundreds of API requests for nothing.
-if ! command -v gh > /dev/null; then
-  echo "gh is not installed; skipping issues. Install it and rerun to build the ticket shaped source." >&2
-else
-  for repo in "${REPOS[@]}"; do
-    name="$(basename "$repo")"
-    out="issues-$name.json"
-    if [ ! -s "$out" ]; then
-      echo "fetching issues for $repo"
-      : > "$out"
-      for page in 1 2 3 4 5 6; do
-        gh api "repos/$repo/issues?state=all&per_page=100&sort=created&direction=desc&page=$page" \
-          >> "$out" 2>/dev/null || break
-      done
-    fi
-  done
-fi
+# gh is used when it is installed and authenticated, because its rate limit is
+# 5000 requests an hour. Otherwise the same endpoint is called unauthenticated,
+# whose limit is 60 requests an hour: this needs 48, so it fits.
+use_gh=no
+if command -v gh > /dev/null && gh auth status > /dev/null 2>&1; then use_gh=yes; fi
+for repo in "${REPOS[@]}"; do
+  name="$(basename "$repo")"
+  out="issues-$name.json"
+  if [ ! -s "$out" ]; then
+    echo "fetching issues for $repo"
+    : > "$out"
+    for page in 1 2 3 4 5 6; do
+      if [ "$use_gh" = yes ]; then
+        gh api "repos/$repo/issues?state=all&per_page=100&sort=created&direction=desc&page=$page" >> "$out" 2>/dev/null || break
+      else
+        curl --fail --location --silent --show-error -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "https://api.github.com/repos/$repo/issues?state=all&per_page=100&sort=created&direction=desc&page=$page" >> "$out" || break
+      fi
+    done
+  fi
+done
 
 echo "== extracting =="
-python3 "$(dirname "$0")/extract-wikipedia.py" "$RAW" "$DERIVED"
+"$PYTHON" "$SCRIPT_DIR/extract-wikipedia.py" "$RAW" "$DERIVED"
 
 # The English dump is streamed and the reader stops early, so only the first part
 # of the 43 GB file is ever transferred.
@@ -96,11 +117,11 @@ if [ ! -s "$DERIVED/enwiki-articles.jsonl" ]; then
   echo "streaming $ENWIKI_ARTICLES articles from the English dump"
   curl --fail --location --silent --show-error --max-time 3000 \
     -A "$UA" "$BASE/enwiki-$DUMP_DATE-cirrussearch-content.json.gz" \
-    | python3 "$(dirname "$0")/extract-wikipedia.py" - "$DERIVED" \
+    | "$PYTHON" "$SCRIPT_DIR/extract-wikipedia.py" - "$DERIVED" \
         --name enwiki-articles.jsonl --min-chars 3000 --limit "$ENWIKI_ARTICLES" || true
 fi
 
-python3 "$(dirname "$0")/extract-github.py" "$RAW" "$DERIVED"
+"$PYTHON" "$SCRIPT_DIR/extract-github.py" "$RAW" "$DERIVED"
 
 echo
 echo "the public material is in $DERIVED"

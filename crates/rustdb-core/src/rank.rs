@@ -41,12 +41,39 @@ pub enum Fusion {
     /// Score based. Each list is scaled onto `[0, 1]` by its own minimum and
     /// maximum, then combined as `weight * vector + (1 - weight) * lexical`.
     NormalizedScore { vector_weight: f32 },
+    /// Score based, scaled by each list's maximum rather than by its range.
+    ///
+    /// The difference from `NormalizedScore` is what happens to a weak list.
+    /// Min-max maps every list onto the full `[0, 1]`, so the best hit of a
+    /// hopeless lexical list scores exactly as high as the best hit of a perfect
+    /// one. Dividing by the maximum keeps zero meaning zero, so a lexical list
+    /// whose scores are all small stays small next to the vector list and
+    /// contributes proportionally to how good it actually was. Bruch et al.
+    /// (TOIS 2023) measure this family, convex combination, above Reciprocal
+    /// Rank Fusion in and out of domain, with one parameter to tune.
+    Convex { vector_weight: f32 },
 }
 
 impl Default for Fusion {
     fn default() -> Self {
         Fusion::ReciprocalRank { k: RRF_K }
     }
+}
+
+/// Scale to `[0, 1]` by the maximum, keeping zero at zero.
+///
+/// Unlike `min_max` this is not invariant to how good the list is: a list whose
+/// best score is a tenth of another run's best still maps its best to 1.0, but
+/// the *spacing* below it is preserved, so a hit half as good as the leader
+/// scores 0.5 rather than being stretched to fill the range. Negative values are
+/// floored at zero: a cosine similarity below zero means the vector points away
+/// from the query, which is not a partial match.
+fn max_scale(values: &[f32]) -> Vec<f32> {
+    let max = values.iter().cloned().fold(f32::MIN, f32::max);
+    if !(max > f32::EPSILON) {
+        return vec![0.0; values.len()];
+    }
+    values.iter().map(|v| (v / max).clamp(0.0, 1.0)).collect()
 }
 
 /// Scale to `[0, 1]` by minimum and maximum. A list whose scores are all equal
@@ -105,6 +132,26 @@ pub fn fuse(
             let v_scaled = min_max(&v_sim);
             let l_raw: Vec<f32> = lexical_hits.iter().map(|h| h.score).collect();
             let l_scaled = min_max(&l_raw);
+
+            for (h, s) in vector_hits.iter().zip(&v_scaled) {
+                scores.insert(h.chunk, (vector_weight * s, HitOrigin::Vector));
+            }
+            for (h, s) in lexical_hits.iter().zip(&l_scaled) {
+                let c = (1.0 - vector_weight) * s;
+                scores
+                    .entry(h.chunk)
+                    .and_modify(|e| {
+                        e.0 += c;
+                        e.1 = HitOrigin::Both;
+                    })
+                    .or_insert((c, HitOrigin::Lexical));
+            }
+        }
+        Fusion::Convex { vector_weight } => {
+            let v_sim: Vec<f32> = vector_hits.iter().map(|h| 1.0 - h.distance).collect();
+            let v_scaled = max_scale(&v_sim);
+            let l_raw: Vec<f32> = lexical_hits.iter().map(|h| h.score).collect();
+            let l_scaled = max_scale(&l_raw);
 
             for (h, s) in vector_hits.iter().zip(&v_scaled) {
                 scores.insert(h.chunk, (vector_weight * s, HitOrigin::Vector));
@@ -302,5 +349,38 @@ mod tests {
         let origins: Vec<HitOrigin> = fused.iter().map(|h| h.origin).collect();
         assert!(origins.contains(&HitOrigin::Vector));
         assert!(origins.contains(&HitOrigin::Lexical));
+    }
+
+    /// The two score based fusions differ in what they preserve. Min-max stretches
+    /// each list onto the whole of `[0, 1]`, so three cosine similarities a hundredth
+    /// apart come out as 1.0, 0.5 and 0.0 — a rounding error becomes the whole range.
+    /// Scaling by the maximum keeps the spacing the scores actually had.
+    #[test]
+    fn convex_fusion_preserves_score_spacing_where_min_max_stretches_it() {
+        let s = store_of(10, 1);
+        // Similarities 1.00, 0.99, 0.98: three nearly equally good hits.
+        let vector = v(&[0, 1, 2]);
+        let convex = fuse(&vector, &[], &s, Fusion::Convex { vector_weight: 1.0 }, 10, 99);
+        let min_max = fuse(&vector, &[], &s, Fusion::NormalizedScore { vector_weight: 1.0 }, 10, 99);
+        let score_of = |hits: &[FusedHit], chunk: u32| hits.iter().find(|h| h.chunk == chunk).unwrap().score;
+
+        assert!((score_of(&convex, 1) - 0.99).abs() < 1e-3, "convex keeps the middle hit near its own value");
+        assert!((score_of(&min_max, 1) - 0.5).abs() < 1e-3, "min-max pushes it to the middle of the range");
+        // Both agree on the order; only the distances between them change.
+        assert_eq!(
+            convex.iter().map(|h| h.chunk).collect::<Vec<_>>(),
+            min_max.iter().map(|h| h.chunk).collect::<Vec<_>>()
+        );
+    }
+
+    /// Every fusion has to survive a list that is entirely zero, which is what a
+    /// lexical search matching nothing above the noise floor produces.
+    #[test]
+    fn convex_fusion_survives_an_all_zero_list() {
+        let s = store_of(10, 1);
+        let zeros = vec![LexicalHit { chunk: 3, score: 0.0 }, LexicalHit { chunk: 4, score: 0.0 }];
+        let fused = fuse(&v(&[0, 1]), &zeros, &s, Fusion::Convex { vector_weight: 0.5 }, 10, 99);
+        assert_eq!(fused.len(), 4);
+        assert!(fused.iter().all(|h| h.score.is_finite()));
     }
 }

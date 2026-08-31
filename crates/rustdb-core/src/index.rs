@@ -28,6 +28,19 @@ pub struct IndexConfig {
     pub per_doc_cap: usize,
     /// Whether a query term also matches the terms it prefixes.
     pub lexical_prefix: bool,
+    /// Exponent on the share of the query a lexical hit actually contains. 0
+    /// scores any term, which is what the engine shipped with; above 0 a chunk
+    /// holding one word of a six word question ranks below one holding five.
+    pub lexical_coverage: f32,
+    /// How much of a lexical score is scaled by how tightly the matched query terms
+    /// sit together. 0 is bag of words, which is what BM25 alone gives; 1 lets
+    /// position decide. PostgreSQL gets this for free from `ts_rank_cd`.
+    pub lexical_proximity: f32,
+    /// Rank lexical hits by how many query terms they hold first, and by score
+    /// second. PostgreSQL gets this from joining terms with `&`: a chunk missing a
+    /// word is not a worse answer there, it is not returned at all. Tiering keeps
+    /// that ordering without losing the partial matches underneath it.
+    pub lexical_tier: bool,
 }
 
 impl Default for IndexConfig {
@@ -38,9 +51,29 @@ impl Default for IndexConfig {
             quantized: false,
             oversample: 3.0,
             candidates: 50,
-            fusion: Fusion::default(),
+            // Measured, not inherited. On the 18,685 chunk corpus, min-max fusion at a
+            // vector weight of 0.35 beat Reciprocal Rank Fusion on every hybrid metric:
+            // nDCG 0.751 against 0.434 on natural language queries, 0.981 against 0.933
+            // on document identity. RRF is still available and still what `Fusion`
+            // defaults to on its own; this is the engine saying which one it recommends.
+            fusion: Fusion::NormalizedScore { vector_weight: 0.35 },
             per_doc_cap: PER_DOC_CAP,
-            lexical_prefix: true,
+            // Measured off. Prefix matching lets `town` match `township`, which is what
+            // PostgreSQL offers through `:*`, and on a 512,000 term dictionary it mostly
+            // buys noise: it credits a chunk with holding a query term it does not hold,
+            // which is exactly the judgement coverage weighting depends on. Measured on
+            // the full corpus, off is better on heading MRR (0.671 against 0.665) and on
+            // the whole hybrid family, and the only thing it costs is a thousandth of
+            // identifier MRR in a scenario rust-db already wins five to one.
+            lexical_prefix: false,
+            lexical_coverage: 3.0,
+            lexical_proximity: 1.0,
+            // Off, because coverage weighting already does its job better. Tiering is the
+            // blunt version of the same idea and it is worth keeping for a caller who
+            // sets `lexical_coverage` to 0: there it lifts heading success@10 from 0.778
+            // to 0.889. At coverage 3 the two orderings agree, and where they disagree,
+            // idf mass is the better judge than a count of terms.
+            lexical_tier: false,
         }
     }
 }
@@ -96,6 +129,46 @@ impl Index {
         if let Some(g) = self.graph.as_mut() {
             g.set_force_graph(on);
         }
+    }
+
+    /// Changes the lexical coverage exponent on a committed index.
+    ///
+    /// Ranking settings are not baked into anything the build produced: the
+    /// postings, the graph and the codes are the same whatever this is. So a
+    /// sweep over it can reuse one index instead of paying a two minute build per
+    /// point, which is the difference between choosing this default in a minute
+    /// and choosing it in an hour.
+    /// @param coverage - the new exponent; 0 scores any term, as before
+    pub fn set_lexical_coverage(&mut self, coverage: f32) {
+        self.config.lexical_coverage = coverage;
+    }
+
+    /// Changes the fusion method on a committed index, for the same reason as
+    /// `set_lexical_coverage`: nothing the build produced depends on it.
+    /// @param fusion - how the vector and lexical lists are combined
+    pub fn set_fusion(&mut self, fusion: Fusion) {
+        self.config.fusion = fusion;
+    }
+
+    /// Changes the lexical proximity weight on a committed index. The positions it
+    /// reads were recorded at build time, so only the weight is a setting.
+    /// @param proximity - 0 for bag of words, 1 to let position decide
+    pub fn set_lexical_proximity(&mut self, proximity: f32) {
+        self.config.lexical_proximity = proximity;
+    }
+
+    /// Turns prefix matching on or off on a committed index. The dictionary is
+    /// already built either way; this only decides whether a query term is also
+    /// allowed to match the terms it prefixes.
+    /// @param on - whether a query term matches the terms it prefixes
+    pub fn set_lexical_prefix(&mut self, on: bool) {
+        self.config.lexical_prefix = on;
+    }
+
+    /// Turns tiered lexical ranking on or off on a committed index.
+    /// @param on - whether the count of matched query terms outranks the score
+    pub fn set_lexical_tier(&mut self, on: bool) {
+        self.config.lexical_tier = on;
     }
 
     pub fn config(&self) -> &IndexConfig {
@@ -292,6 +365,9 @@ impl Index {
             &self.tokenizer,
             k,
             self.config.lexical_prefix,
+            self.config.lexical_coverage,
+            self.config.lexical_proximity,
+            self.config.lexical_tier,
         )
     }
 

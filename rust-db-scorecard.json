@@ -1,6 +1,6 @@
 {
-  "corpus_chunks": 186786,
-  "corpus_documents": 39366,
+  "corpus_chunks": 185078,
+  "corpus_documents": 38847,
   "dimensions": 768,
   "engines": [
     "rust-db",
@@ -18,7 +18,7 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 0.9027774333953857
+              "value": 0.9111111164093018
             }
           ],
           "higher_is_better": true
@@ -29,7 +29,7 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 0.8992221355438232
+              "value": 0.8967781066894531
             }
           ],
           "higher_is_better": true
@@ -47,19 +47,19 @@
           "measures": [
             {
               "engine": "ef_search = 64",
-              "value": 0.9100000262260437
+              "value": 0.85999995470047
             },
             {
               "engine": "ef_search = 128",
-              "value": 0.9325000047683716
+              "value": 0.925000011920929
             },
             {
               "engine": "ef_search = 256",
-              "value": 0.9824999570846558
+              "value": 0.9725000262260437
             },
             {
               "engine": "ef_search = 512",
-              "value": 0.9899999499320984
+              "value": 0.9774999618530273
             }
           ],
           "higher_is_better": true
@@ -70,19 +70,19 @@
           "measures": [
             {
               "engine": "ef_search = 64",
-              "value": 0.468625
+              "value": 0.3934
             },
             {
               "engine": "ef_search = 128",
-              "value": 0.742375
+              "value": 0.6074999999999999
             },
             {
               "engine": "ef_search = 256",
-              "value": 1.216417
+              "value": 1.0947
             },
             {
               "engine": "ef_search = 512",
-              "value": 2.079
+              "value": 1.7621
             }
           ],
           "higher_is_better": false
@@ -104,7 +104,7 @@
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 30.84000015258789
+              "value": 34.08000183105469
             },
             {
               "engine": "pgvector (correctly configured)",
@@ -119,11 +119,11 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 0.9919999837875366
+              "value": 0.9959999918937683
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 0.7039999961853027
+              "value": 0.8199999332427979
             },
             {
               "engine": "pgvector (correctly configured)",
@@ -138,15 +138,15 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 32.47999954223633
+              "value": 50.0
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 4.639999866485596
+              "value": 1.3600000143051147
             },
             {
               "engine": "pgvector (correctly configured)",
-              "value": 29.200000762939453
+              "value": 34.959999084472656
             }
           ],
           "higher_is_better": true
@@ -157,97 +157,21 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 0.3799999952316284
+              "value": 1.0
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 0.07599999755620956
+              "value": 0.06799999624490738
             },
             {
               "engine": "pgvector (correctly configured)",
-              "value": 0.335999995470047
+              "value": 0.3279999792575836
             }
           ],
           "higher_is_better": true
         },
         {
           "label": "source = slack (17616 chunks, rust-db path: exhaustive)",
-          "metric": "rows returned of 50 requested",
-          "measures": [
-            {
-              "engine": "rust-db",
-              "value": 50.0
-            },
-            {
-              "engine": "pgvector (extension defaults)",
-              "value": 1.7999999523162842
-            },
-            {
-              "engine": "pgvector (correctly configured)",
-              "value": 50.0
-            }
-          ],
-          "higher_is_better": true
-        },
-        {
-          "label": "source = slack (17616 chunks, rust-db path: exhaustive)",
-          "metric": "recall@10 within the filter",
-          "measures": [
-            {
-              "engine": "rust-db",
-              "value": 1.0
-            },
-            {
-              "engine": "pgvector (extension defaults)",
-              "value": 0.040000006556510925
-            },
-            {
-              "engine": "pgvector (correctly configured)",
-              "value": 0.6159999370574951
-            }
-          ],
-          "higher_is_better": true
-        },
-        {
-          "label": "source = jira (11145 chunks, rust-db path: exhaustive)",
-          "metric": "rows returned of 50 requested",
-          "measures": [
-            {
-              "engine": "rust-db",
-              "value": 50.0
-            },
-            {
-              "engine": "pgvector (extension defaults)",
-              "value": 1.7599999904632568
-            },
-            {
-              "engine": "pgvector (correctly configured)",
-              "value": 24.040000915527344
-            }
-          ],
-          "higher_is_better": true
-        },
-        {
-          "label": "source = jira (11145 chunks, rust-db path: exhaustive)",
-          "metric": "recall@10 within the filter",
-          "measures": [
-            {
-              "engine": "rust-db",
-              "value": 1.0
-            },
-            {
-              "engine": "pgvector (extension defaults)",
-              "value": 0.04399999976158142
-            },
-            {
-              "engine": "pgvector (correctly configured)",
-              "value": 0.18000000715255737
-            }
-          ],
-          "higher_is_better": true
-        },
-        {
-          "label": "source = figma (9091 chunks, rust-db path: exhaustive)",
           "metric": "rows returned of 50 requested",
           "measures": [
             {
@@ -266,7 +190,7 @@
           "higher_is_better": true
         },
         {
-          "label": "source = figma (9091 chunks, rust-db path: exhaustive)",
+          "label": "source = slack (17616 chunks, rust-db path: exhaustive)",
           "metric": "recall@10 within the filter",
           "measures": [
             {
@@ -275,17 +199,17 @@
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 0.03200000151991844
+              "value": 0.0280000027269125
             },
             {
               "engine": "pgvector (correctly configured)",
-              "value": 1.0
+              "value": 0.6119999289512634
             }
           ],
           "higher_is_better": true
         },
         {
-          "label": "source = miro (7351 chunks, rust-db path: exhaustive)",
+          "label": "source = jira (9429 chunks, rust-db path: exhaustive)",
           "metric": "rows returned of 50 requested",
           "measures": [
             {
@@ -294,7 +218,45 @@
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 0.6000000238418579
+              "value": 3.0799999237060547
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 37.880001068115234
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "source = jira (9429 chunks, rust-db path: exhaustive)",
+          "metric": "recall@10 within the filter",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 1.0
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.08799999952316284
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 0.3280000388622284
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "source = figma (9144 chunks, rust-db path: exhaustive)",
+          "metric": "rows returned of 50 requested",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 50.0
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.47999998927116394
             },
             {
               "engine": "pgvector (correctly configured)",
@@ -304,7 +266,7 @@
           "higher_is_better": true
         },
         {
-          "label": "source = miro (7351 chunks, rust-db path: exhaustive)",
+          "label": "source = figma (9144 chunks, rust-db path: exhaustive)",
           "metric": "recall@10 within the filter",
           "measures": [
             {
@@ -313,11 +275,49 @@
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 0.06000000610947609
+              "value": 0.04800000041723251
             },
             {
               "engine": "pgvector (correctly configured)",
-              "value": 0.8759999871253967
+              "value": 1.0
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "source = miro (7396 chunks, rust-db path: exhaustive)",
+          "metric": "rows returned of 50 requested",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 50.0
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.6399999856948853
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 49.439998626708984
+            }
+          ],
+          "higher_is_better": true
+        },
+        {
+          "label": "source = miro (7396 chunks, rust-db path: exhaustive)",
+          "metric": "recall@10 within the filter",
+          "measures": [
+            {
+              "engine": "rust-db",
+              "value": 1.0
+            },
+            {
+              "engine": "pgvector (extension defaults)",
+              "value": 0.06400000303983688
+            },
+            {
+              "engine": "pgvector (correctly configured)",
+              "value": 0.8799999952316284
             }
           ],
           "higher_is_better": true
@@ -331,7 +331,7 @@
       "rows": [],
       "gate": {
         "passed": true,
-        "detail": "2367 returned rows across 11 filter shapes, every one satisfying its predicate"
+        "detail": "2500 returned rows across 11 filter shapes, every one satisfying its predicate"
       }
     },
     {
@@ -344,11 +344,11 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 0.6888889074325562
+              "value": 0.9222221970558167
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 0.699999988079071
+              "value": 0.7777777910232544
             }
           ],
           "higher_is_better": true
@@ -359,11 +359,11 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 0.5262022018432617
+              "value": 0.7152714133262634
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 0.5773569941520691
+              "value": 0.6245203018188477
             }
           ],
           "higher_is_better": true
@@ -374,11 +374,11 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 50.0
+              "value": 49.46666717529297
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 14.38888931274414
+              "value": 16.85555648803711
             }
           ],
           "higher_is_better": true
@@ -389,11 +389,11 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 0.46666666865348816
+              "value": 0.6222222447395325
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 0.18888889253139496
+              "value": 0.14444445073604584
             }
           ],
           "higher_is_better": true
@@ -404,11 +404,11 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 0.42138510942459106
+              "value": 0.5509263873100281
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 0.1518518477678299
+              "value": 0.12496159970760345
             }
           ],
           "higher_is_better": true
@@ -419,11 +419,11 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 39.53333282470703
+              "value": 35.81111145019531
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 3.077777862548828
+              "value": 3.2666666507720947
             }
           ],
           "higher_is_better": true
@@ -441,15 +441,15 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 0.9007933139801025
+              "value": 0.9816471338272095
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 0.7778663039207458
+              "value": 0.809781551361084
             },
             {
               "engine": "pgvector (correctly configured)",
-              "value": 0.8059406876564026
+              "value": 0.8184302449226379
             }
           ],
           "higher_is_better": true
@@ -460,15 +460,15 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 0.8055555820465088
+              "value": 0.9722222089767456
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 0.7388888597488403
+              "value": 0.7944444417953491
             },
             {
               "engine": "pgvector (correctly configured)",
-              "value": 0.7777777910232544
+              "value": 0.800000011920929
             }
           ],
           "higher_is_better": true
@@ -479,15 +479,15 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 1.0
+              "value": 0.9944444298744202
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 0.8388888835906982
+              "value": 0.8611111044883728
             },
             {
               "engine": "pgvector (correctly configured)",
-              "value": 0.855555534362793
+              "value": 0.8722222447395325
             }
           ],
           "higher_is_better": true
@@ -498,15 +498,15 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 0.8809876441955566
+              "value": 0.9824073910713196
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 0.7783951759338379
+              "value": 0.8195524215698242
             },
             {
               "engine": "pgvector (correctly configured)",
-              "value": 0.8074294924736023
+              "value": 0.8256635069847107
             }
           ],
           "higher_is_better": true
@@ -517,15 +517,15 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 0.40708258748054504
+              "value": 0.7587692141532898
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 0.5572731494903564
+              "value": 0.6323032975196838
             },
             {
               "engine": "pgvector (correctly configured)",
-              "value": 0.5667678117752075
+              "value": 0.6439107060432434
             }
           ],
           "higher_is_better": true
@@ -536,15 +536,15 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 0.2666666805744171
+              "value": 0.6222222447395325
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 0.3888888955116272
+              "value": 0.5555555820465088
             },
             {
               "engine": "pgvector (correctly configured)",
-              "value": 0.3888888955116272
+              "value": 0.5666666626930237
             }
           ],
           "higher_is_better": true
@@ -555,7 +555,7 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 0.6333333253860474
+              "value": 0.9222221970558167
             },
             {
               "engine": "pgvector (extension defaults)",
@@ -563,7 +563,7 @@
             },
             {
               "engine": "pgvector (correctly configured)",
-              "value": 0.7444444298744202
+              "value": 0.7555555701255798
             }
           ],
           "higher_is_better": true
@@ -574,15 +574,15 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 0.35852736234664917
+              "value": 0.7196076512336731
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 0.5138359665870667
+              "value": 0.6171693801879883
             },
             {
               "engine": "pgvector (correctly configured)",
-              "value": 0.5230511426925659
+              "value": 0.6289153695106506
             }
           ],
           "higher_is_better": true
@@ -600,15 +600,23 @@
           "measures": [
             {
               "engine": "Reciprocal Rank Fusion, k = 60",
-              "value": 0.9007933139801025
+              "value": 0.91255122423172
             },
             {
-              "engine": "normalized score, vector weight 0.5",
-              "value": 0.9384948015213013
+              "engine": "min-max, vector weight 0.35 (default)",
+              "value": 0.9816471338272095
             },
             {
-              "engine": "normalized score, vector weight 0.7",
-              "value": 0.8381150364875793
+              "engine": "min-max, vector weight 0.5",
+              "value": 0.9495887756347656
+            },
+            {
+              "engine": "min-max, vector weight 0.7",
+              "value": 0.8480909466743469
+            },
+            {
+              "engine": "convex, vector weight 0.35",
+              "value": 0.9758829474449158
             }
           ],
           "higher_is_better": true
@@ -619,15 +627,23 @@
           "measures": [
             {
               "engine": "Reciprocal Rank Fusion, k = 60",
-              "value": 0.8055555820465088
+              "value": 0.8444444537162781
             },
             {
-              "engine": "normalized score, vector weight 0.5",
-              "value": 0.8777777552604675
+              "engine": "min-max, vector weight 0.35 (default)",
+              "value": 0.9722222089767456
             },
             {
-              "engine": "normalized score, vector weight 0.7",
-              "value": 0.7833333611488342
+              "engine": "min-max, vector weight 0.5",
+              "value": 0.8888888955116272
+            },
+            {
+              "engine": "min-max, vector weight 0.7",
+              "value": 0.7888888716697693
+            },
+            {
+              "engine": "convex, vector weight 0.35",
+              "value": 0.9555555582046509
             }
           ],
           "higher_is_better": true
@@ -645,43 +661,43 @@
           "measures": [
             {
               "engine": "64 dims, f32",
-              "value": 0.33000001311302185
+              "value": 0.29500001668930054
             },
             {
               "engine": "64 dims, int8",
-              "value": 0.33000001311302185
+              "value": 0.30000001192092896
             },
             {
               "engine": "128 dims, f32",
-              "value": 0.4800000786781311
+              "value": 0.445000022649765
             },
             {
               "engine": "128 dims, int8",
-              "value": 0.48500004410743713
+              "value": 0.445000022649765
             },
             {
               "engine": "256 dims, f32",
-              "value": 0.5899999737739563
+              "value": 0.5300000309944153
             },
             {
               "engine": "256 dims, int8",
-              "value": 0.5899999737739563
+              "value": 0.5300000309944153
             },
             {
               "engine": "512 dims, f32",
-              "value": 0.7450000047683716
+              "value": 0.6849998831748962
             },
             {
               "engine": "512 dims, int8",
-              "value": 0.7450000047683716
+              "value": 0.6849998831748962
             },
             {
               "engine": "768 dims, f32",
-              "value": 0.9600000381469727
+              "value": 0.8600000143051147
             },
             {
               "engine": "768 dims, int8",
-              "value": 0.9600000381469727
+              "value": 0.8600000143051147
             }
           ],
           "higher_is_better": true
@@ -746,15 +762,15 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 0.629458
+              "value": 0.6061000000000001
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 1.577
+              "value": 1.5945
             },
             {
               "engine": "pgvector (correctly configured)",
-              "value": 2.557583
+              "value": 2.2001
             }
           ],
           "higher_is_better": false
@@ -765,15 +781,15 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 1.161375
+              "value": 0.9944999999999999
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 3.0080419999999997
+              "value": 2.225
             },
             {
               "engine": "pgvector (correctly configured)",
-              "value": 4.296666
+              "value": 3.3408
             }
           ],
           "higher_is_better": false
@@ -784,15 +800,15 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 1.5584170000000002
+              "value": 0.5651
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 1.436958
+              "value": 1.2631999999999999
             },
             {
               "engine": "pgvector (correctly configured)",
-              "value": 58.170333
+              "value": 34.5673
             }
           ],
           "higher_is_better": false
@@ -803,15 +819,15 @@
           "measures": [
             {
               "engine": "rust-db",
-              "value": 2.728042
+              "value": 1.1386
             },
             {
               "engine": "pgvector (extension defaults)",
-              "value": 2.6666670000000003
+              "value": 1.9819999999999998
             },
             {
               "engine": "pgvector (correctly configured)",
-              "value": 107.117
+              "value": 87.42179999999999
             }
           ],
           "higher_is_better": false
@@ -832,15 +848,15 @@
   "build": [
     {
       "engine": "rust-db",
-      "chunks": 186786,
-      "documents": 39366,
-      "build_seconds": 170.809811167,
+      "chunks": 185078,
+      "documents": 38847,
+      "build_seconds": 119.9926105,
       "graph_layers": 4,
-      "graph_edges": 6175920,
-      "lexical_terms": 512045,
-      "lexical_postings": 11727421,
-      "vector_megabytes": 573.806592,
-      "quantized_megabytes": 144.198792
+      "graph_edges": 6119440,
+      "lexical_terms": 494179,
+      "lexical_postings": 11643704,
+      "vector_megabytes": 568.559616,
+      "quantized_megabytes": 142.880216
     }
   ],
   "caveats": [
@@ -849,5 +865,5 @@
     "Both engines are graded on the same vectors: the corpus is embedded once and the identical bytes are written to the cache rust-db reads and to the PostgreSQL column pgvector reads. A score difference therefore cannot come from the embedding model. The `embed-check` command verifies that pairing by re-embedding a sample and comparing against what is stored.",
     "Latency is measured inside the calling process. rust-db pays no network cost because it is a library; pgvector pays a loopback round trip. That is a real difference in the deployed system rather than a measurement artefact, but it is not a difference in index quality."
   ],
-  "generated_at": "at unix time 1788139066"
+  "generated_at": "at unix time 1788152090"
 }

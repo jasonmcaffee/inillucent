@@ -175,6 +175,29 @@ pub fn judge(card: &ScoreCard) -> Vec<Judgement> {
     out
 }
 
+/// The column headings for one scenario: the engines the card declares, kept in
+/// the card's order and only when this family measured them, followed by any other
+/// label its rows carry. A family whose rows name settings rather than engines gets
+/// its settings as columns.
+/// @param scenario - the family being rendered
+/// @param engines - the engines the whole card compares
+fn scenario_columns(scenario: &Scenario, engines: &[String]) -> Vec<String> {
+    let mut columns: Vec<String> = Vec::new();
+    for e in engines {
+        if scenario.rows.iter().any(|r| r.measures.iter().any(|m| &m.engine == e)) {
+            columns.push(e.clone());
+        }
+    }
+    for row in &scenario.rows {
+        for m in &row.measures {
+            if !columns.contains(&m.engine) {
+                columns.push(m.engine.clone());
+            }
+        }
+    }
+    columns
+}
+
 /// Render the score card as markdown.
 pub fn render(card: &ScoreCard) -> String {
     let mut s = String::new();
@@ -263,13 +286,19 @@ pub fn render(card: &ScoreCard) -> String {
             s.push_str("No measurements in this family.\n\n");
             continue;
         }
-        // One column per engine, in the order the card declares.
+        // The columns are whatever this family measured, in the card's engine order
+        // first and then anything else in the order it appears. Three families do not
+        // compare engines at all: the ef_search sweep, the fusion comparison and the
+        // quantization ladder all have rust-db settings in the engine slot. Rendering
+        // those against the fixed engine list filled every cell with n/a, so three
+        // tables the card spends a paragraph introducing said nothing at all.
+        let columns = scenario_columns(sc, &card.engines);
         s.push_str("| measurement | metric |");
-        for e in &card.engines {
+        for e in &columns {
             s.push_str(&format!(" {e} |"));
         }
         s.push_str("\n|---|---|");
-        for _ in &card.engines {
+        for _ in &columns {
             s.push_str("---|");
         }
         s.push('\n');
@@ -293,7 +322,7 @@ pub fn render(card: &ScoreCard) -> String {
                         }
                     })
                 });
-            for engine in &card.engines {
+            for engine in &columns {
                 match row.measures.iter().find(|m| &m.engine == engine) {
                     Some(m) => {
                         let is_best = best.map(|b| (b - m.value).abs() < 1e-9).unwrap_or(false);

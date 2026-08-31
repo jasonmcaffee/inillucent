@@ -47,6 +47,7 @@ use anyhow::{Context, Result};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
+use rustdb_core::embed_onnx::{Device, OnnxEmbedder, OnnxOptions};
 use rustdb_core::store::ChunkInput;
 use serde::{Deserialize, Serialize};
 
@@ -1335,16 +1336,24 @@ pub fn default_derived_dir() -> PathBuf {
 // Embedding the corpus.
 // ---------------------------------------------------------------------------
 
-/// Embed every chunk and write the cache both engines read.
+/// Embeds every chunk of the corpus in corpus order and writes the cache both
+/// engines read.
 ///
-/// Generating the vectors once and giving the identical bytes to rust-db and to
-/// pgvector is what makes a score difference attributable to indexing and ranking.
-/// If each engine embedded the corpus itself, a difference could come from the
-/// embedder instead, and the whole comparison would be unsound.
+/// Resumable: the vector file is append only and holds fixed width records, so the
+/// count of whole records already in it is the count of chunks already done.
 ///
-/// The run takes hours on a laptop, so it is resumable. Vectors are appended to a
-/// side file as they are produced, and a restart counts what is already there and
-/// carries on. Losing a five hour run to an interruption is otherwise a real risk.
+/// `devices` names the processors the work is spread across. One device is the
+/// original arrangement. Several run one session each, in lockstep over a window
+/// of the corpus, so the file is still written in corpus order: chunk N is record
+/// N whatever ran it.
+/// @param corpus_path - the corpus JSONL produced by synth-build
+/// @param cache_path - the cache written at the end, which the harness loads
+/// @param model_dir - directory holding model.onnx and tokenizer.json
+/// @param model_file - the ONNX file name inside that directory
+/// @param batch_size - texts per inference call, per device
+/// @param report_every - chunks between progress lines
+/// @param devices - the processors to spread the work across
+/// @param window_batches - batches handed to each device between synchronisations
 pub fn embed(
     corpus_path: &Path,
     cache_path: &Path,
@@ -1352,10 +1361,9 @@ pub fn embed(
     model_file: &str,
     batch_size: usize,
     report_every: usize,
+    devices: &[Device],
+    window_batches: usize,
 ) -> Result<()> {
-    use rustdb_core::embed::Embedder;
-    use rustdb_core::embed_onnx::{OnnxEmbedder, OnnxOptions};
-
     let chunks = read_corpus(corpus_path)?;
     eprintln!("corpus holds {} chunks", chunks.len());
 
@@ -1380,23 +1388,7 @@ pub fn embed(
         return assemble_cache(&chunks, &vectors_path, cache_path, dims);
     }
 
-    // One session, one batch at a time, which is the fastest arrangement measured
-    // on this model. Two things that look like they should help do not:
-    //
-    // Raising ONNX Runtime's intra operator thread count makes it slower, not
-    // faster: 11.3 texts a second at the default, 9.6 at six threads, 8.0 at
-    // eighteen on an eighteen core machine.
-    //
-    // Running several sessions at once is worse still. Four sessions embedding
-    // different slices in parallel ran at 2.0 texts a second against 7.4 for one
-    // session, while using *less* total CPU, 299% against 490%. Less CPU at lower
-    // throughput means the sessions are contending for something other than
-    // arithmetic: each one streams its own 550 MB copy of the weights, and the
-    // machine runs out of memory bandwidth long before it runs out of cores. So
-    // the idle cores a single session leaves are not recoverable this way.
-    let options = OnnxOptions { batch_size, ..Default::default() };
-    let embedder = OnnxEmbedder::open_model(model_dir, model_file, options)
-        .context("opening the ONNX embedder. Is ORT_DYLIB_PATH set?")?;
+    let embedders = open_embedders(model_dir, model_file, batch_size, devices)?;
 
     let mut out = std::fs::OpenOptions::new()
         .create(true)
@@ -1407,14 +1399,19 @@ pub fn embed(
     let start = std::time::Instant::now();
     let mut position = done;
     let mut since_report = 0usize;
+    // A window is `window_batches` batches per device. It has to be several rather
+    // than one: the devices are synchronised at the end of every window, so a window
+    // of one batch each pays that synchronisation on every 32 chunks and the faster
+    // card spends its time waiting. Measured on two 5090s at batch 32: one batch per
+    // device ran 613/sec against 450 for a single card, 1.36x rather than 2x.
+    let window = batch_size * embedders.len() * window_batches.max(1);
     while position < chunks.len() {
-        let end = (position + batch_size).min(chunks.len());
+        let end = (position + window).min(chunks.len());
         let texts: Vec<String> = chunks[position..end]
             .iter()
             .map(|c| sanitize_for_model(&c.content))
             .collect();
-        let vectors = embedder
-            .embed_documents(&texts)
+        let vectors = embed_window(&embedders, &texts)
             .with_context(|| format!("embedding chunks {position} to {end}"))?;
         anyhow::ensure!(
             vectors.len() == texts.len(),
@@ -1457,6 +1454,116 @@ pub fn embed(
 
     assemble_cache(&chunks, &vectors_path, cache_path, dims)
 }
+
+/// Opens one embedder per device.
+///
+/// On the processor this is deliberately one session and one batch at a time,
+/// which is the fastest arrangement measured on this model. Two things that look
+/// like they should help do not:
+///
+/// Raising ONNX Runtime's intra operator thread count makes it slower, not faster:
+/// 11.3 texts a second at the default, 9.6 at six threads, 8.0 at eighteen on an
+/// eighteen core machine.
+///
+/// Running several CPU sessions at once is worse still. Four sessions embedding
+/// different slices in parallel ran at 2.0 texts a second against 7.4 for one
+/// session, while using *less* total CPU, 299% against 490%. Less CPU at lower
+/// throughput means the sessions are contending for something other than
+/// arithmetic: each one streams its own 550 MB copy of the weights, and the machine
+/// runs out of memory bandwidth long before it runs out of cores.
+///
+/// A GPU is the opposite case, and that reasoning does not carry over: each card
+/// holds its own copy of the weights in its own memory and shares no bandwidth with
+/// the other, so two cards really are twice the throughput.
+/// @param model_dir - directory holding the weights
+/// @param model_file - the ONNX file name
+/// @param batch_size - texts per inference call
+/// @param devices - the processors to open a session on
+fn open_embedders(
+    model_dir: &str,
+    model_file: &str,
+    batch_size: usize,
+    devices: &[Device],
+) -> Result<Vec<OnnxEmbedder>> {
+    anyhow::ensure!(!devices.is_empty(), "no devices to embed on");
+    let mut embedders = Vec::with_capacity(devices.len());
+    for device in devices {
+        let load = std::time::Instant::now();
+        let options = OnnxOptions { batch_size, device: *device, ..Default::default() };
+        let embedder = OnnxEmbedder::open_model(model_dir, model_file, options)
+            .with_context(|| format!("opening the ONNX embedder on {}. Is ORT_DYLIB_PATH set?", device.label()))?;
+        eprintln!("  session ready on {} in {:.1}s", device.label(), load.elapsed().as_secs_f64());
+        embedders.push(embedder);
+    }
+    Ok(embedders)
+}
+
+/// Embeds one window of texts, spread across the embedders and reassembled in the
+/// caller's order.
+///
+/// The split is by total text length rather than by count, because a window can hold
+/// a 6 character chunk beside a 6227 character one and an even split of *chunks* is
+/// not an even split of *work*. Longest first into whichever device is least loaded
+/// is the classic greedy bound, and it also absorbs a genuinely slower card: the one
+/// that finishes its share first is simply given more of the next window.
+///
+/// Scoped threads rather than rayon: each embedder owns a session that must not be
+/// shared, so this is one slice per embedder rather than a work queue. With one
+/// embedder it is a direct call and spawns nothing.
+/// @param embedders - one per device
+/// @param texts - the window, already sanitized, in corpus order
+fn embed_window(embedders: &[OnnxEmbedder], texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    use rustdb_core::embed::Embedder;
+    if embedders.len() == 1 {
+        return embedders[0].embed_documents(texts);
+    }
+    let mut order: Vec<usize> = (0..texts.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(texts[i].len()));
+    let mut assigned: Vec<Vec<usize>> = vec![Vec::new(); embedders.len()];
+    let mut load: Vec<usize> = vec![0; embedders.len()];
+    for i in order {
+        let lightest = load
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, bytes)| **bytes)
+            .map(|(d, _)| d)
+            .unwrap_or(0);
+        load[lightest] += texts[i].len();
+        assigned[lightest].push(i);
+    }
+    // Back into corpus order within each device, so the length sorting the embedder
+    // does for batching starts from the same arrangement a single device would see.
+    for slice in assigned.iter_mut() {
+        slice.sort_unstable();
+    }
+
+    let batches: Vec<Vec<String>> = assigned
+        .iter()
+        .map(|ids| ids.iter().map(|&i| texts[i].clone()).collect())
+        .collect();
+    let results: Vec<Result<Vec<Vec<f32>>>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = batches
+            .iter()
+            .zip(embedders.iter())
+            .map(|(batch, embedder)| scope.spawn(move || embedder.embed_documents(batch)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("an embedding thread panicked"))))
+            .collect()
+    });
+
+    let mut out: Vec<Vec<f32>> = vec![Vec::new(); texts.len()];
+    for (ids, result) in assigned.iter().zip(results) {
+        let vectors = result?;
+        anyhow::ensure!(vectors.len() == ids.len(), "a device returned {} vectors for {} texts", vectors.len(), ids.len());
+        for (&i, v) in ids.iter().zip(vectors) {
+            out[i] = v;
+        }
+    }
+    Ok(out)
+}
+
 
 /// Turn the corpus text and the vector file into the cache the harness loads.
 pub fn assemble_cache(
@@ -1527,8 +1634,6 @@ pub fn sanitize_for_model(text: &str) -> String {
 /// same two tables, the same columns it joins and filters on, the same HNSW index
 /// with the same parameters, and the same English full text index.
 const SCHEMA: &str = "
-    CREATE EXTENSION IF NOT EXISTS vector;
-
     DROP TABLE IF EXISTS chunks;
     DROP TABLE IF EXISTS documents;
 
@@ -1583,6 +1688,33 @@ const INDEXES: &[(&str, &str)] = &[
     ),
 ];
 
+/// Makes sure the connected database can store and index a vector, whichever way
+/// pgvector was installed into it.
+///
+/// `CREATE EXTENSION vector` is the normal path and is tried first. It fails on a
+/// cluster where pgvector was installed by running its SQL with absolute paths to
+/// the shared library, which is what a machine does when the PostgreSQL install
+/// directory is not writable — the types, operators and both access methods are
+/// all there, but no `vector.control` is on the extension path, so the extension
+/// does not exist by name. Refusing to run there would be refusing over a name.
+/// So the failure is only fatal when the type really is absent.
+/// @param client - a connection to the database being loaded
+fn ensure_pgvector(client: &mut postgres::Client) -> Result<()> {
+    if client.batch_execute("CREATE EXTENSION IF NOT EXISTS vector").is_ok() {
+        return Ok(());
+    }
+    let row = client
+        .query_one("SELECT to_regtype('vector') IS NOT NULL", &[])
+        .context("checking whether the vector type exists")?;
+    let present: bool = row.get(0);
+    anyhow::ensure!(
+        present,
+        "this database has no pgvector: CREATE EXTENSION vector failed and there is no vector type. \
+         Install the extension, or run pgvector's SQL with absolute paths to vector.dll/vector.so."
+    );
+    Ok(())
+}
+
 /// Insert the corpus and its vectors, then build the indexes.
 ///
 /// The vectors written here are the same bytes the cache holds, so the two engines
@@ -1608,6 +1740,7 @@ pub fn load_postgres(
     })?;
 
     eprintln!("creating the schema");
+    ensure_pgvector(&mut client)?;
     client.batch_execute(SCHEMA).context("creating the schema")?;
 
     // One row per document, taken from the first chunk that mentions it.
@@ -2287,7 +2420,14 @@ pub fn check(corpus_path: &Path, per_source: usize) -> Result<()> {
                         if substring {
                             c.to_lowercase().contains(&needle)
                         } else {
-                            filtered_words(c).iter().any(|w| w.eq_ignore_ascii_case(&needle))
+                            // Lowercased the same way the needle was, rather than
+                            // compared ASCII case insensitively. Tokens are cut with
+                            // `char::is_alphanumeric`, which is Unicode aware, so a
+                            // token can hold a letter outside ASCII: `Bogotá-2019`
+                            // lowercases to `bogotá-2019` while an ASCII fold leaves
+                            // the accented letter alone and the two never match. That
+                            // reported a perfectly answerable query as unanswerable.
+                            filtered_words(c).iter().any(|w| w.to_lowercase() == needle)
                         }
                     })
                     .unwrap_or(false)
