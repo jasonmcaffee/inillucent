@@ -317,11 +317,17 @@ The unit tests are separate and take under a minute:
 cargo test --release
 ```
 
-That is 180 tests across the two crates. They should all pass with no warnings.
+That is 255 tests across the two crates. They should all pass with no warnings.
 
 ## Reading the score card
 
-The card opens with a verdict counting how many comparable measurements rust-db won, tied and lost against the better of the two pgvector configurations, and whether both correctness gates passed. Losses are listed explicitly with their numbers.
+The card opens with a verdict over the **primary** measurements only. Each family declares one metric that is judged and the rest are diagnostics: they are printed and they do not vote, because nDCG, success@1, success@10 and reciprocal rank are four views of one ranking and counting each separately turns one result into four.
+
+Each primary comparison is decided against the better of the two pgvector configurations by a 95% paired bootstrap interval and a paired randomization test over the per-query scores, against a practical threshold declared before the run: 0.01 on the ranking measures, five per cent on latency. The verdict is *better* when the interval clears both zero and the threshold, *equivalent* when the whole interval sits inside it, *worse* in the other direction, and *inconclusive* when the run cannot tell. Anything worse is listed explicitly with its numbers, and a run that cannot separate two engines says so rather than rounding up.
+
+Beneath the headline, every primary comparison is printed with its delta, its interval, its p-value, the number of queries behind it and how many of those queries the two engines answered differently. A comparison resting on three queries is worth reading with suspicion however small its p-value, and that column is there so it can be.
+
+The provenance table names the run directory. `runs/<id>/per-query.jsonl` holds one line per engine per query — the ranking, each hit’s relevance grade, the component scores, the latency and the metrics that query contributed — so a miss can be looked at rather than guessed at, and a comparison can be recomputed or re-judged without paying for the run again.
 
 Read the filtered vector search table first. It is where the difference between the engines is largest and least ambiguous, and it reports for each source how many chunks the filter admits, which retrieval path rust-db chose, how many rows of the fifty requested came back, and recall within the filter.
 

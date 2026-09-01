@@ -36,6 +36,12 @@ use rustdb_core::rank::{self, Fusion, PER_DOC_CAP};
 pub struct Hit {
     pub key: String,
     pub score: f32,
+    /// How good this hit is in absolute terms, in `[0, 1]`, independent of how
+    /// good the rest of the candidate list was. See `rank::FusedHit::confidence`.
+    /// The baseline computes the same quantity from its own calibrated ceiling, so
+    /// the abstention family can ask both engines the same question without
+    /// assuming their raw scores are on the same scale.
+    pub confidence: f32,
 }
 
 pub trait SearchEngine {
@@ -206,6 +212,17 @@ pub struct PgVectorEngine {
     /// fusion the baseline was denied would make the hybrid family measure ranking
     /// policy rather than retrieval. The harness sets it on both engines together.
     fusion: Fusion,
+    /// The ceiling `Fusion::TheoreticalMinMax` divides this engine's lexical
+    /// scores by.
+    ///
+    /// rust-db computes its own analytically: BM25 saturates at the query's idf
+    /// mass, and that bound is a property of the query rather than of the results.
+    /// `ts_rank_cd` has no such closed form, so the harness measures one instead,
+    /// from a sample of this engine's own scores on queries the graded run will
+    /// not use. Each engine is therefore scaled by the best bound available for
+    /// its own scoring function, which is what keeps the fusion the same policy
+    /// for both rather than a policy one of them was denied.
+    lexical_ceiling: f32,
 }
 
 impl PgVectorEngine {
@@ -217,6 +234,7 @@ impl PgVectorEngine {
             name: mode.label().to_string(),
             candidates: 50,
             fusion: Fusion::default(),
+            lexical_ceiling: 1.0,
         })
     }
 
@@ -224,6 +242,43 @@ impl PgVectorEngine {
     /// @param fusion - the method to use in `hybrid_search`
     pub fn set_fusion(&mut self, fusion: Fusion) {
         self.fusion = fusion;
+    }
+
+    /// Sets the bound theoretical min-max normalization divides this engine's
+    /// lexical scores by. Only read by that fusion.
+    /// @param ceiling - the largest lexical score this engine is expected to produce
+    #[allow(dead_code)]
+    pub fn set_lexical_ceiling(&mut self, ceiling: f32) {
+        self.lexical_ceiling = ceiling;
+    }
+
+    /// The largest lexical score this engine produced over a sample of queries,
+    /// at the given percentile, which is the empirical stand-in for a bound
+    /// `ts_rank_cd` does not analytically have.
+    ///
+    /// A percentile rather than the maximum, because one query matching a
+    /// pathologically repetitive chunk would set a ceiling nothing else ever
+    /// approaches, and every later query would then be scaled to near zero.
+    /// @param queries - calibration queries, from seeds the graded run does not use
+    /// @param percentile - where in the observed scores to put the ceiling
+    pub fn calibrate_lexical_ceiling(&mut self, queries: &[String], percentile: f64) -> Result<f32> {
+        let filter = Filter::default();
+        let mut scores: Vec<f32> = Vec::new();
+        for q in queries {
+            for hit in self.lexical_search(q, &filter, 10)? {
+                scores.push(hit.score);
+            }
+        }
+        if scores.is_empty() {
+            return Ok(self.lexical_ceiling);
+        }
+        scores.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let at = ((percentile * scores.len() as f64).ceil() as usize)
+            .saturating_sub(1)
+            .min(scores.len() - 1);
+        let ceiling = scores[at].max(f32::EPSILON);
+        self.lexical_ceiling = ceiling;
+        Ok(ceiling)
     }
 
     /// Runs `pg_session_settings` for the query about to be issued. `SET LOCAL`
@@ -365,9 +420,9 @@ impl SearchEngine for PgVectorEngine {
         let rows = self.client.query(&sql, &params)?;
         Ok(rows
             .iter()
-            .map(|r| Hit {
-                key: r.get("key"),
-                score: 1.0 - r.get::<_, f64>("distance") as f32,
+            .map(|r| {
+                let similarity = 1.0 - r.get::<_, f64>("distance") as f32;
+                Hit { key: r.get("key"), score: similarity, confidence: similarity.clamp(0.0, 1.0) }
             })
             .collect())
     }
@@ -398,11 +453,20 @@ impl SearchEngine for PgVectorEngine {
             Ok(r) => r,
             Err(_) => return Ok(Vec::new()),
         };
+        let ceiling = self.lexical_ceiling;
         Ok(rows
             .iter()
-            .map(|r| Hit {
-                key: r.get("key"),
-                score: r.get::<_, f32>("rank"),
+            .map(|r| {
+                let score: f32 = r.get("rank");
+                Hit {
+                    key: r.get("key"),
+                    score,
+                    confidence: if ceiling > f32::EPSILON {
+                        (score / ceiling).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    },
+                }
             })
             .collect())
     }
@@ -416,7 +480,14 @@ impl SearchEngine for PgVectorEngine {
     ) -> Result<Vec<Hit>> {
         let vector_hits = self.vector_search(query_vector, filter, self.candidates)?;
         let lexical_hits = self.lexical_search(query, filter, self.candidates)?;
-        Ok(fuse_keyed(&vector_hits, &lexical_hits, self.fusion, k, PER_DOC_CAP))
+        Ok(fuse_keyed(
+            &vector_hits,
+            &lexical_hits,
+            self.fusion,
+            k,
+            PER_DOC_CAP,
+            self.lexical_ceiling,
+        ))
     }
 }
 
@@ -486,12 +557,16 @@ impl SearchEngine for RustDbEngine {
             .map(|n| Hit {
                 key: self.key(n.chunk),
                 score: 1.0 - n.distance,
+                confidence: (1.0 - n.distance).clamp(0.0, 1.0),
             })
             .collect())
     }
 
     fn lexical_search(&mut self, query: &str, filter: &Filter, k: usize) -> Result<Vec<Hit>> {
         let compiled = self.index.compile(filter);
+        // The query's own BM25 saturation point, which is what turns a raw score
+        // into an absolute one. It does not depend on the results.
+        let ceiling = self.index.lexical_score_ceiling(query);
         Ok(self
             .index
             .lexical_search(query, &compiled, k)
@@ -499,6 +574,11 @@ impl SearchEngine for RustDbEngine {
             .map(|h| Hit {
                 key: self.key(h.chunk),
                 score: h.score,
+                confidence: if ceiling > f32::EPSILON {
+                    (h.score / ceiling).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                },
             })
             .collect())
     }
@@ -518,6 +598,7 @@ impl SearchEngine for RustDbEngine {
             .map(|h| Hit {
                 key: self.key(h.chunk),
                 score: h.score,
+                confidence: h.confidence,
             })
             .collect())
     }
@@ -554,12 +635,16 @@ pub fn exhaustive_reference(
 /// @param fusion - the method, the same one rust-db is using
 /// @param k - how many hits to return
 /// @param per_doc_cap - most chunks kept from any one document
+/// @param lexical_ceiling - kept so the signature says where the bound comes
+///   from; the division itself now happens once, where each hit's confidence is
+///   computed, rather than a second time here
 pub fn fuse_keyed(
     vector_hits: &[Hit],
     lexical_hits: &[Hit],
     fusion: Fusion,
     k: usize,
     per_doc_cap: usize,
+    _lexical_ceiling: f32,
 ) -> Vec<Hit> {
     fn scale(values: &[f32], how: Fusion) -> Vec<f32> {
         if values.is_empty() {
@@ -585,6 +670,26 @@ pub fn fuse_keyed(
         }
     }
 
+    // Absolute confidence, on bounds the candidate list had no say in, computed
+    // whatever fusion is about to order the list. The same quantity rust-db's own
+    // fusion attaches, so the abstention family can ask both engines the same
+    // question. A rank based fusion has no weight, so the two sides are balanced
+    // evenly for this purpose rather than left undefined.
+    let weight = match fusion {
+        Fusion::ReciprocalRank { .. } => 0.5,
+        Fusion::NormalizedScore { vector_weight }
+        | Fusion::Convex { vector_weight }
+        | Fusion::TheoreticalMinMax { vector_weight } => vector_weight,
+    };
+    let mut confidence: HashMap<String, f32> = HashMap::new();
+    for h in vector_hits {
+        *confidence.entry(h.key.clone()).or_insert(0.0) += weight * h.confidence.clamp(0.0, 1.0);
+    }
+    for h in lexical_hits {
+        *confidence.entry(h.key.clone()).or_insert(0.0) +=
+            (1.0 - weight) * h.confidence.clamp(0.0, 1.0);
+    }
+
     let mut scores: HashMap<String, f32> = HashMap::new();
     match fusion {
         Fusion::ReciprocalRank { k: rrf_k } => {
@@ -605,9 +710,28 @@ pub fn fuse_keyed(
                 *scores.entry(h.key.clone()).or_insert(0.0) += (1.0 - vector_weight) * s;
             }
         }
+        Fusion::TheoreticalMinMax { vector_weight } => {
+            // The same arithmetic rust-db does, and the same numbers the
+            // confidence above is built from: each side already carries its score
+            // divided by a bound the results had no say in.
+            for h in vector_hits {
+                *scores.entry(h.key.clone()).or_insert(0.0) +=
+                    vector_weight * h.confidence.clamp(0.0, 1.0);
+            }
+            for h in lexical_hits {
+                *scores.entry(h.key.clone()).or_insert(0.0) +=
+                    (1.0 - vector_weight) * h.confidence.clamp(0.0, 1.0);
+            }
+        }
     }
 
-    let mut all: Vec<Hit> = scores.into_iter().map(|(key, score)| Hit { key, score }).collect();
+    let mut all: Vec<Hit> = scores
+        .into_iter()
+        .map(|(key, score)| {
+            let c = confidence.get(&key).copied().unwrap_or(0.0);
+            Hit { key, score, confidence: c }
+        })
+        .collect();
     all.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
@@ -652,14 +776,22 @@ pub fn fuse_with(
         &vector_hits,
         &lexical_hits,
         engine.index.store(),
-        fusion,
-        k,
-        engine.index.config().per_doc_cap,
+        Some(engine.index.vectors()),
+        rank::FusionParams {
+            fusion,
+            top_k: k,
+            per_doc_cap: engine.index.config().per_doc_cap,
+            bounds: rank::ScoreBounds {
+                lexical_ceiling: engine.index.lexical_score_ceiling(query),
+            },
+            mmr_lambda: engine.index.config().mmr_lambda,
+        },
     )
     .into_iter()
     .map(|h| Hit {
         key: engine.keys[h.chunk as usize].clone(),
         score: h.score,
+        confidence: h.confidence,
     })
     .collect()
 }

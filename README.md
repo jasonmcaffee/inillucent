@@ -11,15 +11,41 @@ The baseline is graded in two configurations. One runs pgvector's extension defa
 
 ## Where it stands
 
-On the corpus this repository builds, against the better of the two pgvector configurations:
+On the corpus this repository builds, over 2,613 queries in nine families, against the better of the
+two pgvector configurations:
 
-**30 comparable measurements: 26 won, 4 tied, 0 lost. Correctness gates: all pass.**
+**17 primary comparisons: 15 better, 1 equivalent, 1 inconclusive, 0 worse. Correctness gates:**
+**all pass.**
 
-The four ties are the ceiling of their metric — three sources where both engines return all 50
-rows asked for, and one where both reach recall 1.000. Neither engine can exceed those.
+Every family declares one measurement that is judged; the rest are diagnostics that are printed and
+do not vote. A comparison is called *better* only when a 95% paired bootstrap interval over the
+per-query scores clears both zero and a practical threshold declared before the run. The one
+*equivalent* is a source where both engines reach recall 1.000 within the filter and neither can do
+better. The one *inconclusive* is confluence filtered recall, where rust-db leads 0.9960 to 0.9760
+and the interval runs 0.0000 to 0.0440 on 25 queries — a lead the run declines to call a win.
 
-The full card, including every measurement that is a rust-db setting rather than a comparison, is
-in [rust-db-scorecard.md](rust-db-scorecard.md).
+| family | measurement | rust-db | best pgvector |
+|---|---|---|---|
+| Hybrid | document identity, nDCG@10 | **0.9756** | 0.8148 |
+| Hybrid | natural language headings, nDCG@10 | **0.7477** | 0.6271 |
+| Passage | passage evidence, graded nDCG@10 | **0.7045** | 0.6027 |
+| Passage | one transposed character, graded nDCG@10 | **0.6794** | 0.3969 |
+| Passage | three keywords, graded nDCG@10 | **0.6266** | 0.4651 |
+| Multi-source | evidence in two sources, evidence recall@10 | **0.6237** | 0.1923 |
+| Abstention | questions with no answer, confident answer rate | **0.0050** | 1.0000 |
+| Lexical | natural language headings, MRR | **0.7221** | 0.5896 |
+| Lexical | rare identifiers, MRR | **0.5442** | 0.1357 |
+| Filtered | `source = jira`, recall@10 in filter | **1.000** | 0.3280 |
+| Latency | no predicate, p50 | **0.704 ms** | 1.519 ms |
+
+The abstention row is the one worth pausing on. Given a question that nothing in the corpus answers,
+the baseline returns a confident top result every single time; rust-db does it on one query in two
+hundred. That is not a ranking difference, it is the difference between a system that can say "no"
+and one that cannot — and it is the failure that never announces itself, because ten confident
+looking passages about nothing look exactly like ten good ones.
+
+The full card, including every diagnostic, every interval and every measurement that is a rust-db
+setting rather than a comparison, is in [rust-db-scorecard.md](rust-db-scorecard.md).
 
 ### What the lexical side does that plain BM25 does not
 
@@ -37,6 +63,12 @@ rust-db keeps the recall and takes the two properties as gradients rather than g
 | `lexical_proximity` | scales it by `matched terms / smallest window holding one of each`, blended by this weight | 1.0 |
 | `lexical_tier` | rank by how many query terms a chunk holds first, score second — the ordering `&` gives PostgreSQL | off |
 | `lexical_prefix` | let a query term match the terms it prefixes, as `:*` does | off |
+| `lexical_phrase` | scales a score by whether the matched terms came in the query's own order inside that window, blended by this weight | 0.75 |
+
+`lexical_phrase` is the one `ts_rank_cd` does not have an answer to. Cover density asks how tightly
+the terms sit; it does not ask whether they came in the order the question asked them in, and
+"offer eligibility rules" and "rules for eligibility of an offer" have the same window width and are
+not the same answer.
 
 Every one of them is measured rather than assumed, and every one has an off switch that restores
 plain BM25. `lexical_tier` is off because `lexical_coverage` does the same job better where they
@@ -58,6 +90,97 @@ settings needs a new index, so `tune` builds one and sweeps every setting agains
 55 settings in 31 seconds on an 18,685 chunk corpus, against 1 minute 19 for one `grade` of the same
 corpus and 4 minutes 21 for one on the full one. `--seed-offset` shifts the query set seeds, so a
 setting is chosen on queries the graded run will not use.
+
+## How it is graded
+
+### How a measurement becomes a verdict
+
+The card used to count measurements won, with anything above `1e-4` a win. All three parts of that
+were wrong in the same direction. `1e-4` is a hundredth of what one query in ninety changing its
+mind moves a mean by, so noise was being counted. Every row got a vote, so nDCG, success@1,
+success@10 and reciprocal rank turned one behaviour into four wins. And `rows returned` was scored
+higher-is-better, so fifty irrelevant chunks beat ten useful ones.
+
+What replaced it:
+
+- **One primary metric per family.** Everything else is a diagnostic: printed, argued about, never
+  voted on.
+- **Paired statistics.** Every primary comparison is decided by a 95% paired bootstrap interval and
+  a paired randomization test over the per-query scores, both seeded so a verdict is reproducible.
+  Smucker, Allan and Carterette found these agree with each other and are the right tests for
+  retrieval; both are reported because they answer different questions — the interval says how large
+  the difference is, the p-value says whether it could be noise.
+- **A practical threshold declared before the run.** 0.01 on the ranking measures, five per cent on
+  latency. With enough queries every difference eventually becomes detectable, including differences
+  far too small to matter.
+- **Four verdicts, not three.** *better* when the interval clears both zero and the threshold,
+  *equivalent* when the whole interval sits inside it, *worse* in the other direction, and
+  *inconclusive* when the run cannot tell. A run that cannot separate two engines says so. "Both
+  engines are at the metric's ceiling" is reported separately from "we cannot tell", because those
+  are not the same statement.
+- **Completeness is a gate.** Returning thirty rows where fifty exist is still a defect; it is just
+  not a relevance win.
+
+### What every run leaves behind
+
+An aggregate card can be read but not interrogated. Every run now writes, beside the card:
+
+```
+runs/<unix time>-<commit>/
+  manifest.json     commit and dirty flag, corpus file and size, model, device,
+                    every query seed, every ranking setting, host, thresholds
+  per-query.jsonl   one line per engine per query: the ranking, each hit's
+                    relevance grade, the component scores, the latency, and the
+                    metrics that query contributed
+```
+
+That is what makes the intervals recomputable without repaying the run, lets a miss be looked at
+rather than guessed at, and lets a run be re-judged after a relevance judgement is corrected.
+
+### The query families
+
+The first three grade a **document**. This corpus writes each document's title and heading into the
+front of every one of its chunks — because the corpus it reproduces did — so a title query is
+answered by any chunk of the right page. That is worth grading and it is not what an agent needs,
+which is the paragraph.
+
+| family | the query | what counts as correct |
+|---|---|---|
+| document identity | the document's own title | any chunk of that document |
+| heading | a section heading | the chunks under it |
+| identifier | a rare literal token | the chunks holding it |
+| **passage evidence** | one body sentence, with every word of the chunk's breadcrumb removed so it cannot be answered by the shared title text, and the two rarest remaining words removed as a deliberate vocabulary gap | **graded**: 3 for the passage that answers, 2 for the rest of its document |
+| **transposition** | the same queries, two adjacent characters swapped in the rarest word | unchanged, so the gap between the two scores is exactly what the mistake cost |
+| **shorthand** | the same queries cut to their three rarest content words | unchanged |
+| **multi-source** | two headings from documents in two different sources, joined | both sets are answer bearing, and the family is scored on whether **both** arrived |
+| **unanswerable** | distinctive words of two documents from sources the builder draws from disjoint pools | nothing is relevant |
+
+The passage family's remaining bias is stated rather than hidden: its words are still drawn from the
+passage it grades. It is a much weaker bias than a title query — the container leak is gone and the
+two strongest lexical anchors with it — and the ground truth stays objective, which a generated
+paraphrase would not.
+
+### Confidence is a different number from score
+
+The unanswerable family is the failure that does not announce itself: ten confident-looking passages
+for a question with no answer, and an agent writes a paragraph out of them. Measuring it needs an
+absolute notion of confidence, and per-list min-max normalization destroys one by construction —
+it maps the best hit of every list to exactly 1.0, whether the list is good or hopeless.
+
+Theoretical min-max fixes that by dividing each side by a bound the results had no say in: cosine
+over normalized vectors is bounded by one, and BM25 by the query's own idf mass at saturation. It
+took the confident-answer rate on unanswerable questions from 1.000 to 0.000.
+
+As a *ranker* it lost, and for a structural reason. Its lexical bound assumes some chunk could hold
+every query term, and a multi-source question is built so that none can, so the whole lexical side
+collapses towards zero and the ranking becomes vector-only: 0.446 against min-max's 0.690 on that
+family. That is correct behaviour for a confidence and wrong behaviour for an order.
+
+So the engine stopped asking one number to do both. Every hit carries a `score`, from whichever
+fusion ranks best, and a `confidence`, always computed on absolute bounds whatever fusion ordered
+the list. The abstention threshold is set on confidence, the ranking is decided by score, and each
+engine is calibrated on its own scale against held-out answerable queries — so the comparison
+assumes nothing about a rust-db score and a `ts_rank_cd` score meaning the same thing.
 
 ## The corpus
 

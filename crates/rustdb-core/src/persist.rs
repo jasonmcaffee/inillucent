@@ -17,11 +17,17 @@ use anyhow::{Context, Result};
 
 use crate::hnsw::{Hnsw, HnswParams};
 use crate::index::{Index, IndexConfig};
+use crate::rank::{AdaptiveWeights, Fusion};
 use crate::store::Store;
 use crate::vectors::VectorSet;
 
 /// Bumped whenever any file layout changes.
-pub const FORMAT_VERSION: u32 = 1;
+///
+/// Version 2 added the ranking settings that version 1 dropped. A version 1 index
+/// reopened by this build would answer differently from the index that was saved,
+/// which is the failure the version stamp exists to prevent, so it is refused
+/// rather than read with defaults substituted.
+pub const FORMAT_VERSION: u32 = 2;
 const MAGIC: &[u8; 8] = b"RUSTDBIX";
 
 fn header(w: &mut impl Write, kind: u8) -> Result<()> {
@@ -66,6 +72,14 @@ fn path(dir: &Path, name: &str) -> PathBuf {
 /// the int8 codes are derived rather than stored: both are a deterministic
 /// function of data that is already here, and recomputing them costs less than
 /// the disk they would occupy.
+///
+/// Every field of `IndexConfig` is here, which was not true before. `SavedConfig`
+/// used to carry `lexical_prefix` and no other ranking setting, so an index built
+/// with a measured fusion, coverage exponent, proximity weight or tiering choice
+/// reopened with the compiled-in defaults instead and answered differently from
+/// the index that had been saved — silently, because nothing about the reopened
+/// index looked wrong. A saved index is a configuration as much as it is data, and
+/// the two have to travel together.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SavedConfig {
     dims: usize,
@@ -79,6 +93,110 @@ struct SavedConfig {
     hnsw_ef_search: usize,
     hnsw_seed: u64,
     hnsw_exhaustive_below: usize,
+    // Everything below this line is what version 1 lost.
+    fusion: SavedFusion,
+    lexical_coverage: f32,
+    lexical_proximity: f32,
+    lexical_tier: bool,
+    lexical_phrase: f32,
+    lexical_rescore_depth: usize,
+    adaptive_fusion: bool,
+    adaptive: SavedAdaptive,
+    mmr_lambda: f32,
+}
+
+/// `Fusion` in a form that survives a round trip through JSON.
+///
+/// Written as a named method plus its parameters rather than as a serde enum so
+/// that adding a method later does not change how the existing ones are spelled
+/// on disk.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedFusion {
+    method: String,
+    vector_weight: f32,
+    rrf_k: f32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedAdaptive {
+    base: f32,
+    out_of_vocabulary_gain: f32,
+    identifier_gain: f32,
+    separation_gain: f32,
+    coverage_gain: f32,
+    floor: f32,
+    ceiling: f32,
+}
+
+impl From<Fusion> for SavedFusion {
+    fn from(f: Fusion) -> Self {
+        match f {
+            Fusion::ReciprocalRank { k } => SavedFusion {
+                method: "rrf".into(),
+                vector_weight: 0.0,
+                rrf_k: k,
+            },
+            Fusion::NormalizedScore { vector_weight } => SavedFusion {
+                method: "minmax".into(),
+                vector_weight,
+                rrf_k: 0.0,
+            },
+            Fusion::Convex { vector_weight } => SavedFusion {
+                method: "convex".into(),
+                vector_weight,
+                rrf_k: 0.0,
+            },
+            Fusion::TheoreticalMinMax { vector_weight } => SavedFusion {
+                method: "tmm".into(),
+                vector_weight,
+                rrf_k: 0.0,
+            },
+        }
+    }
+}
+
+impl SavedFusion {
+    /// The fusion this record describes, or an error naming the method it holds.
+    /// An unknown method is refused rather than defaulted, for the same reason the
+    /// version stamp is checked: an index that answers differently from the one
+    /// that was saved is worse than an index that will not open.
+    fn to_fusion(&self) -> Result<Fusion> {
+        Ok(match self.method.as_str() {
+            "rrf" => Fusion::ReciprocalRank { k: self.rrf_k },
+            "minmax" => Fusion::NormalizedScore { vector_weight: self.vector_weight },
+            "convex" => Fusion::Convex { vector_weight: self.vector_weight },
+            "tmm" => Fusion::TheoreticalMinMax { vector_weight: self.vector_weight },
+            other => anyhow::bail!("the saved index names an unknown fusion method {other}"),
+        })
+    }
+}
+
+impl From<AdaptiveWeights> for SavedAdaptive {
+    fn from(a: AdaptiveWeights) -> Self {
+        SavedAdaptive {
+            base: a.base,
+            out_of_vocabulary_gain: a.out_of_vocabulary_gain,
+            identifier_gain: a.identifier_gain,
+            separation_gain: a.separation_gain,
+            coverage_gain: a.coverage_gain,
+            floor: a.floor,
+            ceiling: a.ceiling,
+        }
+    }
+}
+
+impl From<&SavedAdaptive> for AdaptiveWeights {
+    fn from(a: &SavedAdaptive) -> Self {
+        AdaptiveWeights {
+            base: a.base,
+            out_of_vocabulary_gain: a.out_of_vocabulary_gain,
+            identifier_gain: a.identifier_gain,
+            separation_gain: a.separation_gain,
+            coverage_gain: a.coverage_gain,
+            floor: a.floor,
+            ceiling: a.ceiling,
+        }
+    }
 }
 
 pub fn save(index: &Index, dir: &Path) -> Result<()> {
@@ -115,6 +233,15 @@ pub fn save(index: &Index, dir: &Path) -> Result<()> {
             hnsw_ef_search: cfg.hnsw.ef_search,
             hnsw_seed: cfg.hnsw.seed,
             hnsw_exhaustive_below: cfg.hnsw.exhaustive_below,
+            fusion: cfg.fusion.into(),
+            lexical_coverage: cfg.lexical_coverage,
+            lexical_proximity: cfg.lexical_proximity,
+            lexical_tier: cfg.lexical_tier,
+            lexical_phrase: cfg.lexical_phrase,
+            lexical_rescore_depth: cfg.lexical_rescore_depth,
+            adaptive_fusion: cfg.adaptive_fusion,
+            adaptive: cfg.adaptive.into(),
+            mmr_lambda: cfg.mmr_lambda,
         };
         let mut w = BufWriter::new(File::create(path(dir, "config.bin"))?);
         header(&mut w, KIND_CONFIG)?;
@@ -185,7 +312,15 @@ pub fn load(dir: &Path) -> Result<Index> {
             seed: saved.hnsw_seed,
             exhaustive_below: saved.hnsw_exhaustive_below,
         },
-        ..Default::default()
+        fusion: saved.fusion.to_fusion()?,
+        lexical_coverage: saved.lexical_coverage,
+        lexical_proximity: saved.lexical_proximity,
+        lexical_tier: saved.lexical_tier,
+        lexical_phrase: saved.lexical_phrase,
+        lexical_rescore_depth: saved.lexical_rescore_depth,
+        adaptive_fusion: saved.adaptive_fusion,
+        adaptive: (&saved.adaptive).into(),
+        mmr_lambda: saved.mmr_lambda,
     };
 
     Index::from_parts(config, store, vectors, graph)
@@ -333,4 +468,91 @@ mod tests {
         assert!(load(&dir).map(|_| ()).is_err());
         fs::remove_dir_all(&dir).ok();
     }
+
+    /// The defect this format version exists to fix. An index built with every
+    /// ranking setting away from its default used to reopen with the compiled-in
+    /// defaults, so a saved index answered differently from the index that had
+    /// been saved, and nothing said so.
+    #[test]
+    fn every_ranking_setting_survives_the_round_trip() {
+        let dir = temp_dir("ranking-config");
+        let mut original = small_index();
+        original.set_fusion(Fusion::TheoreticalMinMax { vector_weight: 0.62 });
+        original.set_lexical_coverage(2.25);
+        original.set_lexical_proximity(0.4);
+        original.set_lexical_prefix(true);
+        original.set_lexical_tier(true);
+        original.set_lexical_phrase(0.7);
+        original.set_lexical_rescore_depth(11);
+        original.set_mmr_lambda(0.8);
+        original.set_adaptive_fusion(
+            true,
+            AdaptiveWeights {
+                base: 0.4,
+                out_of_vocabulary_gain: 0.3,
+                identifier_gain: 0.25,
+                separation_gain: 0.15,
+                coverage_gain: 0.1,
+                floor: 0.1,
+                ceiling: 0.9,
+            },
+        );
+
+        save(&original, &dir).unwrap();
+        let loaded = load(&dir).unwrap();
+
+        let a = original.config();
+        let b = loaded.config();
+        assert_eq!(
+            format!("{:?}", a.fusion),
+            format!("{:?}", b.fusion),
+            "the fusion method did not survive"
+        );
+        assert_eq!(a.lexical_coverage, b.lexical_coverage);
+        assert_eq!(a.lexical_proximity, b.lexical_proximity);
+        assert_eq!(a.lexical_prefix, b.lexical_prefix);
+        assert_eq!(a.lexical_tier, b.lexical_tier);
+        assert_eq!(a.lexical_phrase, b.lexical_phrase);
+        assert_eq!(a.lexical_rescore_depth, b.lexical_rescore_depth);
+        assert_eq!(a.mmr_lambda, b.mmr_lambda);
+        assert_eq!(a.adaptive_fusion, b.adaptive_fusion);
+        assert_eq!(format!("{:?}", a.adaptive), format!("{:?}", b.adaptive));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The settings surviving is not the point on its own; the point is that the
+    /// reopened index gives the same answers. A non-default configuration is
+    /// deliberately used, because the defaults would agree either way.
+    #[test]
+    fn a_non_default_index_answers_identically_after_reopening() {
+        let dir = temp_dir("ranking-answers");
+        let mut original = small_index();
+        original.set_fusion(Fusion::TheoreticalMinMax { vector_weight: 0.62 });
+        original.set_lexical_coverage(2.25);
+        original.set_lexical_proximity(0.4);
+        original.set_lexical_tier(true);
+        original.set_lexical_phrase(0.7);
+        save(&original, &dir).unwrap();
+        let loaded = load(&dir).unwrap();
+
+        let query = original.vectors().get(11).to_vec();
+        let f_orig = original.compile(&Filter::default());
+        let f_load = loaded.compile(&Filter::default());
+        let a: Vec<(u32, f32)> = original
+            .hybrid_search("offer eligibility", &query, &f_orig, 10, Some(64))
+            .iter()
+            .map(|h| (h.chunk, h.score))
+            .collect();
+        let b: Vec<(u32, f32)> = loaded
+            .hybrid_search("offer eligibility", &query, &f_load, 10, Some(64))
+            .iter()
+            .map(|h| (h.chunk, h.score))
+            .collect();
+        assert_eq!(a, b, "the reopened index ranked differently");
+        assert!(!a.is_empty(), "the fixture should return hits at all");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
 }

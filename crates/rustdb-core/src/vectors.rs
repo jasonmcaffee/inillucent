@@ -69,6 +69,16 @@ impl VectorSet {
         1.0 - self.similarity(id, query)
     }
 
+    /// Cosine distance between two stored vectors, for the times a caller needs
+    /// to know how similar two results are to each other rather than to a query.
+    /// Diversity selection is the one that does.
+    /// @param a - a chunk ordinal
+    /// @param b - another chunk ordinal
+    #[inline]
+    pub fn distance_between(&self, a: u32, b: u32) -> f32 {
+        1.0 - dot(self.get(a), self.get(b))
+    }
+
     pub fn raw(&self) -> &[f32] {
         &self.data
     }
