@@ -13,3 +13,4 @@ corpus.jsonl
 # Editor and operating system noise.
 .DS_Store
 /.quill/
+/runs/

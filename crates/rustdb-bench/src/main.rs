@@ -15,6 +15,8 @@ mod metrics;
 mod queryset;
 mod report;
 mod scenarios;
+mod runs;
+mod stats;
 mod tune;
 mod synth;
 
@@ -24,7 +26,7 @@ use std::time::Instant;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use rustdb_core::embed_onnx::Device;
-use rustdb_core::rank::Fusion;
+use rustdb_core::rank::{AdaptiveWeights, Fusion};
 
 /// The synthetic corpus database. `synth-load` creates and fills it, so this
 /// default works for anybody who has run the setup steps in the README.
@@ -178,10 +180,28 @@ enum Command {
         /// `false` or both, comma separated.
         #[arg(long, default_value = "true,false")]
         tiers: String,
+        /// Ordered-phrase weights to try, comma separated.
+        #[arg(long, default_value = "0")]
+        phrases: String,
+        /// Fusion methods to try, comma separated: `rrf`, `minmax`, `convex`,
+        /// `tmm`.
+        #[arg(long, default_value = "minmax")]
+        fusions: String,
+        /// Diversity lambdas to try, comma separated. 1 selects purely by score.
+        #[arg(long, default_value = "1")]
+        mmrs: String,
+        /// Adaptive weighting rules to try, as `oov:identifier:separation:coverage`
+        /// gain quadruples, several separated by commas. The arm with no adaptive
+        /// rule at all is always included alongside them.
+        #[arg(long, default_value = "")]
+        adaptive: String,
         /// Added to the query set seeds, so a setting can be chosen on queries the
         /// graded run will not use. 0 uses the same queries `grade` does.
         #[arg(long, default_value_t = 100)]
         seed_offset: u64,
+        /// Fixes every interval and p-value the sweep prints.
+        #[arg(long, default_value_t = 20260901)]
+        stats_seed: u64,
     },
     /// Run the full graded suite and write the score card.
     Grade {
@@ -203,9 +223,9 @@ enum Command {
         /// Processor the queries are embedded on: `cpu`, `cuda` or `cuda:N`.
         #[arg(long, default_value = "cpu")]
         device: String,
-        /// How the vector and lexical lists are combined: `rrf`, `minmax` or
-        /// `convex`. Applied to BOTH engines, so the hybrid family stays a
-        /// measurement of retrieval rather than of ranking policy.
+        /// How the vector and lexical lists are combined: `rrf`, `minmax`,
+        /// `convex` or `tmm`. Applied to BOTH engines, so the hybrid family stays
+        /// a measurement of retrieval rather than of ranking policy.
         #[arg(long, default_value = "minmax")]
         fusion: String,
         /// Weight on the vector side for the two score based fusions.
@@ -225,6 +245,47 @@ enum Command {
         /// Whether the count of matched query terms outranks the score.
         #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
         lexical_tier: bool,
+        /// How much of a lexical score is scaled by whether the matched query
+        /// terms appear in the query's own order, on top of how close together
+        /// they sit. rust-db only.
+        #[arg(long, default_value_t = 0.75)]
+        lexical_phrase: f32,
+        /// How far down the BM25 ranking the position aware rescoring reaches, as
+        /// a multiple of the requested k.
+        #[arg(long, default_value_t = 6)]
+        lexical_rescore_depth: usize,
+        /// Choose the vector weight per query from the query's own shape and from
+        /// how well each side separated its leader, rather than using one weight
+        /// for every question.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        adaptive_fusion: bool,
+        /// Adaptive weighting: added in proportion to the share of query terms the
+        /// dictionary has never seen.
+        #[arg(long, default_value_t = 0.10)]
+        adaptive_oov_gain: f32,
+        /// Adaptive weighting: subtracted in proportion to the share of query terms
+        /// that look like identifiers.
+        #[arg(long, default_value_t = 0.10)]
+        adaptive_identifier_gain: f32,
+        /// Adaptive weighting: added in proportion to how much better the vector
+        /// list separates its leader than the lexical list separates its own.
+        #[arg(long, default_value_t = 0.10)]
+        adaptive_separation_gain: f32,
+        /// Adaptive weighting: subtracted in proportion to how much of the query
+        /// the best lexical hit holds.
+        #[arg(long, default_value_t = 0.10)]
+        adaptive_coverage_gain: f32,
+        /// Maximal Marginal Relevance: 1.0 selects purely by fused score, lower
+        /// values trade score for novelty against what is already selected.
+        #[arg(long, default_value_t = 1.0)]
+        mmr_lambda: f32,
+        /// Where per-query run artifacts are collected, one directory per run.
+        #[arg(long, default_value = "runs")]
+        runs_dir: PathBuf,
+        /// Fixes every bootstrap interval and p-value the card reports, so two
+        /// readings of one run reach the same verdict.
+        #[arg(long, default_value_t = 20260901)]
+        stats_seed: u64,
         /// Skip the two pgvector configurations, for iterating on rust-db alone.
         #[arg(long, default_value_t = false)]
         rustdb_only: bool,
@@ -253,7 +314,13 @@ fn parse_fusion(name: &str, vector_weight: f32) -> Result<Fusion> {
         "rrf" => Fusion::ReciprocalRank { k: rustdb_core::rank::RRF_K },
         "minmax" => Fusion::NormalizedScore { vector_weight },
         "convex" => Fusion::Convex { vector_weight },
-        other => anyhow::bail!("unknown fusion {other}, expected rrf, minmax or convex"),
+        // Theoretical min-max. Scales each side by bounds the results had no say
+        // in, so a weak list stays weak and a fused score means the same thing
+        // from one query to the next.
+        "tmm" => Fusion::TheoreticalMinMax { vector_weight },
+        other => {
+            anyhow::bail!("unknown fusion {other}, expected rrf, minmax, convex or tmm")
+        }
     })
 }
 
@@ -282,6 +349,36 @@ fn parse_floats(text: &str) -> Result<Vec<f32>> {
         .collect::<Result<_>>()?;
     anyhow::ensure!(!values.is_empty(), "the list named no values");
     Ok(values)
+}
+
+/// Parses adaptive weighting rules: `oov:identifier:separation:coverage` gain
+/// quadruples, several separated by commas.
+///
+/// A quadruple rather than four separate lists, because the gains interact and
+/// sweeping their cross product produces hundreds of arms nobody asked for. The
+/// base weight is filled in from the weight being swept, so a rule with every gain
+/// at zero is exactly the fixed arm beside it.
+/// @param text - e.g. "0.3:0.3:0:0,0:0.4:0.2:0"
+fn parse_adaptive(text: &str) -> Result<Vec<AdaptiveWeights>> {
+    let mut out = Vec::new();
+    for rule in text.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let parts: Vec<f32> = rule
+            .split(':')
+            .map(|p| p.trim().parse::<f32>().map_err(|e| anyhow::anyhow!("{p} is not a number: {e}")))
+            .collect::<Result<_>>()?;
+        anyhow::ensure!(
+            parts.len() == 4,
+            "an adaptive rule needs four gains, oov:identifier:separation:coverage, got {rule}"
+        );
+        out.push(AdaptiveWeights {
+            out_of_vocabulary_gain: parts[0],
+            identifier_gain: parts[1],
+            separation_gain: parts[2],
+            coverage_gain: parts[3],
+            ..Default::default()
+        });
+    }
+    Ok(out)
 }
 
 /// Expand a leading `~/` so a default path can name the home directory.
@@ -421,9 +518,60 @@ fn main() -> Result<()> {
             let c = corpus::load_cache(&cli.cache)?;
             embedcheck::run(&c, &dir, &model_file, samples, batch, Device::parse(&device)?)?;
         }
-        Command::Tune { limit, per_source, model_dir, model_file, device, coverages, weights, proximities, prefixes, tiers, seed_offset } => {
+        Command::Tune {
+            limit,
+            per_source,
+            model_dir,
+            model_file,
+            device,
+            coverages,
+            weights,
+            proximities,
+            prefixes,
+            tiers,
+            phrases,
+            fusions,
+            mmrs,
+            adaptive,
+            seed_offset,
+            stats_seed,
+        } => {
             let c = corpus::load_cache(&cli.cache)?;
             let dir = expand_home(&model_dir)?;
+            // The arm the engine currently ships, spelled out so every other arm
+            // in the sweep is compared against it rather than against whichever of
+            // themselves happened to come first.
+            let defaults = rustdb_core::index::IndexConfig::default();
+            let baseline = tune::Setting {
+                label: "baseline (shipped defaults)".to_string(),
+                coverage: defaults.lexical_coverage,
+                proximity: defaults.lexical_proximity,
+                prefix: defaults.lexical_prefix,
+                tier: defaults.lexical_tier,
+                phrase: defaults.lexical_phrase,
+                fusion: defaults.fusion,
+                adaptive: None,
+                mmr_lambda: defaults.mmr_lambda,
+            };
+            let names: Vec<String> = fusions
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+            anyhow::ensure!(!names.is_empty(), "--fusions named no method");
+            let settings = tune::build_settings(
+                baseline,
+                &parse_floats(&coverages)?,
+                &parse_floats(&weights)?,
+                &parse_floats(&proximities)?,
+                &parse_bools(&prefixes)?,
+                &parse_bools(&tiers)?,
+                &parse_floats(&phrases)?,
+                &names,
+                &parse_floats(&mmrs)?,
+                &parse_adaptive(&adaptive)?,
+            );
             tune::run(
                 &c,
                 limit,
@@ -431,12 +579,9 @@ fn main() -> Result<()> {
                 &dir,
                 &model_file,
                 Device::parse(&device)?,
-                &parse_floats(&coverages)?,
-                &parse_floats(&weights)?,
-                &parse_floats(&proximities)?,
-                &parse_bools(&prefixes)?,
-                &parse_bools(&tiers)?,
+                &settings,
                 seed_offset,
+                stats_seed,
             )?;
         }
         Command::Grade {
@@ -452,25 +597,52 @@ fn main() -> Result<()> {
             lexical_proximity,
             lexical_prefix,
             lexical_tier,
+            lexical_phrase,
+            lexical_rescore_depth,
+            adaptive_fusion,
+            adaptive_oov_gain,
+            adaptive_identifier_gain,
+            adaptive_separation_gain,
+            adaptive_coverage_gain,
+            mmr_lambda,
+            runs_dir,
+            stats_seed,
             device,
         } => {
             let c = corpus::load_cache(&cli.cache)?;
             let dir = expand_home(&model_dir)?;
-            let card = scenarios::grade(
-                &c,
+            let options = scenarios::GradeOptions {
                 limit,
                 per_source,
-                &dir,
-                &model_file,
-                &cli.database_url,
+                model_dir: dir,
+                model_file: model_file.clone(),
+                database_url: cli.database_url.clone(),
                 rustdb_only,
-                Device::parse(&device)?,
-                parse_fusion(&fusion, vector_weight)?,
+                device: Device::parse(&device)?,
+                fusion: parse_fusion(&fusion, vector_weight)?,
                 lexical_coverage,
                 lexical_proximity,
                 lexical_prefix,
                 lexical_tier,
-            )?;
+                lexical_phrase,
+                lexical_rescore_depth,
+                adaptive_fusion,
+                adaptive: AdaptiveWeights {
+                    // The base is the same weight a fixed fusion would use, so
+                    // every gain at zero reproduces that fusion exactly.
+                    base: vector_weight,
+                    out_of_vocabulary_gain: adaptive_oov_gain,
+                    identifier_gain: adaptive_identifier_gain,
+                    separation_gain: adaptive_separation_gain,
+                    coverage_gain: adaptive_coverage_gain,
+                    ..Default::default()
+                },
+                mmr_lambda,
+                runs_dir,
+                stats_seed,
+                cache_path: cli.cache.clone(),
+            };
+            let card = scenarios::grade(&c, &options)?;
             let markdown = report::render(&card);
             std::fs::write(&out, markdown)?;
             // The measurements are also saved as JSON, so the card can be

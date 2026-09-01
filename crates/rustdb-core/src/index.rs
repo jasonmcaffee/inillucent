@@ -2,12 +2,14 @@
 //! quantized codes and the inverted index, with the three query paths the current
 //! stack exposes.
 
-use crate::bm25::{Bm25Index, LexicalHit};
+use crate::bm25::{Bm25Index, LexicalHit, LexicalParams};
 use crate::filter::{CompiledFilter, Filter};
 use crate::flat::{self, Neighbour};
 use crate::hnsw::{Hnsw, HnswParams};
 use crate::quantize::QuantizedSet;
-use crate::rank::{self, Fusion, FusedHit, PER_DOC_CAP};
+use crate::rank::{
+    self, AdaptiveWeights, Fusion, FusedHit, FusionParams, QuerySignals, ScoreBounds, PER_DOC_CAP,
+};
 use crate::store::{ChunkInput, Store};
 use crate::tokenize::Tokenizer;
 use crate::vectors::VectorSet;
@@ -41,6 +43,24 @@ pub struct IndexConfig {
     /// word is not a worse answer there, it is not returned at all. Tiering keeps
     /// that ordering without losing the partial matches underneath it.
     pub lexical_tier: bool,
+    /// How much of a lexical score is scaled by whether the matched query terms
+    /// appear in the query's own order. 0 is off, and off is what the engine has
+    /// always done.
+    pub lexical_phrase: f32,
+    /// How far down the BM25 ranking the position-aware rescoring reaches, as a
+    /// multiple of the requested `k`.
+    pub lexical_rescore_depth: usize,
+    /// How the vector weight is chosen per query. Every gain at zero, which is the
+    /// default, makes this exactly the fixed weight `fusion` carries.
+    pub adaptive: AdaptiveWeights,
+    /// Whether the vector weight is chosen per query at all. Separate from the
+    /// gains so a caller can turn the whole mechanism off without losing a tuned
+    /// rule, and so the cost of computing the signals is not paid when it is off.
+    pub adaptive_fusion: bool,
+    /// Maximal Marginal Relevance selection: 1.0 selects purely by fused score,
+    /// lower values trade score for novelty. 1.0 is what the engine has always
+    /// done.
+    pub mmr_lambda: f32,
 }
 
 impl Default for IndexConfig {
@@ -74,6 +94,58 @@ impl Default for IndexConfig {
             // to 0.889. At coverage 3 the two orderings agree, and where they disagree,
             // idf mass is the better judge than a count of terms.
             lexical_tier: false,
+            // Measured on. Proximity asks how wide the smallest window holding
+            // the matched terms is; phrase asks whether they came in the query's
+            // own order inside it, which is the part of a question that survives
+            // paraphrase least well and the part window width cannot see. On the
+            // 185,078 chunk corpus, at 0.75 with everything else held fixed, it
+            // moved graded nDCG on the passage evidence family from 0.7183 to
+            // 0.7211 and multi-source evidence recall from 0.5904 to 0.5949, and
+            // regressed nothing. On its own that is inside the practical
+            // threshold; it is on because it is free and it compounds with the
+            // adaptive weighting below.
+            lexical_phrase: 0.75,
+            lexical_rescore_depth: 6,
+            // Measured on, at a tenth. The vector weight is chosen per query from
+            // four signals the search already computed: how many query terms look
+            // like identifiers, how many the dictionary has never seen, how much
+            // of the query the best lexical hit holds, and how far each side's
+            // leader stands above its own list. DAT (arXiv 2503.23013) established
+            // that the right balance is a property of the query rather than of a
+            // benchmark, and got the signal by putting a language model in the
+            // retrieval path; this gets the same signal for four floating point
+            // operations.
+            //
+            // On the 185,078 chunk corpus over 614 passage evidence queries, with
+            // the phrase weight above: passage evidence 0.7211 to 0.7253,
+            // multi-source evidence recall 0.5949 to 0.6382, heading nDCG 0.7621
+            // to 0.7653, identifier reciprocal rank 0.5617 unchanged, and the rate
+            // at which the engine returns a confident top result for a question
+            // with no answer in the corpus 0.1367 to 0.0067. The one negative
+            // movement anywhere is document identity, 0.9834 to 0.9814, which is a
+            // fifth of the practical threshold and the family least like a
+            // question an agent asks.
+            //
+            // A tenth rather than the 0.15 the sweep also liked: the two cannot be
+            // separated on the primary family, and where a sweep cannot separate
+            // two arms the smaller intervention is the one to ship.
+            adaptive: AdaptiveWeights {
+                base: 0.35,
+                out_of_vocabulary_gain: 0.10,
+                identifier_gain: 0.10,
+                separation_gain: 0.10,
+                coverage_gain: 0.10,
+                floor: 0.05,
+                ceiling: 0.95,
+            },
+            adaptive_fusion: true,
+            // Measured off. Diversity selection is implemented and available, and
+            // on this corpus the per document cap already removes the redundancy
+            // it would remove: every lambda below 1 measured equal to or below 1.0
+            // on the passage and multi-source families. It is worth revisiting on a
+            // corpus with genuine near-duplicate documents, which this one does not
+            // have because each source draws from a disjoint pool.
+            mmr_lambda: 1.0,
         }
     }
 }
@@ -171,8 +243,58 @@ impl Index {
         self.config.lexical_tier = on;
     }
 
+    /// Changes the ordered-phrase weight on a committed index. Like proximity it
+    /// reads positions recorded at build time, so only the weight is a setting.
+    /// @param phrase - 0 ignores order, 1 lets order decide
+    pub fn set_lexical_phrase(&mut self, phrase: f32) {
+        self.config.lexical_phrase = phrase;
+    }
+
+    /// Changes how far the position-aware rescoring reaches, as a multiple of `k`.
+    /// @param depth - the multiple; 1 rescores only the hits already in reach
+    pub fn set_lexical_rescore_depth(&mut self, depth: usize) {
+        self.config.lexical_rescore_depth = depth.max(1);
+    }
+
+    /// Turns per-query vector weighting on or off, and sets the rule it uses.
+    /// @param on - whether the weight is chosen per query
+    /// @param weights - the rule; every gain at zero reproduces the fixed weight
+    pub fn set_adaptive_fusion(&mut self, on: bool, weights: AdaptiveWeights) {
+        self.config.adaptive_fusion = on;
+        self.config.adaptive = weights;
+    }
+
+    /// Changes the diversity trade-off on a committed index.
+    /// @param lambda - 1 selects purely by fused score, lower prefers novelty
+    pub fn set_mmr_lambda(&mut self, lambda: f32) {
+        self.config.mmr_lambda = lambda;
+    }
+
+    /// The ranking dials the lexical index is currently being asked to apply.
+    fn lexical_params(&self) -> LexicalParams {
+        LexicalParams {
+            prefix: self.config.lexical_prefix,
+            coverage: self.config.lexical_coverage,
+            proximity: self.config.lexical_proximity,
+            tier: self.config.lexical_tier,
+            phrase: self.config.lexical_phrase,
+            rescore_depth_factor: self.config.lexical_rescore_depth,
+        }
+    }
+
     pub fn config(&self) -> &IndexConfig {
         &self.config
+    }
+
+    /// The largest lexical score this query could produce, which is the bound
+    /// `Fusion::TheoreticalMinMax` scales by. Zero for a query holding no term the
+    /// dictionary knows.
+    /// @param query - the raw query text
+    pub fn lexical_score_ceiling(&self, query: &str) -> f32 {
+        self.lexical
+            .as_ref()
+            .map(|l| l.score_ceiling(query, &self.tokenizer, self.config.lexical_prefix))
+            .unwrap_or(0.0)
     }
 
     /// Rebuild an index from the parts that were stored, deriving the lexical
@@ -358,17 +480,7 @@ impl Index {
         let Some(lexical) = &self.lexical else {
             return Vec::new();
         };
-        lexical.search(
-            query,
-            &self.store,
-            filter,
-            &self.tokenizer,
-            k,
-            self.config.lexical_prefix,
-            self.config.lexical_coverage,
-            self.config.lexical_proximity,
-            self.config.lexical_tier,
-        )
+        lexical.search(query, &self.store, filter, &self.tokenizer, k, self.lexical_params())
     }
 
     /// The full pipeline: both sides, fused, capped per document, truncated.
@@ -380,18 +492,151 @@ impl Index {
         k: usize,
         ef_search: Option<usize>,
     ) -> Vec<FusedHit> {
+        self.hybrid_search_explained(query, query_vector, filter, k, ef_search).0
+    }
+
+    /// The full pipeline, and what it decided on the way.
+    ///
+    /// Retrieval returns a ranking; an evaluation needs to know why that ranking
+    /// came out the way it did, and recomputing the reason afterwards would ask a
+    /// second, differently-configured question. So the signals the fusion read and
+    /// the weight it settled on are returned alongside the hits, and the score
+    /// card writes them into its per-query run file.
+    /// @param query - the raw query text
+    /// @param query_vector - the query embedding, already normalized
+    /// @param filter - the compiled predicate
+    /// @param k - how many hits to return
+    /// @param ef_search - traversal width, or the configured default
+    pub fn hybrid_search_explained(
+        &self,
+        query: &str,
+        query_vector: &[f32],
+        filter: &CompiledFilter,
+        k: usize,
+        ef_search: Option<usize>,
+    ) -> (Vec<FusedHit>, QueryExplanation) {
         let candidates = self.config.candidates.max(k);
         let vector_hits = self.vector_search(query_vector, filter, candidates, ef_search);
         let lexical_hits = self.lexical_search(query, filter, candidates);
-        rank::fuse(
+
+        let bounds = ScoreBounds {
+            lexical_ceiling: self
+                .lexical
+                .as_ref()
+                .map(|l| l.score_ceiling(query, &self.tokenizer, self.config.lexical_prefix))
+                .unwrap_or(0.0),
+        };
+        let signals = self.signals_for(query, &vector_hits, &lexical_hits);
+        let fusion = self.weighted_fusion(&signals);
+
+        let hits = rank::fuse(
             &vector_hits,
             &lexical_hits,
             &self.store,
-            self.config.fusion,
-            k,
-            self.config.per_doc_cap,
-        )
+            Some(&self.vectors),
+            FusionParams {
+                fusion,
+                top_k: k,
+                per_doc_cap: self.config.per_doc_cap,
+                bounds,
+                mmr_lambda: self.config.mmr_lambda,
+            },
+        );
+        let explanation = QueryExplanation {
+            signals,
+            vector_weight: weight_of(fusion),
+            lexical_ceiling: bounds.lexical_ceiling,
+            vector_candidates: vector_hits.len(),
+            lexical_candidates: lexical_hits.len(),
+        };
+        (hits, explanation)
     }
+
+    /// The fusion this query should use: the configured one, or the same method
+    /// carrying a weight chosen from the query's own signals.
+    ///
+    /// Rank fusion has no weight to adapt, so it is returned untouched rather than
+    /// silently converted into a score fusion.
+    /// @param signals - what the two candidate lists said about this query
+    fn weighted_fusion(&self, signals: &QuerySignals) -> Fusion {
+        if !self.config.adaptive_fusion || self.config.adaptive.is_fixed() {
+            return self.config.fusion;
+        }
+        let w = self.config.adaptive.weight_for(signals);
+        match self.config.fusion {
+            Fusion::ReciprocalRank { k } => Fusion::ReciprocalRank { k },
+            Fusion::NormalizedScore { .. } => Fusion::NormalizedScore { vector_weight: w },
+            Fusion::Convex { .. } => Fusion::Convex { vector_weight: w },
+            Fusion::TheoreticalMinMax { .. } => Fusion::TheoreticalMinMax { vector_weight: w },
+        }
+    }
+
+    /// Read the per-query signals out of the two candidate lists.
+    ///
+    /// Skipped entirely when adaptive fusion is off, because the score card writes
+    /// the signals for every query and computing them for 185,000 chunks' worth of
+    /// candidates is not free when nothing reads them.
+    fn signals_for(
+        &self,
+        query: &str,
+        vector_hits: &[Neighbour],
+        lexical_hits: &[LexicalHit],
+    ) -> QuerySignals {
+        let terms = self.tokenizer.query_terms(query);
+        if terms.is_empty() {
+            return QuerySignals::default();
+        }
+        let n = terms.len() as f32;
+        let identifiers = terms.iter().filter(|t| looks_like_identifier(t)).count() as f32;
+        let unknown = match &self.lexical {
+            Some(l) => terms.iter().filter(|t| !l.contains_term(t)).count() as f32,
+            None => n,
+        };
+        let v_scores: Vec<f32> =
+            vector_hits.iter().map(|h| (1.0 - h.distance).clamp(0.0, 1.0)).collect();
+        let l_scores: Vec<f32> = lexical_hits.iter().map(|h| h.score).collect();
+        QuerySignals {
+            identifier_share: identifiers / n,
+            out_of_vocabulary_share: unknown / n,
+            lexical_coverage: lexical_hits.first().map(|h| h.coverage).unwrap_or(0.0),
+            lexical_separation: rank::separation(&l_scores),
+            vector_separation: rank::separation(&v_scores),
+        }
+    }
+}
+
+/// What one hybrid query decided, for a run artifact to record.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct QueryExplanation {
+    pub signals: QuerySignals,
+    /// The weight actually used, or 0 for a rank based fusion that has none.
+    pub vector_weight: f32,
+    pub lexical_ceiling: f32,
+    pub vector_candidates: usize,
+    pub lexical_candidates: usize,
+}
+
+/// The vector weight a fusion carries, or 0 for a rank based one that has none.
+fn weight_of(fusion: Fusion) -> f32 {
+    match fusion {
+        Fusion::ReciprocalRank { .. } => 0.0,
+        Fusion::NormalizedScore { vector_weight }
+        | Fusion::Convex { vector_weight }
+        | Fusion::TheoreticalMinMax { vector_weight } => vector_weight,
+    }
+}
+
+/// Whether an analyzed term looks like a ticket key, a symbol, a path or a
+/// version string rather than an English word.
+///
+/// The same test the harness uses to mine identifier queries out of the corpus,
+/// so what the ranker calls an identifier and what the benchmark calls one are
+/// the same thing: letters mixed with digits, or an explicit separator.
+fn looks_like_identifier(term: &str) -> bool {
+    let has_digit = term.chars().any(|c| c.is_ascii_digit());
+    let has_alpha = term.chars().any(|c| c.is_alphabetic());
+    let has_separator = term.contains('-') || term.contains('_') || term.contains('.');
+    has_alpha && (has_digit || has_separator)
 }
 
 #[cfg(test)]

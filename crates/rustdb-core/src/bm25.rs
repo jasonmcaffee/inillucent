@@ -47,6 +47,52 @@ pub struct Posting {
 pub struct LexicalHit {
     pub chunk: u32,
     pub score: f32,
+    /// Share of the query's inverse document frequency mass this chunk holds, in
+    /// `[0, 1]`. Carried out of the index rather than recomputed because fusion
+    /// and the adaptive weighting both want to know how much of the question a
+    /// hit actually answered, and the search already computed it.
+    pub coverage: f32,
+    /// How many distinct query terms this chunk holds at all.
+    pub matched_terms: u32,
+}
+
+/// Everything about lexical ranking that is a setting rather than a structure.
+///
+/// Gathered into one type because the list kept growing: `search` took nine
+/// positional arguments, five of which were ranking dials, and a caller could
+/// transpose two `f32`s without the compiler noticing. It is `Copy` and its
+/// `Default` is the configuration the engine ships, so a caller changing one dial
+/// writes `LexicalParams { phrase: 0.5, ..Default::default() }`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LexicalParams {
+    /// Whether a query term also matches the terms it prefixes.
+    pub prefix: bool,
+    /// Exponent on the matched share of the query's idf mass.
+    pub coverage: f32,
+    /// How much of a score is scaled by how tightly the matched terms sit
+    /// together. 0 is bag of words, 1 lets position decide.
+    pub proximity: f32,
+    /// Rank by how many query terms a chunk holds first, by score second.
+    pub tier: bool,
+    /// How much of a score is scaled by whether the matched terms appear in the
+    /// query's own order, on top of merely appearing close together.
+    pub phrase: f32,
+    /// How far down the BM25 ranking the position-aware rescoring reaches, as a
+    /// multiple of the requested `k`.
+    pub rescore_depth_factor: usize,
+}
+
+impl Default for LexicalParams {
+    fn default() -> Self {
+        LexicalParams {
+            prefix: false,
+            coverage: 3.0,
+            proximity: 1.0,
+            tier: false,
+            phrase: 0.0,
+            rescore_depth_factor: RESCORE_DEPTH_FACTOR,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -111,6 +157,14 @@ impl Bm25Index {
 
     pub fn n_postings(&self) -> usize {
         self.postings.values().map(|p| p.len()).sum()
+    }
+
+    /// Whether the dictionary holds this analyzed term at all. A query term it
+    /// does not hold can contribute nothing lexical, which is what the adaptive
+    /// weighting wants to know.
+    /// @param term - an analyzed query term
+    pub fn contains_term(&self, term: &str) -> bool {
+        self.postings.contains_key(term)
     }
 
     fn mean_length(&self) -> f32 {
@@ -180,17 +234,18 @@ impl Bm25Index {
     /// reproduces it without losing the recall: chunks holding every term come first,
     /// then chunks holding all but one, and so on, so a query whose terms nothing
     /// holds together still returns its best partial matches instead of nothing.
+    /// `phrase` is the strictest position feature of the three. Proximity asks how
+    /// wide the smallest window holding the matched terms is; phrase asks whether
+    /// those terms appear inside that window in the order the query wrote them.
+    /// "offer eligibility rules" and "rules for eligibility of an offer" have the
+    /// same window width and are not the same answer.
     /// @param query - the raw query text
     /// @param store - chunk metadata, read by the filter
     /// @param filter - the compiled predicate
     /// @param tokenizer - the analyzer, shared with indexing
     /// @param k - how many hits to return
-    /// @param prefix - whether a query term also matches the terms it prefixes
-    /// @param coverage - exponent on the matched share of the query's idf mass
-    /// @param proximity - how much of the score is scaled by how tightly the
-    ///   matched query terms sit together; 0 is off, 1 scales fully
-    /// @param tier - rank by how many query terms a chunk holds first and by score
-    ///   second, which is what `&` gives PostgreSQL for free
+    /// @param params - the ranking dials, all of which are settings rather than
+    ///   properties of the built index
     pub fn search(
         &self,
         query: &str,
@@ -198,11 +253,10 @@ impl Bm25Index {
         filter: &CompiledFilter,
         tokenizer: &Tokenizer,
         k: usize,
-        prefix: bool,
-        coverage: f32,
-        proximity: f32,
-        tier: bool,
+        params: LexicalParams,
     ) -> Vec<LexicalHit> {
+        let LexicalParams { prefix, coverage, proximity, tier, phrase, rescore_depth_factor } =
+            params;
         if k == 0 || filter.is_dead() || self.n_chunks == 0 {
             return Vec::new();
         }
@@ -296,7 +350,7 @@ impl Bm25Index {
                 tiers.insert(chunk, matched);
                 let share = if total_mass > 0.0 { (mass / total_mass).clamp(0.0, 1.0) } else { 1.0 };
                 let scaled = if coverage <= 0.0 { score } else { score * share.powf(coverage) };
-                LexicalHit { chunk, score: scaled }
+                LexicalHit { chunk, score: scaled, coverage: share, matched_terms: matched }
             })
             .collect();
 
@@ -317,13 +371,52 @@ impl Bm25Index {
         // Proximity is applied AFTER the ranking exists, to the hits that ranking put
         // in reach of the top k, and the result is reordered. Applying it to whatever
         // order the score map happened to produce would rescore an arbitrary subset.
-        if proximity > 0.0 && query_terms.len() > 1 {
-            let reach = (k * RESCORE_DEPTH_FACTOR).min(hits.len());
-            self.rescore_by_proximity(&mut hits[..reach], &query_terms, proximity);
+        if (proximity > 0.0 || phrase > 0.0) && query_terms.len() > 1 {
+            let depth = rescore_depth_factor.max(1);
+            let reach = (k * depth).min(hits.len());
+            self.rescore_by_position(&mut hits[..reach], &query_terms, proximity, phrase);
             hits.sort_by(&order);
         }
         hits.truncate(k);
         hits
+    }
+
+    /// The largest score `search` could hand back for this query, if some chunk
+    /// held every query term at maximum term frequency and minimum length.
+    ///
+    /// This is the ceiling `Fusion::TheoreticalMinMax` needs. Per-list min-max
+    /// normalization maps the best hit of every non-flat list to exactly 1.0, so a
+    /// hopeless lexical list is presented to fusion as confidently as a perfect
+    /// one and the fused score carries no absolute meaning. Scaling by a bound
+    /// that does not depend on the results keeps a weak list weak, which is what
+    /// lets an unanswerable query be recognised as unanswerable.
+    ///
+    /// The bound is `sum over query terms of idf * (k1 + 1)`, which is where the
+    /// BM25 term saturates as term frequency grows without limit. Coverage,
+    /// proximity and phrase weighting all multiply by a factor in `[0, 1]`, so
+    /// they cannot push a score above it.
+    /// @param query - the raw query text
+    /// @param tokenizer - the analyzer, shared with indexing
+    /// @param prefix - whether a query term also matches the terms it prefixes,
+    ///   which changes the document frequency each term is weighted by
+    pub fn score_ceiling(&self, query: &str, tokenizer: &Tokenizer, prefix: bool) -> f32 {
+        let mut ceiling = 0.0f32;
+        for qt in tokenizer.query_terms(query) {
+            let union_df: usize = if prefix {
+                self.expand_prefix(&qt)
+                    .iter()
+                    .filter_map(|v| self.postings.get(*v))
+                    .map(|p| p.len())
+                    .sum()
+            } else {
+                self.postings.get(qt.as_str()).map(|p| p.len()).unwrap_or(0)
+            };
+            if union_df == 0 {
+                continue;
+            }
+            ceiling += self.idf(union_df.min(self.n_chunks)) * (K1 + 1.0);
+        }
+        ceiling
     }
 
     /// Rescales the hits it is given by how tightly their matched query terms sit
@@ -338,25 +431,52 @@ impl Bm25Index {
     /// The caller passes only the leaders, because computing a covering window costs
     /// more than scoring does and almost every chunk BM25 scored was never going to
     /// be returned.
+    /// `phrase` blends in a second, stricter factor: the longest run of query
+    /// terms that occur in the query's own order with nothing of the query
+    /// between them, as a share of the matched terms. A chunk containing the
+    /// query as a phrase scores 1 on it; a chunk holding the same words scattered
+    /// and reordered scores close to 0. Order is the part of a question that
+    /// survives paraphrase least well, so it is a separate dial from width rather
+    /// than folded into it.
     /// @param hits - the leaders, rescored in place
     /// @param query_terms - the analyzed query
-    /// @param proximity - the blend weight
-    fn rescore_by_proximity(&self, hits: &mut [LexicalHit], query_terms: &[String], proximity: f32) {
-        // One position list per query term, reused across chunks.
+    /// @param proximity - the blend weight for window width
+    /// @param phrase - the blend weight for in-order runs
+    fn rescore_by_position(
+        &self,
+        hits: &mut [LexicalHit],
+        query_terms: &[String],
+        proximity: f32,
+        phrase: f32,
+    ) {
+        // One position list per query term, reused across chunks. `ordered` keeps
+        // the same lists paired with the term's place in the query, which is what
+        // the in-order run needs and the window width does not.
         let mut lists: Vec<&[u32]> = Vec::with_capacity(query_terms.len());
+        let mut ordered: Vec<(usize, &[u32])> = Vec::with_capacity(query_terms.len());
         for hit in hits.iter_mut() {
             lists.clear();
-            for term in query_terms {
+            ordered.clear();
+            for (at, term) in query_terms.iter().enumerate() {
                 if let Some(slice) = self.positions_of(term, hit.chunk) {
                     lists.push(slice);
+                    ordered.push((at, slice));
                 }
             }
             if lists.len() < 2 {
                 continue;
             }
-            let Some(span) = smallest_window(&lists) else { continue };
-            let tightness = (lists.len() as f32 / span as f32).clamp(0.0, 1.0);
-            hit.score *= 1.0 - proximity + proximity * tightness;
+            if proximity > 0.0 {
+                if let Some(span) = smallest_window(&lists) {
+                    let tightness = (lists.len() as f32 / span as f32).clamp(0.0, 1.0);
+                    hit.score *= 1.0 - proximity + proximity * tightness;
+                }
+            }
+            if phrase > 0.0 {
+                let run = longest_ordered_run(&ordered);
+                let share = (run as f32 / lists.len() as f32).clamp(0.0, 1.0);
+                hit.score *= 1.0 - phrase + phrase * share;
+            }
         }
     }
 
@@ -373,6 +493,45 @@ impl Bm25Index {
         let start = p.positions_at as usize;
         Some(&self.positions[start..start + p.term_frequency as usize])
     }
+}
+
+/// The longest run of matched query terms that occur in the chunk in the order
+/// the query wrote them, allowing other words in between.
+///
+/// Each term is given the position of its first occurrence at or after the
+/// previous term's chosen position, which is the greedy earliest-match a phrase
+/// search does. A run breaks when a term has no occurrence after the one before
+/// it, and the walk restarts from that term, so "eligibility offer rules" scores
+/// a run of two rather than one.
+///
+/// Terms the chunk does not hold are simply absent from `ordered`, so a chunk
+/// matching terms one and three of a three word query can still score a run of
+/// two: it is being asked whether what it did match came in order, not whether it
+/// matched everything. Coverage weighting is what judges the latter.
+/// @param ordered - matched query terms as (place in the query, ascending position list)
+fn longest_ordered_run(ordered: &[(usize, &[u32])]) -> usize {
+    if ordered.len() < 2 {
+        return ordered.len();
+    }
+    let mut best = 1usize;
+    let mut run = 1usize;
+    // The position the previous term of the current run was matched at.
+    let mut previous = ordered[0].1[0];
+    for window in ordered.windows(2) {
+        let (_, next_positions) = window[1];
+        match next_positions.iter().copied().find(|p| *p > previous) {
+            Some(p) => {
+                run += 1;
+                previous = p;
+            }
+            None => {
+                run = 1;
+                previous = next_positions[0];
+            }
+        }
+        best = best.max(run);
+    }
+    best
 }
 
 /// The width of the smallest window of token positions holding one occurrence of
@@ -444,7 +603,7 @@ mod tests {
         let tok = Tokenizer::default();
         let idx = Bm25Index::build(store, &tok);
         let f = CompiledFilter::compile(&Filter::default(), store);
-        idx.search(query, store, &f, &tok, k, false, 0.0, 0.0, false)
+        idx.search(query, store, &f, &tok, k, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() })
             .into_iter()
             .map(|h| h.chunk)
             .collect()
@@ -493,7 +652,7 @@ mod tests {
         let tok = Tokenizer::default();
         let idx = Bm25Index::build(&s, &tok);
         let f = CompiledFilter::compile(&Filter::default(), &s);
-        let hits = idx.search("offer", &s, &f, &tok, 2, false, 0.0, 0.0, false);
+        let hits = idx.search("offer", &s, &f, &tok, 2, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() });
         let many = hits.iter().find(|h| h.chunk == 0).unwrap().score;
         let one = hits.iter().find(|h| h.chunk == 1).unwrap().score;
         assert!(many < one * 10.0, "frequency did not saturate: {many} vs {one}");
@@ -530,7 +689,7 @@ mod tests {
         let tok = Tokenizer::default();
         let idx = Bm25Index::build(&s, &tok);
         let f = CompiledFilter::compile(&Filter::source("slack"), &s);
-        let hits = idx.search("offer eligibility", &s, &f, &tok, 5, false, 0.0, 0.0, false);
+        let hits = idx.search("offer eligibility", &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() });
         assert_eq!(hits.iter().map(|h| h.chunk).collect::<Vec<_>>(), vec![1]);
     }
 
@@ -560,9 +719,9 @@ mod tests {
         let f = CompiledFilter::compile(&Filter::default(), &s);
         // "elig" is the stem of eligibility, so an exact search already matches.
         // Use a genuine prefix of the stem to exercise expansion.
-        let hits = idx.search("eli", &s, &f, &tok, 5, true, 0.0, 0.0, false);
+        let hits = idx.search("eli", &s, &f, &tok, 5, LexicalParams { prefix: true, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() });
         assert_eq!(hits.len(), 1);
-        assert!(idx.search("eli", &s, &f, &tok, 5, false, 0.0, 0.0, false).is_empty());
+        assert!(idx.search("eli", &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() }).is_empty());
     }
 
     #[test]
@@ -575,7 +734,7 @@ mod tests {
         let tok = Tokenizer::default();
         let idx = Bm25Index::build(&s, &tok);
         let f = CompiledFilter::compile(&Filter::default(), &s);
-        let hits = idx.search("offer eligibility", &s, &f, &tok, 3, false, 0.0, 0.0, false);
+        let hits = idx.search("offer eligibility", &s, &f, &tok, 3, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() });
         for w in hits.windows(2) {
             assert!(w[0].score >= w[1].score);
         }
@@ -614,8 +773,8 @@ mod tests {
             complete / partial
         };
 
-        let plain = idx.search(query, &s, &f, &tok, 5, false, 0.0, 0.0, false);
-        let weighted = idx.search(query, &s, &f, &tok, 5, false, 2.0, 0.0, false);
+        let plain = idx.search(query, &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() });
+        let weighted = idx.search(query, &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 2.0, proximity: 0.0, tier: false, ..Default::default() });
         assert!(
             ratio(&weighted) > ratio(&plain),
             "coverage should raise the complete match relative to the partial one: {} then {}",
@@ -636,8 +795,8 @@ mod tests {
         let tok = Tokenizer::default();
         let idx = Bm25Index::build(&s, &tok);
         let f = CompiledFilter::compile(&Filter::default(), &s);
-        let plain = idx.search("eligibility", &s, &f, &tok, 5, false, 0.0, 0.0, false);
-        let weighted = idx.search("eligibility", &s, &f, &tok, 5, false, 3.0, 0.0, false);
+        let plain = idx.search("eligibility", &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() });
+        let weighted = idx.search("eligibility", &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 3.0, proximity: 0.0, tier: false, ..Default::default() });
         assert_eq!(
             plain.iter().map(|h| h.chunk).collect::<Vec<_>>(),
             weighted.iter().map(|h| h.chunk).collect::<Vec<_>>()
@@ -656,7 +815,7 @@ mod tests {
         let idx = Bm25Index::build(&s, &tok);
         let f = CompiledFilter::compile(&Filter::default(), &s);
 
-        let scored = idx.search("release process", &s, &f, &tok, 5, false, 0.0, 1.0, false);
+        let scored = idx.search("release process", &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 1.0, tier: false, ..Default::default() });
         assert_eq!(scored[0].chunk, 0, "the adjacent pair should lead");
         assert!(scored[0].score > scored[1].score);
     }
@@ -672,15 +831,15 @@ mod tests {
         let tok = Tokenizer::default();
         let idx = Bm25Index::build(&s, &tok);
         let f = CompiledFilter::compile(&Filter::default(), &s);
-        let off = idx.search("release process", &s, &f, &tok, 5, false, 0.0, 0.0, false);
-        let on = idx.search("release process", &s, &f, &tok, 5, false, 0.0, 1.0, false);
+        let off = idx.search("release process", &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() });
+        let on = idx.search("release process", &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 1.0, tier: false, ..Default::default() });
         assert_eq!(off.len(), on.len());
         for (a, b) in off.iter().zip(&on) {
             if a.chunk == b.chunk {
                 continue;
             }
         }
-        assert_eq!(off, idx.search("release process", &s, &f, &tok, 5, false, 0.0, 0.0, false));
+        assert_eq!(off, idx.search("release process", &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() }));
     }
 
     /// The covering window is the whole of the proximity signal, so it is worth
@@ -739,10 +898,10 @@ mod tests {
         // Whether score alone would have ranked the complete match first depends on the
         // collection statistics, which is the whole reason tiering is an ordering rather
         // than a score adjustment: it does not have to out-argue term frequency.
-        let untiered = idx.search(query, &s, &f, &tok, 5, false, 0.0, 0.0, false);
+        let untiered = idx.search(query, &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() });
         assert_eq!(untiered.len(), 2);
 
-        let tiered = idx.search(query, &s, &f, &tok, 5, false, 0.0, 0.0, true);
+        let tiered = idx.search(query, &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: true, ..Default::default() });
         assert_eq!(tiered[0].chunk, 1, "tiered, the chunk holding every term leads");
         assert_eq!(tiered.len(), 2, "and the partial match is still returned");
     }
@@ -758,7 +917,137 @@ mod tests {
         let tok = Tokenizer::default();
         let idx = Bm25Index::build(&s, &tok);
         let f = CompiledFilter::compile(&Filter::default(), &s);
-        let hits = idx.search("release approval elsewhere", &s, &f, &tok, 5, false, 0.0, 0.0, true);
+        let hits = idx.search("release approval elsewhere", &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: true, ..Default::default() });
         assert_eq!(hits.len(), 2, "both partial matches are returned");
     }
+
+    /// The ceiling has to be an upper bound on anything the search can return,
+    /// or theoretical min-max normalization would produce a score above one.
+    #[test]
+    fn the_score_ceiling_bounds_every_score_the_search_produces() {
+        let s = store_of(&[
+            ("confluence", "offer eligibility offer eligibility offer eligibility"),
+            ("confluence", "offer eligibility rules for members of the plan"),
+            ("confluence", "entirely unrelated text about invoices and billing"),
+        ]);
+        let tok = Tokenizer::default();
+        let idx = Bm25Index::build(&s, &tok);
+        let f = CompiledFilter::compile(&Filter::default(), &s);
+        let ceiling = idx.score_ceiling("offer eligibility", &tok, false);
+        assert!(ceiling > 0.0, "a query of known terms has a positive ceiling");
+        for hit in idx.search("offer eligibility", &s, &f, &tok, 10, LexicalParams::default()) {
+            assert!(
+                hit.score <= ceiling + 1e-4,
+                "score {} exceeded the ceiling {ceiling}",
+                hit.score
+            );
+        }
+    }
+
+    /// A query whose every term is absent from the dictionary can produce no
+    /// lexical evidence at all, so its ceiling is zero rather than a small number.
+    #[test]
+    fn a_query_of_unknown_terms_has_a_zero_ceiling() {
+        let s = store_of(&[("confluence", "offer eligibility rules")]);
+        let tok = Tokenizer::default();
+        let idx = Bm25Index::build(&s, &tok);
+        assert_eq!(idx.score_ceiling("tirzepatide semaglutide", &tok, false), 0.0);
+    }
+
+    #[test]
+    fn the_dictionary_reports_which_query_terms_it_holds() {
+        let s = store_of(&[("confluence", "offer eligibility rules")]);
+        let tok = Tokenizer::default();
+        let idx = Bm25Index::build(&s, &tok);
+        let known = tok.query_terms("eligibility");
+        assert!(idx.contains_term(&known[0]));
+        let unknown = tok.query_terms("tirzepatide");
+        assert!(!idx.contains_term(&unknown[0]));
+    }
+
+    /// Proximity asks how wide the window holding the matched terms is; phrase
+    /// asks whether they came in the query's order inside it. Two chunks with the
+    /// same window width and opposite order have to be separated by phrase and
+    /// only by phrase.
+    #[test]
+    fn the_phrase_weight_separates_two_chunks_proximity_cannot() {
+        let s = store_of(&[
+            ("confluence", "the offer eligibility criteria are listed below"),
+            ("confluence", "the eligibility offer criteria are listed below"),
+        ]);
+        let tok = Tokenizer::default();
+        let idx = Bm25Index::build(&s, &tok);
+        let f = CompiledFilter::compile(&Filter::default(), &s);
+
+        let width_only = LexicalParams { proximity: 1.0, phrase: 0.0, ..Default::default() };
+        let a = idx.search("offer eligibility", &s, &f, &tok, 10, width_only);
+        let ordered = |hits: &[LexicalHit], c: u32| hits.iter().find(|h| h.chunk == c).unwrap().score;
+        assert!(
+            (ordered(&a, 0) - ordered(&a, 1)).abs() < 1e-4,
+            "window width cannot tell the two apart"
+        );
+
+        let with_phrase = LexicalParams { proximity: 1.0, phrase: 1.0, ..Default::default() };
+        let b = idx.search("offer eligibility", &s, &f, &tok, 10, with_phrase);
+        assert!(
+            ordered(&b, 0) > ordered(&b, 1),
+            "the chunk holding the query in order should win: {} vs {}",
+            ordered(&b, 0),
+            ordered(&b, 1)
+        );
+    }
+
+    /// Phrase weighting at zero must leave the ranking exactly as it was, or the
+    /// setting could not be turned off.
+    #[test]
+    fn a_phrase_weight_of_zero_changes_nothing() {
+        let s = store_of(&[
+            ("confluence", "offer eligibility rules for members"),
+            ("confluence", "eligibility of an offer, described elsewhere"),
+            ("confluence", "members and their offer records"),
+        ]);
+        let tok = Tokenizer::default();
+        let idx = Bm25Index::build(&s, &tok);
+        let f = CompiledFilter::compile(&Filter::default(), &s);
+        let without = idx.search("offer eligibility", &s, &f, &tok, 10, LexicalParams::default());
+        let with_zero = idx.search(
+            "offer eligibility",
+            &s,
+            &f,
+            &tok,
+            10,
+            LexicalParams { phrase: 0.0, ..Default::default() },
+        );
+        assert_eq!(without, with_zero);
+    }
+
+    #[test]
+    fn every_hit_carries_the_share_of_the_query_it_holds() {
+        let s = store_of(&[
+            ("confluence", "offer eligibility rules"),
+            ("confluence", "offer records only"),
+        ]);
+        let tok = Tokenizer::default();
+        let idx = Bm25Index::build(&s, &tok);
+        let f = CompiledFilter::compile(&Filter::default(), &s);
+        let hits = idx.search("offer eligibility", &s, &f, &tok, 10, LexicalParams::default());
+        let both = hits.iter().find(|h| h.chunk == 0).unwrap();
+        let one = hits.iter().find(|h| h.chunk == 1).unwrap();
+        assert_eq!(both.matched_terms, 2);
+        assert_eq!(one.matched_terms, 1);
+        assert!((both.coverage - 1.0).abs() < 1e-6);
+        assert!(one.coverage < 1.0);
+    }
+
+    #[test]
+    fn the_longest_ordered_run_counts_terms_that_came_in_order() {
+        // Query places 0, 1, 2 at chunk positions: in order, then reversed.
+        let in_order: Vec<(usize, &[u32])> = vec![(0, &[1]), (1, &[4]), (2, &[9])];
+        assert_eq!(longest_ordered_run(&in_order), 3);
+        let reversed: Vec<(usize, &[u32])> = vec![(0, &[9]), (1, &[4]), (2, &[1])];
+        assert_eq!(longest_ordered_run(&reversed), 1);
+        let partial: Vec<(usize, &[u32])> = vec![(0, &[1]), (1, &[4]), (2, &[2])];
+        assert_eq!(longest_ordered_run(&partial), 2);
+    }
+
 }

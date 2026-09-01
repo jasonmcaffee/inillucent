@@ -769,6 +769,114 @@ Keep the current engine and the current scorecard as the baseline. They already 
 
 The key change in mindset is that rust-db should not optimize for “more metric wins.” It should optimize for retrieving the complete, focused, authorized evidence an agent needs, with a measured cost and a result that survives a fresh holdout.
 
+## What task-1764 built
+
+task-1761 was a design. task-1764 implemented the parts of it that could be implemented without a human assessor pool or a generation lane, and the sections above are left as written so the design and what came of it can be read against each other. This section records what exists in the repository now, what the additional research changed about the plan, and what is still only a plan.
+
+Everything here is measured on the corpus this repository builds, with the run artifacts and manifests named in the score card's provenance table.
+
+### Additional research, and what it changed
+
+| Source | What it says | What it changed here |
+|---|---|---|
+| [DAT: Dynamic Alpha Tuning for Hybrid Retrieval](https://arxiv.org/abs/2503.23013) | The right lexical/dense balance is a property of the individual query, not of a benchmark. DAT estimates it by asking a language model to grade each retriever's top hit, and beats fixed weighting across metrics. | Adopted the insight, rejected the mechanism. A language model in the online retrieval path is latency and a dependency this engine does not have. The same question — which retriever did better *on this query* — is answered from numbers the search already computed: how far each side's leader stands above its own list, how much of the query's idf mass the best lexical hit holds, and what the query looks like. |
+| [Query-Adaptive Hybrid Search](https://doi.org/10.3390/make8040091), MDPI *Machine Learning and Knowledge Extraction*, 2026 | A query-driven alpha predictor infers the fusion weight from the query itself at negligible latency, explicitly to avoid "prohibitive computational latency, memory overhead and significant GPU requirements" of LLM-based dynamic weighting. | Confirmed that a cheap query-side rule is the right shape. The implemented rule is linear and monotone in each signal rather than learned, because a default that ships has to be explicable in a score card. |
+| [An Analysis of Fusion Functions for Hybrid Retrieval](https://arxiv.org/abs/2210.11934), Bruch, Gai and Ingber | Convex combination beats reciprocal rank fusion in and out of domain; RRF is more parameter-sensitive than it is given credit for; the learning of a convex fusion is largely agnostic to the choice of normalization. Introduces theoretical min-max: replace the observed minimum and maximum with the range the scoring function itself can attain. | Theoretical min-max is implemented. Its measured effect is not the one expected — see "Confidence is not ranking" below — and that finding is the reason the engine now carries two numbers per hit instead of one. |
+| [Generating Leakage-Free Benchmarks for Robust RAG Evaluation](https://arxiv.org/abs/2605.08838) | Many RAG benchmarks fail to test retrieval at all, because the questions are answerable without it. Benchmark quality should be stated in terms of leakage error and answerability. | Sharpened the diagnosis of the existing families. The leak here is not parametric knowledge, it is structural: this corpus writes each document's title and heading into the front of every one of its chunks, so a title query matches every chunk of its document and the ground truth grades the container rather than the answer. The passage evidence family is built to remove exactly that. |
+| [Coverage, Not Averages: Semantic Stratification for Trustworthy Retrieval Evaluation](https://arxiv.org/abs/2604.20763) | A single averaged retrieval metric hides which kinds of query a system fails on; evaluation should report stratified coverage. | The card reports every family separately and never rolls them into one number, and the query counts behind each family are printed above the results. |
+| [A Comparison of Statistical Significance Tests for IR](https://ciir-publications.cs.umass.edu/pub/web/getpdf.php?id=744), Smucker, Allan and Carterette | The paired bootstrap and the randomization test agree with each other and are the appropriate tests for retrieval evaluation. | Both are implemented and both are reported, because they answer different questions: the interval says how large the difference is, the p-value says whether it could be noise. |
+
+### Confidence is not ranking, and one number cannot be both
+
+The most useful thing the implementation found is a result the design did not anticipate.
+
+Theoretical min-max normalization does what Bruch et al. say it does: it makes a score mean the same thing from one query to the next, because both sides are divided by bounds the candidate list had no say in. Measured on the abstention family, switching the fusion to it took the rate at which the engine returns a confident top result for a question with **no answer in the corpus** from `1.000` to `0.000`. Under per-list min-max that number could not be anything but 1.000, and not because the engine is bad: min-max maps the best hit of every list to exactly 1.0, so there is no threshold on it to set.
+
+But as a *ranker* it measurably lost. On the multi-source family — questions whose evidence is split across two documents in two sources — theoretical min-max scored `0.4458` against min-max's `0.6896`. The reason is structural rather than incidental. The lexical bound is the query's own idf mass at saturation, which assumes some chunk could hold every query term. For a question deliberately built so that no chunk can, every lexical score is a small fraction of the bound, the whole lexical side collapses towards zero, and the ranking becomes vector-only.
+
+That is the correct behaviour for a *confidence* — no chunk answers the whole question, so no chunk should look confident — and the wrong behaviour for an *order*. Ranking asks "which of these is best" and confidence asks "is any of these good", and a normalization that answers one well answers the other badly by construction.
+
+So the engine stopped trying to make one number do both. Every hit now carries a `score`, produced by whichever fusion ranks best, and a `confidence`, always computed the theoretical min-max way whatever fusion ordered the list. The abstention threshold is set on confidence; the ranking is decided by score. The cost is one multiply per candidate.
+
+### The evaluation substrate, as built
+
+| Piece | Where | What it does |
+|---|---|---|
+| Paired statistics | [`stats.rs`](../crates/rustdb-bench/src/stats.rs) | Paired bootstrap 95% interval and paired randomization p-value over per-query scores, both seeded so a verdict is reproducible from the manifest. |
+| Primary versus diagnostic rows | [`report.rs`](../crates/rustdb-bench/src/report.rs) | Each family declares one metric that is judged; the rest are printed and never voted on. |
+| Practical thresholds | [`report.rs`](../crates/rustdb-bench/src/report.rs) | 0.01 on the ranking measures, five per cent on latency, declared in code before any run and written into the manifest. |
+| Verdicts | [`stats.rs`](../crates/rustdb-bench/src/stats.rs) | better / equivalent / inconclusive / worse, plus a separate reading for "both engines are at the metric's ceiling". |
+| Run artifacts | [`runs.rs`](../crates/rustdb-bench/src/runs.rs) | `runs/<id>/per-query.jsonl`, one line per engine per query with the ranking, each hit's grade, the component scores, the latency and the metrics that query contributed; `runs/<id>/manifest.json` with the commit and dirty flag, corpus file and size, model, device, every query seed, every ranking setting and the host. |
+| Graded judgements | [`queryset.rs`](../crates/rustdb-bench/src/queryset.rs) | Grade 3 for the passage that answers, 2 for the rest of its document, 0 otherwise, with graded nDCG in [`metrics.rs`](../crates/rustdb-bench/src/metrics.rs). |
+| Hard families | [`queryset.rs`](../crates/rustdb-bench/src/queryset.rs) | passage evidence, transposition, three-keyword shorthand, multi-source, unanswerable. |
+| Completeness gate | [`scenarios.rs`](../crates/rustdb-bench/src/scenarios.rs) | "rows returned" stopped being a relevance win and became a gate: an engine that returns thirty rows where fifty exist fails, and an engine that returns fifty irrelevant ones wins nothing. |
+| Arm sweep with intervals | [`tune.rs`](../crates/rustdb-bench/src/tune.rs) | Every arm compared against the shipped defaults with the same paired statistics, on queries generated from shifted seeds. |
+
+### The query families, and what each is for
+
+| Family | How the query is built | Ground truth | Why it exists |
+|---|---|---|---|
+| document identity | the document's own title | every chunk of that document | historical continuity; grades finding the right page |
+| heading | a section heading | the chunks under it | reads like a question; still container-level |
+| identifier | a rare literal token | the chunks holding it | where a lexical index must be strongest |
+| **passage evidence** | one body sentence, with every word of the chunk's breadcrumb removed and the two rarest remaining words removed | graded: 3 for that passage, 2 for the rest of its document | grades the paragraph rather than the page, with the structural leak removed and a deliberate vocabulary gap |
+| **transposition** | the same queries, two adjacent characters swapped in the query's rarest word | unchanged | the ground truth does not move, so the gap between the two scores is exactly what the mistake cost |
+| **shorthand** | the same queries cut to their three rarest content words | unchanged | what people type when they are searching rather than writing |
+| **multi-source** | two headings from two documents in two sources, joined | graded: both sets are answer bearing | scored on whether *both* arrived; success@10 calls half an answer a success and evidence recall does not |
+| **unanswerable** | distinctive words of two documents from two sources the builder draws from disjoint pools | nothing is relevant | the failure that does not announce itself: ten confident passages about nothing |
+| abstention calibration | headings from a seed nothing else uses | not scored | sets each engine's threshold on its own scale, so the comparison assumes nothing about the two engines' score ranges |
+
+The passage family's remaining bias is stated rather than hidden: its words are still drawn from the passage it grades. It is a weaker bias than the families it supplements — the container leak is gone and the two strongest lexical anchors are gone with it — and it keeps the ground truth objective, which a generated paraphrase would not. Replacing it with human-written questions is still the right next step and is still Phase 2 of the sequence above.
+
+### What the rebuilt system then said
+
+Two full graded runs on the 185,078 chunk corpus, from the same binary, differing only in the two
+ranking settings, over 2,613 queries across nine families on the graded seeds the sweep never sees.
+
+| primary measurement | before | after | best pgvector | verdict against pgvector |
+|---|---|---|---|---|
+| natural language headings, MRR (lexical only) | 0.6959 | 0.7221 | 0.5896 | better |
+| rare identifiers, MRR (lexical only) | 0.5420 | 0.5442 | 0.1363 | better |
+| document identity, nDCG@10 | 0.9802 | 0.9756 | 0.8148 | better |
+| natural language headings, nDCG@10 | 0.7318 | 0.7477 | 0.6271 | better |
+| passage evidence, graded nDCG@10 | 0.6958 | 0.7045 | 0.6027 | better |
+| one transposed character, graded nDCG@10 | 0.6745 | 0.6794 | 0.3969 | better |
+| three keywords, graded nDCG@10 | 0.6131 | 0.6266 | 0.4651 | better |
+| multi-source, evidence recall@10 | 0.5770 | 0.6237 | 0.1923 | better |
+| questions with no answer, confident answer rate | 0.1700 | 0.0050 | 1.0000 | better |
+| filtered recall@10, six sources | 0.9960–1.000 | 0.9960–1.000 | 0.3280–1.000 | 4 better, 1 equivalent at the ceiling, 1 inconclusive |
+| vector search p50, unfiltered and filtered | 0.668 / 0.773 ms | 0.704 / 0.864 ms | 1.519 / 1.393 ms | better |
+
+**17 primary comparisons: 15 better, 1 equivalent, 1 inconclusive, 0 worse**, with every correctness
+gate passing, on both runs. The verdict count does not move because the engine was already ahead on
+every family; what moved is how far ahead, and the abstention row moved from a defect to nearly gone.
+
+Three things are worth saying plainly about this table.
+
+The **inconclusive** is confluence filtered recall, where rust-db leads 0.9960 to 0.9760 and the
+95% interval runs 0.0000 to 0.0440 on 25 queries. The old rule would have called that a win, and a
+run that cannot separate two engines saying so is the point of the exercise rather than a
+disappointment.
+
+The **one regression** is document identity, −0.0046: half the practical threshold, on the family
+least like a question an agent asks, because a title query is answered by any chunk of the right page.
+
+And the **cost is not measurable**. Hybrid search latency went 5.897 ms to 6.044 ms on one family and
+4.416 ms to 4.182 ms on the other, against a baseline at 11.3 ms and 16.6 ms. The vector search
+latency family moved by 5 to 12 per cent, and that one is certainly noise: neither new setting is
+anywhere in the vector search path, which that family measures on its own.
+
+### What is still only a plan
+
+Unchanged from the design, and deliberately not implemented here:
+
+- **Human-authored or human-reviewed queries and adjudicated judgements.** Needs assessors, not code.
+- **The end-to-end RAG lane.** Needs a fixed generator, a context packer and a calibrated judge; it is the one layer whose absence the card still states as a caveat.
+- **Public out-of-domain, code search and reasoning packs.** BEIR, CodeSearchNet and BRIGHT subsets, for generalization rather than for product quality.
+- **Reranking, learned sparse, late interaction, late chunking and the embedding-model matrix.** Priority 2 of the ladder, and correctly still behind trustworthy judgements.
+- **Alternative vector indexes.** Priority 3, still behind the scale gate, which this corpus does not come close to.
+
+
 ## References
 
 - Nandan Thakur et al., [BEIR: A Heterogeneous Benchmark for Zero-shot Evaluation of Information Retrieval Models](https://arxiv.org/abs/2104.08663), 2021.
@@ -791,3 +899,8 @@ The key change in mindset is that rust-db should not optimize for “more metric
 - Aditi Singh et al., [FreshDiskANN: A Fast and Accurate Graph-Based ANN Index for Streaming Similarity Search](https://arxiv.org/abs/2105.09613), 2021.
 - Luyu Gao et al., [Precise Zero-Shot Dense Retrieval without Relevance Labels](https://aclanthology.org/2023.acl-long.99/), 2023.
 - Nelson Liu et al., [Lost in the Middle: How Language Models Use Long Contexts](https://arxiv.org/abs/2307.03172), 2023.
+- Hsin-Ling Hsu and Jengnan Tzeng, [DAT: Dynamic Alpha Tuning for Hybrid Retrieval in Retrieval-Augmented Generation](https://arxiv.org/abs/2503.23013), 2025.
+- [Query-Adaptive Hybrid Search](https://doi.org/10.3390/make8040091), Machine Learning and Knowledge Extraction, 2026.
+- [Generating Leakage-Free Benchmarks for Robust RAG Evaluation](https://arxiv.org/abs/2605.08838), 2026.
+- [Coverage, Not Averages: Semantic Stratification for Trustworthy Retrieval Evaluation](https://arxiv.org/abs/2604.20763), 2026.
+- Jaime Carbonell and Jade Goldstein, [The Use of MMR, Diversity-Based Reranking for Reordering Documents and Producing Summaries](https://doi.org/10.1145/290941.291025), 1998.

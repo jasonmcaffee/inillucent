@@ -5,7 +5,8 @@
 //! be convenient.
 
 use rustdb_core::embed_onnx::Device;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::Result;
@@ -13,7 +14,7 @@ use rustdb_core::embed::MATRYOSHKA_WIDTHS;
 use rustdb_core::filter::Filter;
 use rustdb_core::hnsw::HnswParams;
 use rustdb_core::index::{BuildStats, Index, IndexConfig};
-use rustdb_core::rank::Fusion;
+use rustdb_core::rank::{AdaptiveWeights, Fusion};
 use rustdb_core::store::ChunkInput;
 
 use crate::corpus::Corpus;
@@ -21,10 +22,14 @@ use crate::engine::{
     exhaustive_reference, fuse_with, PgMode, PgVectorEngine, RustDbEngine, SearchEngine,
 };
 use crate::metrics::{
-    ndcg_at_k_attainable, percentile, reciprocal_rank, recall_at_k, success_at_k, Accumulator,
+    graded_recall_at_k, ndcg_at_k_attainable, ndcg_graded_at_k, percentile, precision_at_k,
+    reciprocal_rank, recall_at_k, success_at_k, Accumulator,
 };
-use crate::queryset::{self, GradedQuery};
-use crate::report::{BuildFacts, GateResult, Measure, MetricRow, Scenario, ScoreCard};
+use crate::queryset::{self, GradedQuery, Perturbation};
+use crate::report::{
+    BuildFacts, GateResult, Measure, MetricRow, Role, Scenario, ScoreCard, Series,
+};
+use crate::runs::{self, HitRecord, QueryRecord, RunManifest, RunWriter};
 
 /// Traversal width rust-db uses on a filtered query, matched to the `hnsw.ef_search`
 /// the well configured baseline uses on one. It also moves the cost model's crossover:
@@ -162,22 +167,113 @@ impl KeySpace {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn grade(
-    corpus: &Corpus,
-    limit: Option<usize>,
-    per_source: usize,
-    model_dir: &str,
-    model_file: &str,
-    database_url: &str,
-    rustdb_only: bool,
-    device: Device,
-    fusion: Fusion,
-    lexical_coverage: f32,
-    lexical_proximity: f32,
-    lexical_prefix: bool,
-    lexical_tier: bool,
-) -> Result<ScoreCard> {
+/// Everything a graded run is configured with.
+///
+/// A struct rather than fourteen positional arguments, and the same reason
+/// `LexicalParams` exists: the list had grown past the point where a caller could
+/// transpose two `f32`s without the compiler noticing, and every setting here also
+/// has to be written into the run manifest, which is far easier to keep complete
+/// when the settings are one value rather than fourteen.
+pub struct GradeOptions {
+    pub limit: Option<usize>,
+    pub per_source: usize,
+    pub model_dir: String,
+    pub model_file: String,
+    pub database_url: String,
+    pub rustdb_only: bool,
+    pub device: Device,
+    pub fusion: Fusion,
+    pub lexical_coverage: f32,
+    pub lexical_proximity: f32,
+    pub lexical_prefix: bool,
+    pub lexical_tier: bool,
+    pub lexical_phrase: f32,
+    pub lexical_rescore_depth: usize,
+    pub adaptive_fusion: bool,
+    pub adaptive: AdaptiveWeights,
+    pub mmr_lambda: f32,
+    /// Where per-query run artifacts are collected.
+    pub runs_dir: PathBuf,
+    /// Fixes every bootstrap interval and p-value the card reports.
+    pub stats_seed: u64,
+    /// The corpus file, recorded so two cards can be checked to describe the same
+    /// corpus before they are compared.
+    pub cache_path: PathBuf,
+}
+
+impl GradeOptions {
+    /// Every ranking setting, as the run manifest and the score card record it.
+    ///
+    /// A number is not reproducible without this, and the settings are exactly
+    /// where two runs most often silently differ.
+    fn arm(&self) -> BTreeMap<String, String> {
+        let mut arm = BTreeMap::new();
+        arm.insert("fusion".into(), format!("{:?}", self.fusion));
+        arm.insert("lexical_coverage".into(), self.lexical_coverage.to_string());
+        arm.insert("lexical_proximity".into(), self.lexical_proximity.to_string());
+        arm.insert("lexical_prefix".into(), self.lexical_prefix.to_string());
+        arm.insert("lexical_tier".into(), self.lexical_tier.to_string());
+        arm.insert("lexical_phrase".into(), self.lexical_phrase.to_string());
+        arm.insert("lexical_rescore_depth".into(), self.lexical_rescore_depth.to_string());
+        arm.insert("adaptive_fusion".into(), self.adaptive_fusion.to_string());
+        arm.insert("adaptive".into(), format!("{:?}", self.adaptive));
+        arm.insert("mmr_lambda".into(), self.mmr_lambda.to_string());
+        arm.insert("per_source".into(), self.per_source.to_string());
+        arm.insert("filtered_ef_search".into(), FILTERED_EF_SEARCH.to_string());
+        arm
+    }
+}
+
+/// The seeds every query family is generated from.
+///
+/// Named and recorded rather than written inline, because a family generated from
+/// a different seed is a different query set, and two cards compared without
+/// noticing that are two cards about different questions. `calibration` is
+/// deliberately far from the rest: it generates answerable queries the report does
+/// not score, used only to choose each engine's abstention threshold, so the
+/// threshold is not fitted on the queries it is then judged on.
+fn seeds() -> BTreeMap<String, u64> {
+    [
+        ("identity", 11u64),
+        ("heading", 12),
+        ("identifier", 13),
+        ("passage", 14),
+        ("unanswerable", 15),
+        ("multi_source", 16),
+        ("calibration", 1012),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect()
+}
+
+fn seed(name: &str) -> u64 {
+    seeds().get(name).copied().unwrap_or(0)
+}
+
+pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
+    let GradeOptions {
+        limit,
+        per_source,
+        model_dir,
+        model_file,
+        database_url,
+        rustdb_only,
+        device,
+        fusion,
+        lexical_coverage,
+        lexical_proximity,
+        lexical_prefix,
+        lexical_tier,
+        ..
+    } = options;
+    let (limit, per_source, device) = (*limit, *per_source, *device);
+    let (fusion, rustdb_only) = (*fusion, *rustdb_only);
+    let (model_dir, model_file, database_url) =
+        (model_dir.as_str(), model_file.as_str(), database_url.as_str());
+    let (lexical_coverage, lexical_proximity) = (*lexical_coverage, *lexical_proximity);
+    let (lexical_prefix, lexical_tier) = (*lexical_prefix, *lexical_tier);
+
     eprintln!("building the rust-db index");
     let (index, keys, stats, build_seconds) = build_index(corpus, limit, true)?;
     eprintln!("  built in {build_seconds:.1}s");
@@ -198,6 +294,10 @@ pub fn grade(
     rustdb.index.set_lexical_proximity(lexical_proximity);
     rustdb.index.set_lexical_prefix(lexical_prefix);
     rustdb.index.set_lexical_tier(lexical_tier);
+    rustdb.index.set_lexical_phrase(options.lexical_phrase);
+    rustdb.index.set_lexical_rescore_depth(options.lexical_rescore_depth);
+    rustdb.index.set_adaptive_fusion(options.adaptive_fusion, options.adaptive);
+    rustdb.index.set_mmr_lambda(options.mmr_lambda);
     rustdb.index.set_fusion(fusion);
 
     // Query sets. Generated from the same slice of the corpus the index holds.
@@ -207,22 +307,92 @@ pub fn grade(
     let sliced = &corpus.chunks[..n];
 
     eprintln!("generating query sets");
-    let identity = queryset::document_identity_queries(sliced, &keys, per_source, 11);
-    let headings = queryset::heading_queries(sliced, &keys, per_source * 3, 12);
-    let identifiers = queryset::identifier_queries(sliced, &keys, per_source * 3, 13);
+    let identity = queryset::document_identity_queries(sliced, &keys, per_source, seed("identity"));
+    let headings = queryset::heading_queries(sliced, &keys, per_source * 3, seed("heading"));
+    let identifiers =
+        queryset::identifier_queries(sliced, &keys, per_source * 3, seed("identifier"));
+
+    // The hard families all need to know how rare a word is in this corpus, which
+    // is one pass over the chunks rather than one per family.
+    let df = queryset::document_frequencies(sliced);
+    let passage =
+        queryset::passage_evidence_queries(sliced, &keys, &df, per_source, seed("passage"));
+    let typo = queryset::perturbed_queries(&passage, Perturbation::Typo, &df);
+    let shorthand = queryset::perturbed_queries(&passage, Perturbation::Shorthand, &df);
+    let unanswerable =
+        queryset::unanswerable_queries(sliced, &df, per_source * 2, seed("unanswerable"));
+    let multi_source =
+        queryset::multi_source_queries(sliced, &keys, per_source * 2, seed("multi_source"));
+    // Answerable queries the report never scores, used only to choose each
+    // engine's abstention threshold. A threshold fitted on the queries it is then
+    // judged against would measure the fit rather than the engine.
+    let calibration = queryset::heading_queries(sliced, &keys, per_source * 2, seed("calibration"));
+
     eprintln!(
-        "  {} document identity, {} heading, {} identifier queries",
+        "  {} document identity, {} heading, {} identifier, {} passage evidence, {} typo, {} shorthand, {} unanswerable, {} multi-source, {} calibration",
         identity.len(),
         headings.len(),
-        identifiers.len()
+        identifiers.len(),
+        passage.len(),
+        typo.len(),
+        shorthand.len(),
+        unanswerable.len(),
+        multi_source.len(),
+        calibration.len()
     );
 
     eprintln!("embedding queries with the in process model from {model_dir}");
-    let identity_texts: Vec<String> = identity.iter().map(|q| q.text.clone()).collect();
-    let identity_vectors = queryset::embed_queries(model_dir, model_file, &identity_texts, device)?;
-    let heading_texts: Vec<String> = headings.iter().map(|q| q.text.clone()).collect();
-    let heading_vectors = queryset::embed_queries(model_dir, model_file, &heading_texts, device)?;
-    eprintln!("  embedded {} queries", identity_vectors.len() + heading_vectors.len());
+    // One session for all nine families. Opening a CUDA session costs tens of
+    // seconds and there is no reason to pay for it nine times.
+    let embedder = queryset::open_query_embedder(model_dir, model_file, device)?;
+    let embed = |qs: &[GradedQuery]| -> Result<Vec<Vec<f32>>> {
+        let texts: Vec<String> = qs.iter().map(|q| q.text.clone()).collect();
+        queryset::embed_with(&embedder, &texts)
+    };
+    let identity_vectors = embed(&identity)?;
+    let heading_vectors = embed(&headings)?;
+    let passage_vectors = embed(&passage)?;
+    let typo_vectors = embed(&typo)?;
+    let shorthand_vectors = embed(&shorthand)?;
+    let unanswerable_vectors = embed(&unanswerable)?;
+    let multi_vectors = embed(&multi_source)?;
+    let calibration_vectors = embed(&calibration)?;
+    let embedded = identity_vectors.len()
+        + heading_vectors.len()
+        + passage_vectors.len()
+        + typo_vectors.len()
+        + shorthand_vectors.len()
+        + unanswerable_vectors.len()
+        + multi_vectors.len()
+        + calibration_vectors.len();
+    eprintln!("  embedded {embedded} queries");
+
+    let mut query_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for (name, n) in [
+        ("document identity", identity.len()),
+        ("heading", headings.len()),
+        ("identifier", identifiers.len()),
+        ("passage evidence", passage.len()),
+        ("passage evidence, typo", typo.len()),
+        ("passage evidence, shorthand", shorthand.len()),
+        ("multi-source", multi_source.len()),
+        ("unanswerable", unanswerable.len()),
+        ("abstention calibration (not scored)", calibration.len()),
+    ] {
+        query_counts.insert(name.to_string(), n);
+    }
+
+    // The run's own directory, opened before the first query so a run that dies
+    // half way still leaves the evidence it had gathered.
+    let (git_commit, git_dirty) = runs::git_revision(std::path::Path::new("."));
+    let run_id = runs::run_id(&git_commit);
+    let mut writer = match RunWriter::create(&options.runs_dir, &run_id) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            eprintln!("  could not open the run directory, continuing without per-query records: {e:#}");
+            None
+        }
+    };
 
     let mut engines: Vec<String> = vec![RUSTDB.to_string()];
     let mut pg_default = if rustdb_only {
@@ -240,8 +410,17 @@ pub fn grade(
 
     // The baseline is fused the same way, so the hybrid family measures retrieval
     // rather than which engine was handed the better ranking policy.
+    let calibration_texts: Vec<String> = calibration.iter().map(|q| q.text.clone()).collect();
     for engine in [pg_default.as_mut(), pg_well_configured.as_mut()].into_iter().flatten() {
         engine.set_fusion(fusion);
+        // Theoretical min-max needs a bound on each engine's lexical scores.
+        // rust-db has one analytically; `ts_rank_cd` does not, so the baseline's is
+        // measured from its own scores on the calibration queries, which the
+        // report does not score.
+        if matches!(fusion, Fusion::TheoreticalMinMax { .. }) {
+            let ceiling = engine.calibrate_lexical_ceiling(&calibration_texts, 0.99)?;
+            eprintln!("  {} lexical ceiling calibrated to {ceiling:.4}", engine.name());
+        }
     }
 
     let mut scenarios = Vec::new();
@@ -285,15 +464,62 @@ pub fn grade(
 
     // ---- Family: hybrid retrieval end to end ----
     eprintln!("scenario: hybrid retrieval");
-    scenarios.push(hybrid(
-        &mut rustdb,
-        pg_default.as_mut(),
-        pg_well_configured.as_mut(),
-        &identity,
-        &identity_vectors,
-        &headings,
-        &heading_vectors,
-    )?);
+    {
+        let per_doc_cap = rustdb.index.config().per_doc_cap;
+        let mut engines: Vec<&mut dyn SearchEngine> = vec![&mut rustdb];
+        if let Some(e) = pg_default.as_mut() {
+            engines.push(e);
+        }
+        if let Some(e) = pg_well_configured.as_mut() {
+            engines.push(e);
+        }
+        let filter = Filter::default();
+
+        let identity_scores = run_family(
+            &mut engines, &identity, &identity_vectors, &filter, per_doc_cap, 10, &mut writer,
+        )?;
+        let heading_scores = run_family(
+            &mut engines, &headings, &heading_vectors, &filter, per_doc_cap, 10, &mut writer,
+        )?;
+        scenarios.push(hybrid(&identity_scores, &heading_scores));
+
+        // ---- Family: the hard packs ----
+        eprintln!("scenario: passage evidence, perturbations and multi-source");
+        let passage_scores = run_family(
+            &mut engines, &passage, &passage_vectors, &filter, per_doc_cap, 10, &mut writer,
+        )?;
+        let typo_scores = run_family(
+            &mut engines, &typo, &typo_vectors, &filter, per_doc_cap, 10, &mut writer,
+        )?;
+        let shorthand_scores = run_family(
+            &mut engines, &shorthand, &shorthand_vectors, &filter, per_doc_cap, 10, &mut writer,
+        )?;
+        let multi_scores = run_family(
+            &mut engines, &multi_source, &multi_vectors, &filter, per_doc_cap, 10, &mut writer,
+        )?;
+        scenarios.push(hard_retrieval(
+            &passage_scores,
+            &typo_scores,
+            &shorthand_scores,
+            &multi_scores,
+        ));
+
+        // ---- Family: abstention on questions nothing answers ----
+        eprintln!("scenario: abstention");
+        let calibration_scores = run_family(
+            &mut engines, &calibration, &calibration_vectors, &filter, per_doc_cap, 10, &mut writer,
+        )?;
+        let negative_scores = run_family(
+            &mut engines,
+            &unanswerable,
+            &unanswerable_vectors,
+            &filter,
+            per_doc_cap,
+            10,
+            &mut writer,
+        )?;
+        scenarios.push(abstention(&calibration_scores, &negative_scores));
+    }
 
     // ---- Family: fusion comparison ----
     eprintln!("scenario: fusion methods");
@@ -330,6 +556,87 @@ pub fn grade(
         quantized_megabytes: stats.quantized_bytes as f64 / 1e6,
     }];
 
+    // Provenance last, so the manifest records the run that actually completed.
+    let cache_meta = std::fs::metadata(&options.cache_path).ok();
+    let manifest = RunManifest {
+        run_id: run_id.clone(),
+        generated_at_unix: runs::now_unix(),
+        git_commit: git_commit.clone(),
+        git_dirty,
+        command: runs::command_line(),
+        corpus: runs::CorpusFacts {
+            chunks: stats.chunks,
+            documents: stats.documents,
+            dimensions: corpus.dims,
+            cache_path: options.cache_path.display().to_string(),
+            cache_bytes: cache_meta.as_ref().map(|m| m.len()).unwrap_or(0),
+            cache_modified_unix: cache_meta
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        },
+        model_dir: model_dir.to_string(),
+        model_file: model_file.to_string(),
+        device: format!("{device:?}"),
+        database: runs::redact(database_url),
+        seeds: seeds(),
+        arm: options.arm(),
+        host: runs::host_facts(),
+        query_counts: query_counts.clone(),
+        practical_thresholds: [
+            ("ranking measures".to_string(), 0.01),
+            ("latency, relative".to_string(), 0.05),
+        ]
+        .into_iter()
+        .collect(),
+    };
+
+    let mut provenance: BTreeMap<String, String> = BTreeMap::new();
+    provenance.insert("run id".into(), run_id.clone());
+    provenance.insert(
+        "commit".into(),
+        format!("{}{}", git_commit, if git_dirty { " (working tree dirty)" } else { "" }),
+    );
+    provenance.insert("command".into(), runs::command_line());
+    provenance.insert("corpus cache".into(), options.cache_path.display().to_string());
+    provenance.insert("embedding model".into(), format!("{model_dir}/{model_file}"));
+    provenance.insert("device".into(), format!("{device:?}"));
+    provenance.insert("baseline database".into(), runs::redact(database_url));
+    provenance.insert(
+        "host".into(),
+        format!(
+            "{} {}, {} logical processors",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0)
+        ),
+    );
+    provenance.insert(
+        "query seeds".into(),
+        seeds().iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", "),
+    );
+    provenance.insert("statistics seed".into(), options.stats_seed.to_string());
+    provenance.insert(
+        "ranking settings".into(),
+        options.arm().iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", "),
+    );
+
+    match writer {
+        Some(w) => {
+            let records = w.written();
+            let dir = w.finish(&manifest)?;
+            provenance.insert(
+                "per-query records".into(),
+                format!("{} lines in {}", records, dir.join("per-query.jsonl").display()),
+            );
+            provenance.insert("run manifest".into(), dir.join("manifest.json").display().to_string());
+        }
+        None => {
+            provenance.insert("per-query records".into(), "**not written**".into());
+        }
+    }
+
     Ok(ScoreCard {
         corpus_chunks: stats.chunks,
         corpus_documents: stats.documents,
@@ -339,6 +646,9 @@ pub fn grade(
         build,
         caveats: caveats(),
         generated_at: timestamp(),
+        stats_seed: options.stats_seed,
+        provenance,
+        query_counts,
     })
 }
 
@@ -381,12 +691,12 @@ fn vector_accuracy(
             let got_ids = space.ids_of(&got);
             acc.push(recall_at_k(&got_ids, &ref_ids, k));
         }
-        rows.push(MetricRow {
-            label: format!("all sources, no predicate ({} queries)", acc.len()),
-            metric: format!("recall@{k}"),
-            measures: vec![Measure { engine: RUSTDB.to_string(), value: acc.mean() as f64 }],
-            higher_is_better: true,
-        });
+        rows.push(MetricRow::diagnostic(
+            format!("all sources, no predicate ({} queries)", acc.len()),
+            &format!("recall@{k}"),
+            vec![Measure { engine: RUSTDB.to_string(), value: acc.mean() as f64 }],
+            true,
+        ));
     }
 
     Scenario {
@@ -449,8 +759,8 @@ fn ef_sweep(engine: &mut RustDbEngine, vectors: &[Vec<f32>]) -> Result<Scenario>
         name: "The ef_search tradeoff".to_string(),
         rationale: "`ef_search` is how wide the traversal keeps its candidate list, and it is the one knob a caller turns. Accuracy is measured against exhaustive cosine over the whole corpus, latency alongside it, so the default rust-db ships is a choice with a table behind it. The columns are settings, not engines.".to_string(),
         rows: vec![
-            MetricRow { label: "no predicate".into(), metric: "recall@10".into(), measures: recall, higher_is_better: true },
-            MetricRow { label: "no predicate".into(), metric: "vector search p50 ms".into(), measures: p50, higher_is_better: false },
+            MetricRow::diagnostic("no predicate".into(), "recall@10", recall, true),
+            MetricRow::diagnostic("no predicate".into(), "vector search p50 ms", p50, false),
         ],
         gate: None,
     })
@@ -466,6 +776,18 @@ fn filtered_vector(
     let mut rows = Vec::new();
     let sample: Vec<&Vec<f32>> = vectors.iter().take(25).collect();
     let k = 50usize;
+    // Every short result, so the completeness question can be a gate instead of a
+    // scored row. Returning fifty irrelevant chunks is not better than returning
+    // ten useful ones, so a count must never be a relevance win; coming back with
+    // thirty rows when fifty exist is still a defect, and a gate is what that is.
+    //
+    // The gate is on rust-db. The baseline's short results are the finding this
+    // whole family exists to report, not a failure of the card, and a gate that
+    // fails because the engine being compared against is incomplete would put "A
+    // GATE FAILED" at the top of a card where nothing rust-db did was wrong. They
+    // are listed in the detail instead, which is where the evidence belongs.
+    let mut short_results: Vec<String> = Vec::new();
+    let mut baseline_short: Vec<String> = Vec::new();
 
     // Keep the two optional engines as a list so each source loop touches them
     // uniformly rather than through duplicated branches.
@@ -486,15 +808,31 @@ fn filtered_vector(
         // Rows actually returned, which is the number that measured zero.
         let mut rustdb_rows = Accumulator::default();
         let mut rustdb_recall = Accumulator::default();
+        let mut recall_series: Vec<Series> = Vec::new();
+        let mut rustdb_recall_values: Vec<f64> = Vec::new();
+        let mut short = 0usize;
         for v in &sample {
             let hits = rustdb.vector_search(v, &filter, k)?;
             rustdb_rows.push(hits.len() as f32);
+            if hits.len() < k.min(pass) {
+                short += 1;
+            }
             let reference = exhaustive_reference(rustdb, v, &filter, 10);
             let mut space = KeySpace::new();
             let ref_ids = space.ids_of(&reference);
             let got_ids = space.ids_of(&keys_of(&hits));
-            rustdb_recall.push(recall_at_k(&got_ids, &ref_ids, 10));
+            let r = recall_at_k(&got_ids, &ref_ids, 10);
+            rustdb_recall.push(r);
+            rustdb_recall_values.push(r as f64);
         }
+        if short > 0 {
+            short_results.push(format!(
+                "rust-db, source = {source}: {short} of {} queries returned fewer than the {} rows the predicate admits",
+                sample.len(),
+                k.min(pass)
+            ));
+        }
+        recall_series.push(Series { engine: RUSTDB.to_string(), values: rustdb_recall_values });
 
         let mut row_measures = vec![Measure {
             engine: RUSTDB.to_string(),
@@ -508,41 +846,73 @@ fn filtered_vector(
         for engine in pg.iter_mut() {
             let mut returned = Accumulator::default();
             let mut recall = Accumulator::default();
+            let mut values: Vec<f64> = Vec::new();
+            let mut short = 0usize;
             for v in &sample {
                 let hits = engine.vector_search(v, &filter, k)?;
                 returned.push(hits.len() as f32);
+                if hits.len() < k.min(pass) {
+                    short += 1;
+                }
                 // The reference is exhaustive cosine over the same passing set,
                 // computed by rust-db because it is exact.
                 let reference = exhaustive_reference(rustdb, v, &filter, 10);
                 let mut space = KeySpace::new();
                 let ref_ids = space.ids_of(&reference);
                 let got_ids = space.ids_of(&keys_of(&hits));
-                recall.push(recall_at_k(&got_ids, &ref_ids, 10));
+                let r = recall_at_k(&got_ids, &ref_ids, 10);
+                recall.push(r);
+                values.push(r as f64);
             }
             let name = engine.name().to_string();
+            if short > 0 {
+                baseline_short.push(format!(
+                    "{name} on {source} returned fewer than the {} rows the predicate admits, on {} of {} queries",
+                    k.min(pass),
+                    short,
+                    sample.len()
+                ));
+            }
             row_measures.push(Measure { engine: name.clone(), value: returned.mean() as f64 });
-            recall_measures.push(Measure { engine: name, value: recall.mean() as f64 });
+            recall_measures.push(Measure { engine: name.clone(), value: recall.mean() as f64 });
+            recall_series.push(Series { engine: name, values });
         }
 
-        rows.push(MetricRow {
-            label: format!("source = {source} ({pass} chunks, rust-db path: {path})"),
-            metric: format!("rows returned of {k} requested"),
-            measures: row_measures,
-            higher_is_better: true,
-        });
-        rows.push(MetricRow {
-            label: format!("source = {source} ({pass} chunks, rust-db path: {path})"),
-            metric: "recall@10 within the filter".to_string(),
-            measures: recall_measures,
-            higher_is_better: true,
-        });
+        rows.push(MetricRow::diagnostic(
+            format!("source = {source} ({pass} chunks, rust-db path: {path})"),
+            &format!("rows returned of {k} requested"),
+            row_measures,
+            true,
+        ));
+        rows.push(MetricRow::primary(
+            format!("source = {source} ({pass} chunks, rust-db path: {path})"),
+            "recall@10 within the filter",
+            recall_measures,
+            true,
+            recall_series,
+        ));
     }
+
+    let completeness = GateResult {
+        passed: short_results.is_empty(),
+        detail: if short_results.is_empty() {
+            let mut detail =
+                "rust-db returned every row the predicate admits, on every source".to_string();
+            if !baseline_short.is_empty() {
+                detail.push_str(". The baseline did not: ");
+                detail.push_str(&baseline_short.join("; "));
+            }
+            detail
+        } else {
+            short_results.join("; ")
+        },
+    };
 
     Ok(Scenario {
         name: "Filtered vector search, per source".to_string(),
-        rationale: "An application with one search tool per source filters on `source` on every call, so this is the common case rather than a corner case. pgvector applies the filter after the index scan and the initial scan yields only `hnsw.ef_search` candidates, so a query restricted to a minority source can come back empty. rust-db expands nodes that fail the predicate but admits only nodes that pass, so the walk continues until it has found enough passing chunks. Two numbers are reported per source: how many rows came back at all, and whether they were the right ones, measured against exhaustive cosine over the same passing set.".to_string(),
+        rationale: "An application with one search tool per source filters on `source` on every call, so this is the common case rather than a corner case. pgvector applies the filter after the index scan and the initial scan yields only `hnsw.ef_search` candidates, so a query restricted to a minority source can come back empty. rust-db expands nodes that fail the predicate but admits only nodes that pass, so the walk continues until it has found enough passing chunks. Recall within the filter is the primary measurement, against exhaustive cosine over the same passing set. Rows returned is a diagnostic and a gate rather than a score: fifty irrelevant chunks are not better than ten useful ones, so a count must never be a relevance win, but coming back with thirty rows when fifty exist is still a defect and that is what the completeness gate is for.".to_string(),
         rows,
-        gate: None,
+        gate: Some(completeness),
     })
 }
 
@@ -684,27 +1054,55 @@ fn lexical(
         let mut success = Vec::new();
         let mut mrr = Vec::new();
         let mut returned = Vec::new();
+        let mut mrr_series = Vec::new();
+        let mut success_series = Vec::new();
         for engine in engines.iter_mut() {
             let mut s = Accumulator::default();
             let mut r = Accumulator::default();
             let mut n = Accumulator::default();
+            let mut mrr_values: Vec<f64> = Vec::new();
+            let mut success_values: Vec<f64> = Vec::new();
             for q in queries {
                 let hits = engine.lexical_search(&q.text, &filter, 50)?;
                 n.push(hits.len() as f32);
                 let mut space = KeySpace::new();
                 let correct = space.set_of(&q.correct);
                 let got = space.ids_of(&keys_of(&hits));
-                s.push(success_at_k(&got, &correct, 10));
-                r.push(reciprocal_rank(&got, &correct));
+                let hit = success_at_k(&got, &correct, 10);
+                let rr = reciprocal_rank(&got, &correct);
+                s.push(hit);
+                r.push(rr);
+                success_values.push(hit as f64);
+                mrr_values.push(rr as f64);
             }
             let name = engine.name().to_string();
             success.push(Measure { engine: name.clone(), value: s.mean() as f64 });
             mrr.push(Measure { engine: name.clone(), value: r.mean() as f64 });
-            returned.push(Measure { engine: name, value: n.mean() as f64 });
+            returned.push(Measure { engine: name.clone(), value: n.mean() as f64 });
+            mrr_series.push(Series { engine: name.clone(), values: mrr_values });
+            success_series.push(Series { engine: name, values: success_values });
         }
-        rows.push(MetricRow { label: label.to_string(), metric: "success@10".into(), measures: success, higher_is_better: true });
-        rows.push(MetricRow { label: label.to_string(), metric: "mean reciprocal rank".into(), measures: mrr, higher_is_better: true });
-        rows.push(MetricRow { label: label.to_string(), metric: "rows returned of 50".into(), measures: returned, higher_is_better: true });
+        // Reciprocal rank is the primary measurement here rather than success@10:
+        // it is the same evidence at finer resolution, so it separates two engines
+        // on far fewer queries, and where a lexical index is weak it is being weak
+        // about position rather than about presence.
+        rows.push(MetricRow::primary(
+            label.to_string(),
+            "mean reciprocal rank",
+            mrr,
+            true,
+            mrr_series,
+        ));
+        let mut hit_row =
+            MetricRow::diagnostic(label.to_string(), "success@10", success, true);
+        hit_row.series = success_series;
+        rows.push(hit_row);
+        rows.push(MetricRow::diagnostic(
+            label.to_string(),
+            "rows returned of 50",
+            returned,
+            true,
+        ));
     }
 
     Ok(Scenario {
@@ -715,72 +1113,373 @@ fn lexical(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn hybrid(
-    rustdb: &mut RustDbEngine,
-    pg_default: Option<&mut PgVectorEngine>,
-    pg_well_configured: Option<&mut PgVectorEngine>,
-    identity: &[GradedQuery],
-    identity_vectors: &[Vec<f32>],
-    headings: &[GradedQuery],
-    heading_vectors: &[Vec<f32>],
-) -> Result<Scenario> {
+/// Both sides, fused, on the two families whose ground truth is a document.
+///
+/// The primary measurement is nDCG@10 and everything else in the family is a
+/// diagnostic. That is a change of substance rather than of presentation: nDCG,
+/// success@1, success@10 and reciprocal rank are four views of one ranking, they
+/// move together, and counting each of them separately turned one result into
+/// four votes.
+///
+/// The scope of what these two families prove is also stated more plainly than it
+/// was. A title or a heading query is answered by *any* chunk of the document,
+/// because the corpus builder writes the title and the heading into the front of
+/// every chunk, so what is being graded is finding the right page. That is a real
+/// question and it is not the question an agent asks, which is why the passage
+/// evidence family below exists.
+/// @param identity - scores for the title-as-query family
+/// @param headings - scores for the heading-as-query family
+fn hybrid(identity: &FamilyScores, headings: &FamilyScores) -> Scenario {
     let mut rows = Vec::new();
-    let filter = Filter::default();
-
-    let per_doc_cap = rustdb.index.config().per_doc_cap;
-    let mut engines: Vec<&mut dyn SearchEngine> = vec![rustdb];
-    if let Some(e) = pg_default {
-        engines.push(e);
-    }
-    if let Some(e) = pg_well_configured {
-        engines.push(e);
-    }
-
-    for (label, queries, vectors) in [
-        ("document identity, title as query", identity, identity_vectors),
-        ("natural language, heading as query", headings, heading_vectors),
+    for (label, scores) in [
+        ("document identity, title as query", identity),
+        ("natural language, heading as query", headings),
     ] {
-        let mut ndcg = Vec::new();
-        let mut s1 = Vec::new();
-        let mut s10 = Vec::new();
-        let mut mrr = Vec::new();
-        for engine in engines.iter_mut() {
-            let mut a_ndcg = Accumulator::default();
-            let mut a_s1 = Accumulator::default();
-            let mut a_s10 = Accumulator::default();
-            let mut a_mrr = Accumulator::default();
-            for (q, v) in queries.iter().zip(vectors) {
-                let hits = engine.hybrid_search(&q.text, v, &filter, 10)?;
-                let mut space = KeySpace::new();
-                let correct = space.set_of(&q.correct);
-                let got = space.ids_of(&keys_of(&hits));
-                // The correct set is every chunk of one document, and both
-                // engines cap chunks per document, so the ideal ranking is
-                // capped the same way.
-                a_ndcg.push(ndcg_at_k_attainable(&got, &correct, 10, per_doc_cap));
-                a_s1.push(success_at_k(&got, &correct, 1));
-                a_s10.push(success_at_k(&got, &correct, 10));
-                a_mrr.push(reciprocal_rank(&got, &correct));
-            }
-            let name = engine.name().to_string();
-            ndcg.push(Measure { engine: name.clone(), value: a_ndcg.mean() as f64 });
-            s1.push(Measure { engine: name.clone(), value: a_s1.mean() as f64 });
-            s10.push(Measure { engine: name.clone(), value: a_s10.mean() as f64 });
-            mrr.push(Measure { engine: name, value: a_mrr.mean() as f64 });
+        rows.push(scores.row(label, M_NDCG, true, Role::Primary));
+        for metric in [M_SUCCESS_1, M_SUCCESS_10, M_MRR, M_PRECISION_10] {
+            rows.push(scores.row(label, metric, true, Role::Diagnostic));
         }
-        rows.push(MetricRow { label: label.into(), metric: "nDCG@10".into(), measures: ndcg, higher_is_better: true });
-        rows.push(MetricRow { label: label.into(), metric: "success@1".into(), measures: s1, higher_is_better: true });
-        rows.push(MetricRow { label: label.into(), metric: "success@10".into(), measures: s10, higher_is_better: true });
-        rows.push(MetricRow { label: label.into(), metric: "mean reciprocal rank".into(), measures: mrr, higher_is_better: true });
+        rows.push(scores.row(label, M_LATENCY, false, Role::Diagnostic));
     }
 
-    Ok(Scenario {
+    Scenario {
         name: "Hybrid retrieval, whole pipeline".to_string(),
-        rationale: "Both sides, fused, capped at two chunks per document, truncated to ten. This is the only family that grades fusion, and it is the closest measure of what a person asking a question actually experiences. success@1 is the strictest: it asks whether the right document is the first thing returned.".to_string(),
+        rationale: "Both sides, fused, capped at two chunks per document, truncated to ten. nDCG@10 is the primary measurement and the rest are diagnostics, because success@1, success@10 and reciprocal rank are the same ranking looked at from three more angles and giving each of them a vote turns one behaviour into four wins. The ground truth here is a whole document: a title or heading query is answered by any chunk of the document that carries it, since the corpus writes both into the front of every chunk. That grades finding the right page, which is worth grading and is not what an agent needs; the passage family below grades finding the right paragraph.".to_string(),
         rows,
         gate: None,
-    })
+    }
+}
+
+/// The families a document-level ground truth cannot express.
+///
+/// Four packs, each aimed at one thing the original three could not measure:
+///
+/// - **passage evidence** grades the paragraph rather than the page, with graded
+///   judgements, so a chunk of the right document that does not answer scores
+///   below the chunk that does instead of scoring identically.
+/// - **typo** is the same queries with one adjacent-character transposition. The
+///   absolute score matters much less than the gap: it is exactly what the
+///   perturbation cost, on ground truth that did not move.
+/// - **shorthand** is the same queries reduced to their three rarest content
+///   words, which is what people type when they are searching rather than writing.
+/// - **multi-source** needs evidence from two documents in two sources, and is
+///   scored on whether *both* arrived. Success@10 calls half an answer a success;
+///   evidence recall does not.
+/// @param passage - the passage evidence pack
+/// @param typo - the same pack with a transposition
+/// @param shorthand - the same pack reduced to keywords
+/// @param multi - the two-source pack
+fn hard_retrieval(
+    passage: &FamilyScores,
+    typo: &FamilyScores,
+    shorthand: &FamilyScores,
+    multi: &FamilyScores,
+) -> Scenario {
+    let mut rows = Vec::new();
+
+    for (label, scores) in [
+        ("passage evidence", passage),
+        ("passage evidence, one transposed character", typo),
+        ("passage evidence, three keywords", shorthand),
+    ] {
+        rows.push(scores.row(label, M_NDCG_GRADED, true, Role::Primary));
+        for metric in [M_SUCCESS_1, M_SUCCESS_10, M_MRR, M_PRECISION_10] {
+            rows.push(scores.row(label, metric, true, Role::Diagnostic));
+        }
+    }
+
+    // The multi-source pack is decided by whether all the required evidence
+    // arrived, not by whether some of it did.
+    rows.push(multi.row("multi-source, evidence in two sources", M_EVIDENCE_RECALL, true, Role::Primary));
+    for metric in [M_NDCG_GRADED, M_SUCCESS_10, M_MRR] {
+        rows.push(multi.row("multi-source, evidence in two sources", metric, true, Role::Diagnostic));
+    }
+
+    Scenario {
+        name: "Passage evidence, perturbation and multi-source".to_string(),
+        rationale: "The families the document-level ground truth cannot express. A passage query is built from one body sentence with the chunk's own breadcrumb words removed, so it cannot be answered by the title text every chunk of that document shares, and with the two rarest remaining words removed, so it is a description of the passage rather than a quotation of it. Judgements are graded: the passage that answers is grade 3, the rest of its document is grade 2 supporting context, and graded nDCG is what separates them. The transposed-character and three-keyword packs are those same queries made harder, on ground truth that did not move, so the gap between the clean score and the perturbed one is exactly what the perturbation cost. The multi-source pack needs evidence from two documents in two sources and is scored on whether both arrived: success@10 counts half an answer as a success, and evidence recall does not.".to_string(),
+        rows,
+        gate: None,
+    }
+}
+
+/// What each engine does with a question nothing in the corpus answers.
+///
+/// This is the failure that does not look like one. Both engines return ten
+/// confident-looking passages for a question with no answer, an agent writes a
+/// paragraph out of them, and nothing anywhere reports an error. Measuring it
+/// needs an absolute notion of confidence, which per-list min-max normalization
+/// destroys by construction: it maps the best hit of every list to 1.0, so every
+/// query's top result looks equally good and there is no threshold to set.
+///
+/// The protocol is the same for both engines and does not require their scores to
+/// be on the same scale. Each engine's threshold is the 5th percentile of its own
+/// top-1 scores over a set of answerable calibration queries the report never
+/// scores — the score below which it would start abstaining on questions it can
+/// answer. The measurement is then how often it produces a result above its own
+/// threshold for a question with no answer.
+/// @param calibration - answerable queries, used only to choose the threshold
+/// @param negative - the queries nothing answers
+fn abstention(calibration: &FamilyScores, negative: &FamilyScores) -> Scenario {
+    let mut thresholds = Vec::new();
+    let mut false_positive = Vec::new();
+    let mut margin = Vec::new();
+    let mut fp_series = Vec::new();
+
+    for engine in negative.by_engine.keys() {
+        let empty: Vec<f64> = Vec::new();
+        // Confidence, not the fused score. The fused score is produced by a
+        // normalization that reads its scale out of the candidate list, so the top
+        // result of every query looks equally good and there is no threshold to
+        // set; confidence is computed on bounds the results had no say in and is
+        // therefore comparable between one query and the next.
+        let calibration_scores = calibration
+            .by_engine
+            .get(engine)
+            .and_then(|m| m.get(M_TOP_CONFIDENCE))
+            .unwrap_or(&empty);
+        let negative_scores = negative
+            .by_engine
+            .get(engine)
+            .and_then(|m| m.get(M_TOP_CONFIDENCE))
+            .unwrap_or(&empty);
+
+        let mut sorted = calibration_scores.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let threshold = percentile(&sorted, 0.05);
+
+        // One value per query so the comparison can be paired like every other.
+        let flags: Vec<f64> = negative_scores
+            .iter()
+            .map(|s| if *s >= threshold { 1.0 } else { 0.0 })
+            .collect();
+        let rate = if flags.is_empty() {
+            0.0
+        } else {
+            flags.iter().sum::<f64>() / flags.len() as f64
+        };
+        let mean = |v: &[f64]| if v.is_empty() { 0.0 } else { v.iter().sum::<f64>() / v.len() as f64 };
+
+        thresholds.push(Measure { engine: engine.clone(), value: threshold });
+        false_positive.push(Measure { engine: engine.clone(), value: rate });
+        margin.push(Measure {
+            engine: engine.clone(),
+            value: mean(calibration_scores) - mean(negative_scores),
+        });
+        fp_series.push(Series { engine: engine.clone(), values: flags });
+    }
+
+    let rows = vec![
+        MetricRow::primary(
+            "questions with no answer in the corpus".to_string(),
+            "confident answer rate at the calibrated threshold",
+            false_positive,
+            false,
+            fp_series,
+        ),
+        MetricRow::diagnostic(
+            "calibration queries, 5th percentile of the top result confidence".to_string(),
+            "abstention threshold",
+            thresholds,
+            true,
+        ),
+        MetricRow::diagnostic(
+            "answerable minus unanswerable".to_string(),
+            "mean top result confidence gap",
+            margin,
+            true,
+        ),
+    ];
+
+    Scenario {
+        name: "Abstention on questions nothing answers".to_string(),
+        rationale: "Queries built by mixing the distinctive words of two documents from two sources, which the corpus builder draws from disjoint pools, so no chunk holds material from both and the question sounds entirely plausible with no answer. This is the failure mode that does not announce itself: ten confident looking passages about nothing, and an agent writes an answer out of them. Each engine is calibrated on its own scale rather than on a shared one, so the comparison needs no assumption that a rust-db score and a `ts_rank_cd` score mean the same thing: the threshold is the fifth percentile of that engine's own top result score over answerable calibration queries the report does not score, and the measurement is how often it exceeds its own threshold on a question with no answer. Lower is better. The number the threshold is set on is deliberately not the fused score: per-list min-max normalization, which is the fusion that ranks best here, maps the best hit of every list to 1.0 whether the list is good or hopeless, so no threshold on it exists. Every hit therefore also carries a confidence computed the theoretical min-max way — each side divided by a bound the results had no say in — whatever fusion ordered the list. Ranking and confidence are two questions and one number could not answer both.".to_string(),
+        rows,
+        gate: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Running a graded family against every engine, and keeping the per-query
+// evidence rather than only its mean.
+// ---------------------------------------------------------------------------
+
+/// Metric names, spelled once so a row label and a per-query record cannot drift
+/// apart.
+pub const M_NDCG_GRADED: &str = "graded nDCG@10";
+pub const M_NDCG: &str = "nDCG@10";
+pub const M_SUCCESS_1: &str = "success@1";
+pub const M_SUCCESS_10: &str = "success@10";
+pub const M_MRR: &str = "mean reciprocal rank";
+pub const M_PRECISION_10: &str = "precision@10";
+pub const M_EVIDENCE_RECALL: &str = "evidence recall@10";
+pub const M_LATENCY: &str = "hybrid search ms";
+pub const M_TOP_SCORE: &str = "top result score";
+/// The top result's absolute confidence, which is a different question from its
+/// fused score and the only one an abstention threshold can be set on.
+pub const M_TOP_CONFIDENCE: &str = "top result confidence";
+
+/// One engine's per-query scores for a family, metric by metric.
+type PerMetric = BTreeMap<String, Vec<f64>>;
+
+/// What one family's run produced: per engine, per metric, one value per query.
+///
+/// Kept whole rather than reduced to means, because every honest comparison in
+/// this card is paired: it needs each query's score under both engines, not two
+/// averages that happen to be over the same query count.
+pub struct FamilyScores {
+    pub by_engine: BTreeMap<String, PerMetric>,
+    #[allow(dead_code)]
+    pub queries: usize,
+}
+
+impl FamilyScores {
+    /// The mean of one metric for one engine, which is the number a row prints.
+    fn mean(&self, engine: &str, metric: &str) -> f64 {
+        let Some(values) = self.by_engine.get(engine).and_then(|m| m.get(metric)) else {
+            return 0.0;
+        };
+        if values.is_empty() {
+            return 0.0;
+        }
+        values.iter().sum::<f64>() / values.len() as f64
+    }
+
+    /// The engines that answered this family, in the order they were given.
+    fn engines(&self) -> Vec<String> {
+        self.by_engine.keys().cloned().collect()
+    }
+
+    /// One row: the mean per engine, and the per-query series behind it.
+    /// @param label - what was measured
+    /// @param metric - which metric to read
+    /// @param higher_is_better - the direction
+    /// @param role - whether this row is judged or only reported
+    fn row(&self, label: &str, metric: &str, higher_is_better: bool, role: Role) -> MetricRow {
+        let measures: Vec<Measure> = self
+            .engines()
+            .into_iter()
+            .map(|e| Measure { value: self.mean(&e, metric), engine: e })
+            .collect();
+        let series: Vec<Series> = self
+            .engines()
+            .into_iter()
+            .filter_map(|e| {
+                self.by_engine
+                    .get(&e)
+                    .and_then(|m| m.get(metric))
+                    .map(|values| Series { engine: e, values: values.clone() })
+            })
+            .collect();
+        match role {
+            Role::Primary => {
+                MetricRow::primary(label.to_string(), metric, measures, higher_is_better, series)
+            }
+            Role::Diagnostic => {
+                let mut row =
+                    MetricRow::diagnostic(label.to_string(), metric, measures, higher_is_better);
+                row.series = series;
+                row
+            }
+        }
+    }
+}
+
+/// Run one graded query family through every engine, scoring each query with every
+/// metric and writing the per-query evidence.
+///
+/// One function rather than one loop per family, because the families now differ
+/// only in their queries and their judgements, and having each of them compute its
+/// own metrics is how two rows of the same card end up meaning slightly different
+/// things.
+/// @param engines - the engines under test, all asked the same questions
+/// @param queries - the family, with its graded judgements
+/// @param vectors - the query embeddings, one per query, shared by every engine
+/// @param filter - the predicate every query in this family carries
+/// @param per_doc_cap - the cap both engines apply, needed by the nDCG ideal
+/// @param k - the cutoff
+/// @param writer - where per-query records go, when a run is being recorded
+fn run_family(
+    engines: &mut [&mut dyn SearchEngine],
+    queries: &[GradedQuery],
+    vectors: &[Vec<f32>],
+    filter: &Filter,
+    per_doc_cap: usize,
+    k: usize,
+    writer: &mut Option<RunWriter>,
+) -> Result<FamilyScores> {
+    let mut by_engine: BTreeMap<String, PerMetric> = BTreeMap::new();
+
+    for engine in engines.iter_mut() {
+        let name = engine.name().to_string();
+        let mut per_metric: PerMetric = BTreeMap::new();
+
+        for (q, v) in queries.iter().zip(vectors) {
+            let start = Instant::now();
+            let hits = engine.hybrid_search(&q.text, v, filter, k)?;
+            let latency = start.elapsed().as_secs_f64() * 1000.0;
+
+            // One key space per query, so the ordinals a metric sees are dense and
+            // local. The alternative, one space for the whole run, grows to the
+            // size of the corpus and buys nothing.
+            let mut space = KeySpace::new();
+            let correct = space.set_of(&q.correct);
+            let grades = q.grades(&mut space);
+            let got = space.ids_of(&keys_of(&hits));
+
+            let scores: [(&str, f64); 10] = [
+                (M_NDCG_GRADED, ndcg_graded_at_k(&got, &grades, k, per_doc_cap) as f64),
+                (M_NDCG, ndcg_at_k_attainable(&got, &correct, k, per_doc_cap) as f64),
+                (M_SUCCESS_1, success_at_k(&got, &correct, 1) as f64),
+                (M_SUCCESS_10, success_at_k(&got, &correct, k) as f64),
+                (M_MRR, reciprocal_rank(&got, &correct) as f64),
+                (M_PRECISION_10, precision_at_k(&got, &correct, k) as f64),
+                (
+                    M_EVIDENCE_RECALL,
+                    graded_recall_at_k(&got, &grades, k, queryset::GRADE_ANSWER) as f64,
+                ),
+                (M_LATENCY, latency),
+                (M_TOP_SCORE, hits.first().map(|h| h.score as f64).unwrap_or(0.0)),
+                (M_TOP_CONFIDENCE, hits.first().map(|h| h.confidence as f64).unwrap_or(0.0)),
+            ];
+            for (metric, value) in scores {
+                per_metric.entry(metric.to_string()).or_default().push(value);
+            }
+
+            if let Some(w) = writer.as_mut() {
+                let hit_records: Vec<HitRecord> = hits
+                    .iter()
+                    .enumerate()
+                    .map(|(i, h)| HitRecord {
+                        rank: i + 1,
+                        key: h.key.clone(),
+                        score: h.score as f64,
+                        grade: q
+                            .graded
+                            .iter()
+                            .find(|(k, _)| *k == h.key)
+                            .map(|(_, g)| *g)
+                            .unwrap_or(0),
+                    })
+                    .collect();
+                w.record(&QueryRecord {
+                    family: &q.family,
+                    query_id: &q.id,
+                    query: &q.text,
+                    engine: &name,
+                    source: &q.source,
+                    answerable: q.answerable,
+                    latency_ms: latency,
+                    returned: hits.len(),
+                    hits: hit_records,
+                    metrics: scores.iter().map(|(m, v)| (m.to_string(), *v)).collect(),
+                })?;
+            }
+        }
+        by_engine.insert(name, per_metric);
+    }
+
+    Ok(FamilyScores { by_engine, queries: queries.len() })
 }
 
 fn fusion_methods(
@@ -823,8 +1522,8 @@ fn fusion_methods(
         ndcg.push(Measure { engine: name.clone(), value: a_ndcg.mean() as f64 });
         s1.push(Measure { engine: name.clone(), value: a_s1.mean() as f64 });
     }
-    rows.push(MetricRow { label: "document identity".into(), metric: "nDCG@10".into(), measures: ndcg, higher_is_better: true });
-    rows.push(MetricRow { label: "document identity".into(), metric: "success@1".into(), measures: s1, higher_is_better: true });
+    rows.push(MetricRow::diagnostic("document identity".into(), "nDCG@10", ndcg, true));
+    rows.push(MetricRow::diagnostic("document identity".into(), "success@1", s1, true));
 
     Scenario {
         name: "Fusion methods compared".to_string(),
@@ -898,18 +1597,18 @@ fn quantization_ladder(
         }
     }
 
-    rows.push(MetricRow {
-        label: format!("against the 768 dimension f32 exact ranking, {ladder_chunks} chunks"),
-        metric: "recall@10".into(),
-        measures: recall_measures,
-        higher_is_better: true,
-    });
-    rows.push(MetricRow {
-        label: "storage".into(),
-        metric: "bytes per vector".into(),
-        measures: bytes_measures,
-        higher_is_better: false,
-    });
+    rows.push(MetricRow::diagnostic(
+        format!("against the 768 dimension f32 exact ranking, {ladder_chunks} chunks"),
+        "recall@10",
+        recall_measures,
+        true,
+    ));
+    rows.push(MetricRow::diagnostic(
+        "storage".into(),
+        "bytes per vector",
+        bytes_measures,
+        false,
+    ));
 
     Ok(Scenario {
         name: "Quantization and the Matryoshka ladder".to_string(),
@@ -942,6 +1641,8 @@ fn latency(
     ] {
         let mut p50 = Vec::new();
         let mut p95 = Vec::new();
+        let mut per_query = Vec::new();
+        let mut series = Vec::new();
         for engine in engines.iter_mut() {
             // A warmup pass, so the first query's cold caches do not land in the
             // reported percentiles.
@@ -955,18 +1656,54 @@ fn latency(
                 let _ = engine.vector_search(v, &filter, 50)?;
                 samples.push(start.elapsed().as_secs_f64() * 1000.0);
             }
-            samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let name = engine.name().to_string();
+            let mean = if samples.is_empty() {
+                0.0
+            } else {
+                samples.iter().sum::<f64>() / samples.len() as f64
+            };
+            // The unsorted samples, in query order, so this row can be compared
+            // as a paired series like every other primary row: the same query
+            // timed under both engines.
+            series.push(Series { engine: name.clone(), values: samples.clone() });
+            per_query.push(Measure { engine: name.clone(), value: mean });
+            samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
             p50.push(Measure { engine: name.clone(), value: percentile(&samples, 0.5) });
             p95.push(Measure { engine: name, value: percentile(&samples, 0.95) });
         }
-        rows.push(MetricRow { label: label.clone(), metric: "vector search p50 ms".into(), measures: p50, higher_is_better: false });
-        rows.push(MetricRow { label, metric: "vector search p95 ms".into(), measures: p95, higher_is_better: false });
+        // The median is what this family is judged on, and it is the one row here
+        // that carries no per-query series.
+        //
+        // Every other primary row on the card is decided by a paired test over
+        // per-query scores, which is strictly better evidence — except for
+        // latency, where it is worse. A mean is not robust: a handful of scheduler
+        // stalls from something else on the machine moves it by more than the
+        // difference being measured, and a run that happened to catch one reported
+        // rust-db's filtered mean at 2.013 ms against a median of 0.838 ms. The
+        // paired machinery faithfully reported that as inconclusive, which was the
+        // correct answer to the wrong question.
+        //
+        // So latency is judged on the median against the same relative threshold,
+        // and the mean and the 95th percentile are diagnostics beside it. The
+        // per-query timings are still written into the run's per-query file and
+        // into the card's JSON, so anyone who wants to reanalyse them can.
+        rows.push(MetricRow::primary(
+            label.clone(),
+            "vector search p50 ms",
+            p50,
+            false,
+            Vec::new(),
+        ));
+        let mut mean_row =
+            MetricRow::diagnostic(label.clone(), "vector search mean ms", per_query, false);
+        mean_row.series = series;
+        rows.push(mean_row);
+        rows.push(MetricRow::diagnostic(label, "vector search p95 ms", p95, false));
     }
 
     Ok(Scenario {
         name: "Latency".to_string(),
-        rationale: "Wall clock per query, measured inside the calling process after a warmup pass, reported as median and 95th percentile because a mean hides the tail people notice. rust-db pays no network cost because it is a library, while pgvector pays a loopback round trip. That is a genuine difference in the deployed system, but it is not a difference in index quality, so read this alongside the accuracy families rather than instead of them.".to_string(),
+        rationale: "Wall clock per query, measured inside the calling process after a warmup pass. The median is the primary measurement and the mean is a diagnostic beside it, which is the one place on this card where a paired test over per-query values is *not* the better evidence: a mean latency is not robust, a few scheduler stalls from something else on the machine move it by more than the difference being measured, and a run that catches one reports a filtered mean of 2.0 ms against a median of 0.8 ms. The 95th percentile is reported because a mean also hides the tail people notice. rust-db pays no network cost because it is a library, while pgvector pays a loopback round trip. That is a genuine difference in the deployed system, but it is not a difference in index quality, so read this alongside the accuracy families rather than instead of them.".to_string(),
         rows,
         gate: None,
     })

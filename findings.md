@@ -290,3 +290,162 @@ so the fast loop and the full loop each have a loaded baseline waiting.
 - The quantization ladder still says what it said: int8 costs nothing measurable (recall@10 0.8600
   either way at 768 dimensions) and Matryoshka truncation costs a great deal (0.6850 at 512, 0.2950
   at 64). Compress, do not shorten.
+
+---
+
+## 6. Rebuilding the scoring system, and what it then said
+
+Sections 1 to 5 describe a card that counted measurements won, with anything above `1e-4` a win.
+That verdict was rebuilt. This section is what the rebuild changed, what it cost, and what the
+engine measured at afterwards.
+
+### Why the old verdict overstated the result
+
+Three things, all pushing the same way.
+
+**`1e-4` is far below the noise.** On ninety queries, one query changing its mind moves a mean by
+about `0.011` — a hundred times the tolerance. Nothing computed the noise, so nothing could tell a
+win from a coin flip. The test for this is in `stats.rs`: ninety queries where exactly one differs
+produces a delta above `1e-4` and must not be called a win.
+
+**Every row got a vote.** nDCG@10, success@1, success@10 and reciprocal rank are four views of one
+ranking. They move together, and counting each of them separately turned one behaviour into four
+wins. Each family now declares one metric that is judged; the rest are printed and do not vote.
+
+**`rows returned` was higher-is-better.** Fifty irrelevant chunks outscored ten useful ones. It is
+now a diagnostic and a gate: an engine that comes back with thirty rows where fifty exist fails the
+gate, and an engine that returns fifty useless ones wins nothing. The gate is on rust-db, because
+the baseline's short results are the finding this family exists to report and not a failure of the
+card.
+
+### What replaced it
+
+A primary comparison is decided by a **95% paired bootstrap interval** and a **paired randomization
+test** over the per-query scores, against a **practical threshold declared before the run**: 0.01 on
+the ranking measures, five per cent on latency. Four verdicts, not three: *better* when the interval
+clears both zero and the threshold, *equivalent* when the whole interval sits inside it, *worse* in
+the other direction, and *inconclusive* when the run cannot tell. "Both engines are at the metric's
+ceiling" is reported separately from "we cannot tell", because a run that has proved neither engine
+can do better has not failed to decide anything.
+
+Latency is the one family judged on a point estimate rather than a paired test, and deliberately.
+A mean is not robust: a run that caught a few scheduler stalls from something else on this machine
+reported rust-db's filtered mean at 2.013 ms against a median of 0.838 ms, and the paired machinery
+faithfully called that inconclusive — the right answer to the wrong question. The median is the
+primary measurement, the mean and the 95th percentile sit beside it as diagnostics, and every
+per-query timing is still in the run file for anyone who wants to reanalyse it.
+
+### What every run now leaves behind
+
+`runs/<unix time>-<commit>/manifest.json` and `per-query.jsonl`: the commit and dirty flag, the
+corpus file with its size and modification time, the model, the device, every query seed, every
+ranking setting, the host, the declared thresholds — and one line per engine per query holding the
+ranking, each hit's relevance grade, the component scores, the latency and the metrics that query
+contributed. The intervals on the card can be recomputed from those files, a miss can be looked at
+instead of guessed at, and a run can be re-judged after a relevance judgement is corrected without
+paying for retrieval again.
+
+### The families the old ground truth could not express
+
+The corpus writes each document's title and heading into the front of every one of its chunks,
+because the corpus it reproduces did. A title query therefore matches every chunk of its document,
+and the three original families all grade **finding the right page**. An agent needs the paragraph.
+
+Five families were added. Passage evidence is built from one body sentence with every word of the
+chunk's own breadcrumb removed, so it cannot be answered by the title text all of that document's
+chunks share, and the two rarest remaining words removed, which is a deliberate vocabulary gap.
+Judgements are graded: 3 for the passage that answers, 2 for the rest of its document. The
+transposition and three-keyword packs are those queries made harder on ground truth that did not
+move, so the gap between the two scores is exactly what the perturbation cost. Multi-source needs
+evidence from two documents in two sources and is scored on whether **both** arrived. And
+unanswerable questions are built by mixing the distinctive words of two documents from sources the
+builder draws from disjoint pools, so the question sounds entirely plausible and has no answer.
+
+### Confidence had to stop being the same number as score
+
+The unanswerable family could not be measured at all at first, and the reason turned out to be
+structural rather than a defect in the engine. Per-list min-max normalization maps the best hit of
+every list to exactly 1.0, whether the list is good or hopeless, so every query's top result looks
+equally confident and there is no threshold to set. The first measurement was therefore that the
+engine returns a confident top result for **100%** of questions with no answer.
+
+Theoretical min-max normalization — dividing each side by a bound the results had no say in, cosine
+by one and BM25 by the query's own idf mass at saturation — took that to **0%**. But as a *ranker*
+it lost, and structurally: its lexical bound assumes some chunk could hold every query term, a
+multi-source question is built so that none can, so the whole lexical side collapses towards zero
+and the ranking becomes vector-only. It scored `0.446` there against min-max's `0.690`.
+
+That is correct behaviour for a confidence and wrong behaviour for an order. So every hit now
+carries both: a `score` from whichever fusion ranks best, and a `confidence` always computed on
+absolute bounds whatever fusion ordered the list. The threshold is set on confidence, the ranking is
+decided by score, and each engine is calibrated on its own scale against answerable queries the
+report never scores — so the comparison assumes nothing about a rust-db score and a `ts_rank_cd`
+score meaning the same thing.
+
+### The two ranking changes, and the evidence for them
+
+Both were chosen on queries generated from shifted seeds and confirmed on the graded set.
+
+**An ordered-phrase feature.** Proximity asks how wide the smallest window holding the matched terms
+is. Phrase asks whether they appeared in the query's own order inside that window, which window
+width cannot see: "offer eligibility rules" and "rules for eligibility of an offer" have the same
+width and are not the same answer.
+
+**Per-query adaptive vector weighting.** The weight is chosen from four signals the search already
+computed — how many query terms look like identifiers, how many the dictionary has never seen, how
+much of the query the best lexical hit holds, and how far each side's leader stands above its own
+list. DAT (arXiv 2503.23013) established that the right balance is a property of the query rather
+than of a benchmark and got the signal by putting a language model in the retrieval path; this gets
+the same signal for four floating point operations. Every gain at zero reproduces the fixed weight
+exactly, which is what makes turning it on judgeable against leaving it off.
+
+Gains of 0.10 rather than the 0.15 the sweep also liked: the two cannot be separated on the primary
+family, and 0.15 costs more document-identity nDCG. Where a sweep cannot separate two arms, the
+smaller intervention is the one to ship. Diversity selection is implemented and measured **off** —
+every lambda below 1 scored equal to or below 1.0, because this corpus gives each source a disjoint
+pool and so has no genuine near-duplicates for it to collapse.
+
+### Not fitting the answer to the test, again
+
+The sweep now prints an interval and a p-value for every arm against the shipped defaults, because
+the highest of forty arms is the highest of forty draws from the same noise unless something says
+otherwise. The winner is still confirmed on the graded seeds, which the sweep never sees.
+
+Both honest results are on the record. On 614 tuning queries the passage-evidence gain measured
+`+0.0070`, interval `+0.0037` to `+0.0110`, `p = 0.0005`: real, and smaller than the 0.01 threshold,
+which the card says rather than rounds up. What clears the threshold is elsewhere — multi-source
+evidence recall, heading nDCG, and the abstention rate.
+
+### What it measured at
+
+Two full graded runs on the 185,078 chunk corpus, from the same binary, differing only in the two
+ranking settings, over 2,613 queries in nine families on the graded seeds the sweep never sees.
+
+| primary measurement | before | after | delta | best pgvector |
+|---|---|---|---|---|
+| natural language headings, MRR (lexical only) | 0.6959 | **0.7221** | +0.0262 | 0.5896 |
+| rare identifiers, MRR (lexical only) | 0.5420 | **0.5442** | +0.0022 | 0.1363 |
+| document identity, nDCG@10 | 0.9802 | 0.9756 | −0.0046 | 0.8148 |
+| natural language headings, nDCG@10 | 0.7318 | **0.7477** | +0.0159 | 0.6271 |
+| passage evidence, graded nDCG@10 | 0.6958 | **0.7045** | +0.0087 | 0.6027 |
+| one transposed character, graded nDCG@10 | 0.6745 | **0.6794** | +0.0049 | 0.3969 |
+| three keywords, graded nDCG@10 | 0.6131 | **0.6266** | +0.0135 | 0.4651 |
+| multi-source, evidence recall@10 | 0.5770 | **0.6237** | +0.0467 | 0.1923 |
+| questions with no answer, confident answer rate | 0.1700 | **0.0050** | −0.1650 | 1.0000 |
+| filtered recall@10, every source | 0.9960–1.000 | 0.9960–1.000 | 0 | 0.3280–1.000 |
+
+Both runs reach **17 primary comparisons: 15 better, 1 equivalent, 1 inconclusive, 0 worse**, with
+every correctness gate passing. The verdict count does not move because the engine was already ahead
+of the baseline on every family; what moved is how far ahead, and the abstention row moved from a
+defect to nearly gone.
+
+The one negative movement is document identity, at −0.0046: half the practical threshold, on the
+family least like a question an agent asks, since a title query is answered by any chunk of the right
+page. It is stated here rather than left for someone to find.
+
+**Cost: none that can be measured.** Hybrid search latency went 5.897 ms to 6.044 ms on one family
+and 4.416 ms to 4.182 ms on the other — noise in both directions, against a baseline at 11.3 ms and
+16.6 ms. The vector search latency family moved too, by 5 to 12 per cent, and that one is definitely
+noise: neither new setting is anywhere in the vector search path, which the family measures on its
+own. Two runs on a shared machine are two runs on a shared machine, which is the reason the card
+judges latency on a median and says so.
