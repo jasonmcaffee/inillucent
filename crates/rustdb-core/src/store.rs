@@ -61,8 +61,8 @@ impl Dictionary {
     /// query against a dictionary of tens of thousands of entries, yields an id
     /// set the hot loop tests with the same integer comparison it already uses.
     ///
-    /// Returns an empty vector when nothing matches, which the caller must read
-    /// as "select nothing" rather than "no constraint".
+    /// Returns an ascending vector, empty when nothing matches - which the caller
+    /// must read as "select nothing" rather than "no constraint".
     /// @param needle - the substring to look for, matched case-insensitively
     pub fn find_containing(&self, needle: &str) -> Vec<u32> {
         if needle.is_empty() {
@@ -72,7 +72,7 @@ impl Dictionary {
         self.values
             .iter()
             .enumerate()
-            .filter(|(_, v)| v.to_lowercase().contains(&lowered))
+            .filter(|(_, v)| contains_ignoring_case(v, &lowered))
             .map(|(i, _)| i as u32)
             .collect()
     }
@@ -82,6 +82,30 @@ impl Dictionary {
     pub fn values(&self) -> &[String] {
         &self.values
     }
+}
+
+/// Whether `haystack` contains `needle`, which must already be lowercase.
+///
+/// The obvious implementation lowercases the haystack, which allocates a `String`
+/// per candidate - and this runs over an entire dictionary once per query, so on a
+/// mail corpus that is a few hundred thousand allocations to answer one filter.
+/// An all-ASCII haystack, which nearly every address and display name is, can be
+/// compared in place. Anything else falls back to the allocating path rather than
+/// guessing at Unicode case folding, because a name with an accent in it has to
+/// keep matching.
+/// @param haystack - the interned value
+/// @param needle - the search text, already lowercased
+fn contains_ignoring_case(haystack: &str, needle: &str) -> bool {
+    if !haystack.is_ascii() || !needle.is_ascii() {
+        return haystack.to_lowercase().contains(needle);
+    }
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    let (haystack, needle) = (haystack.as_bytes(), needle.as_bytes());
+    haystack
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 /// Sentinel for "this document has no updated_at". Sorts below every real
