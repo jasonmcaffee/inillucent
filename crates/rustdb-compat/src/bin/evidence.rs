@@ -24,8 +24,15 @@ use rustdb_vfs::memory::MemoryVfs;
 use rustdb_vfs::os::OsVfs;
 use rustdb_vfs::path::DbPath;
 
-/// The packages whose tests are evidence for phase 0 and phase 1.
-const PACKAGES: [&str; 4] = ["rustdb-base", "rustdb-vfs", "rustdb-sim", "rustdb-compat"];
+/// The packages whose tests are evidence for phases 0 through 3.
+const PACKAGES: [&str; 6] = [
+    "rustdb-base",
+    "rustdb-vfs",
+    "rustdb-sim",
+    "rustdb-value",
+    "rustdb-storage",
+    "rustdb-compat",
+];
 
 /// Collects the evidence and writes it, returning non-zero when a suite failed.
 fn main() -> ExitCode {

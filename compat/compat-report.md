@@ -4,9 +4,9 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 
 | status | capabilities |
 |---|---|
-| missing | 134 |
-| pass | 70 |
-| **total** | **204** |
+| missing | 113 |
+| pass | 106 |
+| **total** | **219** |
 
 ## By phase
 
@@ -19,9 +19,9 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | phase 13: transactional rust-db search and legacy migration | 0 | 0 | 3 | 0 |
 | phase 14: performance qualification and release | 0 | 0 | 2 | 0 |
 | phase 1: VFS, binary primitives, and simulator | 46 | 0 | 0 | 0 |
-| phase 2: values, affinities, collations, and records | 0 | 0 | 10 | 0 |
-| phase 3: read-only header, pager, page cache, and B-tree | 0 | 0 | 10 | 0 |
-| phase 4: B-tree mutation, allocation, and rollback pages | 0 | 0 | 7 | 0 |
+| phase 2: values, affinities, collations, and records | 17 | 0 | 0 | 0 |
+| phase 3: read-only header, pager, page cache, and B-tree | 19 | 0 | 0 | 0 |
+| phase 4: B-tree mutation, allocation, and rollback pages | 0 | 0 | 6 | 0 |
 | phase 5: lexer, parser, AST, and syntax parity | 0 | 0 | 6 | 0 |
 | phase 6: catalog, binder, expression VM, and read-only SELECT | 0 | 0 | 10 | 0 |
 | phase 7: single-database rollback transactions and DML | 0 | 0 | 13 | 0 |
@@ -102,33 +102,33 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `sim.failpoints.error-codes` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `sim.failpoints.short-write` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `sim.vfs.conformance` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
-| `values.storage-classes` | missing | missing | - | 0 |
-| `values.affinity` | missing | missing | - | 0 |
-| `values.comparison` | missing | missing | - | 0 |
-| `values.collation.binary` | missing | missing | - | 0 |
-| `values.collation.nocase` | missing | missing | - | 0 |
-| `values.collation.rtrim` | missing | missing | - | 0 |
-| `values.cast` | missing | missing | - | 0 |
-| `values.numeric-parsing` | missing | missing | - | 0 |
-| `values.record-format` | missing | missing | - | 0 |
-| `values.index-key-order` | missing | missing | - | 0 |
-| `storage.header.codec` | missing | missing | - | 0 |
-| `storage.header.validation` | missing | missing | - | 0 |
-| `storage.pager.read-path` | missing | missing | - | 0 |
-| `storage.page-cache` | missing | missing | - | 0 |
-| `storage.btree.table-leaf` | missing | missing | - | 0 |
-| `storage.btree.table-interior` | missing | missing | - | 0 |
-| `storage.btree.index-leaf` | missing | missing | - | 0 |
-| `storage.btree.index-interior` | missing | missing | - | 0 |
-| `storage.overflow-chains` | missing | missing | - | 0 |
-| `storage.cursor.seek` | missing | missing | - | 0 |
+| `values.storage-classes` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
+| `values.affinity` | pass | pass | linux-x86_64, windows-x86_64 | 10 |
+| `values.comparison` | pass | pass | linux-x86_64, windows-x86_64 | 9 |
+| `values.collation.binary` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
+| `values.collation.nocase` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `values.collation.rtrim` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `values.cast` | pass | pass | linux-x86_64, windows-x86_64 | 10 |
+| `values.numeric-parsing` | pass | pass | linux-x86_64, windows-x86_64 | 12 |
+| `values.record-format` | pass | pass | linux-x86_64, windows-x86_64 | 9 |
+| `values.index-key-order` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
+| `storage.header.codec` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
+| `storage.header.validation` | pass | pass | linux-x86_64, windows-x86_64 | 7 |
+| `storage.pager.read-path` | pass | pass | linux-x86_64, windows-x86_64 | 9 |
+| `storage.page-cache` | pass | pass | linux-x86_64, windows-x86_64 | 11 |
+| `storage.btree.table-leaf` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
+| `storage.btree.table-interior` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `storage.btree.index-leaf` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `storage.btree.index-interior` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `storage.overflow-chains` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `storage.cursor.seek` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
 | `storage.btree.insert` | missing | missing | - | 0 |
 | `storage.btree.delete` | missing | missing | - | 0 |
 | `storage.btree.balance` | missing | missing | - | 0 |
 | `storage.freelist` | missing | missing | - | 0 |
 | `storage.pointer-maps` | missing | missing | - | 0 |
 | `storage.auto-vacuum` | missing | missing | - | 0 |
-| `storage.integrity-check` | missing | missing | - | 0 |
+| `storage.integrity-check` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
 | `sql.lexer.tokens` | missing | missing | - | 0 |
 | `sql.lexer.string-literals` | missing | missing | - | 0 |
 | `sql.lexer.identifiers` | missing | missing | - | 0 |
@@ -236,3 +236,18 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `sql.negative.full-alter-table` | missing | missing | - | 0 |
 | `sql.negative.trigger-for-each-statement` | missing | missing | - | 0 |
 | `sql.negative.writable-views` | missing | missing | - | 0 |
+| `values.collation.registry` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `values.real-to-text` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
+| `values.text-encodings` | pass | pass | linux-x86_64, windows-x86_64 | 11 |
+| `values.subtype` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `values.record-validation` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `values.limits` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `values.no-panic-on-hostile-input` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
+| `storage.pager.sticky-errors` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
+| `storage.pager.read-only` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `storage.btree.page-validation` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `storage.schema.scan` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `storage.freelist.read` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `storage.pointer-map.read` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `storage.without-rowid.read` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `harness.fixtures.corpus` | pass | pass | linux-x86_64, windows-x86_64 | 5 |

@@ -135,7 +135,11 @@ mod tests {
         assert_eq!(limits.get(Limit::Column), 2000);
         assert_eq!(limits.get(Limit::VariableNumber), 32_766);
         assert_eq!(limits.get(Limit::Attached), 10);
-        assert_eq!(limits.get(Limit::FunctionArg), 127);
+        // 127 until SQLite raised it; 3.53.4 compiles SQLITE_MAX_FUNCTION_ARG
+        // as 1000, and the oracle reports that from sqlite3_limit(). This
+        // number was 127 here until the phase 2 differential run asked the
+        // reference build for all twelve limits and compared them.
+        assert_eq!(limits.get(Limit::FunctionArg), 1000);
     }
 
     /// Setting returns the previous value and clamps rather than failing.

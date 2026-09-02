@@ -7,4 +7,5 @@ description = "SQLite file codec, pager, page cache, B-trees, overflow chains, f
 
 [dependencies]
 rustdb-base = { workspace = true }
+rustdb-value = { workspace = true }
 rustdb-vfs = { workspace = true }

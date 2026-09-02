@@ -165,3 +165,6 @@ url = "https://sqlite.org/wal.html"
 [[source]]
 url = "https://sqlite.org/windowfunctions.html"
 
+[[source]]
+url = "https://sqlite.org/withoutrowid.html"
+title = "The WITHOUT ROWID Optimization"

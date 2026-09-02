@@ -1220,6 +1220,8 @@ version = "0.1.0"
 dependencies = [
  "rustdb-base",
  "rustdb-sim",
+ "rustdb-storage",
+ "rustdb-value",
  "rustdb-vfs",
 ]
 
@@ -1291,6 +1293,7 @@ name = "rustdb-storage"
 version = "0.1.0"
 dependencies = [
  "rustdb-base",
+ "rustdb-value",
  "rustdb-vfs",
 ]
 

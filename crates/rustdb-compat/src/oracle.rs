@@ -235,6 +235,21 @@ pub enum Op {
     /// Bind values into `SELECT ?1, ?2, ...` and return them, which is how the
     /// protocol proves it carries every storage class without loss.
     Echo(Vec<TaggedValue>),
+    /// Run SQL with values bound to `?1, ?2, ...` and return its first row.
+    ///
+    /// Embedding a value in SQL text would compare the engines' *parsers*
+    /// rather than their value systems - there is no literal syntax for the
+    /// exact bits of a double, and a blob written as `x'..'` has already been
+    /// through a conversion. Binding is the only way to ask both engines the
+    /// same question about the same value.
+    Bind {
+        /// The statement, with `?1`-style parameters.
+        sql: String,
+        /// The values to bind, in parameter order.
+        values: Vec<TaggedValue>,
+    },
+    /// Report every run-time limit at its current value.
+    Limits,
     /// Close the database.
     Close,
     /// Ask the driver to exit.
@@ -253,6 +268,15 @@ impl Op {
                 let rendered: Vec<String> = values.iter().map(TaggedValue::to_json).collect();
                 format!("{{\"op\":\"echo\",\"values\":[{}]}}", rendered.join(","))
             }
+            Op::Bind { sql, values } => {
+                let rendered: Vec<String> = values.iter().map(TaggedValue::to_json).collect();
+                format!(
+                    "{{\"op\":\"bind\",\"sql\":{},\"values\":[{}]}}",
+                    json_string(sql),
+                    rendered.join(",")
+                )
+            }
+            Op::Limits => "{\"op\":\"limits\"}".to_string(),
             Op::Close => "{\"op\":\"close\"}".to_string(),
             Op::Bye => "{\"op\":\"bye\"}".to_string(),
         }
