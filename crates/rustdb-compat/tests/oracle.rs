@@ -20,14 +20,15 @@ fn sqlite_oracle() -> Option<PathBuf> {
         let path = PathBuf::from(explicit);
         return path.is_file().then_some(path);
     }
+    // The name is chosen by this platform's executable suffix rather than by
+    // trying both, because both exist: the workspace is shared between Windows
+    // and WSL, and a Linux run that picked up `sqlite-oracle.exe` would start
+    // it through the interop layer and then hand a Windows process a `/mnt/c`
+    // path it cannot open. That failed as "unable to open database file",
+    // which looks like a permissions problem and is not one.
     let directory = workspace_root().join(".sqlite-ref/3.53.4");
-    for name in ["sqlite-oracle.exe", "sqlite-oracle"] {
-        let path = directory.join(name);
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-    None
+    let path = directory.join(format!("sqlite-oracle{}", std::env::consts::EXE_SUFFIX));
+    path.is_file().then_some(path)
 }
 
 /// Returns the rust-db oracle binary that cargo built for this test.

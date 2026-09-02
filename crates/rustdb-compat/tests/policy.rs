@@ -15,7 +15,14 @@ use std::process::Command;
 use rustdb_compat::workspace_root;
 
 /// The crates the phase 0-1 policy applies to.
-const GOVERNED: [&str; 4] = ["rustdb-base", "rustdb-vfs", "rustdb-sim", "rustdb-compat"];
+const GOVERNED: [&str; 6] = [
+    "rustdb-base",
+    "rustdb-vfs",
+    "rustdb-sim",
+    "rustdb-value",
+    "rustdb-storage",
+    "rustdb-compat",
+];
 
 /// The only files allowed to contain `unsafe`.
 ///

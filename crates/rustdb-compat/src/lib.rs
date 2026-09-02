@@ -24,6 +24,8 @@
     )
 )]
 
+pub mod corpus;
+pub mod fixtures;
 pub mod hash;
 pub mod layering;
 pub mod manifest;

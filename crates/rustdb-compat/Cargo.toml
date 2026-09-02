@@ -7,6 +7,8 @@ description = "Parity manifest, compatibility report generator, and the SQLite o
 
 [dependencies]
 rustdb-base = { workspace = true }
+rustdb-value = { workspace = true }
+rustdb-storage = { workspace = true }
 rustdb-vfs = { workspace = true }
 rustdb-sim = { workspace = true }
 
@@ -29,3 +31,11 @@ path = "src/bin/baseline.rs"
 [[bin]]
 name = "rustdb-perf"
 path = "src/bin/perf.rs"
+
+[[bin]]
+name = "rustdb-fixtures"
+path = "src/bin/fixtures.rs"
+
+[[bin]]
+name = "rustdb-readperf"
+path = "src/bin/readperf.rs"

@@ -36,11 +36,19 @@ kind = "production"
 layer = 1
 may_depend_on = ["rustdb-base"]
 
+# `rustdb-storage` reaching into `rustdb-value` is a refinement made in
+# task-1783, and it is the layering rule "storage knows pages and byte records"
+# taken literally: an index cursor cannot decide which child to descend into
+# without decoding the two records it is comparing, and `sqlite_schema` cannot
+# be read for root pages without decoding a record. `rustdb-value` is a leaf
+# below storage in the TDD's own graph, so the edge is downward and adds no
+# cycle. What storage still may not reach is anything that knows what a column
+# is called: no catalog, no SQL, no expressions.
 [[crate]]
 name = "rustdb-storage"
 kind = "production"
 layer = 2
-may_depend_on = ["rustdb-base", "rustdb-vfs"]
+may_depend_on = ["rustdb-base", "rustdb-value", "rustdb-vfs"]
 
 [[crate]]
 name = "rustdb-transaction"
@@ -133,7 +141,13 @@ may_depend_on = ["rustdb-base", "rustdb-vfs"]
 name = "rustdb-compat"
 kind = "test-only"
 layer = 10
-may_depend_on = ["rustdb-base", "rustdb-vfs", "rustdb-sim"]
+may_depend_on = [
+  "rustdb-base",
+  "rustdb-value",
+  "rustdb-storage",
+  "rustdb-vfs",
+  "rustdb-sim",
+]
 
 [[crate]]
 name = "rustdb-bench"

@@ -51,15 +51,22 @@ fn the_shipped_manifest_is_structurally_sound() {
     );
 }
 
-/// Every phase 0 and phase 1 row must claim `pass`, and every later row must
-/// not. A row that quietly claims a phase it has not reached is the thing the
-/// report exists to prevent.
+/// The phases that have been implemented are named here, and every row must
+/// agree with the list: a row in a finished phase claims `pass`, and a row in
+/// a phase nobody has reached yet does not. A row that quietly claims a phase
+/// it has not reached is the thing the report exists to prevent, and a phase
+/// added to this list without its rows moving is caught by the same assertion.
+const FINISHED_PHASES: [&str; 4] = ["phase 0:", "phase 1:", "phase 2:", "phase 3:"];
+
+/// Every row in a finished phase must claim `pass`, and every later row must
+/// not.
 #[test]
 fn only_the_finished_phases_claim_to_be_finished() {
     for capability in &manifest().capabilities {
         // The colon matters: "phase 1:" is finished, "phase 10:" is not.
-        let finished =
-            capability.phase.starts_with("phase 0:") || capability.phase.starts_with("phase 1:");
+        let finished = FINISHED_PHASES
+            .iter()
+            .any(|phase| capability.phase.starts_with(phase));
         let claims = capability.status == Status::Pass;
         assert_eq!(
             finished,

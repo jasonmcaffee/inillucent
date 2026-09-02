@@ -1,0 +1,302 @@
+# The fixture corpus.
+#
+# Every valid fixture was written by the pinned SQLite 3.53.4 binary; every
+# malformed one is a single named edit to a valid fixture, applied by
+# crates/rustdb-compat/src/fixtures.rs. Regenerate with:
+#   cargo run -p rustdb-compat --bin rustdb-fixtures
+# and verify the checked-in copies with `-- --verify`.
+#
+# This file is generated. Editing a digest here rather than regenerating the
+# corpus is how a fixture stops being what SQLite wrote.
+
+schema_version = 1
+reference = "sqlite-3.53.4"
+
+[[fixture]]
+name = "basic-p4096-utf8.db"
+kind = "valid"
+page_size = 4096
+encoding = "UTF-8"
+bytes = 24576
+sha256 = "06f1d8a3610bfd440b01cb0092af5ec37fb10915e127c4ea0352df8fc5f24805"
+purpose = "the default page size and encoding, with rowid tables and three indexes"
+
+[[fixture]]
+name = "basic-p512-utf8.db"
+kind = "valid"
+page_size = 512
+encoding = "UTF-8"
+bytes = 3584
+sha256 = "08b6c35171be532431de2df7fc4ea163f5051472967d9920403ddf535fc58843"
+purpose = "the smallest legal page size, which forces a deeper tree and more overflow"
+
+[[fixture]]
+name = "basic-p1024-utf8.db"
+kind = "valid"
+page_size = 1024
+encoding = "UTF-8"
+bytes = 6144
+sha256 = "5365d0d80c304ea4ab1dabb7b6a62cbd95b7d3dae1300400e33c352ea9922ddf"
+purpose = "a mid page size, for comparison against the 512 and 4096 forms"
+
+[[fixture]]
+name = "basic-p65536-utf8.db"
+kind = "valid"
+page_size = 65536
+encoding = "UTF-8"
+bytes = 393216
+sha256 = "8f4d89741a9b92a7e0ed46106f798840590a5dcc7ccfb00a9821c80b38b06924"
+purpose = "the largest page size, whose header field is encoded as 1"
+
+[[fixture]]
+name = "basic-p1024-utf16le.db"
+kind = "valid"
+page_size = 1024
+encoding = "UTF-16le"
+bytes = 6144
+sha256 = "03c8b6ef1b066d0a4ed5a3a2ea19a38f6b85a7092ce593502e085307f3624d14"
+purpose = "a UTF-16 little-endian database, where text serial types double in length"
+
+[[fixture]]
+name = "basic-p1024-utf16be.db"
+kind = "valid"
+page_size = 1024
+encoding = "UTF-16be"
+bytes = 6144
+sha256 = "407799cdf9dc59d1c826ebd52ba49d8e191eacf670df7a26c5144d5b1ce6e6e0"
+purpose = "a UTF-16 big-endian database"
+
+[[fixture]]
+name = "reserved-p4096-utf8.db"
+kind = "valid"
+page_size = 4096
+encoding = "UTF-8"
+bytes = 24576
+sha256 = "5ed462c86a6b68d60efe6b54422652c30e70a99c141e1a2d08b0e2a59ef34c7d"
+purpose = "32 reserved bytes per page, so usable size is not the page size"
+
+[[fixture]]
+name = "overflow-p512-utf8.db"
+kind = "valid"
+page_size = 512
+encoding = "UTF-8"
+bytes = 418304
+sha256 = "daf29dba1b470762e4bc711f09a8c266ede58c948db2a09f83edbe1b3157ebe0"
+purpose = "payloads on both sides of the local threshold and across many overflow pages"
+
+[[fixture]]
+name = "withoutrowid-p1024-utf8.db"
+kind = "valid"
+page_size = 1024
+encoding = "UTF-8"
+bytes = 4096
+sha256 = "a1b8b029260627ad077a4e29ddf283b1254ef16aa40a0fd7e92743a9039b8865"
+purpose = "a WITHOUT ROWID table, which is an index B-tree used as a table"
+
+[[fixture]]
+name = "deep-p512-utf8.db"
+kind = "valid"
+page_size = 512
+encoding = "UTF-8"
+bytes = 103936
+sha256 = "a7b84bc50d499872516f6bf78e84545f89fcac66d4dba0b2d1d5ca049781506d"
+purpose = "enough rows at 512 bytes a page to build interior levels in table and index"
+
+[[fixture]]
+name = "freelist-p1024-utf8.db"
+kind = "valid"
+page_size = 1024
+encoding = "UTF-8"
+bytes = 415744
+sha256 = "a90ca80cdcf4416b5f76aff5569286a3bd833de700d9044b74b5d5ec94599175"
+purpose = "a file with a populated freelist, from rows inserted and then deleted"
+
+[[fixture]]
+name = "autovacuum-p1024-utf8.db"
+kind = "valid"
+page_size = 1024
+encoding = "UTF-8"
+bytes = 454656
+sha256 = "6536496161d399a37d2fcd1635d50eea12ba94635e4a0bb2b47796e4e4081da9"
+purpose = "auto_vacuum FULL, which adds pointer-map pages and a largest-root field"
+
+[[fixture]]
+name = "incrvacuum-p1024-utf8.db"
+kind = "valid"
+page_size = 1024
+encoding = "UTF-8"
+bytes = 132096
+sha256 = "ef85f77cd17c198af034bf4c559a8b5ac8ae8e695e183874ecb9964b59289945"
+purpose = "auto_vacuum INCREMENTAL, which sets the incremental-vacuum header field"
+
+[[fixture]]
+name = "empty-p4096-utf8.db"
+kind = "valid"
+page_size = 4096
+encoding = "UTF-8"
+bytes = 12288
+sha256 = "00c9605b2360d4e3082744ca79dce1b9d65ca374fa73bfaf74c34d9e01c624e8"
+purpose = "a database with a schema and no rows at all, and one with no schema either"
+
+[[fixture]]
+name = "collations-p1024-utf8.db"
+kind = "valid"
+page_size = 1024
+encoding = "UTF-8"
+bytes = 5120
+sha256 = "d2ac7b296a6664b3d67b8263dd309300a3d2fc5fc4f0834a4f98620bfbfbdd8f"
+purpose = "indexes under each built-in collation, over text that separates them"
+
+[[fixture]]
+name = "bad-magic.db"
+kind = "malformed"
+base = "basic-p4096-utf8.db"
+fails_at_open = true
+bytes = 24576
+sha256 = "d1f4a4b3e62bb2d8af2f0ff436e76e77474a4f39b42790c4a67c11eb67bde5dc"
+lie = "the file does not start with the SQLite magic"
+
+[[fixture]]
+name = "bad-page-size.db"
+kind = "malformed"
+base = "basic-p4096-utf8.db"
+fails_at_open = true
+bytes = 24576
+sha256 = "98ef4bb069e7d655af18ee0a6db35e903fe29dc4d7f45c1918891c0d7209d1f9"
+lie = "a page size that is not a power of two"
+
+[[fixture]]
+name = "bad-read-version.db"
+kind = "malformed"
+base = "basic-p4096-utf8.db"
+fails_at_open = true
+bytes = 24576
+sha256 = "a38b61a1c10bab95130f6f46672dfc8ea9e79a4223f77d0d134603df8c5335f3"
+lie = "a read format version the reader does not know"
+
+[[fixture]]
+name = "bad-payload-fraction.db"
+kind = "malformed"
+base = "basic-p4096-utf8.db"
+fails_at_open = true
+bytes = 24576
+sha256 = "5a7e34deea610c336ac9b32a301e2e6c633d37c276f41ab97faff6d197b1631a"
+lie = "a maximum embedded payload fraction other than the fixed 64"
+
+[[fixture]]
+name = "bad-schema-format.db"
+kind = "malformed"
+base = "basic-p4096-utf8.db"
+fails_at_open = true
+bytes = 24576
+sha256 = "5e04ff63604e2fb041a8e476ac32a2f90a6713afbc31c877528bb6ae87468d8a"
+lie = "a schema format number past the four that exist"
+
+[[fixture]]
+name = "masked-text-encoding.db"
+kind = "malformed"
+base = "basic-p4096-utf8.db"
+fails_at_open = false
+bytes = 24576
+sha256 = "4a7d655367dc7f6bca63ce3f9fb967ce61cb796e831207cc33dd0a970512b0c6"
+lie = "a text encoding of 4, which SQLite masks to UTF-8 rather than refusing"
+
+[[fixture]]
+name = "dirty-reserved-expansion.db"
+kind = "malformed"
+base = "basic-p4096-utf8.db"
+fails_at_open = false
+bytes = 24576
+sha256 = "53c596f61856aab720dab9056994e8a2148d31840abe9525cf76506e08be4240"
+lie = "reserved expansion bytes that are not zero, which SQLite does not check"
+
+[[fixture]]
+name = "freelist-head-out-of-range.db"
+kind = "malformed"
+base = "basic-p4096-utf8.db"
+fails_at_open = true
+bytes = 24576
+sha256 = "9d06d57f6487536c52c7d50991637a88ed13ea251591fb9e4e9e81032afed631"
+lie = "a freelist head past the end of the file"
+
+[[fixture]]
+name = "bad-page-type.db"
+kind = "malformed"
+base = "basic-p4096-utf8.db"
+fails_at_open = false
+bytes = 24576
+sha256 = "c71bc19ecbacaddabc9983000bac9b8069fc57524aa4d14683c199e485eb9410"
+lie = "a page whose type byte is not one of the four"
+
+[[fixture]]
+name = "cell-count-too-large.db"
+kind = "malformed"
+base = "basic-p4096-utf8.db"
+fails_at_open = false
+bytes = 24576
+sha256 = "6fee9f25518b41e9eedb500f12bf12a81ba7e5c0b1ebf9f60da8b0e1d353902a"
+lie = "a cell count whose pointer array cannot fit on the page"
+
+[[fixture]]
+name = "content-start-in-header.db"
+kind = "malformed"
+base = "basic-p4096-utf8.db"
+fails_at_open = false
+bytes = 24576
+sha256 = "5d56efeb53c3b25758b67da91ac5fd13829b7638bc5c5ac2ecb79a63c7d7115d"
+lie = "a cell content area that overlaps the cell pointer array"
+
+[[fixture]]
+name = "too-many-fragments.db"
+kind = "malformed"
+base = "basic-p4096-utf8.db"
+fails_at_open = false
+bytes = 24576
+sha256 = "97e47c5288dfc75decad91f272ea5e208d6a6d9639f2413641556cf7a922d458"
+lie = "more fragmented free bytes than the sixty the format allows"
+
+[[fixture]]
+name = "cell-pointer-out-of-range.db"
+kind = "malformed"
+base = "basic-p4096-utf8.db"
+fails_at_open = false
+bytes = 24576
+sha256 = "2f60df91ebc240d0056094a0d64e08d2c01bba2ec58e1e778a3e63d4a80a199c"
+lie = "a cell pointer that lands outside the content area"
+
+[[fixture]]
+name = "freeblock-loop.db"
+kind = "malformed"
+base = "basic-p4096-utf8.db"
+fails_at_open = false
+bytes = 24576
+sha256 = "54cfc9b57e75db63f1f8ee936818016d3e4bf59fba112921daf795ddb1d3662c"
+lie = "a freeblock chain that points at itself"
+
+[[fixture]]
+name = "bad-schema-page-type.db"
+kind = "malformed"
+base = "basic-p4096-utf8.db"
+fails_at_open = false
+bytes = 24576
+sha256 = "896327ae2e22cc886408f2cc0aeca84b0fdbbb07e95ceef3b5ecaf4f25c9915c"
+lie = "a schema root page whose type byte is not a B-tree page"
+
+[[fixture]]
+name = "truncated-mid-page.db"
+kind = "malformed"
+base = "basic-p4096-utf8.db"
+fails_at_open = false
+bytes = 6096
+sha256 = "7fd57866f6f01f5e101f312a8c71d41c1d6b897e7d7637d86a29433e222e8e16"
+lie = "a file that stops in the middle of a page"
+
+[[fixture]]
+name = "truncated-header.db"
+kind = "malformed"
+base = "basic-p4096-utf8.db"
+fails_at_open = true
+bytes = 40
+sha256 = "7ad8cd654fd2736b552f7769543b1b154478a038888d73628724fd54a64bc228"
+lie = "a file too short to hold a header"
+

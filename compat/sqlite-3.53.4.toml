@@ -579,160 +579,160 @@ id = "values.storage-classes"
 source = "https://sqlite.org/datatype3.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-value::value::tests::storage_classes_rank_the_way_comparisons_need", "rustdb-value::value::tests::typeof_names_match_sqlite", "rustdb-value::value::tests::accessors_never_convert_between_classes", "rustdb-value::value::tests::identity_compares_the_bits_of_a_real", "rustdb-value::value::tests::empty_payloads_are_values_rather_than_nulls", "rustdb-compat::every_value_survives_a_round_trip_through_a_file"]
 
 [[capability]]
 id = "values.affinity"
 source = "https://sqlite.org/datatype3.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-value::affinity::tests::the_documented_declared_types_classify_as_documented", "rustdb-value::affinity::tests::the_surprising_substring_cases_follow_the_rules", "rustdb-value::affinity::tests::numeric_affinity_converts_only_well_formed_numbers", "rustdb-value::affinity::tests::a_real_narrows_to_an_integer_only_when_it_is_one", "rustdb-value::affinity::tests::text_affinity_renders_numbers_and_ignores_blobs", "rustdb-value::affinity::tests::blob_affinity_converts_nothing", "rustdb-value::affinity::tests::a_large_integer_keeps_every_bit", "rustdb-value::compare::tests::the_comparison_affinity_table_matches_the_documentation", "rustdb-value::compare::tests::comparison_affinity_converts_the_operand_that_has_none", "rustdb-compat::affinity_on_store_matches_sqlite"]
 
 [[capability]]
 id = "values.comparison"
 source = "https://sqlite.org/datatype3.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-value::compare::tests::classes_order_null_numbers_text_blobs", "rustdb-value::compare::tests::an_integer_and_a_real_compare_exactly", "rustdb-value::compare::tests::a_double_past_the_integer_range_compares_by_its_sign", "rustdb-value::compare::tests::the_two_zeroes_compare_equal", "rustdb-value::compare::tests::null_is_unknown_to_an_operator_and_first_in_an_order", "rustdb-value::compare::tests::three_valued_logic_short_circuits_the_way_sql_says", "rustdb-value::compare::tests::ordering_over_mixed_classes_is_a_total_order", "rustdb-value::compare::tests::blobs_compare_by_bytes_then_by_length", "rustdb-compat::comparison_matches_sqlite"]
 
 [[capability]]
 id = "values.collation.binary"
 source = "https://sqlite.org/datatype3.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-value::collation::tests::binary_compares_bytes_then_length", "rustdb-value::collation::tests::every_collation_is_a_total_order", "rustdb-value::collation::tests::text_compares_by_its_utf8_form_whatever_it_was_stored_as", "rustdb-value::collation::tests::utf16_text_orders_by_code_point_not_by_code_unit", "rustdb-compat::collations_match_sqlite", "rustdb-compat::each_collation_index_is_sorted_under_its_own_collation"]
 
 [[capability]]
 id = "values.collation.nocase"
 source = "https://sqlite.org/datatype3.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-value::collation::tests::nocase_folds_ascii_only", "rustdb-value::collation::tests::every_collation_is_a_total_order", "rustdb-compat::collations_match_sqlite", "rustdb-compat::each_collation_index_is_sorted_under_its_own_collation"]
 
 [[capability]]
 id = "values.collation.rtrim"
 source = "https://sqlite.org/datatype3.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-value::collation::tests::rtrim_ignores_only_trailing_spaces", "rustdb-value::collation::tests::every_collation_is_a_total_order", "rustdb-compat::collations_match_sqlite", "rustdb-compat::each_collation_index_is_sorted_under_its_own_collation"]
 
 [[capability]]
 id = "values.cast"
-source = "https://sqlite.org/datatype3.html"
+source = "https://sqlite.org/lang_expr.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-value::cast::tests::casting_null_always_gives_null", "rustdb-value::cast::tests::a_cast_always_produces_the_requested_class", "rustdb-value::cast::tests::a_numeric_cast_reads_the_leading_number", "rustdb-value::cast::tests::a_numeric_cast_leaves_numbers_alone_and_chooses_for_text", "rustdb-value::cast::tests::casting_a_real_to_an_integer_truncates", "rustdb-value::cast::tests::a_blob_casts_to_text_in_the_database_encoding", "rustdb-value::cast::tests::text_casts_to_a_blob_in_the_database_encoding", "rustdb-value::cast::tests::a_number_casts_to_a_blob_through_its_text", "rustdb-value::cast::tests::a_blob_casts_numerically_through_its_bytes", "rustdb-compat::cast_matches_sqlite"]
 
 [[capability]]
 id = "values.numeric-parsing"
 source = "https://sqlite.org/datatype3.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-value::numeric::tests::a_plain_integer_is_read_exactly", "rustdb-value::numeric::tests::the_two_pow_63_boundary_is_handled_on_both_signs", "rustdb-value::numeric::tests::trailing_bytes_and_missing_digits_are_reported", "rustdb-value::numeric::tests::leading_zeros_do_not_count_toward_the_digit_limit", "rustdb-value::numeric::tests::the_real_scanner_matches_sqlites_grammar", "rustdb-value::numeric::tests::a_signed_zero_keeps_its_sign", "rustdb-value::numeric::tests::an_enormous_exponent_becomes_infinity", "rustdb-value::numeric::tests::the_significand_is_truncated_the_way_sqlite_truncates_it", "rustdb-value::numeric::tests::the_scanner_reports_sqlites_own_return_code", "rustdb-value::numeric::tests::converting_a_real_to_an_integer_truncates_and_saturates", "rustdb-value::numeric::tests::a_real_equals_an_integer_only_inside_the_documented_bound", "rustdb-compat::cast_matches_sqlite"]
 
 [[capability]]
 id = "values.record-format"
 source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-value::record::tests::the_serial_type_table_matches_the_file_format", "rustdb-value::record::tests::the_reserved_serial_types_are_refused", "rustdb-value::record::tests::integers_take_the_narrowest_serial_type", "rustdb-value::record::tests::every_value_round_trips_through_a_record", "rustdb-value::record::tests::an_empty_record_is_legal", "rustdb-value::record::tests::a_long_record_widens_its_header_size_varint", "rustdb-value::record::tests::a_missing_trailing_field_reads_as_null", "rustdb-compat::every_record_re_encodes_to_the_bytes_sqlite_wrote", "rustdb-compat::every_value_survives_a_round_trip_through_a_file"]
 
 [[capability]]
 id = "values.index-key-order"
 source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-value::record::tests::key_comparison_honours_collation_and_direction", "rustdb-value::record::tests::record_order_agrees_with_value_order", "rustdb-value::record::tests::a_short_probe_matches_a_prefix", "rustdb-compat::index_order_matches_sqlites_own_order_by", "rustdb-compat::scans_come_back_in_key_order"]
 
 [[capability]]
 id = "storage.header.codec"
 source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-storage::header::tests::every_header_field_round_trips", "rustdb-storage::header::tests::the_field_offsets_match_the_file_format", "rustdb-storage::header::tests::the_largest_page_size_is_encoded_as_one", "rustdb-storage::header::tests::the_vacuum_mode_is_read_from_both_of_its_fields", "rustdb-compat::each_fixture_has_the_page_size_and_encoding_its_name_declares"]
 
 [[capability]]
 id = "storage.header.validation"
 source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-storage::header::tests::a_spoiled_header_field_is_refused", "rustdb-storage::header::tests::the_page_count_follows_the_version_valid_for_rule", "rustdb-storage::header::tests::out_of_range_page_numbers_are_refused_against_the_file", "rustdb-storage::header::tests::decoding_arbitrary_bytes_never_panics", "rustdb-storage::pager::tests::a_file_with_a_bad_header_does_not_open", "rustdb-compat::every_malformed_fixture_is_refused", "rustdb-compat::sqlite_and_rustdb_both_refuse_the_malformed_corpus"]
 
 [[capability]]
 id = "storage.pager.read-path"
 source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-storage::pager::tests::opening_reads_the_header_and_takes_no_lock", "rustdb-storage::pager::tests::a_reader_takes_a_shared_lock_and_no_more", "rustdb-storage::pager::tests::a_second_read_of_a_page_comes_from_the_cache", "rustdb-storage::pager::tests::a_page_outside_the_database_is_refused", "rustdb-storage::pager::tests::the_read_only_state_machine_allows_exactly_four_states", "rustdb-storage::pager::tests::two_readers_share_the_file", "rustdb-compat::every_valid_fixture_opens_and_scans", "rustdb-compat::two_readers_see_the_same_database", "rustdb-compat::a_page_past_the_end_is_never_readable"]
 
 [[capability]]
 id = "storage.page-cache"
-source = "https://sqlite.org/fileformat2.html"
+source = "https://sqlite.org/pragma.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-storage::cache::tests::a_resident_page_is_returned_and_a_missing_one_is_not", "rustdb-storage::cache::tests::pins_are_counted_and_released_on_drop", "rustdb-storage::cache::tests::the_budget_evicts_unpinned_pages", "rustdb-storage::cache::tests::a_pinned_page_survives_cache_pressure", "rustdb-storage::cache::tests::releasing_unpinned_frames_leaves_only_the_pinned_ones", "rustdb-storage::cache::tests::inserting_a_page_twice_keeps_one_frame", "rustdb-storage::cache::tests::every_frame_gets_its_own_version", "rustdb-storage::cache::tests::keys_spread_across_shards", "rustdb-storage::cache::tests::a_fully_pinned_cache_reports_that_it_cannot_evict", "rustdb-compat::a_tiny_cache_returns_the_same_rows_as_a_large_one", "rustdb-compat::abandoning_a_cursor_releases_its_pins"]
 
 [[capability]]
 id = "storage.btree.table-leaf"
 source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-storage::btree::tests::a_leaf_table_page_decodes_its_cells", "rustdb-storage::btree::tests::a_spoiled_page_is_refused", "rustdb-storage::btree::tests::page_one_starts_after_the_database_header", "rustdb-storage::btree::tests::a_bad_freeblock_chain_is_refused", "rustdb-compat::every_valid_fixture_opens_and_scans", "rustdb-compat::sqlite_and_rustdb_agree_on_every_row_of_every_fixture"]
 
 [[capability]]
 id = "storage.btree.table-interior"
 source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-storage::btree::tests::an_interior_table_cell_has_no_payload", "rustdb-storage::btree::tests::an_interior_page_with_a_zero_child_is_refused", "rustdb-compat::a_point_seek_agrees_with_a_scan", "rustdb-compat::sqlite_and_rustdb_agree_on_every_row_of_every_fixture"]
 
 [[capability]]
 id = "storage.btree.index-leaf"
 source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-storage::btree::tests::the_payload_thresholds_match_the_file_format", "rustdb-compat::an_index_seek_finds_its_keys_and_bounds_a_range", "rustdb-compat::index_order_matches_sqlites_own_order_by", "rustdb-compat::a_without_rowid_table_scans_as_an_index_tree"]
 
 [[capability]]
 id = "storage.btree.index-interior"
 source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-storage::btree::tests::the_local_payload_stays_between_the_minimum_and_the_maximum", "rustdb-compat::a_backward_scan_is_a_forward_scan_reversed", "rustdb-compat::scans_come_back_in_key_order"]
 
 [[capability]]
 id = "storage.overflow-chains"
 source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-storage::btree::tests::the_payload_thresholds_match_the_file_format", "rustdb-storage::btree::tests::the_local_payload_stays_between_the_minimum_and_the_maximum", "rustdb-storage::overflow::tests::an_overflow_page_holds_the_usable_size_less_its_pointer", "rustdb-compat::overflow_payloads_are_reassembled_exactly"]
 
 [[capability]]
 id = "storage.cursor.seek"
 source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::a_point_seek_agrees_with_a_scan", "rustdb-compat::a_missed_seek_lands_where_the_bias_asks", "rustdb-compat::an_index_seek_finds_its_keys_and_bounds_a_range", "rustdb-compat::a_backward_scan_is_a_forward_scan_reversed", "rustdb-compat::scans_come_back_in_key_order"]
 
 [[capability]]
 id = "storage.btree.insert"
@@ -786,9 +786,9 @@ tests = []
 id = "storage.integrity-check"
 source = "https://sqlite.org/pragma.html"
 profile = "default"
-phase = "phase 4: B-tree mutation, allocation, and rollback pages"
-status = "missing"
-tests = []
+phase = "phase 3: read-only header, pager, page cache, and B-tree"
+status = "pass"
+tests = ["rustdb-compat::every_valid_fixture_passes_the_integrity_check", "rustdb-compat::the_freelist_fixture_has_a_freelist_the_check_agrees_with", "rustdb-compat::the_vacuum_fixtures_have_pointer_maps_that_the_check_accounts_for", "rustdb-compat::sqlite_and_rustdb_both_refuse_the_malformed_corpus"]
 
 [[capability]]
 id = "sql.lexer.tokens"
@@ -1650,4 +1650,124 @@ phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "missing"
 expected = "syntax-error"
 tests = []
+
+[[capability]]
+id = "values.collation.registry"
+source = "https://sqlite.org/datatype3.html"
+profile = "default"
+phase = "phase 2: values, affinities, collations, and records"
+status = "pass"
+tests = ["rustdb-value::collation::tests::the_registry_starts_with_the_built_ins", "rustdb-value::collation::tests::collation_names_resolve_case_insensitively", "rustdb-value::collation::tests::replacing_a_collation_invalidates_the_recorded_generation"]
+
+[[capability]]
+id = "values.real-to-text"
+source = "https://sqlite.org/datatype3.html"
+profile = "default"
+phase = "phase 2: values, affinities, collations, and records"
+status = "pass"
+tests = ["rustdb-value::numeric::tests::reals_render_the_way_sqlite_prints_them", "rustdb-value::numeric::tests::a_negative_zero_renders_without_its_sign", "rustdb-value::numeric::tests::rendering_and_rereading_a_real_is_stable", "rustdb-value::numeric::tests::rendering_a_real_round_trips_to_the_same_bits", "rustdb-value::numeric::tests::integers_render_and_scan_back_unchanged", "rustdb-compat::cast_matches_sqlite"]
+
+[[capability]]
+id = "values.text-encodings"
+source = "https://sqlite.org/pragma.html"
+profile = "default"
+phase = "phase 2: values, affinities, collations, and records"
+status = "pass"
+tests = ["rustdb-value::encoding::tests::header_codes_match_the_file_format", "rustdb-value::encoding::tests::an_unset_encoding_is_utf8_and_an_unknown_one_is_masked", "rustdb-value::encoding::tests::text_round_trips_through_both_utf16_forms", "rustdb-value::encoding::tests::the_two_utf16_forms_convert_into_each_other", "rustdb-value::encoding::tests::an_unpaired_surrogate_survives_conversion", "rustdb-value::encoding::tests::an_odd_trailing_byte_is_dropped", "rustdb-value::encoding::tests::malformed_utf8_decodes_to_the_replacement_character", "rustdb-value::numeric::tests::utf16_text_scans_as_ascii_and_refuses_wide_characters", "rustdb-value::record::tests::text_is_stored_in_the_database_encoding", "rustdb-compat::each_fixture_has_the_page_size_and_encoding_its_name_declares", "rustdb-compat::every_value_survives_a_round_trip_through_a_file"]
+
+[[capability]]
+id = "values.subtype"
+source = "https://sqlite.org/c3ref/funclist.html"
+profile = "default"
+phase = "phase 2: values, affinities, collations, and records"
+status = "pass"
+tests = ["rustdb-value::value::tests::a_subtype_is_present_only_when_it_was_set", "rustdb-value::value::tests::flags_union_and_difference_behave_as_a_set", "rustdb-value::value::tests::owning_a_value_drops_the_static_flag"]
+
+[[capability]]
+id = "values.record-validation"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 2: values, affinities, collations, and records"
+status = "pass"
+tests = ["rustdb-value::record::tests::hostile_records_are_refused_rather_than_read", "rustdb-value::record::tests::a_record_that_is_one_byte_short_is_refused", "rustdb-value::record::tests::an_oversized_field_reports_too_big_rather_than_corruption", "rustdb-value::record::tests::parsing_arbitrary_bytes_never_panics"]
+
+[[capability]]
+id = "values.limits"
+source = "https://sqlite.org/limits.html"
+profile = "default"
+phase = "phase 2: values, affinities, collations, and records"
+status = "pass"
+tests = ["rustdb-value::record::tests::an_oversized_field_reports_too_big_rather_than_corruption", "rustdb-compat::every_limit_matches_sqlites_default"]
+
+[[capability]]
+id = "values.no-panic-on-hostile-input"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 2: values, affinities, collations, and records"
+status = "pass"
+tests = ["rustdb-value::numeric::tests::scanning_arbitrary_bytes_never_panics", "rustdb-value::affinity::tests::classifying_arbitrary_bytes_never_panics", "rustdb-value::cast::tests::casting_arbitrary_bytes_never_panics", "rustdb-value::collation::tests::comparing_arbitrary_bytes_never_panics", "rustdb-value::encoding::tests::decoding_arbitrary_bytes_never_reads_past_the_end", "rustdb-value::record::tests::parsing_arbitrary_bytes_never_panics"]
+
+[[capability]]
+id = "storage.pager.sticky-errors"
+source = "https://sqlite.org/rescode.html"
+profile = "default"
+phase = "phase 3: read-only header, pager, page cache, and B-tree"
+status = "pass"
+tests = ["rustdb-storage::pager::tests::an_io_failure_is_sticky", "rustdb-storage::pager::tests::dropping_a_pager_releases_its_lock", "rustdb-storage::pager::tests::ending_a_read_releases_every_unpinned_page", "rustdb-compat::a_damaged_database_is_refused_without_leaking_a_pin_or_a_lock", "rustdb-compat::a_corrupt_page_stops_a_scan_rather_than_being_skipped"]
+
+[[capability]]
+id = "storage.pager.read-only"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 3: read-only header, pager, page cache, and B-tree"
+status = "pass"
+tests = ["rustdb-compat::reading_changes_nothing_on_disk", "rustdb-compat::a_traversal_returns_every_pin_and_lock"]
+
+[[capability]]
+id = "storage.btree.page-validation"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 3: read-only header, pager, page cache, and B-tree"
+status = "pass"
+tests = ["rustdb-storage::btree::tests::a_spoiled_page_is_refused", "rustdb-storage::btree::tests::a_bad_freeblock_chain_is_refused", "rustdb-storage::btree::tests::parsing_arbitrary_pages_never_panics", "rustdb-compat::a_damaged_database_is_refused_without_leaking_a_pin_or_a_lock"]
+
+[[capability]]
+id = "storage.schema.scan"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 3: read-only header, pager, page cache, and B-tree"
+status = "pass"
+tests = ["rustdb-compat::every_valid_fixture_opens_and_scans", "rustdb-compat::a_without_rowid_table_scans_as_an_index_tree", "rustdb-compat::sqlite_and_rustdb_agree_on_every_row_of_every_fixture"]
+
+[[capability]]
+id = "storage.freelist.read"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 3: read-only header, pager, page cache, and B-tree"
+status = "pass"
+tests = ["rustdb-compat::the_freelist_fixture_has_a_freelist_the_check_agrees_with"]
+
+[[capability]]
+id = "storage.pointer-map.read"
+source = "https://sqlite.org/pragma.html#pragma_auto_vacuum"
+profile = "default"
+phase = "phase 3: read-only header, pager, page cache, and B-tree"
+status = "pass"
+tests = ["rustdb-storage::header::tests::pointer_map_pages_land_where_the_format_says", "rustdb-compat::the_vacuum_fixtures_have_pointer_maps_that_the_check_accounts_for"]
+
+[[capability]]
+id = "storage.without-rowid.read"
+source = "https://sqlite.org/withoutrowid.html"
+profile = "default"
+phase = "phase 3: read-only header, pager, page cache, and B-tree"
+status = "pass"
+tests = ["rustdb-compat::a_without_rowid_table_scans_as_an_index_tree", "rustdb-compat::sqlite_and_rustdb_agree_on_every_row_of_every_fixture"]
+
+[[capability]]
+id = "harness.fixtures.corpus"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 3: read-only header, pager, page cache, and B-tree"
+status = "pass"
+tests = ["rustdb-compat::the_corpus_matches_its_manifest", "rustdb-compat::fixtures::tests::fixture_names_are_unique", "rustdb-compat::fixtures::tests::every_malformed_fixture_has_a_base", "rustdb-compat::fixtures::tests::page_sizes_are_readable_from_fixture_names", "rustdb-compat::fixtures::tests::damage_never_writes_past_the_end"]
 

@@ -18,6 +18,8 @@
 **   {"op":"exec","sql":"..."}               -> {"ok":true,"changes":n,...}
 **   {"op":"query","sql":"..."}              -> {"ok":true,"columns":[...],"rows":[[...]]}
 **   {"op":"echo","values":[{...},...]}      -> {"ok":true,"rows":[[...]]}
+**   {"op":"bind","sql":"...","values":[...]} -> {"ok":true,"rows":[[...]]}
+**   {"op":"limits"}                         -> {"ok":true,"rows":[[name,value],...]}
 **   {"op":"close"}                          -> {"ok":true}
 **   {"op":"bye"}                            -> (exits)
 */
@@ -257,7 +259,12 @@ static void do_query(const char *sql){
   rc = sqlite3_prepare_v2(db, sql, -1, &statement, 0);
   if( rc!=SQLITE_OK ){ put_db_error(sqlite3_extended_errcode(db)); return; }
   columns = sqlite3_column_count(statement);
-  fputs("{\"ok\":true,\"columns\":[", stdout);
+  /* "ok" is written *after* the rows, because a statement can fail partway
+  ** through stepping - PRAGMA integrity_check does exactly that on a damaged
+  ** file - and a reply that had already claimed success would then need a
+  ** second line to take it back. Two lines for one command desynchronises the
+  ** protocol for everything that follows, which is worse than the error. */
+  fputs("{\"columns\":[", stdout);
   for(column=0; column<columns; column++){
     if( column ) putchar(',');
     put_json_string(sqlite3_column_name(statement, column));
@@ -277,12 +284,14 @@ static void do_query(const char *sql){
   if( rc!=SQLITE_DONE ){
     int code = sqlite3_extended_errcode(db);
     const char *message = sqlite3_errmsg(db);
+    printf(",\"ok\":false,\"code\":%d,\"extended\":%d,\"message\":", code & 0xff, code);
+    put_json_string(message);
     sqlite3_finalize(statement);
     fputs("}\n", stdout);
     fflush(stdout);
-    put_error(code, message);
     return;
   }
+  fputs(",\"ok\":true", stdout);
   sqlite3_finalize(statement);
   put_state();
   fputs("}\n", stdout);
@@ -294,9 +303,10 @@ static void do_query(const char *sql){
 ** back. This is what proves the protocol carries every storage class without
 ** loss: the values go through SQLite's own value system, not around it.
 */
-static void do_echo(const char *line){
+static void do_bound(const char *line, const char *explicit_sql){
   static unsigned char payload[1 << 20];
-  static char sql[MAX_BIND * 8 + 32];
+  static char generated[MAX_BIND * 8 + 32];
+  const char *sql = explicit_sql;
   const char *at = field(line, "values");
   sqlite3_stmt *statement = 0;
   int count = 0, rc, column, columns;
@@ -306,7 +316,7 @@ static void do_echo(const char *line){
     if( rc!=SQLITE_OK ){ put_db_error(rc); return; }
     owned = 1;
   }
-  if( at==0 ){ put_error(SQLITE_MISUSE, "echo needs a values array"); return; }
+  if( at==0 ){ put_error(SQLITE_MISUSE, "a bound query needs a values array"); return; }
 
   /* Count the value objects so the SELECT can be built with the right arity. */
   {
@@ -317,17 +327,18 @@ static void do_echo(const char *line){
     }
   }
   if( count==0 || count>MAX_BIND ){
-    put_error(SQLITE_MISUSE, "echo takes between one and 64 values");
+    put_error(SQLITE_MISUSE, "a bound query takes between one and 64 values");
     return;
   }
-  {
+  if( sql==0 ){
     int index;
-    strcpy(sql, "SELECT ");
+    strcpy(generated, "SELECT ");
     for(index=0; index<count; index++){
       char parameter[12];
       snprintf(parameter, sizeof(parameter), "%s?%d", index ? "," : "", index+1);
-      strcat(sql, parameter);
+      strcat(generated, parameter);
     }
+    sql = generated;
   }
   rc = sqlite3_prepare_v2(db, sql, -1, &statement, 0);
   if( rc!=SQLITE_OK ){ put_db_error(sqlite3_extended_errcode(db)); return; }
@@ -421,6 +432,60 @@ static void do_echo(const char *line){
   (void)owned;
 }
 
+/* The run-time limits, by the name sqlite3_limit() documents. */
+static const struct { const char *name; int id; } kLimits[] = {
+  { "SQLITE_LIMIT_LENGTH",              SQLITE_LIMIT_LENGTH },
+  { "SQLITE_LIMIT_SQL_LENGTH",          SQLITE_LIMIT_SQL_LENGTH },
+  { "SQLITE_LIMIT_COLUMN",              SQLITE_LIMIT_COLUMN },
+  { "SQLITE_LIMIT_EXPR_DEPTH",          SQLITE_LIMIT_EXPR_DEPTH },
+  { "SQLITE_LIMIT_COMPOUND_SELECT",     SQLITE_LIMIT_COMPOUND_SELECT },
+  { "SQLITE_LIMIT_VDBE_OP",             SQLITE_LIMIT_VDBE_OP },
+  { "SQLITE_LIMIT_FUNCTION_ARG",        SQLITE_LIMIT_FUNCTION_ARG },
+  { "SQLITE_LIMIT_ATTACHED",            SQLITE_LIMIT_ATTACHED },
+  { "SQLITE_LIMIT_LIKE_PATTERN_LENGTH", SQLITE_LIMIT_LIKE_PATTERN_LENGTH },
+  { "SQLITE_LIMIT_VARIABLE_NUMBER",     SQLITE_LIMIT_VARIABLE_NUMBER },
+  { "SQLITE_LIMIT_TRIGGER_DEPTH",       SQLITE_LIMIT_TRIGGER_DEPTH },
+  { "SQLITE_LIMIT_WORKER_THREADS",      SQLITE_LIMIT_WORKER_THREADS },
+};
+
+/* Reports every run-time limit at its current (default) value.
+**
+** A limit that differs from SQLite's is a parity deviation that no query can
+** show until the day it refuses something SQLite allowed, so the harness asks
+** for the numbers directly rather than inferring them.
+*/
+static void do_limits(void){
+  size_t index;
+  int owned = 0;
+  if( db==0 ){
+    int rc = sqlite3_open(":memory:", &db);
+    if( rc!=SQLITE_OK ){ put_db_error(rc); return; }
+    owned = 1;
+  }
+  fputs("{\"ok\":true,\"rows\":[", stdout);
+  for(index=0; index<sizeof(kLimits)/sizeof(kLimits[0]); index++){
+    int value = sqlite3_limit(db, kLimits[index].id, -1);
+    unsigned char be[8];
+    int byte;
+    sqlite3_int64 wide = value;
+    for(byte=7; byte>=0; byte--){ be[byte] = (unsigned char)(wide & 0xff); wide >>= 8; }
+    if( index ) putchar(',');
+    fputs("[{\"class\":\"text\",\"utf8_hex\":\"", stdout);
+    {
+      const char *scan = kLimits[index].name;
+      while( *scan ){ printf("%02x", (unsigned char)*scan); scan++; }
+    }
+    fputs("\"},{\"class\":\"integer\",\"be_hex\":\"", stdout);
+    for(byte=0; byte<8; byte++) printf("%02x", be[byte]);
+    fputs("\"}]", stdout);
+  }
+  fputs("]", stdout);
+  put_state();
+  fputs("}\n", stdout);
+  fflush(stdout);
+  (void)owned;
+}
+
 /* Closes the open database. */
 static void do_close(void){
   if( db ){ sqlite3_close(db); db = 0; }
@@ -452,7 +517,13 @@ int main(void){
     if( strcmp(op, "hello")==0 ){ do_hello(); continue; }
     if( strcmp(op, "open")==0 ){ do_open(line); continue; }
     if( strcmp(op, "close")==0 ){ do_close(); continue; }
-    if( strcmp(op, "echo")==0 ){ do_echo(line); continue; }
+    if( strcmp(op, "echo")==0 ){ do_bound(line, 0); continue; }
+    if( strcmp(op, "limits")==0 ){ do_limits(); continue; }
+    if( strcmp(op, "bind")==0 ){
+      if( !string_field(line, "sql", sql, sizeof(sql)) ){ put_error(SQLITE_MISUSE, "bind needs sql"); continue; }
+      do_bound(line, sql);
+      continue;
+    }
     if( strcmp(op, "exec")==0 ){
       if( !string_field(line, "sql", sql, sizeof(sql)) ){ put_error(SQLITE_MISUSE, "exec needs sql"); continue; }
       do_exec(sql);

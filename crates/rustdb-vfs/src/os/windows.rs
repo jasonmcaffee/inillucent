@@ -292,10 +292,30 @@ impl LockState {
     }
 }
 
+/// How many times a reader retries the PENDING byte before reporting BUSY.
+///
+/// Windows byte-range locks have no shared mode that two readers can take on
+/// the same byte at once, so two connections acquiring SHARED at the same
+/// moment collide on the serialising PENDING byte even though neither is a
+/// writer. SQLite's own Windows VFS makes exactly three attempts with a
+/// millisecond between them for this reason; reporting BUSY on the first
+/// collision would turn ordinary read concurrency into a spurious failure.
+const PENDING_ATTEMPTS: u32 = 3;
+
 /// Takes the read lock, using the PENDING byte to serialise the two steps so
 /// that a writer cannot slip in between them.
 fn take_shared(file: &File) -> VfsResult<()> {
-    if !try_lock_bytes(file, PENDING_BYTE, 1, true, VfsOperation::Lock)? {
+    let mut took_pending = false;
+    for attempt in 0..PENDING_ATTEMPTS {
+        if try_lock_bytes(file, PENDING_BYTE, 1, true, VfsOperation::Lock)? {
+            took_pending = true;
+            break;
+        }
+        if attempt + 1 < PENDING_ATTEMPTS {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+    if !took_pending {
         return Err(error::busy("a writer holds PENDING"));
     }
     let took_read = try_lock_bytes(file, SHARED_FIRST, SHARED_SIZE, false, VfsOperation::Lock)?;

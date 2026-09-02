@@ -64,8 +64,11 @@ description = "Maximum number of instructions in one compiled program."
 [[limit]]
 name = "FunctionArg"
 c_name = "SQLITE_LIMIT_FUNCTION_ARG"
-default = 127
-hard_max = 127
+# 127 until SQLite raised it; 3.53.4 compiles SQLITE_MAX_FUNCTION_ARG as 1000,
+# and the oracle reports 1000 from sqlite3_limit(). The number here was 127
+# until the phase 2 differential run compared them directly.
+default = 1000
+hard_max = 1000
 minimum = 0
 description = "Maximum number of arguments to a SQL function."
 
