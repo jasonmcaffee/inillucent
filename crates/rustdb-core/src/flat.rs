@@ -222,7 +222,10 @@ mod tests {
                 author: None,
                 author_id: None,
                 updated_at: Some(i as i64),
+                external_chunk_id: None,
                 labels: vec![],
+                attributes: Vec::new(),
+                flags: Vec::new(),
                 deleted: false,
             });
         }
@@ -389,7 +392,10 @@ mod tests {
                 author: None,
                 author_id: None,
                 updated_at: None,
+                external_chunk_id: None,
                 labels: vec![],
+                attributes: Vec::new(),
+                flags: Vec::new(),
                 deleted: false,
             });
         }

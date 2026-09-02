@@ -58,8 +58,20 @@ impl Tokenizer {
     pub fn terms(&self, text: &str) -> Vec<String> {
         let mut out = Vec::new();
         for word in text.split_whitespace() {
-            if let Some(compound) = compound_identifier(word) {
-                out.push(compound);
+            // An address is recognised before the general compound rule, and is
+            // never stemmed. `compound_identifier` would keep
+            // `gordon@360water.com` whole by accident, because its domain happens
+            // to hold a digit, and shatter `jasonlmcaffee@gmail.com`, whose local
+            // part would then be stemmed into `jasonlmcaffe` - a string that
+            // appears nowhere. Half a mailbox's addresses indexing as themselves
+            // and half dissolving is worse than either.
+            match email_address(word) {
+                Some(address) => out.push(address),
+                None => {
+                    if let Some(compound) = compound_identifier(word) {
+                        out.push(compound);
+                    }
+                }
             }
             for raw in word.split(|c: char| !c.is_alphanumeric()) {
                 if raw.is_empty() {
@@ -87,6 +99,56 @@ impl Tokenizer {
     pub fn query_terms(&self, text: &str) -> Vec<String> {
         self.terms(text)
     }
+}
+
+/// The whole address, lowercased, when a word is one.
+///
+/// PostgreSQL's `english` configuration has an `email` token type and keeps a
+/// whole address as one unstemmed term:
+///
+/// ```text
+/// to_tsvector('english','gordon@360water.com jasonlmcaffee@gmail.com')
+///   => 'gordon@360water.com':1 'jasonlmcaffee@gmail.com':2
+/// ```
+///
+/// The shape is deliberately narrow - one `@`, a non-empty local part, and a
+/// domain of at least two dot-separated labels - because the point is to
+/// recognise addresses, not to keep every word that happens to contain an at
+/// sign. The parts are still emitted and still stemmed by the caller, so a query
+/// for a bare local part or a domain matches exactly as it did before; what is
+/// new is that the address also survives as itself.
+/// @param word - one whitespace-separated word, possibly punctuated
+fn email_address(word: &str) -> Option<String> {
+    let trimmed = word.trim_matches(|c: char| !c.is_alphanumeric());
+    if trimmed.len() < 5 || trimmed.len() > 64 {
+        return None;
+    }
+    let (local, domain) = trimmed.split_once('@')?;
+    if domain.contains('@') || local.is_empty() {
+        return None;
+    }
+    let ok_local = local
+        .chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '+' | '\''));
+    if !ok_local || !local.chars().any(|c| c.is_alphanumeric()) {
+        return None;
+    }
+    let labels: Vec<&str> = domain.split('.').collect();
+    if labels.len() < 2 || labels.iter().any(|l| l.is_empty()) {
+        return None;
+    }
+    let ok_domain = domain
+        .chars()
+        .all(|c| c.is_alphanumeric() || matches!(c, '.' | '-'));
+    // A top level label of letters, which is what separates an address from a
+    // version string or a filename that happens to carry an at sign.
+    let tld_is_alphabetic = labels
+        .last()
+        .is_some_and(|l| l.len() >= 2 && l.chars().all(|c| c.is_alphabetic()));
+    if !ok_domain || !tld_is_alphabetic {
+        return None;
+    }
+    Some(trimmed.to_lowercase())
 }
 
 /// The whole identifier, when a word looks like one: it carries an internal
@@ -223,6 +285,93 @@ mod tests {
     fn a_query_of_only_stopwords_yields_no_terms() {
         let t = Tokenizer::default();
         assert!(t.query_terms("how do i do the of and").is_empty());
+    }
+
+    #[test]
+    fn an_email_address_survives_whole_and_unstemmed() {
+        let t = Tokenizer::default();
+        // The measured failure: this address used to shatter into
+        // `["jasonlmcaffe", "gmail", "com"]`, so a search for one person's address
+        // quietly matched every message mentioning gmail. The address itself is
+        // now a term, and it is not put through the stemmer.
+        let terms = t.terms("jasonlmcaffee@gmail.com");
+        assert!(terms.contains(&"jasonlmcaffee@gmail.com".to_string()), "got {terms:?}");
+        assert!(
+            !terms.contains(&"jasonlmcaffe@gmail.com".to_string()),
+            "the address itself was stemmed: {terms:?}"
+        );
+    }
+
+    #[test]
+    fn every_address_shape_is_kept_whole_not_only_the_lucky_ones() {
+        let t = Tokenizer::default();
+        // `gordon@360water.com` used to survive only because its domain holds a
+        // digit, which made the general compound rule fire. Both must survive now.
+        for address in [
+            "jasonlmcaffee@gmail.com",
+            "gordon@360water.com",
+            "Terri.Shaw@example.org",
+            "first+tag@sub.example.co.uk",
+        ] {
+            let terms = t.terms(address);
+            assert!(
+                terms.contains(&address.to_lowercase()),
+                "{address} did not survive: {terms:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_address_is_still_split_so_a_part_query_matches() {
+        let t = Tokenizer::default();
+        let terms = t.terms("jasonlmcaffee@gmail.com");
+        assert!(terms.contains(&"gmail".to_string()), "got {terms:?}");
+        assert!(terms.contains(&"com".to_string()));
+    }
+
+    #[test]
+    fn surrounding_punctuation_does_not_change_the_address() {
+        let t = Tokenizer::default();
+        for form in ["<jason@example.com>", "jason@example.com,", "(jason@example.com)"] {
+            assert!(
+                t.terms(form).contains(&"jason@example.com".to_string()),
+                "{form} did not produce the address"
+            );
+        }
+    }
+
+    #[test]
+    fn a_word_carrying_an_at_sign_is_not_an_address() {
+        // Tested against the recogniser rather than the whole tokenizer, because
+        // the general compound rule may still keep some of these whole; what
+        // matters is that none of them is treated as an address and exempted from
+        // stemming.
+        for word in ["@mentions", "cost@10", "a@b", "x@y.1", "two@@ats.com", "user@localhost"] {
+            assert_eq!(email_address(word), None, "{word} was mistaken for an address");
+        }
+    }
+
+    #[test]
+    fn a_bare_local_part_still_matches_through_the_split_terms() {
+        let t = Tokenizer::default();
+        // The parts are still emitted and still stemmed, so the two sides agree:
+        // a document holding the address and a query holding only the local part
+        // both produce the same stem.
+        let document = t.terms("From: jasonlmcaffee@gmail.com");
+        let query = t.query_terms("jasonlmcaffee");
+        assert_eq!(query.len(), 1);
+        assert!(document.contains(&query[0]), "{document:?} does not hold {query:?}");
+    }
+
+    #[test]
+    fn an_address_is_emitted_once_rather_than_twice() {
+        let t = Tokenizer::default();
+        // The compound rule would also have kept this one, so the address rule has
+        // to replace it rather than run beside it, or the term is double counted
+        // and its term frequency is wrong.
+        let terms = t.terms("gordon@360water.com");
+        let count = terms.iter().filter(|x| *x == "gordon@360water.com").count();
+        assert_eq!(count, 1, "got {terms:?}");
     }
 
     #[test]

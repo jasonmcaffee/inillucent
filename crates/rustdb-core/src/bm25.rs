@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use crate::binio;
 use crate::filter::CompiledFilter;
 use crate::store::Store;
 use crate::tokenize::Tokenizer;
@@ -32,7 +33,8 @@ const MAX_PREFIX_EXPANSIONS: usize = 64;
 /// next to the scoring pass.
 const RESCORE_DEPTH_FACTOR: usize = 6;
 
-#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Posting {
     pub chunk: u32,
     /// Where this posting's token positions start in the index's flat position
@@ -80,6 +82,17 @@ pub struct LexicalParams {
     /// How far down the BM25 ranking the position-aware rescoring reaches, as a
     /// multiple of the requested `k`.
     pub rescore_depth_factor: usize,
+    /// How much a term occurring in a chunk's heading is worth above the same term
+    /// in its body.
+    ///
+    /// PostgreSQL expresses this as `setweight(to_tsvector(heading), 'A') ||
+    /// setweight(to_tsvector(body), 'B')`, so a person's name in a subject line
+    /// outranks the same name mentioned in a body. Nothing is *lost* without it -
+    /// the heading is part of the chunk text and its terms are indexed - only the
+    /// boost. 0 is off, which is what the engine has always done; the coverage and
+    /// proximity weighting may already recover most of what the boost was buying,
+    /// so this is a dial to measure rather than a default to assume.
+    pub heading_boost: f32,
 }
 
 impl Default for LexicalParams {
@@ -91,6 +104,7 @@ impl Default for LexicalParams {
             tier: false,
             phrase: 0.0,
             rescore_depth_factor: RESCORE_DEPTH_FACTOR,
+            heading_boost: 0.0,
         }
     }
 }
@@ -105,6 +119,12 @@ pub struct Bm25Index {
     /// Every posting's token positions, concatenated in posting order.
     positions: Vec<u32>,
     chunk_lengths: Vec<u32>,
+    /// How many of each chunk's leading tokens came from its heading.
+    ///
+    /// The heading is the start of the chunk text, so "is this occurrence in the
+    /// heading" is "is its position below this number" - which costs one `u32` per
+    /// chunk rather than a field tag on all 32 million postings.
+    chunk_heading_lengths: Vec<u32>,
     total_length: u64,
     n_chunks: usize,
 }
@@ -113,13 +133,47 @@ impl Bm25Index {
     /// Build over every chunk in `store`, in chunk identifier order.
     pub fn build(store: &Store, tokenizer: &Tokenizer) -> Bm25Index {
         let mut idx = Bm25Index::default();
-        idx.chunk_lengths = vec![0; store.n_chunks()];
+        idx.index_chunks(store, tokenizer, 0..store.n_chunks() as u32);
+        idx
+    }
 
-        let mut accumulator: HashMap<String, Vec<Posting>> = HashMap::new();
-        for chunk in 0..store.n_chunks() as u32 {
+    /// Index one contiguous range of chunks, appending to whatever is already
+    /// here. Returns how many terms the dictionary had never seen.
+    ///
+    /// This is the whole of what an append needs, and it needs nothing clever,
+    /// because the layout was already append-safe. Postings are sorted by chunk
+    /// identifier and new chunks take the next identifiers, so appending keeps
+    /// each list sorted; positions live in one flat array addressed by offset and
+    /// are appended at the end, so every existing offset stays valid. No byte
+    /// already written moves.
+    ///
+    /// `idf`, the mean length and the chunk count are properties of the whole
+    /// index and are updated here rather than kept per segment. That is the reason
+    /// this is one growing index and not a base plus a delta merged at query time:
+    /// a term that is rare across 598,560 chunks and common across today's 181
+    /// would get two incompatible scores, and fusion has nothing to reconcile them
+    /// with.
+    /// @param store - the store the chunks were added to
+    /// @param tokenizer - the analyzer, shared with querying
+    /// @param range - the chunk identifiers to index, ascending
+    pub fn index_chunks(
+        &mut self,
+        store: &Store,
+        tokenizer: &Tokenizer,
+        range: std::ops::Range<u32>,
+    ) -> usize {
+        let mut new_terms: Vec<String> = Vec::new();
+        if self.chunk_lengths.len() < range.end as usize {
+            self.chunk_lengths.resize(range.end as usize, 0);
+            self.chunk_heading_lengths.resize(range.end as usize, 0);
+        }
+
+        for chunk in range {
             let terms = tokenizer.terms(store.content(chunk));
-            idx.chunk_lengths[chunk as usize] = terms.len() as u32;
-            idx.total_length += terms.len() as u64;
+            self.chunk_lengths[chunk as usize] = terms.len() as u32;
+            self.chunk_heading_lengths[chunk as usize] =
+                heading_token_count(store, tokenizer, chunk);
+            self.total_length += terms.len() as u64;
 
             // Positions as well as counts. Term frequency says a chunk mentions two
             // query words; positions say whether it mentions them next to each other,
@@ -134,21 +188,119 @@ impl Bm25Index {
             let mut ordered: Vec<(&str, Vec<u32>)> = occurrences.into_iter().collect();
             ordered.sort_by(|a, b| a.0.cmp(b.0));
             for (term, at) in ordered {
-                let positions_at = idx.positions.len() as u32;
-                idx.positions.extend_from_slice(&at);
-                accumulator.entry(term.to_string()).or_default().push(Posting {
+                let positions_at = self.positions.len() as u32;
+                self.positions.extend_from_slice(&at);
+                let posting = Posting {
                     chunk,
                     term_frequency: at.len() as u32,
                     positions_at,
-                });
+                };
+                match self.postings.get_mut(term) {
+                    Some(list) => list.push(posting),
+                    None => {
+                        self.postings.insert(term.to_string(), vec![posting]);
+                        new_terms.push(term.to_string());
+                    }
+                }
             }
         }
 
-        idx.n_chunks = store.n_chunks();
-        idx.postings = accumulator;
-        idx.sorted_terms = idx.postings.keys().cloned().collect();
-        idx.sorted_terms.sort();
-        idx
+        self.n_chunks = store.n_chunks();
+        self.merge_sorted_terms(new_terms)
+    }
+
+    /// Folds newly seen terms into the sorted dictionary.
+    ///
+    /// Merged in one pass rather than inserted one at a time: `sorted_terms` holds
+    /// 1.7 million strings on this corpus, and an insertion into the middle of it
+    /// moves the tail. A few hundred of those per sync is tens of gigabytes of
+    /// memmove for a list that can be rebuilt by merging in one linear walk.
+    /// @param new_terms - terms the dictionary did not previously hold
+    fn merge_sorted_terms(&mut self, mut new_terms: Vec<String>) -> usize {
+        if new_terms.is_empty() {
+            return 0;
+        }
+        let added = new_terms.len();
+        new_terms.sort();
+        if self.sorted_terms.is_empty() {
+            self.sorted_terms = new_terms;
+            return added;
+        }
+        let mut merged = Vec::with_capacity(self.sorted_terms.len() + added);
+        let mut existing = std::mem::take(&mut self.sorted_terms).into_iter().peekable();
+        let mut fresh = new_terms.into_iter().peekable();
+        loop {
+            match (existing.peek(), fresh.peek()) {
+                (Some(a), Some(b)) => {
+                    if a <= b {
+                        merged.push(existing.next().unwrap());
+                    } else {
+                        merged.push(fresh.next().unwrap());
+                    }
+                }
+                (Some(_), None) => merged.push(existing.next().unwrap()),
+                (None, Some(_)) => merged.push(fresh.next().unwrap()),
+                (None, None) => break,
+            }
+        }
+        self.sorted_terms = merged;
+        added
+    }
+
+    /// Writes the inverted index, so a cold start reads it instead of rebuilding
+    /// it.
+    ///
+    /// It used to be derived on load, on the argument that it is a deterministic
+    /// function of data already on disk and recomputing costs less than the disk
+    /// it would take. On a 186,000-chunk corpus that held. At 598,560 chunks it is
+    /// **26.6 seconds of every start**, because deriving it means running the
+    /// analyzer over 450 MB of text, and the file it avoids is a few hundred
+    /// megabytes on a machine with terabytes.
+    ///
+    /// Postings are written in `sorted_terms` order so the reader rebuilds the map
+    /// and the sorted list from one pass.
+    pub fn write_to(&self, w: &mut impl std::io::Write) -> std::io::Result<()> {
+        binio::write_u64(w, self.n_chunks as u64)?;
+        binio::write_u64(w, self.total_length)?;
+        binio::write_u32_slice(w, &self.chunk_lengths)?;
+        binio::write_u32_slice(w, &self.chunk_heading_lengths)?;
+        binio::write_u32_slice(w, &self.positions)?;
+        binio::write_u64(w, self.sorted_terms.len() as u64)?;
+        for term in &self.sorted_terms {
+            binio::write_str(w, term)?;
+            let postings = self.postings.get(term).map(|p| p.as_slice()).unwrap_or(&[]);
+            binio::write_u64(w, postings.len() as u64)?;
+            w.write_all(bytemuck::cast_slice(postings))?;
+        }
+        Ok(())
+    }
+
+    /// Reads an index written by `write_to`.
+    pub fn read_from(r: &mut impl std::io::Read) -> std::io::Result<Bm25Index> {
+        let n_chunks = binio::read_u64(r)? as usize;
+        let total_length = binio::read_u64(r)?;
+        let chunk_lengths = binio::read_u32_vec(r)?;
+        let chunk_heading_lengths = binio::read_u32_vec(r)?;
+        let positions = binio::read_u32_vec(r)?;
+        let n_terms = binio::read_u64(r)? as usize;
+
+        let mut sorted_terms = Vec::with_capacity(n_terms);
+        let mut postings = HashMap::with_capacity(n_terms);
+        for _ in 0..n_terms {
+            let term = binio::read_str(r)?;
+            let count = binio::read_u64(r)? as usize;
+            postings.insert(term.clone(), binio::read_pod_vec::<Posting>(r, count)?);
+            sorted_terms.push(term);
+        }
+        Ok(Bm25Index {
+            postings,
+            sorted_terms,
+            positions,
+            chunk_lengths,
+            chunk_heading_lengths,
+            total_length,
+            n_chunks,
+        })
     }
 
     pub fn n_terms(&self) -> usize {
@@ -255,8 +407,15 @@ impl Bm25Index {
         k: usize,
         params: LexicalParams,
     ) -> Vec<LexicalHit> {
-        let LexicalParams { prefix, coverage, proximity, tier, phrase, rescore_depth_factor } =
-            params;
+        let LexicalParams {
+            prefix,
+            coverage,
+            proximity,
+            tier,
+            phrase,
+            rescore_depth_factor,
+            heading_boost,
+        } = params;
         if k == 0 || filter.is_dead() || self.n_chunks == 0 {
             return Vec::new();
         }
@@ -327,8 +486,11 @@ impl Bm25Index {
                     let tf = p.term_frequency as f32;
                     let len = self.chunk_lengths[p.chunk as usize] as f32;
                     let norm = if mean_len > 0.0 { len / mean_len } else { 1.0 };
-                    let contribution =
+                    let mut contribution =
                         idf * (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * norm));
+                    if heading_boost > 0.0 {
+                        contribution *= 1.0 + heading_boost * self.heading_share(p);
+                    }
                     *per_term.entry(p.chunk).or_insert(0.0) += weight * contribution;
                 }
             }
@@ -379,6 +541,30 @@ impl Bm25Index {
         }
         hits.truncate(k);
         hits
+    }
+
+    /// What share of one posting's occurrences fell inside its chunk's heading.
+    ///
+    /// Computed from the positions the index already records rather than from a
+    /// per-posting field tag, because the heading is a prefix of the chunk text and
+    /// so is exactly the positions below the heading length.
+    /// @param posting - the posting to weigh
+    fn heading_share(&self, posting: &Posting) -> f32 {
+        let heading_length = self
+            .chunk_heading_lengths
+            .get(posting.chunk as usize)
+            .copied()
+            .unwrap_or(0);
+        if heading_length == 0 || posting.term_frequency == 0 {
+            return 0.0;
+        }
+        let start = posting.positions_at as usize;
+        let end = start + posting.term_frequency as usize;
+        let inside = self.positions[start..end]
+            .iter()
+            .filter(|at| **at < heading_length)
+            .count();
+        inside as f32 / posting.term_frequency as f32
     }
 
     /// The largest score `search` could hand back for this query, if some chunk
@@ -568,6 +754,24 @@ fn smallest_window(lists: &[&[u32]]) -> Option<u32> {
     }
 }
 
+/// How many tokens one chunk's heading contributes to the front of its text.
+///
+/// Nikaya writes a chunk as its heading followed by its body, which is the same
+/// arrangement PostgreSQL weights with `setweight`. Tokenizing the heading on its
+/// own gives the count because the tokenizer splits on whitespace and the join
+/// between heading and body is whitespace, so the terms of the whole are the terms
+/// of the heading followed by the terms of the body.
+/// @param store - the store holding the chunk
+/// @param tokenizer - the analyzer, shared with querying
+/// @param chunk - the chunk identifier
+fn heading_token_count(store: &Store, tokenizer: &Tokenizer, chunk: u32) -> u32 {
+    let heading = store.heading_path(chunk).join(" ");
+    if heading.is_empty() {
+        return 0;
+    }
+    tokenizer.terms(&heading).len() as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -591,12 +795,29 @@ mod tests {
                 author: None,
                 author_id: None,
                 updated_at: Some(i as i64),
+                external_chunk_id: None,
                 labels: vec![],
+                attributes: Vec::new(),
+                flags: Vec::new(),
                 deleted: false,
             })
             .collect();
         s.add_chunks(inputs);
         s
+    }
+
+    /// One chunk whose text begins with its heading, which is how a mail corpus
+    /// writes them and what the heading boost reads.
+    fn headed(doc: &str, heading: &str, body: &str) -> ChunkInput {
+        ChunkInput {
+            source: "email".into(),
+            external_doc_id: doc.into(),
+            heading_path: vec![heading.into()],
+            content: format!("{heading}\n\n{body}"),
+            title: heading.into(),
+            url: format!("u/{doc}"),
+            ..Default::default()
+        }
     }
 
     fn run(store: &Store, query: &str, k: usize) -> Vec<u32> {
@@ -697,6 +918,68 @@ mod tests {
     fn a_query_of_only_stopwords_returns_nothing() {
         let s = store_of(&[("confluence", "offer eligibility")]);
         assert!(run(&s, "how do i the of and", 5).is_empty());
+    }
+
+    /// PostgreSQL puts a subject line in weight class A and a body in class B, so
+    /// a person's name in a subject outranks the same name in a body. With the
+    /// boost off the two are indistinguishable, which is the gap this closes.
+    #[test]
+    fn a_heading_term_can_be_weighted_above_the_same_term_in_a_body() {
+        let mut store = Store::default();
+        store.add_chunks(vec![
+            headed("d1", "Terri Shaw tax return", "please find the attached document"),
+            headed("d2", "meeting notes", "we discussed the Terri Shaw tax return at length"),
+        ]);
+
+        let tokenizer = Tokenizer::default();
+        let index = Bm25Index::build(&store, &tokenizer);
+        let filter = CompiledFilter::compile(&Filter::default(), &store);
+
+        let unweighted = index.search("Terri Shaw", &store, &filter, &tokenizer, 10, LexicalParams::default());
+        let weighted = index.search(
+            "Terri Shaw",
+            &store,
+            &filter,
+            &tokenizer,
+            10,
+            LexicalParams { heading_boost: 3.0, ..Default::default() },
+        );
+        assert_eq!(weighted.len(), 2, "both chunks still match");
+        assert_eq!(weighted[0].chunk, 0, "the heading match should lead: {weighted:?}");
+        let gap = |hits: &[LexicalHit]| {
+            let a = hits.iter().find(|h| h.chunk == 0).unwrap().score;
+            let b = hits.iter().find(|h| h.chunk == 1).unwrap().score;
+            a - b
+        };
+        assert!(
+            gap(&weighted) > gap(&unweighted),
+            "the boost did not widen the gap: {:?} against {:?}",
+            gap(&weighted),
+            gap(&unweighted)
+        );
+    }
+
+    #[test]
+    fn the_heading_boost_is_off_by_default_and_changes_nothing() {
+        let mut store = Store::default();
+        store.add_chunks(vec![headed(
+            "d1",
+            "Terri Shaw tax return",
+            "the body mentions Terri Shaw again",
+        )]);
+        let tokenizer = Tokenizer::default();
+        let index = Bm25Index::build(&store, &tokenizer);
+        let filter = CompiledFilter::compile(&Filter::default(), &store);
+        let a = index.search("Terri Shaw", &store, &filter, &tokenizer, 10, LexicalParams::default());
+        let b = index.search(
+            "Terri Shaw",
+            &store,
+            &filter,
+            &tokenizer,
+            10,
+            LexicalParams { heading_boost: 0.0, ..Default::default() },
+        );
+        assert_eq!(a[0].score.to_bits(), b[0].score.to_bits());
     }
 
     #[test]

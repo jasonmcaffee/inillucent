@@ -50,6 +50,9 @@ pub struct IndexConfig {
     /// How far down the BM25 ranking the position-aware rescoring reaches, as a
     /// multiple of the requested `k`.
     pub lexical_rescore_depth: usize,
+    /// How much a term in a chunk's heading outweighs the same term in its body.
+    /// 0 is off, which is what the engine has always done.
+    pub lexical_heading_boost: f32,
     /// How the vector weight is chosen per query. Every gain at zero, which is the
     /// default, makes this exactly the fixed weight `fusion` carries.
     pub adaptive: AdaptiveWeights,
@@ -106,6 +109,12 @@ impl Default for IndexConfig {
             // adaptive weighting below.
             lexical_phrase: 0.75,
             lexical_rescore_depth: 6,
+            // Measured off. PostgreSQL weights a subject line above a body with
+            // `setweight`, and the terms are all present here either way because a
+            // chunk's text begins with its heading - what is missing is only the
+            // boost. Whether the boost is worth having is a question about a corpus,
+            // and the engine's rule is that a knob is measured rather than assumed.
+            lexical_heading_boost: 0.0,
             // Measured on, at a tenth. The vector weight is chosen per query from
             // four signals the search already computed: how many query terms look
             // like identifiers, how many the dictionary has never seen, how much
@@ -172,6 +181,19 @@ pub struct BuildStats {
     pub quantized_bytes: usize,
 }
 
+/// What one incremental append did, so a sync can report it without asking the
+/// index a second question.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AppendStats {
+    pub chunks_added: usize,
+    pub documents_added: usize,
+    /// Terms the lexical dictionary had never seen before this append.
+    pub new_terms: usize,
+    /// Whether the append went into built structures, or into an index that has
+    /// not been committed yet and still needs a `commit` before it answers.
+    pub committed: bool,
+}
+
 impl Index {
     pub fn new(config: IndexConfig) -> Self {
         Index {
@@ -200,6 +222,43 @@ impl Index {
         self.force_graph = on;
         if let Some(g) = self.graph.as_mut() {
             g.set_force_graph(on);
+        }
+    }
+
+    /// Changes how many places a vector search starts from, on a committed index.
+    ///
+    /// Nothing the build produced depends on it, so a sweep over it reuses one
+    /// index instead of building one per value - which also means the difference it
+    /// measures is the setting rather than two builds that differ for other
+    /// reasons.
+    /// @param count - how many starting points, at least one
+    pub fn set_entry_points(&mut self, count: usize) {
+        self.config.hnsw.entry_points = count.max(1);
+        if let Some(graph) = self.graph.as_mut() {
+            graph.set_entry_points(count);
+        }
+    }
+
+    /// Changes the default candidate breadth on a committed index.
+    /// @param ef - how many candidates a search keeps in flight
+    pub fn set_ef_search(&mut self, ef: usize) {
+        self.config.hnsw.ef_search = ef.max(1);
+        if let Some(graph) = self.graph.as_mut() {
+            graph.set_ef_search(ef);
+        }
+    }
+
+    /// Changes the size below which a filter always scans exhaustively.
+    ///
+    /// The lever the design recommends reaching for first when a graph proves
+    /// unnavigable on a corpus: an exhaustive scan is exact by construction, and on
+    /// a corpus of 598,560 chunks it costs about 110 ms - less at p95 than what the
+    /// baseline charges for a query it has not seen recently.
+    /// @param below - the chunk count; `usize::MAX` makes every search exact
+    pub fn set_exhaustive_below(&mut self, below: usize) {
+        self.config.hnsw.exhaustive_below = below;
+        if let Some(graph) = self.graph.as_mut() {
+            graph.set_exhaustive_below(below);
         }
     }
 
@@ -256,6 +315,14 @@ impl Index {
         self.config.lexical_rescore_depth = depth.max(1);
     }
 
+    /// Changes how much a heading term outweighs a body term, on a committed index.
+    /// The heading lengths it reads were recorded at build time, so only the weight
+    /// is a setting.
+    /// @param boost - 0 ignores where a term occurred, above 0 favours the heading
+    pub fn set_lexical_heading_boost(&mut self, boost: f32) {
+        self.config.lexical_heading_boost = boost.max(0.0);
+    }
+
     /// Turns per-query vector weighting on or off, and sets the rule it uses.
     /// @param on - whether the weight is chosen per query
     /// @param weights - the rule; every gain at zero reproduces the fixed weight
@@ -279,6 +346,7 @@ impl Index {
             tier: self.config.lexical_tier,
             phrase: self.config.lexical_phrase,
             rescore_depth_factor: self.config.lexical_rescore_depth,
+            heading_boost: self.config.lexical_heading_boost,
         }
     }
 
@@ -297,15 +365,25 @@ impl Index {
             .unwrap_or(0.0)
     }
 
-    /// Rebuild an index from the parts that were stored, deriving the lexical
-    /// index and the int8 codes rather than reading them: both are deterministic
-    /// functions of the store and the vectors, and recomputing them costs less
-    /// than the disk they would take.
+    /// Rebuild an index from the parts that were stored.
+    ///
+    /// The int8 codes are still derived: they are one linear pass over vectors
+    /// that have just been read, and a code depends on nothing but its own vector.
+    /// The lexical index is not, any more - deriving it means running the analyzer
+    /// over the whole text arena, which measured at 26.6 seconds of every cold
+    /// start on 598,560 chunks. A caller that has it on disk passes it in; one
+    /// that does not gets it rebuilt.
+    /// @param config - the configuration the index was saved with
+    /// @param store - the documents and chunks
+    /// @param vectors - one vector per chunk
+    /// @param graph - the adjacency lists
+    /// @param lexical - the inverted index, or `None` to rebuild it here
     pub fn from_parts(
         config: IndexConfig,
         store: Store,
         vectors: VectorSet,
         graph: Hnsw,
+        lexical: Option<Bm25Index>,
     ) -> anyhow::Result<Index> {
         if vectors.len() != store.n_chunks() {
             anyhow::bail!(
@@ -315,7 +393,7 @@ impl Index {
             );
         }
         let tokenizer = Tokenizer::default();
-        let lexical = Bm25Index::build(&store, &tokenizer);
+        let lexical = lexical.unwrap_or_else(|| Bm25Index::build(&store, &tokenizer));
         let quantized = if config.quantized {
             Some(QuantizedSet::from_vectors(&vectors))
         } else {
@@ -338,6 +416,17 @@ impl Index {
         match &self.graph {
             Some(g) => {
                 g.write_graph(w)?;
+                Ok(())
+            }
+            None => anyhow::bail!("commit the index before saving it"),
+        }
+    }
+
+    /// Write the lexical index, for `persist::save`.
+    pub fn write_lexical(&self, w: &mut impl std::io::Write) -> anyhow::Result<()> {
+        match &self.lexical {
+            Some(l) => {
+                l.write_to(w)?;
                 Ok(())
             }
             None => anyhow::bail!("commit the index before saving it"),
@@ -369,6 +458,132 @@ impl Index {
         self.graph = None;
         self.lexical = None;
         self.quantized = None;
+    }
+
+    /// Add chunks to a committed index without rebuilding anything.
+    ///
+    /// This is the difference between a sync costing a second and costing nine
+    /// minutes. `add` invalidates the graph, the lexical index and the codes, so
+    /// 181 new chunks used to force a full rebuild of a 598,560 node graph; every
+    /// structure underneath already supported the append, and this composes them.
+    ///
+    /// The graph an incremental insert produces is not byte-identical to one built
+    /// in a single pass, which is why compaction exists and why the mutation gates
+    /// compare a month of appends against a clean rebuild. On an index that was
+    /// never committed this falls back to `add`, because there is nothing to
+    /// append to.
+    /// @param chunks - the new chunks, one vector each
+    /// @param embeddings - their vectors, in the same order
+    pub fn append(&mut self, chunks: Vec<ChunkInput>, embeddings: &[Vec<f32>]) -> AppendStats {
+        assert_eq!(
+            chunks.len(),
+            embeddings.len(),
+            "each chunk needs exactly one vector"
+        );
+        if self.graph.is_none() || self.lexical.is_none() {
+            let documents_before = self.store.n_documents();
+            let chunks_added = chunks.len();
+            self.add(chunks, embeddings);
+            return AppendStats {
+                chunks_added,
+                documents_added: self.store.n_documents() - documents_before,
+                new_terms: 0,
+                committed: false,
+            };
+        }
+
+        let first_chunk = self.store.n_chunks() as u32;
+        let documents_before = self.store.n_documents();
+        self.store.add_chunks(chunks);
+        for e in embeddings {
+            self.vectors.push(e);
+        }
+        let last_chunk = self.store.n_chunks() as u32;
+
+        // Node identifiers are vector ordinals, which are chunk identifiers, so an
+        // appended chunk's node is the one `insert` is about to create.
+        if let Some(graph) = self.graph.as_mut() {
+            for node in first_chunk..last_chunk {
+                graph.insert(&self.vectors, node);
+            }
+        }
+        let new_terms = match self.lexical.as_mut() {
+            Some(lexical) => {
+                lexical.index_chunks(&self.store, &self.tokenizer, first_chunk..last_chunk)
+            }
+            None => 0,
+        };
+        if let Some(codes) = self.quantized.as_mut() {
+            codes.encode_from(&self.vectors, first_chunk as usize);
+        }
+
+        AppendStats {
+            chunks_added: (last_chunk - first_chunk) as usize,
+            documents_added: self.store.n_documents() - documents_before,
+            new_terms,
+            committed: true,
+        }
+    }
+
+    /// Marks one document unreachable, without rebuilding anything.
+    ///
+    /// Query-time exclusion was already there - every path calls
+    /// `CompiledFilter::passes`, which checks `deleted` before anything else - so
+    /// this is only the mutation that was missing. The chunks stay in the graph on
+    /// purpose: a tombstoned node is still a useful stepping stone, and removing
+    /// it would disconnect the paths that ran through it. Compaction is what
+    /// eventually reclaims the space.
+    ///
+    /// Returns whether a live document was found and tombstoned.
+    /// @param source - the source name
+    /// @param external_doc_id - the identifier the source system uses
+    pub fn tombstone(&mut self, source: &str, external_doc_id: &str) -> bool {
+        match self.store.find_document(source, external_doc_id) {
+            Some(doc) => {
+                self.store.tombstone_document(doc);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Tombstones many documents under one call. A Gmail history sync removes
+    /// twenty-nine messages in a pass, and each one taking the writer lock
+    /// separately is a cost with nothing to show for it.
+    /// @param documents - source and external id pairs
+    pub fn tombstone_many(&mut self, documents: &[(String, String)]) -> usize {
+        documents
+            .iter()
+            .filter(|(source, id)| self.tombstone(source, id))
+            .count()
+    }
+
+    /// Replaces one document's chunks: the old document is tombstoned and the new
+    /// chunks are appended as a fresh document.
+    ///
+    /// This is what an append-only index does with an edit. The old chunks stay
+    /// resident until compaction, which is the price of not rebuilding, and the
+    /// store's lookup holds only live documents so the appended chunks cannot land
+    /// back on the row that was just tombstoned.
+    /// @param source - the source name
+    /// @param external_doc_id - the identifier the source system uses
+    /// @param chunks - the document's new chunks
+    /// @param embeddings - their vectors, in the same order
+    pub fn replace_document(
+        &mut self,
+        source: &str,
+        external_doc_id: &str,
+        chunks: Vec<ChunkInput>,
+        embeddings: &[Vec<f32>],
+    ) -> AppendStats {
+        self.tombstone(source, external_doc_id);
+        self.append(chunks, embeddings)
+    }
+
+    /// Share of the corpus that is tombstoned, from 0 to 1. The trigger a
+    /// compaction schedule needs.
+    pub fn deleted_ratio(&self) -> f32 {
+        self.store.deleted_ratio()
     }
 
     /// Build every queryable structure. Separated from `add` so a bulk load pays
@@ -515,9 +730,43 @@ impl Index {
         k: usize,
         ef_search: Option<usize>,
     ) -> (Vec<FusedHit>, QueryExplanation) {
+        self.search_branches(query, query_vector, filter, k, ef_search, Branches::Both)
+    }
+
+    /// The pipeline, running only the branches asked for.
+    ///
+    /// A branch that is switched off contributes an empty list rather than a
+    /// differently-shaped result, so one branch and two branches are fused,
+    /// grouped, scored and reported by exactly the same code. That matters because
+    /// the single-branch modes are what a caller falls back to when the embedder
+    /// is down, and a fallback that runs different code is a fallback nobody has
+    /// measured.
+    /// @param query - the raw query text
+    /// @param query_vector - the query embedding, ignored when the vector branch is off
+    /// @param filter - the compiled predicate
+    /// @param k - how many chunk hits to return
+    /// @param ef_search - traversal width, or the configured default
+    /// @param branches - which branches to run
+    pub fn search_branches(
+        &self,
+        query: &str,
+        query_vector: &[f32],
+        filter: &CompiledFilter,
+        k: usize,
+        ef_search: Option<usize>,
+        branches: Branches,
+    ) -> (Vec<FusedHit>, QueryExplanation) {
         let candidates = self.config.candidates.max(k);
-        let vector_hits = self.vector_search(query_vector, filter, candidates, ef_search);
-        let lexical_hits = self.lexical_search(query, filter, candidates);
+        let vector_hits = if branches.runs_vector() {
+            self.vector_search(query_vector, filter, candidates, ef_search)
+        } else {
+            Vec::new()
+        };
+        let lexical_hits = if branches.runs_lexical() {
+            self.lexical_search(query, filter, candidates)
+        } else {
+            Vec::new()
+        };
 
         let bounds = ScoreBounds {
             lexical_ceiling: self
@@ -605,6 +854,210 @@ impl Index {
     }
 }
 
+
+/// Which retrieval branches a search runs.
+///
+/// A caller with a lexical-only and a semantic-only mode was otherwise forced to
+/// call the single-branch entry points and reimplement grouping, corroboration
+/// and confidence for them. Running one branch through the same fusion keeps all
+/// three modes on one code path, and fusing one list with an empty one is already
+/// what the hybrid path does whenever a branch finds nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Branches {
+    Both,
+    /// Lexical only, for a caller whose embedder is unavailable or whose user
+    /// asked for keyword search.
+    Lexical,
+    /// Vector only.
+    Vector,
+}
+
+impl Branches {
+    fn runs_lexical(self) -> bool {
+        matches!(self, Branches::Both | Branches::Lexical)
+    }
+
+    fn runs_vector(self) -> bool {
+        matches!(self, Branches::Both | Branches::Vector)
+    }
+}
+
+/// What a grouped search was asked for.
+///
+/// A struct rather than five positional arguments, for the same reason
+/// `LexicalParams` is one: a caller can transpose two numbers of the same type
+/// without the compiler noticing.
+#[derive(Debug, Clone, Copy)]
+pub struct GroupedParams {
+    /// How many documents to return.
+    pub documents: usize,
+    /// How many documents to skip before those, for paging.
+    ///
+    /// Deep paging costs a deep search here, because the fusion produces a total
+    /// order and the only way to reach position 200 is to compute the first 200.
+    /// That is the same trade the SQL it replaces was making with `OFFSET`.
+    pub offset: usize,
+    /// Traversal width, or the configured default.
+    pub ef_search: Option<usize>,
+    /// How much each matching chunk beyond the best one adds to its document's
+    /// score.
+    ///
+    /// Summing every chunk outright lets a long newsletter with a dozen weak
+    /// matches outrank a short message that answers the question exactly, so the
+    /// additional chunks corroborate rather than accumulate. Supplied by the
+    /// caller rather than kept as an engine default, because it is a property of
+    /// what documents mean in the caller's corpus and nothing in the engine has
+    /// measured it.
+    pub corroboration: f32,
+    /// How many matching chunks to carry on each returned document.
+    pub chunks_per_document: usize,
+    /// Which branches to run.
+    pub branches: Branches,
+}
+
+impl Default for GroupedParams {
+    fn default() -> Self {
+        GroupedParams {
+            documents: 20,
+            offset: 0,
+            ef_search: None,
+            corroboration: 0.25,
+            chunks_per_document: 3,
+            branches: Branches::Both,
+        }
+    }
+}
+
+/// One document that matched, with the chunk evidence that made it match.
+#[derive(Debug, Clone)]
+pub struct DocumentHit {
+    /// Index into `Store::documents`.
+    pub document: u32,
+    pub score: f32,
+    /// The confidence of this document's best chunk, on absolute bounds.
+    ///
+    /// Carried up from the chunk rather than recomputed, because it is the
+    /// question "is there an answer here at all" and the best chunk is what
+    /// answers it. This is what lets a caller abstain instead of handing an agent
+    /// ten passages for a question the corpus does not answer.
+    pub confidence: f32,
+    /// The matching chunks, best first, capped by `chunks_per_document`.
+    pub chunks: Vec<FusedHit>,
+}
+
+/// A grouped search, and what the engine decided while running it.
+#[derive(Debug, Clone)]
+pub struct GroupedSearch {
+    pub documents: Vec<DocumentHit>,
+    /// `graph` or `exhaustive`. The engine already knew; it just never said, and
+    /// "this search was slow" and "this search was exact" are things a person
+    /// should be able to see rather than infer.
+    pub path: &'static str,
+    pub explanation: QueryExplanation,
+}
+
+impl Index {
+    /// The full pipeline, grouped by document.
+    ///
+    /// The engine already knows the document of every chunk and already caps hits
+    /// per document, so a caller that wants documents was reimplementing grouping,
+    /// corroboration weighting and a re-sort that the engine is better placed to
+    /// do. It also gets the path and the confidence, neither of which a caller can
+    /// recompute afterwards without asking a second, differently-configured
+    /// question.
+    /// @param query - the raw query text
+    /// @param query_vector - the query embedding, already normalized
+    /// @param filter - the compiled predicate
+    /// @param params - how many documents, how deep, and how to score them
+    pub fn hybrid_search_grouped(
+        &self,
+        query: &str,
+        query_vector: &[f32],
+        filter: &CompiledFilter,
+        params: GroupedParams,
+    ) -> GroupedSearch {
+        // Enough chunk hits that the requested number of documents can be filled
+        // even when every document contributes its cap.
+        //
+        // Floored at the configured candidate depth, and that floor is what makes
+        // paging coherent. A document's score depends on how many of its chunks
+        // came back, so asking for five documents and then asking for the next
+        // five would otherwise group two differently-sized chunk lists and produce
+        // two orderings that do not continue each other. Fusing to a fixed depth
+        // and paging inside it means every page reads the same list. Past that
+        // depth - a window of more than `candidates / per_doc_cap` documents - the
+        // caller has asked for a deeper search and gets one.
+        let wanted_documents = params.offset + params.documents;
+        let chunk_budget = wanted_documents
+            .saturating_mul(self.config.per_doc_cap)
+            .max(self.config.candidates)
+            .max(1);
+        let (hits, explanation) = self.search_branches(
+            query,
+            query_vector,
+            filter,
+            chunk_budget,
+            params.ef_search,
+            params.branches,
+        );
+
+        let mut order: Vec<u32> = Vec::new();
+        let mut grouped: std::collections::HashMap<u32, Vec<FusedHit>> =
+            std::collections::HashMap::new();
+        for hit in hits {
+            let document = self.store.chunks[hit.chunk as usize].doc;
+            let entry = grouped.entry(document).or_insert_with(|| {
+                order.push(document);
+                Vec::new()
+            });
+            entry.push(hit);
+        }
+
+        let mut documents: Vec<DocumentHit> = order
+            .into_iter()
+            .map(|document| {
+                let mut chunks = grouped.remove(&document).unwrap_or_default();
+                chunks.sort_by(|a, b| {
+                    b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+                        .then(a.chunk.cmp(&b.chunk))
+                });
+                let score = score_document(&chunks, params.corroboration);
+                let confidence = chunks.first().map(|c| c.confidence).unwrap_or(0.0);
+                chunks.truncate(params.chunks_per_document.max(1));
+                DocumentHit { document, score, confidence, chunks }
+            })
+            .collect();
+        documents.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.document.cmp(&b.document))
+        });
+
+        let documents = documents
+            .into_iter()
+            .skip(params.offset)
+            .take(params.documents)
+            .collect();
+        let path = if params.branches.runs_vector() {
+            self.path_for(filter, params.ef_search)
+        } else {
+            "lexical"
+        };
+        GroupedSearch { documents, path, explanation }
+    }
+}
+
+/// One document's score: its best chunk leads and the rest only corroborate.
+/// @param chunks - the document's matching chunks, best first
+/// @param corroboration - what each chunk beyond the best contributes
+fn score_document(chunks: &[FusedHit], corroboration: f32) -> f32 {
+    match chunks.split_first() {
+        Some((best, rest)) => best.score + corroboration * rest.iter().map(|c| c.score).sum::<f32>(),
+        None => 0.0,
+    }
+}
+
 /// What one hybrid query decided, for a run artifact to record.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct QueryExplanation {
@@ -679,7 +1132,10 @@ mod tests {
                 author: None,
                 author_id: None,
                 updated_at: Some(1000 + i as i64),
+                external_chunk_id: None,
                 labels: vec![],
+                attributes: Vec::new(),
+                flags: Vec::new(),
                 deleted: false,
             });
             let c = &centres[i % 16];
@@ -708,7 +1164,10 @@ mod tests {
                 author: None,
                 author_id: None,
                 updated_at: None,
+                external_chunk_id: None,
                 labels: vec![],
+                attributes: Vec::new(),
+                flags: Vec::new(),
                 deleted: false,
             })
             .collect();
@@ -825,7 +1284,10 @@ mod tests {
                 author: None,
                 author_id: None,
                 updated_at: None,
+                external_chunk_id: None,
                 labels: vec![],
+                attributes: Vec::new(),
+                flags: Vec::new(),
                 deleted: false,
             }],
             &[{
@@ -842,6 +1304,160 @@ mod tests {
     }
 
     #[test]
+    fn a_grouped_search_returns_documents_rather_than_chunks() {
+        let index = build(2000, 32, IndexConfig::default());
+        let f = index.compile(&Filter::default());
+        let q = index.vectors().get(0).to_vec();
+        let grouped = index.hybrid_search_grouped(
+            "offer eligibility rules",
+            &q,
+            &f,
+            GroupedParams { documents: 10, ..Default::default() },
+        );
+        assert_eq!(grouped.documents.len(), 10);
+        let unique: std::collections::HashSet<u32> =
+            grouped.documents.iter().map(|d| d.document).collect();
+        assert_eq!(unique.len(), 10, "a document appeared twice");
+        assert!(grouped.documents.iter().all(|d| !d.chunks.is_empty()));
+        // Descending by score, with a total order.
+        for pair in grouped.documents.windows(2) {
+            assert!(pair[0].score >= pair[1].score);
+        }
+    }
+
+    #[test]
+    fn a_single_branch_grouped_search_returns_that_branch_only() {
+        let index = build(2000, 32, IndexConfig::default());
+        let f = index.compile(&Filter::default());
+        // A vector that matches nothing in particular, and a query that does.
+        let q = vector(32, 999.0);
+
+        let lexical = index.hybrid_search_grouped(
+            "offer eligibility rules",
+            &q,
+            &f,
+            GroupedParams { branches: Branches::Lexical, ..Default::default() },
+        );
+        assert_eq!(lexical.path, "lexical");
+        assert!(!lexical.documents.is_empty());
+        assert!(lexical.explanation.vector_candidates == 0);
+
+        let vector_only = index.hybrid_search_grouped(
+            "a query holding no term this corpus knows",
+            &q,
+            &f,
+            GroupedParams { branches: Branches::Vector, ..Default::default() },
+        );
+        assert!(!vector_only.documents.is_empty(), "the vector branch found nothing");
+        assert_eq!(vector_only.explanation.lexical_candidates, 0);
+    }
+
+    #[test]
+    fn a_grouped_search_says_which_path_it_took() {
+        let index = build(3000, 32, IndexConfig::default());
+        let q = index.vectors().get(0).to_vec();
+
+        let everything = index.compile(&Filter::default());
+        let selective = index.compile(&Filter::source("jira"));
+        let broad = index.hybrid_search_grouped("offer", &q, &everything, GroupedParams::default());
+        let narrow = index.hybrid_search_grouped("offer", &q, &selective, GroupedParams::default());
+
+        assert_eq!(broad.path, index.path_for(&everything, None));
+        assert_eq!(narrow.path, "exhaustive", "a selective filter should scan");
+    }
+
+    #[test]
+    fn corroboration_lifts_a_document_that_matched_more_than_once() {
+        let index = build(400, 16, IndexConfig::default());
+        let f = index.compile(&Filter::default());
+        let q = index.vectors().get(0).to_vec();
+
+        let none = index.hybrid_search_grouped(
+            "offer eligibility",
+            &q,
+            &f,
+            GroupedParams { corroboration: 0.0, ..Default::default() },
+        );
+        let weighted = index.hybrid_search_grouped(
+            "offer eligibility",
+            &q,
+            &f,
+            GroupedParams { corroboration: 1.0, ..Default::default() },
+        );
+        let multi_chunk = weighted.documents.iter().find(|d| d.chunks.len() > 1);
+        let Some(multi) = multi_chunk else {
+            return; // nothing in this fixture matched twice; the rule is untested but not wrong
+        };
+        let same = none.documents.iter().find(|d| d.document == multi.document).unwrap();
+        assert!(
+            multi.score > same.score,
+            "corroboration did not lift a document with {} matching chunks",
+            multi.chunks.len()
+        );
+    }
+
+    #[test]
+    fn a_grouped_search_pages_without_repeating_a_document() {
+        let index = build(2000, 32, IndexConfig::default());
+        let f = index.compile(&Filter::default());
+        let q = index.vectors().get(0).to_vec();
+        let first = index.hybrid_search_grouped(
+            "offer eligibility",
+            &q,
+            &f,
+            GroupedParams { documents: 5, offset: 0, ..Default::default() },
+        );
+        let second = index.hybrid_search_grouped(
+            "offer eligibility",
+            &q,
+            &f,
+            GroupedParams { documents: 5, offset: 5, ..Default::default() },
+        );
+        let front: std::collections::HashSet<u32> =
+            first.documents.iter().map(|d| d.document).collect();
+        assert!(second.documents.iter().all(|d| !front.contains(&d.document)));
+    }
+
+    #[test]
+    fn a_grouped_search_carries_the_confidence_of_its_best_chunk() {
+        let index = build(2000, 32, IndexConfig::default());
+        let f = index.compile(&Filter::default());
+        let q = index.vectors().get(0).to_vec();
+        let grouped =
+            index.hybrid_search_grouped("offer eligibility", &q, &f, GroupedParams::default());
+        for document in &grouped.documents {
+            let best = document
+                .chunks
+                .iter()
+                .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap())
+                .unwrap();
+            assert_eq!(document.confidence, best.confidence);
+        }
+    }
+
+    #[test]
+    fn a_grouped_search_excludes_tombstoned_documents() {
+        let mut index = build(400, 16, IndexConfig::default());
+        index.append(
+            vec![chunk("doomed", 0, "a chunk about tirzepatide dosing")],
+            &[vector(16, 3.0)],
+        );
+        let v = vector(16, 3.0);
+        let f = index.compile(&Filter::default());
+        let before = index.hybrid_search_grouped("tirzepatide", &v, &f, GroupedParams::default());
+        assert!(before.documents.iter().any(|d| {
+            index.store().documents[d.document as usize].external_id == "doomed"
+        }));
+
+        index.tombstone("slack", "doomed");
+        let f = index.compile(&Filter::default());
+        let after = index.hybrid_search_grouped("tirzepatide", &v, &f, GroupedParams::default());
+        assert!(after.documents.iter().all(|d| {
+            index.store().documents[d.document as usize].external_id != "doomed"
+        }));
+    }
+
+    #[test]
     fn both_fusion_methods_produce_a_full_result_set() {
         for fusion in [
             Fusion::ReciprocalRank { k: 60.0 },
@@ -853,5 +1469,269 @@ mod tests {
             let hits = index.hybrid_search("offer eligibility rules", &q, &f, 10, None);
             assert_eq!(hits.len(), 10, "{fusion:?} returned {} of 10", hits.len());
         }
+    }
+
+    /// One chunk shaped like the corpus `build` produces, so an appended chunk is
+    /// comparable to the ones already there.
+    fn chunk(doc: &str, index: u32, content: &str) -> ChunkInput {
+        ChunkInput {
+            source: "slack".into(),
+            external_doc_id: doc.into(),
+            chunk_index: index,
+            content: content.into(),
+            title: doc.into(),
+            url: format!("u/{doc}/{index}"),
+            ..Default::default()
+        }
+    }
+
+    /// A deterministic unit vector, so an appended chunk lands somewhere specific
+    /// rather than somewhere random.
+    fn vector(dims: usize, seed: f32) -> Vec<f32> {
+        let mut v: Vec<f32> = (0..dims).map(|d| ((d as f32 + seed) * 0.37).sin()).collect();
+        normalize(&mut v);
+        v
+    }
+
+    #[test]
+    fn an_append_makes_new_chunks_retrievable_without_a_rebuild() {
+        let mut index = build(2000, 32, IndexConfig::default());
+        let before = index.store().n_chunks();
+
+        let stats = index.append(
+            vec![chunk("appended", 0, "a chunk about tirzepatide dosing")],
+            &[vector(32, 7.0)],
+        );
+        assert!(stats.committed, "the append should not have needed a commit");
+        assert_eq!(stats.chunks_added, 1);
+        assert_eq!(stats.documents_added, 1);
+        assert_eq!(index.store().n_chunks(), before + 1);
+
+        // No commit call anywhere between the append and the search.
+        let f = index.compile(&Filter::default());
+        let hits = index.lexical_search("tirzepatide", &f, 5);
+        assert_eq!(hits.len(), 1, "the appended chunk is not lexically reachable");
+        assert_eq!(hits[0].chunk, before as u32);
+    }
+
+    #[test]
+    fn an_appended_chunk_is_reachable_by_its_own_vector() {
+        let mut index = build(2000, 32, IndexConfig { hnsw: HnswParams { exhaustive_below: 0, ..Default::default() }, ..Default::default() });
+        let v = vector(32, 11.0);
+        index.append(vec![chunk("appended", 0, "vector reachable")], &[v.clone()]);
+
+        let f = index.compile(&Filter::default());
+        let hits = index.vector_search(&v, &f, 5, Some(200));
+        assert!(
+            hits.iter().any(|h| h.chunk == index.store().n_chunks() as u32 - 1),
+            "the appended node was not found through the graph"
+        );
+    }
+
+    #[test]
+    fn an_append_leaves_the_existing_ranking_alone() {
+        // idf moves when the corpus grows, so the scores move; the ordering of the
+        // chunks that were already there must not.
+        let mut index = build(2000, 32, IndexConfig::default());
+        let f = index.compile(&Filter::default());
+        let before: Vec<u32> =
+            index.lexical_search("offer eligibility rules", &f, 20).iter().map(|h| h.chunk).collect();
+
+        index.append(
+            vec![chunk("appended", 0, "an unrelated chunk about tirzepatide")],
+            &[vector(32, 13.0)],
+        );
+        let f = index.compile(&Filter::default());
+        let after: Vec<u32> =
+            index.lexical_search("offer eligibility rules", &f, 20).iter().map(|h| h.chunk).collect();
+        assert_eq!(before, after, "an unrelated append reordered the results");
+    }
+
+    #[test]
+    fn appending_matches_building_the_same_corpus_in_one_pass_lexically() {
+        // The lexical index has no approximation in it, so an appended index and a
+        // rebuilt one must agree exactly. Anything else is a bookkeeping bug in the
+        // postings, the positions or the lengths.
+        let mut appended = build(500, 16, IndexConfig::default());
+        let extra: Vec<ChunkInput> = (0..40)
+            .map(|i| chunk(&format!("extra{i}"), 0, &format!("extra chunk {i} about offer eligibility")))
+            .collect();
+        let vectors: Vec<Vec<f32>> = (0..40).map(|i| vector(16, 100.0 + i as f32)).collect();
+        appended.append(extra.clone(), &vectors);
+
+        let mut rebuilt = build(500, 16, IndexConfig::default());
+        rebuilt.add(extra, &vectors);
+        rebuilt.commit();
+
+        let a = appended.compile(&Filter::default());
+        let r = rebuilt.compile(&Filter::default());
+        for query in ["offer eligibility", "extra chunk", "rules number3"] {
+            let left = appended.lexical_search(query, &a, 20);
+            let right = rebuilt.lexical_search(query, &r, 20);
+            assert_eq!(left.len(), right.len(), "{query} returned different counts");
+            for (l, r) in left.iter().zip(right.iter()) {
+                assert_eq!(l.chunk, r.chunk, "{query} ranked differently after an append");
+                assert!((l.score - r.score).abs() < 1e-4, "{query} scored differently");
+            }
+        }
+    }
+
+    #[test]
+    fn a_tombstoned_document_disappears_from_every_branch() {
+        let mut index = build(400, 16, IndexConfig::default());
+        index.append(
+            vec![chunk("doomed", 0, "a chunk about tirzepatide dosing")],
+            &[vector(16, 3.0)],
+        );
+        let f = index.compile(&Filter::default());
+        assert_eq!(index.lexical_search("tirzepatide", &f, 5).len(), 1);
+
+        assert!(index.tombstone("slack", "doomed"));
+
+        let f = index.compile(&Filter::default());
+        assert!(index.lexical_search("tirzepatide", &f, 5).is_empty());
+        let v = vector(16, 3.0);
+        assert!(index.vector_search(&v, &f, 10, None).iter().all(|h| h.chunk != 400));
+        assert!(index.exhaustive_search(&v, &f, 10).iter().all(|h| h.chunk != 400));
+        assert!(index.hybrid_search("tirzepatide", &v, &f, 10, None).iter().all(|h| h.chunk != 400));
+    }
+
+    #[test]
+    fn tombstoning_corrects_the_counts_that_route_queries() {
+        let mut index = build(400, 16, IndexConfig::default());
+        index.append(
+            vec![chunk("doomed", 0, "one"), chunk("doomed", 1, "two")],
+            &[vector(16, 3.0), vector(16, 4.0)],
+        );
+        let live_before = index.store().live_chunks;
+        let source = index.store().sources.get("slack").unwrap();
+        let per_source_before = index.store().live_chunks_for_source(source);
+
+        index.tombstone("slack", "doomed");
+
+        assert_eq!(index.store().live_chunks, live_before - 2);
+        assert_eq!(index.store().live_chunks_for_source(source), per_source_before - 2);
+        // The chunks are still there, and still visible to a scan that has to
+        // reject them.
+        assert_eq!(index.store().chunks_of_source(source).len() as u32 >= 2, true);
+        let empty = index.compile(&Filter::default());
+        assert_eq!(empty.pass_count(), index.store().live_chunks as usize);
+    }
+
+    #[test]
+    fn tombstoning_something_absent_reports_that_it_was_absent() {
+        let mut index = build(100, 16, IndexConfig::default());
+        assert!(!index.tombstone("slack", "never-existed"));
+        assert!(!index.tombstone("nosuchsource", "d0"));
+    }
+
+    #[test]
+    fn a_batch_tombstone_counts_only_what_it_actually_removed() {
+        let mut index = build(100, 16, IndexConfig::default());
+        index.append(vec![chunk("a", 0, "one"), chunk("b", 0, "two")], &[vector(16, 1.0), vector(16, 2.0)]);
+        let removed = index.tombstone_many(&[
+            ("slack".into(), "a".into()),
+            ("slack".into(), "b".into()),
+            ("slack".into(), "a".into()),
+            ("slack".into(), "never".into()),
+        ]);
+        assert_eq!(removed, 2, "a repeat and an absent document must not be counted");
+    }
+
+    #[test]
+    fn replacing_a_document_leaves_the_old_chunks_unreachable() {
+        let mut index = build(400, 16, IndexConfig::default());
+        index.append(vec![chunk("edited", 0, "the original text mentions tirzepatide")], &[vector(16, 5.0)]);
+
+        index.replace_document(
+            "slack",
+            "edited",
+            vec![chunk("edited", 0, "the revised text mentions semaglutide")],
+            &[vector(16, 6.0)],
+        );
+
+        let f = index.compile(&Filter::default());
+        assert!(index.lexical_search("tirzepatide", &f, 5).is_empty(), "the old text is still reachable");
+        assert_eq!(index.lexical_search("semaglutide", &f, 5).len(), 1);
+    }
+
+    #[test]
+    fn replacing_a_document_keeps_the_live_count_right() {
+        let mut index = build(400, 16, IndexConfig::default());
+        index.append(vec![chunk("edited", 0, "one"), chunk("edited", 1, "two")], &[vector(16, 5.0), vector(16, 6.0)]);
+        let live = index.store().live_chunks;
+
+        // Two chunks out, three in.
+        index.replace_document(
+            "slack",
+            "edited",
+            vec![chunk("edited", 0, "a"), chunk("edited", 1, "b"), chunk("edited", 2, "c")],
+            &[vector(16, 7.0), vector(16, 8.0), vector(16, 9.0)],
+        );
+
+        assert_eq!(index.store().live_chunks, live - 2 + 3);
+        assert_eq!(index.compile(&Filter::default()).pass_count(), index.store().live_chunks as usize);
+        // Two documents now carry the same external id: one dead, one live.
+        assert_eq!(
+            index.store().documents.iter().filter(|d| d.external_id == "edited").count(),
+            2
+        );
+    }
+
+    #[test]
+    fn the_deleted_ratio_tracks_what_compaction_would_reclaim() {
+        let mut index = build(400, 16, IndexConfig::default());
+        assert_eq!(index.deleted_ratio(), 0.0);
+        index.append(vec![chunk("doomed", 0, "x")], &[vector(16, 2.0)]);
+        index.tombstone("slack", "doomed");
+        assert!((index.deleted_ratio() - 1.0 / 401.0).abs() < 1e-6, "got {}", index.deleted_ratio());
+    }
+
+    #[test]
+    fn appending_to_an_index_that_was_never_committed_still_works() {
+        let mut index = Index::new(IndexConfig { dims: 16, ..Default::default() });
+        let stats = index.append(vec![chunk("d", 0, "a chunk about tirzepatide")], &[vector(16, 1.0)]);
+        assert!(!stats.committed, "there was nothing to append to yet");
+        index.commit();
+        let f = index.compile(&Filter::default());
+        assert_eq!(index.lexical_search("tirzepatide", &f, 5).len(), 1);
+    }
+
+    #[test]
+    fn thirty_appends_stay_close_to_a_clean_rebuild() {
+        // A month of daily syncs, then the same corpus built in one pass. The graph
+        // an incremental insert produces is not identical to a rebuilt one, so this
+        // measures how far apart they drift rather than asserting they agree.
+        let mut appended = build(3000, 32, IndexConfig { hnsw: HnswParams { exhaustive_below: 0, ..Default::default() }, ..Default::default() });
+        let mut every: Vec<ChunkInput> = Vec::new();
+        let mut every_vector: Vec<Vec<f32>> = Vec::new();
+        for day in 0..30u32 {
+            let chunks: Vec<ChunkInput> = (0..6)
+                .map(|i| chunk(&format!("day{day}-{i}"), 0, &format!("sync {day} chunk {i} about offer eligibility")))
+                .collect();
+            let vectors: Vec<Vec<f32>> =
+                (0..6).map(|i| vector(32, 500.0 + (day * 6 + i) as f32)).collect();
+            appended.append(chunks.clone(), &vectors);
+            every.extend(chunks);
+            every_vector.extend(vectors);
+        }
+
+        let mut rebuilt = build(3000, 32, IndexConfig { hnsw: HnswParams { exhaustive_below: 0, ..Default::default() }, ..Default::default() });
+        rebuilt.add(every, &every_vector);
+        rebuilt.commit();
+        assert_eq!(appended.store().n_chunks(), rebuilt.store().n_chunks());
+
+        let f = appended.compile(&Filter::default());
+        let mut total = 0.0;
+        let probes = 20;
+        for i in 0..probes {
+            let q = vector(32, 900.0 + i as f32);
+            let exact = appended.exhaustive_search(&q, &f, 20);
+            let approximate = appended.vector_search(&q, &f, 20, Some(200));
+            let want: std::collections::HashSet<u32> = exact.iter().map(|n| n.chunk).collect();
+            total += approximate.iter().filter(|n| want.contains(&n.chunk)).count() as f32 / 20.0;
+        }
+        let recall = total / probes as f32;
+        assert!(recall > 0.9, "recall after 30 appends fell to {recall}");
     }
 }

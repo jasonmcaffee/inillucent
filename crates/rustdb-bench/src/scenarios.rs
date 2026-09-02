@@ -108,7 +108,10 @@ pub fn build_selected(
             author: c.author.clone(),
             author_id: c.author_id.clone(),
             updated_at: c.updated_at,
+            external_chunk_id: None,
             labels: c.labels.clone(),
+            attributes: Vec::new(),
+            flags: Vec::new(),
             deleted: c.deleted,
         })
         .collect();

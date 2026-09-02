@@ -1110,7 +1110,10 @@ impl SynthChunk {
             author: self.author.clone(),
             author_id: self.author_id.clone(),
             updated_at: self.updated_at,
+            external_chunk_id: None,
             labels: self.labels.clone(),
+            attributes: Vec::new(),
+            flags: Vec::new(),
             deleted: self.deleted,
         }
     }

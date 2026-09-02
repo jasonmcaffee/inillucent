@@ -1,10 +1,20 @@
 //! Saving and loading an index.
 //!
-//! An index is a directory of files. The store, the graph and the lexical index
-//! are serialized with a version stamped header each, so a file written by a
-//! different layout is refused rather than misread. Vectors are written as a raw
-//! little endian f32 array, which is what makes loading them a read rather than a
-//! parse.
+//! An index directory holds numbered generation directories and a `current` file
+//! naming the live one. Each generation holds the store, the vectors, the graph,
+//! the lexical index and the configuration, each with a version stamped header, so
+//! a file written by a different layout is refused rather than misread.
+//!
+//! Saving never writes over what a reader is using. It writes a new generation,
+//! makes every file durable, and then replaces the one small pointer file - which
+//! is the only step that has to be atomic, and the only one the platform performs
+//! atomically. A crash anywhere before that leaves the previous generation intact
+//! and still current, which is the difference between an index that survives a
+//! power loss and one that has to be rebuilt from a database.
+//!
+//! Everything else is a raw byte array: vectors are little endian f32, the store
+//! is fixed width records and contiguous arenas, and loading them is a read rather
+//! than a parse.
 //!
 //! There is no daemon, no port and no background process. Opening an index is
 //! opening files.
@@ -15,6 +25,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::bm25::Bm25Index;
 use crate::hnsw::{Hnsw, HnswParams};
 use crate::index::{Index, IndexConfig};
 use crate::rank::{AdaptiveWeights, Fusion};
@@ -27,13 +38,40 @@ use crate::vectors::VectorSet;
 /// reopened by this build would answer differently from the index that was saved,
 /// which is the failure the version stamp exists to prevent, so it is refused
 /// rather than read with defaults substituted.
-pub const FORMAT_VERSION: u32 = 2;
+///
+/// Version 3 writes the store as fixed-width binary rather than JSON, adds the
+/// lexical index as a file of its own, and lays the whole index out as numbered
+/// generations behind a pointer file. A version 2 index cannot be read; the way
+/// back is a rebuild from whatever the caller's source of truth is, which for
+/// every current caller is a database.
+pub const FORMAT_VERSION: u32 = 3;
 const MAGIC: &[u8; 8] = b"RUSTDBIX";
 
 fn header(w: &mut impl Write, kind: u8) -> Result<()> {
     w.write_all(MAGIC)?;
     w.write_all(&FORMAT_VERSION.to_le_bytes())?;
     w.write_all(&[kind])?;
+    Ok(())
+}
+
+/// Reads and checks the magic and the version, leaving the section tag unread.
+///
+/// Separate from `check_header` so a readability probe can ask "is this an index
+/// this build can open" without caring which section it happens to be looking at.
+fn check_header_version(r: &mut impl Read) -> Result<()> {
+    let mut magic = [0u8; 8];
+    r.read_exact(&mut magic).context("reading the file header")?;
+    if &magic != MAGIC {
+        anyhow::bail!("not a rust-db index file");
+    }
+    let mut version = [0u8; 4];
+    r.read_exact(&mut version)?;
+    let version = u32::from_le_bytes(version);
+    if version != FORMAT_VERSION {
+        anyhow::bail!(
+            "index was written by format version {version}, this build reads version {FORMAT_VERSION}"
+        );
+    }
     Ok(())
 }
 
@@ -63,15 +101,16 @@ const KIND_STORE: u8 = 1;
 const KIND_VECTORS: u8 = 2;
 const KIND_GRAPH: u8 = 3;
 const KIND_CONFIG: u8 = 4;
+const KIND_LEXICAL: u8 = 5;
 
 fn path(dir: &Path, name: &str) -> PathBuf {
     dir.join(name)
 }
 
-/// What the index needs in order to be rebuilt from disk. The lexical index and
-/// the int8 codes are derived rather than stored: both are a deterministic
-/// function of data that is already here, and recomputing them costs less than
-/// the disk they would occupy.
+/// What the index needs in order to be rebuilt from disk. The int8 codes are the
+/// one structure still derived rather than stored: a code depends on nothing but
+/// its own vector, and re-encoding a set of vectors that were just read is one
+/// linear pass.
 ///
 /// Every field of `IndexConfig` is here, which was not true before. `SavedConfig`
 /// used to carry `lexical_prefix` and no other ranking setting, so an index built
@@ -93,6 +132,9 @@ struct SavedConfig {
     hnsw_ef_search: usize,
     hnsw_seed: u64,
     hnsw_exhaustive_below: usize,
+    hnsw_entry_points: usize,
+    hnsw_keep_pruned_connections: bool,
+    hnsw_build_threads: usize,
     // Everything below this line is what version 1 lost.
     fusion: SavedFusion,
     lexical_coverage: f32,
@@ -100,6 +142,7 @@ struct SavedConfig {
     lexical_tier: bool,
     lexical_phrase: f32,
     lexical_rescore_depth: usize,
+    lexical_heading_boost: f32,
     adaptive_fusion: bool,
     adaptive: SavedAdaptive,
     mmr_lambda: f32,
@@ -199,29 +242,10 @@ impl From<&SavedAdaptive> for AdaptiveWeights {
     }
 }
 
-pub fn save(index: &Index, dir: &Path) -> Result<()> {
-    fs::create_dir_all(dir).context("creating the index directory")?;
 
-    {
-        let mut w = BufWriter::new(File::create(path(dir, "store.bin"))?);
-        header(&mut w, KIND_STORE)?;
-        serde_json::to_writer(&mut w, index.store()).context("writing the store")?;
-        w.flush()?;
-    }
-    {
-        let mut w = BufWriter::new(File::create(path(dir, "vectors.bin"))?);
-        header(&mut w, KIND_VECTORS)?;
-        let raw = index.vectors().raw();
-        w.write_all(&(index.vectors().dims() as u32).to_le_bytes())?;
-        w.write_all(&(index.vectors().len() as u32).to_le_bytes())?;
-        // One write of the whole buffer; f32 little endian is the on disk form.
-        let bytes: &[u8] = bytemuck::cast_slice(raw);
-        w.write_all(bytes)?;
-        w.flush()?;
-    }
-    {
-        let cfg = index.config();
-        let saved = SavedConfig {
+impl From<&IndexConfig> for SavedConfig {
+    fn from(cfg: &IndexConfig) -> Self {
+        SavedConfig {
             dims: cfg.dims,
             quantized: cfg.quantized,
             oversample: cfg.oversample,
@@ -233,97 +257,275 @@ pub fn save(index: &Index, dir: &Path) -> Result<()> {
             hnsw_ef_search: cfg.hnsw.ef_search,
             hnsw_seed: cfg.hnsw.seed,
             hnsw_exhaustive_below: cfg.hnsw.exhaustive_below,
+            hnsw_entry_points: cfg.hnsw.entry_points,
+            hnsw_keep_pruned_connections: cfg.hnsw.keep_pruned_connections,
+            hnsw_build_threads: cfg.hnsw.build_threads,
             fusion: cfg.fusion.into(),
             lexical_coverage: cfg.lexical_coverage,
             lexical_proximity: cfg.lexical_proximity,
             lexical_tier: cfg.lexical_tier,
             lexical_phrase: cfg.lexical_phrase,
             lexical_rescore_depth: cfg.lexical_rescore_depth,
+            lexical_heading_boost: cfg.lexical_heading_boost,
             adaptive_fusion: cfg.adaptive_fusion,
             adaptive: cfg.adaptive.into(),
             mmr_lambda: cfg.mmr_lambda,
-        };
-        let mut w = BufWriter::new(File::create(path(dir, "config.bin"))?);
-        header(&mut w, KIND_CONFIG)?;
-        serde_json::to_writer(&mut w, &saved)?;
-        w.flush()?;
+        }
     }
+}
+
+impl SavedConfig {
+    /// The graph parameters this record describes.
+    fn hnsw_params(&self) -> HnswParams {
+        HnswParams {
+            m: self.hnsw_m,
+            ef_construction: self.hnsw_ef_construction,
+            ef_search: self.hnsw_ef_search,
+            seed: self.hnsw_seed,
+            exhaustive_below: self.hnsw_exhaustive_below,
+            entry_points: self.hnsw_entry_points,
+            keep_pruned_connections: self.hnsw_keep_pruned_connections,
+            build_threads: self.hnsw_build_threads,
+        }
+    }
+
+    /// The whole index configuration this record describes.
+    ///
+    /// Every field of `IndexConfig` travels with the index. A saved index is a
+    /// configuration as much as it is data: one built with a measured fusion,
+    /// coverage exponent or proximity weight and reopened with the compiled-in
+    /// defaults answers differently from the index that was saved, silently,
+    /// because nothing about it looks wrong.
+    fn to_config(&self) -> Result<IndexConfig> {
+        Ok(IndexConfig {
+            dims: self.dims,
+            quantized: self.quantized,
+            oversample: self.oversample,
+            candidates: self.candidates,
+            per_doc_cap: self.per_doc_cap,
+            lexical_prefix: self.lexical_prefix,
+            hnsw: self.hnsw_params(),
+            fusion: self.fusion.to_fusion()?,
+            lexical_coverage: self.lexical_coverage,
+            lexical_proximity: self.lexical_proximity,
+            lexical_tier: self.lexical_tier,
+            lexical_phrase: self.lexical_phrase,
+            lexical_rescore_depth: self.lexical_rescore_depth,
+            lexical_heading_boost: self.lexical_heading_boost,
+            adaptive_fusion: self.adaptive_fusion,
+            adaptive: (&self.adaptive).into(),
+            mmr_lambda: self.mmr_lambda,
+        })
+    }
+}
+
+/// The name of the file that says which generation directory is the live one.
+const CURRENT: &str = "current";
+/// The prefix of a generation directory.
+const GENERATION: &str = "g";
+/// How many superseded generations survive a save.
+///
+/// One, not zero: a search running against the previous generation's files must
+/// not have them removed out from under it while the pointer is swapped.
+const KEEP_GENERATIONS: usize = 1;
+
+fn generation_dir(dir: &Path, generation: u64) -> PathBuf {
+    dir.join(format!("{GENERATION}{generation:012}"))
+}
+
+/// The generation the pointer file names, or `None` for a directory that has
+/// never been saved to.
+fn read_current(dir: &Path) -> Option<u64> {
+    let text = fs::read_to_string(dir.join(CURRENT)).ok()?;
+    text.trim().strip_prefix(GENERATION)?.parse().ok()
+}
+
+/// Every generation directory present, ascending.
+fn existing_generations(dir: &Path) -> Vec<u64> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<u64> = entries
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().into_string().ok()?;
+            name.strip_prefix(GENERATION)?.parse::<u64>().ok()
+        })
+        .collect();
+    found.sort_unstable();
+    found
+}
+
+/// Writes one file, flushing it to the disk rather than to the operating system's
+/// cache.
+///
+/// `flush` on a `BufWriter` only moves bytes out of the process. Without the
+/// `sync_all` a power loss can leave a file that the directory entry says is
+/// there and whose contents were never written, which is the failure the
+/// generation pointer exists to make survivable - and it only works if the
+/// generation's own files are durable before the pointer starts naming them.
+/// @param path - where to write
+/// @param kind - the section tag stamped into the header
+/// @param write - what to write after the header
+fn write_file(
+    path: &Path,
+    kind: u8,
+    write: impl FnOnce(&mut BufWriter<File>) -> Result<()>,
+) -> Result<()> {
+    let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
+    let mut w = BufWriter::with_capacity(1 << 20, file);
+    header(&mut w, kind)?;
+    write(&mut w)?;
+    w.flush()?;
+    w.into_inner()
+        .map_err(|e| anyhow::anyhow!("flushing {}: {e}", path.display()))?
+        .sync_all()
+        .with_context(|| format!("syncing {}", path.display()))?;
+    Ok(())
+}
+
+/// Saves an index into a new generation directory and then points at it.
+///
+/// The old shape wrote the four files in place, with no temp-and-rename and no
+/// fsync, so a crash or a power loss part way through left an index that would
+/// not open - and the store was 450 MB of escaped JSON, which made the window
+/// wide. Here a save never touches the files a reader is using: it writes a new
+/// generation, makes it durable, and then replaces one small pointer file, which
+/// is the only step that has to be atomic. A crash at any point before that leaves
+/// the previous generation exactly as it was.
+/// @param index - the index to write
+/// @param dir - the index directory, created if absent
+pub fn save(index: &Index, dir: &Path) -> Result<()> {
+    fs::create_dir_all(dir).context("creating the index directory")?;
+    let previous = read_current(dir);
+    let generation = previous.map(|g| g + 1).unwrap_or(1);
+    let target = generation_dir(dir, generation);
+    let _ = fs::remove_dir_all(&target);
+    fs::create_dir_all(&target).context("creating the generation directory")?;
+
+    write_file(&target.join("store.bin"), KIND_STORE, |w| {
+        index.store().write_to(w).context("writing the store")
+    })?;
+    write_file(&target.join("vectors.bin"), KIND_VECTORS, |w| {
+        let vectors = index.vectors();
+        w.write_all(&(vectors.dims() as u32).to_le_bytes())?;
+        w.write_all(&(vectors.len() as u32).to_le_bytes())?;
+        // One write of the whole buffer; f32 little endian is the on disk form.
+        w.write_all(bytemuck::cast_slice(vectors.raw()))?;
+        Ok(())
+    })?;
+    write_file(&target.join("config.bin"), KIND_CONFIG, |w| {
+        serde_json::to_writer(w, &SavedConfig::from(index.config()))?;
+        Ok(())
+    })?;
+    write_file(&target.join("graph.bin"), KIND_GRAPH, |w| {
+        index.write_graph(w)
+    })?;
+    write_file(&target.join("lexical.bin"), KIND_LEXICAL, |w| {
+        index.write_lexical(w)
+    })?;
+
+    // The pointer, last and on its own. Written beside its target and renamed over
+    // the old one, which is the one operation the platform performs atomically.
+    let pointer = dir.join(CURRENT);
+    let staging = dir.join("current.tmp");
     {
-        // The graph is written as its adjacency lists. Rebuilding it instead would
-        // cost minutes on this corpus, which is the one structure worth storing.
-        let mut w = BufWriter::new(File::create(path(dir, "graph.bin"))?);
-        header(&mut w, KIND_GRAPH)?;
-        index.write_graph(&mut w)?;
-        w.flush()?;
+        let mut w = File::create(&staging)?;
+        write!(w, "{GENERATION}{generation:012}")?;
+        w.sync_all()?;
+    }
+    fs::rename(&staging, &pointer).context("publishing the new generation")?;
+
+    // Only now is anything older unreferenced. One superseded generation is kept
+    // so a reader that opened the previous one keeps its files.
+    let keep: Vec<u64> = existing_generations(dir)
+        .into_iter()
+        .rev()
+        .take(KEEP_GENERATIONS + 1)
+        .collect();
+    for old in existing_generations(dir) {
+        if !keep.contains(&old) {
+            let _ = fs::remove_dir_all(generation_dir(dir, old));
+        }
     }
     Ok(())
 }
 
+/// Opens the generation the pointer names.
+///
+/// A directory with no pointer, or one naming a generation that is not there, is
+/// an error rather than a best guess: an index that answers differently from the
+/// one that was saved is worse than an index that will not open.
+/// @param dir - the index directory
 pub fn load(dir: &Path) -> Result<Index> {
+    let generation = read_current(dir).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} holds no index: there is no current generation pointer",
+            dir.display()
+        )
+    })?;
+    load_generation(&generation_dir(dir, generation))
+}
+
+/// Whether `dir` holds a readable index of this format version.
+///
+/// The question a service asks at startup, so it can rebuild from its own source
+/// of truth instead of failing. Checked by opening the header rather than by
+/// testing for the files, because a half-written generation has the files.
+/// @param dir - the index directory
+pub fn is_readable(dir: &Path) -> bool {
+    let Some(generation) = read_current(dir) else {
+        return false;
+    };
+    let g = generation_dir(dir, generation);
+    ["store.bin", "vectors.bin", "config.bin", "graph.bin", "lexical.bin"]
+        .iter()
+        .all(|name| {
+            File::open(g.join(name))
+                .ok()
+                .map(|f| {
+                    let mut r = BufReader::new(f);
+                    check_header_version(&mut r).is_ok()
+                })
+                .unwrap_or(false)
+        })
+}
+
+/// Reads every file of one generation directory into an index.
+fn load_generation(dir: &Path) -> Result<Index> {
     let saved: SavedConfig = {
         let mut r = BufReader::new(File::open(path(dir, "config.bin"))?);
         check_header(&mut r, KIND_CONFIG)?;
         serde_json::from_reader(r).context("reading the config")?
     };
     let store: Store = {
-        let mut r = BufReader::new(File::open(path(dir, "store.bin"))?);
+        let mut r = BufReader::with_capacity(1 << 20, File::open(path(dir, "store.bin"))?);
         check_header(&mut r, KIND_STORE)?;
-        serde_json::from_reader(r).context("reading the store")?
+        Store::read_from(&mut r).context("reading the store")?
     };
     let vectors: VectorSet = {
-        let mut r = BufReader::new(File::open(path(dir, "vectors.bin"))?);
+        let mut r = BufReader::with_capacity(1 << 20, File::open(path(dir, "vectors.bin"))?);
         check_header(&mut r, KIND_VECTORS)?;
         let mut buf4 = [0u8; 4];
         r.read_exact(&mut buf4)?;
         let dims = u32::from_le_bytes(buf4) as usize;
         r.read_exact(&mut buf4)?;
         let n = u32::from_le_bytes(buf4) as usize;
-        let mut bytes = vec![0u8; dims * n * 4];
-        r.read_exact(&mut bytes)?;
-        let floats: &[f32] = bytemuck::cast_slice(&bytes);
-        VectorSet::from_raw(dims, floats.to_vec())
+        VectorSet::from_raw(dims, crate::binio::read_pod_vec::<f32>(&mut r, dims * n)?)
     };
+    let params = saved.hnsw_params();
     let graph: Hnsw = {
-        let mut r = BufReader::new(File::open(path(dir, "graph.bin"))?);
+        let mut r = BufReader::with_capacity(1 << 20, File::open(path(dir, "graph.bin"))?);
         check_header(&mut r, KIND_GRAPH)?;
-        Hnsw::read_graph(
-            &mut r,
-            HnswParams {
-                m: saved.hnsw_m,
-                ef_construction: saved.hnsw_ef_construction,
-                ef_search: saved.hnsw_ef_search,
-                seed: saved.hnsw_seed,
-                exhaustive_below: saved.hnsw_exhaustive_below,
-            },
-        )?
+        Hnsw::read_graph(&mut r, params)?
+    };
+    let lexical: Bm25Index = {
+        let mut r = BufReader::with_capacity(1 << 20, File::open(path(dir, "lexical.bin"))?);
+        check_header(&mut r, KIND_LEXICAL)?;
+        Bm25Index::read_from(&mut r).context("reading the lexical index")?
     };
 
-    let config = IndexConfig {
-        dims: saved.dims,
-        quantized: saved.quantized,
-        oversample: saved.oversample,
-        candidates: saved.candidates,
-        per_doc_cap: saved.per_doc_cap,
-        lexical_prefix: saved.lexical_prefix,
-        hnsw: HnswParams {
-            m: saved.hnsw_m,
-            ef_construction: saved.hnsw_ef_construction,
-            ef_search: saved.hnsw_ef_search,
-            seed: saved.hnsw_seed,
-            exhaustive_below: saved.hnsw_exhaustive_below,
-        },
-        fusion: saved.fusion.to_fusion()?,
-        lexical_coverage: saved.lexical_coverage,
-        lexical_proximity: saved.lexical_proximity,
-        lexical_tier: saved.lexical_tier,
-        lexical_phrase: saved.lexical_phrase,
-        lexical_rescore_depth: saved.lexical_rescore_depth,
-        adaptive_fusion: saved.adaptive_fusion,
-        adaptive: (&saved.adaptive).into(),
-        mmr_lambda: saved.mmr_lambda,
-    };
-
-    Index::from_parts(config, store, vectors, graph)
+    Index::from_parts(saved.to_config()?, store, vectors, graph, Some(lexical))
 }
 
 #[cfg(test)]
@@ -342,6 +544,7 @@ mod tests {
                 chunk_index: (i % 2) as u32,
                 heading_path: vec![format!("h{i}")],
                 content: format!("chunk {i} about offer eligibility token{i}"),
+                external_chunk_id: Some(format!("chunk-{i}")),
                 title: format!("title {i}"),
                 url: format!("https://x/{i}"),
                 space_key: Some("ENG".into()),
@@ -349,6 +552,8 @@ mod tests {
                 author_id: Some("u1".into()),
                 updated_at: Some(1000 + i as i64),
                 labels: vec!["design".into()],
+                attributes: Vec::new(),
+                flags: Vec::new(),
                 deleted: i == 7,
             })
             .collect();
@@ -443,8 +648,8 @@ mod tests {
         let original = small_index();
         save(&original, &dir).unwrap();
 
-        // Corrupt the version stamp in the config header.
-        let p = path(&dir, "config.bin");
+        // Corrupt the version stamp in the config header of the live generation.
+        let p = generation_dir(&dir, read_current(&dir).unwrap()).join("config.bin");
         let mut bytes = fs::read(&p).unwrap();
         bytes[8] = 99;
         fs::write(&p, bytes).unwrap();
@@ -555,4 +760,190 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+
+    #[test]
+    fn a_save_publishes_a_new_generation_rather_than_overwriting_the_old_one() {
+        let dir = temp_dir("generations");
+        let index = small_index();
+        save(&index, &dir).unwrap();
+        let first = read_current(&dir).unwrap();
+        save(&index, &dir).unwrap();
+        let second = read_current(&dir).unwrap();
+
+        assert!(second > first, "the pointer did not move: {first} then {second}");
+        assert!(
+            generation_dir(&dir, first).join("store.bin").exists(),
+            "the superseded generation was removed while a reader could still hold it"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A crash during a save must leave the previous index openable. Simulated by
+    /// writing a new generation's files and never publishing the pointer, which is
+    /// exactly the state a process killed mid-save leaves behind.
+    #[test]
+    fn a_half_written_generation_is_ignored_and_the_previous_one_still_opens() {
+        let dir = temp_dir("crash");
+        let index = small_index();
+        save(&index, &dir).unwrap();
+        let live = read_current(&dir).unwrap();
+
+        let orphan = generation_dir(&dir, live + 1);
+        fs::create_dir_all(&orphan).unwrap();
+        fs::write(orphan.join("store.bin"), b"truncated garbage").unwrap();
+
+        let reopened = load(&dir).unwrap();
+        assert_eq!(reopened.store().n_chunks(), index.store().n_chunks());
+        assert!(is_readable(&dir));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_directory_that_was_never_saved_to_is_not_readable() {
+        let dir = temp_dir("empty");
+        fs::create_dir_all(&dir).unwrap();
+        assert!(!is_readable(&dir));
+        assert!(load(&dir).is_err());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Only three generations may ever be on disk: the live one and one superseded
+    /// one, plus whatever the save in progress is writing. Otherwise a nightly
+    /// compaction fills the disk with 2.4 GB copies of a corpus.
+    #[test]
+    fn superseded_generations_are_reclaimed() {
+        let dir = temp_dir("reclaim");
+        let index = small_index();
+        for _ in 0..5 {
+            save(&index, &dir).unwrap();
+        }
+        let generations = existing_generations(&dir);
+        assert!(
+            generations.len() <= 2,
+            "{} generations left on disk: {generations:?}",
+            generations.len()
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The reason the lexical index is now a file: deriving it means running the
+    /// analyzer over the whole corpus. Reading it back has to produce exactly the
+    /// index that was written, or a reopened server ranks differently from the one
+    /// that saved.
+    #[test]
+    fn the_lexical_index_survives_the_round_trip_exactly() {
+        let dir = temp_dir("lexical");
+        let original = small_index();
+        save(&original, &dir).unwrap();
+        let loaded = load(&dir).unwrap();
+
+        let a = original.compile(&Filter::default());
+        let b = loaded.compile(&Filter::default());
+        for query in ["offer eligibility", "chunk 42 token42", "title"] {
+            let left = original.lexical_search(query, &a, 20);
+            let right = loaded.lexical_search(query, &b, 20);
+            assert_eq!(left.len(), right.len(), "{query} returned different counts");
+            for (l, r) in left.iter().zip(right.iter()) {
+                assert_eq!(l.chunk, r.chunk, "{query} ranked differently after reloading");
+                assert_eq!(l.score.to_bits(), r.score.to_bits(), "{query} scored differently");
+                assert_eq!(l.matched_terms, r.matched_terms);
+            }
+        }
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Everything the new store format carries has to come back: flags, named
+    /// attribute sets, per-document chunk counts and the tombstone accounting.
+    #[test]
+    fn the_new_store_columns_survive_the_round_trip() {
+        let dir = temp_dir("columns");
+        let mut original = small_index();
+        original.append(
+            vec![ChunkInput {
+                source: "email".into(),
+                external_doc_id: "mail-1".into(),
+                chunk_index: 0,
+                content: "a message from terri".into(),
+                title: "subject".into(),
+                url: "u".into(),
+                author: Some("Terri Shaw".into()),
+                author_id: Some("terri@example.org".into()),
+                updated_at: Some(4242),
+                attributes: vec![(
+                    "participant".to_string(),
+                    vec!["terri@example.org".into(), "jason@example.com".into()],
+                )],
+                flags: vec!["has_attachment".into()],
+                ..Default::default()
+            }],
+            &[{
+                let mut v = vec![0.25f32; 16];
+                normalize(&mut v);
+                v
+            }],
+        );
+        original.tombstone("slack", "d3");
+
+        save(&original, &dir).unwrap();
+        let mut loaded = load(&dir).unwrap();
+
+        assert_eq!(loaded.store().live_chunks, original.store().live_chunks);
+        assert_eq!(loaded.store().deleted_chunks, original.store().deleted_chunks);
+        assert!(loaded.store().flag_bit("has_attachment").is_some());
+        assert_eq!(loaded.store().chunk_external_id(0), original.store().chunk_external_id(0));
+        assert!(loaded.store().attribute_dictionary("participant").is_some());
+
+        // The filters that read those columns must behave identically.
+        let with_attachment =
+            loaded.compile(&Filter::default().with_flag("has_attachment", true));
+        assert_eq!(with_attachment.pass_count(), 1);
+        let by_participant = loaded.compile(
+            &Filter::default()
+                .with_attribute(crate::filter::AttributeFilter::containing("participant", "jason@")),
+        );
+        assert_eq!(by_participant.pass_count(), 1);
+        let before = loaded.compile(&Filter { updated_before: Some(4242), ..Default::default() });
+        assert!(before.pass_count() > 0);
+
+        // And the document lookup rebuilds over live documents only, so a
+        // tombstoned document stays tombstoned across a restart.
+        assert!(loaded.tombstone("slack", "d3") == false);
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A reopened index must be appendable, which means every counter the append
+    /// path reads has to have survived the round trip too.
+    #[test]
+    fn a_reopened_index_can_still_be_appended_to() {
+        let dir = temp_dir("append-after-load");
+        let original = small_index();
+        save(&original, &dir).unwrap();
+        let mut loaded = load(&dir).unwrap();
+
+        let before = loaded.store().n_chunks();
+        let stats = loaded.append(
+            vec![ChunkInput {
+                source: "slack".into(),
+                external_doc_id: "fresh".into(),
+                content: "a chunk about tirzepatide".into(),
+                title: "fresh".into(),
+                url: "u".into(),
+                ..Default::default()
+            }],
+            &[{
+                let mut v = vec![0.5f32; 16];
+                normalize(&mut v);
+                v
+            }],
+        );
+        assert!(stats.committed);
+        assert_eq!(loaded.store().n_chunks(), before + 1);
+        let f = loaded.compile(&Filter::default());
+        assert_eq!(loaded.lexical_search("tirzepatide", &f, 5).len(), 1);
+
+        // And it saves again, into a further generation.
+        save(&loaded, &dir).unwrap();
+        assert_eq!(load(&dir).unwrap().store().n_chunks(), before + 1);
+        fs::remove_dir_all(&dir).ok();
+    }
 }
