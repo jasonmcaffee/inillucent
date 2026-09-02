@@ -451,20 +451,51 @@ pub fn save(index: &Index, dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// How many times `load` re-reads the pointer when the generation it named is
+/// reclaimed out from under it.
+///
+/// Two, because the only way this happens is a save publishing a newer generation
+/// and then reclaiming an older one between the pointer read and the file opens.
+/// One retry covers a single such save; a second covers a reader unlucky enough to
+/// be lapped twice. A reader that loses three times in a row is not racing a save,
+/// it is looking at a directory something else is deleting.
+const LOAD_ATTEMPTS: usize = 3;
+
 /// Opens the generation the pointer names.
 ///
 /// A directory with no pointer, or one naming a generation that is not there, is
 /// an error rather than a best guess: an index that answers differently from the
 /// one that was saved is worse than an index that will not open.
+///
+/// Reading the pointer and opening the generation's files are two steps, and a save
+/// can publish a newer generation and reclaim an older one in between - so a slow
+/// reader can be handed a number whose directory is gone by the time it opens the
+/// fifth file. The reclaim keeps one superseded generation precisely to make that
+/// window small, and re-reading the pointer closes it: the generation that replaced
+/// the one that vanished is the one the reader wanted anyway.
 /// @param dir - the index directory
 pub fn load(dir: &Path) -> Result<Index> {
-    let generation = read_current(dir).ok_or_else(|| {
-        anyhow::anyhow!(
-            "{} holds no index: there is no current generation pointer",
-            dir.display()
-        )
-    })?;
-    load_generation(&generation_dir(dir, generation))
+    let mut last: Option<anyhow::Error> = None;
+    for _ in 0..LOAD_ATTEMPTS {
+        let generation = read_current(dir).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} holds no index: there is no current generation pointer",
+                dir.display()
+            )
+        })?;
+        let target = generation_dir(dir, generation);
+        match load_generation(&target) {
+            Ok(index) => return Ok(index),
+            // Only a vanished generation is retried. A corrupt or wrong-version
+            // file is refused, because re-reading a pointer cannot fix it and
+            // retrying would only hide it.
+            Err(error) if !target.join("config.bin").exists() => last = Some(error),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        anyhow::anyhow!("{} was rewritten while it was being read", dir.display())
+    }))
 }
 
 /// Whether `dir` holds a readable index of this format version.
@@ -795,6 +826,53 @@ mod tests {
         let reopened = load(&dir).unwrap();
         assert_eq!(reopened.store().n_chunks(), index.store().n_chunks());
         assert!(is_readable(&dir));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A reader that is handed a generation number and finds the directory gone
+    /// has been lapped by a save; re-reading the pointer gets it the generation
+    /// that replaced the one it lost.
+    #[test]
+    fn a_generation_reclaimed_mid_read_sends_the_reader_to_the_current_one() {
+        let dir = temp_dir("reclaimed");
+        let index = small_index();
+        save(&index, &dir).unwrap();
+        save(&index, &dir).unwrap();
+        let live = read_current(&dir).unwrap();
+
+        // Point at a generation that no longer exists, as a save that reclaimed it
+        // would leave things for a reader mid-flight, then let the pointer move on.
+        let vanished = generation_dir(&dir, live + 1);
+        fs::write(dir.join("current.tmp"), format!("g{:012}", live + 1)).unwrap();
+        fs::rename(dir.join("current.tmp"), dir.join("current")).unwrap();
+        assert!(!vanished.exists());
+        assert!(load(&dir).is_err(), "a pointer to nothing has nothing to fall back to");
+
+        // With the pointer naming a generation that is there, the read succeeds.
+        fs::write(dir.join("current.tmp"), format!("g{live:012}")).unwrap();
+        fs::rename(dir.join("current.tmp"), dir.join("current")).unwrap();
+        assert_eq!(load(&dir).unwrap().store().n_chunks(), index.store().n_chunks());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A corrupt file is refused rather than retried. Re-reading a pointer cannot
+    /// repair a bad file, and retrying would turn a loud failure into a slow one.
+    #[test]
+    fn a_corrupt_generation_is_refused_rather_than_retried() {
+        let dir = temp_dir("corrupt-no-retry");
+        let index = small_index();
+        save(&index, &dir).unwrap();
+        let live = generation_dir(&dir, read_current(&dir).unwrap());
+        fs::write(live.join("store.bin"), b"not an index").unwrap();
+
+        let error = match load(&dir) {
+            Ok(_) => panic!("a corrupt store was accepted"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}").contains("index file") || format!("{error:#}").contains("header"),
+            "expected a header complaint, got: {error:#}"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 

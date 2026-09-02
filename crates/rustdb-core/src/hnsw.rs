@@ -887,10 +887,12 @@ impl Hnsw {
                     self.params.ef_construction,
                 );
                 let selected = self.select_neighbours(vectors, &candidates, self.max_degree(layer));
-                if let Ok(mut own) = layers[layer][node].write() {
-                    own.clear();
-                    own.extend_from_slice(&selected);
-                }
+                // Merged into whatever is already there, never assigned over it.
+                // Another thread inserting concurrently may already have linked
+                // back to this node, and clearing the list erases that edge - the
+                // other endpoint keeps its half, so the graph quietly loses a link
+                // in one direction and gains a race nobody can reproduce.
+                self.publish_neighbours(&layers[layer], vectors, node as u32, &selected, layer);
                 for neighbour in &selected {
                     self.link_locked(&layers[layer], vectors, *neighbour, node as u32, layer);
                 }
@@ -931,6 +933,14 @@ impl Hnsw {
     /// The same rule as `link`: add the edge, and if that overflows the degree cap
     /// prune with the diversity heuristic rather than by plain distance, because
     /// pruning by distance is what collapses a graph into clusters.
+    ///
+    /// Everything happens under one write lock. An earlier version dropped the lock
+    /// to compute distances and took it again to write the result back, which is a
+    /// read-modify-write across a gap: an edge another thread added in between was
+    /// overwritten, and the "keep what arrived while we were pruning" loop could
+    /// never keep anything because the pruned list was already at the cap. Holding
+    /// the lock costs `cap` dot products - tens of microseconds - and the lock is
+    /// per node, so two threads only ever contend on a node they both link to.
     fn link_locked(
         &self,
         layer_lists: &LockedLayer,
@@ -940,29 +950,69 @@ impl Hnsw {
         layer: usize,
     ) {
         let cap = self.max_degree(layer);
-        let overflowing = {
-            let Ok(mut list) = layer_lists[from as usize].write() else {
-                return;
-            };
-            if list.contains(&to) {
-                return;
-            }
-            list.push(to);
-            list.len() > cap
+        let Ok(mut list) = layer_lists[from as usize].write() else {
+            return;
         };
-        if !overflowing {
+        if list.contains(&to) {
             return;
         }
-        // Re-read, prune, write back. The distances are computed outside the lock
-        // so a busy hub does not serialise every thread that touches it.
-        let current: Vec<u32> = match layer_lists[from as usize].read() {
-            Ok(list) => list.clone(),
-            Err(_) => return,
+        list.push(to);
+        if list.len() <= cap {
+            return;
+        }
+        *list = self.prune_to_cap(vectors, from, &list, cap);
+    }
+
+    /// Publishes a node's own neighbour list, merging rather than replacing.
+    ///
+    /// A node being inserted starts with an empty list, but by the time its search
+    /// finishes another thread may already have linked back to it. Those reciprocal
+    /// edges are real - the other endpoint is keeping its half - so they are merged
+    /// with the selection and the union is pruned to the cap by the same heuristic
+    /// that chose the selection.
+    /// @param layer_lists - the layer being written
+    /// @param vectors - the vectors, for the pruning heuristic
+    /// @param node - the node whose list this is
+    /// @param selected - what this node's own search chose
+    /// @param layer - which layer, which sets the degree cap
+    fn publish_neighbours(
+        &self,
+        layer_lists: &LockedLayer,
+        vectors: &VectorSet,
+        node: u32,
+        selected: &[u32],
+        layer: usize,
+    ) {
+        let cap = self.max_degree(layer);
+        let Ok(mut list) = layer_lists[node as usize].write() else {
+            return;
         };
-        let from_vec = vectors.get(from).to_vec();
-        let mut candidates: Vec<Nearest> = current
+        for candidate in selected {
+            if !list.contains(candidate) {
+                list.push(*candidate);
+            }
+        }
+        if list.len() > cap {
+            *list = self.prune_to_cap(vectors, node, &list, cap);
+        }
+    }
+
+    /// Reduces one neighbour list to the degree cap with the diversity heuristic.
+    /// @param vectors - the vectors, for the distances the heuristic reads
+    /// @param node - the node the list belongs to
+    /// @param list - the current neighbours, which may exceed the cap
+    /// @param cap - the degree cap for this layer
+    fn prune_to_cap(
+        &self,
+        vectors: &VectorSet,
+        node: u32,
+        list: &[u32],
+        cap: usize,
+    ) -> Vec<u32> {
+        let node_vector = vectors.get(node).to_vec();
+        let mut candidates: Vec<Nearest> = list
             .iter()
-            .map(|n| Nearest { distance: vectors.distance(*n, &from_vec), node: *n })
+            .map(|n| Nearest { distance: vectors.distance(*n, &node_vector), node: *n })
             .collect();
         candidates.sort_by(|a, b| {
             a.distance
@@ -970,21 +1020,7 @@ impl Hnsw {
                 .unwrap_or(Ordering::Equal)
                 .then(a.node.cmp(&b.node))
         });
-        let pruned = self.select_neighbours(vectors, &candidates, cap);
-        if let Ok(mut list) = layer_lists[from as usize].write() {
-            // Anything another thread added while the pruning ran is kept, up to
-            // the cap; dropping it would lose an edge that thread believes exists.
-            let mut next = pruned;
-            for n in list.iter() {
-                if next.len() >= cap {
-                    break;
-                }
-                if !next.contains(n) {
-                    next.push(*n);
-                }
-            }
-            *list = next;
-        }
+        self.select_neighbours(vectors, &candidates, cap)
     }
 }
 
@@ -1382,6 +1418,53 @@ mod tests {
             .filter(|n| graph.layers[0][*n].is_empty())
             .count();
         assert_eq!(isolated, 0, "{isolated} nodes have no layer-0 neighbours");
+    }
+
+    /// A parallel build must not lose edges to a race.
+    ///
+    /// The failure this pins down is a read-modify-write across a dropped lock: a
+    /// thread publishing its own neighbour list, or pruning another node's, would
+    /// overwrite an edge a second thread had added in between. The other endpoint
+    /// keeps its half, so the graph loses a link in one direction and nothing
+    /// reports it. Edge count is the observable: a build that loses edges builds a
+    /// measurably smaller graph, and repeating it under contention is what makes a
+    /// rare race show up at all.
+    #[test]
+    fn a_parallel_build_does_not_lose_edges_to_a_race() {
+        let (vectors, _) = fixture(8_000, 16);
+        let base = HnswParams { exhaustive_below: 0, ..Default::default() };
+        let mut sequential = Hnsw::new(base);
+        sequential.build(&vectors);
+        let expected = sequential.edge_count();
+
+        for attempt in 0..3 {
+            let mut parallel = Hnsw::new(HnswParams { build_threads: 16, ..base });
+            parallel.build(&vectors);
+            let edges = parallel.edge_count();
+            assert!(
+                edges as f64 >= expected as f64 * 0.97,
+                "attempt {attempt} built {edges} edges against the sequential build's {expected}"
+            );
+        }
+    }
+
+    /// A reciprocal edge added by another thread has to survive the node's own
+    /// publish, which is the specific write that used to clear the list.
+    #[test]
+    fn publishing_a_nodes_own_neighbours_keeps_edges_another_thread_added() {
+        let (vectors, _) = fixture(200, 8);
+        let graph = Hnsw::new(HnswParams::default());
+        let layer: LockedLayer = (0..200).map(|_| std::sync::RwLock::new(Vec::new())).collect();
+
+        // Another thread got there first and linked back to node 5.
+        layer[5].write().unwrap().push(42);
+        graph.publish_neighbours(&layer, &vectors, 5, &[7, 9, 11], 0);
+
+        let list = layer[5].read().unwrap().clone();
+        assert!(list.contains(&42), "the reciprocal edge was erased: {list:?}");
+        for chosen in [7u32, 9, 11] {
+            assert!(list.contains(&chosen), "the node's own choice {chosen} is missing: {list:?}");
+        }
     }
 
     /// No adjacency list may exceed its degree cap, however many threads pruned it.
