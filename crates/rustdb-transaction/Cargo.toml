@@ -1,0 +1,11 @@
+[package]
+name = "rustdb-transaction"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Locks, autocommit, savepoints, rollback journal, WAL, checkpoints, and recovery."
+
+[dependencies]
+rustdb-base = { workspace = true }
+rustdb-vfs = { workspace = true }
+rustdb-storage = { workspace = true }

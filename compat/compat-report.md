@@ -1,0 +1,237 @@
+# rust-db compatibility with SQLite sqlite-3.53.4
+
+Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
+
+| status | capabilities |
+|---|---|
+| missing | 134 |
+| pass | 69 |
+| **total** | **203** |
+
+## By phase
+
+| phase | pass | partial | missing | deviation |
+|---|---|---|---|---|
+| phase 0: contract, provenance, and harness foundation | 24 | 0 | 0 | 0 |
+| phase 10: WAL and concurrent connection semantics | 0 | 0 | 12 | 0 |
+| phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree | 0 | 0 | 15 | 0 |
+| phase 12: C ABI and CLI completion | 0 | 0 | 12 | 0 |
+| phase 13: transactional rust-db search and legacy migration | 0 | 0 | 3 | 0 |
+| phase 14: performance qualification and release | 0 | 0 | 2 | 0 |
+| phase 1: VFS, binary primitives, and simulator | 45 | 0 | 0 | 0 |
+| phase 2: values, affinities, collations, and records | 0 | 0 | 10 | 0 |
+| phase 3: read-only header, pager, page cache, and B-tree | 0 | 0 | 10 | 0 |
+| phase 4: B-tree mutation, allocation, and rollback pages | 0 | 0 | 7 | 0 |
+| phase 5: lexer, parser, AST, and syntax parity | 0 | 0 | 6 | 0 |
+| phase 6: catalog, binder, expression VM, and read-only SELECT | 0 | 0 | 10 | 0 |
+| phase 7: single-database rollback transactions and DML | 0 | 0 | 13 | 0 |
+| phase 8: complete SELECT, planner, schema, and SQL semantics | 0 | 0 | 28 | 0 |
+| phase 9: foreign keys, ATTACH, and multi-database commit | 0 | 0 | 6 | 0 |
+
+## Capabilities
+
+| id | claimed | evidenced | platforms | tests |
+|---|---|---|---|---|
+| `harness.manifest.schema` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `harness.manifest.duplicate-ids` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `harness.manifest.missing-tests` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `harness.manifest.dead-source-links` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `harness.manifest.unsupported-release-claims` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `harness.report.reproducible` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `harness.report.shipped-manifest-is-sound` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `harness.reference.pinned-metadata` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `harness.reference.checksums-verify` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `harness.oracle.protocol` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `harness.oracle.value-tagging` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `harness.oracle.error-tagging` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `harness.dependency.no-engine` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `harness.dependency.layering` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `harness.evidence.results-model` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `harness.policy.unsafe-code` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `harness.policy.documentation` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `harness.policy.formatting` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `harness.policy.provenance` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `harness.baseline.retrieval-unchanged` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `errors.table.primary-codes` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `errors.table.extended-codes` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `errors.table.recovery-contract` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `limits.defaults` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `binary.bigendian.widths` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `binary.bigendian.bounds` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `binary.varint.codec` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `binary.varint.robustness` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `binary.checksum.wal` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `binary.checksum.crc32` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `binary.page.size-rules` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `binary.page.offsets` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
+| `binary.buffers.fallible` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `binary.determinism.rng` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `vfs.contract.open` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `vfs.contract.read` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `vfs.contract.write` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `vfs.contract.truncate` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `vfs.contract.sync` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `vfs.contract.readonly` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `vfs.contract.delete` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `vfs.contract.access` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `vfs.contract.fullpath` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `vfs.contract.identity` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `vfs.contract.temp-files` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `vfs.contract.randomness` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `vfs.contract.clock` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `vfs.contract.device-characteristics` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `vfs.lock.shared` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `vfs.lock.reserved` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `vfs.lock.pending` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `vfs.lock.exclusive` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `vfs.lock.protocol-errors` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `vfs.lock.release-on-close` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `vfs.lock.cross-process` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `vfs.paths.companion-files` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `vfs.shm.mapping` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `vfs.shm.locks` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `vfs.conformance.memory` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `vfs.conformance.os` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `sim.determinism.trace` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `sim.determinism.schedule` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `sim.crash.synced-writes-survive` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `sim.crash.unsynced-writes-may-be-lost` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `sim.crash.torn-sectors` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `sim.crash.artifacts` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `sim.failpoints.campaign` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `sim.failpoints.short-write` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `sim.vfs.conformance` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `values.storage-classes` | missing | missing | - | 0 |
+| `values.affinity` | missing | missing | - | 0 |
+| `values.comparison` | missing | missing | - | 0 |
+| `values.collation.binary` | missing | missing | - | 0 |
+| `values.collation.nocase` | missing | missing | - | 0 |
+| `values.collation.rtrim` | missing | missing | - | 0 |
+| `values.cast` | missing | missing | - | 0 |
+| `values.numeric-parsing` | missing | missing | - | 0 |
+| `values.record-format` | missing | missing | - | 0 |
+| `values.index-key-order` | missing | missing | - | 0 |
+| `storage.header.codec` | missing | missing | - | 0 |
+| `storage.header.validation` | missing | missing | - | 0 |
+| `storage.pager.read-path` | missing | missing | - | 0 |
+| `storage.page-cache` | missing | missing | - | 0 |
+| `storage.btree.table-leaf` | missing | missing | - | 0 |
+| `storage.btree.table-interior` | missing | missing | - | 0 |
+| `storage.btree.index-leaf` | missing | missing | - | 0 |
+| `storage.btree.index-interior` | missing | missing | - | 0 |
+| `storage.overflow-chains` | missing | missing | - | 0 |
+| `storage.cursor.seek` | missing | missing | - | 0 |
+| `storage.btree.insert` | missing | missing | - | 0 |
+| `storage.btree.delete` | missing | missing | - | 0 |
+| `storage.btree.balance` | missing | missing | - | 0 |
+| `storage.freelist` | missing | missing | - | 0 |
+| `storage.pointer-maps` | missing | missing | - | 0 |
+| `storage.auto-vacuum` | missing | missing | - | 0 |
+| `storage.integrity-check` | missing | missing | - | 0 |
+| `sql.lexer.tokens` | missing | missing | - | 0 |
+| `sql.lexer.string-literals` | missing | missing | - | 0 |
+| `sql.lexer.identifiers` | missing | missing | - | 0 |
+| `sql.parser.statement-splitting` | missing | missing | - | 0 |
+| `sql.parser.error-offsets` | missing | missing | - | 0 |
+| `sql.parser.keyword-set` | missing | missing | - | 0 |
+| `sql.select.basic` | missing | missing | - | 0 |
+| `sql.select.where` | missing | missing | - | 0 |
+| `sql.select.order-by` | missing | missing | - | 0 |
+| `sql.select.limit-offset` | missing | missing | - | 0 |
+| `sql.expr.operators` | missing | missing | - | 0 |
+| `sql.expr.case` | missing | missing | - | 0 |
+| `sql.expr.like-glob` | missing | missing | - | 0 |
+| `sql.expr.in-subquery` | missing | missing | - | 0 |
+| `catalog.sqlite-schema` | missing | missing | - | 0 |
+| `catalog.schema-cookie` | missing | missing | - | 0 |
+| `catalog.prepared-statement-invalidation` | missing | missing | - | 0 |
+| `sql.insert` | missing | missing | - | 0 |
+| `sql.update` | missing | missing | - | 0 |
+| `sql.delete` | missing | missing | - | 0 |
+| `sql.create-table` | missing | missing | - | 0 |
+| `sql.drop-table` | missing | missing | - | 0 |
+| `sql.create-index` | missing | missing | - | 0 |
+| `sql.conflict-resolution` | missing | missing | - | 0 |
+| `txn.begin-commit-rollback` | missing | missing | - | 0 |
+| `txn.rollback-journal` | missing | missing | - | 0 |
+| `txn.hot-journal-recovery` | missing | missing | - | 0 |
+| `txn.savepoints` | missing | missing | - | 0 |
+| `txn.statement-journal` | missing | missing | - | 0 |
+| `txn.synchronous-modes` | missing | missing | - | 0 |
+| `sql.select.joins` | missing | missing | - | 0 |
+| `sql.select.compound` | missing | missing | - | 0 |
+| `sql.select.group-by-having` | missing | missing | - | 0 |
+| `sql.select.distinct` | missing | missing | - | 0 |
+| `sql.with.cte` | missing | missing | - | 0 |
+| `sql.with.recursive` | missing | missing | - | 0 |
+| `sql.select.window` | missing | missing | - | 0 |
+| `sql.upsert` | missing | missing | - | 0 |
+| `sql.returning` | missing | missing | - | 0 |
+| `sql.create-view` | missing | missing | - | 0 |
+| `sql.create-trigger` | missing | missing | - | 0 |
+| `sql.alter-table` | missing | missing | - | 0 |
+| `sql.generated-columns` | missing | missing | - | 0 |
+| `sql.without-rowid` | missing | missing | - | 0 |
+| `sql.strict-tables` | missing | missing | - | 0 |
+| `sql.explain` | missing | missing | - | 0 |
+| `sql.analyze` | missing | missing | - | 0 |
+| `sql.reindex` | missing | missing | - | 0 |
+| `sql.vacuum` | missing | missing | - | 0 |
+| `planner.access-paths` | missing | missing | - | 0 |
+| `planner.join-order` | missing | missing | - | 0 |
+| `planner.statistics` | missing | missing | - | 0 |
+| `sql.foreign-keys.immediate` | missing | missing | - | 0 |
+| `sql.foreign-keys.deferred` | missing | missing | - | 0 |
+| `sql.foreign-keys.actions` | missing | missing | - | 0 |
+| `sql.attach-detach` | missing | missing | - | 0 |
+| `txn.multi-database-commit` | missing | missing | - | 0 |
+| `txn.master-journal` | missing | missing | - | 0 |
+| `wal.mode-switch` | missing | missing | - | 0 |
+| `wal.frame-format` | missing | missing | - | 0 |
+| `wal.index` | missing | missing | - | 0 |
+| `wal.read-transactions` | missing | missing | - | 0 |
+| `wal.write-transactions` | missing | missing | - | 0 |
+| `wal.checkpoint.passive` | missing | missing | - | 0 |
+| `wal.checkpoint.full` | missing | missing | - | 0 |
+| `wal.checkpoint.restart` | missing | missing | - | 0 |
+| `wal.checkpoint.truncate` | missing | missing | - | 0 |
+| `wal.recovery` | missing | missing | - | 0 |
+| `txn.busy-handler` | missing | missing | - | 0 |
+| `txn.isolation` | missing | missing | - | 0 |
+| `functions.core` | missing | missing | - | 0 |
+| `functions.aggregate` | missing | missing | - | 0 |
+| `functions.date-time` | missing | missing | - | 0 |
+| `functions.math` | missing | missing | - | 0 |
+| `functions.json` | missing | missing | - | 0 |
+| `functions.window` | missing | missing | - | 0 |
+| `pragma.schema` | missing | missing | - | 0 |
+| `pragma.pager` | missing | missing | - | 0 |
+| `pragma.integrity` | missing | missing | - | 0 |
+| `pragma.query-only` | missing | missing | - | 0 |
+| `vtab.contract` | missing | missing | - | 0 |
+| `vtab.eponymous` | missing | missing | - | 0 |
+| `ext.fts5.queries` | missing | missing | - | 0 |
+| `ext.fts5.ranking` | missing | missing | - | 0 |
+| `ext.rtree` | missing | missing | - | 0 |
+| `capi.open-close` | missing | missing | - | 0 |
+| `capi.prepare-step-finalize` | missing | missing | - | 0 |
+| `capi.bind` | missing | missing | - | 0 |
+| `capi.column-metadata` | missing | missing | - | 0 |
+| `capi.hooks` | missing | missing | - | 0 |
+| `capi.backup` | missing | missing | - | 0 |
+| `capi.blob-io` | missing | missing | - | 0 |
+| `capi.serialize-deserialize` | missing | missing | - | 0 |
+| `capi.custom-functions` | missing | missing | - | 0 |
+| `capi.vfs-registration` | missing | missing | - | 0 |
+| `cli.dot-commands` | missing | missing | - | 0 |
+| `cli.output-modes` | missing | missing | - | 0 |
+| `search.virtual-table` | missing | missing | - | 0 |
+| `search.transactional-visibility` | missing | missing | - | 0 |
+| `search.legacy-migration` | missing | missing | - | 0 |
+| `perf.qualified-measurement` | missing | missing | - | 0 |
+| `perf.regression-tracking` | missing | missing | - | 0 |
+| `sql.negative.right-outer-join-pre-3-39` | missing | missing | - | 0 |
+| `sql.negative.grant-revoke` | missing | missing | - | 0 |
+| `sql.negative.full-alter-table` | missing | missing | - | 0 |
+| `sql.negative.trigger-for-each-statement` | missing | missing | - | 0 |
+| `sql.negative.writable-views` | missing | missing | - | 0 |

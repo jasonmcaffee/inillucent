@@ -1,0 +1,12 @@
+[package]
+name = "rustdb-capi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Versioned SQLite C API compatibility surface and ABI probes."
+
+[lib]
+crate-type = ["lib"]
+
+[dependencies]
+rustdb = { workspace = true }

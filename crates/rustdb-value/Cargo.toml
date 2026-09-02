@@ -1,0 +1,9 @@
+[package]
+name = "rustdb-value"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "First-party values, affinities, collations, expression primitives, and record codecs."
+
+[dependencies]
+rustdb-base = { workspace = true }

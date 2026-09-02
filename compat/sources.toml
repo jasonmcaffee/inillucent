@@ -1,0 +1,167 @@
+# Every documentation page a capability row may cite.
+#
+# The report generator refuses a capability whose source is not listed
+# here, which is how a dead or mistyped link is caught without the build
+# needing network access. The pinned documentation archive named below is
+# what a link is checked against when the archive is present.
+
+schema_version = 1
+reference = "sqlite-3.53.4"
+archive = "sqlite-doc-3530400.zip"
+
+[[source]]
+url = "https://sqlite.org/atomiccommit.html"
+
+[[source]]
+url = "https://sqlite.org/backup.html"
+
+[[source]]
+url = "https://sqlite.org/c3ref/blob_open.html"
+
+[[source]]
+url = "https://sqlite.org/c3ref/funclist.html"
+
+[[source]]
+url = "https://sqlite.org/c3ref/serialize.html"
+
+[[source]]
+url = "https://sqlite.org/cli.html"
+
+[[source]]
+url = "https://sqlite.org/datatype3.html"
+
+[[source]]
+url = "https://sqlite.org/fileformat2.html"
+
+[[source]]
+url = "https://sqlite.org/foreignkeys.html"
+
+[[source]]
+url = "https://sqlite.org/fts5.html"
+
+[[source]]
+url = "https://sqlite.org/isolation.html"
+
+[[source]]
+url = "https://sqlite.org/json1.html"
+
+[[source]]
+url = "https://sqlite.org/lang.html"
+
+[[source]]
+url = "https://sqlite.org/lang_aggfunc.html"
+
+[[source]]
+url = "https://sqlite.org/lang_altertable.html"
+
+[[source]]
+url = "https://sqlite.org/lang_analyze.html"
+
+[[source]]
+url = "https://sqlite.org/lang_attach.html"
+
+[[source]]
+url = "https://sqlite.org/lang_conflict.html"
+
+[[source]]
+url = "https://sqlite.org/lang_corefunc.html"
+
+[[source]]
+url = "https://sqlite.org/lang_createindex.html"
+
+[[source]]
+url = "https://sqlite.org/lang_createtable.html"
+
+[[source]]
+url = "https://sqlite.org/lang_createtrigger.html"
+
+[[source]]
+url = "https://sqlite.org/lang_createview.html"
+
+[[source]]
+url = "https://sqlite.org/lang_datefunc.html"
+
+[[source]]
+url = "https://sqlite.org/lang_delete.html"
+
+[[source]]
+url = "https://sqlite.org/lang_droptable.html"
+
+[[source]]
+url = "https://sqlite.org/lang_explain.html"
+
+[[source]]
+url = "https://sqlite.org/lang_expr.html"
+
+[[source]]
+url = "https://sqlite.org/lang_insert.html"
+
+[[source]]
+url = "https://sqlite.org/lang_mathfunc.html"
+
+[[source]]
+url = "https://sqlite.org/lang_reindex.html"
+
+[[source]]
+url = "https://sqlite.org/lang_returning.html"
+
+[[source]]
+url = "https://sqlite.org/lang_savepoint.html"
+
+[[source]]
+url = "https://sqlite.org/lang_select.html"
+
+[[source]]
+url = "https://sqlite.org/lang_transaction.html"
+
+[[source]]
+url = "https://sqlite.org/lang_update.html"
+
+[[source]]
+url = "https://sqlite.org/lang_upsert.html"
+
+[[source]]
+url = "https://sqlite.org/lang_vacuum.html"
+
+[[source]]
+url = "https://sqlite.org/lang_with.html"
+
+[[source]]
+url = "https://sqlite.org/limits.html"
+
+[[source]]
+url = "https://sqlite.org/lockingv3.html"
+
+[[source]]
+url = "https://sqlite.org/omitted.html"
+
+[[source]]
+url = "https://sqlite.org/pragma.html"
+
+[[source]]
+url = "https://sqlite.org/pragma.html#pragma_auto_vacuum"
+
+[[source]]
+url = "https://sqlite.org/quirks.html"
+
+[[source]]
+url = "https://sqlite.org/rescode.html"
+
+[[source]]
+url = "https://sqlite.org/rtree.html"
+
+[[source]]
+url = "https://sqlite.org/tempfiles.html"
+
+[[source]]
+url = "https://sqlite.org/vfs.html"
+
+[[source]]
+url = "https://sqlite.org/vtab.html"
+
+[[source]]
+url = "https://sqlite.org/wal.html"
+
+[[source]]
+url = "https://sqlite.org/windowfunctions.html"
+

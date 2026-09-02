@@ -1,0 +1,11 @@
+[package]
+name = "rustdb-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SQL virtual table and index-method bridge to the existing BM25, vector, and hybrid ranking core."
+
+[dependencies]
+rustdb-base = { workspace = true }
+rustdb-ext = { workspace = true }
+rustdb-core = { workspace = true }

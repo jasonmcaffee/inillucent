@@ -2,7 +2,12 @@
 
 An embedded vector search engine for retrieval augmented generation, over a corpus of workplace documents: pages, chat messages, issues, source files, design files and boards. It does the job of PostgreSQL with the pgvector extension plus `llama.cpp` serving an embedding model over HTTP, in one library that runs inside the calling process. That combination is also the baseline it is graded against.
 
-Two crates:
+Since task-1782 the repository also holds the beginning of a second, separate engine: a first-party
+SQL database aiming at SQLite file-format and behaviour parity, designed in
+`tasks/task-1781-sqlite-feature-parity-tdd.md`. It shares nothing with the retrieval engine yet and
+does not change it. See [The relational engine](#the-relational-engine) below.
+
+Two crates carry the retrieval engine:
 
 - `rustdb-core` is the engine. It links no database client. Storage with dictionary encoded filter columns, cosine over L2 normalized vectors, exhaustive search, an HNSW graph with traversal that honours a predicate, int8 scalar quantization, an inverted index with BM25 that weights a hit by how much of the query it holds and by how tightly those terms sit together, three fusion methods, and persistence.
 - `rustdb-bench` is the grading harness. It builds the corpus, embeds it, loads it into PostgreSQL, and grades both engines. It is the only crate that talks to PostgreSQL, because its job is to query the baseline engine.
@@ -182,6 +187,59 @@ the list. The abstention threshold is set on confidence, the ranking is decided 
 engine is calibrated on its own scale against held-out answerable queries — so the comparison
 assumes nothing about a rust-db score and a `ts_rank_cd` score meaning the same thing.
 
+## The relational engine
+
+A first-party SQL engine, built to SQLite's file format and observable behaviour. It links no
+database engine and no SQL parser: `docs/dependency-policy.md` records the rule, and a test walks
+every crate manifest and fails on a dependency that breaks it. SQLite appears in this repository in
+exactly one form - a pinned 3.53.4 build, compiled from the official amalgamation, run as a child
+process, and compared against as a black-box oracle.
+
+The work is sequenced into fifteen phases by the design document. Phases 0 and 1 are done:
+
+| crate | what it holds |
+|---|---|
+| `rustdb-base` | checked big-endian codecs, the varint, WAL and CRC-32 checksums, page arithmetic, fallible buffers, run-time limits, the stable error table |
+| `rustdb-vfs` | the VFS contract plus Windows, POSIX and in-memory implementations, the SQLite byte-range locking protocol, and shared memory |
+| `rustdb-sim` | a deterministic simulator: layered media, torn and dropped sectors, failure injection, a replayable scheduler, event traces |
+| `rustdb-compat` | the parity manifest, the report that gates a release, the oracle protocol, and the dependency-direction check |
+
+Ten more crates exist as declared layers with no behaviour yet - `rustdb-value`, `rustdb-storage`,
+`rustdb-transaction`, `rustdb-catalog`, `rustdb-sql`, `rustdb-vm`, `rustdb-ext`, `rustdb-session`,
+`rustdb`, `rustdb-capi`, `rustdb-cli` and `rustdb-search`. They are there so the dependency graph is
+enforced from the first commit rather than retrofitted once the edges exist.
+
+### The compatibility report
+
+`compat/sqlite-3.53.4.toml` carries one row per capability rust-db owes, including the ones nothing
+has been written for yet: 203 rows, of which 69 pass and 134 are missing. That is the denominator on
+purpose. A capability with no row cannot be reported as owed.
+
+A row reaches `pass` only when a test run recorded a passing result for every test it cites, on both
+Windows and Linux. The generator refuses a manifest with a duplicated identifier, a claim with no
+test behind it, a source link that is not in `compat/sources.toml`, or a release claim with no
+recorded platform evidence.
+
+```bash
+cargo run -p rustdb-compat --bin rustdb-manifest -- check      # validate the manifest
+cargo run -p rustdb-compat --bin rustdb-evidence               # run the suites, record results
+cargo run -p rustdb-compat --bin rustdb-manifest -- report     # regenerate compat-report.{json,md}
+cargo run -p rustdb-compat --bin rustdb-manifest -- layering   # check the dependency contract
+```
+
+### The oracle
+
+```bash
+pwsh tools/sqlite-reference.ps1     # Windows
+bash tools/sqlite-reference.sh      # Linux
+```
+
+Both download the pinned amalgamation and shell, verify them against the SHA3-256 sums sqlite.org
+publishes - using rust-db's own SHA3 - and compile `compat/oracle/sqlite_driver.c` into a driver that
+speaks the harness protocol. Values cross that protocol as tagged bytes: an integer as its
+big-endian hex, a double as its exact IEEE-754 bits, text and blobs as their bytes. A decimal
+rendering would compare the harness's formatting rather than the two engines.
+
 ## The corpus
 
 The engine is graded on a corpus assembled from public data, built by this repository. Every number on the score card can be reproduced by anyone with this repository, an internet connection and a few hours.
@@ -271,6 +329,21 @@ cargo test --release
 The engine's own tests cover the pieces a search engine gets quietly wrong: that filtered traversal returns a full result set on a minority source, that filtered recall against exhaustive cosine stays high, that a filter naming a value the corpus lacks selects nothing rather than everything, that stemming matches what PostgreSQL's `english` configuration produces, that BM25 saturates term frequency and normalizes for document length, that quantization keeps the ranking, and that a saved index answers the same queries after loading. It also covers the ranking work the score card turns on: that reduce-as-you-go top k selection agrees with sorting every candidate, on ties as well; that coverage weighting raises a chunk holding the whole query and leaves a one term query alone; that proximity prefers the chunk whose terms sit together and that its weight is a real off switch; that the smallest covering window is found, including when the best one is at the end; that tiering puts every-term matches first and still returns the partial ones; that the two score based fusions normalise in the documented way; and that a batch never exceeds the attention budget, never drops a text and never mixes lengths.
 
 The corpus builder's tests cover what makes a corpus usable for grading rather than merely large: that chunks stay near their target length and none swallows the rest of its document, that chunking never splits a word or a line of code, that the article pool is shared so no source is starved, that chunk counts per document reproduce the measured quantiles, and that authors are unique and stable across rebuilds.
+
+The relational engine's crates are tested separately, and quickly:
+
+```sh
+cargo test -p rustdb-base -p rustdb-vfs -p rustdb-sim -p rustdb-compat
+```
+
+They cover what a storage layer gets quietly wrong. Every codec is exercised with hundreds of
+thousands of seeded random inputs and must return an error rather than panic on any of them. The
+locking protocol is proved across two real processes, not two handles in one, because POSIX advisory
+locks are per process and a same-process test would pass on a broken implementation. A dead process
+must release its locks. The simulator must lose an unsynced write sometimes and a synced one never,
+over every seed. A recorded schedule must replay an event-for-event identical trace. And the same
+26-case conformance suite runs against the in-memory VFS, the real file system, and the simulator,
+so "the simulator behaves like a disk" is a checked claim rather than a hope.
 
 ## Using the engine
 

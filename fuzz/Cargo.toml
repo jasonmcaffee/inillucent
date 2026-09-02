@@ -1,0 +1,38 @@
+[package]
+name = "rustdb-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Excluded from the workspace on purpose: cargo-fuzz needs a nightly toolchain
+# and libfuzzer-sys, and neither belongs in the graph the layering check walks.
+# The stable toolchain still gets fuzz coverage - every target below has a
+# seeded, deterministic counterpart in the crate it exercises, which runs in the
+# ordinary test suite.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rustdb-base = { path = "../crates/rustdb-base" }
+rustdb-vfs = { path = "../crates/rustdb-vfs" }
+
+[[bin]]
+name = "varint"
+path = "fuzz_targets/varint.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "bigendian"
+path = "fuzz_targets/bigendian.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "page_header"
+path = "fuzz_targets/page_header.rs"
+test = false
+doc = false

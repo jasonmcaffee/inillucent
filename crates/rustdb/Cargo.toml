@@ -1,0 +1,11 @@
+[package]
+name = "rustdb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stable public Rust facade: Database, Connection, Statement, Rows, and Transaction."
+
+[dependencies]
+rustdb-base = { workspace = true }
+rustdb-value = { workspace = true }
+rustdb-session = { workspace = true }

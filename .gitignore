@@ -14,3 +14,12 @@ corpus.jsonl
 .DS_Store
 /.quill/
 /runs/
+
+# The pinned SQLite reference build. Downloaded and verified by
+# tools/sqlite-reference.*, used only as a test oracle, never shipped.
+/.sqlite-ref/
+
+# Agent-produced artifacts: measurements, scratch renders, harness output. The
+# evidence that gates a release is not here - it is checked in under compat/,
+# because the compatibility report is generated from it.
+/_agent_output/

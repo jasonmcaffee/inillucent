@@ -1,0 +1,8 @@
+[package]
+name = "rustdb-base"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Checked binary primitives, identifiers, buffers, limits, and the stable error model."
+
+[dependencies]
