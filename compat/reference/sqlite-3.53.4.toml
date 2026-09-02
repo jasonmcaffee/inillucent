@@ -1,0 +1,60 @@
+# The pinned SQLite reference build.
+#
+# Every parity claim in this workspace is measured against this exact release.
+# The checksums are the SHA3-256 sums SQLite publishes on its download page, and
+# tools/fetch-sqlite-reference verifies a download against them before it is
+# used, so an oracle run cannot silently be comparing against a different build.
+#
+# SQLite is a test oracle here, never a runtime component. Nothing in this file
+# is read by a production crate, and the downloaded artifacts land in the
+# gitignored .sqlite-ref/ directory rather than in the workspace.
+
+schema_version = 1
+version = "3.53.4"
+release_id = "3530400"
+download_page = "https://sqlite.org/download.html"
+checksum_algorithm = "sha3-256"
+
+# The compile-time profile the oracle is built with. It is the ordinary
+# distribution profile plus the extensions the parity contract covers; a
+# smaller build could measure footprint but cannot stand in for parity.
+profile = "default"
+compile_options = "SQLITE_ENABLE_FTS5 SQLITE_ENABLE_RTREE SQLITE_ENABLE_MATH_FUNCTIONS SQLITE_ENABLE_COLUMN_METADATA SQLITE_ENABLE_PREUPDATE_HOOK SQLITE_ENABLE_SESSION SQLITE_THREADSAFE=1 SQLITE_ENABLE_DBSTAT_VTAB"
+
+# The run-time settings a comparison run uses on both sides. A benchmark or a
+# differential run that changes one of these has changed the experiment.
+page_size = 4096
+journal_mode = "delete"
+synchronous = "full"
+cache_size = -2000
+temp_store = "file"
+mmap_size = 0
+foreign_keys = "on"
+
+[[artifact]]
+name = "sqlite-amalgamation-3530400.zip"
+url = "https://sqlite.org/2026/sqlite-amalgamation-3530400.zip"
+bytes = 2946650
+sha3_256 = "628a44cfe82c66aed1ccbbe85a562d2e33ebe64b3288981ed76285612227934e"
+used_for = "the C oracle driver is compiled from this amalgamation"
+
+[[artifact]]
+name = "sqlite-tools-win-x64-3530400.zip"
+url = "https://sqlite.org/2026/sqlite-tools-win-x64-3530400.zip"
+bytes = 6557792
+sha3_256 = "88b4659fe747896b853af10157316b4ade143553efb89c1c8ca7423a278dcc8b"
+used_for = "the pinned sqlite3 shell on windows-x86_64"
+
+[[artifact]]
+name = "sqlite-tools-linux-x64-3530400.zip"
+url = "https://sqlite.org/2026/sqlite-tools-linux-x64-3530400.zip"
+bytes = 4265665
+sha3_256 = "6eeb57e8f2aef7687f9f016a980992cf2799c8c07a87c5e21495530f91915047"
+used_for = "the pinned sqlite3 shell on linux-x86_64"
+
+[[artifact]]
+name = "sqlite-doc-3530400.zip"
+url = "https://sqlite.org/2026/sqlite-doc-3530400.zip"
+bytes = 11820412
+sha3_256 = "7ccf86a52e7dd1fb9b31e63edcebe3b553f18f89cd26eef59c7f191a5111836e"
+used_for = "the documentation archive capability source links are checked against"

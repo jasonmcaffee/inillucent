@@ -1,0 +1,220 @@
+//! The phase 0 acceptance evidence: the shipped manifest, the shipped
+//! dependency contract, and the pinned reference build.
+//!
+//! Invariant: these tests run against the real files in the repository, not
+//! against fixtures. A generator that only works on its own examples proves
+//! nothing about the manifest the release gate reads.
+
+use std::path::PathBuf;
+
+use rustdb_compat::hash::sha3_256_hex;
+use rustdb_compat::layering::{self, Contract};
+use rustdb_compat::manifest::{Manifest, Reference, SourceRegister, Status};
+use rustdb_compat::report;
+use rustdb_compat::results::ResultSet;
+use rustdb_compat::workspace_root;
+
+/// Loads the shipped manifest.
+fn manifest() -> Manifest {
+    Manifest::load(&workspace_root().join("compat/sqlite-3.53.4.toml"))
+        .expect("the manifest parses")
+}
+
+/// Loads the shipped source register.
+fn sources() -> SourceRegister {
+    SourceRegister::load(&workspace_root().join("compat/sources.toml"))
+        .expect("the register parses")
+}
+
+/// The manifest the release gate reads must be structurally sound: no
+/// duplicated identifier, no claim without a test, no source link that is not
+/// in the register.
+#[test]
+fn the_shipped_manifest_is_structurally_sound() {
+    let generated = report::generate(&manifest(), &sources(), &ResultSet::default());
+    let structural: Vec<_> = generated
+        .problems
+        .iter()
+        .filter(|problem| problem.kind != "unsupported-release-claim")
+        .collect();
+    assert!(structural.is_empty(), "{structural:#?}");
+    assert!(
+        manifest().capabilities.len() > 150,
+        "the manifest has to carry the whole denominator, not just what is done"
+    );
+    assert!(
+        manifest()
+            .capabilities
+            .iter()
+            .any(|capability| capability.status == Status::Missing),
+        "a manifest with nothing missing is not describing SQLite"
+    );
+}
+
+/// Every phase 0 and phase 1 row must claim `pass`, and every later row must
+/// not. A row that quietly claims a phase it has not reached is the thing the
+/// report exists to prevent.
+#[test]
+fn only_the_finished_phases_claim_to_be_finished() {
+    for capability in &manifest().capabilities {
+        // The colon matters: "phase 1:" is finished, "phase 10:" is not.
+        let finished =
+            capability.phase.starts_with("phase 0:") || capability.phase.starts_with("phase 1:");
+        let claims = capability.status == Status::Pass;
+        assert_eq!(
+            finished,
+            claims,
+            "`{}` is in `{}` and claims `{}`",
+            capability.id,
+            capability.phase,
+            capability.status.as_str()
+        );
+    }
+}
+
+/// The report must be byte-identical across two runs from the same inputs, and
+/// its digest must be stable, or it cannot gate a release.
+#[test]
+fn the_shipped_report_is_reproducible() {
+    let results = ResultSet::load_directory(&workspace_root().join("compat/results"))
+        .expect("the results directory reads");
+    let first = report::generate(&manifest(), &sources(), &results);
+    let second = report::generate(&manifest(), &sources(), &results);
+    assert_eq!(first.to_json(), second.to_json());
+    assert_eq!(first.digest(), second.digest());
+    assert_eq!(first.to_markdown(), second.to_markdown());
+    assert_eq!(
+        first.rows.len(),
+        manifest().capabilities.len(),
+        "every capability must appear in the report"
+    );
+}
+
+/// An empty scorecard has to be generatable on a machine with no recorded
+/// results at all, because that is the state a fresh checkout is in.
+#[test]
+fn an_empty_scorecard_is_generated_without_any_results() {
+    let generated = report::generate(&manifest(), &sources(), &ResultSet::default());
+    let markdown = generated.to_markdown();
+    assert!(markdown.contains("rust-db compatibility with SQLite sqlite-3.53.4"));
+    assert!(markdown.contains("phase 1: VFS, binary primitives, and simulator"));
+    assert!(
+        !generated.counts.contains_key("pass"),
+        "nothing may be `pass` with no evidence recorded"
+    );
+    assert!(
+        !generated.problems.is_empty(),
+        "unsupported claims must be reported"
+    );
+}
+
+/// The workspace must obey its own dependency contract. This is the check that
+/// makes "no database engine and no SQL parser in a production crate" a fact
+/// rather than an intention.
+#[test]
+fn the_workspace_obeys_the_dependency_contract() {
+    let root = workspace_root();
+    let contract =
+        Contract::load(&root.join("docs/invariants/layering.toml")).expect("the contract parses");
+    let manifests = layering::read_workspace(&root).expect("the workspace reads");
+    let violations = layering::check(&contract, &manifests);
+    assert!(violations.is_empty(), "{violations:#?}");
+    assert!(
+        manifests.len() >= 16,
+        "the workspace should hold the whole crate graph, found {}",
+        manifests.len()
+    );
+}
+
+/// The pinned reference metadata must name a complete build: a version, the
+/// compile options, the run-time settings a comparison uses, and a checksum for
+/// every artifact.
+#[test]
+fn the_reference_metadata_is_pinned() {
+    let reference = Reference::load(&workspace_root().join("compat/reference/sqlite-3.53.4.toml"))
+        .expect("the reference parses");
+    assert_eq!(reference.version, "3.53.4");
+    assert_eq!(reference.release_id, "3530400");
+    assert!(reference.compile_options.contains("SQLITE_ENABLE_FTS5"));
+    for key in ["page_size", "journal_mode", "synchronous", "foreign_keys"] {
+        assert!(reference.settings.contains_key(key), "no `{key}` setting");
+    }
+    assert!(reference.artifacts.len() >= 3);
+    for artifact in &reference.artifacts {
+        assert_eq!(
+            artifact.sha3_256.len(),
+            64,
+            "{} has no checksum",
+            artifact.name
+        );
+        assert!(artifact.bytes > 0, "{} has no size", artifact.name);
+        assert!(
+            artifact.url.starts_with("https://sqlite.org/"),
+            "{}",
+            artifact.url
+        );
+    }
+}
+
+/// When the reference has been downloaded, every artifact must match the
+/// checksum SQLite published. A build that silently compared against a
+/// different SQLite would invalidate every parity claim made against it.
+#[test]
+fn the_reference_artifacts_match_their_pinned_checksums() {
+    let root = workspace_root();
+    let reference = Reference::load(&root.join("compat/reference/sqlite-3.53.4.toml"))
+        .expect("the reference parses");
+    let directory = root.join(".sqlite-ref/3.53.4");
+    if !directory.is_dir() {
+        eprintln!("the reference is not downloaded; run tools/sqlite-reference.{{ps1,sh}}");
+        return;
+    }
+    let mut checked = 0;
+    for artifact in &reference.artifacts {
+        let path: PathBuf = directory.join(&artifact.name);
+        if !path.is_file() {
+            continue;
+        }
+        let bytes = std::fs::read(&path).expect("the artifact reads");
+        assert_eq!(
+            bytes.len() as u64,
+            artifact.bytes,
+            "{} is the wrong size",
+            artifact.name
+        );
+        assert_eq!(
+            sha3_256_hex(&bytes),
+            artifact.sha3_256,
+            "{} does not match its pinned checksum",
+            artifact.name
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "the reference directory exists but holds no pinned artifact"
+    );
+}
+
+/// The retrieval engine must be byte-identical to the baseline this ticket
+/// captured. task-1782 builds a relational engine beside it and is not allowed
+/// to disturb it, and "we did not touch it" is a claim worth checking rather
+/// than asserting.
+#[test]
+fn the_retrieval_baseline_is_unchanged() {
+    let baseline = workspace_root().join("compat/baseline/rustdb-core-baseline.json");
+    if !baseline.is_file() {
+        eprintln!("no baseline captured yet; run `rustdb-baseline capture`");
+        return;
+    }
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rustdb-baseline"))
+        .arg("verify")
+        .output()
+        .expect("the baseline tool runs");
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

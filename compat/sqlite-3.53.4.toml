@@ -1,0 +1,1645 @@
+# The SQLite parity manifest: one row per capability rust-db owes.
+#
+# Allowed statuses are missing, partial, pass, and intentional-deviation.
+# Only pass is releasable in the default profile. A row may not claim pass
+# without at least one test id, and the report generator refuses a manifest
+# with a duplicate id, a source that is not in compat/sources.toml, or a
+# release claim with no recorded platform result.
+#
+# Rows for later phases are present and missing on purpose. A capability
+# that has no row cannot be reported as owed, and "we did not know we owed
+# it" is exactly what a parity manifest exists to prevent.
+
+schema_version = 1
+reference = "sqlite-3.53.4"
+generated_by = "task-1782"
+
+[[capability]]
+id = "harness.manifest.schema"
+source = "https://sqlite.org/rescode.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-compat::toml_lite::tests::the_manifest_subset_parses", "rustdb-compat::toml_lite::tests::anything_outside_the_subset_is_refused", "rustdb-compat::manifest::tests::a_capability_row_parses"]
+
+[[capability]]
+id = "harness.manifest.duplicate-ids"
+source = "https://sqlite.org/rescode.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-compat::report::tests::duplicate_ids_are_detected"]
+
+[[capability]]
+id = "harness.manifest.missing-tests"
+source = "https://sqlite.org/rescode.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-compat::report::tests::missing_tests_are_detected", "rustdb-compat::manifest::tests::a_missing_tests_list_is_refused"]
+
+[[capability]]
+id = "harness.manifest.dead-source-links"
+source = "https://sqlite.org/rescode.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-compat::report::tests::dead_source_links_are_detected"]
+
+[[capability]]
+id = "harness.manifest.unsupported-release-claims"
+source = "https://sqlite.org/rescode.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-compat::report::tests::unsupported_release_claims_are_detected_and_downgraded", "rustdb-compat::report::tests::a_recorded_failure_demotes_a_claim"]
+
+[[capability]]
+id = "harness.report.reproducible"
+source = "https://sqlite.org/rescode.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-compat::report::tests::the_report_is_reproducible", "rustdb-compat::the_shipped_report_is_reproducible"]
+
+[[capability]]
+id = "harness.report.shipped-manifest-is-sound"
+source = "https://sqlite.org/rescode.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-compat::the_shipped_manifest_is_structurally_sound"]
+
+[[capability]]
+id = "harness.reference.pinned-metadata"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-compat::the_reference_metadata_is_pinned", "rustdb-compat::hash::tests::sha3_256_matches_its_published_vectors"]
+
+[[capability]]
+id = "harness.reference.checksums-verify"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-compat::the_reference_artifacts_match_their_pinned_checksums"]
+
+[[capability]]
+id = "harness.oracle.protocol"
+source = "https://sqlite.org/c3ref/funclist.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-compat::oracle::tests::an_observation_parses", "rustdb-compat::oracle::tests::an_error_observation_parses", "rustdb-compat::oracle::tests::the_comparator_names_every_difference"]
+
+[[capability]]
+id = "harness.oracle.value-tagging"
+source = "https://sqlite.org/datatype3.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-compat::oracle::tests::every_storage_class_round_trips_through_the_protocol", "rustdb-compat::oracle::tests::doubles_are_compared_by_their_bits", "rustdb-compat::the_oracle_round_trips_every_storage_class_against_sqlite"]
+
+[[capability]]
+id = "harness.oracle.error-tagging"
+source = "https://sqlite.org/rescode.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-compat::the_oracle_reports_the_same_error_as_sqlite"]
+
+[[capability]]
+id = "harness.dependency.no-engine"
+source = "https://sqlite.org/omitted.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-compat::layering::tests::another_engine_is_refused", "rustdb-compat::layering::tests::an_unapproved_dependency_is_refused", "rustdb-compat::the_workspace_obeys_the_dependency_contract"]
+
+[[capability]]
+id = "harness.dependency.layering"
+source = "https://sqlite.org/omitted.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-compat::layering::tests::an_upward_edge_is_refused", "rustdb-compat::layering::tests::a_production_crate_may_not_use_the_harness", "rustdb-compat::layering::tests::a_cycle_is_reported", "rustdb-compat::the_workspace_obeys_the_dependency_contract"]
+
+[[capability]]
+id = "harness.evidence.results-model"
+source = "https://sqlite.org/rescode.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-compat::results::tests::a_result_round_trips", "rustdb-compat::results::tests::coverage_is_the_intersection_across_tests", "rustdb-compat::results::tests::an_incomplete_line_is_refused", "rustdb-compat::results::tests::a_failure_is_visible"]
+
+[[capability]]
+id = "harness.policy.unsafe-code"
+source = "https://sqlite.org/omitted.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-compat::unsafe_code_is_confined_and_justified"]
+
+[[capability]]
+id = "harness.policy.documentation"
+source = "https://sqlite.org/omitted.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-compat::every_governed_crate_denies_undocumented_items", "rustdb-compat::every_module_states_its_invariant"]
+
+[[capability]]
+id = "harness.policy.formatting"
+source = "https://sqlite.org/omitted.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-compat::the_governed_crates_are_formatted"]
+
+[[capability]]
+id = "harness.policy.provenance"
+source = "https://sqlite.org/omitted.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-compat::no_reference_is_a_production_dependency", "rustdb-compat::the_dependency_policy_covers_what_the_contract_allows"]
+
+[[capability]]
+id = "harness.baseline.retrieval-unchanged"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-compat::the_retrieval_baseline_is_unchanged"]
+
+[[capability]]
+id = "errors.table.primary-codes"
+source = "https://sqlite.org/rescode.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-base::error::tests::primary_codes_round_trip_through_their_numeric_value", "rustdb-base::error::tests::numeric_values_are_unique"]
+
+[[capability]]
+id = "errors.table.extended-codes"
+source = "https://sqlite.org/rescode.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-base::error::tests::extended_codes_agree_with_their_primary_code", "rustdb-base::error::tests::unknown_extended_codes_fall_back_to_their_low_byte"]
+
+[[capability]]
+id = "errors.table.recovery-contract"
+source = "https://sqlite.org/rescode.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-base::error::tests::recovery_contract_matches_the_manifest", "rustdb-base::error::tests::display_hides_internal_detail"]
+
+[[capability]]
+id = "limits.defaults"
+source = "https://sqlite.org/limits.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+status = "pass"
+tests = ["rustdb-base::limits::tests::defaults_match_the_reference_build", "rustdb-base::limits::tests::setting_returns_the_previous_value_and_clamps", "rustdb-base::limits::tests::a_negative_request_only_queries", "rustdb-base::limits::tests::every_row_has_a_coherent_range"]
+
+[[capability]]
+id = "binary.bigendian.widths"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-base::bytes::tests::widths_round_trip_at_their_boundaries", "rustdb-base::bytes::tests::narrow_widths_reject_values_that_do_not_fit", "rustdb-base::bytes::tests::doubles_keep_their_exact_bits"]
+
+[[capability]]
+id = "binary.bigendian.bounds"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-base::bytes::tests::reads_past_the_end_are_errors", "rustdb-base::bytes::tests::random_offsets_never_panic", "rustdb-base::bytes::tests::reader_tracks_its_offset_and_stops_at_the_end"]
+
+[[capability]]
+id = "binary.varint.codec"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-base::varint::tests::width_boundaries_use_the_documented_number_of_bytes", "rustdb-base::varint::tests::the_nine_byte_form_carries_a_full_last_byte", "rustdb-base::varint::tests::signed_values_round_trip", "rustdb-base::varint::tests::random_values_round_trip_canonically"]
+
+[[capability]]
+id = "binary.varint.robustness"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-base::varint::tests::truncated_input_is_an_error_at_every_width", "rustdb-base::varint::tests::arbitrary_bytes_never_panic", "rustdb-base::varint::tests::encoding_refuses_a_buffer_that_is_too_small"]
+
+[[capability]]
+id = "binary.checksum.wal"
+source = "https://sqlite.org/wal.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-base::checksum::tests::wal_checksum_depends_on_the_declared_byte_order", "rustdb-base::checksum::tests::wal_checksum_chains_across_calls", "rustdb-base::checksum::tests::wal_checksum_refuses_a_partial_block"]
+
+[[capability]]
+id = "binary.checksum.crc32"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-base::checksum::tests::crc32_matches_the_published_check_value", "rustdb-base::checksum::tests::crc32_detects_single_bit_flips", "rustdb-base::checksum::tests::crc32_is_the_same_whether_it_arrives_whole_or_in_pieces"]
+
+[[capability]]
+id = "binary.page.size-rules"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-base::page::tests::page_sizes_follow_the_file_format_rules", "rustdb-base::page::tests::the_largest_page_size_round_trips_through_its_encoded_form", "rustdb-base::page::tests::usable_size_respects_the_reserved_region_and_its_floor"]
+
+[[capability]]
+id = "binary.page.offsets"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-base::page::tests::page_offsets_are_one_based", "rustdb-base::page::tests::the_largest_addressable_page_does_not_overflow", "rustdb-base::page::tests::page_count_ignores_a_trailing_partial_page", "rustdb-base::ids::tests::page_zero_is_rejected", "rustdb-base::ids::tests::page_numbering_is_one_based"]
+
+[[capability]]
+id = "binary.buffers.fallible"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-base::buffer::tests::an_impossible_allocation_returns_nomem", "rustdb-base::buffer::tests::allocation_counters_track_what_was_allocated", "rustdb-base::buffer::tests::field_accessors_are_bounds_checked", "rustdb-base::buffer::tests::wrapping_the_wrong_length_is_refused"]
+
+[[capability]]
+id = "binary.determinism.rng"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-base::rng::tests::the_same_seed_replays_the_same_stream", "rustdb-base::rng::tests::adjacent_seeds_produce_unrelated_streams", "rustdb-base::rng::tests::output_covers_its_range", "rustdb-base::rng::tests::bounded_selection_stays_in_range"]
+
+[[capability]]
+id = "vfs.contract.open"
+source = "https://sqlite.org/vfs.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["vfs.open.create-and-reopen", "vfs.open.missing-without-create", "vfs.open.exclusive-refuses-existing"]
+
+[[capability]]
+id = "vfs.contract.read"
+source = "https://sqlite.org/vfs.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["vfs.read.short-read-zero-fills"]
+
+[[capability]]
+id = "vfs.contract.write"
+source = "https://sqlite.org/vfs.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["vfs.write.extends-with-zeroes"]
+
+[[capability]]
+id = "vfs.contract.truncate"
+source = "https://sqlite.org/vfs.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["vfs.truncate.shrinks-and-grows"]
+
+[[capability]]
+id = "vfs.contract.sync"
+source = "https://sqlite.org/vfs.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["vfs.sync.succeeds-in-every-mode"]
+
+[[capability]]
+id = "vfs.contract.readonly"
+source = "https://sqlite.org/vfs.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["vfs.readonly.refuses-writes"]
+
+[[capability]]
+id = "vfs.contract.delete"
+source = "https://sqlite.org/vfs.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["vfs.delete.is-idempotent"]
+
+[[capability]]
+id = "vfs.contract.access"
+source = "https://sqlite.org/vfs.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["vfs.access.reports-existence"]
+
+[[capability]]
+id = "vfs.contract.fullpath"
+source = "https://sqlite.org/vfs.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["vfs.fullpath.is-absolute-and-stable"]
+
+[[capability]]
+id = "vfs.contract.identity"
+source = "https://sqlite.org/vfs.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["vfs.identity.is-stable-across-handles"]
+
+[[capability]]
+id = "vfs.contract.temp-files"
+source = "https://sqlite.org/tempfiles.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["vfs.temp.path-is-fresh", "vfs.temp.delete-on-close"]
+
+[[capability]]
+id = "vfs.contract.randomness"
+source = "https://sqlite.org/vfs.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["vfs.random.is-not-constant"]
+
+[[capability]]
+id = "vfs.contract.clock"
+source = "https://sqlite.org/vfs.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["vfs.clock.is-monotonic-enough"]
+
+[[capability]]
+id = "vfs.contract.device-characteristics"
+source = "https://sqlite.org/vfs.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["vfs.device.claims-are-true", "rustdb-vfs::contract::tests::the_conservative_device_grants_nothing"]
+
+[[capability]]
+id = "vfs.lock.shared"
+source = "https://sqlite.org/lockingv3.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["vfs.lock.shared-is-shared", "rustdb-vfs::locks::tests::readers_share"]
+
+[[capability]]
+id = "vfs.lock.reserved"
+source = "https://sqlite.org/lockingv3.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["vfs.lock.reserved-is-exclusive", "vfs.lock.reserved-is-visible", "rustdb-vfs::locks::tests::reserved_excludes_other_writers_but_not_readers"]
+
+[[capability]]
+id = "vfs.lock.pending"
+source = "https://sqlite.org/lockingv3.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["vfs.lock.pending-blocks-new-readers", "rustdb-vfs::locks::tests::pending_stops_new_readers"]
+
+[[capability]]
+id = "vfs.lock.exclusive"
+source = "https://sqlite.org/lockingv3.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["vfs.lock.exclusive-waits-for-readers", "vfs.lock.downgrade-restores-reader", "rustdb-vfs::locks::tests::exclusive_waits_for_readers_to_leave", "rustdb-vfs::locks::tests::dropping_from_exclusive_to_shared_restores_the_read_lock"]
+
+[[capability]]
+id = "vfs.lock.protocol-errors"
+source = "https://sqlite.org/lockingv3.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-vfs::locks::tests::illegal_transitions_are_protocol_errors", "rustdb-vfs::contract::tests::lock_levels_are_ordered_by_strength"]
+
+[[capability]]
+id = "vfs.lock.release-on-close"
+source = "https://sqlite.org/lockingv3.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["vfs.lock.close-releases", "rustdb-vfs::locks::tests::releasing_everything_leaves_the_table_unlocked", "rustdb-vfs::a_dead_process_releases_its_locks"]
+
+[[capability]]
+id = "vfs.lock.cross-process"
+source = "https://sqlite.org/lockingv3.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-vfs::locks_conflict_across_processes"]
+
+[[capability]]
+id = "vfs.paths.companion-files"
+source = "https://sqlite.org/tempfiles.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-vfs::path::tests::companion_files_append_to_the_whole_name", "rustdb-vfs::path::tests::a_name_without_an_extension_still_gets_companions", "rustdb-vfs::path::tests::the_special_names_are_recognised"]
+
+[[capability]]
+id = "vfs.shm.mapping"
+source = "https://sqlite.org/wal.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["vfs.shm.round-trips"]
+
+[[capability]]
+id = "vfs.shm.locks"
+source = "https://sqlite.org/wal.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["vfs.shm.locks-exclude", "rustdb-vfs::shm_locks::tests::readers_share_and_writers_exclude", "rustdb-vfs::shm_locks::tests::a_blocked_range_changes_nothing", "rustdb-vfs::shm_locks::tests::out_of_range_requests_are_refused"]
+
+[[capability]]
+id = "vfs.conformance.memory"
+source = "https://sqlite.org/vfs.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-vfs::memory_vfs_passes_the_conformance_suite"]
+
+[[capability]]
+id = "vfs.conformance.os"
+source = "https://sqlite.org/vfs.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-vfs::os_vfs_passes_the_conformance_suite"]
+
+[[capability]]
+id = "sim.determinism.trace"
+source = "https://sqlite.org/atomiccommit.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-sim::the_same_seed_replays_an_identical_trace", "rustdb-sim::the_seed_drives_the_simulated_randomness", "rustdb-sim::trace::tests::the_digest_follows_the_events", "rustdb-sim::trace::tests::events_serialise_in_a_fixed_shape"]
+
+[[capability]]
+id = "sim.determinism.schedule"
+source = "https://sqlite.org/isolation.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-sim::a_recorded_schedule_replays_an_identical_event_trace", "rustdb-sim::schedule::tests::the_same_seed_replays_the_same_interleaving", "rustdb-sim::schedule::tests::exploration_enumerates_every_schedule", "rustdb-sim::schedule::tests::a_recorded_schedule_replays_its_run"]
+
+[[capability]]
+id = "sim.crash.synced-writes-survive"
+source = "https://sqlite.org/atomiccommit.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-sim::a_synced_write_survives_every_simulated_power_loss", "rustdb-sim::media::tests::a_synced_write_always_survives"]
+
+[[capability]]
+id = "sim.crash.unsynced-writes-may-be-lost"
+source = "https://sqlite.org/atomiccommit.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-sim::an_unsynced_write_is_sometimes_lost_across_seeds", "rustdb-sim::media::tests::an_unsynced_write_is_sometimes_lost"]
+
+[[capability]]
+id = "sim.crash.torn-sectors"
+source = "https://sqlite.org/atomiccommit.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-sim::media::tests::a_torn_sector_mixes_only_old_and_new", "rustdb-sim::media::tests::powersafe_overwrite_changes_what_a_crash_can_produce", "rustdb-sim::the_media_model_follows_its_declaration", "rustdb-sim::media::tests::truncation_drops_cached_sectors_past_the_end"]
+
+[[capability]]
+id = "sim.crash.artifacts"
+source = "https://sqlite.org/atomiccommit.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-sim::crash_artifacts_are_written_to_disk"]
+
+[[capability]]
+id = "sim.failpoints.campaign"
+source = "https://sqlite.org/rescode.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-sim::the_failpoint_campaign_terminates_with_every_failure_reported", "rustdb-sim::failpoint::tests::the_nth_call_campaign_fires_once_at_the_right_call", "rustdb-sim::failpoint::tests::a_per_site_policy_counts_its_own_site", "rustdb-sim::failpoint::tests::injected_failures_carry_the_sites_code"]
+
+[[capability]]
+id = "sim.failpoints.short-write"
+source = "https://sqlite.org/rescode.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-sim::a_short_write_reports_success_and_stores_half"]
+
+[[capability]]
+id = "sim.vfs.conformance"
+source = "https://sqlite.org/vfs.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-sim::the_simulator_passes_the_vfs_conformance_suite"]
+
+[[capability]]
+id = "values.storage-classes"
+source = "https://sqlite.org/datatype3.html"
+profile = "default"
+phase = "phase 2: values, affinities, collations, and records"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "values.affinity"
+source = "https://sqlite.org/datatype3.html"
+profile = "default"
+phase = "phase 2: values, affinities, collations, and records"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "values.comparison"
+source = "https://sqlite.org/datatype3.html"
+profile = "default"
+phase = "phase 2: values, affinities, collations, and records"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "values.collation.binary"
+source = "https://sqlite.org/datatype3.html"
+profile = "default"
+phase = "phase 2: values, affinities, collations, and records"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "values.collation.nocase"
+source = "https://sqlite.org/datatype3.html"
+profile = "default"
+phase = "phase 2: values, affinities, collations, and records"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "values.collation.rtrim"
+source = "https://sqlite.org/datatype3.html"
+profile = "default"
+phase = "phase 2: values, affinities, collations, and records"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "values.cast"
+source = "https://sqlite.org/datatype3.html"
+profile = "default"
+phase = "phase 2: values, affinities, collations, and records"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "values.numeric-parsing"
+source = "https://sqlite.org/datatype3.html"
+profile = "default"
+phase = "phase 2: values, affinities, collations, and records"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "values.record-format"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 2: values, affinities, collations, and records"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "values.index-key-order"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 2: values, affinities, collations, and records"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "storage.header.codec"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 3: read-only header, pager, page cache, and B-tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "storage.header.validation"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 3: read-only header, pager, page cache, and B-tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "storage.pager.read-path"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 3: read-only header, pager, page cache, and B-tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "storage.page-cache"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 3: read-only header, pager, page cache, and B-tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "storage.btree.table-leaf"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 3: read-only header, pager, page cache, and B-tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "storage.btree.table-interior"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 3: read-only header, pager, page cache, and B-tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "storage.btree.index-leaf"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 3: read-only header, pager, page cache, and B-tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "storage.btree.index-interior"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 3: read-only header, pager, page cache, and B-tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "storage.overflow-chains"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 3: read-only header, pager, page cache, and B-tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "storage.cursor.seek"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 3: read-only header, pager, page cache, and B-tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "storage.btree.insert"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 4: B-tree mutation, allocation, and rollback pages"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "storage.btree.delete"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 4: B-tree mutation, allocation, and rollback pages"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "storage.btree.balance"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 4: B-tree mutation, allocation, and rollback pages"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "storage.freelist"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 4: B-tree mutation, allocation, and rollback pages"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "storage.pointer-maps"
+source = "https://sqlite.org/pragma.html#pragma_auto_vacuum"
+profile = "default"
+phase = "phase 4: B-tree mutation, allocation, and rollback pages"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "storage.auto-vacuum"
+source = "https://sqlite.org/pragma.html#pragma_auto_vacuum"
+profile = "default"
+phase = "phase 4: B-tree mutation, allocation, and rollback pages"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "storage.integrity-check"
+source = "https://sqlite.org/pragma.html"
+profile = "default"
+phase = "phase 4: B-tree mutation, allocation, and rollback pages"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.lexer.tokens"
+source = "https://sqlite.org/lang.html"
+profile = "default"
+phase = "phase 5: lexer, parser, AST, and syntax parity"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.lexer.string-literals"
+source = "https://sqlite.org/lang_expr.html"
+profile = "default"
+phase = "phase 5: lexer, parser, AST, and syntax parity"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.lexer.identifiers"
+source = "https://sqlite.org/lang.html"
+profile = "default"
+phase = "phase 5: lexer, parser, AST, and syntax parity"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.parser.statement-splitting"
+source = "https://sqlite.org/lang.html"
+profile = "default"
+phase = "phase 5: lexer, parser, AST, and syntax parity"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.parser.error-offsets"
+source = "https://sqlite.org/lang.html"
+profile = "default"
+phase = "phase 5: lexer, parser, AST, and syntax parity"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.parser.keyword-set"
+source = "https://sqlite.org/lang.html"
+profile = "default"
+phase = "phase 5: lexer, parser, AST, and syntax parity"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.select.basic"
+source = "https://sqlite.org/lang_select.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.select.where"
+source = "https://sqlite.org/lang_select.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.select.order-by"
+source = "https://sqlite.org/lang_select.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.select.limit-offset"
+source = "https://sqlite.org/lang_select.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.expr.operators"
+source = "https://sqlite.org/lang_expr.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.expr.case"
+source = "https://sqlite.org/lang_expr.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.expr.like-glob"
+source = "https://sqlite.org/lang_expr.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.expr.in-subquery"
+source = "https://sqlite.org/lang_expr.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "catalog.sqlite-schema"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "catalog.schema-cookie"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "catalog.prepared-statement-invalidation"
+source = "https://sqlite.org/c3ref/funclist.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.insert"
+source = "https://sqlite.org/lang_insert.html"
+profile = "default"
+phase = "phase 7: single-database rollback transactions and DML"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.update"
+source = "https://sqlite.org/lang_update.html"
+profile = "default"
+phase = "phase 7: single-database rollback transactions and DML"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.delete"
+source = "https://sqlite.org/lang_delete.html"
+profile = "default"
+phase = "phase 7: single-database rollback transactions and DML"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.create-table"
+source = "https://sqlite.org/lang_createtable.html"
+profile = "default"
+phase = "phase 7: single-database rollback transactions and DML"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.drop-table"
+source = "https://sqlite.org/lang_droptable.html"
+profile = "default"
+phase = "phase 7: single-database rollback transactions and DML"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.create-index"
+source = "https://sqlite.org/lang_createindex.html"
+profile = "default"
+phase = "phase 7: single-database rollback transactions and DML"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.conflict-resolution"
+source = "https://sqlite.org/lang_conflict.html"
+profile = "default"
+phase = "phase 7: single-database rollback transactions and DML"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "txn.begin-commit-rollback"
+source = "https://sqlite.org/lang_transaction.html"
+profile = "default"
+phase = "phase 7: single-database rollback transactions and DML"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "txn.rollback-journal"
+source = "https://sqlite.org/atomiccommit.html"
+profile = "default"
+phase = "phase 7: single-database rollback transactions and DML"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "txn.hot-journal-recovery"
+source = "https://sqlite.org/atomiccommit.html"
+profile = "default"
+phase = "phase 7: single-database rollback transactions and DML"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "txn.savepoints"
+source = "https://sqlite.org/lang_savepoint.html"
+profile = "default"
+phase = "phase 7: single-database rollback transactions and DML"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "txn.statement-journal"
+source = "https://sqlite.org/atomiccommit.html"
+profile = "default"
+phase = "phase 7: single-database rollback transactions and DML"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "txn.synchronous-modes"
+source = "https://sqlite.org/pragma.html"
+profile = "default"
+phase = "phase 7: single-database rollback transactions and DML"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.select.joins"
+source = "https://sqlite.org/lang_select.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.select.compound"
+source = "https://sqlite.org/lang_select.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.select.group-by-having"
+source = "https://sqlite.org/lang_select.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.select.distinct"
+source = "https://sqlite.org/lang_select.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.with.cte"
+source = "https://sqlite.org/lang_with.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.with.recursive"
+source = "https://sqlite.org/lang_with.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.select.window"
+source = "https://sqlite.org/windowfunctions.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.upsert"
+source = "https://sqlite.org/lang_upsert.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.returning"
+source = "https://sqlite.org/lang_returning.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.create-view"
+source = "https://sqlite.org/lang_createview.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.create-trigger"
+source = "https://sqlite.org/lang_createtrigger.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.alter-table"
+source = "https://sqlite.org/lang_altertable.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.generated-columns"
+source = "https://sqlite.org/lang_createtable.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.without-rowid"
+source = "https://sqlite.org/lang_createtable.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.strict-tables"
+source = "https://sqlite.org/lang_createtable.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.explain"
+source = "https://sqlite.org/lang_explain.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.analyze"
+source = "https://sqlite.org/lang_analyze.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.reindex"
+source = "https://sqlite.org/lang_reindex.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.vacuum"
+source = "https://sqlite.org/lang_vacuum.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "planner.access-paths"
+source = "https://sqlite.org/lang_select.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "planner.join-order"
+source = "https://sqlite.org/lang_select.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "planner.statistics"
+source = "https://sqlite.org/lang_analyze.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.foreign-keys.immediate"
+source = "https://sqlite.org/foreignkeys.html"
+profile = "default"
+phase = "phase 9: foreign keys, ATTACH, and multi-database commit"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.foreign-keys.deferred"
+source = "https://sqlite.org/foreignkeys.html"
+profile = "default"
+phase = "phase 9: foreign keys, ATTACH, and multi-database commit"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.foreign-keys.actions"
+source = "https://sqlite.org/foreignkeys.html"
+profile = "default"
+phase = "phase 9: foreign keys, ATTACH, and multi-database commit"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.attach-detach"
+source = "https://sqlite.org/lang_attach.html"
+profile = "default"
+phase = "phase 9: foreign keys, ATTACH, and multi-database commit"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "txn.multi-database-commit"
+source = "https://sqlite.org/atomiccommit.html"
+profile = "default"
+phase = "phase 9: foreign keys, ATTACH, and multi-database commit"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "txn.master-journal"
+source = "https://sqlite.org/atomiccommit.html"
+profile = "default"
+phase = "phase 9: foreign keys, ATTACH, and multi-database commit"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "wal.mode-switch"
+source = "https://sqlite.org/wal.html"
+profile = "default"
+phase = "phase 10: WAL and concurrent connection semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "wal.frame-format"
+source = "https://sqlite.org/wal.html"
+profile = "default"
+phase = "phase 10: WAL and concurrent connection semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "wal.index"
+source = "https://sqlite.org/wal.html"
+profile = "default"
+phase = "phase 10: WAL and concurrent connection semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "wal.read-transactions"
+source = "https://sqlite.org/wal.html"
+profile = "default"
+phase = "phase 10: WAL and concurrent connection semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "wal.write-transactions"
+source = "https://sqlite.org/wal.html"
+profile = "default"
+phase = "phase 10: WAL and concurrent connection semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "wal.checkpoint.passive"
+source = "https://sqlite.org/wal.html"
+profile = "default"
+phase = "phase 10: WAL and concurrent connection semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "wal.checkpoint.full"
+source = "https://sqlite.org/wal.html"
+profile = "default"
+phase = "phase 10: WAL and concurrent connection semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "wal.checkpoint.restart"
+source = "https://sqlite.org/wal.html"
+profile = "default"
+phase = "phase 10: WAL and concurrent connection semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "wal.checkpoint.truncate"
+source = "https://sqlite.org/wal.html"
+profile = "default"
+phase = "phase 10: WAL and concurrent connection semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "wal.recovery"
+source = "https://sqlite.org/wal.html"
+profile = "default"
+phase = "phase 10: WAL and concurrent connection semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "txn.busy-handler"
+source = "https://sqlite.org/c3ref/funclist.html"
+profile = "default"
+phase = "phase 10: WAL and concurrent connection semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "txn.isolation"
+source = "https://sqlite.org/isolation.html"
+profile = "default"
+phase = "phase 10: WAL and concurrent connection semantics"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "functions.core"
+source = "https://sqlite.org/lang_corefunc.html"
+profile = "default"
+phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "functions.aggregate"
+source = "https://sqlite.org/lang_aggfunc.html"
+profile = "default"
+phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "functions.date-time"
+source = "https://sqlite.org/lang_datefunc.html"
+profile = "default"
+phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "functions.math"
+source = "https://sqlite.org/lang_mathfunc.html"
+profile = "default"
+phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "functions.json"
+source = "https://sqlite.org/json1.html"
+profile = "default"
+phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "functions.window"
+source = "https://sqlite.org/windowfunctions.html"
+profile = "default"
+phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "pragma.schema"
+source = "https://sqlite.org/pragma.html"
+profile = "default"
+phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "pragma.pager"
+source = "https://sqlite.org/pragma.html"
+profile = "default"
+phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "pragma.integrity"
+source = "https://sqlite.org/pragma.html"
+profile = "default"
+phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "pragma.query-only"
+source = "https://sqlite.org/pragma.html"
+profile = "default"
+phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "vtab.contract"
+source = "https://sqlite.org/vtab.html"
+profile = "default"
+phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "vtab.eponymous"
+source = "https://sqlite.org/vtab.html"
+profile = "default"
+phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "ext.fts5.queries"
+source = "https://sqlite.org/fts5.html"
+profile = "default"
+phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "ext.fts5.ranking"
+source = "https://sqlite.org/fts5.html"
+profile = "default"
+phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "ext.rtree"
+source = "https://sqlite.org/rtree.html"
+profile = "default"
+phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "capi.open-close"
+source = "https://sqlite.org/c3ref/funclist.html"
+profile = "default"
+phase = "phase 12: C ABI and CLI completion"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "capi.prepare-step-finalize"
+source = "https://sqlite.org/c3ref/funclist.html"
+profile = "default"
+phase = "phase 12: C ABI and CLI completion"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "capi.bind"
+source = "https://sqlite.org/c3ref/funclist.html"
+profile = "default"
+phase = "phase 12: C ABI and CLI completion"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "capi.column-metadata"
+source = "https://sqlite.org/c3ref/funclist.html"
+profile = "default"
+phase = "phase 12: C ABI and CLI completion"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "capi.hooks"
+source = "https://sqlite.org/c3ref/funclist.html"
+profile = "default"
+phase = "phase 12: C ABI and CLI completion"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "capi.backup"
+source = "https://sqlite.org/backup.html"
+profile = "default"
+phase = "phase 12: C ABI and CLI completion"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "capi.blob-io"
+source = "https://sqlite.org/c3ref/blob_open.html"
+profile = "default"
+phase = "phase 12: C ABI and CLI completion"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "capi.serialize-deserialize"
+source = "https://sqlite.org/c3ref/serialize.html"
+profile = "default"
+phase = "phase 12: C ABI and CLI completion"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "capi.custom-functions"
+source = "https://sqlite.org/c3ref/funclist.html"
+profile = "default"
+phase = "phase 12: C ABI and CLI completion"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "capi.vfs-registration"
+source = "https://sqlite.org/vfs.html"
+profile = "default"
+phase = "phase 12: C ABI and CLI completion"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "cli.dot-commands"
+source = "https://sqlite.org/cli.html"
+profile = "default"
+phase = "phase 12: C ABI and CLI completion"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "cli.output-modes"
+source = "https://sqlite.org/cli.html"
+profile = "default"
+phase = "phase 12: C ABI and CLI completion"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "search.virtual-table"
+source = "https://sqlite.org/vtab.html"
+profile = "default"
+phase = "phase 13: transactional rust-db search and legacy migration"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "search.transactional-visibility"
+source = "https://sqlite.org/isolation.html"
+profile = "default"
+phase = "phase 13: transactional rust-db search and legacy migration"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "search.legacy-migration"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 13: transactional rust-db search and legacy migration"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "perf.qualified-measurement"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 14: performance qualification and release"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "perf.regression-tracking"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 14: performance qualification and release"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "sql.negative.right-outer-join-pre-3-39"
+source = "https://sqlite.org/omitted.html"
+profile = "negative-parity"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+expected = "syntax-error"
+tests = []
+
+[[capability]]
+id = "sql.negative.grant-revoke"
+source = "https://sqlite.org/omitted.html"
+profile = "negative-parity"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+expected = "syntax-error"
+tests = []
+
+[[capability]]
+id = "sql.negative.full-alter-table"
+source = "https://sqlite.org/omitted.html"
+profile = "negative-parity"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+expected = "syntax-error"
+tests = []
+
+[[capability]]
+id = "sql.negative.trigger-for-each-statement"
+source = "https://sqlite.org/omitted.html"
+profile = "negative-parity"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+expected = "syntax-error"
+tests = []
+
+[[capability]]
+id = "sql.negative.writable-views"
+source = "https://sqlite.org/omitted.html"
+profile = "negative-parity"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "missing"
+expected = "syntax-error"
+tests = []
+

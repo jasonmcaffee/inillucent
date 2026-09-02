@@ -1,0 +1,10 @@
+[package]
+name = "rustdb-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SQLite file codec, pager, page cache, B-trees, overflow chains, freelist, and vacuum."
+
+[dependencies]
+rustdb-base = { workspace = true }
+rustdb-vfs = { workspace = true }

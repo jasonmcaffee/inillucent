@@ -1,6 +1,29 @@
 [workspace]
 resolver = "2"
-members = ["crates/rustdb-core", "crates/rustdb-bench"]
+members = [
+    # Phase 1 foundation.
+    "crates/rustdb-base",
+    "crates/rustdb-vfs",
+    "crates/rustdb-sim",
+    # Engine layers, filled in by later phases.
+    "crates/rustdb-value",
+    "crates/rustdb-storage",
+    "crates/rustdb-transaction",
+    "crates/rustdb-catalog",
+    "crates/rustdb-sql",
+    "crates/rustdb-ext",
+    "crates/rustdb-vm",
+    "crates/rustdb-session",
+    "crates/rustdb",
+    "crates/rustdb-capi",
+    "crates/rustdb-cli",
+    "crates/rustdb-search",
+    # Existing retrieval engine and its grading harness.
+    "crates/rustdb-core",
+    "crates/rustdb-bench",
+    # Test-only assurance tooling.
+    "crates/rustdb-compat",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -8,10 +31,35 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
+# ---------------------------------------------------------------------------
+# First-party crates. Every internal edge is declared here so that the layering
+# test in rustdb-compat can read one table instead of walking the file system.
+# ---------------------------------------------------------------------------
+rustdb-base = { path = "crates/rustdb-base" }
+rustdb-vfs = { path = "crates/rustdb-vfs" }
+rustdb-sim = { path = "crates/rustdb-sim" }
+rustdb-value = { path = "crates/rustdb-value" }
+rustdb-storage = { path = "crates/rustdb-storage" }
+rustdb-transaction = { path = "crates/rustdb-transaction" }
+rustdb-catalog = { path = "crates/rustdb-catalog" }
+rustdb-sql = { path = "crates/rustdb-sql" }
+rustdb-ext = { path = "crates/rustdb-ext" }
+rustdb-vm = { path = "crates/rustdb-vm" }
+rustdb-session = { path = "crates/rustdb-session" }
+rustdb = { path = "crates/rustdb" }
+rustdb-core = { path = "crates/rustdb-core" }
+rustdb-search = { path = "crates/rustdb-search" }
+
+# ---------------------------------------------------------------------------
+# Third-party dependencies. docs/dependency-policy.md records why each one is
+# infrastructure rather than delegated database behaviour, and the dependency
+# graph test refuses anything that is not listed there.
+# ---------------------------------------------------------------------------
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
 rayon = "1"
 rust-stemmers = "1"
 bytemuck = { version = "1", features = ["derive"] }
@@ -20,6 +68,16 @@ rand = "0.8"
 clap = { version = "4", features = ["derive"] }
 postgres = "0.19"
 pgvector = { version = "0.4", features = ["postgres"] }
+libc = "0.2"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_Security_Cryptography",
+    "Win32_System_Threading",
+] }
 # ONNX inference. `load-dynamic` loads libonnxruntime at runtime through dlopen
 # rather than linking it, because ort's system linking strategy wants a static
 # library and Homebrew ships only a dylib. It also avoids ort's own binary

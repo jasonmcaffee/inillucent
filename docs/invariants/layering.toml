@@ -1,0 +1,292 @@
+# The dependency-direction contract.
+#
+# This file is checked, not documented: `deps.layering-is-acyclic` and its
+# siblings in rustdb-compat read it, walk the workspace manifests, and fail on
+# any edge that is not declared here. An architecture rule that is only written
+# down is a rule that has already been broken somewhere.
+#
+# `kind` decides who may depend on whom. A production crate may depend only on
+# production crates listed in its own `may_depend_on`. A test-only crate may
+# depend inward on anything; nothing may depend outward on a test-only crate.
+#
+# The TDD's crate table names `rustdb-value` and `rustdb-vfs` as the two leaves.
+# `rustdb-base` is a refinement made in task-1782: phase 1 needs checked
+# integers, varints, checksums, page arithmetic and the error table before
+# values exist, and `rustdb-vfs` needs the same error table, so they live in a
+# leaf below both rather than being duplicated or forced into a crate whose own
+# contents do not land until phase 2.
+
+schema_version = 1
+
+[[crate]]
+name = "rustdb-base"
+kind = "production"
+layer = 0
+may_depend_on = []
+
+[[crate]]
+name = "rustdb-vfs"
+kind = "production"
+layer = 1
+may_depend_on = ["rustdb-base"]
+
+[[crate]]
+name = "rustdb-value"
+kind = "production"
+layer = 1
+may_depend_on = ["rustdb-base"]
+
+[[crate]]
+name = "rustdb-storage"
+kind = "production"
+layer = 2
+may_depend_on = ["rustdb-base", "rustdb-vfs"]
+
+[[crate]]
+name = "rustdb-transaction"
+kind = "production"
+layer = 3
+may_depend_on = ["rustdb-base", "rustdb-vfs", "rustdb-storage"]
+
+[[crate]]
+name = "rustdb-catalog"
+kind = "production"
+layer = 4
+may_depend_on = ["rustdb-base", "rustdb-value", "rustdb-transaction"]
+
+[[crate]]
+name = "rustdb-ext"
+kind = "production"
+layer = 4
+may_depend_on = ["rustdb-base", "rustdb-value"]
+
+[[crate]]
+name = "rustdb-sql"
+kind = "production"
+layer = 5
+may_depend_on = ["rustdb-base", "rustdb-value", "rustdb-catalog"]
+
+[[crate]]
+name = "rustdb-vm"
+kind = "production"
+layer = 5
+may_depend_on = [
+  "rustdb-base",
+  "rustdb-value",
+  "rustdb-catalog",
+  "rustdb-storage",
+  "rustdb-transaction",
+  "rustdb-ext",
+]
+
+[[crate]]
+name = "rustdb-session"
+kind = "production"
+layer = 6
+may_depend_on = [
+  "rustdb-base",
+  "rustdb-value",
+  "rustdb-vfs",
+  "rustdb-catalog",
+  "rustdb-transaction",
+  "rustdb-sql",
+  "rustdb-vm",
+]
+
+[[crate]]
+name = "rustdb"
+kind = "production"
+layer = 7
+may_depend_on = ["rustdb-base", "rustdb-value", "rustdb-session"]
+
+[[crate]]
+name = "rustdb-capi"
+kind = "production"
+layer = 8
+may_depend_on = ["rustdb"]
+
+[[crate]]
+name = "rustdb-cli"
+kind = "production"
+layer = 8
+may_depend_on = ["rustdb"]
+
+[[crate]]
+name = "rustdb-core"
+kind = "production"
+layer = 0
+may_depend_on = []
+
+[[crate]]
+name = "rustdb-search"
+kind = "production"
+layer = 5
+may_depend_on = ["rustdb-base", "rustdb-ext", "rustdb-core"]
+
+[[crate]]
+name = "rustdb-sim"
+kind = "test-only"
+layer = 9
+may_depend_on = ["rustdb-base", "rustdb-vfs"]
+
+[[crate]]
+name = "rustdb-compat"
+kind = "test-only"
+layer = 10
+may_depend_on = ["rustdb-base", "rustdb-vfs", "rustdb-sim"]
+
+[[crate]]
+name = "rustdb-bench"
+kind = "test-only"
+layer = 10
+may_depend_on = ["rustdb-core"]
+
+# ---------------------------------------------------------------------------
+# Third-party crates a production crate may depend on, and where.
+#
+# Everything here is infrastructure: error plumbing, an operating-system
+# boundary, or a numeric kernel. Nothing here decides database behaviour, and
+# `docs/dependency-policy.md` records the argument for each one.
+# ---------------------------------------------------------------------------
+
+[[external]]
+name = "libc"
+category = "os-boundary"
+allowed_in = ["rustdb-vfs"]
+
+[[external]]
+name = "windows-sys"
+category = "os-boundary"
+allowed_in = ["rustdb-vfs"]
+
+[[external]]
+name = "anyhow"
+category = "error-plumbing"
+allowed_in = ["rustdb-core", "rustdb-bench"]
+
+[[external]]
+name = "thiserror"
+category = "error-plumbing"
+allowed_in = ["rustdb-core", "rustdb-bench"]
+
+[[external]]
+name = "serde"
+category = "data-plumbing"
+allowed_in = ["rustdb-core", "rustdb-bench"]
+
+[[external]]
+name = "serde_json"
+category = "data-plumbing"
+allowed_in = ["rustdb-core", "rustdb-bench"]
+
+[[external]]
+name = "rayon"
+category = "numeric-kernel"
+allowed_in = ["rustdb-core", "rustdb-bench"]
+
+[[external]]
+name = "rust-stemmers"
+category = "numeric-kernel"
+allowed_in = ["rustdb-core"]
+
+[[external]]
+name = "bytemuck"
+category = "numeric-kernel"
+allowed_in = ["rustdb-core"]
+
+[[external]]
+name = "memmap2"
+category = "os-boundary"
+allowed_in = ["rustdb-core"]
+
+[[external]]
+name = "rand"
+category = "numeric-kernel"
+allowed_in = ["rustdb-core", "rustdb-bench"]
+
+[[external]]
+name = "clap"
+category = "cli"
+allowed_in = ["rustdb-bench"]
+
+[[external]]
+name = "postgres"
+category = "benchmark-baseline"
+allowed_in = ["rustdb-bench"]
+
+[[external]]
+name = "pgvector"
+category = "benchmark-baseline"
+allowed_in = ["rustdb-bench"]
+
+[[external]]
+name = "ort"
+category = "numeric-kernel"
+allowed_in = ["rustdb-core", "rustdb-bench"]
+
+[[external]]
+name = "tokenizers"
+category = "numeric-kernel"
+allowed_in = ["rustdb-core"]
+
+# ---------------------------------------------------------------------------
+# Crates that may never appear in a production dependency graph. These are the
+# things the first-party charter forbids delegating: another database engine,
+# another SQL parser, another storage or transaction layer.
+# ---------------------------------------------------------------------------
+
+[[forbidden]]
+pattern = "sqlite"
+reason = "SQLite is a reference and a test oracle, never a runtime component"
+
+[[forbidden]]
+pattern = "libsql"
+reason = "a SQLite fork is still another engine"
+
+[[forbidden]]
+pattern = "turso"
+reason = "Turso is a non-normative design reference only"
+
+[[forbidden]]
+pattern = "limbo"
+reason = "Turso's engine under its former name"
+
+[[forbidden]]
+pattern = "duckdb"
+reason = "another database engine"
+
+[[forbidden]]
+pattern = "sqlparser"
+reason = "rust-db owns its SQL front end"
+
+[[forbidden]]
+pattern = "sqlx"
+reason = "brings a driver and a parser"
+
+[[forbidden]]
+pattern = "diesel"
+reason = "brings a query builder and drivers"
+
+[[forbidden]]
+pattern = "rocksdb"
+reason = "another storage engine"
+
+[[forbidden]]
+pattern = "redb"
+reason = "another storage engine"
+
+[[forbidden]]
+pattern = "sled"
+reason = "another storage engine"
+
+[[forbidden]]
+pattern = "lmdb"
+reason = "another storage engine"
+
+[[forbidden]]
+pattern = "heed"
+reason = "an LMDB wrapper"
+
+[[forbidden]]
+pattern = "rusqlite"
+reason = "SQLite bindings"

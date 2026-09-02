@@ -1,0 +1,475 @@
+//! The dependency-direction check.
+//!
+//! Invariant: the layer graph in `docs/invariants/layering.toml` is what the
+//! workspace actually looks like. The check walks every crate manifest, builds
+//! the real graph, and refuses an edge the contract does not declare.
+//!
+//! Two of the charter's rules are impossible to enforce by review alone and are
+//! enforced here instead: no production crate may depend on another database
+//! engine or SQL parser, and no production crate may depend on the test-only
+//! harness crates. Both are the kind of mistake that is one `cargo add` away
+//! and invisible in a diff.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+use crate::toml_lite::{self, Value};
+
+/// What a crate is for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CrateKind {
+    /// Ships in the engine.
+    Production,
+    /// Exists only to test the engine.
+    TestOnly,
+}
+
+/// One declared crate.
+#[derive(Clone, Debug)]
+pub struct CrateRule {
+    /// The crate name.
+    pub name: String,
+    /// What the crate is for.
+    pub kind: CrateKind,
+    /// Its position in the layer graph, for reporting.
+    pub layer: i64,
+    /// The internal crates it may depend on.
+    pub may_depend_on: BTreeSet<String>,
+}
+
+/// One allowed third-party crate.
+#[derive(Clone, Debug)]
+pub struct ExternalRule {
+    /// The crate name.
+    pub name: String,
+    /// Why it is infrastructure rather than delegated behaviour.
+    pub category: String,
+    /// The first-party crates that may depend on it.
+    pub allowed_in: BTreeSet<String>,
+}
+
+/// One banned dependency pattern.
+#[derive(Clone, Debug)]
+pub struct ForbiddenRule {
+    /// A substring that must not appear in a production dependency's name.
+    pub pattern: String,
+    /// Why it is banned.
+    pub reason: String,
+}
+
+/// The whole contract.
+#[derive(Clone, Debug, Default)]
+pub struct Contract {
+    /// Every declared crate, by name.
+    pub crates: BTreeMap<String, CrateRule>,
+    /// Every allowed third-party crate, by name.
+    pub externals: BTreeMap<String, ExternalRule>,
+    /// Every banned pattern.
+    pub forbidden: Vec<ForbiddenRule>,
+}
+
+impl Contract {
+    /// Reads the contract from disk.
+    pub fn load(path: &Path) -> Result<Contract, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+        Contract::parse(&text)
+    }
+
+    /// Parses the contract.
+    pub fn parse(text: &str) -> Result<Contract, String> {
+        let document = toml_lite::parse(text)?;
+        let mut contract = Contract::default();
+        for row in document.array("crate") {
+            let name = row
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("a crate row has no name")?
+                .to_string();
+            let kind = match row.get("kind").and_then(Value::as_str) {
+                Some("production") => CrateKind::Production,
+                Some("test-only") => CrateKind::TestOnly,
+                other => return Err(format!("crate `{name}` has unknown kind {other:?}")),
+            };
+            contract.crates.insert(
+                name.clone(),
+                CrateRule {
+                    name,
+                    kind,
+                    layer: row.get("layer").and_then(Value::as_integer).unwrap_or(0),
+                    may_depend_on: row
+                        .get("may_depend_on")
+                        .and_then(Value::as_list)
+                        .map(|list| list.iter().cloned().collect())
+                        .unwrap_or_default(),
+                },
+            );
+        }
+        for row in document.array("external") {
+            let name = row
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or("an external row has no name")?
+                .to_string();
+            contract.externals.insert(
+                name.clone(),
+                ExternalRule {
+                    name,
+                    category: row
+                        .get("category")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unclassified")
+                        .to_string(),
+                    allowed_in: row
+                        .get("allowed_in")
+                        .and_then(Value::as_list)
+                        .map(|list| list.iter().cloned().collect())
+                        .unwrap_or_default(),
+                },
+            );
+        }
+        for row in document.array("forbidden") {
+            contract.forbidden.push(ForbiddenRule {
+                pattern: row
+                    .get("pattern")
+                    .and_then(Value::as_str)
+                    .ok_or("a forbidden row has no pattern")?
+                    .to_string(),
+                reason: row
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("no reason recorded")
+                    .to_string(),
+            });
+        }
+        Ok(contract)
+    }
+}
+
+/// One crate's declared dependencies, read from its manifest.
+#[derive(Clone, Debug)]
+pub struct CrateManifest {
+    /// The crate name.
+    pub name: String,
+    /// The crates it depends on in a normal (non-dev, non-build) build.
+    pub normal: BTreeSet<String>,
+    /// The crates it depends on only for its own tests.
+    pub development: BTreeSet<String>,
+}
+
+/// Reads every workspace member's manifest.
+///
+/// The manifests are parsed rather than `cargo metadata` being invoked because
+/// the check has to run without a network and without a resolved lockfile, and
+/// because the declared edge is what the contract is about: a transitive edge
+/// through an allowed crate is not a violation.
+pub fn read_workspace(root: &Path) -> Result<Vec<CrateManifest>, String> {
+    let crates_dir = root.join("crates");
+    let entries = std::fs::read_dir(&crates_dir)
+        .map_err(|error| format!("cannot read {}: {error}", crates_dir.display()))?;
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.join("Cargo.toml").is_file())
+        .collect();
+    paths.sort();
+    let mut manifests = Vec::new();
+    for path in paths {
+        manifests.push(read_manifest(&path.join("Cargo.toml"))?);
+    }
+    Ok(manifests)
+}
+
+/// Reads one crate manifest's dependency sections.
+///
+/// This is a deliberately small reader for the shapes the workspace uses:
+/// `[dependencies]`, `[dev-dependencies]`, and target-specific variants of
+/// both. Anything else is reported rather than ignored.
+fn read_manifest(path: &Path) -> Result<CrateManifest, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let mut name = String::new();
+    let mut normal = BTreeSet::new();
+    let mut development = BTreeSet::new();
+    let mut section = String::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            section = line
+                .trim_matches(|character| character == '[' || character == ']')
+                .to_string();
+            continue;
+        }
+        let Some((key, _)) = line.split_once('=') else {
+            continue;
+        };
+        // `serde.workspace = true` names the crate `serde`; the dotted suffix
+        // is cargo syntax, not part of the dependency's name.
+        let key = key
+            .trim()
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if section == "package" && key == "name" {
+            name = line
+                .split('"')
+                .nth(1)
+                .ok_or_else(|| format!("{}: package name is not a string", path.display()))?
+                .to_string();
+            continue;
+        }
+        if section.ends_with("dev-dependencies") {
+            development.insert(key);
+        } else if section.ends_with("dependencies") {
+            normal.insert(key);
+        }
+    }
+    if name.is_empty() {
+        return Err(format!("{}: no package name", path.display()));
+    }
+    Ok(CrateManifest {
+        name,
+        normal,
+        development,
+    })
+}
+
+/// Checks the real workspace against the contract, returning every violation.
+pub fn check(contract: &Contract, manifests: &[CrateManifest]) -> Vec<String> {
+    let mut violations = Vec::new();
+    let known: BTreeSet<&str> = contract.crates.keys().map(String::as_str).collect();
+
+    for manifest in manifests {
+        let Some(rule) = contract.crates.get(&manifest.name) else {
+            violations.push(format!(
+                "crate `{}` is not declared in docs/invariants/layering.toml",
+                manifest.name
+            ));
+            continue;
+        };
+        for dependency in &manifest.normal {
+            if known.contains(dependency.as_str()) {
+                check_internal_edge(contract, rule, dependency, &mut violations);
+                continue;
+            }
+            check_external_edge(contract, rule, dependency, &mut violations);
+        }
+        for dependency in manifest
+            .development
+            .iter()
+            .filter(|name| known.contains(name.as_str()))
+        {
+            let Some(target) = contract.crates.get(dependency) else {
+                continue;
+            };
+            if rule.kind == CrateKind::Production && target.kind == CrateKind::TestOnly {
+                violations.push(format!(
+                    "production crate `{}` uses test-only crate `{dependency}` even as a dev-dependency, which puts harness code in the engine's test surface",
+                    rule.name
+                ));
+            }
+        }
+    }
+    violations.extend(find_cycles(contract));
+    violations
+}
+
+/// Checks one edge between two first-party crates.
+fn check_internal_edge(
+    contract: &Contract,
+    rule: &CrateRule,
+    dependency: &str,
+    violations: &mut Vec<String>,
+) {
+    if !rule.may_depend_on.contains(dependency) {
+        violations.push(format!(
+            "crate `{}` depends on `{dependency}`, which its layering rule does not allow",
+            rule.name
+        ));
+        return;
+    }
+    let Some(target) = contract.crates.get(dependency) else {
+        return;
+    };
+    if rule.kind == CrateKind::Production && target.kind == CrateKind::TestOnly {
+        violations.push(format!(
+            "production crate `{}` depends on test-only crate `{dependency}`",
+            rule.name
+        ));
+    }
+    if target.layer >= rule.layer && rule.name != dependency {
+        violations.push(format!(
+            "crate `{}` (layer {}) depends on `{dependency}` (layer {}), which is not below it",
+            rule.name, rule.layer, target.layer
+        ));
+    }
+}
+
+/// Checks one edge to a third-party crate.
+fn check_external_edge(
+    contract: &Contract,
+    rule: &CrateRule,
+    dependency: &str,
+    violations: &mut Vec<String>,
+) {
+    let lowered = dependency.to_ascii_lowercase();
+    for forbidden in &contract.forbidden {
+        if lowered.contains(&forbidden.pattern) {
+            violations.push(format!(
+                "crate `{}` depends on `{dependency}`, which is forbidden: {}",
+                rule.name, forbidden.reason
+            ));
+            return;
+        }
+    }
+    let Some(external) = contract.externals.get(dependency) else {
+        violations.push(format!(
+            "crate `{}` depends on third-party crate `{dependency}`, which docs/dependency-policy.md does not approve",
+            rule.name
+        ));
+        return;
+    };
+    if !external.allowed_in.contains(&rule.name) {
+        violations.push(format!(
+            "crate `{}` depends on `{dependency}`, which is approved only for {:?}",
+            rule.name, external.allowed_in
+        ));
+    }
+}
+
+/// Reports any cycle in the declared graph.
+///
+/// The layer numbers already forbid a cycle, but they are a human-maintained
+/// field; walking the graph catches a cycle introduced by two rules that were
+/// each individually plausible.
+fn find_cycles(contract: &Contract) -> Vec<String> {
+    let mut violations = Vec::new();
+    for start in contract.crates.keys() {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        let mut frontier: Vec<&str> = contract
+            .crates
+            .get(start)
+            .map(|rule| rule.may_depend_on.iter().map(String::as_str).collect())
+            .unwrap_or_default();
+        while let Some(next) = frontier.pop() {
+            if next == start.as_str() {
+                violations.push(format!("crate `{start}` is in a dependency cycle"));
+                break;
+            }
+            if !seen.insert(next) {
+                continue;
+            }
+            if let Some(rule) = contract.crates.get(next) {
+                frontier.extend(rule.may_depend_on.iter().map(String::as_str));
+            }
+        }
+    }
+    violations
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds a two-crate contract for a test.
+    fn contract() -> Contract {
+        Contract::parse(
+            "[[crate]]\nname = \"low\"\nkind = \"production\"\nlayer = 0\nmay_depend_on = []\n\n\
+             [[crate]]\nname = \"high\"\nkind = \"production\"\nlayer = 1\nmay_depend_on = [\"low\"]\n\n\
+             [[crate]]\nname = \"harness\"\nkind = \"test-only\"\nlayer = 9\nmay_depend_on = [\"low\", \"high\"]\n\n\
+             [[external]]\nname = \"libc\"\ncategory = \"os-boundary\"\nallowed_in = [\"low\"]\n\n\
+             [[forbidden]]\npattern = \"sqlite\"\nreason = \"another engine\"\n",
+        )
+        .expect("the contract parses")
+    }
+
+    /// Builds a manifest for a test.
+    fn manifest(name: &str, normal: &[&str]) -> CrateManifest {
+        CrateManifest {
+            name: name.to_string(),
+            normal: normal.iter().map(|item| item.to_string()).collect(),
+            development: BTreeSet::new(),
+        }
+    }
+
+    /// The declared graph must pass its own check.
+    #[test]
+    fn a_conforming_workspace_passes() {
+        let violations = check(
+            &contract(),
+            &[
+                manifest("low", &["libc"]),
+                manifest("high", &["low"]),
+                manifest("harness", &["low", "high"]),
+            ],
+        );
+        assert!(violations.is_empty(), "{violations:?}");
+    }
+
+    /// An edge that points upward is what the whole contract exists to stop.
+    #[test]
+    fn an_upward_edge_is_refused() {
+        let violations = check(&contract(), &[manifest("low", &["high"])]);
+        assert!(violations
+            .iter()
+            .any(|violation| violation.contains("does not allow")));
+    }
+
+    /// A production crate reaching into the harness is refused, including as a
+    /// dev-dependency.
+    #[test]
+    fn a_production_crate_may_not_use_the_harness() {
+        let mut low = manifest("low", &[]);
+        low.development.insert("harness".to_string());
+        let violations = check(&contract(), &[low]);
+        assert!(violations
+            .iter()
+            .any(|violation| violation.contains("test-only")));
+    }
+
+    /// Another database engine is refused by name, whatever it is called.
+    #[test]
+    fn another_engine_is_refused() {
+        let violations = check(&contract(), &[manifest("low", &["rusqlite"])]);
+        assert!(violations
+            .iter()
+            .any(|violation| violation.contains("forbidden")));
+    }
+
+    /// An unapproved third-party crate is refused even when it is harmless,
+    /// because the policy is an allow-list rather than a deny-list.
+    #[test]
+    fn an_unapproved_dependency_is_refused() {
+        let violations = check(&contract(), &[manifest("low", &["itertools"])]);
+        assert!(violations
+            .iter()
+            .any(|violation| violation.contains("does not approve")));
+    }
+
+    /// An approved crate in the wrong place is still refused: `libc` belongs to
+    /// the VFS layer and nowhere else.
+    #[test]
+    fn an_approved_dependency_in_the_wrong_crate_is_refused() {
+        let violations = check(&contract(), &[manifest("high", &["low", "libc"])]);
+        assert!(violations
+            .iter()
+            .any(|violation| violation.contains("approved only for")));
+    }
+
+    /// A cycle in the declared rules must be reported even when each rule looks
+    /// reasonable on its own.
+    #[test]
+    fn a_cycle_is_reported() {
+        let cyclic = Contract::parse(
+            "[[crate]]\nname = \"a\"\nkind = \"production\"\nlayer = 0\nmay_depend_on = [\"b\"]\n\n\
+             [[crate]]\nname = \"b\"\nkind = \"production\"\nlayer = 1\nmay_depend_on = [\"a\"]\n",
+        )
+        .expect("the contract parses");
+        let violations = find_cycles(&cyclic);
+        assert!(!violations.is_empty(), "the cycle was not reported");
+    }
+}

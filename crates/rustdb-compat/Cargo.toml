@@ -1,0 +1,31 @@
+[package]
+name = "rustdb-compat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Parity manifest, compatibility report generator, and the SQLite oracle protocol."
+
+[dependencies]
+rustdb-base = { workspace = true }
+rustdb-vfs = { workspace = true }
+rustdb-sim = { workspace = true }
+
+[[bin]]
+name = "rustdb-manifest"
+path = "src/bin/manifest.rs"
+
+[[bin]]
+name = "rustdb-oracle"
+path = "src/bin/oracle.rs"
+
+[[bin]]
+name = "rustdb-evidence"
+path = "src/bin/evidence.rs"
+
+[[bin]]
+name = "rustdb-baseline"
+path = "src/bin/baseline.rs"
+
+[[bin]]
+name = "rustdb-perf"
+path = "src/bin/perf.rs"

@@ -1,0 +1,15 @@
+[package]
+name = "rustdb-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Connection-local state, statement lifecycle, hooks, PRAGMA state, and interrupt handling."
+
+[dependencies]
+rustdb-base = { workspace = true }
+rustdb-value = { workspace = true }
+rustdb-vfs = { workspace = true }
+rustdb-catalog = { workspace = true }
+rustdb-transaction = { workspace = true }
+rustdb-sql = { workspace = true }
+rustdb-vm = { workspace = true }
