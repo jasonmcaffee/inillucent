@@ -5,8 +5,8 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | status | capabilities |
 |---|---|
 | missing | 134 |
-| pass | 69 |
-| **total** | **203** |
+| pass | 70 |
+| **total** | **204** |
 
 ## By phase
 
@@ -18,7 +18,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | phase 12: C ABI and CLI completion | 0 | 0 | 12 | 0 |
 | phase 13: transactional rust-db search and legacy migration | 0 | 0 | 3 | 0 |
 | phase 14: performance qualification and release | 0 | 0 | 2 | 0 |
-| phase 1: VFS, binary primitives, and simulator | 45 | 0 | 0 | 0 |
+| phase 1: VFS, binary primitives, and simulator | 46 | 0 | 0 | 0 |
 | phase 2: values, affinities, collations, and records | 0 | 0 | 10 | 0 |
 | phase 3: read-only header, pager, page cache, and B-tree | 0 | 0 | 10 | 0 |
 | phase 4: B-tree mutation, allocation, and rollback pages | 0 | 0 | 7 | 0 |
@@ -44,7 +44,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `harness.oracle.protocol` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `harness.oracle.value-tagging` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `harness.oracle.error-tagging` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
-| `harness.dependency.no-engine` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `harness.dependency.no-engine` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
 | `harness.dependency.layering` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
 | `harness.evidence.results-model` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
 | `harness.policy.unsafe-code` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
@@ -99,6 +99,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `sim.crash.torn-sectors` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
 | `sim.crash.artifacts` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `sim.failpoints.campaign` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `sim.failpoints.error-codes` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `sim.failpoints.short-write` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `sim.vfs.conformance` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `values.storage-classes` | missing | missing | - | 0 |

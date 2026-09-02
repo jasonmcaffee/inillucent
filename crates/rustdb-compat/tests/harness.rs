@@ -218,3 +218,68 @@ fn the_retrieval_baseline_is_unchanged() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// The *resolved* production dependency tree must hold no database engine and
+/// no SQL parser.
+///
+/// The layering check reads declared edges, which is the right level for an
+/// architecture rule but says nothing about what an approved crate drags in
+/// behind it. This runs `cargo tree --edges normal` - the resolved graph, minus
+/// dev and build dependencies - over every production crate and looks for the
+/// banned names in it.
+#[test]
+fn the_production_dependency_tree_holds_no_engine() {
+    let root = workspace_root();
+    let contract =
+        Contract::load(&root.join("docs/invariants/layering.toml")).expect("the contract parses");
+    let production: Vec<&str> = contract
+        .crates
+        .values()
+        .filter(|rule| rule.kind == rustdb_compat::layering::CrateKind::Production)
+        .map(|rule| rule.name.as_str())
+        .collect();
+    assert!(
+        production.len() >= 14,
+        "found {} production crates",
+        production.len()
+    );
+
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let mut checked = 0usize;
+    for crate_name in production {
+        let output = std::process::Command::new(&cargo)
+            .current_dir(&root)
+            .args([
+                "tree",
+                "-p",
+                crate_name,
+                "--edges",
+                "normal",
+                "--prefix",
+                "none",
+                "--no-dedupe",
+            ])
+            .output()
+            .expect("cargo tree runs");
+        if !output.status.success() {
+            // A crate whose optional features cannot resolve offline is not
+            // evidence either way; say so rather than passing quietly.
+            eprintln!(
+                "cargo tree could not resolve {crate_name}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            continue;
+        }
+        let tree = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+        for forbidden in &contract.forbidden {
+            assert!(
+                !tree.contains(&forbidden.pattern),
+                "the resolved tree of `{crate_name}` contains `{}`: {}",
+                forbidden.pattern,
+                forbidden.reason
+            );
+        }
+        checked += 1;
+    }
+    assert!(checked >= 10, "only {checked} production trees resolved");
+}

@@ -334,3 +334,74 @@ fn the_media_model_follows_its_declaration() {
         "an atomic device produced a torn sector"
     );
 }
+
+/// A disk-full failure, a permission failure and an interrupt must each arrive
+/// as the code SQLite uses for it, on the operation that hit it. The pager
+/// above will branch on these, so a failure that arrives as a generic I/O error
+/// is a failure the pager cannot handle correctly.
+#[test]
+fn injected_failures_arrive_as_the_right_code() {
+    use rustdb_base::error::PrimaryCode;
+
+    let cases = [
+        (Site::Write, Failure::DiskFull, PrimaryCode::Full),
+        (Site::Write, Failure::Permission, PrimaryCode::Perm),
+        (Site::Write, Failure::Interrupt, PrimaryCode::Interrupt),
+        (Site::Write, Failure::IoError, PrimaryCode::IoErr),
+    ];
+    for (site, failure, expected) in cases {
+        let vfs = simulator(21);
+        vfs.failpoints().set(site, Policy::Nth(1, failure));
+        let path = DbPath::from("/sim/codes.db");
+        let file = vfs
+            .open(&path, OpenOptions::main_db())
+            .expect("the database opens");
+        let error = file
+            .write_all_at(0, &[0u8; 512])
+            .expect_err("the injected failure must be reported");
+        assert_eq!(error.code(), expected, "{failure:?} arrived as {error:?}");
+        assert!(
+            error.detail().contains("injected"),
+            "an injected failure should say so: {error:?}"
+        );
+    }
+}
+
+/// A short read must zero-fill and report SQLITE_IOERR_SHORT_READ whether it
+/// came from a truncated file or from injection, because the pager cannot tell
+/// the two apart and must handle both the same way.
+#[test]
+fn an_injected_short_read_matches_a_truncated_one() {
+    let injected = simulator(22);
+    injected
+        .failpoints()
+        .set(Site::Read, Policy::Nth(1, Failure::ShortRead));
+    let path = DbPath::from("/sim/short-read.db");
+    let file = injected
+        .open(&path, OpenOptions::main_db())
+        .expect("the database opens");
+    file.write_all_at(0, &[0xee; 4096])
+        .expect("the write lands");
+    let mut buffer = [0x11u8; 4096];
+    let error = file
+        .read_exact_at(0, &mut buffer)
+        .expect_err("the injected short read must be reported");
+    assert_eq!(
+        error.extended(),
+        rustdb_base::error::ExtendedCode::IO_ERR_SHORT_READ
+    );
+    assert!(
+        buffer.iter().all(|byte| *byte == 0),
+        "the buffer was not zeroed"
+    );
+
+    let truncated = simulator(23);
+    let file = truncated
+        .open(&path, OpenOptions::main_db())
+        .expect("the database opens");
+    file.write_all_at(0, &[0xee; 512]).expect("the write lands");
+    let natural = file
+        .read_exact_at(0, &mut buffer)
+        .expect_err("reading past the end must be reported");
+    assert_eq!(natural.extended(), error.extended());
+}
