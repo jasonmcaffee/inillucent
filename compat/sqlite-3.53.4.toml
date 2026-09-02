@@ -116,7 +116,7 @@ source = "https://sqlite.org/omitted.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-compat::layering::tests::another_engine_is_refused", "rustdb-compat::layering::tests::an_unapproved_dependency_is_refused", "rustdb-compat::the_workspace_obeys_the_dependency_contract"]
+tests = ["rustdb-compat::layering::tests::another_engine_is_refused", "rustdb-compat::layering::tests::an_unapproved_dependency_is_refused", "rustdb-compat::the_workspace_obeys_the_dependency_contract", "rustdb-compat::the_production_dependency_tree_holds_no_engine"]
 
 [[capability]]
 id = "harness.dependency.layering"
@@ -549,6 +549,14 @@ profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
 tests = ["rustdb-sim::the_failpoint_campaign_terminates_with_every_failure_reported", "rustdb-sim::failpoint::tests::the_nth_call_campaign_fires_once_at_the_right_call", "rustdb-sim::failpoint::tests::a_per_site_policy_counts_its_own_site", "rustdb-sim::failpoint::tests::injected_failures_carry_the_sites_code"]
+
+[[capability]]
+id = "sim.failpoints.error-codes"
+source = "https://sqlite.org/rescode.html"
+profile = "default"
+phase = "phase 1: VFS, binary primitives, and simulator"
+status = "pass"
+tests = ["rustdb-sim::injected_failures_arrive_as_the_right_code", "rustdb-sim::an_injected_short_read_matches_a_truncated_one"]
 
 [[capability]]
 id = "sim.failpoints.short-write"

@@ -85,6 +85,7 @@
 {"test_id": "rustdb-compat::the_oracle_reports_connection_state", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_oracle_reports_the_same_error_as_sqlite", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_oracle_round_trips_every_storage_class_against_sqlite", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::the_production_dependency_tree_holds_no_engine", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_reference_artifacts_match_their_pinned_checksums", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_reference_metadata_is_pinned", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_retrieval_baseline_is_unchanged", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
@@ -99,6 +100,7 @@
 {"test_id": "rustdb-sim::a_recorded_schedule_replays_an_identical_event_trace", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-sim::a_short_write_reports_success_and_stores_half", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-sim::a_synced_write_survives_every_simulated_power_loss", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-sim::an_injected_short_read_matches_a_truncated_one", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-sim::an_unsynced_write_is_sometimes_lost_across_seeds", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-sim::crash_artifacts_are_written_to_disk", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-sim::failpoint::tests::a_chance_policy_replays_from_its_seed", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
@@ -106,6 +108,7 @@
 {"test_id": "rustdb-sim::failpoint::tests::injected_failures_carry_the_sites_code", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-sim::failpoint::tests::nothing_fires_by_default_but_calls_are_counted", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-sim::failpoint::tests::the_nth_call_campaign_fires_once_at_the_right_call", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-sim::injected_failures_arrive_as_the_right_code", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-sim::media::tests::a_synced_write_always_survives", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-sim::media::tests::a_torn_sector_mixes_only_old_and_new", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-sim::media::tests::an_unsynced_write_is_sometimes_lost", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
