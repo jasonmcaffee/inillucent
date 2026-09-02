@@ -21,25 +21,42 @@ pub struct QuantizedSet {
 
 impl QuantizedSet {
     pub fn from_vectors(vectors: &VectorSet) -> QuantizedSet {
-        let dims = vectors.dims();
-        let n = vectors.len();
-        let mut codes = vec![0i8; n * dims];
-        let mut scales = vec![0f32; n];
+        let mut set = QuantizedSet {
+            dims: vectors.dims(),
+            codes: Vec::new(),
+            scales: Vec::new(),
+        };
+        set.encode_from(vectors, 0);
+        set
+    }
 
-        for id in 0..n {
+    /// Encode every vector from `first` onward, appending to the codes already
+    /// here.
+    ///
+    /// A code is a function of its own vector and nothing else - one scale per
+    /// vector, no shared codebook - so appending changes no existing code. That is
+    /// what makes the quantized pass appendable at all.
+    /// @param vectors - the full vector set, including the ones already encoded
+    /// @param first - the ordinal to start at
+    pub fn encode_from(&mut self, vectors: &VectorSet, first: usize) {
+        let dims = self.dims;
+        let n = vectors.len();
+        self.codes.resize(n * dims, 0);
+        self.scales.resize(n, 1.0);
+
+        for id in first..n {
             let v = vectors.get(id as u32);
             let peak = v.iter().fold(0f32, |acc, x| acc.max(x.abs()));
             let scale = if peak > 0.0 { peak / 127.0 } else { 1.0 };
-            scales[id] = scale;
+            self.scales[id] = scale;
             let base = id * dims;
             for (d, x) in v.iter().enumerate() {
                 // round, then clamp, so a value exactly at the peak lands on 127
                 // rather than overflowing to -128.
                 let q = (x / scale).round().clamp(-127.0, 127.0);
-                codes[base + d] = q as i8;
+                self.codes[base + d] = q as i8;
             }
         }
-        QuantizedSet { dims, codes, scales }
     }
 
     pub fn len(&self) -> usize {

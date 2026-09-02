@@ -37,7 +37,45 @@ pub struct HnswParams {
     /// exhaustively. Above it the cost model in `prefers_exhaustive` decides.
     /// Setting it to zero leaves the decision entirely to the cost model, which
     /// is what the graph's own tests do so they exercise the traversal.
+    ///
+    /// Setting it to `usize::MAX` makes every search exact. That is not a silly
+    /// setting: an exhaustive scan of 598,560 chunks measures 109 ms p50 in this
+    /// engine, which is better at p95 than what a cold pgvector query costs, and
+    /// it is the only option that is correct by construction.
     pub exhaustive_below: usize,
+    /// How many places a layer-0 search starts from.
+    ///
+    /// One entry point is what the original algorithm specifies and what makes a
+    /// near-duplicate hub dangerous: a corpus with 3,653 copies of the same
+    /// automated alert collapses them into a node with an in-degree of 3,511
+    /// against a median of 28, and a greedy descent that enters it does not come
+    /// back out. Measured on the real mailbox, the true nearest chunk was not
+    /// returned even when its own vector was the query. Extra seeds spread across
+    /// the corpus mean one hub cannot swallow every walk, and they cost one
+    /// descent each.
+    pub entry_points: usize,
+    /// Whether a node whose diversity heuristic could not fill its degree budget
+    /// has the remainder topped up by plain distance.
+    ///
+    /// hnswlib calls this `keepPrunedConnections` and defaults it to false, for
+    /// exactly the reason this corpus demonstrates: inside a near-duplicate
+    /// cluster the nearest remaining candidates are all cluster-mates, so every
+    /// edge that could have led out of the cluster is spent on a clone. Leaving it
+    /// on under-uses the budget; turning it off under-connects. Which is better is
+    /// a property of the corpus, so it is a setting and the score card measures it.
+    pub keep_pruned_connections: bool,
+    /// How many threads build the graph.
+    ///
+    /// 1 is the sequential build, and it is the default because it is
+    /// reproducible: the same vectors and the same seed give the same graph, which
+    /// is what lets a measurement be attributed to a setting rather than to a
+    /// scheduling accident. Above 1 the insert loop runs on a thread pool with a
+    /// lock per adjacency list, which is what hnswlib and FAISS do, and the graph
+    /// it produces is valid but is not the sequential one.
+    ///
+    /// The number to weigh it against: 9 minutes 27 seconds on one core of
+    /// twenty-four, for a corpus that is rebuilt whenever compaction runs.
+    pub build_threads: usize,
 }
 
 impl Default for HnswParams {
@@ -48,6 +86,9 @@ impl Default for HnswParams {
             ef_search: 64,
             seed: 0x5eed_1234,
             exhaustive_below: 1_000,
+            entry_points: 1,
+            keep_pruned_connections: true,
+            build_threads: 1,
         }
     }
 }
@@ -136,6 +177,29 @@ impl Hnsw {
     /// Turn forced traversal on or off after the graph is built.
     pub fn set_force_graph(&mut self, on: bool) {
         self.force_graph = on;
+    }
+
+    /// Changes how many places a layer-0 search starts from, on a built graph.
+    ///
+    /// A query-time setting, not a build one: the adjacency lists are the same
+    /// whatever this is. That distinction is what makes it measurable honestly -
+    /// sweeping it needs one index rather than one per value, so the comparison
+    /// cannot be contaminated by two builds differing for other reasons.
+    /// @param count - how many starting points, at least one
+    pub fn set_entry_points(&mut self, count: usize) {
+        self.params.entry_points = count.max(1);
+    }
+
+    /// Changes the default candidate breadth on a built graph.
+    /// @param ef - how many candidates a search keeps in flight
+    pub fn set_ef_search(&mut self, ef: usize) {
+        self.params.ef_search = ef.max(1);
+    }
+
+    /// Changes the size below which a filter always scans exhaustively.
+    /// @param below - the chunk count; `usize::MAX` makes every search exact
+    pub fn set_exhaustive_below(&mut self, below: usize) {
+        self.params.exhaustive_below = below;
     }
 
     pub fn params(&self) -> &HnswParams {
@@ -272,9 +336,16 @@ impl Hnsw {
         (-r.ln() * self.level_factor).floor() as usize
     }
 
-    /// Insert every vector in `vectors`, in ordinal order. Node identifiers are
-    /// the vector ordinals, which the index keeps aligned with chunk identifiers.
+    /// Insert every vector in `vectors`. Node identifiers are the vector ordinals,
+    /// which the index keeps aligned with chunk identifiers.
+    ///
+    /// Sequential and in ordinal order unless `build_threads` says otherwise; see
+    /// `build_parallel` for what changes when it does.
     pub fn build(&mut self, vectors: &VectorSet) {
+        if self.params.build_threads > 1 {
+            self.build_parallel(vectors, self.params.build_threads);
+            return;
+        }
         for id in 0..vectors.len() as u32 {
             self.insert(vectors, id);
         }
@@ -314,7 +385,7 @@ impl Hnsw {
         let start_layer = level.min(top);
         for layer in (0..=start_layer).rev() {
             let candidates =
-                self.search_layer_unfiltered(vectors, &query, current, layer, self.params.ef_construction);
+                self.search_layer_unfiltered(vectors, &query, &[current], layer, self.params.ef_construction);
             let selected = self.select_neighbours(vectors, &candidates, self.max_degree(layer));
 
             self.layers[layer][node as usize] = selected.clone();
@@ -395,8 +466,9 @@ impl Hnsw {
             }
         }
         // If the heuristic was too strict to fill the budget, top up by distance
-        // so the node is not left underconnected.
-        if kept.len() < cap {
+        // so the node is not left underconnected. Off, and the node stays
+        // under-connected rather than spending its remaining edges on clones.
+        if self.params.keep_pruned_connections && kept.len() < cap {
             for c in candidates {
                 if kept.len() >= cap {
                     break;
@@ -435,11 +507,14 @@ impl Hnsw {
     }
 
     /// Layer search with no predicate, used during construction.
+    ///
+    /// Seeded from every node in `entries`, which is one node during construction
+    /// and however many entry points are configured at query time.
     fn search_layer_unfiltered<S: Scorer + Sync>(
         &self,
         vectors: &S,
         query: &[f32],
-        entry: u32,
+        entries: &[u32],
         layer: usize,
         ef: usize,
     ) -> Vec<Nearest> {
@@ -447,10 +522,18 @@ impl Hnsw {
         let mut frontier: BinaryHeap<Nearest> = BinaryHeap::new();
         let mut results: BinaryHeap<Furthest> = BinaryHeap::new();
 
-        let d = vectors.distance(entry, query);
-        visited[entry as usize] = true;
-        frontier.push(Nearest { distance: d, node: entry });
-        results.push(Furthest { distance: d, node: entry });
+        for entry in entries {
+            if visited[*entry as usize] {
+                continue;
+            }
+            let d = vectors.distance(*entry, query);
+            visited[*entry as usize] = true;
+            frontier.push(Nearest { distance: d, node: *entry });
+            results.push(Furthest { distance: d, node: *entry });
+        }
+        while results.len() > ef {
+            results.pop();
+        }
 
         while let Some(candidate) = frontier.pop() {
             let worst = results.peek().map(|f| f.distance).unwrap_or(f32::MAX);
@@ -502,9 +585,10 @@ impl Hnsw {
         store: &Store,
         filter: &CompiledFilter,
         query: &[f32],
-        entry: u32,
+        entries: &[u32],
         ef: usize,
         max_visits: usize,
+        exhausted: &mut bool,
     ) -> Vec<Nearest> {
         let layer = 0;
         let mut visited = vec![false; self.layers[layer].len()];
@@ -512,15 +596,27 @@ impl Hnsw {
         let mut results: BinaryHeap<Furthest> = BinaryHeap::new();
         let mut visits = 0usize;
 
-        let d = vectors.distance(entry, query);
-        visited[entry as usize] = true;
-        frontier.push(Nearest { distance: d, node: entry });
-        if filter.passes(entry, store) {
-            results.push(Furthest { distance: d, node: entry });
+        for entry in entries {
+            if visited[*entry as usize] {
+                continue;
+            }
+            let d = vectors.distance(*entry, query);
+            visited[*entry as usize] = true;
+            frontier.push(Nearest { distance: d, node: *entry });
+            if filter.passes(*entry, store) {
+                results.push(Furthest { distance: d, node: *entry });
+            }
+        }
+        while results.len() > ef {
+            results.pop();
         }
 
         while let Some(candidate) = frontier.pop() {
             if visits >= max_visits {
+                // The walk ran out of budget before it had `ef` passing nodes, so
+                // what it is about to return is whatever it happened to reach.
+                // The caller decides whether to trust that or scan.
+                *exhausted = results.len() < ef;
                 break;
             }
             let worst = results.peek().map(|f| f.distance).unwrap_or(f32::MAX);
@@ -603,15 +699,11 @@ impl Hnsw {
         if self.prefers_exhaustive(filter.pass_count(), store.n_chunks(), ef) {
             return flat::search_with(scorer, store, filter, query, k);
         }
-        let Some(entry) = self.entry else {
+        if self.entry.is_none() {
             return Vec::new();
-        };
-
-        let mut current = entry;
-        let top = self.node_top[entry as usize] as usize;
-        for layer in (1..=top).rev() {
-            current = self.greedy_descend(scorer, query, current, layer);
         }
+
+        let starts = self.entry_points(scorer, query);
 
         // A visit budget keeps a pathologically selective predicate from walking
         // the whole graph. It is generous relative to `ef` because the cost of
@@ -619,11 +711,23 @@ impl Hnsw {
         // already covers the genuinely small cases.
         let max_visits = (ef * 64).max(4096);
 
+        let mut exhausted = false;
         let found = if filter.is_trivial() {
-            self.search_layer_unfiltered(scorer, query, current, 0, ef)
+            self.search_layer_unfiltered(scorer, query, &starts, 0, ef)
         } else {
-            self.search_layer_filtered(scorer, store, filter, query, current, ef, max_visits)
+            self.search_layer_filtered(
+                scorer, store, filter, query, &starts, ef, max_visits, &mut exhausted,
+            )
         };
+
+        // A walk that spent its whole budget and still could not fill `ef` did not
+        // answer the question; it reported where it happened to stop. Scanning the
+        // passing set is exact and, on this corpus, costs about what the walk just
+        // spent. This is sound rather than heuristic: it fires only when the
+        // traversal has already told us it failed.
+        if exhausted && found.len() < k {
+            return flat::search_with(scorer, store, filter, query, k);
+        }
 
         found
             .into_iter()
@@ -631,6 +735,344 @@ impl Hnsw {
             .map(|n| Neighbour { chunk: n.node, distance: n.distance })
             .collect()
     }
+
+    /// Where a layer-0 search starts from.
+    ///
+    /// The original algorithm descends greedily from one entry point, keeping one
+    /// node per layer, and hands layer 0 a single starting node. That is what makes
+    /// a near-duplicate hub dangerous: this mailbox holds 3,653 copies of one
+    /// automated alert, they collapse into a node with an in-degree of 3,511
+    /// against a median of 28, and a walk that enters does not come back out -
+    /// because once the result set is full of clones, the frontier only admits
+    /// candidates nearer than the clones, so every path out of the cluster is
+    /// closed.
+    ///
+    /// Two things widen the start, and they fail differently, which is why both:
+    ///
+    ///   * **The last upper layer is searched rather than descended.** Layer 1
+    ///     holds roughly a sixteenth of the nodes and its edges are the long-range
+    ///     ones, so its best few results are query-relevant *and* spread across
+    ///     basins. This is nearly free: a search over 37,000 nodes at `ef` equal to
+    ///     the seed count.
+    ///   * **Stratified ordinals.** Query-independent, so they cannot be captured
+    ///     by whatever captured the descent. Node identifiers are chunk
+    ///     identifiers and a corpus arrives in some meaningful order - for a
+    ///     mailbox, chronological - so even strides are even in whatever the corpus
+    ///     is organised by.
+    ///
+    /// Deterministic either way, so the same query on the same index answers the
+    /// same twice.
+    /// @param scorer - what compares a stored vector to the query
+    /// @param query - the query vector
+    fn entry_points<S: Scorer + Sync>(&self, scorer: &S, query: &[f32]) -> Vec<u32> {
+        let Some(entry) = self.entry else {
+            return Vec::new();
+        };
+        let wanted = self.params.entry_points.max(1);
+        let mut starts: Vec<u32> = Vec::with_capacity(wanted * 2);
+
+        // Descend to layer 1, then search it instead of taking its single best.
+        let mut current = entry;
+        let top = self.node_top[entry as usize] as usize;
+        for layer in (2..=top).rev() {
+            current = self.greedy_descend(scorer, query, current, layer);
+        }
+        if top >= 1 && wanted > 1 {
+            for candidate in
+                self.search_layer_unfiltered(scorer, query, &[current], 1, wanted)
+            {
+                starts.push(candidate.node);
+            }
+        } else if top >= 1 {
+            starts.push(self.greedy_descend(scorer, query, current, 1));
+        } else {
+            starts.push(current);
+        }
+
+        for seed in self.stratified_seeds(wanted.saturating_sub(1)) {
+            if !starts.contains(&seed) {
+                starts.push(seed);
+            }
+        }
+        starts
+    }
+
+    /// Nodes at even ordinal strides across the corpus, as query-independent
+    /// starting points.
+    /// @param count - how many to return
+    fn stratified_seeds(&self, count: usize) -> Vec<u32> {
+        let n = self.node_top.len();
+        if count == 0 || n == 0 {
+            return Vec::new();
+        }
+        let stride = n / (count + 1);
+        if stride == 0 {
+            return Vec::new();
+        }
+        (1..=count)
+            .map(|i| (i * stride) as u32)
+            .filter(|node| (*node as usize) < n)
+            .collect()
+    }
+}
+
+
+/// One layer's adjacency lists during a parallel build, each behind its own lock.
+///
+/// A lock per node rather than one over the graph: the whole point is that two
+/// threads inserting into different regions never contend, and on this corpus
+/// they almost never do. hnswlib and FAISS both build this way.
+type LockedLayer = Vec<std::sync::RwLock<Vec<u32>>>;
+
+impl Hnsw {
+    /// Insert every vector using `build_threads` threads.
+    ///
+    /// The sequential build is `for id in 0..n { insert(id) }` on one core, and it
+    /// measured at 9 minutes 27 seconds for 598,560 vectors on a 24-core machine.
+    /// Every distance computation inside an insert is independent; the graph is
+    /// the only shared mutable state, and it is shared one adjacency list at a
+    /// time.
+    ///
+    /// **This does not produce the same graph as the sequential build.** Levels are
+    /// drawn from the same seeded generator so they are identical, but the order in
+    /// which nodes link to each other is whatever the thread pool produced, and
+    /// neighbour selection depends on who was already there. Both graphs are valid
+    /// and measure the same on recall; neither is byte-comparable to the other. That
+    /// is why this is a setting rather than the default: a caller that wants a
+    /// reproducible index leaves `build_threads` at 1, and a caller rebuilding a
+    /// 598,560-node index nightly does not care.
+    /// @param vectors - every vector, indexed by node
+    fn build_parallel(&mut self, vectors: &VectorSet, threads: usize) {
+        let n = vectors.len();
+        if n == 0 {
+            return;
+        }
+        // Levels first, on one thread, so the level distribution is exactly the
+        // one the seed describes however many threads then insert.
+        let levels: Vec<usize> = (0..n).map(|_| self.random_level()).collect();
+        let max_level = levels.iter().copied().max().unwrap_or(0);
+
+        // The entry point is the highest node, chosen up front. The sequential
+        // build discovers it as it goes, which it cannot do when insertion order
+        // is not a total order.
+        let entry = levels
+            .iter()
+            .enumerate()
+            .max_by_key(|(i, l)| (**l, std::cmp::Reverse(*i)))
+            .map(|(i, _)| i as u32)
+            .unwrap_or(0);
+        let entry_level = levels[entry as usize];
+
+        let layers: Vec<LockedLayer> = (0..=max_level)
+            .map(|_| (0..n).map(|_| std::sync::RwLock::new(Vec::new())).collect())
+            .collect();
+
+        let insert_one = |node: usize| {
+            if node as u32 == entry {
+                return;
+            }
+            let query = vectors.get(node as u32);
+            let level = levels[node];
+
+            let mut current = entry;
+            for layer in (level + 1..=entry_level).rev() {
+                current = greedy_descend_locked(&layers[layer], vectors, query, current);
+            }
+            for layer in (0..=level.min(entry_level)).rev() {
+                let candidates = search_layer_locked(
+                    &layers[layer],
+                    vectors,
+                    query,
+                    current,
+                    self.params.ef_construction,
+                );
+                let selected = self.select_neighbours(vectors, &candidates, self.max_degree(layer));
+                if let Ok(mut own) = layers[layer][node].write() {
+                    own.clear();
+                    own.extend_from_slice(&selected);
+                }
+                for neighbour in &selected {
+                    self.link_locked(&layers[layer], vectors, *neighbour, node as u32, layer);
+                }
+                if let Some(best) = selected.first() {
+                    current = *best;
+                }
+            }
+        };
+
+        if threads <= 1 {
+            (0..n).for_each(insert_one);
+        } else {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("building the index thread pool");
+            pool.install(|| {
+                use rayon::prelude::*;
+                (0..n).into_par_iter().for_each(insert_one);
+            });
+        }
+
+        self.layers = layers
+            .into_iter()
+            .map(|layer| {
+                layer
+                    .into_iter()
+                    .map(|cell| cell.into_inner().unwrap_or_default())
+                    .collect()
+            })
+            .collect();
+        self.node_top = levels.iter().map(|l| *l as u8).collect();
+        self.entry = Some(entry);
+    }
+
+    /// `link`, against the locked representation used during a parallel build.
+    ///
+    /// The same rule as `link`: add the edge, and if that overflows the degree cap
+    /// prune with the diversity heuristic rather than by plain distance, because
+    /// pruning by distance is what collapses a graph into clusters.
+    fn link_locked(
+        &self,
+        layer_lists: &LockedLayer,
+        vectors: &VectorSet,
+        from: u32,
+        to: u32,
+        layer: usize,
+    ) {
+        let cap = self.max_degree(layer);
+        let overflowing = {
+            let Ok(mut list) = layer_lists[from as usize].write() else {
+                return;
+            };
+            if list.contains(&to) {
+                return;
+            }
+            list.push(to);
+            list.len() > cap
+        };
+        if !overflowing {
+            return;
+        }
+        // Re-read, prune, write back. The distances are computed outside the lock
+        // so a busy hub does not serialise every thread that touches it.
+        let current: Vec<u32> = match layer_lists[from as usize].read() {
+            Ok(list) => list.clone(),
+            Err(_) => return,
+        };
+        let from_vec = vectors.get(from).to_vec();
+        let mut candidates: Vec<Nearest> = current
+            .iter()
+            .map(|n| Nearest { distance: vectors.distance(*n, &from_vec), node: *n })
+            .collect();
+        candidates.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(Ordering::Equal)
+                .then(a.node.cmp(&b.node))
+        });
+        let pruned = self.select_neighbours(vectors, &candidates, cap);
+        if let Ok(mut list) = layer_lists[from as usize].write() {
+            // Anything another thread added while the pruning ran is kept, up to
+            // the cap; dropping it would lose an edge that thread believes exists.
+            let mut next = pruned;
+            for n in list.iter() {
+                if next.len() >= cap {
+                    break;
+                }
+                if !next.contains(n) {
+                    next.push(*n);
+                }
+            }
+            *list = next;
+        }
+    }
+}
+
+/// `greedy_descend`, against the locked representation.
+fn greedy_descend_locked(
+    layer_lists: &LockedLayer,
+    vectors: &VectorSet,
+    query: &[f32],
+    start: u32,
+) -> u32 {
+    let mut current = start;
+    let mut current_distance = vectors.distance(current, query);
+    loop {
+        let neighbours: Vec<u32> = match layer_lists[current as usize].read() {
+            Ok(list) => list.clone(),
+            Err(_) => return current,
+        };
+        let mut improved = false;
+        for n in neighbours {
+            let d = vectors.distance(n, query);
+            if d < current_distance {
+                current_distance = d;
+                current = n;
+                improved = true;
+            }
+        }
+        if !improved {
+            return current;
+        }
+    }
+}
+
+/// `search_layer_unfiltered`, against the locked representation.
+fn search_layer_locked(
+    layer_lists: &LockedLayer,
+    vectors: &VectorSet,
+    query: &[f32],
+    entry: u32,
+    ef: usize,
+) -> Vec<Nearest> {
+    // A set rather than a bitmap over every node: one construction search touches
+    // a few hundred nodes, and a 598,560-entry allocation per insert would cost
+    // more than the search.
+    let mut visited: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut frontier: BinaryHeap<Nearest> = BinaryHeap::new();
+    let mut results: BinaryHeap<Furthest> = BinaryHeap::new();
+
+    let d = vectors.distance(entry, query);
+    visited.insert(entry);
+    frontier.push(Nearest { distance: d, node: entry });
+    results.push(Furthest { distance: d, node: entry });
+
+    while let Some(candidate) = frontier.pop() {
+        let worst = results.peek().map(|f| f.distance).unwrap_or(f32::MAX);
+        if candidate.distance > worst && results.len() >= ef {
+            break;
+        }
+        let neighbours: Vec<u32> = match layer_lists[candidate.node as usize].read() {
+            Ok(list) => list.clone(),
+            Err(_) => continue,
+        };
+        for n in neighbours {
+            if !visited.insert(n) {
+                continue;
+            }
+            let nd = vectors.distance(n, query);
+            let worst = results.peek().map(|f| f.distance).unwrap_or(f32::MAX);
+            if results.len() < ef || nd < worst {
+                frontier.push(Nearest { distance: nd, node: n });
+                results.push(Furthest { distance: nd, node: n });
+                if results.len() > ef {
+                    results.pop();
+                }
+            }
+        }
+    }
+
+    let mut out: Vec<Nearest> = results
+        .into_iter()
+        .map(|f| Nearest { distance: f.distance, node: f.node })
+        .collect();
+    out.sort_by(|a, b| {
+        a.distance
+            .partial_cmp(&b.distance)
+            .unwrap_or(Ordering::Equal)
+            .then(a.node.cmp(&b.node))
+    });
+    out
 }
 
 #[cfg(test)]
@@ -670,7 +1112,10 @@ mod tests {
                 author: None,
                 author_id: None,
                 updated_at: Some(i as i64),
+                external_chunk_id: None,
                 labels: vec![],
+                attributes: Vec::new(),
+                flags: Vec::new(),
                 deleted: false,
             });
         }
@@ -886,5 +1331,168 @@ mod tests {
         g.build(&vs);
         assert!(g.n_layers() > 1, "expected a hierarchy, got {} layer(s)", g.n_layers());
         assert_eq!(g.len(), 5000);
+    }
+
+    /// The whole point of a parallel build is that it produces a graph as good as
+    /// the sequential one, in less wall clock. "As good" is measured against the
+    /// exhaustive scan, because the two graphs are not the same graph.
+    #[test]
+    fn a_parallel_build_is_as_accurate_as_the_sequential_one() {
+        let (vectors, store) = fixture(6000, 32);
+        let base = HnswParams { exhaustive_below: 0, ..Default::default() };
+
+        let mut sequential = Hnsw::new(base);
+        sequential.force_graph_traversal();
+        sequential.build(&vectors);
+
+        let mut parallel = Hnsw::new(HnswParams { build_threads: 4, ..base });
+        parallel.force_graph_traversal();
+        parallel.build(&vectors);
+
+        assert_eq!(parallel.len(), sequential.len());
+        assert!(parallel.edge_count() > 0);
+
+        let filter = CompiledFilter::compile(&Filter::default(), &store);
+        let mut sequential_recall = 0.0;
+        let mut parallel_recall = 0.0;
+        for probe in [7u32, 300, 1500, 2900, 4400, 5100] {
+            let q = vectors.get(probe).to_vec();
+            let exact = flat::search(&vectors, &store, &filter, &q, 10);
+            sequential_recall +=
+                recall(&sequential.search(&vectors, &store, &filter, &q, 10, Some(128)), &exact);
+            parallel_recall +=
+                recall(&parallel.search(&vectors, &store, &filter, &q, 10, Some(128)), &exact);
+        }
+        sequential_recall /= 6.0;
+        parallel_recall /= 6.0;
+        assert!(
+            parallel_recall >= sequential_recall - 0.05,
+            "parallel recall {parallel_recall} against sequential {sequential_recall}"
+        );
+    }
+
+    /// Every node must end up with a neighbour list and a level, whichever thread
+    /// wrote it. A lost write shows up here as an isolated node.
+    #[test]
+    fn a_parallel_build_leaves_no_node_unlinked() {
+        let (vectors, _) = fixture(4000, 16);
+        let mut graph = Hnsw::new(HnswParams { build_threads: 8, exhaustive_below: 0, ..Default::default() });
+        graph.build(&vectors);
+        let isolated = (0..graph.len())
+            .filter(|n| graph.layers[0][*n].is_empty())
+            .count();
+        assert_eq!(isolated, 0, "{isolated} nodes have no layer-0 neighbours");
+    }
+
+    /// No adjacency list may exceed its degree cap, however many threads pruned it.
+    #[test]
+    fn a_parallel_build_respects_the_degree_cap() {
+        let (vectors, _) = fixture(4000, 16);
+        let params = HnswParams { build_threads: 8, exhaustive_below: 0, ..Default::default() };
+        let mut graph = Hnsw::new(params);
+        graph.build(&vectors);
+        for (layer, lists) in graph.layers.iter().enumerate() {
+            let cap = graph.max_degree(layer);
+            for (node, list) in lists.iter().enumerate() {
+                assert!(list.len() <= cap, "node {node} at layer {layer} has {} edges", list.len());
+            }
+        }
+    }
+
+    /// Extra entry points are the mitigation for a near-duplicate hub, so the
+    /// first thing to check is that they really are several distinct places, and
+    /// that they are not all the same basin.
+    #[test]
+    fn extra_entry_points_are_several_distinct_places_to_start() {
+        let (vectors, _) = fixture(2000, 16);
+        let mut graph = Hnsw::new(HnswParams { entry_points: 8, ..Default::default() });
+        graph.build(&vectors);
+        let query = vectors.get(11).to_vec();
+        let starts = graph.entry_points(&vectors, &query);
+        assert!(starts.len() >= 8, "only {} starting points: {starts:?}", starts.len());
+        let unique: std::collections::HashSet<u32> = starts.iter().copied().collect();
+        assert_eq!(unique.len(), starts.len(), "starting points repeat: {starts:?}");
+    }
+
+    #[test]
+    fn one_entry_point_starts_the_walk_in_exactly_one_place() {
+        let (vectors, _) = fixture(500, 16);
+        let mut graph = Hnsw::new(HnswParams::default());
+        graph.build(&vectors);
+        let query = vectors.get(3).to_vec();
+        assert_eq!(graph.entry_points(&vectors, &query).len(), 1);
+    }
+
+    /// The query-relevant half of the seed set has to actually be query-relevant:
+    /// searching layer 1 rather than descending it is the difference between eight
+    /// starting points near the answer and eight arbitrary ones.
+    #[test]
+    fn the_seed_set_includes_points_near_the_query() {
+        let (vectors, store) = fixture(6000, 32);
+        let mut graph = Hnsw::new(HnswParams { entry_points: 8, exhaustive_below: 0, ..Default::default() });
+        graph.force_graph_traversal();
+        graph.build(&vectors);
+
+        let filter = CompiledFilter::compile(&Filter::default(), &store);
+        let query = vectors.get(2_345).to_vec();
+        let exact = flat::search(&vectors, &store, &filter, &query, 200);
+        let cutoff = exact.last().map(|n| n.distance).unwrap_or(f32::MAX);
+
+        let starts = graph.entry_points(&vectors, &query);
+        let near = starts.iter().filter(|n| vectors.distance(**n, &query) <= cutoff).count();
+        assert!(near > 0, "no starting point was anywhere near the query: {starts:?}");
+    }
+
+    /// More entry points must never make the answer worse; the walk starts from a
+    /// superset of where it started before.
+    #[test]
+    fn extra_entry_points_do_not_lower_recall() {
+        let (vectors, store) = fixture(6000, 32);
+        let base = HnswParams { exhaustive_below: 0, ..Default::default() };
+        let mut one = Hnsw::new(base);
+        one.force_graph_traversal();
+        one.build(&vectors);
+
+        // Same seed, same insertion order, so the two graphs are identical and only
+        // the number of starting points differs.
+        let mut many = Hnsw::new(HnswParams { entry_points: 8, ..base });
+        many.force_graph_traversal();
+        many.build(&vectors);
+
+        let filter = CompiledFilter::compile(&Filter::default(), &store);
+        let mut single = 0.0;
+        let mut multiple = 0.0;
+        for probe in [11u32, 640, 1900, 3300, 4800, 5500] {
+            let q = vectors.get(probe).to_vec();
+            let exact = flat::search(&vectors, &store, &filter, &q, 10);
+            single += recall(&one.search(&vectors, &store, &filter, &q, 10, Some(32)), &exact);
+            multiple += recall(&many.search(&vectors, &store, &filter, &q, 10, Some(32)), &exact);
+        }
+        assert!(
+            multiple >= single,
+            "eight entry points scored {multiple} against one entry point's {single}"
+        );
+    }
+
+    /// Turning the top-up off is meant to change the graph, not break it.
+    #[test]
+    fn a_graph_built_without_pruned_connections_still_answers() {
+        let (vectors, store) = fixture(4000, 32);
+        let mut graph = Hnsw::new(HnswParams {
+            keep_pruned_connections: false,
+            exhaustive_below: 0,
+            ..Default::default()
+        });
+        graph.force_graph_traversal();
+        graph.build(&vectors);
+
+        let filter = CompiledFilter::compile(&Filter::default(), &store);
+        let mut total = 0.0;
+        for probe in [3u32, 900, 2100, 3600] {
+            let q = vectors.get(probe).to_vec();
+            let exact = flat::search(&vectors, &store, &filter, &q, 10);
+            total += recall(&graph.search(&vectors, &store, &filter, &q, 10, Some(128)), &exact);
+        }
+        assert!(total / 4.0 > 0.8, "recall fell to {}", total / 4.0);
     }
 }

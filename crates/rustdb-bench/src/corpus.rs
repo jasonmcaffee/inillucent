@@ -112,7 +112,10 @@ pub fn load_from_postgres(url: &str, limit: Option<usize>) -> Result<Corpus> {
                 author: row.get("author"),
                 author_id: row.get("author_id"),
                 updated_at,
+                external_chunk_id: None,
                 labels: row.get::<_, Vec<String>>("labels"),
+                attributes: Vec::new(),
+                flags: Vec::new(),
                 deleted: row.get("deleted"),
             });
             vectors.push(v);
@@ -260,7 +263,10 @@ pub fn load_cache(path: &Path) -> Result<Corpus> {
             author,
             author_id,
             updated_at,
+            external_chunk_id: None,
             labels,
+            attributes: Vec::new(),
+            flags: Vec::new(),
             deleted,
         });
         vectors.push(v);
