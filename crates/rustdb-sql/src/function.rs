@@ -71,6 +71,22 @@ pub enum ScalarFunc {
     Upper,
     /// `zeroblob(n)`
     ZeroBlob,
+    /// `printf(format, ...)` and `format(format, ...)`
+    Printf,
+    /// `octet_length(x)`
+    OctetLength,
+    /// `random()`
+    Random,
+    /// `randomblob(n)`
+    RandomBlob,
+    /// `changes()`
+    Changes,
+    /// `total_changes()`
+    TotalChanges,
+    /// `last_insert_rowid()`
+    LastInsertRowid,
+    /// `sqlite_source_id()`
+    SourceId,
     /// `sqlite_version()`
     Version,
 }
@@ -345,6 +361,14 @@ pub fn lookup_scalar(folded: &[u8]) -> Option<ScalarFunc> {
         b"rtrim" => ScalarFunc::RTrim,
         b"sign" => ScalarFunc::Sign,
         b"substr" | b"substring" => ScalarFunc::Substr,
+        b"printf" | b"format" => ScalarFunc::Printf,
+        b"octet_length" => ScalarFunc::OctetLength,
+        b"random" => ScalarFunc::Random,
+        b"randomblob" => ScalarFunc::RandomBlob,
+        b"changes" => ScalarFunc::Changes,
+        b"total_changes" => ScalarFunc::TotalChanges,
+        b"last_insert_rowid" => ScalarFunc::LastInsertRowid,
+        b"sqlite_source_id" => ScalarFunc::SourceId,
         b"trim" => ScalarFunc::Trim,
         b"typeof" => ScalarFunc::TypeOf,
         b"unhex" => ScalarFunc::Unhex,
@@ -401,6 +425,13 @@ pub fn scalar_arity_ok(func: ScalarFunc, count: usize) -> bool {
         ScalarFunc::Char | ScalarFunc::Concat => count >= 1,
         ScalarFunc::ConcatWs => count >= 2,
         ScalarFunc::Version => count == 0,
+        ScalarFunc::Printf => count >= 1,
+        ScalarFunc::OctetLength | ScalarFunc::RandomBlob => count == 1,
+        ScalarFunc::Random
+        | ScalarFunc::Changes
+        | ScalarFunc::TotalChanges
+        | ScalarFunc::LastInsertRowid
+        | ScalarFunc::SourceId => count == 0,
     }
 }
 

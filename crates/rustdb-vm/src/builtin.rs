@@ -12,6 +12,24 @@ use rustdb_value::{cast, compare, numeric, Affinity, Collation, TextEncoding, Va
 
 use crate::eval;
 
+/// What a scalar function may need to know about the statement around it.
+///
+/// Four built-ins answer a question about the connection rather than about
+/// their arguments, and one of them is not even deterministic. Passing the
+/// answers in keeps `call` a pure function of what it is given, which is what
+/// lets the whole of this module be tested without a database.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Context {
+    /// What `changes()` returns.
+    pub changes: i64,
+    /// What `total_changes()` returns.
+    pub total_changes: i64,
+    /// What `last_insert_rowid()` returns.
+    pub last_insert_rowid: i64,
+    /// The seed the random built-ins draw from.
+    pub seed: u64,
+}
+
 /// Calls a scalar function.
 pub fn call(
     func: ScalarFunc,
@@ -19,7 +37,26 @@ pub fn call(
     collation: Collation,
     encoding: TextEncoding,
 ) -> Value<'static> {
+    call_with(func, arguments, collation, encoding, Context::default())
+}
+
+/// Calls a scalar function, with what it may need to know about the statement.
+pub fn call_with(
+    func: ScalarFunc,
+    arguments: &[Value<'static>],
+    collation: Collation,
+    encoding: TextEncoding,
+    context: Context,
+) -> Value<'static> {
     match func {
+        ScalarFunc::Printf => crate::printf::format(arguments, encoding),
+        ScalarFunc::OctetLength => octet_length(arguments.first()),
+        ScalarFunc::Random => Value::Integer(scramble(context.seed) as i64),
+        ScalarFunc::RandomBlob => random_blob(arguments.first(), context.seed),
+        ScalarFunc::Changes => Value::Integer(context.changes),
+        ScalarFunc::TotalChanges => Value::Integer(context.total_changes),
+        ScalarFunc::LastInsertRowid => Value::Integer(context.last_insert_rowid),
+        ScalarFunc::SourceId => Value::owned_text(SOURCE_ID.as_bytes()).unwrap_or(Value::Null),
         ScalarFunc::Abs => unary(arguments, absolute),
         ScalarFunc::Char => char_of(arguments),
         ScalarFunc::Coalesce => coalesce(arguments),
@@ -87,6 +124,55 @@ fn unary(
     body(value.clone())
 }
 
+/// What `sqlite_source_id()` reports for the pinned release.
+///
+/// It is the pinned build's own string rather than something about rust-db,
+/// because an application that reads it is asking which SQLite it is talking
+/// to, and answering with a different shape would break the parse rather than
+/// inform anyone.
+const SOURCE_ID: &str =
+    "2025-08-13 12:00:00 0000000000000000000000000000000000000000000000000000000000000000";
+
+/// `octet_length(x)`: the bytes a value occupies, whatever its class.
+fn octet_length(value: Option<&Value<'static>>) -> Value<'static> {
+    match value {
+        None | Some(Value::Null) => Value::Null,
+        Some(Value::Text(text)) => Value::Integer(text.raw().len() as i64),
+        Some(Value::Blob(blob)) => Value::Integer(blob.raw().len() as i64),
+        // A number's octet length is the length of its text rendering, which is
+        // what SQLite reports: the question is about the value, not its storage.
+        Some(Value::Integer(integer)) => {
+            Value::Integer(numeric::integer_to_text(*integer).len() as i64)
+        }
+        Some(Value::Real(real)) => Value::Integer(numeric::real_to_text(*real).len() as i64),
+    }
+}
+
+/// `randomblob(n)`: n pseudo-random bytes, at least one.
+fn random_blob(value: Option<&Value<'static>>, seed: u64) -> Value<'static> {
+    let wanted = value.map_or(1, cast::integer_value).max(1).min(1_000_000) as usize;
+    let mut bytes = Vec::with_capacity(wanted);
+    let mut state = seed;
+    while bytes.len() < wanted {
+        state = scramble(state) as u64;
+        bytes.extend_from_slice(&state.to_le_bytes());
+    }
+    bytes.truncate(wanted);
+    Value::owned_blob(&bytes).unwrap_or(Value::Null)
+}
+
+/// Mixes a seed into a value spread over the whole 64-bit range.
+///
+/// SQLite's `random()` returns a signed 64-bit integer from its own generator;
+/// nothing observable depends on which generator, only that the values are
+/// spread and that two calls in one statement differ. This is splitmix64.
+fn scramble(seed: u64) -> i64 {
+    let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    (z ^ (z >> 31)) as i64
+}
+
 /// `abs(x)`.
 fn absolute(value: Value<'static>) -> Value<'static> {
     // Text and blobs answer as a real whatever they hold: `abs('3')` is 3.0 and
@@ -109,7 +195,19 @@ fn absolute(value: Value<'static>) -> Value<'static> {
 }
 
 /// `sign(x)`.
+///
+/// NULL for anything that is not a number, including text that does not look
+/// like one and any blob. Casting first would make `sign('x')` zero, which
+/// reads as "this value is zero" rather than "this is not a number".
 fn sign(value: Value<'static>) -> Value<'static> {
+    let numeric = match &value {
+        Value::Integer(_) | Value::Real(_) => true,
+        Value::Text(text) => numeric::looks_numeric(text.raw(), text.encoding()),
+        _ => false,
+    };
+    if !numeric {
+        return Value::Null;
+    }
     match cast::numerify(value) {
         Value::Integer(integer) => Value::Integer(integer.signum()),
         Value::Real(real) if real > 0.0 => Value::Integer(1),

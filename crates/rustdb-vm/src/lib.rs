@@ -15,6 +15,7 @@
 //! - [`verify`] - the independent check the machine relies on;
 //! - [`eval`] - SQLite's arithmetic, comparison and three-valued logic;
 //! - [`builtin`] - the scalar functions;
+//! - [`printf`] - `printf()` and `format()`;
 //! - [`mathfn`] - the math functions;
 //! - [`datetime`] - the date and time functions;
 //! - [`pattern`] - `LIKE` and `GLOB`;
@@ -70,6 +71,7 @@ pub mod eval;
 pub mod machine;
 pub mod mathfn;
 pub mod pattern;
+pub mod printf;
 pub mod program;
 pub mod sorter;
 pub mod verify;
