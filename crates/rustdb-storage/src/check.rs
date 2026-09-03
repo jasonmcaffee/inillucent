@@ -29,10 +29,11 @@ use rustdb_base::DbResult;
 use rustdb_value::record::{KeyInfo, RecordRef};
 use rustdb_value::{record, TextEncoding};
 
-use crate::btree::{BTreePage, PageKind, PageLayout};
+use crate::btree::{BTreePage, PageKind};
 use crate::header::VacuumMode;
 use crate::overflow;
 use crate::pager::Pager;
+use crate::ptrmap;
 use crate::schema;
 
 /// How thorough a check to run.
@@ -143,6 +144,8 @@ enum PageUse {
     PointerMap,
     /// Page 1, which is the header and the schema root at once.
     Header,
+    /// The page holding the byte-range lock, which belongs to nothing.
+    LockByte,
 }
 
 impl PageUse {
@@ -155,6 +158,7 @@ impl PageUse {
             PageUse::FreelistLeaf => "the freelist".to_string(),
             PageUse::PointerMap => "a pointer map".to_string(),
             PageUse::Header => "page 1".to_string(),
+            PageUse::LockByte => "the lock byte".to_string(),
         }
     }
 }
@@ -172,6 +176,64 @@ pub fn check_database(pager: &mut Pager, level: CheckLevel) -> DbResult<CheckRep
     check_database_with_keys(pager, level, &BTreeMap::new())
 }
 
+/// What a check should look at.
+///
+/// The default is what `PRAGMA integrity_check` does: read `sqlite_schema`,
+/// walk every root it names, and account for every page. The other two fields
+/// exist because storage has callers above it that know things the schema does
+/// not - a caller holding a tree that is not in the schema yet, and a caller
+/// that knows how an index's keys are declared to sort.
+#[derive(Clone, Debug)]
+pub struct CheckOptions {
+    /// How much of the check to run.
+    pub level: CheckLevel,
+    /// Whether to read `sqlite_schema` for the roots to walk.
+    pub schema_roots: bool,
+    /// Roots to walk in addition to the ones the schema names.
+    pub extra_roots: Vec<PageId>,
+    /// How each index's keys are declared to sort, by root page.
+    pub index_keys: BTreeMap<u32, KeyInfo>,
+}
+
+impl Default for CheckOptions {
+    /// The options `PRAGMA integrity_check` runs with.
+    fn default() -> CheckOptions {
+        CheckOptions::integrity()
+    }
+}
+
+impl CheckOptions {
+    /// The options `PRAGMA integrity_check` runs with.
+    pub fn integrity() -> CheckOptions {
+        CheckOptions {
+            level: CheckLevel::Integrity,
+            schema_roots: true,
+            extra_roots: Vec::new(),
+            index_keys: BTreeMap::new(),
+        }
+    }
+
+    /// A check of trees the caller names, without reading the schema.
+    ///
+    /// Storage has no catalog, so a test or a layer above that has just built a
+    /// tree cannot put it in `sqlite_schema` to have it checked. Naming the
+    /// roots directly is how the mutation suite checks what it built.
+    pub fn roots(roots: Vec<PageId>) -> CheckOptions {
+        CheckOptions {
+            level: CheckLevel::Integrity,
+            schema_roots: false,
+            extra_roots: roots,
+            index_keys: BTreeMap::new(),
+        }
+    }
+
+    /// Adds an index's declared key ordering.
+    pub fn with_key(mut self, root: PageId, key: KeyInfo) -> CheckOptions {
+        self.index_keys.insert(root.get(), key);
+        self
+    }
+}
+
 /// Runs a check, using the caller's knowledge of each index's key order.
 ///
 /// `index_keys` maps a B-tree's root page to the ordering its declaration
@@ -181,21 +243,47 @@ pub fn check_database_with_keys(
     level: CheckLevel,
     index_keys: &BTreeMap<u32, KeyInfo>,
 ) -> DbResult<CheckReport> {
+    check_database_with_options(
+        pager,
+        &CheckOptions {
+            level,
+            schema_roots: true,
+            extra_roots: Vec::new(),
+            index_keys: index_keys.clone(),
+        },
+    )
+}
+
+/// Runs a check over exactly the trees the options name.
+pub fn check_database_with_options(
+    pager: &mut Pager,
+    options: &CheckOptions,
+) -> DbResult<CheckReport> {
+    let level = options.level;
+    let index_keys = &options.index_keys;
     let mut report = CheckReport::new();
     let mut uses: BTreeMap<u32, PageUse> = BTreeMap::new();
+    let mut expected: BTreeMap<u32, ptrmap::Entry> = BTreeMap::new();
     uses.insert(1, PageUse::Header);
 
-    let objects = match schema::load_schema(pager) {
-        Ok(objects) => objects,
-        Err(error) => {
-            report.report(format!("the schema could not be read: {error}"));
-            Vec::new()
+    let mut roots = Vec::new();
+    if options.schema_roots {
+        let objects = match schema::load_schema(pager) {
+            Ok(objects) => objects,
+            Err(error) => {
+                report.report(format!("the schema could not be read: {error}"));
+                Vec::new()
+            }
+        };
+        // Page 1 is the schema's own root and is checked like any other tree.
+        roots.push(PageId::from_persisted(schema::SCHEMA_ROOT)?);
+        roots.extend(schema::root_pages(&objects));
+    }
+    for root in &options.extra_roots {
+        if !roots.contains(root) {
+            roots.push(*root);
         }
-    };
-
-    // Page 1 is the schema's own root and is checked like any other tree.
-    let mut roots = vec![PageId::from_persisted(schema::SCHEMA_ROOT)?];
-    roots.extend(schema::root_pages(&objects));
+    }
 
     let limits = Limits::default();
     let encoding = pager.text_encoding();
@@ -204,12 +292,16 @@ pub fn check_database_with_keys(
         let declared = index_keys.get(&root.get()).cloned();
         let key = declared.clone().unwrap_or_default();
         let check_order = declared.is_some();
+        if root.get() != 1 {
+            expected.insert(root.get(), ptrmap::Entry::root());
+        }
         if let Err(error) = check_tree(
             pager,
             root,
             root,
             &mut report,
             &mut uses,
+            &mut expected,
             &limits,
             encoding,
             &key,
@@ -223,12 +315,13 @@ pub fn check_database_with_keys(
         }
     }
 
-    if let Err(error) = check_freelist(pager, &mut report, &mut uses) {
+    if let Err(error) = check_freelist(pager, &mut report, &mut uses, &mut expected) {
         report.report(format!("the freelist could not be walked: {error}"));
     }
 
     if level == CheckLevel::Integrity {
         account_for_every_page(pager, &mut report, &mut uses)?;
+        verify_pointer_maps(pager, &mut report, &expected)?;
     }
 
     for use_kind in uses.values() {
@@ -243,6 +336,7 @@ pub fn check_database_with_keys(
             PageUse::Tree(_) | PageUse::Header => {
                 report.tree_pages = report.tree_pages.saturating_add(1)
             }
+            PageUse::LockByte => {}
         }
     }
     Ok(report)
@@ -256,6 +350,7 @@ fn check_tree(
     page_id: PageId,
     report: &mut CheckReport,
     uses: &mut BTreeMap<u32, PageUse>,
+    expected: &mut BTreeMap<u32, ptrmap::Entry>,
     limits: &Limits,
     encoding: TextEncoding,
     key: &KeyInfo,
@@ -265,7 +360,7 @@ fn check_tree(
     claim(uses, page_id, PageUse::Tree(root.get()), report);
     let pin = pager.get_page(page_id)?;
     let usable = pager.usable_size()?;
-    let layout = match PageLayout::parse(pin.bytes(), page_id, usable) {
+    let layout = match pin.layout(usable) {
         Ok(layout) => layout,
         Err(error) => {
             report.report(format!("page {} is malformed: {error}", page_id.get()));
@@ -300,12 +395,14 @@ fn check_tree(
         };
 
         if let Some(child) = cell.left_child {
+            expected.insert(child.get(), ptrmap::Entry::child_of(page_id));
             let child_key = check_tree(
                 pager,
                 root,
                 child,
                 report,
                 uses,
+                expected,
                 limits,
                 encoding,
                 key,
@@ -344,8 +441,15 @@ fn check_tree(
         if cell.split.overflows {
             match overflow::chain_pages(pager, cell.split.total, cell.split.local, cell.overflow) {
                 Ok(pages) => {
+                    let mut previous: Option<PageId> = None;
                     for overflow_page in pages {
                         claim(uses, overflow_page, PageUse::Overflow, report);
+                        let entry = match previous {
+                            Some(before) => ptrmap::Entry::overflow_next(before),
+                            None => ptrmap::Entry::overflow_head(page_id),
+                        };
+                        expected.insert(overflow_page.get(), entry);
+                        previous = Some(overflow_page);
                     }
                 }
                 Err(error) => report.report(format!(
@@ -400,12 +504,14 @@ fn check_tree(
     }
 
     if let Some(right) = page.right_child() {
+        expected.insert(right.get(), ptrmap::Entry::child_of(page_id));
         let child_key = check_tree(
             pager,
             root,
             right,
             report,
             uses,
+            expected,
             limits,
             encoding,
             key,
@@ -439,6 +545,7 @@ fn check_freelist(
     pager: &mut Pager,
     report: &mut CheckReport,
     uses: &mut BTreeMap<u32, PageUse>,
+    expected: &mut BTreeMap<u32, ptrmap::Entry>,
 ) -> DbResult<()> {
     let head = pager.header().freelist_head;
     let claimed = pager.header().freelist_count;
@@ -466,6 +573,7 @@ fn check_freelist(
             break;
         }
         claim(uses, trunk_id, PageUse::FreelistTrunk, report);
+        expected.insert(trunk_id.get(), ptrmap::Entry::free());
         counted = counted.saturating_add(1);
         let pin = pager.get_page(trunk_id)?;
         let bytes_of = pin.bytes();
@@ -498,6 +606,7 @@ fn check_freelist(
                 continue;
             }
             claim(uses, leaf_id, PageUse::FreelistLeaf, report);
+            expected.insert(leaf_id.get(), ptrmap::Entry::free());
             counted = counted.saturating_add(1);
         }
         next = following;
@@ -523,7 +632,15 @@ fn account_for_every_page(
     uses: &mut BTreeMap<u32, PageUse>,
 ) -> DbResult<()> {
     let claimed = pager.page_count();
-    let in_file = pager.pages_in_file();
+    // A writer's pages reach the file at commit, so during a transaction the
+    // database is legitimately longer than the file it lives in. Outside one,
+    // a header that claims more pages than the file holds is the corruption
+    // this check exists to report.
+    let in_file = if pager.is_writing() {
+        claimed.max(pager.pages_in_file())
+    } else {
+        pager.pages_in_file()
+    };
     if claimed > in_file {
         report.report(format!(
             "the header claims {claimed} pages but the file holds {in_file}"
@@ -542,6 +659,13 @@ fn account_for_every_page(
             claim(uses, page_id, PageUse::PointerMap, report);
             continue;
         }
+        if number == crate::alloc::lock_byte_page(header.page_size) {
+            // The page holding the lock byte belongs to nothing, in every
+            // database, at every page size. Only a file larger than a gigabyte
+            // has one at all.
+            claim(uses, page_id, PageUse::LockByte, report);
+            continue;
+        }
         if !uses.contains_key(&number) {
             report.report(format!(
                 "page {number} is not on the freelist and is not part of any tree"
@@ -552,6 +676,47 @@ fn account_for_every_page(
         if *number > page_count {
             report.report(format!(
                 "page {number} is used but is outside a {page_count}-page database"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Compares every pointer-map entry against what the traversal found.
+///
+/// This is the check that makes auto-vacuum safe rather than hopeful. A stale
+/// reverse pointer is invisible until something moves the page it describes,
+/// and then it rewrites four bytes of a page that does not point there - which
+/// is a corruption with no symptom at the time and no way back afterwards.
+fn verify_pointer_maps(
+    pager: &mut Pager,
+    report: &mut CheckReport,
+    expected: &BTreeMap<u32, ptrmap::Entry>,
+) -> DbResult<()> {
+    if !ptrmap::is_enabled(pager) {
+        return Ok(());
+    }
+    let page_count = pager.page_count();
+    for (number, wanted) in expected {
+        if report.is_full() {
+            break;
+        }
+        if *number > page_count {
+            continue;
+        }
+        let Ok(page) = PageId::from_persisted(*number) else {
+            continue;
+        };
+        let Some(found) = ptrmap::get(pager, page)? else {
+            continue;
+        };
+        if found != *wanted {
+            report.report(format!(
+                "page {number} is {} whose parent is page {}, but its pointer map says {} whose parent is page {}",
+                wanted.describe(),
+                wanted.parent,
+                found.describe(),
+                found.parent
             ));
         }
     }

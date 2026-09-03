@@ -4,9 +4,9 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 
 | status | capabilities |
 |---|---|
-| missing | 113 |
-| pass | 106 |
-| **total** | **219** |
+| missing | 107 |
+| pass | 123 |
+| **total** | **230** |
 
 ## By phase
 
@@ -21,7 +21,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | phase 1: VFS, binary primitives, and simulator | 46 | 0 | 0 | 0 |
 | phase 2: values, affinities, collations, and records | 17 | 0 | 0 | 0 |
 | phase 3: read-only header, pager, page cache, and B-tree | 19 | 0 | 0 | 0 |
-| phase 4: B-tree mutation, allocation, and rollback pages | 0 | 0 | 6 | 0 |
+| phase 4: B-tree mutation, allocation, and rollback pages | 17 | 0 | 0 | 0 |
 | phase 5: lexer, parser, AST, and syntax parity | 0 | 0 | 6 | 0 |
 | phase 6: catalog, binder, expression VM, and read-only SELECT | 0 | 0 | 10 | 0 |
 | phase 7: single-database rollback transactions and DML | 0 | 0 | 13 | 0 |
@@ -122,12 +122,23 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `storage.btree.index-interior` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `storage.overflow-chains` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
 | `storage.cursor.seek` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
-| `storage.btree.insert` | missing | missing | - | 0 |
-| `storage.btree.delete` | missing | missing | - | 0 |
-| `storage.btree.balance` | missing | missing | - | 0 |
-| `storage.freelist` | missing | missing | - | 0 |
-| `storage.pointer-maps` | missing | missing | - | 0 |
-| `storage.auto-vacuum` | missing | missing | - | 0 |
+| `storage.btree.insert` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
+| `storage.btree.delete` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
+| `storage.btree.balance` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `storage.freelist` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `storage.pointer-maps` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `storage.auto-vacuum` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `storage.pager.write-transaction` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `storage.pager.statement-undo` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
+| `storage.pager.savepoints` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `storage.page.cell-edit` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
+| `storage.overflow.write` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `storage.cursor.restore` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `storage.vacuum.incremental` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `storage.vacuum.copy` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `storage.interop.cross-mutation` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `storage.failure.statement-atomicity` | pass | pass | linux-x86_64, windows-x86_64 | 7 |
+| `harness.model.btree` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
 | `storage.integrity-check` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
 | `sql.lexer.tokens` | missing | missing | - | 0 |
 | `sql.lexer.string-literals` | missing | missing | - | 0 |

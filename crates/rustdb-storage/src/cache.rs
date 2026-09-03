@@ -19,12 +19,15 @@
 //! reason - it approximates least-recently-used without a list to maintain on
 //! every hit, which is the operation that actually happens millions of times.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use rustdb_base::buffer::PageBuffer;
 use rustdb_base::error::no_mem;
 use rustdb_base::ids::{DatabaseId, PageId};
+
+use crate::btree::PageLayout;
 use rustdb_base::DbResult;
 
 /// How many independent shards the cache is split into.
@@ -84,9 +87,62 @@ pub enum PageState {
     Invalid,
 }
 
+impl PageState {
+    /// Returns the byte a frame stores this state as.
+    ///
+    /// The state has to be changeable without replacing the frame - a commit
+    /// turns every dirty frame clean, and copying each page again to do that
+    /// would double the cost of committing - so it lives in an atomic and this
+    /// is its encoding.
+    fn to_code(self) -> u8 {
+        match self {
+            PageState::Clean => 0,
+            PageState::Dirty {
+                before_image_saved: false,
+            } => 1,
+            PageState::Dirty {
+                before_image_saved: true,
+            } => 2,
+            PageState::Writeback => 3,
+            PageState::Invalid => 4,
+        }
+    }
+
+    /// Returns the state a byte names, treating anything unknown as invalid.
+    fn from_code(code: u8) -> PageState {
+        match code {
+            0 => PageState::Clean,
+            1 => PageState::Dirty {
+                before_image_saved: false,
+            },
+            2 => PageState::Dirty {
+                before_image_saved: true,
+            },
+            3 => PageState::Writeback,
+            _ => PageState::Invalid,
+        }
+    }
+
+    /// Reports whether a frame in this state may be evicted.
+    fn is_evictable(self) -> bool {
+        matches!(self, PageState::Clean)
+    }
+}
+
 /// One cached page.
 #[derive(Debug)]
 pub struct PageFrame {
+    /// The page's validated structure, parsed at most once.
+    ///
+    /// Validating a page is the expensive half of reading one: an interior
+    /// table page holds hundreds of cells and every one of them is decoded
+    /// before the first is read. A descent parses each page it passes through,
+    /// an insert parses the leaf again, and a balance parses it once more - so
+    /// the same few hundred decodes were paid four or five times for one row.
+    /// Hanging the result off the frame pays them once, and gets the
+    /// invalidation for free: a writer publishes a *new* frame rather than
+    /// mutating this one, so a layout cannot outlive the bytes it describes.
+    layout: OnceLock<Arc<PageLayout>>,
     /// Which page this frame holds.
     pub key: PageKey,
     /// The page's bytes.
@@ -95,8 +151,8 @@ pub struct PageFrame {
     pins: AtomicU32,
     /// The frame's version.
     version: PageVersion,
-    /// What the frame is doing.
-    state: PageState,
+    /// What the frame is doing, as a [`PageState`] code.
+    state: AtomicU8,
     /// The CLOCK reference bit.
     referenced: AtomicBool,
 }
@@ -114,12 +170,31 @@ impl PageFrame {
 
     /// Returns what the frame is doing.
     pub fn state(&self) -> PageState {
-        self.state
+        PageState::from_code(self.state.load(Ordering::Acquire))
+    }
+
+    /// Records what the frame is doing.
+    fn set_state(&self, state: PageState) {
+        self.state.store(state.to_code(), Ordering::Release);
     }
 
     /// Returns how many pins are outstanding.
     pub fn pin_count(&self) -> u32 {
         self.pins.load(Ordering::Acquire)
+    }
+
+    /// Returns the page's validated layout, parsing it the first time.
+    ///
+    /// Two callers racing both parse and one result is kept; the two are equal,
+    /// so which one wins does not matter, and the alternative is a lock on the
+    /// read path to save an occasional duplicate parse.
+    pub fn layout(&self, usable: u32) -> DbResult<Arc<PageLayout>> {
+        if let Some(layout) = self.layout.get() {
+            return Ok(Arc::clone(layout));
+        }
+        let parsed = Arc::new(PageLayout::parse(self.bytes(), self.key.page, usable)?);
+        let _ = self.layout.set(Arc::clone(&parsed));
+        Ok(parsed)
     }
 }
 
@@ -152,6 +227,11 @@ impl PagePin {
     /// Returns the frame's version at the time it was pinned.
     pub fn version(&self) -> PageVersion {
         self.frame.version()
+    }
+
+    /// Returns the page's validated layout, parsed at most once per frame.
+    pub fn layout(&self, usable: u32) -> DbResult<Arc<PageLayout>> {
+        self.frame.layout(usable)
     }
 
     /// Returns the frame itself, for callers that need its state.
@@ -196,10 +276,20 @@ pub struct CacheCounters {
 }
 
 /// One shard of the cache.
+///
+/// The frames are held in a map rather than a list, and that is a measured
+/// choice rather than a stylistic one. With a list, finding a page meant
+/// comparing keys down the shard - sixty-five pointer chases per lookup at a
+/// four-thousand-page cache - and an insert makes about ten lookups, so the
+/// scan was most of what a write cost. The clock hand still needs an order, so
+/// it keeps one: a ring of keys that may name pages the map no longer holds,
+/// which the hand skips and a compaction removes.
 #[derive(Debug, Default)]
 struct Shard {
-    /// The frames this shard holds, in insertion order for the clock hand.
-    frames: Vec<Arc<PageFrame>>,
+    /// The frames this shard holds, by key.
+    frames: HashMap<PageKey, Arc<PageFrame>>,
+    /// The order the clock hand sweeps, which may name evicted pages.
+    ring: Vec<PageKey>,
     /// Where the clock hand is.
     hand: usize,
 }
@@ -207,10 +297,40 @@ struct Shard {
 impl Shard {
     /// Finds a resident frame.
     fn find(&self, key: PageKey) -> Option<Arc<PageFrame>> {
-        self.frames
-            .iter()
-            .find(|frame| frame.key == key)
-            .map(Arc::clone)
+        self.frames.get(&key).map(Arc::clone)
+    }
+
+    /// Adds a frame, returning the byte size of one it replaced.
+    fn put(&mut self, key: PageKey, frame: Arc<PageFrame>) -> Option<usize> {
+        let replaced = self.frames.insert(key, frame);
+        match replaced {
+            Some(old) => Some(old.bytes.as_slice().len()),
+            None => {
+                self.ring.push(key);
+                self.compact();
+                None
+            }
+        }
+    }
+
+    /// Removes a frame, returning its byte size when one was resident.
+    fn remove(&mut self, key: PageKey) -> Option<usize> {
+        let frame = self.frames.remove(&key)?;
+        Some(frame.bytes.as_slice().len())
+    }
+
+    /// Drops ring entries that name pages the map no longer holds.
+    ///
+    /// The ring is allowed to carry stale keys because removing one from the
+    /// middle would be the linear scan this design exists to avoid. It is only
+    /// worth compacting when the staleness is most of it.
+    fn compact(&mut self) {
+        if self.ring.len() < self.frames.len().saturating_mul(4).max(64) {
+            return;
+        }
+        let live = &self.frames;
+        self.ring.retain(|key| live.contains_key(key));
+        self.hand = 0;
     }
 
     /// Evicts one frame, returning its byte size, or `None` when every frame
@@ -221,31 +341,35 @@ impl Shard {
     /// mean every frame is pinned, which is a caller problem rather than a
     /// policy one and is reported as such.
     fn evict_one(&mut self) -> Option<usize> {
-        if self.frames.is_empty() {
+        if self.frames.is_empty() || self.ring.is_empty() {
             return None;
         }
-        let limit = self.frames.len().saturating_mul(2);
+        let limit = self.ring.len().saturating_mul(2);
         for _ in 0..limit {
-            let index = self.hand % self.frames.len().max(1);
+            let index = self.hand % self.ring.len().max(1);
             self.hand = index.saturating_add(1);
-            let Some(frame) = self.frames.get(index) else {
+            let Some(key) = self.ring.get(index).copied() else {
+                continue;
+            };
+            let Some(frame) = self.frames.get(&key) else {
                 continue;
             };
             if frame.pin_count() != 0 {
                 continue;
             }
-            if matches!(frame.state, PageState::Dirty { .. } | PageState::Writeback) {
+            if !frame.state().is_evictable() {
                 // A dirty frame cannot leave until the durability protocol has
-                // written it. A read-only pager never makes one; the check is
-                // here so that phase 4 cannot lose a page by adding one.
+                // written it. Evicting one would lose a change that only this
+                // cache holds, so eviction skips it and the budget is exceeded
+                // instead - which is the failure a caller can survive.
                 continue;
             }
             if frame.referenced.swap(false, Ordering::AcqRel) {
                 continue;
             }
-            let evicted = self.frames.remove(index);
-            self.hand = index;
-            return Some(evicted.bytes.as_slice().len());
+            let size = frame.bytes.as_slice().len();
+            self.frames.remove(&key);
+            return Some(size);
         }
         None
     }
@@ -306,6 +430,19 @@ impl PageCache {
         Some(PagePin { frame })
     }
 
+    /// Returns the version of the resident frame for a page, if there is one.
+    ///
+    /// This takes no pin and counts no hit, because it answers a question about
+    /// the cache rather than asking it for a page: a cursor uses it to find out
+    /// whether the page it walked through has been replaced underneath it, and
+    /// a lookup that counted as a hit would make the counters describe cursor
+    /// bookkeeping instead of reads.
+    pub fn version_of(&self, key: PageKey) -> Option<PageVersion> {
+        let shard = self.lock(key.shard())?;
+        let frame = shard.find(key)?;
+        Some(frame.version())
+    }
+
     /// Records a miss, for a caller that is about to read the page.
     pub fn record_miss(&self) {
         self.misses.fetch_add(1, Ordering::Relaxed);
@@ -324,7 +461,8 @@ impl PageCache {
             bytes,
             pins: AtomicU32::new(1),
             version,
-            state: PageState::Clean,
+            state: AtomicU8::new(PageState::Clean.to_code()),
+            layout: OnceLock::new(),
             referenced: AtomicBool::new(true),
         });
         {
@@ -337,7 +475,7 @@ impl PageCache {
                 existing.pins.fetch_add(1, Ordering::AcqRel);
                 return Ok(PagePin { frame: existing });
             }
-            shard.frames.push(Arc::clone(&frame));
+            shard.put(key, Arc::clone(&frame));
         }
         self.resident.fetch_add(1, Ordering::Relaxed);
         self.resident_bytes
@@ -358,9 +496,8 @@ impl PageCache {
             };
             let mut freed_bytes = 0u64;
             let mut freed = 0u64;
-            shard.frames.retain(|frame| {
-                let keep = frame.pin_count() != 0
-                    || matches!(frame.state, PageState::Dirty { .. } | PageState::Writeback);
+            shard.frames.retain(|_, frame| {
+                let keep = frame.pin_count() != 0 || !frame.state().is_evictable();
                 if !keep {
                     freed_bytes = freed_bytes.saturating_add(frame.bytes.as_slice().len() as u64);
                     freed = freed.saturating_add(1);
@@ -395,8 +532,135 @@ impl PageCache {
             let Some(shard) = self.lock(index) else {
                 continue;
             };
-            for frame in &shard.frames {
+            for frame in shard.frames.values() {
                 if frame.pin_count() != 0 {
+                    count = count.saturating_add(1);
+                }
+            }
+        }
+        count
+    }
+
+    /// Publishes new bytes for a page, replacing whatever frame was resident.
+    ///
+    /// The old frame is removed from the shard rather than mutated, because a
+    /// frame's bytes are immutable behind its `Arc`: a cursor that pinned the
+    /// page keeps reading the bytes it validated, and its recorded version no
+    /// longer matches the resident one, which is exactly the signal
+    /// `path_is_current` exists to give. Mutating in place would change a
+    /// page under a cursor that had already parsed it.
+    pub fn publish(&self, key: PageKey, bytes: PageBuffer, state: PageState) -> DbResult<PagePin> {
+        let size = bytes.as_slice().len();
+        let version = PageVersion(self.next_version.fetch_add(1, Ordering::Relaxed));
+        let frame = Arc::new(PageFrame {
+            key,
+            bytes,
+            pins: AtomicU32::new(1),
+            version,
+            state: AtomicU8::new(state.to_code()),
+            layout: OnceLock::new(),
+            referenced: AtomicBool::new(true),
+        });
+        let removed = {
+            let Some(mut shard) = self.lock(key.shard()) else {
+                return Err(no_mem("the page cache shard is poisoned"));
+            };
+            shard.put(key, Arc::clone(&frame))
+        };
+        match removed {
+            Some(old) => {
+                let old_size = old as u64;
+                let new_size = size as u64;
+                if new_size >= old_size {
+                    self.resident_bytes
+                        .fetch_add(new_size.saturating_sub(old_size), Ordering::Relaxed);
+                } else {
+                    self.resident_bytes
+                        .fetch_sub(old_size.saturating_sub(new_size), Ordering::Relaxed);
+                }
+            }
+            None => {
+                self.resident.fetch_add(1, Ordering::Relaxed);
+                self.resident_bytes
+                    .fetch_add(size as u64, Ordering::Relaxed);
+            }
+        }
+        self.enforce_budget();
+        Ok(PagePin { frame })
+    }
+
+    /// Removes a page's frame whatever state it is in.
+    ///
+    /// This is what a rollback of a page that did not exist before the
+    /// transaction does: there is no earlier image to put back, and leaving
+    /// the frame resident would serve a page the file does not have.
+    pub fn discard(&self, key: PageKey) {
+        let Some(mut shard) = self.lock(key.shard()) else {
+            return;
+        };
+        let removed = shard.remove(key);
+        drop(shard);
+        if let Some(size) = removed {
+            self.resident.fetch_sub(1, Ordering::Relaxed);
+            self.resident_bytes
+                .fetch_sub(size as u64, Ordering::Relaxed);
+        }
+    }
+
+    /// Removes every frame for one database above a page number.
+    ///
+    /// Truncation is the one operation that makes a resident frame describe a
+    /// page that no longer exists, and a later read of that page number - after
+    /// the file has grown again for a different reason - would otherwise be
+    /// served the old contents out of the cache.
+    pub fn discard_above(&self, database: DatabaseId, page_count: u32) {
+        for index in 0..self.shards.len() {
+            let Some(mut shard) = self.lock(index) else {
+                continue;
+            };
+            let mut freed_bytes = 0u64;
+            let mut freed = 0u64;
+            shard.frames.retain(|key, frame| {
+                let keep = key.database != database || key.page.get() <= page_count;
+                if !keep {
+                    freed_bytes = freed_bytes.saturating_add(frame.bytes.as_slice().len() as u64);
+                    freed = freed.saturating_add(1);
+                }
+                keep
+            });
+            shard.hand = 0;
+            drop(shard);
+            self.resident.fetch_sub(freed, Ordering::Relaxed);
+            self.resident_bytes
+                .fetch_sub(freed_bytes, Ordering::Relaxed);
+        }
+    }
+
+    /// Marks a resident frame clean, which is what a commit does once the
+    /// page has reached the file.
+    ///
+    /// The frame keeps its bytes and its version: the contents are now the
+    /// file's contents, so a cursor that pinned the page is still looking at
+    /// the right thing, and only its eligibility for eviction has changed.
+    pub fn mark_clean(&self, key: PageKey) {
+        let Some(shard) = self.lock(key.shard()) else {
+            return;
+        };
+        if let Some(frame) = shard.find(key) {
+            drop(shard);
+            frame.set_state(PageState::Clean);
+        }
+    }
+
+    /// Returns how many frames are dirty right now.
+    pub fn dirty_frames(&self) -> u64 {
+        let mut count = 0u64;
+        for index in 0..self.shards.len() {
+            let Some(shard) = self.lock(index) else {
+                continue;
+            };
+            for frame in shard.frames.values() {
+                if matches!(frame.state(), PageState::Dirty { .. }) {
                     count = count.saturating_add(1);
                 }
             }

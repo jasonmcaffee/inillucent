@@ -44,21 +44,27 @@
     )
 )]
 
+pub mod alloc;
 pub mod btree;
 pub mod cache;
 pub mod check;
 pub mod cursor;
+pub mod edit;
 pub mod header;
+pub mod mutate;
 pub mod overflow;
 pub mod pager;
+pub mod ptrmap;
 pub mod schema;
+pub mod vacuum;
 
 pub use btree::{BTreePage, CellRef, PageKind, PageLayout};
 pub use cache::{CacheCounters, PageCache, PageKey, PagePin, PageVersion};
 pub use check::{CheckLevel, CheckReport};
-pub use cursor::{BTreeCursor, CursorState, SeekBias, TreeKind};
+pub use cursor::{BTreeCursor, CursorState, SavedPosition, SeekBias, TreeKind};
+pub use edit::{encode_cell, rewrite_page};
 pub use header::{DatabaseHeader, VacuumMode};
-pub use pager::{Pager, PagerCounters, PagerOptions, PagerState};
+pub use pager::{NewDatabase, Pager, PagerCounters, PagerOptions, PagerState};
 pub use schema::{SchemaKind, SchemaObject};
 
 /// The implementation phase that filled this crate in, as named by the TDD.
