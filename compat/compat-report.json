@@ -2,7 +2,7 @@
   "reference": "sqlite-3.53.4",
   "counts": {
     "missing": 76,
-    "pass": 183
+    "pass": 184
   },
   "capabilities": [
     {"id": "harness.manifest.schema", "claimed": "pass", "evidenced": "pass", "phase": "phase 0: contract, provenance, and harness foundation", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::toml_lite::tests::the_manifest_subset_parses", "rustdb-compat::toml_lite::tests::anything_outside_the_subset_is_refused", "rustdb-compat::manifest::tests::a_capability_row_parses"]},
@@ -263,7 +263,8 @@
     {"id": "sql.drop-index", "claimed": "pass", "evidenced": "pass", "phase": "phase 7: single-database rollback transactions and DML", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::index_maintenance_matches_sqlite"]},
     {"id": "sql.rowid-allocation", "claimed": "pass", "evidenced": "pass", "phase": "phase 7: single-database rollback transactions and DML", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::rowid_allocation_matches_sqlite"]},
     {"id": "catalog.schema-table-query", "claimed": "pass", "evidenced": "pass", "phase": "phase 7: single-database rollback transactions and DML", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::the_schema_table_matches_sqlite"]},
-    {"id": "interop.cross-write", "claimed": "pass", "evidenced": "pass", "phase": "phase 7: single-database rollback transactions and DML", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::sqlite_reads_what_rustdb_wrote", "rustdb-compat::sqlite_writes_on_top_of_rustdb_and_rustdb_reads_it_back", "rustdb-compat::rustdb_writes_into_a_database_sqlite_built", "rustdb-compat::dropping_a_table_leaves_a_database_sqlite_accepts", "rustdb-compat::a_rolled_back_transaction_is_invisible_to_sqlite"]}
+    {"id": "interop.cross-write", "claimed": "pass", "evidenced": "pass", "phase": "phase 7: single-database rollback transactions and DML", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::sqlite_reads_what_rustdb_wrote", "rustdb-compat::sqlite_writes_on_top_of_rustdb_and_rustdb_reads_it_back", "rustdb-compat::rustdb_writes_into_a_database_sqlite_built", "rustdb-compat::dropping_a_table_leaves_a_database_sqlite_accepts", "rustdb-compat::a_rolled_back_transaction_is_invisible_to_sqlite"]},
+    {"id": "txn.hooks", "claimed": "pass", "evidenced": "pass", "phase": "phase 7: single-database rollback transactions and DML", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::the_update_hook_reports_every_changed_row", "rustdb-compat::a_commit_hook_can_veto_a_commit", "rustdb-compat::the_rollback_hook_fires_on_an_explicit_rollback"]}
   ],
   "problems": [
 

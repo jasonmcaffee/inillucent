@@ -199,7 +199,9 @@ pub enum Opcode {
     ClearBtree,
     /// `p1`: register holding a rowid to add to the change count.
     ///
-    /// `p2` of 1 also records the rowid as the last insert rowid.
+    /// `p2` of 1 also records the rowid as the last insert rowid. `p3` names
+    /// the operation for the update hook - 0 delete, 1 insert, 2 update - and
+    /// `p4` carries the table it happened to.
     CountChange,
 }
 
@@ -419,6 +421,59 @@ pub enum Operand {
     Count(u32),
     /// The affinity of each column of a record, in column order.
     Affinities(Vec<Affinity>),
+    /// A row change: which operation, and the table it happened to.
+    Change(RowChangeKind, Vec<u8>),
+}
+
+/// What a row change did, as the update hook reports it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RowChangeKind {
+    /// A row was inserted.
+    Insert,
+    /// A row was updated in place.
+    Update,
+    /// A row was deleted.
+    Delete,
+}
+
+impl RowChangeKind {
+    /// Returns the operand number the compiler writes for this kind.
+    pub fn as_operand(self) -> i32 {
+        match self {
+            RowChangeKind::Delete => 0,
+            RowChangeKind::Insert => 1,
+            RowChangeKind::Update => 2,
+        }
+    }
+
+    /// Returns the kind an operand number names, defaulting to an update.
+    pub fn from_operand(value: i32) -> RowChangeKind {
+        match value {
+            0 => RowChangeKind::Delete,
+            1 => RowChangeKind::Insert,
+            _ => RowChangeKind::Update,
+        }
+    }
+
+    /// Returns the name SQLite's authorizer and hooks use.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RowChangeKind::Insert => "INSERT",
+            RowChangeKind::Update => "UPDATE",
+            RowChangeKind::Delete => "DELETE",
+        }
+    }
+}
+
+/// One row change, as the update hook sees it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RowChange {
+    /// What happened to the row.
+    pub kind: RowChangeKind,
+    /// The table it happened to.
+    pub table: Vec<u8>,
+    /// The rowid of the row.
+    pub rowid: i64,
 }
 
 /// One instruction.

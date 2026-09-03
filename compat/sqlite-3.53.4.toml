@@ -2090,3 +2090,11 @@ profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
 tests = ["rustdb-compat::sqlite_reads_what_rustdb_wrote", "rustdb-compat::sqlite_writes_on_top_of_rustdb_and_rustdb_reads_it_back", "rustdb-compat::rustdb_writes_into_a_database_sqlite_built", "rustdb-compat::dropping_a_table_leaves_a_database_sqlite_accepts", "rustdb-compat::a_rolled_back_transaction_is_invisible_to_sqlite"]
+
+[[capability]]
+id = "txn.hooks"
+source = "https://sqlite.org/c3ref/update_hook.html"
+profile = "default"
+phase = "phase 7: single-database rollback transactions and DML"
+status = "pass"
+tests = ["rustdb-compat::the_update_hook_reports_every_changed_row", "rustdb-compat::a_commit_hook_can_veto_a_commit", "rustdb-compat::the_rollback_hook_fires_on_an_explicit_rollback"]

@@ -70,7 +70,9 @@ pub mod verify;
 pub use compile::{compile, compile_select};
 pub use compile_dml::{compile_delete, compile_insert, compile_update};
 pub use machine::{Machine, MachineState, StepOutcome};
-pub use program::{Instruction, Opcode, Program, ProgramDependencies, ResultColumn};
+pub use program::{
+    Instruction, Opcode, Program, ProgramDependencies, ResultColumn, RowChange, RowChangeKind,
+};
 pub use verify::{verify, verify_operands, VerifyError};
 
 /// The implementation phase that filled this crate in, as named by the TDD.

@@ -34,6 +34,7 @@ use rustdb_transaction::state::{
 use rustdb_vfs::os::OsVfs;
 use rustdb_vfs::path::DbPath;
 use rustdb_vfs::Vfs;
+use rustdb_vm::program::{RowChange, RowChangeKind};
 
 /// How a database is opened.
 #[derive(Clone, Debug)]
@@ -174,6 +175,46 @@ pub enum Outcome {
     Rollback,
 }
 
+/// What a connection calls back into when a row changes.
+///
+/// The arguments are SQLite's: the operation, the database the table is in,
+/// the table, and the rowid. The hook is told what happened, not asked - it
+/// cannot change the row and cannot run SQL on the connection that called it,
+/// which is why it takes no handle.
+pub type UpdateHook = Box<dyn Fn(RowChangeKind, &[u8], &[u8], i64)>;
+
+/// What a connection calls back into before a transaction commits.
+///
+/// Returning `true` vetoes the commit, which is then rolled back - the
+/// inversion is SQLite's, whose hook returns non-zero to abort.
+pub type CommitHook = Box<dyn Fn() -> bool>;
+
+/// What a connection calls back into after a transaction is rolled back.
+pub type RollbackHook = Box<dyn Fn()>;
+
+/// The callbacks a connection fires.
+#[derive(Default)]
+pub struct Hooks {
+    /// Fired once per row changed, in the order the rows changed.
+    pub update: Option<UpdateHook>,
+    /// Fired before a commit, and able to veto it.
+    pub commit: Option<CommitHook>,
+    /// Fired after a rollback.
+    pub rollback: Option<RollbackHook>,
+}
+
+impl std::fmt::Debug for Hooks {
+    /// Reports which hooks are set, since a closure has nothing else to say.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Hooks")
+            .field("update", &self.update.is_some())
+            .field("commit", &self.commit.is_some())
+            .field("rollback", &self.rollback.is_some())
+            .finish()
+    }
+}
+
 /// One connection: a pager, a catalog snapshot, and the statements on it.
 pub struct Connection {
     state: RefCell<ConnectionState>,
@@ -183,6 +224,7 @@ pub struct Connection {
     path: DbPath,
     vfs: Arc<dyn Vfs>,
     options: OpenOptions,
+    hooks: RefCell<Hooks>,
 }
 
 impl Connection {
@@ -212,7 +254,81 @@ impl Connection {
             path: path.clone(),
             vfs,
             options,
+            hooks: RefCell::new(Hooks::default()),
         })
+    }
+
+    /// Sets the callback fired once per row changed, returning the old one.
+    pub fn set_update_hook(&self, hook: Option<UpdateHook>) -> Option<UpdateHook> {
+        self.hooks
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut hooks| core::mem::replace(&mut hooks.update, hook))
+    }
+
+    /// Sets the callback fired before a commit, returning the old one.
+    pub fn set_commit_hook(&self, hook: Option<CommitHook>) -> Option<CommitHook> {
+        self.hooks
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut hooks| core::mem::replace(&mut hooks.commit, hook))
+    }
+
+    /// Sets the callback fired after a rollback, returning the old one.
+    pub fn set_rollback_hook(&self, hook: Option<RollbackHook>) -> Option<RollbackHook> {
+        self.hooks
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut hooks| core::mem::replace(&mut hooks.rollback, hook))
+    }
+
+    /// Reports whether an update hook is registered.
+    ///
+    /// A statement asks before it runs, because logging every row it changes
+    /// costs memory proportional to the rows and nobody would read it.
+    pub fn wants_row_changes(&self) -> bool {
+        self.hooks
+            .try_borrow()
+            .is_ok_and(|hooks| hooks.update.is_some())
+    }
+
+    /// Fires the update hook for one row.
+    ///
+    /// The hook runs with the connection's own state *not* borrowed, so a hook
+    /// that asks the connection a question deadlocks on nothing. It still may
+    /// not run SQL on this connection - the statement that called it is in the
+    /// middle of running - and that is the same rule SQLite states.
+    pub fn fire_update_hook(&self, change: &RowChange) {
+        let Ok(hooks) = self.hooks.try_borrow() else {
+            return;
+        };
+        let Some(hook) = hooks.update.as_ref() else {
+            return;
+        };
+        hook(
+            change.kind,
+            &self.options.main_name,
+            &change.table,
+            change.rowid,
+        );
+    }
+
+    /// Asks the commit hook whether the commit may proceed.
+    fn commit_is_vetoed(&self) -> bool {
+        let Ok(hooks) = self.hooks.try_borrow() else {
+            return false;
+        };
+        hooks.commit.as_ref().is_some_and(|hook| hook())
+    }
+
+    /// Fires the rollback hook.
+    fn fire_rollback_hook(&self) {
+        let Ok(hooks) = self.hooks.try_borrow() else {
+            return;
+        };
+        if let Some(hook) = hooks.rollback.as_ref() {
+            hook();
+        }
     }
 
     /// Returns the catalog snapshot statements are compiled against.
@@ -383,6 +499,7 @@ impl Connection {
                     state.pager.rollback()?;
                 }
                 state.transaction.finish(false);
+                self.fire_rollback_hook();
                 transaction_over = true;
             }
         }
@@ -397,16 +514,18 @@ impl Connection {
                 return Ok(());
             }
             if state.pager.is_writing() {
-                if matches!(outcome, Outcome::Done | Outcome::Fail) {
+                if matches!(outcome, Outcome::Done | Outcome::Fail) && !self.commit_is_vetoed() {
                     let committed = state.pager.commit();
                     if committed.is_err() {
                         let _ = state.pager.rollback();
+                        self.fire_rollback_hook();
                     }
                     state.transaction.finish(committed.is_ok());
                     committed?;
                 } else {
                     state.pager.rollback()?;
                     state.transaction.finish(false);
+                    self.fire_rollback_hook();
                 }
             } else {
                 state.transaction.end_read();
@@ -603,6 +722,17 @@ impl Connection {
                 "cannot commit transaction - SQL statements in progress",
             ));
         }
+        // The commit hook runs before anything is written, and a veto turns
+        // the COMMIT into a ROLLBACK rather than an error - which is SQLite's
+        // behaviour and the reason the hook is worth having at all.
+        if self.commit_is_vetoed() {
+            let rolled = state.pager.rollback();
+            state.transaction.finish(false);
+            let released = state.pager.end_read();
+            self.fire_rollback_hook();
+            rolled?;
+            return released;
+        }
         let committed = if state.pager.is_writing() {
             state.pager.commit()
         } else {
@@ -613,6 +743,9 @@ impl Connection {
         }
         state.transaction.finish(committed.is_ok());
         let released = state.pager.end_read();
+        if committed.is_err() {
+            self.fire_rollback_hook();
+        }
         committed?;
         released
     }
@@ -629,6 +762,7 @@ impl Connection {
         let rolled = state.pager.rollback();
         state.transaction.finish(false);
         let released = state.pager.end_read();
+        self.fire_rollback_hook();
         rolled?;
         released
     }
@@ -674,6 +808,14 @@ impl Connection {
         }
         // Releasing the savepoint that started an implicit transaction commits
         // it, which is the one place a RELEASE is a commit.
+        if self.commit_is_vetoed() {
+            let rolled = state.pager.rollback();
+            state.transaction.finish(false);
+            let released = state.pager.end_read();
+            self.fire_rollback_hook();
+            rolled?;
+            return released;
+        }
         let committed = if state.pager.is_writing() {
             state.pager.commit()
         } else {

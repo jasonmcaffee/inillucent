@@ -35,8 +35,8 @@ use rustdb_value::{Affinity, Collation};
 
 use crate::compile::{Compiler, Label};
 use crate::program::{
-    IndexKey, Instruction, Opcode, Operand, Program, ProgramDependencies, ResultColumn, SortColumn,
-    SortKey,
+    IndexKey, Instruction, Opcode, Operand, Program, ProgramDependencies, ResultColumn,
+    RowChangeKind, SortColumn, SortKey,
 };
 
 /// The result codes a constraint failure reports.
@@ -147,6 +147,25 @@ impl Compiler {
             indexes,
             definitions,
         }
+    }
+
+    /// Counts one changed row, and logs it for the update hook.
+    fn emit_count_change(
+        &mut self,
+        table: &TableInfo,
+        rowid: u32,
+        kind: RowChangeKind,
+        is_insert: bool,
+    ) {
+        self.emit(
+            Instruction::new(
+                Opcode::CountChange,
+                rowid as i32,
+                i32::from(is_insert),
+                kind.as_operand(),
+            )
+            .with_p4(Operand::Change(kind, table.name.clone())),
+        );
     }
 
     /// Emits a halt that reports a constraint failure.
@@ -679,12 +698,7 @@ impl Compiler {
         self.emit_delete_current(writer, table)?;
         self.patch_here(gone);
         self.emit_write_row(writer, table, &values, new_rowid)?;
-        self.emit(Instruction::new(
-            Opcode::CountChange,
-            new_rowid as i32,
-            0,
-            0,
-        ));
+        self.emit_count_change(table, new_rowid, RowChangeKind::Update, false);
         let previous = core::mem::replace(
             &mut self.substitutions,
             row_substitutions(table, &values, new_rowid),
@@ -1103,7 +1117,7 @@ impl Compiler {
             &mut skip,
         )?;
         self.emit_write_row(writer, table, &values, rowid)?;
-        self.emit(Instruction::new(Opcode::CountChange, rowid as i32, 1, 0));
+        self.emit_count_change(table, rowid, RowChangeKind::Insert, true);
         let previous = core::mem::replace(
             &mut self.substitutions,
             row_substitutions(table, &values, rowid),
@@ -1238,7 +1252,7 @@ pub fn compile_delete(
     ));
     compiler.emit_returning(&delete.returning)?;
     compiler.emit_delete_current(&writer, &delete.table)?;
-    compiler.emit(Instruction::new(Opcode::CountChange, rowid as i32, 0, 0));
+    compiler.emit_count_change(&delete.table, rowid, RowChangeKind::Delete, false);
     compiler.patch_here(missing);
     compiler.emit(Instruction::new(Opcode::SorterNext, sorter as i32, top, 0));
     compiler.patch_here(empty);
@@ -1438,12 +1452,7 @@ impl Compiler {
         self.emit_delete_current(writer, table)?;
         self.patch_here(gone);
         self.emit_write_row(writer, table, &values, new_rowid)?;
-        self.emit(Instruction::new(
-            Opcode::CountChange,
-            new_rowid as i32,
-            0,
-            0,
-        ));
+        self.emit_count_change(table, new_rowid, RowChangeKind::Update, false);
         let previous = core::mem::replace(
             &mut self.substitutions,
             row_substitutions(table, &values, new_rowid),
