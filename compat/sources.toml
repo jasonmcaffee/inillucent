@@ -46,6 +46,9 @@ url = "https://sqlite.org/c3ref/serialize.html"
 url = "https://sqlite.org/c3ref/step.html"
 
 [[source]]
+url = "https://sqlite.org/c3ref/update_hook.html"
+
+[[source]]
 url = "https://sqlite.org/cli.html"
 
 [[source]]

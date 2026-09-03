@@ -151,6 +151,37 @@ impl Connection {
         self.inner.counters().last_insert_rowid
     }
 
+    /// Sets the callback fired once per row changed, returning the old one.
+    ///
+    /// The hook is told what happened - the operation, the database, the table
+    /// and the rowid - and cannot change it. It must not run SQL on this
+    /// connection: the statement that called it has not finished.
+    pub fn set_update_hook(
+        &self,
+        hook: Option<rustdb_session::UpdateHook>,
+    ) -> Option<rustdb_session::UpdateHook> {
+        self.inner.set_update_hook(hook)
+    }
+
+    /// Sets the callback fired before a commit, returning the old one.
+    ///
+    /// Returning `true` vetoes the commit, which becomes a rollback rather
+    /// than an error.
+    pub fn set_commit_hook(
+        &self,
+        hook: Option<rustdb_session::CommitHook>,
+    ) -> Option<rustdb_session::CommitHook> {
+        self.inner.set_commit_hook(hook)
+    }
+
+    /// Sets the callback fired after a rollback, returning the old one.
+    pub fn set_rollback_hook(
+        &self,
+        hook: Option<rustdb_session::RollbackHook>,
+    ) -> Option<rustdb_session::RollbackHook> {
+        self.inner.set_rollback_hook(hook)
+    }
+
     /// Returns what the journal has cost since the connection was opened.
     pub fn journal_stats(&self) -> rustdb_storage::JournalStats {
         self.inner.journal_stats()

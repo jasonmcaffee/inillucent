@@ -27,7 +27,7 @@ use rustdb_value::{affinity, cast, Affinity, Collation, TextEncoding, Value};
 use crate::aggregate::Accumulator;
 use crate::builtin;
 use crate::eval;
-use crate::program::{Instruction, Opcode, Operand, Program};
+use crate::program::{Instruction, Opcode, Operand, Program, RowChange};
 use crate::sorter::{DistinctSet, Sorter};
 
 /// What one step of the machine produced.
@@ -89,6 +89,8 @@ pub struct Machine {
     changes: i64,
     last_insert_rowid: i64,
     conflict: Option<i32>,
+    record_changes: bool,
+    row_changes: Vec<RowChange>,
 }
 
 impl Machine {
@@ -122,7 +124,26 @@ impl Machine {
             changes: 0,
             last_insert_rowid: 0,
             conflict: None,
+            record_changes: false,
+            row_changes: Vec::new(),
         }
+    }
+
+    /// Asks the machine to log every row it changes, for the update hook.
+    pub fn record_row_changes(&mut self, record: bool) {
+        self.record_changes = record;
+        if !record {
+            self.row_changes.clear();
+        }
+    }
+
+    /// Takes the row changes logged since the last call.
+    ///
+    /// They are drained rather than read, because the session fires the hook
+    /// for each one and firing the same change twice would be worse than not
+    /// firing it at all.
+    pub fn take_row_changes(&mut self) -> Vec<RowChange> {
+        core::mem::take(&mut self.row_changes)
     }
 
     /// Returns the conflict algorithm the failing constraint carried.
@@ -187,6 +208,7 @@ impl Machine {
     pub fn reset(&mut self) {
         self.changes = 0;
         self.conflict = None;
+        self.row_changes.clear();
         self.registers = vec![Value::Null; self.program.register_count as usize];
         self.cursors.clear();
         self.cursors
@@ -550,8 +572,21 @@ impl Machine {
             Opcode::ClearBtree => self.clear_btree(instruction, pager),
             Opcode::CountChange => {
                 self.changes = self.changes.saturating_add(1);
+                let rowid = cast::integer_value(&self.register(instruction.p1));
                 if instruction.p2 == 1 {
-                    self.last_insert_rowid = cast::integer_value(&self.register(instruction.p1));
+                    self.last_insert_rowid = rowid;
+                }
+                // The log is only kept when a hook is registered. A delete of a
+                // million rows would otherwise buffer a million entries nobody
+                // was going to read.
+                if self.record_changes {
+                    if let Operand::Change(kind, table) = &instruction.p4 {
+                        self.row_changes.push(RowChange {
+                            kind: *kind,
+                            table: table.clone(),
+                            rowid,
+                        });
+                    }
                 }
                 Ok(Flow::Next)
             }

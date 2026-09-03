@@ -302,3 +302,142 @@ fn writes_survive_a_close_and_reopen() {
         "a committed transaction leaves no journal behind"
     );
 }
+
+/// The update hook reports every row a statement changed, in order.
+#[test]
+fn the_update_hook_reports_every_changed_row() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let (database, _path) = database(
+        "hooks.db",
+        "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);
+         INSERT INTO t VALUES(1, 'one');
+         INSERT INTO t VALUES(2, 'two');",
+    );
+    let connection = database.connect().expect("connects");
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let recorder = Rc::clone(&seen);
+    connection.set_update_hook(Some(Box::new(move |kind, database, table, rowid| {
+        recorder.borrow_mut().push(format!(
+            "{} {}.{} {rowid}",
+            kind.as_str(),
+            String::from_utf8_lossy(database),
+            String::from_utf8_lossy(table)
+        ));
+    })));
+
+    connection
+        .execute_batch("INSERT INTO t VALUES(3, 'three')")
+        .expect("inserts");
+    connection
+        .execute_batch("UPDATE t SET b = 'x' WHERE a >= 2")
+        .expect("updates");
+    connection
+        .execute_batch("DELETE FROM t WHERE a = 1")
+        .expect("deletes");
+
+    assert_eq!(
+        seen.borrow().as_slice(),
+        [
+            "INSERT main.t 3",
+            "UPDATE main.t 2",
+            "UPDATE main.t 3",
+            "DELETE main.t 1",
+        ]
+    );
+
+    // Removing the hook stops the reports.
+    connection.set_update_hook(None);
+    connection
+        .execute_batch("INSERT INTO t VALUES(4, 'four')")
+        .expect("inserts");
+    assert_eq!(seen.borrow().len(), 4, "a removed hook still fired");
+}
+
+/// A commit hook can veto a commit, which becomes a rollback.
+#[test]
+fn a_commit_hook_can_veto_a_commit() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let (database, _path) = database(
+        "commit-hook.db",
+        "CREATE TABLE t(a INTEGER PRIMARY KEY);
+         INSERT INTO t VALUES(1);",
+    );
+    let connection = database.connect().expect("connects");
+    let veto = Rc::new(Cell::new(false));
+    let rolled_back = Rc::new(Cell::new(0u32));
+    let asked = Rc::clone(&veto);
+    connection.set_commit_hook(Some(Box::new(move || asked.get())));
+    let counted = Rc::clone(&rolled_back);
+    connection.set_rollback_hook(Some(Box::new(move || {
+        counted.set(counted.get().saturating_add(1));
+    })));
+
+    // With the hook allowing it, the write lands.
+    connection
+        .execute_batch("INSERT INTO t VALUES(2)")
+        .expect("inserts");
+    assert_eq!(
+        connection.query("SELECT a FROM t").expect("queries").len(),
+        2
+    );
+    assert_eq!(rolled_back.get(), 0);
+
+    // With the hook vetoing, the write does not - and the veto is reported as
+    // a rollback rather than as an error.
+    veto.set(true);
+    connection
+        .execute_batch("INSERT INTO t VALUES(3)")
+        .expect("the veto is not an error");
+    assert_eq!(
+        connection.query("SELECT a FROM t").expect("queries").len(),
+        2,
+        "the vetoed row was written anyway"
+    );
+    assert_eq!(rolled_back.get(), 1, "the rollback hook did not fire");
+
+    // An explicit transaction is vetoed the same way.
+    connection.execute_batch("BEGIN").expect("begins");
+    connection
+        .execute_batch("INSERT INTO t VALUES(4)")
+        .expect("inserts");
+    connection
+        .execute_batch("COMMIT")
+        .expect("the veto is not an error");
+    assert_eq!(
+        connection.query("SELECT a FROM t").expect("queries").len(),
+        2
+    );
+    assert_eq!(rolled_back.get(), 2);
+}
+
+/// The rollback hook fires for an explicit ROLLBACK too.
+#[test]
+fn the_rollback_hook_fires_on_an_explicit_rollback() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let (database, _path) = database("rollback-hook.db", "CREATE TABLE t(a INTEGER PRIMARY KEY);");
+    let connection = database.connect().expect("connects");
+    let fired = Rc::new(Cell::new(0u32));
+    let counted = Rc::clone(&fired);
+    connection.set_rollback_hook(Some(Box::new(move || {
+        counted.set(counted.get().saturating_add(1));
+    })));
+
+    connection
+        .execute_batch("BEGIN; INSERT INTO t VALUES(1); ROLLBACK;")
+        .expect("runs");
+    assert_eq!(fired.get(), 1);
+    connection
+        .execute_batch("INSERT INTO t VALUES(2)")
+        .expect("inserts");
+    assert_eq!(
+        fired.get(),
+        1,
+        "a successful commit fired the rollback hook"
+    );
+}

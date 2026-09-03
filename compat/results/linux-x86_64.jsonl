@@ -54,6 +54,7 @@
 {"test_id": "rustdb-catalog::snapshot::tests::temp_shadows_main_unless_the_name_is_qualified", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-catalog::snapshot::tests::unknown_names_and_indexes_are_empty", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::a_backward_scan_is_a_forward_scan_reversed", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::a_commit_hook_can_veto_a_commit", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::a_corrupt_page_stops_a_scan_rather_than_being_skipped", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::a_corrupt_schema_row_names_its_object", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::a_crash_during_recovery_is_idempotent", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
@@ -252,10 +253,12 @@
 {"test_id": "rustdb-compat::the_register_is_structurally_sound", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_report_regenerates", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_retrieval_baseline_is_unchanged", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::the_rollback_hook_fires_on_an_explicit_rollback", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_schema_table_matches_sqlite", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_shipped_manifest_is_structurally_sound", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_shipped_report_is_reproducible", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_two_engines_take_turns_writing_the_same_file", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::the_update_hook_reports_every_changed_row", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_vacuum_fixtures_have_pointer_maps_that_the_check_accounts_for", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_verifier_rejects_generated_invalid_programs", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_verifier_rejects_mismatched_operands", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}

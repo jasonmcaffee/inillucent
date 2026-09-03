@@ -5,8 +5,8 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | status | capabilities |
 |---|---|
 | missing | 76 |
-| pass | 183 |
-| **total** | **259** |
+| pass | 184 |
+| **total** | **260** |
 
 ## By phase
 
@@ -24,7 +24,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | phase 4: B-tree mutation, allocation, and rollback pages | 17 | 0 | 0 | 0 |
 | phase 5: lexer, parser, AST, and syntax parity | 10 | 0 | 0 | 0 |
 | phase 6: catalog, binder, expression VM, and read-only SELECT | 22 | 0 | 0 | 0 |
-| phase 7: single-database rollback transactions and DML | 28 | 0 | 0 | 0 |
+| phase 7: single-database rollback transactions and DML | 29 | 0 | 0 | 0 |
 | phase 8: complete SELECT, planner, schema, and SQL semantics | 0 | 0 | 26 | 0 |
 | phase 9: foreign keys, ATTACH, and multi-database commit | 0 | 0 | 6 | 0 |
 
@@ -291,3 +291,4 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `sql.rowid-allocation` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `catalog.schema-table-query` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `interop.cross-write` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
+| `txn.hooks` | pass | pass | linux-x86_64, windows-x86_64 | 3 |

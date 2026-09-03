@@ -184,11 +184,19 @@ impl<'connection> Statement<'connection> {
                 self.check_schema()?;
             }
             self.connection.begin_statement(self.access)?;
+            self.machine
+                .record_row_changes(self.connection.wants_row_changes());
             self.open = true;
         }
         let outcome = self
             .connection
             .with_pager(|pager| self.machine.step(pager))?;
+        // The hook fires for the rows this step changed, in the order they
+        // changed, and before the statement's own result reaches the caller.
+        // It runs outside the pager borrow, so a hook may read the connection.
+        for change in self.machine.take_row_changes() {
+            self.connection.fire_update_hook(&change);
+        }
         match outcome {
             Ok(StepOutcome::Row) => {
                 self.current = self.machine.row().to_vec();
