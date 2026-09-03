@@ -8,3 +8,6 @@ description = "Scalar, aggregate, and window functions, collations, virtual tabl
 [dependencies]
 rustdb-base = { workspace = true }
 rustdb-value = { workspace = true }
+rustdb-storage = { workspace = true }
+rustdb-transaction = { workspace = true }
+rustdb-sql = { workspace = true }

@@ -304,7 +304,9 @@ fn result_metadata_names_the_column_and_its_origin() {
         .iter()
         .map(|column| String::from_utf8_lossy(&column.name).into_owned())
         .collect();
-    assert_eq!(names, vec!["name", "s", ""]);
+    // An unaliased expression is named after the text it was written as,
+    // which is SQLite's default and what `sqlite3_column_name` reports.
+    assert_eq!(names, vec!["name", "s", "id + 1"]);
     let origin = statement
         .columns()
         .first()

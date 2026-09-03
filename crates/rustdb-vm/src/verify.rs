@@ -188,7 +188,11 @@ fn check_operand_ranges(program: &Program, address: usize, problems: &mut Vec<Ve
             blocks.push((instruction.p3, i32::from(instruction.p5)))
         }
         Opcode::ResultRow | Opcode::ApplyAffinity => blocks.push((instruction.p1, instruction.p2)),
-        Opcode::Function | Opcode::Pattern | Opcode::MathCall | Opcode::TimeCall => {
+        Opcode::Function
+        | Opcode::Pattern
+        | Opcode::MathCall
+        | Opcode::TimeCall
+        | Opcode::JsonCall => {
             blocks.push((instruction.p1, instruction.p2));
             registers.push((instruction.p3, "destination"));
         }
@@ -498,9 +502,11 @@ fn writes_of(program: &Program, address: usize) -> Vec<u32> {
         | Opcode::And
         | Opcode::Or
         | Opcode::InList => single(instruction.p3),
-        Opcode::Function | Opcode::Pattern | Opcode::MathCall | Opcode::TimeCall => {
-            single(instruction.p3)
-        }
+        Opcode::Function
+        | Opcode::Pattern
+        | Opcode::MathCall
+        | Opcode::TimeCall
+        | Opcode::JsonCall => single(instruction.p3),
         Opcode::AggFinal => single(instruction.p2),
         Opcode::Gosub => single(instruction.p1),
         Opcode::NewRowid | Opcode::RowData | Opcode::CreateBtree => single(instruction.p2),
@@ -551,6 +557,7 @@ fn reads_of(program: &Program, address: usize) -> Vec<u32> {
         | Opcode::Pattern
         | Opcode::MathCall
         | Opcode::TimeCall
+        | Opcode::JsonCall
         | Opcode::AggStep => block(instruction.p1, instruction.p2),
         Opcode::InList => {
             let mut reads = vec![instruction.p1.max(0) as u32];
@@ -593,6 +600,7 @@ pub fn operand_matches(opcode: Opcode, operand: &Operand) -> bool {
         Opcode::Arithmetic => matches!(operand, Operand::Arithmetic(_)),
         Opcode::Cast | Opcode::ApplyAffinity => matches!(operand, Operand::Affinity(_)),
         Opcode::Function => matches!(operand, Operand::Scalar(_, _)),
+        Opcode::JsonCall => matches!(operand, Operand::Json(_)),
         Opcode::Pattern => matches!(operand, Operand::Pattern(_)),
         Opcode::AggStep | Opcode::AggFinal | Opcode::AggReset => {
             matches!(operand, Operand::Aggregate(_))

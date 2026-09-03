@@ -93,6 +93,18 @@ impl CursorSlot {
 pub struct Machine {
     program: Arc<Program>,
     registers: Vec<Value<'static>>,
+    /// Which registers hold a value that is JSON rather than text that
+    /// looks like it.
+    ///
+    /// SQLite calls this the value's subtype and keeps it in the same
+    /// structure as the value. Here it is a parallel array, for one
+    /// reason: `Value` is the type every layer of the engine passes
+    /// around, and a field only the JSON functions read would be carried
+    /// through the record codec, the b-tree and the comparison rules by
+    /// everything that never looks at it. The mark belongs to the
+    /// register, not to the value - which is also why it does not survive
+    /// being written to a row.
+    register_marks: Vec<bool>,
     cursors: Vec<Option<CursorSlot>>,
     sorters: Vec<Option<Sorter>>,
     distincts: Vec<DistinctSet>,
@@ -168,6 +180,7 @@ impl Machine {
     /// Returns a machine ready to run a program.
     pub fn new(program: Arc<Program>, interrupt: Arc<AtomicBool>, limits: Limits) -> Machine {
         let registers = vec![Value::Null; program.register_count as usize];
+        let register_marks = vec![false; program.register_count as usize];
         let mut cursors = Vec::new();
         cursors.resize_with(program.cursor_count as usize, || None);
         let mut sorters = Vec::new();
@@ -181,6 +194,7 @@ impl Machine {
         Machine {
             program,
             registers,
+            register_marks,
             cursors,
             sorters,
             distincts,
@@ -314,6 +328,7 @@ impl Machine {
         self.conflict = None;
         self.row_changes.clear();
         self.registers = vec![Value::Null; self.program.register_count as usize];
+        self.register_marks = vec![false; self.program.register_count as usize];
         self.cursors.clear();
         self.cursors
             .resize_with(self.program.cursor_count as usize, || None);
@@ -415,11 +430,39 @@ impl Machine {
             .unwrap_or(Value::Null)
     }
 
-    /// Stores a value into a register.
+    /// Stores a value into a register, clearing its JSON mark.
+    ///
+    /// Clearing is the safe default and the common case: every opcode but
+    /// the JSON call and the register copy produces a value that is not a
+    /// document, and a mark left behind would make the next
+    /// `json_object()` embed a string as if it were JSON.
     fn store(&mut self, index: i32, value: Value<'static>) {
+        self.store_marked(index, value, false);
+    }
+
+    /// Stores a value into a register with an explicit JSON mark.
+    fn store_marked(&mut self, index: i32, value: Value<'static>, json: bool) {
         if let Some(slot) = self.registers.get_mut(index.max(0) as usize) {
             *slot = value;
         }
+        if let Some(mark) = self.register_marks.get_mut(index.max(0) as usize) {
+            *mark = json;
+        }
+    }
+
+    /// Returns whether a register's value is marked as JSON.
+    fn marked(&self, index: i32) -> bool {
+        self.register_marks
+            .get(index.max(0) as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Returns the JSON marks of a contiguous block of registers.
+    fn mark_block(&self, first: i32, count: i32) -> Vec<bool> {
+        (0..count.max(0))
+            .map(|offset| self.marked(first.saturating_add(offset)))
+            .collect()
     }
 
     /// Returns a contiguous block of registers.
@@ -522,12 +565,17 @@ impl Machine {
             }
             Opcode::Copy => {
                 let value = self.register(instruction.p1);
-                let value = match instruction.p5 {
-                    1 => normalise_limit(&value),
-                    2 => normalise_offset(&value),
-                    _ => value,
+                // A plain copy carries the JSON mark with the value; the two
+                // normalising forms produce a counter, which is never JSON.
+                // Losing the mark here is how `json_object('a', json('[1]'))`
+                // would come to quote its argument: the argument reaches the
+                // call through exactly this opcode.
+                let (value, json) = match instruction.p5 {
+                    1 => (normalise_limit(&value), false),
+                    2 => (normalise_offset(&value), false),
+                    _ => (value, self.marked(instruction.p1)),
                 };
-                self.store(instruction.p2, value);
+                self.store_marked(instruction.p2, value, json);
                 Ok(Flow::Next)
             }
             Opcode::Arithmetic => {
@@ -651,17 +699,23 @@ impl Machine {
                 self.store(instruction.p3, value);
                 Ok(Flow::Next)
             }
+            Opcode::JsonCall => self.json_call(instruction),
             Opcode::Pattern => self.pattern(instruction),
             Opcode::AggStep => self.aggregate_step(instruction),
             Opcode::AggFinal => {
                 let slot = instruction.p1.max(0) as usize;
-                let value = self
+                let answer = match self
                     .accumulators
                     .get(slot)
                     .and_then(|accumulator| accumulator.as_ref())
-                    .map(Accumulator::finish)
-                    .unwrap_or(Value::Null);
-                self.store(instruction.p2, value);
+                {
+                    Some(accumulator) => accumulator.finish()?,
+                    None => rustdb_ext::json::Answer {
+                        value: Value::Null,
+                        json: false,
+                    },
+                };
+                self.store_marked(instruction.p2, answer.value, answer.json);
                 Ok(Flow::Next)
             }
             Opcode::AggReset => {
@@ -919,7 +973,7 @@ impl Machine {
                 };
                 let encoding = self.encoding;
                 if let Some(Some(store)) = self.ephemerals.get_mut(instruction.p1.max(0) as usize) {
-                    crate::window::compute(store, &plan, encoding);
+                    crate::window::compute(store, &plan, encoding)?;
                 }
                 Ok(Flow::Next)
             }
@@ -1957,13 +2011,38 @@ impl Machine {
             return Err(error::misuse("AggStep without an aggregate"));
         };
         let arguments = self.block(instruction.p1, instruction.p2);
+        let marks = self.mark_block(instruction.p1, instruction.p2);
         let encoding = self.encoding;
         let Some(slot) = self.accumulators.get_mut(instruction.p3.max(0) as usize) else {
             return Err(error::misuse("an aggregate slot that does not exist"));
         };
         let accumulator =
             slot.get_or_insert_with(|| Accumulator::new(call.func, call.distinct, call.collation));
-        accumulator.step(&arguments, encoding);
+        accumulator.step(&arguments, &marks, encoding)?;
+        Ok(Flow::Next)
+    }
+
+    /// Calls a JSON built-in.
+    ///
+    /// It is the one call that reads the JSON mark off its arguments and
+    /// writes one onto its answer, and the one that can fail: a document
+    /// that will not parse stops the statement rather than answering NULL.
+    fn json_call(&mut self, instruction: &Instruction) -> DbResult<Flow> {
+        let Operand::Json(func) = instruction.p4 else {
+            return Err(error::misuse("JsonCall without a function"));
+        };
+        let values = self.block(instruction.p1, instruction.p2);
+        let marks = self.mark_block(instruction.p1, instruction.p2);
+        let arguments: Vec<rustdb_ext::json::Argument<'_>> = values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| rustdb_ext::json::Argument {
+                value,
+                json: marks.get(index).copied().unwrap_or(false),
+            })
+            .collect();
+        let answer = rustdb_ext::json::call(func, &arguments)?;
+        self.store_marked(instruction.p3, answer.value, answer.json);
         Ok(Flow::Next)
     }
 

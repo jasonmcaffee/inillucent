@@ -21,7 +21,7 @@ use crate::ast::{
 use crate::ast::{FrameBound, FrameExclude, FrameUnit};
 use crate::catalog_view::{CatalogView, ColumnInfo, TableInfo, TableKind};
 use crate::diagnostic::{ParseError, ParseErrorKind};
-use crate::function::{self, AggregateFunc, MathFunc, ScalarFunc, TimeFunc, WindowFunc};
+use crate::function::{self, AggregateFunc, JsonFunc, MathFunc, ScalarFunc, TimeFunc, WindowFunc};
 use crate::lexer::Span;
 
 /// What an authorizer decided about one action.
@@ -276,6 +276,17 @@ pub enum BoundExpr {
         /// The arguments.
         arguments: Vec<BoundExpr>,
     },
+    /// A JSON function call.
+    ///
+    /// Its own variant for the reason `JsonFunc` is its own enum: every one of
+    /// these can fail, and every one of them reads the JSON mark its arguments
+    /// carry. A `Function` node promises neither.
+    Json {
+        /// Which function.
+        func: JsonFunc,
+        /// The arguments.
+        arguments: Vec<BoundExpr>,
+    },
     /// A scalar function call.
     Function {
         /// Which function.
@@ -397,6 +408,7 @@ impl BoundExpr {
             | BoundExpr::SorterColumn { .. } => false,
             BoundExpr::Unary { operand, .. } => operand.is_constant(),
             BoundExpr::Collate { operand, .. } => operand.is_constant(),
+            BoundExpr::Json { arguments, .. } => arguments.iter().all(BoundExpr::is_constant),
             BoundExpr::Not(operand) => operand.is_constant(),
             BoundExpr::IsNull { operand, .. } => operand.is_constant(),
             BoundExpr::Cast { operand, .. } => operand.is_constant(),
@@ -925,6 +937,12 @@ struct BlockFrame {
 pub struct Binder<'a> {
     pub(crate) catalog: &'a dyn CatalogView,
     pub(crate) ast: &'a Ast,
+    /// The statement text the parse came from.
+    ///
+    /// It is here for one reason: a result column with no alias that is
+    /// not a bare column reference is named after the text it was written
+    /// as, and the arena holds spans rather than the bytes they cut.
+    pub(crate) source: &'a [u8],
     pub(crate) authorizer: &'a dyn Authorizer,
     pub(crate) sources: Vec<BoundSource>,
     /// One entry per query block currently being bound, innermost last, each
@@ -1087,6 +1105,16 @@ pub(crate) struct RowAliases {
 }
 
 impl<'a> Binder<'a> {
+    /// Points the binder at the text its parse came from.
+    ///
+    /// A binder with no source names an unaliased expression column with
+    /// the empty string, which is what a nested parse of schema text
+    /// wants: those columns are never returned to anybody.
+    pub fn with_source(mut self, source: &'a [u8]) -> Binder<'a> {
+        self.source = source;
+        self
+    }
+
     /// Returns a binder over one catalog snapshot and one parse.
     pub fn new(
         catalog: &'a dyn CatalogView,
@@ -1096,6 +1124,7 @@ impl<'a> Binder<'a> {
         Binder {
             catalog,
             ast,
+            source: &[],
             authorizer,
             sources: Vec::new(),
             scopes: Vec::new(),
@@ -2489,7 +2518,12 @@ impl<'a> Binder<'a> {
         if let Some(Expr::Column { column, .. }) = self.ast.expr(id) {
             return self.ast.text(*column).to_vec();
         }
-        Vec::new()
+        // Everything else is named after the text it was written as,
+        // exactly as written - `SELECT 1 +  2` has a column called
+        // `1 +  2`, spaces and all, because SQLite cuts the span rather
+        // than re-rendering the expression.
+        let span = self.ast.expr_span(id);
+        span.slice(self.source).to_vec()
     }
 
     /// Returns the origin triple and declared type of a bound column.
@@ -3197,10 +3231,14 @@ impl<'a> Binder<'a> {
             BinaryOp::Match | BinaryOp::Regexp => {
                 Err(no_such_function(b"regexp", self.ast.expr_span(right)))
             }
-            BinaryOp::Extract | BinaryOp::ExtractText => Err(unsupported(
-                "the JSON extract operators",
-                self.ast.expr_span(right),
-            )),
+            BinaryOp::Extract | BinaryOp::ExtractText => Ok(BoundExpr::Json {
+                func: if op == BinaryOp::Extract {
+                    JsonFunc::Arrow
+                } else {
+                    JsonFunc::ArrowShift
+                },
+                arguments: vec![bound_left, bound_right],
+            }),
             _ => Ok(BoundExpr::Arithmetic {
                 op,
                 left: Box::new(bound_left),
@@ -3313,6 +3351,25 @@ impl<'a> Binder<'a> {
                 bound.push(self.bind_expr(*argument)?);
             }
             return Ok(BoundExpr::Math {
+                func,
+                arguments: bound,
+            });
+        }
+        if let Some(func) = function::lookup_json(&folded) {
+            if star {
+                return Err(wrong_arguments(&folded, span));
+            }
+            if distinct {
+                return Err(unsupported("DISTINCT in a scalar function", span));
+            }
+            if !func.arity_ok(list.len()) {
+                return Err(wrong_arguments(&folded, span));
+            }
+            let mut bound = Vec::with_capacity(list.len());
+            for argument in &list {
+                bound.push(self.bind_expr(*argument)?);
+            }
+            return Ok(BoundExpr::Json {
                 func,
                 arguments: bound,
             });

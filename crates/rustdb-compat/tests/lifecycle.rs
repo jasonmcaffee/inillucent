@@ -167,7 +167,10 @@ fn column_metadata_is_available_before_stepping() {
     assert_eq!(statement.column_count(), 3);
     assert_eq!(statement.column_name(0), Some(b"id".as_slice()));
     assert_eq!(statement.column_name(1), Some(b"who".as_slice()));
-    assert_eq!(statement.column_name(2), Some(b"".as_slice()));
+    // An expression with no alias is named after the text it was written as,
+    // which is what SQLite's default `short_column_names` produces and what an
+    // application reading results by name depends on.
+    assert_eq!(statement.column_name(2), Some(b"id + 1".as_slice()));
     assert_eq!(statement.column_name(3), None);
 }
 

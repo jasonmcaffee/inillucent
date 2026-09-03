@@ -20,6 +20,7 @@ use rustdb_value::{compare, Collation, TextEncoding, Value};
 use crate::aggregate::Accumulator;
 use crate::ephemeral::Ephemeral;
 use crate::program::{WindowCall, WindowPlan};
+use rustdb_base::DbResult;
 use rustdb_sql::ast::{FrameExclude, FrameUnit};
 use rustdb_sql::function::WindowFunc;
 
@@ -29,7 +30,7 @@ use rustdb_sql::function::WindowFunc;
 /// and then the window's own `ORDER BY`. Each row grows by one value per window
 /// call, appended in the order the calls were bound, so the drain that follows
 /// reads them by a fixed column number.
-pub fn compute(store: &mut Ephemeral, plan: &WindowPlan, encoding: TextEncoding) {
+pub fn compute(store: &mut Ephemeral, plan: &WindowPlan, encoding: TextEncoding) -> DbResult<()> {
     let rows = store.take_rows();
     let total = rows.len();
     let mut values: Vec<Vec<Value<'static>>> = rows.iter().map(|_| Vec::new()).collect();
@@ -39,7 +40,7 @@ pub fn compute(store: &mut Ephemeral, plan: &WindowPlan, encoding: TextEncoding)
             let end = partition_end(&rows, plan, start);
             let peers = peer_groups(&rows, call, start, end);
             for row in start..end {
-                let value = evaluate(&rows, call, start, end, row, &peers, encoding);
+                let value = evaluate(&rows, call, start, end, row, &peers, encoding)?;
                 if let Some(slot) = values.get_mut(row) {
                     slot.push(value);
                 }
@@ -52,6 +53,7 @@ pub fn compute(store: &mut Ephemeral, plan: &WindowPlan, encoding: TextEncoding)
         whole.extend(extra);
         store.insert(whole);
     }
+    Ok(())
 }
 
 /// Returns the row after the last one in the partition that starts at `start`.
@@ -156,12 +158,12 @@ fn evaluate(
     row: usize,
     peers: &[(usize, usize)],
     encoding: TextEncoding,
-) -> Value<'static> {
+) -> DbResult<Value<'static>> {
     let (peer_start, peer_end) = peers
         .get(row.saturating_sub(start))
         .copied()
         .unwrap_or((row, row.saturating_add(1)));
-    match call.func {
+    Ok(match call.func {
         WindowSlot::Plain(WindowFunc::RowNumber) => {
             Value::Integer(row.saturating_sub(start).saturating_add(1) as i64)
         }
@@ -174,7 +176,7 @@ fn evaluate(
         WindowSlot::Plain(WindowFunc::PercentRank) => {
             let count = end.saturating_sub(start);
             if count <= 1 {
-                return Value::Real(0.0);
+                return Ok(Value::Real(0.0));
             }
             let rank = peer_start.saturating_sub(start) as f64;
             Value::Real(rank / (count.saturating_sub(1) as f64))
@@ -205,11 +207,12 @@ fn evaluate(
                     .iter()
                     .map(|column| value_at(rows, member, *column))
                     .collect();
-                accumulator.step(&arguments, encoding);
+                let marks = vec![false; arguments.len()];
+                accumulator.step(&arguments, &marks, encoding)?;
             }
-            accumulator.finish()
+            accumulator.finish()?.value
         }
-    }
+    })
 }
 
 /// Returns whether a row passes the call's `FILTER (WHERE ...)`.

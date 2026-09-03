@@ -11,7 +11,7 @@
 //! machine in this crate.
 
 use rustdb_sql::ast::{BinaryOp, FrameExclude, FrameUnit, PatternOp};
-use rustdb_sql::function::{AggregateFunc, MathFunc, ScalarFunc, TimeFunc, WindowFunc};
+use rustdb_sql::function::{AggregateFunc, JsonFunc, MathFunc, ScalarFunc, TimeFunc, WindowFunc};
 use rustdb_value::{Affinity, Collation};
 
 /// What an instruction does.
@@ -133,6 +133,13 @@ pub enum Opcode {
     /// `p1`: first argument register, `p2`: argument count, `p3`: destination,
     /// `p4`: the date or time function.
     TimeCall,
+    /// `p1`: first argument register, `p2`: argument count, `p3`: destination,
+    /// `p4`: the JSON function.
+    ///
+    /// Its own opcode rather than a `Function` with a different tag because it
+    /// is the one call that reads and writes the JSON mark on a register, and
+    /// the one that can fail.
+    JsonCall,
     /// `p1`: first argument register, `p2`: argument count, `p3`: accumulator,
     /// `p4`: the aggregate.
     AggStep,
@@ -410,6 +417,7 @@ impl Opcode {
             Opcode::Cast => "Cast",
             Opcode::ApplyAffinity => "Affinity",
             Opcode::Function => "Function",
+            Opcode::JsonCall => "JsonCall",
             Opcode::Pattern => "Pattern",
             Opcode::MathCall => "Function",
             Opcode::TimeCall => "Function",
@@ -640,6 +648,8 @@ pub enum Operand {
     Math(MathFunc),
     /// A date or time function.
     Time(TimeFunc),
+    /// A JSON function.
+    Json(JsonFunc),
     /// An aggregate call.
     Aggregate(AggregateCall),
     /// A sorter key.

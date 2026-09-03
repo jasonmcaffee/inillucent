@@ -15,7 +15,7 @@ use std::process::Command;
 use rustdb_compat::workspace_root;
 
 /// The crates the policy applies to.
-const GOVERNED: [&str; 11] = [
+const GOVERNED: [&str; 12] = [
     "rustdb-base",
     "rustdb-vfs",
     "rustdb-sim",
@@ -23,6 +23,7 @@ const GOVERNED: [&str; 11] = [
     "rustdb-storage",
     "rustdb-sql",
     "rustdb-catalog",
+    "rustdb-ext",
     "rustdb-vm",
     "rustdb-session",
     "rustdb",
