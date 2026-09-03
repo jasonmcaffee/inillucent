@@ -64,29 +64,18 @@ pub fn open_database(
             "the database has a hot journal and cannot be opened read-only until it is recovered",
         ));
     }
-    let missing = !vfs.access(path, AccessMode::Exists)?
-        || vfs
-            .open(path, OpenOptions::of_kind(FileKind::MainDb).read_only())
-            .and_then(|file| file.file_size())
-            .map(|size| size == 0)
-            .unwrap_or(false);
-    let mut pager = if !options.writable {
-        Pager::open_read_only(vfs.as_ref(), path, options.pager)?
-    } else if missing {
-        // A database that does not exist yet is created empty, which is what
-        // SQLite does: one page holding the header and an empty
-        // `sqlite_schema`. Doing it here rather than in the pager keeps the
-        // "recover before exposing a page" rule in one place - a file that
-        // does not exist has nothing to recover, and one that does has already
-        // been recovered above.
-        Pager::create(
-            vfs.as_ref(),
-            path,
-            options.pager,
-            rustdb_storage::pager::NewDatabase::default(),
-        )?
-    } else {
-        Pager::open_read_write(vfs.as_ref(), path, options.pager)?
+    let log = log_page_size(vfs.as_ref(), path)?;
+    let mut pager = match open_from_file(vfs.as_ref(), path, options) {
+        Ok(pager) => pager,
+        // A database file whose own header cannot be read is not lost while a
+        // log stands beside it: an interrupted checkpoint leaves page one half
+        // copied, and the log still holds every frame that checkpoint was
+        // copying. The log is the authority in that case, so the pager is
+        // opened against it rather than against the file.
+        Err(reason) => match log {
+            Some(page_size) => return open_from_log(vfs, path, options, page_size, reason),
+            None => return Err(reason),
+        },
     };
     // A file whose format versions say WAL is opened in WAL mode whatever the
     // connection asked for. The alternative - honouring the request - would
@@ -101,6 +90,95 @@ pub fn open_database(
         pager.attach_journal(Box::new(journal));
     }
     Ok(pager)
+}
+
+/// Opens the pager against the database file, whose header it expects to hold.
+fn open_from_file(vfs: &dyn Vfs, path: &DbPath, options: DatabaseOptions) -> DbResult<Pager> {
+    let missing = !vfs.access(path, AccessMode::Exists)?
+        || vfs
+            .open(path, OpenOptions::of_kind(FileKind::MainDb).read_only())
+            .and_then(|file| file.file_size())
+            .map(|size| size == 0)
+            .unwrap_or(false);
+    if !options.writable {
+        Pager::open_read_only(vfs, path, options.pager)
+    } else if missing {
+        // A database that does not exist yet is created empty, which is what
+        // SQLite does: one page holding the header and an empty
+        // `sqlite_schema`. Doing it here rather than in the pager keeps the
+        // "recover before exposing a page" rule in one place - a file that
+        // does not exist has nothing to recover, and one that does has already
+        // been recovered above.
+        Pager::create(
+            vfs,
+            path,
+            options.pager,
+            rustdb_storage::pager::NewDatabase::default(),
+        )
+    } else {
+        Pager::open_read_write(vfs, path, options.pager)
+    }
+}
+
+/// Opens a database whose header only the log can supply.
+///
+/// The log is attached first and then a read is taken and immediately
+/// released, because taking a read is what runs recovery, rebuilds the index
+/// and reads page one through the snapshot - and page one is the header. Doing
+/// it here rather than leaving it to the first statement means an unreadable
+/// database is still reported by `open`, which is where every caller expects
+/// to find out.
+///
+/// `reason` is why the file's own header could not be used, and it is what
+/// comes back when the log cannot supply one either. That is the honest error:
+/// the database is unreadable, and the log's failure to rescue it says nothing
+/// the caller needs beyond that.
+fn open_from_log(
+    vfs: Arc<dyn Vfs>,
+    path: &DbPath,
+    options: DatabaseOptions,
+    page_size: rustdb_base::page::PageSize,
+    reason: rustdb_base::DbError,
+) -> DbResult<Pager> {
+    let mut pager = Pager::open_with_header_from_log(
+        vfs.as_ref(),
+        path,
+        options.pager,
+        page_size,
+        options.writable,
+    )?;
+    attach_wal(&mut pager, &vfs, path, options)?;
+    let began = pager.begin_read();
+    // The read is released whatever happened, so a database that cannot be
+    // recovered does not also leak a read mark for the life of the process.
+    let ended = pager.end_read();
+    if began.is_err() {
+        return Err(reason);
+    }
+    ended?;
+    Ok(pager)
+}
+
+/// Returns the page size a log beside the database declares, if it has one.
+///
+/// A log too short for a header, or one whose header does not verify, is not a
+/// log: SQLite starts again from an unreadable header rather than reporting
+/// it, so there is nothing here that could rescue a database either.
+fn log_page_size(vfs: &dyn Vfs, path: &DbPath) -> DbResult<Option<rustdb_base::page::PageSize>> {
+    let log = path.wal();
+    if !vfs.access(&log, AccessMode::Exists)? {
+        return Ok(None);
+    }
+    let Ok(file) = vfs.open(&log, OpenOptions::of_kind(FileKind::Wal).read_only()) else {
+        return Ok(None);
+    };
+    let mut raw = [0u8; crate::wal::format::WAL_HEADER_SIZE];
+    if file.file_size()? < raw.len() as u64 || file.read_exact_at(0, &mut raw).is_err() {
+        return Ok(None);
+    }
+    Ok(crate::wal::format::WalHeader::decode(&raw)
+        .ok()
+        .map(|header| header.page_size))
 }
 
 /// Opens the write-ahead log beside a database and attaches it to the pager.
