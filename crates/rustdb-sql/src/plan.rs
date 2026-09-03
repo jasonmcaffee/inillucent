@@ -18,6 +18,7 @@ use rustdb_value::Collation;
 use crate::ast::{BinaryOp, CompoundOp, JoinKind};
 use crate::bind::{BoundExpr, BoundSelect, BoundSource, SourceRows};
 use crate::catalog_view::{IndexInfo, TableInfo};
+use crate::cost;
 
 /// A comparison an access path can enforce.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,6 +168,14 @@ impl AccessPath {
 /// One FROM term with the path chosen for it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlannedSource {
+    /// What the planner estimated this term's path would cost.
+    ///
+    /// It is kept so that a test can assert on the *reason* a plan was chosen
+    /// rather than only on the plan, which is the difference between catching a
+    /// cost-model regression and catching it two releases later.
+    pub cost: f64,
+    /// How many rows the path is estimated to produce.
+    pub rows: f64,
     /// The statement-wide number every bound expression refers to it by.
     pub id: usize,
     /// The table.
@@ -293,7 +302,6 @@ fn compound_name(op: CompoundOp) -> &'static str {
 pub fn plan_select(select: BoundSelect) -> PhysicalPlan {
     let mut select = select;
     let compound_arms = core::mem::take(&mut select.compounds);
-    let ids: Vec<usize> = select.sources.iter().map(|source| source.id).collect();
     let mut terms = Vec::new();
     if let Some(filter) = &select.filter {
         split_conjunction(filter, &mut terms);
@@ -306,11 +314,28 @@ pub fn plan_select(select: BoundSelect) -> PhysicalPlan {
             split_conjunction(constraint, &mut terms);
         }
     }
+    // The order the terms are visited in is chosen before their paths are, and
+    // then the paths are chosen in that order - because a path may use a value
+    // from a term visited earlier, and which terms those are is exactly what the
+    // order decides.
+    let order = choose_order(&select, &terms);
+    let ordered: Vec<usize> = order.clone();
+    let ids: Vec<usize> = ordered
+        .iter()
+        .filter_map(|position| select.sources.get(*position))
+        .map(|source| source.id)
+        .collect();
     let mut consumed = vec![false; terms.len()];
     let mut sources = Vec::with_capacity(select.sources.len());
-    for (position, source) in select.sources.iter().enumerate() {
-        let path = choose_path(position, &ids, source, &terms, &mut consumed);
+    for (level, position) in ordered.iter().enumerate() {
+        let Some(source) = select.sources.get(*position) else {
+            continue;
+        };
+        let path = choose_path(level, &ids, source, &terms, &mut consumed);
+        let (cost, rows) = path_cost(source, &path);
         sources.push(PlannedSource {
+            cost,
+            rows,
             id: source.id,
             table: source.table.clone(),
             alias: source.alias.clone(),
@@ -343,6 +368,181 @@ pub fn plan_select(select: BoundSelect) -> PhysicalPlan {
         needs_sort,
         compounds,
     }
+}
+
+/// Returns the order the FROM terms are visited in.
+///
+/// The legality rule is the whole of the difficulty. An outer join's rows
+/// depend on the terms it was written against: a `LEFT JOIN` cannot be visited
+/// before the term it null-extends, and neither side of one can cross it. A
+/// `CROSS JOIN` is SQLite's documented instruction not to reorder at all. So a
+/// term may only move within the run of ordinary joins it belongs to, and the
+/// enumeration is over those runs rather than over the whole list.
+///
+/// Inside a run the search is exhaustive while that is affordable - the runs
+/// that occur in practice are two to five terms - and falls back to the written
+/// order beyond, because a greedy answer that is worse than the written order
+/// is worse than not reordering at all.
+fn choose_order(select: &BoundSelect, terms: &[BoundExpr]) -> Vec<usize> {
+    let count = select.sources.len();
+    if count < 2 {
+        return (0..count).collect();
+    }
+    let mut order = Vec::with_capacity(count);
+    let mut run: Vec<usize> = Vec::new();
+    for position in 0..count {
+        let pins = select
+            .sources
+            .get(position)
+            .is_some_and(|source| matches!(source.join, JoinKind::Cross) || is_outer(source.join));
+        if pins {
+            order.extend(best_order(select, terms, &run));
+            run.clear();
+            order.push(position);
+            continue;
+        }
+        run.push(position);
+    }
+    order.extend(best_order(select, terms, &run));
+    order
+}
+
+/// Returns the cheapest visiting order for one run of reorderable terms.
+fn best_order(select: &BoundSelect, terms: &[BoundExpr], run: &[usize]) -> Vec<usize> {
+    // Eight terms is 40,320 orders, which is milliseconds; beyond that the
+    // written order stands rather than a guess being substituted for it.
+    if run.len() < 2 || run.len() > 8 {
+        return run.to_vec();
+    }
+    let mut best: Option<(f64, Vec<usize>)> = None;
+    let mut candidate = run.to_vec();
+    permute(&mut candidate, 0, &mut |order| {
+        let cost = order_cost(select, terms, order);
+        let better = best
+            .as_ref()
+            .is_none_or(|(existing, _)| cost < *existing - 1e-9);
+        if better {
+            best = Some((cost, order.to_vec()));
+        }
+    });
+    best.map(|(_, order)| order).unwrap_or_else(|| run.to_vec())
+}
+
+/// Calls a closure with every permutation of a slice.
+fn permute(order: &mut Vec<usize>, at: usize, visit: &mut impl FnMut(&[usize])) {
+    if at >= order.len() {
+        visit(order);
+        return;
+    }
+    for index in at..order.len() {
+        order.swap(at, index);
+        permute(order, at.saturating_add(1), visit);
+        order.swap(at, index);
+    }
+}
+
+/// Returns what one visiting order is estimated to cost.
+///
+/// The loops are nested, so each term's cost is multiplied by the rows every
+/// term before it produced - which is the whole reason the order matters, and
+/// why putting the most selective term first is usually right and sometimes
+/// spectacularly wrong.
+fn order_cost(select: &BoundSelect, terms: &[BoundExpr], order: &[usize]) -> f64 {
+    let ids: Vec<usize> = order
+        .iter()
+        .filter_map(|position| select.sources.get(*position))
+        .map(|source| source.id)
+        .collect();
+    let mut consumed = vec![false; terms.len()];
+    let mut total = 0.0f64;
+    let mut outer_rows = 1.0f64;
+    for (level, position) in order.iter().enumerate() {
+        let Some(source) = select.sources.get(*position) else {
+            continue;
+        };
+        let path = choose_path(level, &ids, source, terms, &mut consumed);
+        let (cost, rows) = path_cost(source, &path);
+        total += outer_rows * cost;
+        outer_rows *= rows.max(1.0);
+    }
+    total
+}
+
+/// Returns what one term's path costs, and how many rows it produces.
+fn path_cost(source: &BoundSource, path: &AccessPath) -> (f64, f64) {
+    let rows = estimated_rows(&source.table);
+    match path {
+        AccessPath::TableScan { .. } => (cost::scan_cost(rows), rows),
+        AccessPath::RowidSeek { .. } => (cost::search_cost(rows, 1.0, true), 1.0),
+        AccessPath::RowidRange { .. } => {
+            let matches = (rows / cost::RANGE_SHARE).max(1.0);
+            (cost::search_cost(rows, matches, true), matches)
+        }
+        AccessPath::IndexSeek {
+            index_name,
+            equalities,
+            low,
+            high,
+            ..
+        } => {
+            let index = source
+                .table
+                .indexes
+                .iter()
+                .find(|candidate| candidate.name == *index_name);
+            let matches = index_matches(
+                index,
+                rows,
+                equalities.len(),
+                low.is_some() || high.is_some(),
+            );
+            (cost::search_cost(rows, matches, false), matches)
+        }
+        // A materialised term is built once and then scanned; the build is
+        // charged where it happens, which is the block that fills it.
+        AccessPath::Subquery { .. } | AccessPath::Recursive { .. } => (cost::scan_cost(rows), rows),
+        AccessPath::RecursiveSelf { .. } => (1.0, 1.0),
+    }
+}
+
+/// Returns how many rows a table is estimated to hold.
+fn estimated_rows(table: &TableInfo) -> f64 {
+    match table.analysed_rows {
+        Some(rows) if rows > 0 => rows as f64,
+        // A measured zero is a real answer, and so is an unmeasured table: the
+        // first is empty and the second is assumed large. Collapsing them would
+        // make an `ANALYZE` on an empty table look like no `ANALYZE` at all.
+        Some(_) => 1.0,
+        None => cost::DEFAULT_ROWS,
+    }
+}
+
+/// Returns how many rows an index search is estimated to return.
+fn index_matches(index: Option<&IndexInfo>, rows: f64, equalities: usize, ranged: bool) -> f64 {
+    let mut matches = match index {
+        // Measured: the average number of rows sharing the prefix the search
+        // pinned down. This is the number `ANALYZE` exists to supply.
+        Some(index) if !index.prefix_rows.is_empty() && equalities > 0 => index
+            .prefix_rows
+            .get(equalities.saturating_sub(1))
+            .copied()
+            .map(|value| value as f64)
+            .unwrap_or(rows),
+        // Unmeasured: a unique index pins one row, and every other equality is
+        // assumed to select a tenth.
+        Some(index) if index.unique && equalities >= index.columns.len() => 1.0,
+        _ => {
+            let mut estimate = rows;
+            for _ in 0..equalities {
+                estimate /= cost::EQUALITY_SHARE;
+            }
+            estimate
+        }
+    };
+    if ranged {
+        matches /= cost::RANGE_SHARE;
+    }
+    matches.max(1.0)
 }
 
 /// Returns whether a join keeps rows that match nothing on the other side.
@@ -452,11 +652,27 @@ fn choose_path(
     }
     let id = ids.get(position).copied().unwrap_or(position);
     let table = &source.table;
-    if let Some(path) = rowid_path(id, position, ids, table, terms, consumed) {
+    let mut trial = consumed.to_vec();
+    if let Some(path) = rowid_path(id, position, ids, table, terms, &mut trial) {
+        consumed.copy_from_slice(&trial);
         return path;
     }
-    if let Some(path) = index_path(id, position, ids, table, terms, consumed) {
-        return path;
+    // The candidate is built against a *copy* of the consumed list, because a
+    // path that is not chosen must not leave its predicates marked as handled.
+    // It did: when a scan beat an index range, the range's own comparison had
+    // already been struck off the residual list and the scan then returned
+    // every row of the table, silently.
+    let mut trial = consumed.to_vec();
+    if let Some(path) = index_path(id, position, ids, source, terms, &mut trial) {
+        // A scan beats a search that returns most of the table: an index that
+        // has to fetch every row costs a second descent per row on top of the
+        // scan it was meant to avoid.
+        let (index_cost, _) = path_cost(source, &path);
+        let (scan_cost, _) = path_cost(source, &AccessPath::TableScan { root: table.root });
+        if index_cost <= scan_cost {
+            consumed.copy_from_slice(&trial);
+            return path;
+        }
     }
     AccessPath::TableScan { root: table.root }
 }
@@ -556,11 +772,12 @@ fn index_path(
     id: usize,
     position: usize,
     ids: &[usize],
-    table: &TableInfo,
+    source: &BoundSource,
     terms: &[BoundExpr],
     consumed: &mut [bool],
 ) -> Option<AccessPath> {
-    let mut best: Option<(usize, AccessPath, Vec<usize>)> = None;
+    let table = &source.table;
+    let mut best: Option<(f64, AccessPath, Vec<usize>)> = None;
     for index in &table.indexes {
         if index.partial_sql.is_some() {
             // A partial index only holds the rows its predicate accepts. Using
@@ -572,12 +789,18 @@ fn index_path(
         else {
             continue;
         };
-        let strength = used.len();
+        // The choice between two usable indexes is a cost, not a count of
+        // consumed terms. Two indexes that each satisfy one equality consume
+        // the same number of terms and can differ by orders of magnitude in
+        // how many rows they return - and taking the first one found made a
+        // query constrained on both a two-valued column and a four-hundred-
+        // valued one search the two-valued one.
+        let (cost, _) = path_cost(source, &path);
         let better = best
             .as_ref()
-            .is_none_or(|(existing, _, _)| strength > *existing);
+            .is_none_or(|(existing, _, _)| cost < *existing - 1e-9);
         if better {
-            best = Some((strength, path, used));
+            best = Some((cost, path, used));
         }
     }
     let (_, path, used) = best?;

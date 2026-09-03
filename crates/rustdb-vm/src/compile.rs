@@ -1967,6 +1967,21 @@ impl Compiler {
             };
         }
         self.apply_index_affinity(body, level, columns, key, seek_len)?;
+        // A NULL equality key matches nothing at all. The index *stores* NULLs
+        // and orders them together, so a seek on one finds them - but `x = NULL`
+        // is unknown, not true, and the rows must not be returned. Without this
+        // guard `a JOIN b ON a.team = b.team` paired the row whose team is NULL
+        // on one side with the row whose team is NULL on the other, but only
+        // once the planner started choosing the index for that equality.
+        let mut null_key: Vec<Label> = Vec::new();
+        for position in 0..equalities.len() {
+            null_key.push(self.emit_jump(Instruction::new(
+                Opcode::IfNull,
+                key.saturating_add(position as u32) as i32,
+                -1,
+                0,
+            )));
+        }
         let empty = self.emit_jump(
             Instruction::new(opcode, index_cursor as i32, -1, key as i32).with_p5(seek_len as u16),
         );
@@ -2041,6 +2056,9 @@ impl Compiler {
             self.patch_here(label);
         }
         self.patch_here(empty);
+        for label in null_key {
+            self.patch_here(label);
+        }
         Ok(())
     }
 

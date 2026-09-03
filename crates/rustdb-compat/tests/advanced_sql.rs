@@ -498,3 +498,61 @@ fn core_functions_match_the_oracle() {
         ],
     );
 }
+
+/// The statements SQLite refuses, refused the same way.
+///
+/// A negative test is worth as much as a positive one and is easier to get
+/// wrong: an engine that accepts what the reference rejects has a *larger*
+/// language, and every statement it accepts is one the reference cannot read.
+/// The messages are not compared - they are prose - but the refusal is.
+#[test]
+fn refusals_match_the_oracle() {
+    grade(
+        "negative",
+        &[
+            // Access control is not SQLite's; these are not statements at all.
+            "GRANT SELECT ON a TO someone",
+            "REVOKE SELECT ON a FROM someone",
+            "CREATE USER bob",
+            // A view is not writable, however it is written to.
+            "INSERT INTO blue VALUES (9, 'x', 1.0)",
+            "INSERT INTO blue (id) VALUES (9)",
+            "UPDATE blue SET name = 'x'",
+            "UPDATE blue SET name = 'x' WHERE id = 1",
+            "DELETE FROM blue",
+            "DELETE FROM blue WHERE id = 1",
+            "DROP TABLE blue",
+            "DROP VIEW a",
+            "CREATE INDEX blue_name ON blue (name)",
+            // A compound's arms must agree on their width, and only the last
+            // may carry an ORDER BY or a LIMIT.
+            "SELECT id FROM a UNION SELECT id, name FROM a",
+            "SELECT id FROM a ORDER BY id UNION SELECT id FROM a",
+            "SELECT id FROM a LIMIT 1 UNION SELECT id FROM a",
+            "SELECT id FROM a UNION SELECT id FROM a ORDER BY nosuchcolumn",
+            // A scalar subquery is one column.
+            "SELECT (SELECT id, name FROM a)",
+            "SELECT * FROM a WHERE id IN (SELECT id, name FROM a)",
+            // Names that do not resolve.
+            "SELECT nosuchcolumn FROM a",
+            "SELECT * FROM nosuchtable",
+            "SELECT * FROM a JOIN b USING (nosuchcolumn)",
+            "SELECT * FROM a AS x JOIN b AS y ON x.nosuch = y.team",
+            "WITH t AS (SELECT 1) SELECT * FROM nosucht",
+            "SELECT row_number() OVER nosuchwindow FROM a",
+            "SELECT nosuchfunction(1)",
+            "SELECT abs(1, 2)",
+            "SELECT count(*, 1) FROM a",
+            // Aggregates and windows where they do not belong.
+            "SELECT * FROM a WHERE count(*) > 1",
+            "SELECT sum(sum(id)) FROM a",
+            "SELECT * FROM a WHERE row_number() OVER () = 1",
+            // A frame offset is a constant.
+            "SELECT sum(id) OVER (ORDER BY id ROWS id PRECEDING) FROM a",
+            // `RIGHT` and `FULL` are accepted by the pinned build, so this is
+            // the one row here that both engines must *not* refuse.
+            "SELECT count(*) FROM a RIGHT JOIN b ON a.team = b.team",
+            "SELECT count(*) FROM a FULL JOIN b ON a.team = b.team",
+        ],
+    );
+}

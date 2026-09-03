@@ -14,6 +14,7 @@
 
 use rustdb_base::error::misuse;
 use rustdb_base::DbResult;
+use rustdb_catalog::analyze;
 use rustdb_catalog::ddl::{self, SchemaRow};
 use rustdb_sql::ast::ObjectKind;
 use rustdb_sql::directive::{BeginKind, Directive, PragmaArgument};
@@ -66,6 +67,9 @@ pub fn run_directive(
         Directive::CreateTable { .. } => run_write(connection, |connection| {
             create_table(connection, directive, source)
         }),
+        Directive::Analyze { .. } => {
+            run_write(connection, |connection| analyze(connection, directive))
+        }
         Directive::CreateView { .. } => run_write(connection, |connection| {
             create_view(connection, directive, source)
         }),
@@ -166,6 +170,86 @@ fn create_table(
     connection.with_state(|state| ddl::bump_schema_cookie(&mut state.pager))??;
     connection.refresh_catalog()?;
     Ok(Vec::new())
+}
+
+/// Runs `ANALYZE`: measures the schema, and writes what it measured.
+///
+/// The statistics table is created on first use, exactly as SQLite creates it,
+/// and rewritten whole rather than updated in place - a stale row for an index
+/// that has since been dropped would be read back as a statistic about
+/// something that no longer exists.
+fn analyze(connection: &Connection, directive: &Directive) -> DbResult<DirectiveRows> {
+    let Directive::Analyze { table, .. } = directive else {
+        return Err(misuse("not an ANALYZE"));
+    };
+    let root = statistics_root(connection)?;
+    connection.with_state(|state| analyze::clear_stats(&mut state.pager, root))??;
+
+    let catalog = connection.catalog()?;
+    let wanted = table.as_ref().map(|name| name.to_ascii_lowercase());
+    let targets: Vec<rustdb_sql::catalog_view::TableInfo> = {
+        use rustdb_sql::catalog_view::{CatalogView, TableKind};
+        catalog
+            .tables_of(0)
+            .into_iter()
+            .filter(|candidate| candidate.kind == TableKind::Table)
+            // The statistics table is not measured. It is written by this
+            // statement, so any figure taken from it would describe the state
+            // before the write and be wrong the moment it landed.
+            .filter(|candidate| !candidate.folded.starts_with(b"sqlite_"))
+            .filter(|candidate| {
+                wanted
+                    .as_ref()
+                    .is_none_or(|name| candidate.folded == name.as_slice())
+            })
+            .cloned()
+            .collect()
+    };
+
+    let mut rowid = 1i64;
+    for target in &targets {
+        let stats = connection.with_state(|state| analyze::measure(&mut state.pager, target))??;
+        for stat in &stats {
+            connection
+                .with_state(|state| analyze::write_stat(&mut state.pager, root, rowid, stat))??;
+            rowid = rowid.saturating_add(1);
+        }
+    }
+    connection.with_state(|state| ddl::bump_schema_cookie(&mut state.pager))??;
+    connection.refresh_catalog()?;
+    Ok(Vec::new())
+}
+
+/// Returns the root page of `sqlite_stat1`, creating the table if it is absent.
+fn statistics_root(connection: &Connection) -> DbResult<u32> {
+    let catalog = connection.catalog()?;
+    let existing = {
+        use rustdb_sql::catalog_view::CatalogView;
+        catalog
+            .find_table(None, analyze::STAT1.as_bytes())
+            .map(|table| table.root)
+    };
+    if let Some(root) = existing {
+        if root != 0 {
+            return Ok(root);
+        }
+    }
+    let root = connection.with_state(|state| ddl::allocate_table_root(&mut state.pager))??;
+    connection.with_state(|state| {
+        ddl::insert_schema_row(
+            &mut state.pager,
+            &SchemaRow {
+                kind: SchemaKind::Table,
+                name: analyze::STAT1.as_bytes().to_vec(),
+                table: analyze::STAT1.as_bytes().to_vec(),
+                root,
+                sql: Some(analyze::STAT1_SQL.as_bytes().to_vec()),
+            },
+        )
+    })??;
+    connection.with_state(|state| ddl::bump_schema_cookie(&mut state.pager))??;
+    connection.refresh_catalog()?;
+    Ok(root)
 }
 
 /// Creates a view: one `sqlite_schema` row, and no B-tree at all.

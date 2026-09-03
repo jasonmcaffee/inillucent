@@ -81,6 +81,13 @@ pub enum Directive {
         /// Whether the table already exists.
         exists: bool,
     },
+    /// `ANALYZE`, over one object or the whole schema.
+    Analyze {
+        /// Which attached database.
+        database: usize,
+        /// The one table to measure, or nothing for all of them.
+        table: Option<Vec<u8>>,
+    },
     /// `CREATE VIEW`.
     CreateView {
         /// Whether `IF NOT EXISTS` was written.
@@ -187,6 +194,7 @@ impl<'a> Binder<'a> {
                 columns,
                 *filter,
             ),
+            ast::Statement::Analyze { database, name } => self.bind_analyze(*database, *name),
             ast::Statement::CreateView {
                 temporary,
                 if_not_exists,
@@ -343,6 +351,59 @@ impl<'a> Binder<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Binds an `ANALYZE`.
+    ///
+    /// A bare `ANALYZE` measures everything; one with a name measures that
+    /// object. SQLite accepts a database name, an index name or a table name in
+    /// the same position and works out which it is, and so does this: the name
+    /// is resolved against the tables, then the indexes, and only then refused.
+    fn bind_analyze(
+        &mut self,
+        database: Option<ast::NameId>,
+        name: Option<ast::NameId>,
+    ) -> Result<Directive, ParseError> {
+        let index = self.resolve_database(database)?;
+        self.record_write_dependency(index);
+        let Some(name) = name else {
+            return Ok(Directive::Analyze {
+                database: index,
+                table: None,
+            });
+        };
+        let folded = self.ast.folded(name).to_vec();
+        let database_name = self.catalog.database_name(index).to_vec();
+        if self
+            .catalog
+            .database_index(&folded)
+            .is_some_and(|found| found == index)
+        {
+            // The name was the database's, which means everything in it.
+            return Ok(Directive::Analyze {
+                database: index,
+                table: None,
+            });
+        }
+        if let Some(table) = self
+            .catalog
+            .find_table(Some(database_name.as_slice()), &folded)
+        {
+            return Ok(Directive::Analyze {
+                database: index,
+                table: Some(table.name.clone()),
+            });
+        }
+        if let Some((table, _)) = self
+            .catalog
+            .find_index(Some(database_name.as_slice()), &folded)
+        {
+            return Ok(Directive::Analyze {
+                database: index,
+                table: Some(table.name.clone()),
+            });
+        }
+        Err(no_such_table(self.ast.text(name), Span::default()))
     }
 
     /// Binds a `CREATE VIEW`.

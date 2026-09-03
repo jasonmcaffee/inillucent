@@ -37,6 +37,7 @@
     )
 )]
 
+pub mod analyze;
 pub mod ddl;
 pub mod load;
 pub mod snapshot;

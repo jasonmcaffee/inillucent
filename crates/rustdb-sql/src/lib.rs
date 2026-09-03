@@ -45,6 +45,7 @@
 pub mod ast;
 pub mod bind;
 pub mod catalog_view;
+pub mod cost;
 pub mod diagnostic;
 pub mod directive;
 pub mod dml;

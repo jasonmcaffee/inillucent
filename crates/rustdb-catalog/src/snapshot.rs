@@ -163,6 +163,7 @@ mod tests {
             create_sql: Vec::new(),
             indexes: Vec::new(),
             view: None,
+            analysed_rows: None,
             checks: Vec::new(),
         }
     }
