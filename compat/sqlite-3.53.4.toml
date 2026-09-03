@@ -1386,7 +1386,7 @@ source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
 status = "pass"
-tests = ["rustdb-compat::sqlite_reads_a_log_rustdb_wrote", "rustdb-compat::rustdb_extends_a_wal_database_sqlite_wrote", "rustdb-transaction::wal::format::tests::a_header_round_trips_and_checks_itself", "rustdb-transaction::wal::format::tests::a_damaged_header_is_refused", "rustdb-transaction::wal::format::tests::the_magic_declares_the_byte_order", "rustdb-transaction::wal::format::tests::a_frame_only_verifies_in_its_own_place", "rustdb-transaction::wal::format::tests::a_commit_frame_carries_the_new_page_count", "rustdb-transaction::wal::format::tests::frame_offsets_follow_the_format", "rustdb-transaction::wal::format::tests::a_restart_changes_both_salts"]
+tests = ["rustdb-compat::sqlite_reads_a_log_rustdb_wrote", "rustdb-compat::rustdb_extends_a_wal_database_sqlite_wrote", "rustdb-compat::sqlite_and_rustdb_share_one_log_at_the_same_time", "rustdb-transaction::wal::format::tests::a_header_round_trips_and_checks_itself", "rustdb-transaction::wal::format::tests::a_damaged_header_is_refused", "rustdb-transaction::wal::format::tests::the_magic_declares_the_byte_order", "rustdb-transaction::wal::format::tests::a_frame_only_verifies_in_its_own_place", "rustdb-transaction::wal::format::tests::a_commit_frame_carries_the_new_page_count", "rustdb-transaction::wal::format::tests::frame_offsets_follow_the_format", "rustdb-transaction::wal::format::tests::a_restart_changes_both_salts"]
 
 [[capability]]
 id = "wal.index"
@@ -1394,7 +1394,7 @@ source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
 status = "pass"
-tests = ["rustdb-compat::a_wal_index_left_by_a_crash_is_rebuilt", "rustdb-vfs::an_abandoned_wal_index_is_discarded", "rustdb-transaction::wal::index::tests::the_layout_is_the_one_the_format_specifies", "rustdb-transaction::wal::index::tests::frames_map_to_their_regions", "rustdb-transaction::wal::index::tests::a_header_round_trips_and_both_copies_must_agree", "rustdb-transaction::wal::index::tests::entries_are_found_by_page_and_bounded_by_the_snapshot", "rustdb-transaction::wal::index::tests::truncating_drops_the_entries_above_the_limit", "rustdb-transaction::wal::index::tests::reader_marks_round_trip_and_reset", "rustdb-transaction::wal::index::tests::the_second_region_holds_the_frames_past_the_first", "rustdb-transaction::wal::tests::the_index_is_rebuilt_from_the_log"]
+tests = ["rustdb-compat::a_wal_index_left_by_a_crash_is_rebuilt", "rustdb-compat::sqlite_and_rustdb_share_one_log_at_the_same_time", "rustdb-vfs::an_abandoned_wal_index_is_discarded", "rustdb-transaction::wal::index::tests::the_layout_is_the_one_the_format_specifies", "rustdb-transaction::wal::index::tests::frames_map_to_their_regions", "rustdb-transaction::wal::index::tests::a_header_round_trips_and_both_copies_must_agree", "rustdb-transaction::wal::index::tests::entries_are_found_by_page_and_bounded_by_the_snapshot", "rustdb-transaction::wal::index::tests::truncating_drops_the_entries_above_the_limit", "rustdb-transaction::wal::index::tests::reader_marks_round_trip_and_reset", "rustdb-transaction::wal::index::tests::the_second_region_holds_the_frames_past_the_first", "rustdb-transaction::wal::tests::the_index_is_rebuilt_from_the_log"]
 
 [[capability]]
 id = "wal.read-transactions"
