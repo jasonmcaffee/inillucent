@@ -26,7 +26,7 @@ use rustdb_base::{error, DbResult};
 use rustdb_sql::ast::{ConflictAction, TriggerTime};
 use rustdb_sql::bind::{BoundExpr, BoundResultColumn};
 use rustdb_sql::bind::{BoundSelect, EXCLUDED_SOURCE, NEW_SOURCE, OLD_SOURCE};
-use rustdb_sql::catalog_view::{IndexInfo, TableInfo, TableKind};
+use rustdb_sql::catalog_view::{IndexInfo, IndexOrigin, TableInfo, TableKind};
 use rustdb_sql::dml::{
     BoundAssignment, BoundCheck, BoundDelete, BoundInsert, BoundInsertSource, BoundTrigger,
     BoundTriggerStatement, BoundUpdate, BoundUpsert, ColumnSource,
@@ -126,19 +126,39 @@ impl Compiler {
     fn open_for_write(&mut self, table: &TableInfo, source: usize) -> Writer {
         let cursor = self.cursors;
         self.cursors = self.cursors.saturating_add(1);
-        self.emit(
-            Instruction::new(Opcode::OpenWrite, cursor as i32, table.root as i32, 0)
-                .with_p4(Operand::Count(table.columns.len() as u32)),
-        );
+        if table.without_rowid {
+            // The root is an index b-tree keyed by the primary key, so it is
+            // opened as one and written with the index opcodes.
+            self.emit(
+                Instruction::new(Opcode::OpenWriteIndex, cursor as i32, table.root as i32, 0)
+                    .with_p4(Operand::IndexKey(crate::compile::primary_key_of(table))),
+            );
+        } else {
+            self.emit(
+                Instruction::new(Opcode::OpenWrite, cursor as i32, table.root as i32, 0)
+                    .with_p4(Operand::Count(table.columns.len() as u32)),
+            );
+        }
         // Registered under the statement's own number for this term, not at
         // slot zero. Two fires of one trigger open two cursors on the same
         // table, and clobbering slot zero left the second fire's expressions
         // reading the cursor the first fire had opened.
-        self.register_source(source, crate::compile::SourceCursors::table_only(cursor));
+        if table.without_rowid {
+            self.register_source(source, crate::compile::SourceCursors::index_only(cursor));
+        } else {
+            self.register_source(source, crate::compile::SourceCursors::table_only(cursor));
+        }
         let mut indexes = Vec::new();
         let mut definitions = Vec::new();
         for index in &table.indexes {
             if index.root == 0 {
+                continue;
+            }
+            if table.without_rowid && index.root == table.root {
+                // The primary key of a WITHOUT ROWID table is the table's own
+                // b-tree, already open above. Its uniqueness is checked against
+                // that cursor by `emit_primary_key_constraint` rather than as
+                // one more secondary index.
                 continue;
             }
             let slot = self.cursors;
@@ -188,6 +208,24 @@ impl Compiler {
     /// Reads a table cursor's column into a fresh register.
     fn read_column(&mut self, cursor: u32, table: &TableInfo, column: u16) -> u32 {
         let register = self.register();
+        if table.without_rowid {
+            // Read through the index opcode: the cursor is an index cursor, and
+            // the slot is where the primary-key-first permutation put it.
+            let slot = table.record_slot(column).unwrap_or(usize::from(column));
+            let widen = table
+                .column(column)
+                .is_some_and(|info| info.affinity == Affinity::Real);
+            self.emit(
+                Instruction::new(
+                    Opcode::IdxColumn,
+                    cursor as i32,
+                    slot as i32,
+                    register as i32,
+                )
+                .with_p5(u16::from(widen)),
+            );
+            return register;
+        }
         if table.rowid_alias == Some(column) {
             self.emit(Instruction::new(
                 Opcode::Rowid,
@@ -226,7 +264,12 @@ impl Compiler {
         rowid: u32,
         table: &TableInfo,
     ) -> DbResult<u32> {
-        let width = index.columns.len().saturating_add(1);
+        let trailing = if table.without_rowid {
+            table.primary_key().len()
+        } else {
+            1
+        };
+        let width = index.columns.len().saturating_add(trailing);
         let block = self.register_block(width);
         for (position, key) in index.columns.iter().enumerate() {
             let Some(column) = key.column else {
@@ -243,29 +286,59 @@ impl Compiler {
                 0,
             ));
         }
-        let rowid_slot = block.saturating_add(index.columns.len() as u32);
-        self.emit(Instruction::new(
-            Opcode::Copy,
-            rowid as i32,
-            rowid_slot as i32,
-            0,
-        ));
-        let affinities = index
-            .columns
-            .iter()
-            .map(|key| {
-                key.column
-                    .and_then(|column| table.column(column))
+        // A rowid table's index entry ends with the rowid; a WITHOUT ROWID
+        // table has none, so its entries end with the primary key instead -
+        // which is how a seek on a secondary index finds the row.
+        let trailing: Vec<u16> = if table.without_rowid {
+            table.primary_key()
+        } else {
+            Vec::new()
+        };
+        if table.without_rowid {
+            for (offset, position) in trailing.iter().enumerate() {
+                let Some(source) = values.get(usize::from(*position)).copied() else {
+                    return Err(error::misuse(
+                        "the primary key names a column the table has not",
+                    ));
+                };
+                let target = block.saturating_add(index.columns.len() as u32 + offset as u32);
+                self.emit(Instruction::new(
+                    Opcode::Copy,
+                    source as i32,
+                    target as i32,
+                    0,
+                ));
+            }
+        } else {
+            let rowid_slot = block.saturating_add(index.columns.len() as u32);
+            self.emit(Instruction::new(
+                Opcode::Copy,
+                rowid as i32,
+                rowid_slot as i32,
+                0,
+            ));
+        }
+        let keys = index.columns.iter().map(|key| {
+            key.column
+                .and_then(|column| table.column(column))
+                .map_or(Affinity::Blob, |column| column.affinity)
+        });
+        let affinities: Vec<Affinity> = if table.without_rowid {
+            keys.chain(trailing.iter().map(|position| {
+                table
+                    .column(*position)
                     .map_or(Affinity::Blob, |column| column.affinity)
-            })
-            .chain(core::iter::once(Affinity::Integer))
-            .collect();
+            }))
+            .collect()
+        } else {
+            keys.chain(core::iter::once(Affinity::Integer)).collect()
+        };
         let record = self.register();
         self.emit(
             Instruction::new(
                 Opcode::MakeRecord,
                 block as i32,
-                width as i32,
+                affinities.len() as i32,
                 record as i32,
             )
             .with_p4(Operand::Affinities(affinities)),
@@ -281,12 +354,19 @@ impl Compiler {
     /// them from.
     fn emit_delete_current(&mut self, writer: &Writer, table: &TableInfo) -> DbResult<()> {
         let rowid = self.register();
-        self.emit(Instruction::new(
-            Opcode::Rowid,
-            writer.table as i32,
-            rowid as i32,
-            0,
-        ));
+        if table.without_rowid {
+            // There is no rowid to read; the register exists so the index-entry
+            // builder has something to copy where a rowid table would put one,
+            // and for a WITHOUT ROWID table it puts the key columns instead.
+            self.emit(Instruction::new(Opcode::Null, 0, rowid as i32, 0));
+        } else {
+            self.emit(Instruction::new(
+                Opcode::Rowid,
+                writer.table as i32,
+                rowid as i32,
+                0,
+            ));
+        }
         let values: Vec<u32> = (0..table.columns.len() as u16)
             .map(|column| self.read_column(writer.table, table, column))
             .collect();
@@ -302,13 +382,65 @@ impl Compiler {
                 0,
             ));
         }
-        self.emit(Instruction::new(
-            Opcode::DeleteRow,
-            writer.table as i32,
-            0,
-            0,
-        ));
+        if table.without_rowid {
+            // The entry is deleted by its key, which is the record itself.
+            let record = self.emit_table_record(table, &values)?;
+            self.emit(Instruction::new(
+                Opcode::IdxDelete,
+                writer.table as i32,
+                record as i32,
+                0,
+            ));
+        } else {
+            self.emit(Instruction::new(
+                Opcode::DeleteRow,
+                writer.table as i32,
+                0,
+                0,
+            ));
+        }
         Ok(())
+    }
+
+    /// Builds the record a `WITHOUT ROWID` table's entry is, from its columns.
+    ///
+    /// The same permutation `emit_write_row` uses, because a delete has to
+    /// present the entry byte for byte the way the insert wrote it.
+    fn emit_table_record(&mut self, table: &TableInfo, values: &[u32]) -> DbResult<u32> {
+        let order = table.record_order();
+        let block = self.register_block(order.len().max(1));
+        for (slot, position) in order.iter().enumerate() {
+            let target = block.saturating_add(slot as u32);
+            let Some(source) = values.get(usize::from(*position)).copied() else {
+                self.emit(Instruction::new(Opcode::Null, 0, target as i32, 0));
+                continue;
+            };
+            self.emit(Instruction::new(
+                Opcode::Copy,
+                source as i32,
+                target as i32,
+                0,
+            ));
+        }
+        let affinities = order
+            .iter()
+            .map(|position| {
+                table
+                    .column(*position)
+                    .map_or(Affinity::Blob, |column| column.affinity)
+            })
+            .collect();
+        let record = self.register();
+        self.emit(
+            Instruction::new(
+                Opcode::MakeRecord,
+                block as i32,
+                order.len() as i32,
+                record as i32,
+            )
+            .with_p4(Operand::Affinities(affinities)),
+        );
+        Ok(record)
     }
 
     /// Emits the type test a `STRICT` table's columns owe.
@@ -884,23 +1016,18 @@ impl Compiler {
         // position would leave a hole and shift every column after it.
         let width = table.record_width().max(1);
         let block = self.register_block(width);
-        let mut target_slot = 0usize;
-        for position in 0..table.columns.len() {
-            let virtual_column = table
-                .column(position as u16)
-                .is_some_and(|column| column.generated && !column.stored);
-            if virtual_column {
-                continue;
-            }
-            let target = block.saturating_add(target_slot as u32);
-            target_slot = target_slot.saturating_add(1);
-            if table.rowid_alias == Some(position as u16) {
+        // In *record* order, which is declaration order for a rowid table and
+        // the primary key followed by the rest for a WITHOUT ROWID one.
+        let order = table.record_order();
+        for (slot, position) in order.iter().enumerate() {
+            let target = block.saturating_add(slot as u32);
+            if table.rowid_alias == Some(*position) {
                 // The rowid is the row's key, not one of its fields; SQLite
                 // stores a NULL in the record and reads the key back instead.
                 self.emit(Instruction::new(Opcode::Null, 0, target as i32, 0));
                 continue;
             }
-            let Some(source) = values.get(position).copied() else {
+            let Some(source) = values.get(usize::from(*position)).copied() else {
                 self.emit(Instruction::new(Opcode::Null, 0, target as i32, 0));
                 continue;
             };
@@ -911,16 +1038,15 @@ impl Compiler {
                 0,
             ));
         }
-        let affinities = table
-            .columns
+        let affinities = order
             .iter()
-            .enumerate()
-            .filter(|(_, column)| !(column.generated && !column.stored))
-            .map(|(position, column)| {
-                if table.rowid_alias == Some(position as u16) {
+            .map(|position| {
+                if table.rowid_alias == Some(*position) {
                     Affinity::Blob
                 } else {
-                    column.affinity
+                    table
+                        .column(*position)
+                        .map_or(Affinity::Blob, |column| column.affinity)
                 }
             })
             .collect();
@@ -934,12 +1060,23 @@ impl Compiler {
             )
             .with_p4(Operand::Affinities(affinities)),
         );
-        self.emit(Instruction::new(
-            Opcode::InsertRow,
-            writer.table as i32,
-            record as i32,
-            rowid as i32,
-        ));
+        if table.without_rowid {
+            // The record *is* the entry: the key is its leading primary-key
+            // columns and the rest of the row rides along behind them.
+            self.emit(Instruction::new(
+                Opcode::IdxInsert,
+                writer.table as i32,
+                record as i32,
+                0,
+            ));
+        } else {
+            self.emit(Instruction::new(
+                Opcode::InsertRow,
+                writer.table as i32,
+                record as i32,
+                rowid as i32,
+            ));
+        }
         for (position, index) in writer.definitions.clone().iter().enumerate() {
             let Some(cursor) = writer.indexes.get(position).copied() else {
                 continue;
@@ -1455,6 +1592,15 @@ impl Compiler {
         if let Some(rows) = delete.view_rows.as_ref() {
             return self.emit_view_write(&delete.table, rows, &delete.triggers, None);
         }
+        if delete.table.without_rowid {
+            return self.emit_keyed_write(
+                &delete.table,
+                delete.source,
+                delete.filter.as_ref(),
+                None,
+                Some(delete),
+            );
+        }
         let writer = self.open_for_write(&delete.table, delete.source);
         let sorter = self.open_rowid_sorter();
         self.emit_collect_rowids(&writer, delete.filter.as_ref(), sorter)?;
@@ -1512,6 +1658,15 @@ impl Compiler {
                 rows,
                 &update.triggers,
                 Some(&update.assignments),
+            );
+        }
+        if update.table.without_rowid {
+            return self.emit_keyed_write(
+                &update.table,
+                update.source,
+                update.filter.as_ref(),
+                Some(update),
+                None,
             );
         }
         let writer = self.open_for_write(&update.table, update.source);
@@ -1720,6 +1875,112 @@ impl Compiler {
         RowImage { values, rowid }
     }
 
+    /// Emits the uniqueness check a `WITHOUT ROWID` table's primary key owes.
+    ///
+    /// The key is the table's own b-tree, so the check is a seek on the cursor
+    /// the row is about to be written through rather than on a separate index.
+    /// On an `UPDATE` a hit is only a conflict when the key actually moved: a
+    /// row whose key is unchanged finds itself.
+    fn emit_primary_key_constraint(
+        &mut self,
+        writer: &Writer,
+        table: &TableInfo,
+        values: &[u32],
+        old_key: Option<&[u32]>,
+        statement: Option<ConflictAction>,
+        skip: &mut Vec<Label>,
+    ) -> DbResult<()> {
+        let keys = table.primary_key();
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let block = self.register_block(keys.len());
+        for (offset, position) in keys.iter().enumerate() {
+            let Some(source) = values.get(usize::from(*position)).copied() else {
+                continue;
+            };
+            let target = block.saturating_add(offset as u32);
+            self.emit(Instruction::new(
+                Opcode::Copy,
+                source as i32,
+                target as i32,
+                0,
+            ));
+        }
+        let clear = self.emit_jump(
+            Instruction::new(Opcode::NoConflict, writer.table as i32, -1, block as i32)
+                .with_p5(keys.len() as u16),
+        );
+        // An entry was found. On an UPDATE whose key did not move, that entry is
+        // this row.
+        let mut same: Vec<Label> = Vec::new();
+        if let Some(old_key) = old_key {
+            for (offset, previous) in old_key.iter().enumerate() {
+                let current = block.saturating_add(offset as u32);
+                let equal = self.register();
+                self.emit(
+                    Instruction::new(
+                        Opcode::Compare,
+                        current as i32,
+                        *previous as i32,
+                        equal as i32,
+                    )
+                    .with_p4(Operand::Comparison(crate::program::Comparison {
+                        op: rustdb_sql::ast::BinaryOp::Equal,
+                        affinity: None,
+                        collation: Collation::Binary,
+                    })),
+                );
+                // Any column that differs means the key moved, so the hit is a
+                // real duplicate and the halt below is reached.
+                let differs =
+                    self.emit_jump(Instruction::new(Opcode::IfNot, equal as i32, -1, 0).with_p5(1));
+                same.push(differs);
+            }
+            // Every key column compared equal: this is the same row.
+            let itself = self.emit_jump(Instruction::new(Opcode::Goto, 0, -1, 0));
+            for label in same {
+                self.patch_here(label);
+            }
+            same = vec![itself];
+        }
+        let action = statement
+            .or(table
+                .indexes
+                .iter()
+                .find(|index| index.origin == IndexOrigin::PrimaryKey)
+                .and_then(|index| index.conflict))
+            .unwrap_or(ConflictAction::Abort);
+        let names: Vec<String> = keys
+            .iter()
+            .filter_map(|position| table.column(*position))
+            .map(|column| {
+                format!(
+                    "{}.{}",
+                    String::from_utf8_lossy(&table.name),
+                    String::from_utf8_lossy(&column.name)
+                )
+            })
+            .collect();
+        let message = format!("UNIQUE constraint failed: {}", names.join(", "));
+        match action {
+            ConflictAction::Ignore => {
+                skip.push(self.emit_jump(Instruction::new(Opcode::Goto, 0, -1, 0)));
+            }
+            ConflictAction::Replace => {
+                // The row in the way is deleted and the write carries on, which
+                // is what REPLACE means. The cursor is already on it.
+                self.emit_delete_current(writer, table)?;
+            }
+            other => self.emit_constraint_halt(codes::PRIMARY_KEY, other, message),
+        }
+        for label in same {
+            self.patch_here(label);
+        }
+        self.patch_here(clear);
+        Ok(())
+    }
+
     /// Emits everything one inserted row costs.
     fn emit_insert_row(
         &mut self,
@@ -1790,6 +2051,16 @@ impl Compiler {
         );
         self.substitutions = previous;
         constraints?;
+        if table.without_rowid {
+            self.emit_primary_key_constraint(
+                writer,
+                table,
+                &values,
+                None,
+                insert.on_conflict,
+                &mut skip,
+            )?;
+        }
         self.emit_unique_constraints(
             writer,
             table,
@@ -1836,6 +2107,14 @@ impl Compiler {
         insert: &BoundInsert,
         values: &[u32],
     ) -> DbResult<u32> {
+        if insert.table.without_rowid {
+            // There is no rowid to allocate. The register exists because the
+            // callers pass one through to the row image and the index-entry
+            // builder, both of which ignore it for a WITHOUT ROWID table.
+            let register = self.register();
+            self.emit(Instruction::new(Opcode::Null, 0, register as i32, 0));
+            return Ok(register);
+        }
         let table = &insert.table;
         let Some(alias) = table.rowid_alias else {
             let rowid = self.register();
@@ -1960,6 +2239,291 @@ impl Compiler {
             )),
         );
         sorter
+    }
+
+    /// Opens the sorter a `WITHOUT ROWID` write collects its keys in.
+    ///
+    /// One sort column per primary-key column, with the key's own collations:
+    /// the second pass seeks the table by these values, so a sorter that
+    /// ordered them differently would still be correct but a sorter that
+    /// compared them differently would collapse two distinct keys into one.
+    fn open_key_sorter(&mut self, table: &TableInfo) -> u32 {
+        let sorter = self.sorters;
+        self.sorters = self.sorters.saturating_add(1);
+        let columns = table
+            .primary_key()
+            .into_iter()
+            .map(|position| SortColumn {
+                descending: false,
+                nulls_first: true,
+                collation: table
+                    .column(position)
+                    .map(|column| {
+                        Collation::from_name(
+                            core::str::from_utf8(&column.collation).unwrap_or("BINARY"),
+                        )
+                        .unwrap_or(Collation::Binary)
+                    })
+                    .unwrap_or(Collation::Binary),
+            })
+            .collect();
+        self.emit(
+            Instruction::new(Opcode::SorterOpen, sorter as i32, 0, 0)
+                .with_p4(Operand::SortKey(SortKey { columns })),
+        );
+        sorter
+    }
+
+    /// Emits the scan that collects the keys a `WITHOUT ROWID` write will change.
+    fn emit_collect_keys(
+        &mut self,
+        writer: &Writer,
+        table: &TableInfo,
+        filter: Option<&BoundExpr>,
+        sorter: u32,
+    ) -> DbResult<()> {
+        let keys = table.primary_key();
+        let end = self.emit_jump(Instruction::new(Opcode::Rewind, writer.table as i32, -1, 0));
+        let top = self.here();
+        let mut skip = None;
+        if let Some(filter) = filter {
+            let register = self.compile_expr(filter)?;
+            skip = Some(
+                self.emit_jump(Instruction::new(Opcode::IfNot, register as i32, -1, 0).with_p5(1)),
+            );
+        }
+        let block = self.register_block(keys.len().max(1));
+        for (offset, position) in keys.iter().enumerate() {
+            let value = self.read_column(writer.table, table, *position);
+            let target = block.saturating_add(offset as u32);
+            self.emit(Instruction::new(
+                Opcode::Copy,
+                value as i32,
+                target as i32,
+                0,
+            ));
+        }
+        self.emit(Instruction::new(
+            Opcode::SorterInsert,
+            sorter as i32,
+            block as i32,
+            keys.len() as i32,
+        ));
+        if let Some(skip) = skip {
+            self.patch_here(skip);
+        }
+        self.emit(Instruction::new(Opcode::Next, writer.table as i32, top, 0));
+        self.patch_here(end);
+        Ok(())
+    }
+
+    /// Emits an `UPDATE` or `DELETE` on a `WITHOUT ROWID` table.
+    ///
+    /// The same two passes a rowid table gets - collect what will change, then
+    /// change it - keyed by the primary key rather than by rowid, because that
+    /// is the only locator such a table has. One pass would rewrite rows the
+    /// scan had not reached yet.
+    fn emit_keyed_write(
+        &mut self,
+        table: &TableInfo,
+        source: usize,
+        filter: Option<&BoundExpr>,
+        update: Option<&BoundUpdate>,
+        delete: Option<&BoundDelete>,
+    ) -> DbResult<()> {
+        let writer = self.open_for_write(table, source);
+        let sorter = self.open_key_sorter(table);
+        self.emit_collect_keys(&writer, table, filter, sorter)?;
+        let keys = table.primary_key();
+        let empty = self.emit_jump(Instruction::new(Opcode::SorterSort, sorter as i32, -1, 0));
+        let top = self.here();
+        let block = self.register_block(keys.len().max(1));
+        for offset in 0..keys.len() {
+            self.emit(Instruction::new(
+                Opcode::SorterColumn,
+                sorter as i32,
+                offset as i32,
+                block.saturating_add(offset as u32) as i32,
+            ));
+        }
+        let missing = self.emit_jump(
+            Instruction::new(Opcode::NoConflict, writer.table as i32, -1, block as i32)
+                .with_p5(keys.len() as u16),
+        );
+        let old_key: Vec<u32> = (0..keys.len())
+            .map(|offset| block.saturating_add(offset as u32))
+            .collect();
+        match (update, delete) {
+            (Some(update), _) => self.emit_keyed_update_row(&writer, update, &old_key)?,
+            (_, Some(delete)) => {
+                self.emit_returning(&delete.returning)?;
+                let rowid = self.register();
+                self.emit(Instruction::new(Opcode::Null, 0, rowid as i32, 0));
+                let old = self.read_row_image(&writer, table, rowid);
+                let ignored = core::mem::take(&mut self.ignore_jumps);
+                self.emit_triggers(
+                    &delete.triggers,
+                    TriggerTime::Before,
+                    table,
+                    Some(&old),
+                    None,
+                )?;
+                self.emit_delete_current(&writer, table)?;
+                self.emit_count_change(table, rowid, RowChangeKind::Delete, false);
+                self.emit_triggers(
+                    &delete.triggers,
+                    TriggerTime::After,
+                    table,
+                    Some(&old),
+                    None,
+                )?;
+                for label in core::mem::replace(&mut self.ignore_jumps, ignored) {
+                    self.patch_here(label);
+                }
+            }
+            (None, None) => return Err(error::misuse("a keyed write with nothing to do")),
+        }
+        self.patch_here(missing);
+        self.emit(Instruction::new(Opcode::SorterNext, sorter as i32, top, 0));
+        self.patch_here(empty);
+        Ok(())
+    }
+
+    /// Emits one updated row of a `WITHOUT ROWID` table.
+    fn emit_keyed_update_row(
+        &mut self,
+        writer: &Writer,
+        update: &BoundUpdate,
+        old_key: &[u32],
+    ) -> DbResult<()> {
+        let table = &update.table;
+        let rowid = self.register();
+        self.emit(Instruction::new(Opcode::Null, 0, rowid as i32, 0));
+        let old_row = if update.triggers.is_empty() {
+            RowImage {
+                values: Vec::new(),
+                rowid,
+            }
+        } else {
+            self.read_row_image(writer, table, rowid)
+        };
+        let mut values = Vec::with_capacity(table.columns.len());
+        for position in 0..table.columns.len() as u16 {
+            let assigned = update
+                .assignments
+                .iter()
+                .find(|assignment: &&BoundAssignment| assignment.column == position);
+            let register = match assigned {
+                Some(assignment) => {
+                    let value = self.compile_expr(&assignment.value)?;
+                    let copy = self.register();
+                    self.emit(Instruction::new(Opcode::Copy, value as i32, copy as i32, 0));
+                    if let Some(column) = table.column(position) {
+                        self.emit(
+                            Instruction::new(Opcode::ApplyAffinity, copy as i32, 1, 0)
+                                .with_p4(Operand::Affinity(column.affinity)),
+                        );
+                    }
+                    copy
+                }
+                None => self.read_column(writer.table, table, position),
+            };
+            values.push(register);
+        }
+        let mut skip = Vec::new();
+        let new_row = RowImage {
+            values: values.clone(),
+            rowid,
+        };
+        let ignored = core::mem::take(&mut self.ignore_jumps);
+        self.emit_triggers(
+            &update.triggers,
+            TriggerTime::Before,
+            table,
+            Some(&old_row),
+            Some(&new_row),
+        )?;
+        let previous = core::mem::replace(
+            &mut self.substitutions,
+            row_substitutions(table, &values, rowid),
+        );
+        let constraints = self.emit_row_constraints(
+            table,
+            &values,
+            &update.checks,
+            update.on_conflict,
+            &mut skip,
+        );
+        self.substitutions = previous;
+        constraints?;
+        // The old entry goes first, before the key check: the check has to see
+        // the tree without this row in it, or a key that did not move would
+        // find itself and a REPLACE would delete the row it was rewriting.
+        let old_values: Vec<u32> = (0..table.columns.len() as u16)
+            .map(|column| self.read_column(writer.table, table, column))
+            .collect();
+        for (position, index) in writer.definitions.clone().iter().enumerate() {
+            let Some(cursor) = writer.indexes.get(position).copied() else {
+                continue;
+            };
+            let record = self.emit_index_record(index, &old_values, rowid, table)?;
+            self.emit(Instruction::new(
+                Opcode::IdxDelete,
+                cursor as i32,
+                record as i32,
+                0,
+            ));
+        }
+        let gone = self.emit_table_record(table, &old_values)?;
+        self.emit(Instruction::new(
+            Opcode::IdxDelete,
+            writer.table as i32,
+            gone as i32,
+            0,
+        ));
+        self.emit_primary_key_constraint(
+            writer,
+            table,
+            &values,
+            Some(old_key),
+            update.on_conflict,
+            &mut skip,
+        )?;
+        self.emit_unique_constraints(
+            writer,
+            table,
+            &values,
+            rowid,
+            None,
+            update.on_conflict,
+            None,
+            &update.checks,
+            &update.returning,
+            &mut skip,
+        )?;
+        self.emit_write_row(writer, table, &values, rowid)?;
+        self.emit_count_change(table, rowid, RowChangeKind::Update, false);
+        self.emit_triggers(
+            &update.triggers,
+            TriggerTime::After,
+            table,
+            Some(&old_row),
+            Some(&new_row),
+        )?;
+        let previous = core::mem::replace(
+            &mut self.substitutions,
+            row_substitutions(table, &values, rowid),
+        );
+        let returning = self.emit_returning(&update.returning);
+        self.substitutions = previous;
+        returning?;
+        for label in core::mem::replace(&mut self.ignore_jumps, ignored) {
+            self.patch_here(label);
+        }
+        for label in skip {
+            self.patch_here(label);
+        }
+        Ok(())
     }
 
     /// Emits the scan that collects the rowids a write is going to change.

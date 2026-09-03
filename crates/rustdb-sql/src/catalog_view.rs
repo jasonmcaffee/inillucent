@@ -301,6 +301,12 @@ impl TableInfo {
     /// this rather than through the column's declared position, and a `VIRTUAL`
     /// column has no slot at all - it is computed.
     pub fn record_slot(&self, column: u16) -> Option<usize> {
+        if self.without_rowid {
+            return self
+                .record_order()
+                .iter()
+                .position(|stored| *stored == column);
+        }
         let mut slot = 0usize;
         for (position, info) in self.columns.iter().enumerate() {
             if info.generated && !info.stored {
@@ -315,6 +321,56 @@ impl TableInfo {
             slot = slot.saturating_add(1);
         }
         None
+    }
+
+    /// Returns the primary key's columns, in key order.
+    ///
+    /// Key order, not declaration order: `PRIMARY KEY(b, a)` is ordered by `b`
+    /// and then `a` however the columns were declared, and for a `WITHOUT
+    /// ROWID` table that order also decides where in the record they sit.
+    pub fn primary_key(&self) -> Vec<u16> {
+        let mut keys: Vec<(u16, u16)> = self
+            .columns
+            .iter()
+            .enumerate()
+            .filter_map(|(position, column)| {
+                column
+                    .primary_key_position
+                    .map(|key| (key, position as u16))
+            })
+            .collect();
+        keys.sort_by_key(|(key, _)| *key);
+        keys.into_iter().map(|(_, position)| position).collect()
+    }
+
+    /// Returns the columns a record holds, in the order it holds them.
+    ///
+    /// A rowid table stores its columns as declared. A `WITHOUT ROWID` table's
+    /// B-tree is an index whose key is the primary key, so its record is the
+    /// key columns first, in key order, and then everything else as declared -
+    /// verified against a file the pinned build wrote: `PRIMARY KEY(b, a)` over
+    /// `(a, b, c)` stores `(b, a, c)`.
+    pub fn record_order(&self) -> Vec<u16> {
+        let stored = |position: usize| {
+            self.columns
+                .get(position)
+                .is_some_and(|column| !(column.generated && !column.stored))
+        };
+        if !self.without_rowid {
+            return (0..self.columns.len())
+                .filter(|position| stored(*position))
+                .map(|position| position as u16)
+                .collect();
+        }
+        let keys = self.primary_key();
+        let mut order = keys.clone();
+        for position in 0..self.columns.len() {
+            if keys.contains(&(position as u16)) || !stored(position) {
+                continue;
+            }
+            order.push(position as u16);
+        }
+        order
     }
 
     /// Returns how many columns the record holds.

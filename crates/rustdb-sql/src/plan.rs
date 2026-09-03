@@ -88,6 +88,14 @@ pub enum AccessPath {
         columns: Vec<u16>,
         /// Whether the table has no rowid, so the index key holds the key.
         without_rowid: bool,
+        /// Where in each entry the row's primary key sits, for a `WITHOUT
+        /// ROWID` table read through a *secondary* index.
+        ///
+        /// Such an entry ends with the primary key where a rowid table's would
+        /// end with a rowid, and that is how the row is then found. Empty for a
+        /// rowid table, and empty when the index is the table's own key - then
+        /// the entry the seek landed on already is the row.
+        key_entry_slots: Vec<usize>,
     },
     /// Rows produced by a nested query, materialised and then scanned.
     Subquery {
@@ -915,6 +923,14 @@ fn index_candidate(
             descending,
             columns,
             without_rowid: table.without_rowid,
+            key_entry_slots: if table.without_rowid && index.root != table.root {
+                let leading = index.columns.len();
+                (0..table.primary_key().len())
+                    .map(|offset| leading.saturating_add(offset))
+                    .collect()
+            } else {
+                Vec::new()
+            },
         },
         used,
     ))

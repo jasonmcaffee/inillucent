@@ -4,8 +4,8 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 
 | status | capabilities |
 |---|---|
-| missing | 47 |
-| pass | 213 |
+| missing | 46 |
+| pass | 214 |
 | **total** | **260** |
 
 ## By phase
@@ -25,7 +25,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | phase 5: lexer, parser, AST, and syntax parity | 10 | 0 | 0 | 0 |
 | phase 6: catalog, binder, expression VM, and read-only SELECT | 22 | 0 | 0 | 0 |
 | phase 7: single-database rollback transactions and DML | 29 | 0 | 0 | 0 |
-| phase 8: complete SELECT, planner, schema, and SQL semantics | 29 | 0 | 2 | 0 |
+| phase 8: complete SELECT, planner, schema, and SQL semantics | 30 | 0 | 1 | 0 |
 | phase 9: foreign keys, ATTACH, and multi-database commit | 0 | 0 | 6 | 0 |
 
 ## Capabilities
@@ -183,7 +183,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `sql.create-trigger` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
 | `sql.alter-table` | pass | pass | linux-x86_64, windows-x86_64 | 8 |
 | `sql.generated-columns` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
-| `sql.without-rowid` | missing | missing | - | 0 |
+| `sql.without-rowid` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `sql.strict-tables` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `sql.explain` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `sql.analyze` | pass | pass | linux-x86_64, windows-x86_64 | 2 |

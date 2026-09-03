@@ -889,3 +889,112 @@ fn the_trigger_forms_sqlite_omits_are_refused() {
     drop(database);
     sqlite_reads(&path, &[("SELECT count(*) FROM sqlite_schema", &["int:2"])]);
 }
+
+/// A `WITHOUT ROWID` table rust-db wrote, read and written by SQLite.
+///
+/// The b-tree at such a table's root is an *index* b-tree whose record is the
+/// row with the primary key moved to the front. Every part of that is a file
+/// format claim, so the only test worth having is the reference opening the
+/// file: a page created as a table b-tree, or a record left in declaration
+/// order, is something rust-db would read back perfectly and SQLite would not.
+#[test]
+fn without_rowid_round_trips_through_sqlite() {
+    let path = scratch("without-rowid");
+    let database = Database::open(&path).expect("the database opens");
+    let connection = database.connect().expect("the connection opens");
+    run_all(
+        &connection,
+        &[
+            "CREATE TABLE w (a TEXT, b INTEGER, c TEXT, PRIMARY KEY (b, a)) WITHOUT ROWID",
+            "INSERT INTO w VALUES ('x', 2, 'cx')",
+            "INSERT INTO w VALUES ('y', 1, 'cy')",
+            "INSERT INTO w VALUES ('z', 3, NULL)",
+            "CREATE INDEX w_c ON w (c)",
+            "INSERT INTO w VALUES ('q', 9, 'cq')",
+            "UPDATE w SET c = 'updated' WHERE b = 1",
+            "DELETE FROM w WHERE b = 3",
+            "CREATE TABLE k (id TEXT PRIMARY KEY, v REAL) WITHOUT ROWID",
+            "INSERT INTO k VALUES ('b', 2.5), ('a', 1.5)",
+        ],
+    );
+    assert_eq!(
+        run(&connection, "SELECT a, b, c FROM w ORDER BY b, a"),
+        Ok(vec![
+            "text:y|int:1|text:updated".to_string(),
+            "text:x|int:2|text:cx".to_string(),
+            "text:q|int:9|text:cq".to_string(),
+        ])
+    );
+    // A table with no rowid has no `rowid` column, in any of its spellings.
+    assert!(run(&connection, "SELECT rowid FROM w").is_err());
+    assert!(run(&connection, "SELECT oid FROM k").is_err());
+    // The key is unique and implicitly NOT NULL.
+    assert!(run(&connection, "INSERT INTO w VALUES ('x', 2, 'dup')").is_err());
+    assert!(run(&connection, "INSERT INTO w VALUES (NULL, 5, 'nullkey')").is_err());
+    // And a WITHOUT ROWID table must declare one.
+    assert!(run(&connection, "CREATE TABLE nokey (a) WITHOUT ROWID").is_err());
+    drop(connection);
+    drop(database);
+
+    sqlite_reads(
+        &path,
+        &[
+            (
+                "SELECT a, b, c FROM w ORDER BY b, a",
+                &[
+                    "text:y|int:1|text:updated",
+                    "text:x|int:2|text:cx",
+                    "text:q|int:9|text:cq",
+                ],
+            ),
+            // Read back through the secondary index, whose entries end with the
+            // primary key rather than with a rowid.
+            ("SELECT a, b FROM w WHERE c = 'cq'", &["text:q|int:9"]),
+            (
+                "SELECT id, v FROM k ORDER BY id",
+                &["text:a|real:1.5", "text:b|real:2.5"],
+            ),
+            // The primary key gets no `sqlite_autoindex` row of its own: the
+            // table's own root is that index.
+            (
+                "SELECT type, name FROM sqlite_schema ORDER BY name",
+                &[
+                    "text:table|text:k",
+                    "text:table|text:w",
+                    "text:index|text:w_c",
+                ],
+            ),
+        ],
+    );
+    // The reference writes it, and rust-db reads what it wrote.
+    sqlite_writes_then_reads(
+        &path,
+        &[
+            "INSERT INTO w VALUES ('r', 4, 'cr')",
+            "UPDATE w SET c = 'by-sqlite' WHERE b = 2",
+            "DELETE FROM w WHERE b = 9",
+        ],
+        &[(
+            "SELECT a, b, c FROM w ORDER BY b, a",
+            &[
+                "text:y|int:1|text:updated",
+                "text:x|int:2|text:by-sqlite",
+                "text:r|int:4|text:cr",
+            ],
+        )],
+    );
+    let database = Database::open(&path).expect("the database re-opens");
+    let connection = database.connect().expect("the connection re-opens");
+    assert_eq!(
+        run(&connection, "SELECT a, b, c FROM w ORDER BY b, a"),
+        Ok(vec![
+            "text:y|int:1|text:updated".to_string(),
+            "text:x|int:2|text:by-sqlite".to_string(),
+            "text:r|int:4|text:cr".to_string(),
+        ])
+    );
+    assert_eq!(
+        run(&connection, "SELECT a, b FROM w WHERE c = 'cr'"),
+        Ok(vec!["text:r|int:4".to_string()])
+    );
+}
