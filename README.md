@@ -200,11 +200,28 @@ is the point at which the engine reads *and writes*: it creates tables and index
 and deletes rows, enforces constraints, runs transactions and savepoints, and commits through a
 rollback journal that survives a power loss at every cut point.
 
+Phase 8 is under way and most of it has landed: every join form including `RIGHT` and `FULL`,
+compound selects, subqueries in every position, ordinary and recursive CTEs, window functions with
+all three frame units and all four `EXCLUDE` forms, views, `STRICT` tables, `EXPLAIN`, `REINDEX`,
+`ANALYZE` with a costed planner that reorders joins on what it measured, and the core, aggregate,
+date-time and math built-ins. Triggers, generated columns, `WITHOUT ROWID` writes, `ALTER TABLE` and
+a full `VACUUM` are the parts still to come, and the manifest says so - 24 of phase 8's 31 rows read
+`pass`, and the other seven read `missing`.
+
 ```sql
 CREATE TABLE people(id INTEGER PRIMARY KEY, name TEXT UNIQUE, score REAL CHECK (score >= 0));
 INSERT INTO people(name, score) VALUES('ada', 9.5) RETURNING id, name;
 CREATE INDEX people_score ON people(score);
 BEGIN; UPDATE people SET score = score + 1; SAVEPOINT s; DELETE FROM people; ROLLBACK TO s; COMMIT;
+
+CREATE VIEW ranked AS
+  SELECT name, rank() OVER (PARTITION BY team ORDER BY score DESC) AS place FROM people;
+WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10)
+  SELECT sum(i) FROM n;
+SELECT p.name, t.region FROM people AS p LEFT JOIN teams AS t USING (team)
+  WHERE p.score > (SELECT avg(score) FROM people);
+ANALYZE;
+EXPLAIN QUERY PLAN SELECT * FROM people WHERE score > 5;
 ```
 
 A file rust-db writes is one SQLite opens, reads, `PRAGMA integrity_check`s and keeps writing to,
@@ -233,7 +250,7 @@ commit rather than retrofitted once the edges exist.
 ### The compatibility report
 
 `compat/sqlite-3.53.4.toml` carries one row per capability rust-db owes, including the ones nothing
-has been written for yet: 260 rows, of which 184 pass and 76 are missing. That is the denominator on
+has been written for yet: 260 rows, of which 208 pass and 52 are missing. That is the denominator on
 purpose. A capability with no row cannot be reported as owed.
 
 A row reaches `pass` only when a test run recorded a passing result for every test it cites, on both

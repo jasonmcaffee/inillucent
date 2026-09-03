@@ -70,6 +70,10 @@ pub fn run_directive(
         Directive::Analyze { .. } => {
             run_write(connection, |connection| analyze(connection, directive))
         }
+        Directive::Reindex { .. } => {
+            run_write(connection, |connection| reindex(connection, directive))
+        }
+        Directive::Vacuum { .. } => vacuum(connection),
         Directive::CreateView { .. } => run_write(connection, |connection| {
             create_view(connection, directive, source)
         }),
@@ -169,6 +173,78 @@ fn create_table(
     }
     connection.with_state(|state| ddl::bump_schema_cookie(&mut state.pager))??;
     connection.refresh_catalog()?;
+    Ok(Vec::new())
+}
+
+/// Runs `REINDEX`: empties each index and fills it from its table again.
+///
+/// The refill goes through the same `build_index` a `CREATE INDEX` uses rather
+/// than through a second implementation, which is the point of the statement:
+/// an index rebuilt by different code from the one that built it could be
+/// rebuilt *wrongly* and nothing would notice, because the thing that checks an
+/// index is the index.
+fn reindex(connection: &Connection, directive: &Directive) -> DbResult<DirectiveRows> {
+    let Directive::Reindex { indexes, .. } = directive else {
+        return Err(misuse("not a REINDEX"));
+    };
+    for name in indexes {
+        let found = {
+            use rustdb_sql::catalog_view::CatalogView;
+            let catalog = connection.catalog()?;
+            let folded = name.to_ascii_lowercase();
+            catalog
+                .find_index(None, &folded)
+                .map(|(table, index)| (table.clone(), index.clone()))
+        };
+        let Some((table, index)) = found else {
+            continue;
+        };
+        let Some(root) = rustdb_base::ids::PageId::new(index.root) else {
+            continue;
+        };
+        connection
+            .with_state(|state| rustdb_storage::mutate::clear_tree(&mut state.pager, root))??;
+        backfill_index(connection, name)?;
+        let _ = table;
+    }
+    Ok(Vec::new())
+}
+
+/// Runs `VACUUM`: moves every free page off the end of the file and truncates.
+///
+/// On an auto-vacuum database this is the incremental vacuum run to completion,
+/// which is exactly what SQLite's own `PRAGMA incremental_vacuum` does with no
+/// limit, and it reaches the file the format specifies. The page-relocation and
+/// pointer-map bookkeeping then has one implementation rather than two.
+///
+/// On a database that is *not* in auto-vacuum mode there are no pointer maps,
+/// so a page cannot be moved without finding every reference to it - and SQLite
+/// does not try either: it rebuilds the whole database into a fresh file and
+/// swaps it. That rebuild needs a second pager and the file-swap protocol, both
+/// of which belong to the backup service in phase 9, so it is refused here
+/// rather than reported as having done something it did not do. A `VACUUM` that
+/// silently no-ops is worse than one that says it cannot: the first leaves a
+/// fragmented file and a person who believes otherwise.
+fn vacuum(connection: &Connection) -> DbResult<DirectiveRows> {
+    let auto = connection.with_state(|state| state.pager.header().vacuum_mode)?;
+    if auto != rustdb_storage::header::VacuumMode::Auto {
+        return Err(misuse(
+            "VACUUM on a database that is not in auto_vacuum mode is not implemented yet",
+        ));
+    }
+    connection.begin_statement(Access::Schema)?;
+    let outcome = connection.with_state(|state| {
+        let pages = state.pager.page_count().saturating_add(1);
+        rustdb_storage::vacuum::incremental_vacuum(&mut state.pager, pages)
+    });
+    let ending = if matches!(outcome, Ok(Ok(_))) {
+        Outcome::Done
+    } else {
+        Outcome::Abort
+    };
+    let closed = connection.end_statement(Access::Schema, ending);
+    outcome??;
+    closed?;
     Ok(Vec::new())
 }
 

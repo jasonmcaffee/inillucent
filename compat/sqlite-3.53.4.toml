@@ -987,8 +987,8 @@ id = "sql.expr.in-subquery"
 source = "https://sqlite.org/lang_expr.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::subqueries_match_the_oracle"]
 
 [[capability]]
 id = "catalog.sqlite-schema"
@@ -1123,56 +1123,56 @@ id = "sql.select.joins"
 source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::joins_match_the_oracle", "rustdb-compat::refusals_match_the_oracle"]
 
 [[capability]]
 id = "sql.select.compound"
 source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::compounds_match_the_oracle"]
 
 [[capability]]
 id = "sql.select.group-by-having"
 source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::windows_match_the_oracle", "rustdb-compat::the_foundational_select_suite_is_green"]
 
 [[capability]]
 id = "sql.select.distinct"
 source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::compounds_match_the_oracle", "rustdb-compat::windows_match_the_oracle"]
 
 [[capability]]
 id = "sql.with.cte"
 source = "https://sqlite.org/lang_with.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::ctes_match_the_oracle"]
 
 [[capability]]
 id = "sql.with.recursive"
 source = "https://sqlite.org/lang_with.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::ctes_match_the_oracle"]
 
 [[capability]]
 id = "sql.select.window"
 source = "https://sqlite.org/windowfunctions.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::windows_match_the_oracle"]
 
 [[capability]]
 id = "sql.upsert"
@@ -1195,8 +1195,8 @@ id = "sql.create-view"
 source = "https://sqlite.org/lang_createview.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::views_match_the_oracle", "rustdb-compat::a_view_round_trips_through_sqlite", "rustdb-compat::dropping_a_view_leaves_the_table"]
 
 [[capability]]
 id = "sql.create-trigger"
@@ -1235,32 +1235,32 @@ id = "sql.strict-tables"
 source = "https://sqlite.org/lang_createtable.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::strict_tables_refuse_the_wrong_class", "rustdb-compat::strict_is_enforced_on_a_file_sqlite_wrote"]
 
 [[capability]]
 id = "sql.explain"
 source = "https://sqlite.org/lang_explain.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::explain_reports_without_running"]
 
 [[capability]]
 id = "sql.analyze"
 source = "https://sqlite.org/lang_analyze.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::analyze_writes_statistics_sqlite_reads", "rustdb-compat::statistics_sqlite_wrote_are_read_back"]
 
 [[capability]]
 id = "sql.reindex"
 source = "https://sqlite.org/lang_reindex.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::reindex_rebuilds_an_index"]
 
 [[capability]]
 id = "sql.vacuum"
@@ -1275,24 +1275,24 @@ id = "planner.access-paths"
 source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_more_selective_index_wins", "rustdb-compat::the_foundational_select_suite_is_green"]
 
 [[capability]]
 id = "planner.join-order"
 source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::statistics_reorder_the_join", "rustdb-compat::cross_join_pins_the_order"]
 
 [[capability]]
 id = "planner.statistics"
 source = "https://sqlite.org/lang_analyze.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::statistics_reorder_the_join", "rustdb-compat::statistics_sqlite_wrote_are_read_back"]
 
 [[capability]]
 id = "sql.foreign-keys.immediate"
@@ -1442,33 +1442,33 @@ tests = []
 id = "functions.core"
 source = "https://sqlite.org/lang_corefunc.html"
 profile = "default"
-phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
-status = "missing"
-tests = []
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "pass"
+tests = ["rustdb-compat::core_functions_match_the_oracle"]
 
 [[capability]]
 id = "functions.aggregate"
 source = "https://sqlite.org/lang_aggfunc.html"
 profile = "default"
-phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
-status = "missing"
-tests = []
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "pass"
+tests = ["rustdb-compat::windows_match_the_oracle", "rustdb-compat::core_functions_match_the_oracle"]
 
 [[capability]]
 id = "functions.date-time"
 source = "https://sqlite.org/lang_datefunc.html"
 profile = "default"
-phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
-status = "missing"
-tests = []
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "pass"
+tests = ["rustdb-compat::date_and_time_functions_match_the_oracle"]
 
 [[capability]]
 id = "functions.math"
 source = "https://sqlite.org/lang_mathfunc.html"
 profile = "default"
-phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
-status = "missing"
-tests = []
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "pass"
+tests = ["rustdb-compat::math_functions_match_the_oracle"]
 
 [[capability]]
 id = "functions.json"
@@ -1482,9 +1482,9 @@ tests = []
 id = "functions.window"
 source = "https://sqlite.org/windowfunctions.html"
 profile = "default"
-phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
-status = "missing"
-tests = []
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "pass"
+tests = ["rustdb-compat::windows_match_the_oracle"]
 
 [[capability]]
 id = "pragma.schema"
@@ -1699,18 +1699,18 @@ id = "sql.negative.right-outer-join-pre-3-39"
 source = "https://sqlite.org/omitted.html"
 profile = "negative-parity"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
+status = "pass"
 expected = "syntax-error"
-tests = []
+tests = ["rustdb-compat::refusals_match_the_oracle", "rustdb-compat::joins_match_the_oracle"]
 
 [[capability]]
 id = "sql.negative.grant-revoke"
 source = "https://sqlite.org/omitted.html"
 profile = "negative-parity"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
+status = "pass"
 expected = "syntax-error"
-tests = []
+tests = ["rustdb-compat::refusals_match_the_oracle"]
 
 [[capability]]
 id = "sql.negative.full-alter-table"
@@ -1735,9 +1735,9 @@ id = "sql.negative.writable-views"
 source = "https://sqlite.org/omitted.html"
 profile = "negative-parity"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
+status = "pass"
 expected = "syntax-error"
-tests = []
+tests = ["rustdb-compat::refusals_match_the_oracle", "rustdb-compat::views_match_the_oracle"]
 
 [[capability]]
 id = "values.collation.registry"

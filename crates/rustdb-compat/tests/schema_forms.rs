@@ -414,3 +414,66 @@ fn explain_reports_without_running() {
     );
     assert!(run(&connection, "EXPLAIN SELECT * FROM nosuchtable").is_err());
 }
+
+/// `REINDEX` rebuilds an index, and the rebuilt one finds the same rows.
+///
+/// The check that matters is the one SQLite makes: after the rebuild the file
+/// still passes `integrity_check`, which walks every index entry against the
+/// table it indexes. An index rebuilt wrongly is invisible to a query that uses
+/// it - the query simply returns the wrong rows.
+#[test]
+fn reindex_rebuilds_an_index() {
+    let path = scratch("reindex");
+    let database = Database::open(&path).expect("the database opens");
+    let connection = database.connect().expect("the connection opens");
+    run_all(
+        &connection,
+        &[
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, team TEXT COLLATE NOCASE)",
+            "CREATE INDEX t_name ON t (name)",
+            "CREATE INDEX t_team ON t (team)",
+            "CREATE UNIQUE INDEX t_unique ON t (name, team)",
+            "INSERT INTO t VALUES (1, 'ada', 'Blue')",
+            "INSERT INTO t VALUES (2, 'bob', 'red')",
+            "INSERT INTO t VALUES (3, 'cai', 'BLUE')",
+            "DELETE FROM t WHERE id = 2",
+            "INSERT INTO t VALUES (4, 'dee', 'green')",
+        ],
+    );
+    let before = run(&connection, "SELECT id FROM t WHERE name = 'cai'");
+
+    // Every form: one index, one table's worth, a collation's worth, and all.
+    run_all(
+        &connection,
+        &["REINDEX t_name", "REINDEX t", "REINDEX NOCASE", "REINDEX"],
+    );
+    assert_eq!(
+        run(&connection, "SELECT id FROM t WHERE name = 'cai'"),
+        before
+    );
+    assert_eq!(
+        run(
+            &connection,
+            "SELECT id FROM t WHERE team = 'blue' ORDER BY id"
+        ),
+        Ok(vec!["int:1".to_string(), "int:3".to_string()])
+    );
+    assert_eq!(
+        run(&connection, "SELECT count(*) FROM t"),
+        Ok(vec!["int:3".to_string()])
+    );
+    // The unique index still refuses a duplicate, so it really was rebuilt with
+    // its entries rather than merely emptied.
+    assert!(run(&connection, "INSERT INTO t VALUES (5, 'ada', 'blue')").is_err());
+    assert!(run(&connection, "REINDEX nosuchthing").is_err());
+    drop(connection);
+    drop(database);
+
+    sqlite_reads(
+        &path,
+        &[
+            ("SELECT id FROM t WHERE name = 'cai'", &["int:3"]),
+            ("SELECT count(*) FROM t", &["int:3"]),
+        ],
+    );
+}
