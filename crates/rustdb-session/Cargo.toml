@@ -13,3 +13,4 @@ rustdb-sql = { workspace = true }
 rustdb-catalog = { workspace = true }
 rustdb-vm = { workspace = true }
 rustdb-storage = { workspace = true }
+rustdb-transaction = { workspace = true }

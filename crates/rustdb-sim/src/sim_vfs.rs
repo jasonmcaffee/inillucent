@@ -94,6 +94,15 @@ struct Counters {
 struct SimState {
     config: SimConfig,
     files: Mutex<BTreeMap<PathBuf, Arc<SimInode>>>,
+    /// Files whose deletion has not been made durable.
+    ///
+    /// A directory entry is data like any other: removing it writes to the
+    /// directory, and until that write is synced a power loss may put the
+    /// entry back. That is the whole reason `synchronous=FULL` syncs the
+    /// directory after deleting a rollback journal - in DELETE mode the
+    /// deletion *is* the commit point, and a commit that was reported and then
+    /// un-deleted would be a commit recovery undoes.
+    pending_deletes: Mutex<BTreeMap<PathBuf, Arc<SimInode>>>,
     counters: Mutex<Counters>,
     failpoints: Failpoints,
     trace: Trace,
@@ -162,6 +171,7 @@ impl SimVfs {
                 crash_rng: Mutex::new(Rng::new(seed ^ 0xc0ff_ee00)),
                 scheduler: Mutex::new(None),
                 powered_off: AtomicBool::new(false),
+                pending_deletes: Mutex::new(BTreeMap::new()),
             }),
         }
     }
@@ -203,6 +213,28 @@ impl SimVfs {
         let files = guard(&self.state.files);
         let mut snapshot = CrashSnapshot::default();
         let mut rng = guard(&self.state.crash_rng);
+        // A deletion that was never synced to the directory may not have
+        // happened. Each one is resolved independently, so a run that deleted
+        // a journal without syncing the directory sees both outcomes across a
+        // campaign rather than only the convenient one.
+        let pending = guard(&self.state.pending_deletes);
+        for (path, inode) in pending.iter() {
+            if rng.chance(1, 2) {
+                snapshot
+                    .outcomes
+                    .push(format!("{}\tdirectory entry\tRestored", path.display()));
+                let image = guard(&inode.image);
+                let (recovered, _) = image.crash(self.state.config.model, &mut rng);
+                snapshot
+                    .files
+                    .insert(path.clone(), recovered.durable_bytes().to_vec());
+            } else {
+                snapshot
+                    .outcomes
+                    .push(format!("{}\tdirectory entry\tRemoved", path.display()));
+            }
+        }
+        drop(pending);
         for (path, inode) in files.iter() {
             let image = guard(&inode.image);
             let (recovered, outcomes) = image.crash(self.state.config.model, &mut rng);
@@ -276,6 +308,21 @@ impl SimState {
         self.failpoints.check(site)
     }
 
+    /// Cuts the power, whichever operation was running.
+    ///
+    /// Every site can lose power, not only the ones that write. A crash during
+    /// a read or a lock changes nothing on the media, but it is still a cut
+    /// point a systematic campaign has to be able to land on - and a campaign
+    /// that silently did nothing at those calls would report a coverage number
+    /// several times larger than the number of crashes it actually caused.
+    fn power_off(&self, operation: VfsOperation) -> VfsError {
+        self.powered_off.store(true, Ordering::SeqCst);
+        VfsError::new(
+            operation.extended_code(),
+            "the simulated machine lost power",
+        )
+    }
+
     /// Advances the simulated clock and returns the new value.
     fn tick(&self) -> u64 {
         self.clock
@@ -295,6 +342,9 @@ impl Vfs for SimVfs {
         self.state.yield_point();
         self.state.require_power(VfsOperation::Open)?;
         if let Some(failure) = self.state.failpoint(Site::Open) {
+            if failure == Failure::Crash {
+                return Err(self.state.power_off(VfsOperation::Open));
+            }
             if let Some(error) = failure.to_error(Site::Open) {
                 self.state.trace.record(
                     current_actor().0,
@@ -339,18 +389,37 @@ impl Vfs for SimVfs {
     }
 
     /// Removes a file.
-    fn delete(&self, path: &DbPath, _sync_dir: bool) -> VfsResult<()> {
+    fn delete(&self, path: &DbPath, sync_dir: bool) -> VfsResult<()> {
         self.state.yield_point();
         self.state.require_power(VfsOperation::Delete)?;
         if let Some(failure) = self.state.failpoint(Site::Delete) {
+            if failure == Failure::Crash {
+                self.state.powered_off.store(true, Ordering::SeqCst);
+                return Err(VfsError::new(
+                    VfsOperation::Delete.extended_code(),
+                    "the simulated machine lost power during a delete",
+                ));
+            }
             if let Some(error) = failure.to_error(Site::Delete) {
                 return Err(error);
             }
         }
-        guard(&self.state.files).remove(path.as_path());
-        self.state
-            .trace
-            .record(current_actor().0, "delete", &path.display(), 0, 0, "ok");
+        let removed = guard(&self.state.files).remove(path.as_path());
+        if sync_dir {
+            // A synced directory makes every pending removal durable, not just
+            // this one: the entries share the directory this call flushed.
+            guard(&self.state.pending_deletes).clear();
+        } else if let Some(inode) = removed {
+            guard(&self.state.pending_deletes).insert(path.as_path().to_path_buf(), inode);
+        }
+        self.state.trace.record(
+            current_actor().0,
+            "delete",
+            &path.display(),
+            0,
+            u64::from(sync_dir),
+            "ok",
+        );
         Ok(())
     }
 
@@ -427,6 +496,9 @@ impl VfsFile for SimFile {
         self.state.require_power(VfsOperation::Read)?;
         let injected = self.state.failpoint(Site::Read);
         if let Some(failure) = injected {
+            if failure == Failure::Crash {
+                return Err(self.state.power_off(VfsOperation::Read));
+            }
             if let Some(error) = failure.to_error(Site::Read) {
                 for slot in output.iter_mut() {
                     *slot = 0;
@@ -525,6 +597,13 @@ impl VfsFile for SimFile {
         self.state.require_power(VfsOperation::Truncate)?;
         self.require_writable(VfsOperation::Truncate)?;
         if let Some(failure) = self.state.failpoint(Site::Truncate) {
+            if failure == Failure::Crash {
+                self.state.powered_off.store(true, Ordering::SeqCst);
+                return Err(VfsError::new(
+                    VfsOperation::Truncate.extended_code(),
+                    "the simulated machine lost power during a truncate",
+                ));
+            }
             if let Some(error) = failure.to_error(Site::Truncate) {
                 return Err(error);
             }
@@ -581,6 +660,9 @@ impl VfsFile for SimFile {
         self.state.yield_point();
         self.state.require_power(VfsOperation::Lock)?;
         if let Some(failure) = self.state.failpoint(Site::Lock) {
+            if failure == Failure::Crash {
+                return Err(self.state.power_off(VfsOperation::Lock));
+            }
             if let Some(error) = failure.to_error(Site::Lock) {
                 return Err(error);
             }
@@ -683,6 +765,9 @@ impl VfsFile for SimFile {
             return Ok(None);
         }
         if let Some(failure) = self.state.failpoint(Site::Shm) {
+            if failure == Failure::Crash {
+                return Err(self.state.power_off(Site::Shm.operation()));
+            }
             if let Some(error) = failure.to_error(Site::Shm) {
                 return Err(error);
             }

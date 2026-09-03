@@ -34,6 +34,7 @@ use rustdb_vfs::{DbPath, FileLock, OpenOptions, SyncMode, Vfs, VfsFile};
 use crate::btree::PageKind;
 use crate::cache::{CacheCounters, PageCache, PageKey, PagePin, PageState};
 use crate::header::{DatabaseHeader, VacuumMode, HEADER_SIZE};
+use crate::journal::{Journal, JournalStats};
 
 /// What the pager is doing.
 ///
@@ -200,6 +201,10 @@ pub struct Pager {
     freed: BTreeSet<u32>,
     sites_reached: u64,
     fail_at: Option<(u64, Option<FailSite>)>,
+    journal: Option<Box<dyn Journal>>,
+    journalled: BTreeSet<u32>,
+    wrote_database: bool,
+    journal_totals: JournalStats,
 }
 
 /// One level of undo: everything needed to put the database back the way it
@@ -280,6 +285,10 @@ impl Pager {
             freed: BTreeSet::new(),
             sites_reached: 0,
             fail_at: None,
+            journal: None,
+            journalled: BTreeSet::new(),
+            wrote_database: false,
+            journal_totals: JournalStats::default(),
         })
     }
 
@@ -647,6 +656,37 @@ impl Pager {
         Pager::open_read_write(vfs, path, options)
     }
 
+    /// Attaches the journal that makes this pager's commits crash-atomic.
+    ///
+    /// A pager with no journal attached still commits, and still orders its
+    /// writes so that a crash usually leaves the old database - that is what
+    /// phase 4 delivered and what the storage-level tests exercise. What it
+    /// cannot do is promise it, and the promise is the whole point, so every
+    /// path that opens a database for an application goes through
+    /// `rustdb_transaction::open_database`, which attaches one.
+    pub fn attach_journal(&mut self, journal: Box<dyn Journal>) {
+        self.journal = Some(journal);
+    }
+
+    /// Reports whether a journal is attached.
+    pub fn has_journal(&self) -> bool {
+        self.journal.is_some()
+    }
+
+    /// Returns what the journal has cost since the pager was opened.
+    pub fn journal_stats(&self) -> JournalStats {
+        let mut totals = self.journal_totals;
+        if let Some(journal) = self.journal.as_ref() {
+            totals.add(journal.stats());
+        }
+        totals
+    }
+
+    /// Returns how many pages this transaction has written to the journal.
+    pub fn journalled_page_count(&self) -> usize {
+        self.journalled.len()
+    }
+
     /// Reports whether this pager refuses every write.
     pub fn is_read_only(&self) -> bool {
         self.read_only
@@ -707,6 +747,16 @@ impl Pager {
         self.dirty.clear();
         self.undo.clear();
         self.freed.clear();
+        self.journalled.clear();
+        self.wrote_database = false;
+        let page_size = self.header.page_size.bytes();
+        let page_count = self.page_count;
+        if let Some(journal) = self.journal.as_mut() {
+            if let Err(error) = journal.begin(page_size, page_count) {
+                let _ = self.file.unlock(FileLock::Shared);
+                return Err(self.fail(error));
+            }
+        }
         self.undo.push(UndoFrame {
             name: None,
             images: BTreeMap::new(),
@@ -725,6 +775,14 @@ impl Pager {
     /// Opens a named undo level, which is what a savepoint is.
     pub fn begin_savepoint(&mut self, name: &str) -> DbResult<()> {
         self.push_undo_level(Some(name.to_string()))
+    }
+
+    /// Returns the depth a named savepoint sits at, if it is open.
+    pub fn savepoint_depth(&self, name: &str) -> Option<usize> {
+        self.undo
+            .iter()
+            .rposition(|frame| frame.name.as_deref() == Some(name))
+            .map(|index| index.saturating_add(1))
     }
 
     /// Closes the innermost undo level, keeping its changes.
@@ -862,8 +920,14 @@ impl Pager {
         if count < self.page_count {
             self.reach_failpoint(FailSite::Truncate)?;
             for page in count.saturating_add(1)..=self.page_count {
-                if self.dirty.contains(&page) {
-                    if let Ok(page_id) = PageId::from_persisted(page) {
+                if let Ok(page_id) = PageId::from_persisted(page) {
+                    // The journal needs every dropped page, not just the dirty
+                    // ones: commit truncates the file, so a rollback that only
+                    // restored the page count would restore zeroes. In-memory
+                    // rollback does not need the clean ones, because the file
+                    // still holds them until the commit truncates it.
+                    self.journal_original(page_id)?;
+                    if self.dirty.contains(&page) {
                         self.record_image(page_id)?;
                     }
                 }
@@ -903,10 +967,32 @@ impl Pager {
     }
 
     /// Commits the transaction, putting every modified page in the file.
+    ///
+    /// The order is the one the TDD's commit sequence lists, and each step is
+    /// there because a crash between it and the next one has to leave a
+    /// recoverable database:
+    ///
+    /// 1. stamp the header, which journals page one like any other page;
+    /// 2. make the journal durable - after this the old database is
+    ///    reconstructible from the file plus the journal;
+    /// 3. take EXCLUSIVE, so no reader sees the mixture that follows;
+    /// 4. write every dirty page and truncate;
+    /// 5. sync the database - after this the new database is complete;
+    /// 6. make the journal non-hot, which is the atomic commit point;
+    /// 7. publish: mark frames clean and release the locks.
+    ///
+    /// A crash before step 6 finds a hot journal and rolls the database back.
+    /// A crash after it finds none and keeps the new database. There is no
+    /// window in between, because step 6 is a single file operation.
     pub fn commit(&mut self) -> DbResult<()> {
         self.check_usable()?;
         self.require_writer()?;
-        if self.dirty.is_empty() {
+        if self.dirty.is_empty() && self.journalled.is_empty() {
+            if let Some(journal) = self.journal.as_mut() {
+                let outcome = journal.discard();
+                self.collect_journal_stats();
+                outcome?;
+            }
             return self.finish_transaction();
         }
         self.reach_failpoint(FailSite::Commit)?;
@@ -916,6 +1002,12 @@ impl Pager {
         header.version_valid_for = header.change_counter;
         header.write_library_version = WRITE_LIBRARY_VERSION;
         self.set_header(header)?;
+
+        if let Some(journal) = self.journal.as_mut() {
+            if let Err(error) = journal.prepare_commit() {
+                return Err(self.fail(error));
+            }
+        }
 
         if let Err(error) = self.file.lock(FileLock::Exclusive) {
             let error = error.into_db_error();
@@ -927,15 +1019,18 @@ impl Pager {
         self.state = PagerState::WriterDbMod;
 
         let pages: Vec<u32> = self.dirty.iter().copied().collect();
+        // Page one carries the change counter, so it is written last: a reader
+        // that sees the new counter has, on an ordered device, already been
+        // able to see the pages it describes. The journal is what makes this
+        // safe rather than merely likely, but the ordering costs nothing.
         for page in pages.iter().copied().filter(|page| *page != 1) {
+            self.wrote_database = true;
             if let Err(error) = self.write_page_to_file(page) {
                 return Err(self.fail(error));
             }
         }
-        if let Err(error) = self.file.sync(SyncMode::Normal) {
-            return Err(self.fail(error.into_db_error()));
-        }
         if pages.contains(&1) {
+            self.wrote_database = true;
             if let Err(error) = self.write_page_to_file(1) {
                 return Err(self.fail(error));
             }
@@ -947,8 +1042,22 @@ impl Pager {
             }
             self.file_bytes = wanted;
         }
-        if let Err(error) = self.file.sync(SyncMode::Normal) {
-            return Err(self.fail(error.into_db_error()));
+        let database_sync = match self.journal.as_ref() {
+            Some(journal) => journal.database_sync(),
+            None => Some(SyncMode::Normal),
+        };
+        if let Some(mode) = database_sync {
+            if let Err(error) = self.file.sync(mode) {
+                return Err(self.fail(error.into_db_error()));
+            }
+        }
+
+        if let Some(journal) = self.journal.as_mut() {
+            let outcome = journal.commit_point();
+            self.collect_journal_stats();
+            if let Err(error) = outcome {
+                return Err(self.fail(error));
+            }
         }
 
         for page in pages {
@@ -964,16 +1073,126 @@ impl Pager {
     }
 
     /// Undoes the whole transaction and releases the writer's locks.
+    ///
+    /// Two rollbacks are possible and they are not interchangeable. Before the
+    /// commit reached the file, the undo images in memory are the whole story
+    /// and putting them back is enough. After it reached the file, the file
+    /// itself holds a mixture, and only the journal can undo that - so the
+    /// journal is replayed onto the file, the file is truncated back to the
+    /// size it had, and the cache is emptied of everything the transaction
+    /// touched rather than being trusted.
     pub fn rollback(&mut self) -> DbResult<()> {
         if !self.is_writing() && self.undo.is_empty() {
             return Ok(());
+        }
+        if self.wrote_database {
+            return self.rollback_from_journal();
         }
         while let Some(frame) = self.undo.pop() {
             self.restore(frame)?;
         }
         self.dirty.clear();
+        if let Some(journal) = self.journal.as_mut() {
+            let outcome = journal.discard();
+            self.collect_journal_stats();
+            outcome?;
+        }
         self.counters.rollbacks = self.counters.rollbacks.saturating_add(1);
+        self.clear_recoverable_error();
         self.finish_transaction()
+    }
+
+    /// Puts the database file back the way the journal says it was.
+    fn rollback_from_journal(&mut self) -> DbResult<()> {
+        let Some(mut journal) = self.journal.take() else {
+            return Err(self.fail(corrupt(
+                "the database file was modified with no journal to undo it",
+            )));
+        };
+        let outcome = journal.playback(self.file.as_ref());
+        let original = match outcome {
+            Ok(original) => original,
+            Err(error) => {
+                self.journal = Some(journal);
+                return Err(self.fail(error));
+            }
+        };
+        if let Some(pages) = original {
+            let wanted = u64::from(pages).saturating_mul(u64::from(self.header.page_size.bytes()));
+            if let Err(error) = self.file.truncate(wanted) {
+                self.journal = Some(journal);
+                return Err(self.fail(error.into_db_error()));
+            }
+            self.file_bytes = wanted;
+            self.page_count = pages;
+            if let Err(error) = self.file.sync(SyncMode::Normal) {
+                self.journal = Some(journal);
+                return Err(self.fail(error.into_db_error()));
+            }
+        }
+        let discarded = journal.discard();
+        self.journal_totals.add(journal.stats());
+        self.journal = Some(journal);
+        discarded?;
+        // Everything this transaction touched is now wrong in the cache, and
+        // the truth is in the file. Dropping the frames is cheaper than being
+        // clever about which of them survived, and it cannot be wrong.
+        // Page zero does not exist, so "above zero" is every page.
+        self.cache.discard_above(self.database, 0);
+        self.dirty.clear();
+        self.undo.clear();
+        self.journalled.clear();
+        self.wrote_database = false;
+        self.reload_header()?;
+        self.counters.rollbacks = self.counters.rollbacks.saturating_add(1);
+        self.clear_recoverable_error();
+        self.finish_transaction()
+    }
+
+    /// Forgets a sticky error the rollback has just repaired.
+    ///
+    /// Stickiness exists so that a query which hit an unreadable page cannot
+    /// return a partial answer that looks complete. Once the transaction has
+    /// been rolled back there is no partial state left to protect anyone from,
+    /// and a pager that kept refusing would make one out-of-memory statement
+    /// end the connection.
+    ///
+    /// Corruption is the exception and is deliberately not cleared. A page
+    /// that does not decode is still there after the rollback, and forgetting
+    /// that would turn "this database is damaged" into an intermittent error
+    /// that goes away when the caller retries.
+    fn clear_recoverable_error(&mut self) {
+        let recoverable = self.sticky.as_ref().is_some_and(|error| {
+            !matches!(
+                error.code(),
+                rustdb_base::PrimaryCode::Corrupt | rustdb_base::PrimaryCode::NotADb
+            )
+        });
+        if recoverable {
+            self.sticky = None;
+            if self.state == PagerState::Error {
+                self.state = PagerState::Reader;
+            }
+        }
+    }
+
+    /// Re-reads the header from the file, after a playback replaced page one.
+    fn reload_header(&mut self) -> DbResult<()> {
+        let mut prefix = [0u8; HEADER_SIZE];
+        self.file.read_exact_at(0, &mut prefix)?;
+        let header = DatabaseHeader::decode(&prefix)?;
+        self.file_bytes = self.file.file_size()?;
+        self.page_count = header.database_size;
+        self.header = header;
+        Ok(())
+    }
+
+    /// Folds a finished journal's numbers into the pager's running totals.
+    fn collect_journal_stats(&mut self) {
+        let stats = self.journal.as_ref().map(|journal| journal.stats());
+        if let Some(stats) = stats {
+            self.journal_totals.add(stats);
+        }
     }
 
     /// Pushes a new undo level.
@@ -1043,6 +1262,7 @@ impl Pager {
 
     /// Records a page's current contents in the innermost undo level.
     fn record_image(&mut self, page: PageId) -> DbResult<()> {
+        self.journal_original(page)?;
         let Some(level) = self.undo.last() else {
             return Err(misuse("a page was edited with no transaction open"));
         };
@@ -1061,6 +1281,43 @@ impl Pager {
             return Err(misuse("a page was edited with no transaction open"));
         };
         level.images.insert(page.get(), image);
+        Ok(())
+    }
+
+    /// Writes a page's pre-transaction image to the journal, exactly once.
+    ///
+    /// It runs before the page is modified, so what the cache holds now is
+    /// what a rollback has to put back - and because it runs before *any*
+    /// modification, the first call for a page is the only one that sees the
+    /// pre-transaction bytes, which is why the set is consulted rather than
+    /// the undo level. An undo level records the page as it was when that
+    /// level opened, which for a nested statement is already a modified page.
+    ///
+    /// A page the transaction created has no image worth keeping: the journal
+    /// records the original page count and recovery truncates back to it.
+    fn journal_original(&mut self, page: PageId) -> DbResult<()> {
+        if self.journal.is_none() {
+            return Ok(());
+        }
+        let original = self
+            .undo
+            .first()
+            .map_or(self.page_count, |base| base.page_count);
+        if page.get() > original || self.journalled.contains(&page.get()) {
+            return Ok(());
+        }
+        // Inserted before the write, so a failure part-way cannot leave the
+        // page marked as journalled when it is not.
+        let image = {
+            let pin = self.get_page(page)?;
+            self.copy_bytes(pin.bytes())?
+        };
+        let number = page.get();
+        let Some(journal) = self.journal.as_mut() else {
+            return Ok(());
+        };
+        journal.record(number, image.as_slice())?;
+        self.journalled.insert(number);
         Ok(())
     }
 
@@ -1099,6 +1356,8 @@ impl Pager {
         self.dirty.clear();
         self.undo.clear();
         self.freed.clear();
+        self.journalled.clear();
+        self.wrote_database = false;
         if self.file.lock_level() > FileLock::Shared {
             self.file.unlock(FileLock::Shared)?;
         }

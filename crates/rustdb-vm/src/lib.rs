@@ -59,6 +59,7 @@ pub(crate) use assert_same;
 pub mod aggregate;
 pub mod builtin;
 pub mod compile;
+pub mod compile_dml;
 pub mod eval;
 pub mod machine;
 pub mod pattern;
@@ -67,6 +68,7 @@ pub mod sorter;
 pub mod verify;
 
 pub use compile::{compile, compile_select};
+pub use compile_dml::{compile_delete, compile_insert, compile_update};
 pub use machine::{Machine, MachineState, StepOutcome};
 pub use program::{Instruction, Opcode, Program, ProgramDependencies, ResultColumn};
 pub use verify::{verify, verify_operands, VerifyError};

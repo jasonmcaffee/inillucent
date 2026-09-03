@@ -49,8 +49,69 @@ pub fn allocation_stats() -> AllocationStats {
     }
 }
 
+thread_local! {
+    /// Which allocation to refuse, counting from one; zero disarms it.
+    ///
+    /// Per thread rather than per process, because a test binary runs its
+    /// tests in parallel threads and a process-wide failpoint armed by one of
+    /// them fires inside another - which looks exactly like a bug in whichever
+    /// test happened to allocate next.
+    static FAIL_ALLOCATION_AT: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+
+    /// How many allocations this thread has made since it armed the failpoint.
+    static ALLOCATIONS_SINCE_ARMED: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+/// Makes the `n`th buffer allocation from now report `SQLITE_NOMEM`.
+///
+/// A memory failure cannot be injected at the VFS, because it is not I/O; and
+/// it cannot be injected by exhausting the machine's memory, because that
+/// fails somewhere unpredictable and takes the test process with it. Counting
+/// allocations and refusing one is the only way to ask "what does the engine
+/// do when *this* allocation fails" and get the same answer twice.
+///
+/// The check costs one relaxed load on a path that already performs two
+/// relaxed adds, so it is left compiled in rather than hidden behind a feature
+/// that the release build would not exercise.
+pub fn fail_allocation_after(n: u64) {
+    ALLOCATIONS_SINCE_ARMED.with(|count| count.set(0));
+    FAIL_ALLOCATION_AT.with(|slot| slot.set(n));
+}
+
+/// Disarms the allocation failpoint.
+pub fn clear_allocation_failpoint() {
+    FAIL_ALLOCATION_AT.with(|slot| slot.set(0));
+}
+
+/// Returns which allocation the failpoint is armed to refuse.
+pub fn armed_allocation() -> u64 {
+    FAIL_ALLOCATION_AT.with(core::cell::Cell::get)
+}
+
+/// Returns how many allocations have happened since the failpoint was armed.
+pub fn allocations_since_armed() -> u64 {
+    ALLOCATIONS_SINCE_ARMED.with(core::cell::Cell::get)
+}
+
+/// Reports whether this allocation is the one the failpoint refuses.
+fn allocation_is_refused() -> bool {
+    let armed = FAIL_ALLOCATION_AT.with(core::cell::Cell::get);
+    if armed == 0 {
+        return false;
+    }
+    let index = ALLOCATIONS_SINCE_ARMED.with(|count| {
+        let next = count.get().saturating_add(1);
+        count.set(next);
+        next
+    });
+    index == armed
+}
+
 /// Allocates a zeroed byte buffer, returning `SQLITE_NOMEM` on failure.
 pub fn try_zeroed(len: usize) -> DbResult<Box<[u8]>> {
+    if allocation_is_refused() {
+        return Err(no_mem("an injected allocation failure"));
+    }
     let mut buffer: Vec<u8> = Vec::new();
     buffer
         .try_reserve_exact(len)

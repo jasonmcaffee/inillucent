@@ -136,6 +136,31 @@ impl Connection {
         self.inner.autocommit()
     }
 
+    /// Returns how many rows the most recent completed statement changed.
+    pub fn changes(&self) -> i64 {
+        self.inner.counters().changes
+    }
+
+    /// Returns how many rows the connection has changed since it opened.
+    pub fn total_changes(&self) -> i64 {
+        self.inner.counters().total_changes
+    }
+
+    /// Returns the rowid the most recent successful insert allocated.
+    pub fn last_insert_rowid(&self) -> i64 {
+        self.inner.counters().last_insert_rowid
+    }
+
+    /// Returns what the journal has cost since the connection was opened.
+    pub fn journal_stats(&self) -> rustdb_storage::JournalStats {
+        self.inner.journal_stats()
+    }
+
+    /// Returns what the pager has done since the connection was opened.
+    pub fn pager_counters(&self) -> rustdb_storage::pager::PagerCounters {
+        self.inner.pager_counters()
+    }
+
     /// Rereads the schema, invalidating every prepared statement.
     pub fn reload_schema(&self) -> DbResult<()> {
         self.inner.reload_catalog()

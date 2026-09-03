@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Records the phase 0-6 evidence on Linux.
+# Records the engine evidence on Linux.
 #
 # The workspace is shared between Windows and WSL, so the build directory has to
 # be a Linux one: sharing `target/` between the two would have each toolchain

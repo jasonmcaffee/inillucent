@@ -20,7 +20,7 @@ use rustdb_sql::ast::{
     ColumnConstraint, CreateTableBody, Expr, IndexedColumn, Statement, TableConstraint,
 };
 use rustdb_sql::catalog_view::{
-    ColumnInfo, IndexColumnInfo, IndexInfo, IndexOrigin, TableInfo, TableKind,
+    CheckInfo, ColumnInfo, IndexColumnInfo, IndexInfo, IndexOrigin, TableInfo, TableKind,
 };
 use rustdb_sql::parser::parse_next_statement;
 use rustdb_sql::Ast;
@@ -54,11 +54,50 @@ pub fn load_database_catalog(
         }
         attach_index(&mut tables, row)?;
     }
+    tables.extend(schema_table_aliases(database));
     Ok(DatabaseCatalog {
         name: name.to_vec(),
         schema_cookie,
         tables,
     })
+}
+
+/// The `CREATE` text SQLite reports for the schema table itself.
+const SCHEMA_TABLE_SQL: &[u8] =
+    b"CREATE TABLE sqlite_schema(type text,name text,tbl_name text,rootpage integer,sql text)";
+
+/// Returns the schema table under each of the names it answers to.
+///
+/// `sqlite_schema` is the one table that has no row in `sqlite_schema`: it is
+/// rooted at page one by definition, and a file that had to describe it would
+/// have nowhere to put the description. So it is synthesised here, and under
+/// every alias SQLite accepts - `sqlite_master` is what almost every tool
+/// actually types, and a database that could not answer it would be one no
+/// existing tool could inspect.
+///
+/// The entries are deliberately not part of what `SELECT ... FROM
+/// sqlite_schema` returns, because they are not rows in the file; they exist
+/// only so a name resolves.
+fn schema_table_aliases(database: usize) -> Vec<TableInfo> {
+    let mut aliases = Vec::new();
+    for name in [
+        b"sqlite_schema".as_slice(),
+        b"sqlite_master".as_slice(),
+        b"sqlite_temp_schema".as_slice(),
+        b"sqlite_temp_master".as_slice(),
+    ] {
+        let Ok(mut table) = table_from_create_sql(
+            SCHEMA_TABLE_SQL,
+            database,
+            rustdb_storage::schema::SCHEMA_ROOT,
+        ) else {
+            continue;
+        };
+        table.name = name.to_vec();
+        table.folded = name.to_ascii_lowercase();
+        aliases.push(table);
+    }
+    aliases
 }
 
 /// Builds a table entry from one `sqlite_schema` row.
@@ -78,6 +117,7 @@ fn table_from_row(row: &SchemaObject, database: usize) -> DbResult<TableInfo> {
             kind: TableKind::View,
             create_sql: sql.into_bytes(),
             indexes: Vec::new(),
+            checks: Vec::new(),
         });
     }
     if sql.is_empty() {
@@ -95,6 +135,7 @@ fn table_from_row(row: &SchemaObject, database: usize) -> DbResult<TableInfo> {
             kind: TableKind::Virtual,
             create_sql: Vec::new(),
             indexes: Vec::new(),
+            checks: Vec::new(),
         });
     }
     let mut table = table_from_create_sql(sql.as_bytes(), database, root)
@@ -127,6 +168,7 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
                 kind: TableKind::Virtual,
                 create_sql: sql.to_vec(),
                 indexes: Vec::new(),
+                checks: Vec::new(),
             });
         }
         return Err(error::corrupt("schema SQL is not a CREATE TABLE"));
@@ -153,10 +195,12 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
         kind: TableKind::Table,
         create_sql: sql.to_vec(),
         indexes: Vec::new(),
+        checks: Vec::new(),
     };
     for column in columns {
-        info.columns.push(column_info(&parsed.ast, column));
+        info.columns.push(column_info(sql, &parsed.ast, column));
     }
+    info.checks = collect_checks(sql, &parsed.ast, columns, constraints);
     apply_table_constraints(&mut info, &parsed.ast, constraints);
     info.rowid_alias = rowid_alias(&info, &parsed.ast, columns, constraints);
     info.indexes = automatic_indexes(&info, &parsed.ast, columns, constraints);
@@ -164,7 +208,7 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
 }
 
 /// Builds one column entry from its declaration.
-fn column_info(ast: &Ast, column: &rustdb_sql::ast::ColumnDef) -> ColumnInfo {
+fn column_info(source: &[u8], ast: &Ast, column: &rustdb_sql::ast::ColumnDef) -> ColumnInfo {
     let name = ast.text(column.name).to_vec();
     let declared = column.declared_type.clone().unwrap_or_default();
     let mut info = ColumnInfo {
@@ -174,6 +218,7 @@ fn column_info(ast: &Ast, column: &rustdb_sql::ast::ColumnDef) -> ColumnInfo {
         declared_type: declared,
         collation: b"binary".to_vec(),
         not_null: false,
+        not_null_conflict: None,
         default_sql: None,
         primary_key_position: None,
         hidden: false,
@@ -181,12 +226,15 @@ fn column_info(ast: &Ast, column: &rustdb_sql::ast::ColumnDef) -> ColumnInfo {
     };
     for (_, constraint) in &column.constraints {
         match constraint {
-            ColumnConstraint::NotNull(_) => info.not_null = true,
+            ColumnConstraint::NotNull(action) => {
+                info.not_null = true;
+                info.not_null_conflict = *action;
+            }
             ColumnConstraint::Collate(name) => {
                 info.collation = ast.folded(*name).to_vec();
             }
             ColumnConstraint::Default(expr) => {
-                info.default_sql = Some(render_default(ast, *expr));
+                info.default_sql = Some(source_of(source, ast, *expr));
             }
             ColumnConstraint::PrimaryKey { .. } => {
                 info.primary_key_position = Some(1);
@@ -203,15 +251,48 @@ fn column_info(ast: &Ast, column: &rustdb_sql::ast::ColumnDef) -> ColumnInfo {
     info
 }
 
-/// Renders a `DEFAULT` expression back to text, for reporting only.
-fn render_default(ast: &Ast, expr: rustdb_sql::ast::ExprId) -> Vec<u8> {
-    match ast.expr(expr) {
-        Some(Expr::Literal(rustdb_sql::ast::Literal::Integer(text))) => text.clone(),
-        Some(Expr::Literal(rustdb_sql::ast::Literal::Float(text))) => text.clone(),
-        Some(Expr::Literal(rustdb_sql::ast::Literal::String(text))) => text.clone(),
-        Some(Expr::Literal(rustdb_sql::ast::Literal::Null)) => b"NULL".to_vec(),
-        _ => Vec::new(),
+/// Returns the source text an expression was written as.
+///
+/// It is sliced out of the stored `CREATE` statement by the span the parser
+/// recorded, rather than rendered back from the tree. Rendering loses whatever
+/// the printer does not know how to write - `DEFAULT -1` is a unary expression,
+/// not a literal, and reconstructing it as the empty string turned a default
+/// into no default at all - and the stored text is the definition, so slicing
+/// it cannot disagree with it.
+fn source_of(source: &[u8], ast: &Ast, expr: rustdb_sql::ast::ExprId) -> Vec<u8> {
+    ast.expr_span(expr).slice(source).to_vec()
+}
+
+/// Collects every `CHECK` constraint a table declares, in written order.
+///
+/// Column-level checks come first in SQLite's own evaluation order, which is
+/// the order they are declared in, and table-level ones follow.
+fn collect_checks(
+    source: &[u8],
+    ast: &Ast,
+    columns: &[rustdb_sql::ast::ColumnDef],
+    constraints: &[(Option<rustdb_sql::ast::NameId>, TableConstraint)],
+) -> Vec<CheckInfo> {
+    let mut checks = Vec::new();
+    for column in columns {
+        for (name, constraint) in &column.constraints {
+            if let ColumnConstraint::Check(expr) = constraint {
+                checks.push(CheckInfo {
+                    name: name.map(|name| ast.text(name).to_vec()),
+                    expr_sql: source_of(source, ast, *expr),
+                });
+            }
+        }
     }
+    for (name, constraint) in constraints {
+        if let TableConstraint::Check(expr) = constraint {
+            checks.push(CheckInfo {
+                name: name.map(|name| ast.text(name).to_vec()),
+                expr_sql: source_of(source, ast, *expr),
+            });
+        }
+    }
+    checks
 }
 
 /// Applies table-level `PRIMARY KEY` and `NOT NULL` implications.
@@ -320,14 +401,14 @@ fn automatic_indexes(
     let mut ordinal = 0u32;
     for (position, column) in columns.iter().enumerate() {
         for (_, constraint) in &column.constraints {
-            let (unique, origin) = match constraint {
-                ColumnConstraint::PrimaryKey { .. } => {
+            let (unique, origin, conflict) = match constraint {
+                ColumnConstraint::PrimaryKey { on_conflict, .. } => {
                     if info.rowid_alias == Some(position as u16) {
                         continue;
                     }
-                    (true, IndexOrigin::PrimaryKey)
+                    (true, IndexOrigin::PrimaryKey, *on_conflict)
                 }
-                ColumnConstraint::Unique(_) => (true, IndexOrigin::Unique),
+                ColumnConstraint::Unique(action) => (true, IndexOrigin::Unique, *action),
                 _ => continue,
             };
             ordinal = ordinal.saturating_add(1);
@@ -348,12 +429,17 @@ fn automatic_indexes(
                 }],
                 partial_sql: None,
                 origin,
+                conflict,
             });
         }
     }
     for (_, constraint) in constraints {
-        let (keys, unique, origin) = match constraint {
-            TableConstraint::PrimaryKey { columns, .. } => {
+        let (keys, unique, origin, conflict) = match constraint {
+            TableConstraint::PrimaryKey {
+                columns,
+                on_conflict,
+                ..
+            } => {
                 let single_rowid = columns.len() == 1
                     && columns
                         .first()
@@ -363,9 +449,12 @@ fn automatic_indexes(
                 if single_rowid {
                     continue;
                 }
-                (columns, true, IndexOrigin::PrimaryKey)
+                (columns, true, IndexOrigin::PrimaryKey, *on_conflict)
             }
-            TableConstraint::Unique { columns, .. } => (columns, true, IndexOrigin::Unique),
+            TableConstraint::Unique {
+                columns,
+                on_conflict,
+            } => (columns, true, IndexOrigin::Unique, *on_conflict),
             _ => continue,
         };
         ordinal = ordinal.saturating_add(1);
@@ -394,6 +483,7 @@ fn automatic_indexes(
             columns: key_columns,
             partial_sql: None,
             origin,
+            conflict,
         });
     }
     indexes
@@ -486,6 +576,10 @@ fn index_from_create_sql(sql: &[u8], table: &TableInfo, root: u32) -> DbResult<I
         columns: key_columns,
         partial_sql,
         origin: IndexOrigin::Created,
+        // `CREATE UNIQUE INDEX` has no `ON CONFLICT` clause in the grammar, so
+        // a violation of one always resolves as ABORT unless the statement
+        // overrides it.
+        conflict: None,
     })
 }
 

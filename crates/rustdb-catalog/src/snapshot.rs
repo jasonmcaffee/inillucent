@@ -5,7 +5,7 @@
 //! disagree about the schema they describe. A statement holds its snapshot for
 //! as long as it is running; a schema change makes a new one.
 
-use rustdb_sql::catalog_view::{CatalogView, TableInfo};
+use rustdb_sql::catalog_view::{CatalogView, IndexInfo, TableInfo};
 
 /// One attached database's objects.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -99,6 +99,37 @@ impl CatalogView for CatalogSnapshot {
         None
     }
 
+    /// Returns the table an index belongs to, and the index.
+    fn find_index(
+        &self,
+        database: Option<&[u8]>,
+        folded: &[u8],
+    ) -> Option<(&TableInfo, &IndexInfo)> {
+        let order = match database {
+            Some(name) => vec![self.database_index(name)?],
+            None => self.search_order(),
+        };
+        for position in order {
+            let Some(catalog) = self.databases.get(position) else {
+                continue;
+            };
+            for table in &catalog.tables {
+                if let Some(index) = table.indexes.iter().find(|index| index.folded == folded) {
+                    return Some((table, index));
+                }
+            }
+        }
+        None
+    }
+
+    /// Returns every table of one attached database.
+    fn tables_of(&self, database: usize) -> Vec<&TableInfo> {
+        self.databases
+            .get(database)
+            .map(|catalog| catalog.tables.iter().collect())
+            .unwrap_or_default()
+    }
+
     /// Returns the schema cookie an attached database was read at.
     fn schema_cookie(&self, database: usize) -> u32 {
         self.databases
@@ -131,6 +162,7 @@ mod tests {
             kind: TableKind::Table,
             create_sql: Vec::new(),
             indexes: Vec::new(),
+            checks: Vec::new(),
         }
     }
 

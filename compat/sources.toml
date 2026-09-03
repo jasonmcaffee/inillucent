@@ -22,7 +22,13 @@ url = "https://sqlite.org/c3ref/bind_blob.html"
 url = "https://sqlite.org/c3ref/blob_open.html"
 
 [[source]]
+url = "https://sqlite.org/c3ref/changes.html"
+
+[[source]]
 url = "https://sqlite.org/c3ref/funclist.html"
+
+[[source]]
+url = "https://sqlite.org/c3ref/get_autocommit.html"
 
 [[source]]
 url = "https://sqlite.org/c3ref/interrupt.html"
@@ -100,6 +106,9 @@ url = "https://sqlite.org/lang_datefunc.html"
 url = "https://sqlite.org/lang_delete.html"
 
 [[source]]
+url = "https://sqlite.org/lang_dropindex.html"
+
+[[source]]
 url = "https://sqlite.org/lang_droptable.html"
 
 [[source]]
@@ -167,6 +176,9 @@ url = "https://sqlite.org/rescode.html"
 
 [[source]]
 url = "https://sqlite.org/rtree.html"
+
+[[source]]
+url = "https://sqlite.org/schematab.html"
 
 [[source]]
 url = "https://sqlite.org/tempfiles.html"

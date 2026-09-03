@@ -15,6 +15,7 @@ rustdb-sql = { workspace = true }
 rustdb-catalog = { workspace = true }
 rustdb-vm = { workspace = true }
 rustdb-session = { workspace = true }
+rustdb-transaction = { workspace = true }
 rustdb = { workspace = true }
 
 [[bin]]
@@ -56,3 +57,7 @@ path = "src/bin/readperf.rs"
 [[bin]]
 name = "rustdb-writeperf"
 path = "src/bin/writeperf.rs"
+
+[[bin]]
+name = "rustdb-txnperf"
+path = "src/bin/txnperf.rs"

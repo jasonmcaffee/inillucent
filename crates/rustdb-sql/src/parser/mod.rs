@@ -264,12 +264,26 @@ impl<'a> Parser<'a> {
 
     /// Consumes an identifier, interning it.
     fn parse_name(&mut self) -> Result<NameId, ParseError> {
+        Ok(self.parse_name_spanned()?.0)
+    }
+
+    /// Parses an identifier and returns where it was written.
+    ///
+    /// The written position and the interned name's position are not the same
+    /// thing, and confusing them is a real bug rather than a cosmetic one.
+    /// Interning deduplicates, so the name `b` in `CHECK (b > 0)` resolves to
+    /// the entry the *column declaration* `b INTEGER` created, and that entry
+    /// carries the declaration's span. Building the expression's span from it
+    /// made `CHECK (b > 0)` claim to span `b INTEGER CHECK (b > 0`, which the
+    /// catalog then stored as the constraint's source and could not reparse.
+    /// The token's own span is the only one that describes this occurrence.
+    fn parse_name_spanned(&mut self) -> Result<(NameId, Span), ParseError> {
         let token = self.peek()?;
         if !Parser::token_is_name(token) {
             return Err(self.unexpected(&["a name"])?);
         }
         self.bump()?;
-        Ok(self.intern_token(token))
+        Ok((self.intern_token(token), token.span))
     }
 
     /// Interns an identifier token into the arena.
@@ -657,22 +671,15 @@ pub fn parse_next_statement(
     let end = parser.cursor();
     // Everything up to and including the terminator belongs to this statement;
     // what follows is the caller's tail.
-    let consumed;
-    loop {
-        let token = parser.peek()?;
-        match token.kind {
-            TokenKind::EndOfInput => {
-                consumed = source.len();
-                break;
-            }
-            TokenKind::Punctuator(Punctuator::Semicolon) => {
-                parser.bump()?;
-                consumed = token.span.end as usize;
-                break;
-            }
-            _ => return Err(parser.unexpected(&[";"])?),
+    let token = parser.peek()?;
+    let consumed = match token.kind {
+        TokenKind::EndOfInput => source.len(),
+        TokenKind::Punctuator(Punctuator::Semicolon) => {
+            parser.bump()?;
+            token.span.end as usize
         }
-    }
+        _ => return Err(parser.unexpected(&[";"])?),
+    };
     let span = Span::new(start, end);
     let parameters = parser.parameters.clone();
     Ok(ParsedStatement {

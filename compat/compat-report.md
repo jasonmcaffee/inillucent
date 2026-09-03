@@ -4,9 +4,9 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 
 | status | capabilities |
 |---|---|
-| missing | 91 |
-| pass | 155 |
-| **total** | **246** |
+| missing | 76 |
+| pass | 183 |
+| **total** | **259** |
 
 ## By phase
 
@@ -24,8 +24,8 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | phase 4: B-tree mutation, allocation, and rollback pages | 17 | 0 | 0 | 0 |
 | phase 5: lexer, parser, AST, and syntax parity | 10 | 0 | 0 | 0 |
 | phase 6: catalog, binder, expression VM, and read-only SELECT | 22 | 0 | 0 | 0 |
-| phase 7: single-database rollback transactions and DML | 0 | 0 | 13 | 0 |
-| phase 8: complete SELECT, planner, schema, and SQL semantics | 0 | 0 | 28 | 0 |
+| phase 7: single-database rollback transactions and DML | 28 | 0 | 0 | 0 |
+| phase 8: complete SELECT, planner, schema, and SQL semantics | 0 | 0 | 26 | 0 |
 | phase 9: foreign keys, ATTACH, and multi-database commit | 0 | 0 | 6 | 0 |
 
 ## Capabilities
@@ -157,19 +157,19 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `catalog.sqlite-schema` | pass | pass | linux-x86_64, windows-x86_64 | 8 |
 | `catalog.schema-cookie` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `catalog.prepared-statement-invalidation` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
-| `sql.insert` | missing | missing | - | 0 |
-| `sql.update` | missing | missing | - | 0 |
-| `sql.delete` | missing | missing | - | 0 |
-| `sql.create-table` | missing | missing | - | 0 |
-| `sql.drop-table` | missing | missing | - | 0 |
-| `sql.create-index` | missing | missing | - | 0 |
-| `sql.conflict-resolution` | missing | missing | - | 0 |
-| `txn.begin-commit-rollback` | missing | missing | - | 0 |
-| `txn.rollback-journal` | missing | missing | - | 0 |
-| `txn.hot-journal-recovery` | missing | missing | - | 0 |
-| `txn.savepoints` | missing | missing | - | 0 |
-| `txn.statement-journal` | missing | missing | - | 0 |
-| `txn.synchronous-modes` | missing | missing | - | 0 |
+| `sql.insert` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
+| `sql.update` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `sql.delete` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `sql.create-table` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `sql.drop-table` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `sql.create-index` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `sql.conflict-resolution` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
+| `txn.begin-commit-rollback` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
+| `txn.rollback-journal` | pass | pass | linux-x86_64, windows-x86_64 | 7 |
+| `txn.hot-journal-recovery` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
+| `txn.savepoints` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
+| `txn.statement-journal` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `txn.synchronous-modes` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `sql.select.joins` | missing | missing | - | 0 |
 | `sql.select.compound` | missing | missing | - | 0 |
 | `sql.select.group-by-having` | missing | missing | - | 0 |
@@ -177,8 +177,8 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `sql.with.cte` | missing | missing | - | 0 |
 | `sql.with.recursive` | missing | missing | - | 0 |
 | `sql.select.window` | missing | missing | - | 0 |
-| `sql.upsert` | missing | missing | - | 0 |
-| `sql.returning` | missing | missing | - | 0 |
+| `sql.upsert` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `sql.returning` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `sql.create-view` | missing | missing | - | 0 |
 | `sql.create-trigger` | missing | missing | - | 0 |
 | `sql.alter-table` | missing | missing | - | 0 |
@@ -278,3 +278,16 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `vm.statement.interrupt` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `api.rust.bind-step-reset` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `api.rust.read-only-open` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `txn.journal-modes` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
+| `txn.crash-matrix` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
+| `txn.change-counters` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `txn.autocommit` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `txn.resource-failures` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `txn.writer-contention` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `sql.constraints.not-null` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `sql.constraints.check` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `sql.constraints.unique` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `sql.drop-index` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `sql.rowid-allocation` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `catalog.schema-table-query` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `interop.cross-write` | pass | pass | linux-x86_64, windows-x86_64 | 5 |

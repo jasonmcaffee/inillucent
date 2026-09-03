@@ -1170,6 +1170,7 @@ dependencies = [
  "rustdb-base",
  "rustdb-catalog",
  "rustdb-session",
+ "rustdb-storage",
  "rustdb-value",
 ]
 
@@ -1227,6 +1228,7 @@ dependencies = [
  "rustdb-sim",
  "rustdb-sql",
  "rustdb-storage",
+ "rustdb-transaction",
  "rustdb-value",
  "rustdb-vfs",
  "rustdb-vm",
@@ -1273,6 +1275,7 @@ dependencies = [
  "rustdb-catalog",
  "rustdb-sql",
  "rustdb-storage",
+ "rustdb-transaction",
  "rustdb-value",
  "rustdb-vfs",
  "rustdb-vm",

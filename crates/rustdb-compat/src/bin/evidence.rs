@@ -1,4 +1,4 @@
-//! Runs the phase 0-1 suites and records what they actually did.
+//! Runs the engine suites and records what they actually did.
 //!
 //! Invariant: a result row exists because a test ran and reported an outcome on
 //! this machine, not because anyone said it passes. The rows this writes are
@@ -24,13 +24,14 @@ use rustdb_vfs::memory::MemoryVfs;
 use rustdb_vfs::os::OsVfs;
 use rustdb_vfs::path::DbPath;
 
-/// The packages whose tests are evidence for phases 0 through 6.
-const PACKAGES: [&str; 11] = [
+/// The packages whose tests are evidence for phases 0 through 7.
+const PACKAGES: [&str; 12] = [
     "rustdb-base",
     "rustdb-vfs",
     "rustdb-sim",
     "rustdb-value",
     "rustdb-storage",
+    "rustdb-transaction",
     "rustdb-sql",
     "rustdb-catalog",
     "rustdb-vm",

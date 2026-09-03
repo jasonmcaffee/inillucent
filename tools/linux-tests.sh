@@ -15,5 +15,5 @@ export RUSTDB_SQLITE_ORACLE="$ROOT/.sqlite-ref/3.53.4/sqlite-oracle"
 chmod +x "$RUSTDB_SQLITE_ORACLE" 2>/dev/null || true
 cargo test --manifest-path "$ROOT/Cargo.toml" \
   -p rustdb-base -p rustdb-vfs -p rustdb-sim -p rustdb-value -p rustdb-storage \
-  -p rustdb-sql -p rustdb-catalog -p rustdb-vm -p rustdb-session -p rustdb \
+  -p rustdb-transaction -p rustdb-sql -p rustdb-catalog -p rustdb-vm -p rustdb-session -p rustdb \
   -p rustdb-compat 2>&1 | grep -E 'test result|^error|FAILED'

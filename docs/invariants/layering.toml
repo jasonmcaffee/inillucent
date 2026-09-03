@@ -50,6 +50,18 @@ kind = "production"
 layer = 2
 may_depend_on = ["rustdb-base", "rustdb-value", "rustdb-vfs"]
 
+# The edge from `rustdb-transaction` down to `rustdb-storage` is the one the
+# TDD draws, and phase 7 had to decide which side of it the rollback journal
+# falls on. The crate table puts "locks, journals, WAL, savepoints, recovery"
+# here; the pager section puts the writer state machine and "journal the before
+# image inside `get_page_mut`" in storage. Both are true, so the split is by
+# knowledge rather than by code: `rustdb_storage::journal::Journal` is a trait
+# declaring the *moments* a journal is needed - which only the pager knows -
+# and this crate owns the format, the five modes, the four durability levels
+# and recovery. Moving the whole commit up would have dragged the dirty set,
+# the page cache and the lock ladder with it and left the pager as a
+# byte-shuffling helper with no state machine, which is the opposite of what
+# the TDD describes.
 [[crate]]
 name = "rustdb-transaction"
 kind = "production"
@@ -124,9 +136,12 @@ may_depend_on = [
   "rustdb-vm",
 ]
 
-# The facade names `CatalogSnapshot` in one accessor, so it depends on the
-# crate that defines it. The edge is downward and adds nothing the facade could
-# not already reach through the session; naming the type is the point.
+# The facade names `CatalogSnapshot` in one accessor and `JournalStats` and
+# `PagerCounters` in two more, so it depends on the crates that define them.
+# Every edge is downward and adds nothing the facade could not already reach
+# through the session; naming the types is the point, because a caller that
+# wants to know what a commit cost should not have to reach past the facade to
+# find out.
 [[crate]]
 name = "rustdb"
 kind = "production"
@@ -134,6 +149,7 @@ layer = 8
 may_depend_on = [
   "rustdb-base",
   "rustdb-value",
+  "rustdb-storage",
   "rustdb-catalog",
   "rustdb-session",
 ]
@@ -180,6 +196,7 @@ may_depend_on = [
   "rustdb-sim",
   "rustdb-sql",
   "rustdb-catalog",
+  "rustdb-transaction",
   "rustdb-vm",
   "rustdb-session",
   "rustdb",

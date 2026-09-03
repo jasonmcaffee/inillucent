@@ -26,19 +26,28 @@ use crate::program::{
 
 /// A jump target that is patched once its address is known.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Label(usize);
+pub(crate) struct Label(pub(crate) usize);
 
 /// The compiler's working state.
 pub struct Compiler {
-    instructions: Vec<Instruction>,
-    registers: u32,
-    cursors: u32,
-    sorters: u32,
+    pub(crate) instructions: Vec<Instruction>,
+    pub(crate) registers: u32,
+    pub(crate) cursors: u32,
+    pub(crate) sorters: u32,
     distincts: u32,
     aggregates: u32,
-    substitutions: Vec<(BoundExpr, u32)>,
+    pub(crate) substitutions: Vec<(BoundExpr, u32)>,
+    /// The table cursor each FROM term reads through.
+    ///
+    /// A source's number and its cursor's number are not the same thing, and
+    /// assuming they were is a bug the verifier caught rather than a wrong
+    /// answer: an access path that opens an index takes a second cursor, so
+    /// the second FROM term's table cursor is number two rather than number
+    /// one, and `SELECT b.label FROM a, b WHERE a.k = 'x'` addressed `a`'s
+    /// index cursor as if it were `b`'s table.
+    pub(crate) source_cursors: Vec<u32>,
     aggregate_registers: Vec<u32>,
-    end_jumps: Vec<Label>,
+    pub(crate) end_jumps: Vec<Label>,
 }
 
 impl Default for Compiler {
@@ -61,51 +70,64 @@ impl Compiler {
             distincts: 0,
             aggregates: 0,
             substitutions: Vec::new(),
+            source_cursors: Vec::new(),
             aggregate_registers: Vec::new(),
             end_jumps: Vec::new(),
         }
     }
 
     /// Allocates one register.
-    fn register(&mut self) -> u32 {
+    pub(crate) fn register(&mut self) -> u32 {
         let register = self.registers;
         self.registers = self.registers.saturating_add(1);
         register
     }
 
     /// Allocates a contiguous block of registers.
-    fn register_block(&mut self, count: usize) -> u32 {
+    pub(crate) fn register_block(&mut self, count: usize) -> u32 {
         let first = self.registers;
         self.registers = self.registers.saturating_add(count.max(1) as u32);
         first
     }
 
     /// Emits an instruction and returns its address.
-    fn emit(&mut self, instruction: Instruction) -> usize {
+    pub(crate) fn emit(&mut self, instruction: Instruction) -> usize {
         self.instructions.push(instruction);
         self.instructions.len().saturating_sub(1)
     }
 
     /// Emits a jumping instruction whose target is not known yet.
-    fn emit_jump(&mut self, instruction: Instruction) -> Label {
+    pub(crate) fn emit_jump(&mut self, instruction: Instruction) -> Label {
         Label(self.emit(instruction))
     }
 
     /// Points a previously emitted jump at the current end of the program.
-    fn patch_here(&mut self, label: Label) {
+    pub(crate) fn patch_here(&mut self, label: Label) {
         let target = self.instructions.len() as i32;
         self.patch(label, target);
     }
 
     /// Points a previously emitted jump at an address.
-    fn patch(&mut self, label: Label, target: i32) {
+    pub(crate) fn patch(&mut self, label: Label, target: i32) {
         if let Some(instruction) = self.instructions.get_mut(label.0) {
             instruction.p2 = target;
         }
     }
 
+    /// Returns the table cursor a FROM term reads through.
+    ///
+    /// Falling back to the source's own number is what a DML program relies
+    /// on: it opens one cursor for its target table and registers it, so the
+    /// map is always consulted rather than the two ever being assumed equal.
+    fn cursor_for_source(&self, source: usize) -> i32 {
+        self.source_cursors
+            .get(source)
+            .copied()
+            .map_or(source as i32, |cursor| cursor as i32)
+    }
+
     /// Returns the address the next instruction will be emitted at.
-    fn here(&self) -> i32 {
+    pub(crate) fn here(&self) -> i32 {
         self.instructions.len() as i32
     }
 }
@@ -221,6 +243,7 @@ impl Compiler {
                 _ => None,
             };
             cursors.push(SourceCursors { table, index });
+            self.source_cursors.push(table);
         }
         cursors
     }
@@ -1344,25 +1367,17 @@ impl Compiler {
                 // A REAL column widens an integer back to a real on read; see
                 // the note on the opcode.
                 let widen = u16::from(*affinity == Affinity::Real);
+                let cursor = self.cursor_for_source(*source);
                 self.emit(
-                    Instruction::new(
-                        Opcode::Column,
-                        *source as i32,
-                        *column as i32,
-                        register as i32,
-                    )
-                    .with_p5(widen),
+                    Instruction::new(Opcode::Column, cursor, *column as i32, register as i32)
+                        .with_p5(widen),
                 );
                 Ok(register)
             }
             BoundExpr::Rowid { source } => {
                 let register = self.register();
-                self.emit(Instruction::new(
-                    Opcode::Rowid,
-                    *source as i32,
-                    register as i32,
-                    0,
-                ));
+                let cursor = self.cursor_for_source(*source);
+                self.emit(Instruction::new(Opcode::Rowid, cursor, register as i32, 0));
                 Ok(register)
             }
             BoundExpr::Aggregate { slot } => self
@@ -1604,7 +1619,7 @@ impl Compiler {
     }
 
     /// Emits a literal load into a fresh register.
-    fn emit_load(&mut self, operand: Operand) -> u32 {
+    pub(crate) fn emit_load(&mut self, operand: Operand) -> u32 {
         let register = self.register();
         self.emit(Instruction::new(Opcode::Load, 0, register as i32, 0).with_p4(operand));
         register

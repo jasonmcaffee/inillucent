@@ -250,8 +250,7 @@ impl Parser<'_> {
 
     /// Parses `a`, `a.b`, `a.b.c`, `a.*` and `a.b.*`.
     fn parse_column_reference(&mut self) -> Result<ExprId, ParseError> {
-        let first = self.parse_name()?;
-        let start = self.ast.name(first).map(|n| n.span).unwrap_or_default();
+        let (first, start) = self.parse_name_spanned()?;
         if !self.at(Punctuator::Dot)? {
             return Ok(self.ast.add_expr(
                 Expr::Column {
@@ -269,8 +268,7 @@ impl Parser<'_> {
                 .ast
                 .add_expr(Expr::Star { table: Some(first) }, start.to(star.span)));
         }
-        let second = self.parse_name()?;
-        let second_span = self.ast.name(second).map(|n| n.span).unwrap_or_default();
+        let (second, second_span) = self.parse_name_spanned()?;
         if !self.at(Punctuator::Dot)? {
             return Ok(self.ast.add_expr(
                 Expr::Column {
@@ -291,8 +289,7 @@ impl Parser<'_> {
                 start.to(star.span),
             ));
         }
-        let third = self.parse_name()?;
-        let third_span = self.ast.name(third).map(|n| n.span).unwrap_or_default();
+        let (third, third_span) = self.parse_name_spanned()?;
         Ok(self.ast.add_expr(
             Expr::Column {
                 database: Some(first),

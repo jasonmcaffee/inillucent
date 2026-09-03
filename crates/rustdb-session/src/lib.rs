@@ -36,9 +36,10 @@
 )]
 
 pub mod connection;
+pub mod execute;
 pub mod statement;
 
-pub use connection::{Connection, OpenOptions, SessionDatabase};
+pub use connection::{Access, Connection, OpenOptions, Outcome, SessionDatabase};
 pub use statement::{ColumnMetadata, Statement};
 
 /// The implementation phase that filled this crate in, as named by the TDD.

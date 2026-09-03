@@ -10,6 +10,7 @@
 //! binder can be compiled and tested against a hand-built schema with no file
 //! anywhere near it.
 
+use crate::ast::ConflictAction;
 use rustdb_value::Affinity;
 
 /// Where an index came from, which decides whether it can be dropped and how
@@ -39,6 +40,13 @@ pub struct ColumnInfo {
     pub collation: Vec<u8>,
     /// Whether the column is `NOT NULL`.
     pub not_null: bool,
+    /// The `ON CONFLICT` clause written on the `NOT NULL`, when there was one.
+    ///
+    /// A constraint carries its own algorithm and the statement may override
+    /// it: `INSERT OR IGNORE` beats `NOT NULL ON CONFLICT ABORT`. Recording it
+    /// per constraint rather than per table is what makes that override a
+    /// choice between two known values instead of a guess.
+    pub not_null_conflict: Option<ConflictAction>,
     /// The `DEFAULT` expression, as written.
     pub default_sql: Option<Vec<u8>>,
     /// The one-based position in the primary key, when it is in one.
@@ -79,6 +87,8 @@ pub struct IndexInfo {
     pub partial_sql: Option<Vec<u8>>,
     /// Where the index came from.
     pub origin: IndexOrigin,
+    /// The `ON CONFLICT` clause the constraint that created it carried.
+    pub conflict: Option<ConflictAction>,
 }
 
 /// What kind of schema object a name resolves to.
@@ -117,6 +127,23 @@ pub struct TableInfo {
     pub create_sql: Vec<u8>,
     /// The indexes over this table.
     pub indexes: Vec<IndexInfo>,
+    /// Every `CHECK` constraint, as the source text it was written as.
+    ///
+    /// The text rather than a bound expression, for the same reason
+    /// `default_sql` is text: the catalog is below the binder, so it cannot
+    /// bind anything, and a constraint that had been half-interpreted on the
+    /// way through would be a second source of truth beside the `CREATE`
+    /// statement the file actually stores.
+    pub checks: Vec<CheckInfo>,
+}
+
+/// One `CHECK` constraint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckInfo {
+    /// The constraint's name, when one was written.
+    pub name: Option<Vec<u8>>,
+    /// The predicate, as the source text between its parentheses.
+    pub expr_sql: Vec<u8>,
 }
 
 impl TableInfo {
@@ -169,6 +196,22 @@ pub trait CatalogView {
     /// With no qualifier the search follows SQLite's order: `temp`, then
     /// `main`, then every other attached database in attachment order.
     fn find_table(&self, database: Option<&[u8]>, folded: &[u8]) -> Option<&TableInfo>;
+
+    /// Returns the table an index belongs to, together with the index.
+    ///
+    /// Index names live in the same namespace as table names in SQLite, but
+    /// the catalog stores an index inside the table it indexes - which is
+    /// where every reader of one wants it. `DROP INDEX` is the caller that
+    /// has only the name, so the search lives here rather than being written
+    /// out again wherever a name has to be resolved.
+    fn find_index(
+        &self,
+        database: Option<&[u8]>,
+        folded: &[u8],
+    ) -> Option<(&TableInfo, &IndexInfo)>;
+
+    /// Returns every table of one attached database, in no particular order.
+    fn tables_of(&self, database: usize) -> Vec<&TableInfo>;
 
     /// Returns the schema cookie of an attached database, which a prepared
     /// statement records so it can tell whether the schema moved under it.
@@ -246,6 +289,32 @@ impl CatalogView for StaticCatalog {
         None
     }
 
+    /// Returns the table an index belongs to, and the index.
+    fn find_index(
+        &self,
+        database: Option<&[u8]>,
+        folded: &[u8],
+    ) -> Option<(&TableInfo, &IndexInfo)> {
+        let wanted = database.and_then(|name| self.database_index(name));
+        for table in &self.tables {
+            if wanted.is_some_and(|index| index != table.database) {
+                continue;
+            }
+            if let Some(index) = table.indexes.iter().find(|index| index.folded == folded) {
+                return Some((table, index));
+            }
+        }
+        None
+    }
+
+    /// Returns every table of one attached database.
+    fn tables_of(&self, database: usize) -> Vec<&TableInfo> {
+        self.tables
+            .iter()
+            .filter(|table| table.database == database)
+            .collect()
+    }
+
     /// Returns the schema cookie of an attached database.
     fn schema_cookie(&self, database: usize) -> u32 {
         self.databases
@@ -297,6 +366,7 @@ mod tests {
                 affinity: Affinity::Blob,
                 collation: b"binary".to_vec(),
                 not_null: false,
+                not_null_conflict: None,
                 default_sql: None,
                 primary_key_position: None,
                 hidden: false,
@@ -308,6 +378,7 @@ mod tests {
             kind: TableKind::Table,
             create_sql: Vec::new(),
             indexes: Vec::new(),
+            checks: Vec::new(),
         }
     }
 

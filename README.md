@@ -195,24 +195,45 @@ every crate manifest and fails on a dependency that breaks it. SQLite appears in
 exactly one form - a pinned 3.53.4 build, compiled from the official amalgamation, run as a child
 process, and compared against as a black-box oracle.
 
-The work is sequenced into fifteen phases by the design document. Phases 0 and 1 are done:
+The work is sequenced into fifteen phases by the design document. Phases 0 through 7 are done, which
+is the point at which the engine reads *and writes*: it creates tables and indexes, inserts, updates
+and deletes rows, enforces constraints, runs transactions and savepoints, and commits through a
+rollback journal that survives a power loss at every cut point.
+
+```sql
+CREATE TABLE people(id INTEGER PRIMARY KEY, name TEXT UNIQUE, score REAL CHECK (score >= 0));
+INSERT INTO people(name, score) VALUES('ada', 9.5) RETURNING id, name;
+CREATE INDEX people_score ON people(score);
+BEGIN; UPDATE people SET score = score + 1; SAVEPOINT s; DELETE FROM people; ROLLBACK TO s; COMMIT;
+```
+
+A file rust-db writes is one SQLite opens, reads, `PRAGMA integrity_check`s and keeps writing to,
+and the reverse holds too - both directions are tested against the pinned 3.53.4 build rather than
+asserted.
 
 | crate | what it holds |
 |---|---|
 | `rustdb-base` | checked big-endian codecs, the varint, WAL and CRC-32 checksums, page arithmetic, fallible buffers, run-time limits, the stable error table |
 | `rustdb-vfs` | the VFS contract plus Windows, POSIX and in-memory implementations, the SQLite byte-range locking protocol, and shared memory |
+| `rustdb-value` | values, storage classes, affinity, collation, comparison, and the record codec |
+| `rustdb-storage` | the file header, the pager and its page cache, the four B-tree page kinds, cursors, mutation and balancing, the freelist, pointer maps and vacuum |
+| `rustdb-transaction` | the rollback journal and its five modes, the four durability levels, hot-journal recovery, and the connection's transaction machine |
+| `rustdb-sql` | the lexer, the parser, the arena AST, the binder, and the physical plan |
+| `rustdb-catalog` | `sqlite_schema` read and written, the immutable snapshot, and the schema cookie |
+| `rustdb-vm` | the opcode set, the compiler, the bytecode verifier, and the machine |
+| `rustdb-session` | connections, prepared statements, the statement lifecycle, and DDL |
+| `rustdb` | the public facade |
 | `rustdb-sim` | a deterministic simulator: layered media, torn and dropped sectors, failure injection, a replayable scheduler, event traces |
 | `rustdb-compat` | the parity manifest, the report that gates a release, the oracle protocol, and the dependency-direction check |
 
-Ten more crates exist as declared layers with no behaviour yet - `rustdb-value`, `rustdb-storage`,
-`rustdb-transaction`, `rustdb-catalog`, `rustdb-sql`, `rustdb-vm`, `rustdb-ext`, `rustdb-session`,
-`rustdb`, `rustdb-capi`, `rustdb-cli` and `rustdb-search`. They are there so the dependency graph is
-enforced from the first commit rather than retrofitted once the edges exist.
+Four crates exist as declared layers with no behaviour yet - `rustdb-ext`, `rustdb-capi`,
+`rustdb-cli` and `rustdb-search`. They are there so the dependency graph is enforced from the first
+commit rather than retrofitted once the edges exist.
 
 ### The compatibility report
 
 `compat/sqlite-3.53.4.toml` carries one row per capability rust-db owes, including the ones nothing
-has been written for yet: 203 rows, of which 69 pass and 134 are missing. That is the denominator on
+has been written for yet: 259 rows, of which 183 pass and 76 are missing. That is the denominator on
 purpose. A capability with no row cannot be reported as owed.
 
 A row reaches `pass` only when a test run recorded a passing result for every test it cites, on both
