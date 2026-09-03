@@ -92,6 +92,29 @@ pub trait Journal: std::fmt::Debug + Send {
     /// Reports whether a journal file with records in it currently exists.
     fn is_active(&self) -> bool;
 
+    /// Returns the path this journal is written to, when it has one.
+    ///
+    /// A commit across several databases lists every journal in one file, so
+    /// it has to be able to name them. A journal that lives in memory has no
+    /// name and answers `None`, which is also why such a mode cannot take part
+    /// in a multi-database commit.
+    fn path(&self) -> Option<rustdb_vfs::DbPath> {
+        None
+    }
+
+    /// Names the super-journal whose existence decides this transaction.
+    ///
+    /// A journal that names one is replayed only while that file is there. It
+    /// is how several databases commit together: the deletion of that one file
+    /// is the moment every one of them has committed, and until it happens
+    /// every one of them rolls back.
+    ///
+    /// The default does nothing, which is right for a journal that cannot take
+    /// part - and a caller that needs the guarantee asks for the path first.
+    fn set_super_journal(&mut self, path: Option<rustdb_vfs::DbPath>) {
+        let _ = path;
+    }
+
     /// Returns the running totals.
     fn stats(&self) -> JournalStats;
 }

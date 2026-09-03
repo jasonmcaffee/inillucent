@@ -20,6 +20,8 @@
 //! - [`recovery`] - hot-journal detection and replay, and the opener that runs
 //!   it before a single page is exposed;
 //! - [`state`] - autocommit, begin modes, savepoints, and the change counters;
+//! - [`super_journal`] - the file that makes a commit across several
+//!   databases one event;
 //! - [`wal`] - the write-ahead log, its shared-memory index, and checkpoints.
 
 #![forbid(unsafe_code)]
@@ -41,6 +43,7 @@
 pub mod journal;
 pub mod recovery;
 pub mod state;
+pub mod super_journal;
 pub mod wal;
 
 pub use journal::{
@@ -52,6 +55,7 @@ pub use state::{
     BeginMode, ChangeCounters, ConflictAlgorithm, Savepoint, Transaction, TransactionState,
     TransactionStats,
 };
+pub use super_journal::SuperJournal;
 pub use wal::{Wal, WalOptions};
 
 /// The implementation phase that filled this crate in, as named by the TDD.

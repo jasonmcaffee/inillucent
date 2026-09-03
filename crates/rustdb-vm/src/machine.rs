@@ -21,6 +21,7 @@ use rustdb_sql::ast::BinaryOp;
 use rustdb_storage::cursor::{BTreeCursor, SavedPosition, SeekBias};
 use rustdb_storage::mutate;
 use rustdb_storage::pager::Pager;
+use rustdb_storage::PagerSet;
 use rustdb_value::record::{self, KeyColumn, KeyInfo, RecordRef};
 use rustdb_value::{affinity, cast, Affinity, Collation, TextEncoding, Value};
 
@@ -57,6 +58,13 @@ pub enum MachineState {
 
 /// One open cursor.
 struct CursorSlot {
+    /// Which attached database the cursor is open on.
+    ///
+    /// Two databases have a page 2 each, so a root page number is only an
+    /// address when it is paired with the database it is in. Everything that
+    /// compares roots - saving the cursors a write disturbs, invalidating the
+    /// ones a dropped tree leaves behind - compares this too.
+    database: usize,
     cursor: BTreeCursor,
     payload: Option<Vec<u8>>,
     is_index: bool,
@@ -291,15 +299,23 @@ impl Machine {
     }
 
     /// Runs until the program produces a row or finishes.
-    pub fn step(&mut self, pager: &mut Pager) -> DbResult<StepOutcome> {
+    pub fn step(&mut self, databases: &mut dyn PagerSet) -> DbResult<StepOutcome> {
         if self.state == MachineState::Failed {
             return Err(error::misuse("this statement has failed and must be reset"));
         }
         if self.state == MachineState::Done {
             return Ok(StepOutcome::Done);
         }
-        self.encoding = pager.text_encoding();
-        self.file_format = pager.header().schema_format.max(1);
+        // The encoding and the file format are the main database's. Every
+        // database a connection can reach has to agree with it - an ATTACH of a
+        // file with a different text encoding is refused for exactly this
+        // reason - so reading them once from `main` is reading them from all of
+        // them.
+        {
+            let main = databases.pager(rustdb_storage::MAIN_DATABASE)?;
+            self.encoding = main.text_encoding();
+            self.file_format = main.header().schema_format.max(1);
+        }
         self.state = MachineState::Running;
         loop {
             // The interrupt is checked at instruction boundaries, which are the
@@ -314,7 +330,7 @@ impl Machine {
                 return Ok(StepOutcome::Done);
             };
             self.steps = self.steps.saturating_add(1);
-            match self.execute(&instruction, pager) {
+            match self.execute(&instruction, databases) {
                 Ok(Flow::Next) => self.counter = self.counter.saturating_add(1),
                 Ok(Flow::Jump(target)) => self.counter = target,
                 Ok(Flow::Row) => {
@@ -357,7 +373,18 @@ impl Machine {
     }
 
     /// Runs one instruction.
-    fn execute(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
+    /// Runs one instruction against the database it names.
+    ///
+    /// Which database that is comes from one of two places: a cursor remembers
+    /// the one it was opened on, and the handful of opcodes that reach a
+    /// database without a cursor carry the number as an operand. Nothing here
+    /// assumes `main`, because a statement that writes an attached database
+    /// looks exactly like one that writes the main one.
+    fn execute(
+        &mut self,
+        instruction: &Instruction,
+        databases: &mut dyn PagerSet,
+    ) -> DbResult<Flow> {
         match instruction.opcode {
             Opcode::Init | Opcode::Goto => Ok(Flow::Jump(instruction.p2.max(0) as usize)),
             Opcode::Halt => Ok(Flow::Halt),
@@ -381,14 +408,38 @@ impl Machine {
                 }
                 Ok(Flow::Next)
             }
-            Opcode::Rewind | Opcode::Last => self.rewind(instruction, pager),
-            Opcode::Next | Opcode::Prev => self.advance(instruction, pager),
-            Opcode::SeekRowid => self.seek_rowid(instruction, pager),
-            Opcode::SeekGe | Opcode::SeekGt => self.seek(instruction, pager),
-            Opcode::IdxGe | Opcode::IdxGt => self.index_bound(instruction, pager),
-            Opcode::IdxRowid => self.index_rowid(instruction, pager),
-            Opcode::Column => self.column(instruction, pager),
-            Opcode::IdxColumn => self.column(instruction, pager),
+            Opcode::Rewind | Opcode::Last => {
+                let pager = self.pager_for_cursor(instruction.p1, databases)?;
+                self.rewind(instruction, pager)
+            }
+            Opcode::Next | Opcode::Prev => {
+                let pager = self.pager_for_cursor(instruction.p1, databases)?;
+                self.advance(instruction, pager)
+            }
+            Opcode::SeekRowid => {
+                let pager = self.pager_for_cursor(instruction.p1, databases)?;
+                self.seek_rowid(instruction, pager)
+            }
+            Opcode::SeekGe | Opcode::SeekGt => {
+                let pager = self.pager_for_cursor(instruction.p1, databases)?;
+                self.seek(instruction, pager)
+            }
+            Opcode::IdxGe | Opcode::IdxGt => {
+                let pager = self.pager_for_cursor(instruction.p1, databases)?;
+                self.index_bound(instruction, pager)
+            }
+            Opcode::IdxRowid => {
+                let pager = self.pager_for_cursor(instruction.p1, databases)?;
+                self.index_rowid(instruction, pager)
+            }
+            Opcode::Column => {
+                let pager = self.pager_for_cursor(instruction.p1, databases)?;
+                self.column(instruction, pager)
+            }
+            Opcode::IdxColumn => {
+                let pager = self.pager_for_cursor(instruction.p1, databases)?;
+                self.column(instruction, pager)
+            }
             Opcode::Rowid => {
                 let null_row = self
                     .cursors
@@ -829,22 +880,64 @@ impl Machine {
             }
             Opcode::OpenWrite => self.open_cursor(instruction, false),
             Opcode::OpenWriteIndex => self.open_cursor(instruction, true),
-            Opcode::NewRowid => self.new_rowid(instruction, pager),
+            Opcode::NewRowid => {
+                let pager = self.pager_for_cursor(instruction.p1, databases)?;
+                self.new_rowid(instruction, pager)
+            }
             Opcode::MakeRecord => self.make_record(instruction),
-            Opcode::InsertRow => self.insert_row(instruction, pager),
-            Opcode::DeleteRow => self.delete_row(instruction, pager),
-            Opcode::IdxInsert => self.index_insert(instruction, pager),
-            Opcode::IdxDelete => self.index_delete(instruction, pager),
-            Opcode::NotExists => self.not_exists(instruction, pager),
-            Opcode::NoConflict => self.no_conflict(instruction, pager),
-            Opcode::RowData => self.row_data(instruction, pager),
+            Opcode::InsertRow => {
+                let database = self.cursor_database(instruction.p1)?;
+                self.insert_row(instruction, database, databases.pager(database)?)
+            }
+            Opcode::DeleteRow => {
+                let database = self.cursor_database(instruction.p1)?;
+                self.delete_row(instruction, database, databases.pager(database)?)
+            }
+            Opcode::IdxInsert => {
+                let database = self.cursor_database(instruction.p1)?;
+                self.index_insert(instruction, database, databases.pager(database)?)
+            }
+            Opcode::IdxDelete => {
+                let database = self.cursor_database(instruction.p1)?;
+                self.index_delete(instruction, database, databases.pager(database)?)
+            }
+            Opcode::NotExists => {
+                let pager = self.pager_for_cursor(instruction.p1, databases)?;
+                self.not_exists(instruction, pager)
+            }
+            Opcode::NoConflict => {
+                let pager = self.pager_for_cursor(instruction.p1, databases)?;
+                self.no_conflict(instruction, pager)
+            }
+            Opcode::RowData => {
+                let pager = self.pager_for_cursor(instruction.p1, databases)?;
+                self.row_data(instruction, pager)
+            }
             Opcode::HaltError => self.halt_error(instruction),
-            Opcode::SetCookie => self.set_cookie(instruction, pager),
-            Opcode::CreateBtree => self.create_btree(instruction, pager),
-            Opcode::DestroyBtree => self.destroy_btree(instruction, pager),
-            Opcode::ClearBtree => self.clear_btree(instruction, pager),
-            Opcode::SeqRowid => self.sequence_rowid(instruction, pager),
-            Opcode::SeqUpdate => self.sequence_update(instruction, pager),
+            Opcode::SetCookie => {
+                let pager = databases.pager(instruction.p1.max(0) as usize)?;
+                self.set_cookie(instruction, pager)
+            }
+            Opcode::CreateBtree => {
+                let pager = databases.pager(instruction.p1.max(0) as usize)?;
+                self.create_btree(instruction, pager)
+            }
+            Opcode::DestroyBtree => {
+                let database = instruction.p2.max(0) as usize;
+                self.destroy_btree(instruction, database, databases.pager(database)?)
+            }
+            Opcode::ClearBtree => {
+                let database = instruction.p2.max(0) as usize;
+                self.clear_btree(instruction, database, databases.pager(database)?)
+            }
+            Opcode::SeqRowid => {
+                let pager = databases.pager(usize::from(instruction.p5))?;
+                self.sequence_rowid(instruction, pager)
+            }
+            Opcode::SeqUpdate => {
+                let pager = databases.pager(usize::from(instruction.p5))?;
+                self.sequence_update(instruction, pager)
+            }
             Opcode::LastRowid => {
                 if instruction.p2 == 1 {
                     self.last_insert_rowid = cast::integer_value(&self.register(instruction.p1));
@@ -1100,7 +1193,12 @@ impl Machine {
     }
 
     /// Writes a row into a table B-tree.
-    fn insert_row(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
+    fn insert_row(
+        &mut self,
+        instruction: &Instruction,
+        database: usize,
+        pager: &mut Pager,
+    ) -> DbResult<Flow> {
         let payload = self.record_bytes(instruction.p2)?;
         let rowid = cast::integer_value(&self.register(instruction.p3));
         let root = self.cursor_root(instruction.p1)?;
@@ -1111,30 +1209,40 @@ impl Machine {
         } else {
             mutate::insert_row(pager, root, rowid, &payload)?;
         }
-        self.invalidate_cursors_on(root);
+        self.invalidate_cursors_on(database, root);
         self.restore_cursors(saved, pager)?;
         Ok(Flow::Next)
     }
 
     /// Deletes the row a cursor is sitting on.
-    fn delete_row(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
+    fn delete_row(
+        &mut self,
+        instruction: &Instruction,
+        database: usize,
+        pager: &mut Pager,
+    ) -> DbResult<Flow> {
         let rowid = self.with_cursor(instruction.p1, |slot| slot.cursor.rowid())?;
         let root = self.cursor_root(instruction.p1)?;
         let saved = self.save_cursors_on(root, instruction.p1, pager)?;
         mutate::delete_row(pager, root, rowid)?;
-        self.invalidate_cursors_on(root);
+        self.invalidate_cursors_on(database, root);
         self.restore_cursors(saved, pager)?;
         Ok(Flow::Next)
     }
 
     /// Writes an entry into an index B-tree.
-    fn index_insert(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
+    fn index_insert(
+        &mut self,
+        instruction: &Instruction,
+        database: usize,
+        pager: &mut Pager,
+    ) -> DbResult<Flow> {
         let payload = self.record_bytes(instruction.p2)?;
         let root = self.cursor_root(instruction.p1)?;
         let key = self.cursor_key(instruction.p1)?;
         let saved = self.save_cursors_on(root, instruction.p1, pager)?;
         mutate::insert_entry(pager, root, &key, &payload)?;
-        self.invalidate_cursors_on(root);
+        self.invalidate_cursors_on(database, root);
         self.restore_cursors(saved, pager)?;
         Ok(Flow::Next)
     }
@@ -1144,13 +1252,18 @@ impl Machine {
     /// A missing entry is not an error. An UPDATE that does not change a key
     /// deletes and reinserts the same entry, and a REPLACE may have removed it
     /// already; refusing here would turn a no-op into a failure.
-    fn index_delete(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
+    fn index_delete(
+        &mut self,
+        instruction: &Instruction,
+        database: usize,
+        pager: &mut Pager,
+    ) -> DbResult<Flow> {
         let payload = self.record_bytes(instruction.p2)?;
         let root = self.cursor_root(instruction.p1)?;
         let key = self.cursor_key(instruction.p1)?;
         let saved = self.save_cursors_on(root, instruction.p1, pager)?;
         mutate::delete_entry(pager, root, &key, &payload)?;
-        self.invalidate_cursors_on(root);
+        self.invalidate_cursors_on(database, root);
         self.restore_cursors(saved, pager)?;
         Ok(Flow::Next)
     }
@@ -1234,18 +1347,28 @@ impl Machine {
     }
 
     /// Frees every page of a B-tree.
-    fn destroy_btree(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
+    fn destroy_btree(
+        &mut self,
+        instruction: &Instruction,
+        database: usize,
+        pager: &mut Pager,
+    ) -> DbResult<Flow> {
         let root = self.root_from_register(instruction.p1)?;
         mutate::drop_tree(pager, root)?;
-        self.invalidate_cursors_on(root);
+        self.invalidate_cursors_on(database, root);
         Ok(Flow::Next)
     }
 
     /// Empties a B-tree, keeping its root page.
-    fn clear_btree(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
+    fn clear_btree(
+        &mut self,
+        instruction: &Instruction,
+        database: usize,
+        pager: &mut Pager,
+    ) -> DbResult<Flow> {
         let root = self.root_from_register(instruction.p1)?;
         mutate::clear_tree(pager, root)?;
-        self.invalidate_cursors_on(root);
+        self.invalidate_cursors_on(database, root);
         Ok(Flow::Next)
     }
 
@@ -1274,9 +1397,9 @@ impl Machine {
     /// hold what it did. The positions themselves are restored by the cursor's
     /// own staleness check; what has to be dropped here is the cached payload,
     /// which nothing else would notice was out of date.
-    fn invalidate_cursors_on(&mut self, root: PageId) {
+    fn invalidate_cursors_on(&mut self, database: usize, root: PageId) {
         for slot in self.cursors.iter_mut().flatten() {
-            if slot.cursor.root() == root {
+            if slot.database == database && slot.cursor.root() == root {
                 slot.payload = None;
             }
         }
@@ -1302,12 +1425,16 @@ impl Machine {
         pager: &mut Pager,
     ) -> DbResult<Vec<(usize, SavedPosition)>> {
         let index = writer.max(0) as usize;
+        let database = self.cursor_database(writer)?;
         let sharing = self
             .cursors
             .iter()
             .enumerate()
             .filter(|(position, slot)| {
-                *position != index && slot.as_ref().is_some_and(|slot| slot.cursor.root() == root)
+                *position != index
+                    && slot
+                        .as_ref()
+                        .is_some_and(|slot| slot.database == database && slot.cursor.root() == root)
             })
             .count();
         if sharing == 0 {
@@ -1320,12 +1447,35 @@ impl Machine {
                 continue;
             }
             let Some(slot) = slot else { continue };
-            if slot.cursor.root() != root {
+            if slot.database != database || slot.cursor.root() != root {
                 continue;
             }
             saved.push((position, slot.cursor.save_position(pager, &limits)?));
         }
         Ok(saved)
+    }
+
+    /// Returns the pager of the database a cursor is open on.
+    fn pager_for_cursor<'a>(
+        &self,
+        cursor: i32,
+        databases: &'a mut dyn PagerSet,
+    ) -> DbResult<&'a mut Pager> {
+        let database = self.cursor_database(cursor)?;
+        databases.pager(database)
+    }
+
+    /// Returns the database a cursor is open on.
+    ///
+    /// A cursor that is not open answers `main`, because the callers that ask
+    /// are about to fail on the cursor itself and a second error about the
+    /// database would say less.
+    fn cursor_database(&self, index: i32) -> DbResult<usize> {
+        Ok(self
+            .cursors
+            .get(index.max(0) as usize)
+            .and_then(|slot| slot.as_ref())
+            .map_or(rustdb_storage::MAIN_DATABASE, |slot| slot.database))
     }
 
     /// Puts the saved cursors back on the entries they were reading.
@@ -1404,6 +1554,7 @@ impl Machine {
         };
         if let Some(slot) = self.cursors.get_mut(instruction.p1.max(0) as usize) {
             *slot = Some(CursorSlot {
+                database: instruction.p3.max(0) as usize,
                 null_row: false,
                 cursor,
                 payload: None,

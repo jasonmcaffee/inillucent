@@ -123,10 +123,44 @@ impl SessionDatabase {
     }
 }
 
+/// One database attached to a connection by name.
+///
+/// `main` is not one of these: it is the file the connection was opened on, it
+/// cannot be detached, and every statement that mentions no schema means it. A
+/// list of "the other databases" is therefore the honest shape, and it is what
+/// makes database number zero mean `main` without anybody having to maintain
+/// that.
+pub struct AttachedDatabase {
+    /// The name it was attached under.
+    pub name: Vec<u8>,
+    /// The file it was opened from.
+    pub path: DbPath,
+    /// Its pager.
+    pub pager: Pager,
+}
+
+/// How many databases one connection may attach beside `main`.
+///
+/// SQLite's own default, and the reason there is a limit at all is the same:
+/// every statement resolves every name against every attached database, so the
+/// cost of a name lookup is linear in this number.
+pub const MAX_ATTACHED: usize = 10;
+
 /// The mutable half of a connection.
 pub struct ConnectionState {
     /// The pager, which owns the file and the page cache.
     pub pager: Pager,
+    /// The databases `ATTACH` added, in the order it added them.
+    pub attached: Vec<AttachedDatabase>,
+    /// The databases this transaction has a writer on, in the order they
+    /// joined it.
+    ///
+    /// A statement writes the databases it names and no others, so a
+    /// transaction over two files holds two writers and a transaction over one
+    /// holds one. Keeping the list is what makes the statement level, the
+    /// savepoint, the rollback and the commit reach exactly the databases the
+    /// transaction actually changed.
+    pub writing: Vec<usize>,
     /// How many statements are holding the transaction open.
     pub active: usize,
     /// The transaction machine: autocommit, savepoints, and counters.
@@ -146,6 +180,57 @@ pub struct ConnectionState {
     /// statement that deferred a check cannot leave the next transaction
     /// deferring them too.
     pub defer_foreign_keys: bool,
+}
+
+impl rustdb_storage::PagerSet for ConnectionState {
+    /// Returns the pager of one attached database.
+    fn pager(&mut self, database: usize) -> DbResult<&mut Pager> {
+        if database == rustdb_storage::MAIN_DATABASE {
+            return Ok(&mut self.pager);
+        }
+        self.attached
+            .get_mut(database.saturating_sub(1))
+            .map(|attached| &mut attached.pager)
+            .ok_or_else(|| {
+                error::misuse(format!(
+                    "database {database} is not attached to this connection"
+                ))
+            })
+    }
+
+    /// One for `main`, plus whatever is attached.
+    fn count(&self) -> usize {
+        self.attached.len().saturating_add(1)
+    }
+}
+
+impl ConnectionState {
+    /// Runs a closure over every open pager, `main` first.
+    ///
+    /// The order matters where it is used: a commit writes `main` last, so a
+    /// crash between two databases leaves the one that names the others still
+    /// describing the old state.
+    pub fn for_each_pager<T>(
+        &mut self,
+        mut body: impl FnMut(usize, &mut Pager) -> DbResult<T>,
+    ) -> DbResult<()> {
+        body(rustdb_storage::MAIN_DATABASE, &mut self.pager)?;
+        for (position, attached) in self.attached.iter_mut().enumerate() {
+            body(position.saturating_add(1), &mut attached.pager)?;
+        }
+        Ok(())
+    }
+
+    /// Returns the number a name is attached under.
+    pub fn database_index(&self, folded: &[u8], main: &[u8]) -> Option<usize> {
+        if folded.eq_ignore_ascii_case(main) {
+            return Some(rustdb_storage::MAIN_DATABASE);
+        }
+        self.attached
+            .iter()
+            .position(|attached| attached.name.eq_ignore_ascii_case(folded))
+            .map(|position| position.saturating_add(1))
+    }
 }
 
 /// What a statement needs from its connection.
@@ -267,6 +352,8 @@ impl Connection {
             state: RefCell::new(ConnectionState {
                 pager,
                 active: 0,
+                attached: Vec::new(),
+                writing: Vec::new(),
                 transaction: Transaction::new(),
                 journal,
                 foreign_keys: false,
@@ -452,6 +539,25 @@ impl Connection {
             })
     }
 
+    /// Runs a closure with the pager of one attached database.
+    ///
+    /// It is what every schema write goes through. `CREATE TABLE aux.t` has to
+    /// write `aux`'s `sqlite_schema`, not `main`'s, and the statement is the
+    /// only thing that knows which - so the number travels with it rather than
+    /// being assumed.
+    pub fn with_database<T>(
+        &self,
+        database: usize,
+        body: impl FnOnce(&mut Pager) -> T,
+    ) -> DbResult<T> {
+        let mut state = self
+            .state
+            .try_borrow_mut()
+            .map_err(|_| error::misuse("the connection is already running a statement"))?;
+        let pager = rustdb_storage::PagerSet::pager(&mut *state, database)?;
+        Ok(body(pager))
+    }
+
     /// Runs a closure with the mutable connection state.
     pub fn with_state<T>(&self, body: impl FnOnce(&mut ConnectionState) -> T) -> DbResult<T> {
         let mut state = self
@@ -464,6 +570,18 @@ impl Connection {
     /// Opens the level a statement runs inside, taking the transaction when
     /// this is the first statement to need it.
     pub fn begin_statement(&self, access: Access) -> DbResult<()> {
+        self.begin_statement_on(access, &[rustdb_storage::MAIN_DATABASE])
+    }
+
+    /// Opens the level a statement runs inside, over the databases it writes.
+    ///
+    /// Every attached database is read: a statement that names none of them
+    /// still resolves names against all of them, and a SHARED lock is what
+    /// makes the schema it resolved against still true when it runs. Only the
+    /// databases the statement actually writes get a writer, because a
+    /// RESERVED lock on a file nobody is changing is a lock somebody else is
+    /// waiting for.
+    pub fn begin_statement_on(&self, access: Access, writes: &[usize]) -> DbResult<()> {
         let timeout = self.options.busy_timeout;
         let mut state = self
             .state
@@ -473,12 +591,22 @@ impl Connection {
             return Err(error::DbError::primary(rustdb_base::PrimaryCode::ReadOnly)
                 .with_message("attempt to write a readonly database"));
         }
-        if !state.pager.state().can_read() {
-            begin_read_with_timeout(&mut state.pager, timeout)?;
+        let count = rustdb_storage::PagerSet::count(&*state);
+        for database in 0..count {
+            let pager = rustdb_storage::PagerSet::pager(&mut *state, database)?;
+            if !pager.state().can_read() {
+                begin_read_with_timeout(pager, timeout)?;
+            }
         }
         if access.writes() {
-            let fresh = !state.pager.is_writing();
-            begin_write_with_timeout(&mut state.pager, timeout)?;
+            let fresh = state.writing.is_empty();
+            for database in writes.iter().copied() {
+                let pager = rustdb_storage::PagerSet::pager(&mut *state, database)?;
+                begin_write_with_timeout(pager, timeout)?;
+                if !state.writing.contains(&database) {
+                    state.writing.push(database);
+                }
+            }
             state.transaction.promote_to_write()?;
             if fresh {
                 open_pending_savepoint_levels(&mut state)?;
@@ -486,7 +614,10 @@ impl Connection {
             // Only a write transaction has undo levels; a query has nothing
             // to put back, and asking the pager for a level it cannot open
             // would fail on the first SELECT of every connection.
-            state.pager.begin_statement()?;
+            let writing = state.writing.clone();
+            for database in writing {
+                rustdb_storage::PagerSet::pager(&mut *state, database)?.begin_statement()?;
+            }
         } else {
             state.transaction.promote_to_read();
         }
@@ -527,30 +658,28 @@ impl Connection {
         match outcome {
             Outcome::Done => {
                 if writing {
-                    state.pager.release_statement()?;
+                    for_each_writer(&mut state, |pager| pager.release_statement())?;
                 }
                 state.transaction.commit_statement()?;
             }
             Outcome::Fail => {
                 if writing {
-                    state.pager.release_statement()?;
+                    for_each_writer(&mut state, |pager| pager.release_statement())?;
                 }
                 state.transaction.fail_statement()?;
             }
             Outcome::Abort => {
                 if writing {
-                    state.pager.rollback_statement()?;
+                    for_each_writer(&mut state, |pager| pager.rollback_statement())?;
                 }
                 state.transaction.rollback_statement()?;
             }
             Outcome::Rollback => {
                 if writing {
-                    state.pager.rollback_statement()?;
+                    for_each_writer(&mut state, |pager| pager.rollback_statement())?;
                 }
                 state.transaction.rollback_statement()?;
-                if state.pager.is_writing() {
-                    state.pager.rollback()?;
-                }
+                rollback_writers(&mut state)?;
                 state.transaction.finish(false);
                 self.fire_rollback_hook();
                 transaction_over = true;
@@ -566,17 +695,17 @@ impl Connection {
             if state.transaction.outlives_a_statement() {
                 return Ok(());
             }
-            if state.pager.is_writing() {
+            if !state.writing.is_empty() {
                 if matches!(outcome, Outcome::Done | Outcome::Fail) && !self.commit_is_vetoed() {
-                    let committed = state.pager.commit();
+                    let committed = commit_writers(&mut state, &self.vfs, &self.path);
                     if committed.is_err() {
-                        let _ = state.pager.rollback();
+                        let _ = rollback_writers(&mut state);
                         self.fire_rollback_hook();
                     }
                     state.transaction.finish(committed.is_ok());
                     committed?;
                 } else {
-                    state.pager.rollback()?;
+                    rollback_writers(&mut state)?;
                     state.transaction.finish(false);
                     self.fire_rollback_hook();
                 }
@@ -584,7 +713,7 @@ impl Connection {
                 state.transaction.end_read();
             }
         }
-        let released = state.pager.end_read();
+        let released = end_reads(&mut state);
         drop(state);
         if let Some(error) = deferred {
             return Err(error);
@@ -742,13 +871,54 @@ impl Connection {
                 .state
                 .try_borrow_mut()
                 .map_err(|_| error::misuse("the connection is running a statement"))?;
-            load_database_catalog(&mut state.pager, &name, 0)?
+            read_every_catalog(&mut state, &name, generation)?
         };
         let mut catalog = self
             .catalog
             .try_borrow_mut()
             .map_err(|_| error::misuse("the catalog is in use"))?;
-        *catalog = Arc::new(CatalogSnapshot::single(loaded, generation));
+        *catalog = Arc::new(loaded);
+        Ok(())
+    }
+
+    /// Rebuilds the catalog with a read transaction of its own.
+    ///
+    /// `ATTACH` and `DETACH` are the callers: neither is allowed inside a
+    /// transaction, so there is no open read to reuse and the reads are taken
+    /// and released here.
+    pub fn reload_schema(&self) -> DbResult<()> {
+        let generation = {
+            let catalog = self
+                .catalog
+                .try_borrow()
+                .map_err(|_| error::misuse("the catalog is in use"))?;
+            catalog.generation.saturating_add(1)
+        };
+        let name = self.options.main_name.clone();
+        let timeout = self.options.busy_timeout;
+        let loaded = {
+            let mut state = self
+                .state
+                .try_borrow_mut()
+                .map_err(|_| error::misuse("the connection is running a statement"))?;
+            let count = rustdb_storage::PagerSet::count(&*state);
+            for database in 0..count {
+                let pager = rustdb_storage::PagerSet::pager(&mut *state, database)?;
+                if !pager.state().can_read() {
+                    begin_read_with_timeout(pager, timeout)?;
+                }
+            }
+            let read = read_every_catalog(&mut state, &name, generation);
+            let released = end_reads(&mut state);
+            let loaded = read?;
+            released?;
+            loaded
+        };
+        let mut catalog = self
+            .catalog
+            .try_borrow_mut()
+            .map_err(|_| error::misuse("the catalog is in use"))?;
+        *catalog = Arc::new(loaded);
         Ok(())
     }
 
@@ -860,6 +1030,105 @@ impl Connection {
             state.pager.end_read()?;
         }
         state.pager.checkpoint(mode)
+    }
+
+    /// Opens a database file and attaches it under a name.
+    ///
+    /// It is refused inside a transaction, which is SQLite's rule and a
+    /// necessary one: the statements already bound in that transaction resolved
+    /// their names against a schema that did not have this database in it, and
+    /// the numbers they carry would move underneath them.
+    pub fn attach(&self, file: &[u8], name: &[u8]) -> DbResult<()> {
+        let folded = name.to_ascii_lowercase();
+        {
+            let state = self
+                .state
+                .try_borrow()
+                .map_err(|_| error::misuse("the connection is running a statement"))?;
+            if folded == self.options.main_name.to_ascii_lowercase() || folded == b"temp" {
+                return Err(error::misuse(format!(
+                    "database {} is already in use",
+                    String::from_utf8_lossy(name)
+                )));
+            }
+            if state
+                .attached
+                .iter()
+                .any(|attached| attached.name.eq_ignore_ascii_case(&folded))
+            {
+                return Err(error::misuse(format!(
+                    "database {} is already in use",
+                    String::from_utf8_lossy(name)
+                )));
+            }
+            if state.attached.len() >= MAX_ATTACHED {
+                return Err(error::misuse(format!(
+                    "too many attached databases - max {MAX_ATTACHED}"
+                )));
+            }
+        }
+        let path = DbPath::new(std::path::PathBuf::from(
+            String::from_utf8_lossy(file).into_owned(),
+        ));
+        let options = self.options.journal;
+        let pager = open_database(
+            Arc::clone(&self.vfs),
+            &path,
+            DatabaseOptions {
+                pager: PagerOptions::default(),
+                journal: options,
+                writable: self.options.writable,
+            },
+        )?;
+        {
+            let mut state = self
+                .state
+                .try_borrow_mut()
+                .map_err(|_| error::misuse("the connection is running a statement"))?;
+            // A connection reads one encoding. A file that disagrees would have
+            // every text value in it read as the wrong bytes, so it is refused
+            // rather than silently misread.
+            if pager.text_encoding() != state.pager.text_encoding() && pager.page_count() > 1 {
+                return Err(error::misuse(
+                    "attached databases must use the same text encoding as main database",
+                ));
+            }
+            state.attached.push(AttachedDatabase {
+                name: name.to_vec(),
+                path,
+                pager,
+            });
+        }
+        self.reload_schema()
+    }
+
+    /// Closes an attached database and forgets its name.
+    pub fn detach(&self, name: &[u8]) -> DbResult<()> {
+        {
+            let mut state = self
+                .state
+                .try_borrow_mut()
+                .map_err(|_| error::misuse("the connection is running a statement"))?;
+            if state.transaction.state() != TransactionState::Autocommit {
+                return Err(error::misuse("cannot DETACH database within transaction"));
+            }
+            let Some(position) = state
+                .attached
+                .iter()
+                .position(|attached| attached.name.eq_ignore_ascii_case(name))
+            else {
+                if name.eq_ignore_ascii_case(&self.options.main_name) {
+                    return Err(error::misuse("cannot detach database main"));
+                }
+                return Err(error::misuse(format!(
+                    "no such database: {}",
+                    String::from_utf8_lossy(name)
+                )));
+            };
+            let mut detached = state.attached.remove(position);
+            detached.pager.close()?;
+        }
+        self.reload_schema()
     }
 
     /// Reports whether foreign keys are enforced.
@@ -1000,24 +1269,24 @@ impl Connection {
         // the COMMIT into a ROLLBACK rather than an error - which is SQLite's
         // behaviour and the reason the hook is worth having at all.
         if self.commit_is_vetoed() {
-            let rolled = state.pager.rollback();
+            let rolled = rollback_writers(&mut state);
             state.transaction.finish(false);
-            let released = state.pager.end_read();
+            let released = end_reads(&mut state);
             self.fire_rollback_hook();
             rolled?;
             return released;
         }
-        let committed = if state.pager.is_writing() {
-            state.pager.commit()
-        } else {
+        let committed = if state.writing.is_empty() {
             Ok(())
+        } else {
+            commit_writers(&mut state, &self.vfs, &self.path)
         };
         if committed.is_err() {
-            let _ = state.pager.rollback();
+            let _ = rollback_writers(&mut state);
         }
         state.transaction.finish(committed.is_ok());
         state.defer_foreign_keys = false;
-        let released = state.pager.end_read();
+        let released = end_reads(&mut state);
         if committed.is_err() {
             self.fire_rollback_hook();
         }
@@ -1034,9 +1303,10 @@ impl Connection {
         if state.transaction.autocommit() {
             return Err(error::misuse("cannot rollback - no transaction is active"));
         }
-        let rolled = state.pager.rollback();
+        let rolled = rollback_writers(&mut state);
         state.transaction.finish(false);
-        let released = state.pager.end_read();
+        state.defer_foreign_keys = false;
+        let released = end_reads(&mut state);
         self.fire_rollback_hook();
         rolled?;
         released
@@ -1057,14 +1327,20 @@ impl Connection {
             .try_borrow_mut()
             .map_err(|_| error::misuse("the connection is running a statement"))?;
         let text = String::from_utf8_lossy(name).into_owned();
-        if !state.pager.state().can_read() {
-            begin_read_with_timeout(&mut state.pager, timeout)?;
+        let count = rustdb_storage::PagerSet::count(&*state);
+        for database in 0..count {
+            let pager = rustdb_storage::PagerSet::pager(&mut *state, database)?;
+            if !pager.state().can_read() {
+                begin_read_with_timeout(pager, timeout)?;
+            }
         }
         state.transaction.open_savepoint(&text)?;
-        if state.pager.is_writing() {
-            state.pager.begin_savepoint(&text)?;
-        }
-        Ok(())
+        for_each_writer(&mut state, |pager| {
+            if pager.is_writing() {
+                pager.begin_savepoint(&text)?;
+            }
+            Ok(())
+        })
     }
 
     /// Releases a savepoint, keeping its changes.
@@ -1075,32 +1351,35 @@ impl Connection {
             .map_err(|_| error::misuse("the connection is running a statement"))?;
         let text = String::from_utf8_lossy(name).into_owned();
         let outermost = state.transaction.release_savepoint(&text)?;
-        if state.pager.is_writing() {
-            let _ = state.pager.release_savepoint(&text);
-        }
+        let _ = for_each_writer(&mut state, |pager| {
+            if pager.is_writing() {
+                let _ = pager.release_savepoint(&text);
+            }
+            Ok(())
+        });
         if !outermost {
             return Ok(());
         }
         // Releasing the savepoint that started an implicit transaction commits
         // it, which is the one place a RELEASE is a commit.
         if self.commit_is_vetoed() {
-            let rolled = state.pager.rollback();
+            let rolled = rollback_writers(&mut state);
             state.transaction.finish(false);
-            let released = state.pager.end_read();
+            let released = end_reads(&mut state);
             self.fire_rollback_hook();
             rolled?;
             return released;
         }
-        let committed = if state.pager.is_writing() {
-            state.pager.commit()
-        } else {
+        let committed = if state.writing.is_empty() {
             Ok(())
+        } else {
+            commit_writers(&mut state, &self.vfs, &self.path)
         };
         if committed.is_err() {
-            let _ = state.pager.rollback();
+            let _ = rollback_writers(&mut state);
         }
         state.transaction.finish(committed.is_ok());
-        let released = state.pager.end_read();
+        let released = end_reads(&mut state);
         committed?;
         released
     }
@@ -1113,9 +1392,12 @@ impl Connection {
             .map_err(|_| error::misuse("the connection is running a statement"))?;
         let text = String::from_utf8_lossy(name).into_owned();
         state.transaction.rollback_to_savepoint(&text)?;
-        if state.pager.is_writing() {
-            let _ = state.pager.rollback_to_savepoint(&text);
-        }
+        let _ = for_each_writer(&mut state, |pager| {
+            if pager.is_writing() {
+                let _ = pager.rollback_to_savepoint(&text);
+            }
+            Ok(())
+        });
         Ok(())
     }
 
@@ -1209,6 +1491,160 @@ fn stamp_format_versions(state: &mut ConnectionState, version: u8) -> DbResult<(
     state.pager.end_read()
 }
 
+/// Reads the schema of every attached database into one snapshot.
+///
+/// The order is the connection's, and it has to be: a bound statement carries
+/// database *numbers*, and they mean what this list says they mean. `main` is
+/// zero and everything else follows in attachment order.
+///
+/// Every pager must already be in a read transaction. The callers differ on
+/// where that came from - a statement's own, or one taken for the reload - and
+/// neither wants the other's.
+fn read_every_catalog(
+    state: &mut ConnectionState,
+    main_name: &[u8],
+    generation: u64,
+) -> DbResult<CatalogSnapshot> {
+    let mut databases = Vec::with_capacity(state.attached.len().saturating_add(1));
+    databases.push(load_database_catalog(&mut state.pager, main_name, 0)?);
+    for position in 0..state.attached.len() {
+        let index = position.saturating_add(1);
+        let Some(attached) = state.attached.get_mut(position) else {
+            continue;
+        };
+        let name = attached.name.clone();
+        databases.push(load_database_catalog(&mut attached.pager, &name, index)?);
+    }
+    Ok(CatalogSnapshot {
+        databases,
+        generation,
+    })
+}
+
+/// Runs a closure over the pager of every database the transaction writes.
+fn for_each_writer(
+    state: &mut ConnectionState,
+    mut body: impl FnMut(&mut Pager) -> DbResult<()>,
+) -> DbResult<()> {
+    let writing = state.writing.clone();
+    for database in writing {
+        body(rustdb_storage::PagerSet::pager(state, database)?)?;
+    }
+    Ok(())
+}
+
+/// Ends the read transaction on every database.
+fn end_reads(state: &mut ConnectionState) -> DbResult<()> {
+    let count = rustdb_storage::PagerSet::count(state);
+    let mut outcome = Ok(());
+    for database in 0..count {
+        let released =
+            rustdb_storage::PagerSet::pager(state, database).and_then(|pager| pager.end_read());
+        if outcome.is_ok() {
+            outcome = released;
+        }
+    }
+    outcome
+}
+
+/// Undoes the transaction on every database it reached.
+fn rollback_writers(state: &mut ConnectionState) -> DbResult<()> {
+    // Every database, not only the ones the transaction recorded a writer on:
+    // a write that failed before it was recorded still has undo images, and a
+    // pager with nothing to undo returns at once.
+    let count = rustdb_storage::PagerSet::count(state);
+    let mut outcome = Ok(());
+    for database in 0..count {
+        let rolled =
+            rustdb_storage::PagerSet::pager(state, database).and_then(|pager| pager.rollback());
+        if outcome.is_ok() {
+            outcome = rolled;
+        }
+    }
+    state.writing.clear();
+    outcome
+}
+
+/// Commits every database the transaction wrote, as one event.
+///
+/// One database commits the way it always has: the step that makes its journal
+/// non-hot is the commit point, and there is nothing else to coordinate with.
+///
+/// Several commit through a super-journal. Each journal is written with that
+/// file's name in it and made durable, each database is written and made
+/// durable, and then the super-journal is deleted - and that deletion is the
+/// commit. A crash before it finds journals naming a file that is still there
+/// and undoes every one of them; a crash after it finds journals naming a file
+/// that is gone and undoes none of them. There is no third outcome, because a
+/// deletion is one operation and there is nothing to observe inside it.
+fn commit_writers(state: &mut ConnectionState, vfs: &Arc<dyn Vfs>, main: &DbPath) -> DbResult<()> {
+    if state.writing.len() <= 1 {
+        let outcome = for_each_writer(state, |pager| pager.commit());
+        state.writing.clear();
+        return outcome;
+    }
+    commit_across_databases(state, vfs, main)
+}
+
+/// The multi-database commit protocol.
+fn commit_across_databases(
+    state: &mut ConnectionState,
+    vfs: &Arc<dyn Vfs>,
+    main: &DbPath,
+) -> DbResult<()> {
+    let mut journals = Vec::new();
+    for database in state.writing.clone() {
+        let pager = rustdb_storage::PagerSet::pager(state, database)?;
+        let Some(path) = pager.journal_path() else {
+            // A journal that has no file cannot be named by a super-journal,
+            // so a transaction that spans databases cannot be made atomic in
+            // this mode. Saying so is better than committing them one at a
+            // time and calling it atomic.
+            return Err(error::misuse(
+                "a transaction over several databases needs a journal mode that writes a file",
+            ));
+        };
+        journals.push(path);
+    }
+    let mut super_journal = rustdb_transaction::SuperJournal::create(Arc::clone(vfs), main)?;
+    let prepared = write_super_journal(&mut super_journal, &journals);
+    if prepared.is_err() {
+        super_journal.abandon();
+        return prepared;
+    }
+    let name = super_journal.path().clone();
+    let phase_one = commit_phase_one(state, &name);
+    if phase_one.is_err() {
+        super_journal.abandon();
+        return phase_one;
+    }
+    // The commit point. Every database is durable and every journal is hot;
+    // this makes all of them non-hot at once.
+    super_journal.commit()?;
+    let outcome = for_each_writer(state, |pager| pager.commit_phase_two());
+    state.writing.clear();
+    outcome
+}
+
+/// Lists the journals in the super-journal and makes the list durable.
+fn write_super_journal(
+    super_journal: &mut rustdb_transaction::SuperJournal,
+    journals: &[DbPath],
+) -> DbResult<()> {
+    for journal in journals {
+        super_journal.add(journal)?;
+    }
+    super_journal.sync()
+}
+
+/// Runs phase one on every database, naming the super-journal first.
+fn commit_phase_one(state: &mut ConnectionState, name: &DbPath) -> DbResult<()> {
+    for_each_writer(state, |pager| {
+        pager.set_super_journal(Some(name.clone()));
+        pager.commit_phase_one().map(|_| ())
+    })
+}
+
 /// Opens a pager undo level for every savepoint taken before the write began.
 ///
 /// A savepoint taken while the connection was only reading has no pages to
@@ -1222,12 +1658,14 @@ fn open_pending_savepoint_levels(state: &mut ConnectionState) -> DbResult<()> {
         .iter()
         .filter_map(|level| level.name.clone())
         .collect();
-    for name in names {
-        if state.pager.savepoint_depth(&name).is_none() {
-            state.pager.begin_savepoint(&name)?;
+    for_each_writer(state, |pager| {
+        for name in &names {
+            if pager.savepoint_depth(name).is_none() {
+                pager.begin_savepoint(name)?;
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Takes the read lock, retrying a busy file until the timeout runs out.

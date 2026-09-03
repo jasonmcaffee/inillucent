@@ -65,30 +65,38 @@ pub fn run_directive(
             connection.release_savepoint(name)?;
             Ok(Vec::new())
         }
-        Directive::CreateTable { .. } => run_write(connection, |connection| {
+        Directive::CreateTable { .. } => run_write(connection, directive, |connection| {
             create_table(connection, directive, source)
         }),
-        Directive::Analyze { .. } => {
-            run_write(connection, |connection| analyze(connection, directive))
-        }
-        Directive::Alter { .. } => run_write(connection, |connection| {
+        Directive::Analyze { .. } => run_write(connection, directive, |connection| {
+            analyze(connection, directive)
+        }),
+        Directive::Alter { .. } => run_write(connection, directive, |connection| {
             alter_table(connection, directive, source)
         }),
-        Directive::Reindex { .. } => {
-            run_write(connection, |connection| reindex(connection, directive))
-        }
+        Directive::Reindex { .. } => run_write(connection, directive, |connection| {
+            reindex(connection, directive)
+        }),
         Directive::Vacuum { .. } => vacuum(connection, directive),
-        Directive::CreateView { .. } => run_write(connection, |connection| {
+        Directive::CreateView { .. } => run_write(connection, directive, |connection| {
             create_view(connection, directive, source)
         }),
-        Directive::CreateIndex { .. } => run_write(connection, |connection| {
+        Directive::CreateIndex { .. } => run_write(connection, directive, |connection| {
             create_index(connection, directive, source)
         }),
-        Directive::CreateTrigger { .. } => run_write(connection, |connection| {
+        Directive::CreateTrigger { .. } => run_write(connection, directive, |connection| {
             create_trigger(connection, directive, source)
         }),
-        Directive::Drop { .. } => {
-            run_write(connection, |connection| drop_object(connection, directive))
+        Directive::Drop { .. } => run_write(connection, directive, |connection| {
+            drop_object(connection, directive)
+        }),
+        Directive::Attach { file, schema } => {
+            connection.attach(file, schema)?;
+            Ok(Vec::new())
+        }
+        Directive::Detach { schema } => {
+            connection.detach(schema)?;
+            Ok(Vec::new())
         }
         Directive::Pragma { name, argument } => pragma(connection, name, argument.as_ref()),
     }
@@ -106,9 +114,10 @@ fn begin_mode(kind: BeginKind) -> BeginMode {
 /// Runs a write inside a statement level, undoing it if it fails.
 fn run_write(
     connection: &Connection,
+    directive: &Directive,
     body: impl FnOnce(&Connection) -> DbResult<DirectiveRows>,
 ) -> DbResult<DirectiveRows> {
-    connection.begin_statement(Access::Schema)?;
+    connection.begin_statement_on(Access::Schema, &[target_database(directive)])?;
     let outcome = body(connection);
     let ending = if outcome.is_ok() {
         Outcome::Done
@@ -121,6 +130,26 @@ fn run_write(
     Ok(rows)
 }
 
+/// Returns the database a directive writes.
+///
+/// A schema statement names it - `CREATE TABLE aux.t` - and the writer has to
+/// be taken on that file rather than on `main`. A directive that names none
+/// writes `main`, which is what an unqualified statement means.
+fn target_database(directive: &Directive) -> usize {
+    match directive {
+        Directive::CreateTable { database, .. }
+        | Directive::Alter { database, .. }
+        | Directive::Reindex { database, .. }
+        | Directive::Vacuum { database, .. }
+        | Directive::Analyze { database, .. }
+        | Directive::CreateView { database, .. }
+        | Directive::CreateIndex { database, .. }
+        | Directive::CreateTrigger { database, .. }
+        | Directive::Drop { database, .. } => *database,
+        _ => rustdb_storage::MAIN_DATABASE,
+    }
+}
+
 /// Creates a table, its automatic indexes, and its `sqlite_schema` rows.
 fn create_table(
     connection: &Connection,
@@ -128,6 +157,7 @@ fn create_table(
     source: &[u8],
 ) -> DbResult<DirectiveRows> {
     let Directive::CreateTable {
+        database,
         name,
         name_offset,
         exists,
@@ -148,16 +178,16 @@ fn create_table(
     let without_rowid = rustdb_catalog::table_from_create_sql(&sql, 0, 0)
         .map(|table| table.without_rowid)
         .unwrap_or(false);
-    let root = connection.with_state(|state| {
+    let root = connection.with_database(*database, |pager| {
         if without_rowid {
-            ddl::allocate_index_root(&mut state.pager)
+            ddl::allocate_index_root(pager)
         } else {
-            ddl::allocate_table_root(&mut state.pager)
+            ddl::allocate_table_root(pager)
         }
     })??;
-    connection.with_state(|state| {
+    connection.with_database(*database, |pager| {
         ddl::insert_schema_row(
-            &mut state.pager,
+            pager,
             &SchemaRow {
                 kind: SchemaKind::Table,
                 name: name.clone(),
@@ -180,12 +210,13 @@ fn create_table(
             // one would leave a second object claiming the same root page.
             continue;
         }
-        let root = connection.with_state(|state| ddl::allocate_index_root(&mut state.pager))??;
+        let root =
+            connection.with_database(*database, |pager| ddl::allocate_index_root(pager))??;
         let index_name = ddl::automatic_index_name(name, ordinal.saturating_add(1) as u32);
         let _ = index;
-        connection.with_state(|state| {
+        connection.with_database(*database, |pager| {
             ddl::insert_schema_row(
-                &mut state.pager,
+                pager,
                 &SchemaRow {
                     kind: SchemaKind::Index,
                     name: index_name.clone(),
@@ -202,7 +233,7 @@ fn create_table(
         // a root that already exists.
         sequence_root(connection)?;
     }
-    connection.with_state(|state| ddl::bump_schema_cookie(&mut state.pager))??;
+    connection.with_database(*database, |pager| ddl::bump_schema_cookie(pager))??;
     connection.refresh_catalog()?;
     Ok(Vec::new())
 }
@@ -258,11 +289,16 @@ fn alter_table(
     directive: &Directive,
     source: &[u8],
 ) -> DbResult<DirectiveRows> {
-    let Directive::Alter { table, action, .. } = directive else {
+    let Directive::Alter {
+        database,
+        table,
+        action,
+    } = directive
+    else {
         return Err(misuse("not an ALTER TABLE"));
     };
     let folded = table.to_ascii_lowercase();
-    let rows = connection.with_state(|state| ddl::read_schema_rows(&mut state.pager))??;
+    let rows = connection.with_database(*database, |pager| ddl::read_schema_rows(pager))??;
 
     // Every rewrite is computed first, and one that fails aborts the whole
     // statement before anything is written.
@@ -368,9 +404,11 @@ fn alter_table(
     }
 
     for (rowid, row) in &updates {
-        connection.with_state(|state| ddl::update_schema_row(&mut state.pager, *rowid, row))??;
+        connection.with_database(*database, |pager| {
+            ddl::update_schema_row(pager, *rowid, row)
+        })??;
     }
-    connection.with_state(|state| ddl::bump_schema_cookie(&mut state.pager))??;
+    connection.with_database(*database, |pager| ddl::bump_schema_cookie(pager))??;
     connection.refresh_catalog()?;
     Ok(Vec::new())
 }
@@ -445,7 +483,7 @@ fn drop_column_values(connection: &Connection, root: u32, position: usize) -> Db
 /// rebuilt *wrongly* and nothing would notice, because the thing that checks an
 /// index is the index.
 fn reindex(connection: &Connection, directive: &Directive) -> DbResult<DirectiveRows> {
-    let Directive::Reindex { indexes, .. } = directive else {
+    let Directive::Reindex { database, indexes } = directive else {
         return Err(misuse("not a REINDEX"));
     };
     for name in indexes {
@@ -463,8 +501,9 @@ fn reindex(connection: &Connection, directive: &Directive) -> DbResult<Directive
         let Some(root) = rustdb_base::ids::PageId::new(index.root) else {
             continue;
         };
-        connection
-            .with_state(|state| rustdb_storage::mutate::clear_tree(&mut state.pager, root))??;
+        connection.with_database(*database, |pager| {
+            rustdb_storage::mutate::clear_tree(pager, root)
+        })??;
         backfill_index(connection, name)?;
         let _ = table;
     }
@@ -684,11 +723,11 @@ fn copy_back(connection: &Connection, scratch: &std::path::Path) -> DbResult<()>
 /// that has since been dropped would be read back as a statistic about
 /// something that no longer exists.
 fn analyze(connection: &Connection, directive: &Directive) -> DbResult<DirectiveRows> {
-    let Directive::Analyze { table, .. } = directive else {
+    let Directive::Analyze { database, table } = directive else {
         return Err(misuse("not an ANALYZE"));
     };
     let root = statistics_root(connection)?;
-    connection.with_state(|state| analyze::clear_stats(&mut state.pager, root))??;
+    connection.with_database(*database, |pager| analyze::clear_stats(pager, root))??;
 
     let catalog = connection.catalog()?;
     let wanted = table.as_ref().map(|name| name.to_ascii_lowercase());
@@ -713,14 +752,16 @@ fn analyze(connection: &Connection, directive: &Directive) -> DbResult<Directive
 
     let mut rowid = 1i64;
     for target in &targets {
-        let stats = connection.with_state(|state| analyze::measure(&mut state.pager, target))??;
+        let stats =
+            connection.with_database(*database, |pager| analyze::measure(pager, target))??;
         for stat in &stats {
-            connection
-                .with_state(|state| analyze::write_stat(&mut state.pager, root, rowid, stat))??;
+            connection.with_database(*database, |pager| {
+                analyze::write_stat(pager, root, rowid, stat)
+            })??;
             rowid = rowid.saturating_add(1);
         }
     }
-    connection.with_state(|state| ddl::bump_schema_cookie(&mut state.pager))??;
+    connection.with_database(*database, |pager| ddl::bump_schema_cookie(pager))??;
     connection.refresh_catalog()?;
     Ok(Vec::new())
 }
@@ -768,6 +809,7 @@ fn create_view(
     source: &[u8],
 ) -> DbResult<DirectiveRows> {
     let Directive::CreateView {
+        database,
         name,
         name_offset,
         exists,
@@ -780,9 +822,9 @@ fn create_view(
         return Ok(Vec::new());
     }
     let sql = ddl::canonical_sql("CREATE VIEW", source, *name_offset, source.len() as u32);
-    connection.with_state(|state| {
+    connection.with_database(*database, |pager| {
         ddl::insert_schema_row(
-            &mut state.pager,
+            pager,
             &SchemaRow {
                 kind: SchemaKind::View,
                 name: name.clone(),
@@ -792,7 +834,7 @@ fn create_view(
             },
         )
     })??;
-    connection.with_state(|state| ddl::bump_schema_cookie(&mut state.pager))??;
+    connection.with_database(*database, |pager| ddl::bump_schema_cookie(pager))??;
     connection.refresh_catalog()?;
     Ok(Vec::new())
 }
@@ -810,6 +852,7 @@ fn create_trigger(
     source: &[u8],
 ) -> DbResult<DirectiveRows> {
     let Directive::CreateTrigger {
+        database,
         name,
         name_offset,
         table,
@@ -823,9 +866,9 @@ fn create_trigger(
         return Ok(Vec::new());
     }
     let sql = ddl::canonical_sql("CREATE TRIGGER", source, *name_offset, source.len() as u32);
-    connection.with_state(|state| {
+    connection.with_database(*database, |pager| {
         ddl::insert_schema_row(
-            &mut state.pager,
+            pager,
             &SchemaRow {
                 kind: SchemaKind::Trigger,
                 name: name.clone(),
@@ -835,7 +878,7 @@ fn create_trigger(
             },
         )
     })??;
-    connection.with_state(|state| ddl::bump_schema_cookie(&mut state.pager))??;
+    connection.with_database(*database, |pager| ddl::bump_schema_cookie(pager))??;
     connection.refresh_catalog()?;
     Ok(Vec::new())
 }
@@ -847,6 +890,7 @@ fn create_index(
     source: &[u8],
 ) -> DbResult<DirectiveRows> {
     let Directive::CreateIndex {
+        database,
         unique,
         name,
         name_offset,
@@ -866,10 +910,10 @@ fn create_index(
         "CREATE INDEX"
     };
     let sql = ddl::canonical_sql(keywords, source, *name_offset, source.len() as u32);
-    let root = connection.with_state(|state| ddl::allocate_index_root(&mut state.pager))??;
-    connection.with_state(|state| {
+    let root = connection.with_database(*database, |pager| ddl::allocate_index_root(pager))??;
+    connection.with_database(*database, |pager| {
         ddl::insert_schema_row(
-            &mut state.pager,
+            pager,
             &SchemaRow {
                 kind: SchemaKind::Index,
                 name: name.clone(),
@@ -879,7 +923,7 @@ fn create_index(
             },
         )
     })??;
-    connection.with_state(|state| ddl::bump_schema_cookie(&mut state.pager))??;
+    connection.with_database(*database, |pager| ddl::bump_schema_cookie(pager))??;
     connection.refresh_catalog()?;
     backfill_index(connection, name)?;
     Ok(Vec::new())
@@ -979,6 +1023,7 @@ fn index_key_info(index: &rustdb_sql::catalog_view::IndexInfo) -> rustdb_value::
 /// Drops a table or an index, freeing its pages and removing its rows.
 fn drop_object(connection: &Connection, directive: &Directive) -> DbResult<DirectiveRows> {
     let Directive::Drop {
+        database,
         kind,
         name,
         root,
@@ -999,8 +1044,8 @@ fn drop_object(connection: &Connection, directive: &Directive) -> DbResult<Direc
         ObjectKind::Trigger => b"trigger",
         _ => b"index",
     };
-    connection.with_state(|state| {
-        ddl::delete_schema_rows(&mut state.pager, |row| {
+    connection.with_database(*database, |pager| {
+        ddl::delete_schema_rows(pager, |row| {
             if table_drop {
                 // A table takes its indexes and triggers with it, which is why
                 // the match is on the row's *table* rather than on its name.
@@ -1014,7 +1059,7 @@ fn drop_object(connection: &Connection, directive: &Directive) -> DbResult<Direc
     // because a table's automatic indexes are named in it and a row that was
     // already missing would silently leak its pages.
     for root in index_roots.iter().chain(core::iter::once(root)) {
-        connection.with_state(|state| ddl::free_root(&mut state.pager, *root))??;
+        connection.with_database(*database, |pager| ddl::free_root(pager, *root))??;
     }
     if table_drop {
         // A dropped table's `AUTOINCREMENT` counter goes with it. Leaving the
@@ -1022,7 +1067,7 @@ fn drop_object(connection: &Connection, directive: &Directive) -> DbResult<Direc
         // from the dead one's numbers.
         forget_sequence(connection, &folded)?;
     }
-    connection.with_state(|state| ddl::bump_schema_cookie(&mut state.pager))??;
+    connection.with_database(*database, |pager| ddl::bump_schema_cookie(pager))??;
     connection.refresh_catalog()?;
     Ok(Vec::new())
 }
@@ -1104,7 +1149,9 @@ fn pragma(
         b"user_version" => {
             if let Some(argument) = argument {
                 let value = argument_integer(argument);
-                return run_write(connection, |connection| {
+                // `PRAGMA user_version = N` writes the main database, which
+                // is where the pragma reads it from too.
+                return run_write(connection, &Directive::Commit, |connection| {
                     connection.with_state(|state| {
                         let mut header = *state.pager.header();
                         header.user_version = value as i32;

@@ -132,13 +132,23 @@ impl Compiler {
             // The root is an index b-tree keyed by the primary key, so it is
             // opened as one and written with the index opcodes.
             self.emit(
-                Instruction::new(Opcode::OpenWriteIndex, cursor as i32, table.root as i32, 0)
-                    .with_p4(Operand::IndexKey(crate::compile::primary_key_of(table))),
+                Instruction::new(
+                    Opcode::OpenWriteIndex,
+                    cursor as i32,
+                    table.root as i32,
+                    table.database as i32,
+                )
+                .with_p4(Operand::IndexKey(crate::compile::primary_key_of(table))),
             );
         } else {
             self.emit(
-                Instruction::new(Opcode::OpenWrite, cursor as i32, table.root as i32, 0)
-                    .with_p4(Operand::Count(table.columns.len() as u32)),
+                Instruction::new(
+                    Opcode::OpenWrite,
+                    cursor as i32,
+                    table.root as i32,
+                    table.database as i32,
+                )
+                .with_p4(Operand::Count(table.columns.len() as u32)),
             );
         }
         // Registered under the statement's own number for this term, not at
@@ -166,8 +176,13 @@ impl Compiler {
             let slot = self.cursors;
             self.cursors = self.cursors.saturating_add(1);
             self.emit(
-                Instruction::new(Opcode::OpenWriteIndex, slot as i32, index.root as i32, 0)
-                    .with_p4(Operand::IndexKey(index_key(index))),
+                Instruction::new(
+                    Opcode::OpenWriteIndex,
+                    slot as i32,
+                    index.root as i32,
+                    table.database as i32,
+                )
+                .with_p4(Operand::IndexKey(index_key(index))),
             );
             indexes.push(slot);
             definitions.push(index.clone());
@@ -1970,7 +1985,8 @@ impl Compiler {
                 insert.sequence_root as i32,
                 register as i32,
             )
-            .with_p4(Operand::Text(table.name.clone())),
+            .with_p4(Operand::Text(table.name.clone()))
+            .with_p5(table.database as u16),
         );
         let Some(supplied) = supplied else {
             return Ok(Some(register));
@@ -2154,7 +2170,8 @@ impl Compiler {
                     insert.sequence_root as i32,
                     0,
                 )
-                .with_p4(Operand::Text(table.name.clone())),
+                .with_p4(Operand::Text(table.name.clone()))
+                .with_p5(table.database as u16),
             );
         }
         let mut skip = Vec::new();
