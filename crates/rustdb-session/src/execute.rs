@@ -622,6 +622,7 @@ fn build_rebuild(connection: &Connection, target: &std::path::Path) -> DbResult<
         rustdb_storage::pager::PagerOptions {
             cache_bytes: 2 * 1024 * 1024,
             database: rustdb_base::ids::DatabaseId(1),
+            ..rustdb_storage::pager::PagerOptions::default()
         },
         rustdb_storage::pager::NewDatabase {
             page_size: header.page_size,
@@ -670,6 +671,7 @@ fn copy_back(connection: &Connection, scratch: &std::path::Path) -> DbResult<()>
         rustdb_storage::pager::PagerOptions {
             cache_bytes: 2 * 1024 * 1024,
             database: rustdb_base::ids::DatabaseId(2),
+            ..rustdb_storage::pager::PagerOptions::default()
         },
     )?;
     rebuilt.begin_read()?;

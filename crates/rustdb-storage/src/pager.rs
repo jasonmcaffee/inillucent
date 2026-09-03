@@ -140,15 +140,26 @@ pub struct PagerOptions {
     pub cache_bytes: u64,
     /// Which attached database this is, which keys the cache.
     pub database: DatabaseId,
+    /// How long a commit waits for a reader to leave before reporting BUSY.
+    ///
+    /// It is here rather than only in the session because the commit is the
+    /// one place the pager takes a lock nothing above it can retry for. A
+    /// statement that cannot get its reservation has done nothing yet and the
+    /// caller can start again; a commit that cannot get EXCLUSIVE has already
+    /// written and synced its journal, and starting again would mean writing
+    /// it twice. So the wait happens where the lock is asked for.
+    pub busy_timeout: std::time::Duration,
 }
 
 impl Default for PagerOptions {
     /// A two-megabyte cache on the main database, which is roughly SQLite's
-    /// own default of 2000 pages of 1 KiB.
+    /// own default of 2000 pages of 1 KiB, and SQLite's default of giving up
+    /// at once on a busy file.
     fn default() -> PagerOptions {
         PagerOptions {
             cache_bytes: 2 * 1024 * 1024,
             database: DatabaseId(0),
+            busy_timeout: std::time::Duration::ZERO,
         }
     }
 }
@@ -203,6 +214,8 @@ pub struct Pager {
     sites_reached: u64,
     fail_at: Option<(u64, Option<FailSite>)>,
     journal: Option<Box<dyn Journal>>,
+    /// How long a commit waits for readers before reporting BUSY.
+    busy_timeout: std::time::Duration,
     journalled: BTreeSet<u32>,
     wrote_database: bool,
     journal_totals: JournalStats,
@@ -297,6 +310,7 @@ impl Pager {
             sites_reached: 0,
             fail_at: None,
             journal: None,
+            busy_timeout: options.busy_timeout,
             journalled: BTreeSet::new(),
             wrote_database: false,
             journal_totals: JournalStats::default(),
@@ -427,6 +441,44 @@ impl Pager {
             return Err(self.fail(error));
         }
         self.state = PagerState::Reader;
+        if let Err(error) = self.discard_a_stale_cache() {
+            return Err(self.fail(error));
+        }
+        Ok(())
+    }
+
+    /// Drops the cache when another connection has committed since this pager
+    /// last looked at the file.
+    ///
+    /// The change counter is what makes this both cheap and correct. It moves
+    /// on every commit, so a reader that finds it where it left it knows every
+    /// page it has cached is still what the file holds, and one that finds it
+    /// moved knows nothing it has cached can be trusted. A hundred bytes are
+    /// read to find out, which is what SQLite reads on the way into a read
+    /// transaction and for exactly this reason.
+    ///
+    /// Without it a connection serves pages from before another connection's
+    /// commit for as long as they stay in its cache - not a stale *snapshot*,
+    /// which would at least be consistent, but whatever mixture of old and new
+    /// pages the cache happens to hold. WAL mode has its own version of this
+    /// check in `begin_wal_read`, where the snapshot rather than the counter is
+    /// what has to agree.
+    fn discard_a_stale_cache(&mut self) -> DbResult<()> {
+        if self.file_bytes < HEADER_SIZE as u64 {
+            return Ok(());
+        }
+        let previous = self.header.change_counter;
+        let mut prefix = [0u8; HEADER_SIZE];
+        self.file.read_exact_at(0, &mut prefix)?;
+        let header = DatabaseHeader::decode(&prefix)?;
+        if header.change_counter == previous {
+            return Ok(());
+        }
+        self.file_bytes = self.file.file_size()?;
+        self.page_count = header.effective_page_count(self.file_bytes);
+        self.header = header;
+        // Page zero does not exist, so "above zero" is every page.
+        self.cache.discard_above(self.database, 0);
         Ok(())
     }
 
@@ -743,6 +795,7 @@ impl Pager {
             sites_reached: 0,
             fail_at: None,
             journal: None,
+            busy_timeout: options.busy_timeout,
             journalled: BTreeSet::new(),
             wrote_database: false,
             journal_totals: JournalStats::default(),
@@ -1137,8 +1190,7 @@ impl Pager {
             }
         }
 
-        if let Err(error) = self.file.lock(FileLock::Exclusive) {
-            let error = error.into_db_error();
+        if let Err(error) = self.lock_exclusive_for_commit() {
             if error.code() == rustdb_base::PrimaryCode::Busy {
                 return Err(error);
             }
@@ -1181,6 +1233,37 @@ impl Pager {
         }
         self.committing = pages;
         Ok(CommitPhase::Owed)
+    }
+
+    /// Takes the EXCLUSIVE lock a commit writes under, waiting for readers.
+    ///
+    /// This is the one lock in the engine that has to be waited for here
+    /// rather than by the caller. Every reader has to have left before a page
+    /// can be written over, and the first refusal leaves this connection
+    /// holding PENDING - which is what stops new readers arriving, so the wait
+    /// is bounded by the readers that were already there rather than by
+    /// whoever turns up next. A caller that gave up and started the
+    /// transaction again would write and sync its journal a second time for
+    /// nothing.
+    ///
+    /// With no timeout set this is one attempt and a `SQLITE_BUSY`, which is
+    /// SQLite's default and its documented behaviour for a commit that meets a
+    /// reader.
+    fn lock_exclusive_for_commit(&mut self) -> DbResult<()> {
+        let started = std::time::Instant::now();
+        loop {
+            let outcome = self.file.lock(FileLock::Exclusive);
+            let Err(error) = outcome else {
+                return Ok(());
+            };
+            let error = error.into_db_error();
+            if error.code() != rustdb_base::PrimaryCode::Busy
+                || started.elapsed() >= self.busy_timeout
+            {
+                return Err(error);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 
     /// The step that makes the journal non-hot, which is the commit point.

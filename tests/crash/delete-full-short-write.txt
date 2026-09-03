@@ -1,4 +1,4 @@
-cut points: 27, acknowledged commits: 28, detected damage: 1
+cut points: 29, acknowledged commits: 30, detected damage: 1
 1	committed	new
 2	committed	new
 3	committed	new
@@ -21,9 +21,11 @@ cut points: 27, acknowledged commits: 28, detected damage: 1
 20	committed	new
 21	committed	new
 22	committed	new
-23	committed	detected
+23	committed	new
 24	committed	new
-25	committed	new
+25	committed	detected
 26	committed	new
 27	committed	new
-28	acknowledged	new
+28	committed	new
+29	committed	new
+30	acknowledged	new

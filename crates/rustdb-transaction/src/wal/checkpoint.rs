@@ -61,6 +61,14 @@ pub fn run(
     backfill(wal, database, safe, &mut outcome)?;
     let copied = wal.index.backfill()?;
     outcome.checkpointed_frames = copied;
+    // A mode that promised to copy the whole log has to say when it did not.
+    // `PASSIVE` promised nothing, so a reader in its way is an ordinary
+    // outcome; for the three above it a short copy is the `SQLITE_BUSY` the
+    // caller is waiting to hear, and reporting success instead would have an
+    // application believe its log had been emptied when it had not.
+    if mode.waits_for_readers() && copied < wal.header.max_frame {
+        outcome.busy = true;
+    }
     if mode.restarts_the_log() && copied == wal.header.max_frame {
         restart(wal, mode, &mut outcome)?;
     }
@@ -88,10 +96,12 @@ fn safe_frame(wal: &mut Wal, mode: CheckpointMode) -> DbResult<u32> {
             released?;
             continue;
         }
-        // The mark is held by a live reader. A passive checkpoint stops where
-        // that reader can still see; a blocking one has no more patience to
-        // spend here either, because waiting for a reader that is inside a
-        // long query is a wedge, not a wait.
+        // The mark is held by a live reader, so the frames from it on stay.
+        // Every mode stops here, including the ones whose names suggest they
+        // wait: waiting for a reader that is inside a long query is a wedge
+        // rather than a wait, and the caller has a busy handler of its own to
+        // decide with. What the waiting modes do differently is *report* the
+        // short copy, which `run` does above.
         let _ = mode;
         safe = safe.min(mark);
     }

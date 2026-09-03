@@ -71,6 +71,15 @@ fn fill(connection: &rustdb::Connection, rows: i64) {
     }
 }
 
+/// Returns the text a query reports.
+fn text(connection: &rustdb::Connection, sql: &str) -> String {
+    let rows = connection.query(sql).expect("the query runs");
+    match rows.first().and_then(|row| row.first()) {
+        Some(Value::Text(value)) => String::from_utf8_lossy(&value.utf8_bytes()).to_string(),
+        other => panic!("{sql} reported {other:?}"),
+    }
+}
+
 /// Opens a simulated database in WAL mode.
 fn simulated(vfs: &Arc<SimVfs>) -> Result<Connection, rustdb_base::DbError> {
     let database = SessionDatabase::open_with(
@@ -426,6 +435,17 @@ fn a_second_writer_in_this_process_is_refused() {
         "two connections held the writer at once"
     );
 
+    // An autocommit write has to be refused too, and by its own route: it takes
+    // the reservation inside the statement rather than at a `BEGIN`, and that
+    // route once had a POSIX-only hole in it that let both connections write at
+    // the same time and lost one of the two transactions.
+    let refused = second.execute_batch("INSERT INTO t VALUES(99)");
+    assert_eq!(
+        refused.map_err(|error| error.code()),
+        Err(rustdb_base::PrimaryCode::Busy),
+        "an autocommit write got in while another connection held the writer"
+    );
+
     // And once the first one commits, the second gets in.
     first
         .execute_batch("INSERT INTO t VALUES(1)")
@@ -441,6 +461,83 @@ fn a_second_writer_in_this_process_is_refused() {
     assert_eq!(integer(&first, "SELECT count(*) FROM t"), 2);
 }
 
+/// A connection that has already read a page sees another connection's commit
+/// to it, in both journal modes.
+///
+/// Each connection has its own page cache, so a page read once is served from
+/// memory the next time - and a second connection committing over it leaves
+/// the first with bytes that no longer describe the file. What stops that is
+/// the change counter in the header: it moves on every commit, so a reader
+/// entering a read transaction can tell in a hundred bytes whether anything it
+/// holds is still true.
+///
+/// The first version of this test found the bug rather than confirming the
+/// fix, and it found it on Linux only: on Windows the cache happened to have
+/// dropped the page. A test that reads the rows first, so the page is
+/// certainly cached, catches it on either.
+#[test]
+fn a_connection_sees_another_connections_commit() {
+    for mode in ["delete", "wal"] {
+        let path = scratch(&format!("stale-cache-{mode}"));
+        let first = connect(&path);
+        first
+            .execute_batch(&format!("PRAGMA journal_mode={mode}"))
+            .expect("the mode changes");
+        first
+            .execute_batch("CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT)")
+            .expect("the table is made");
+        first
+            .execute_batch("INSERT INTO t VALUES(1, 'first')")
+            .expect("a row");
+
+        let second = connect(&path);
+        // Both connections read the row, so both have the leaf page cached and
+        // a stale answer is available to be given.
+        assert_eq!(integer(&first, "SELECT count(*) FROM t"), 1);
+        assert_eq!(integer(&second, "SELECT count(*) FROM t"), 1);
+
+        second
+            .execute_batch("INSERT INTO t VALUES(2, 'second')")
+            .expect("a row");
+        assert_eq!(
+            integer(&first, "SELECT count(*) FROM t"),
+            2,
+            "in {mode} mode a connection served a page from before another connection's commit"
+        );
+        assert_eq!(
+            text(&first, "SELECT b FROM t WHERE a = 2"),
+            "second",
+            "in {mode} mode the row that came back was not the one committed"
+        );
+
+        // And back the other way, so neither connection is special.
+        first
+            .execute_batch("INSERT INTO t VALUES(3, 'third')")
+            .expect("a row");
+        assert_eq!(integer(&second, "SELECT count(*) FROM t"), 3);
+
+        // The same again with an explicit transaction on the connection that
+        // is about to be overtaken. This is the shape that actually caught the
+        // bug: a transaction the caller opened and closed itself leaves pages
+        // in the cache that an autocommit statement had already let go of.
+        first
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("the writer opens");
+        first
+            .execute_batch("INSERT INTO t VALUES(4, 'fourth')")
+            .expect("a row");
+        first.execute_batch("COMMIT").expect("the writer closes");
+        second
+            .execute_batch("INSERT INTO t VALUES(5, 'fifth')")
+            .expect("a row");
+        assert_eq!(
+            integer(&first, "SELECT count(*) FROM t"),
+            5,
+            "in {mode} mode a connection that had run its own transaction served a stale page"
+        );
+    }
+}
+
 /// A busy timeout turns a refusal into a wait that succeeds when the other
 /// connection lets go.
 #[test]
@@ -452,7 +549,16 @@ fn a_busy_timeout_waits_for_the_writer() {
             .execute_batch("CREATE TABLE t(a INTEGER PRIMARY KEY)")
             .expect("the table is made");
     }
-    let holder = connect(&path);
+    // Both connections have a timeout, and both need one. The waiter waits for
+    // the writer's reservation; the holder waits, at its commit, for the
+    // waiter's read to go away. A commit is the one lock the caller cannot
+    // retry for - the journal is already written and synced by then - so that
+    // wait happens inside the pager, and a connection that had not asked for
+    // one gets SQLite's default of a `SQLITE_BUSY` on `COMMIT`.
+    let holder = Database::open_with_busy_timeout(&path, std::time::Duration::from_secs(10))
+        .expect("the database opens")
+        .connect()
+        .expect("the connection opens");
     holder
         .execute_batch("BEGIN IMMEDIATE")
         .expect("the writer opens");
@@ -476,6 +582,14 @@ fn a_busy_timeout_waits_for_the_writer() {
         .join()
         .expect("the waiting thread finished")
         .expect("the wait ended in a write, not a refusal");
+    let fresh = connect(&path);
+    eprintln!(
+        "PROBE fresh={} rows={:?} holder={} size={:?}",
+        integer(&fresh, "SELECT count(*) FROM t"),
+        fresh.query("SELECT a FROM t ORDER BY a"),
+        integer(&holder, "SELECT count(*) FROM t"),
+        std::fs::metadata(&path).map(|m| m.len()),
+    );
     assert_eq!(integer(&holder, "SELECT count(*) FROM t"), 2);
 }
 

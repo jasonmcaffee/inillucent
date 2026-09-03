@@ -65,3 +65,7 @@ path = "src/bin/writeperf.rs"
 [[bin]]
 name = "rustdb-txnperf"
 path = "src/bin/txnperf.rs"
+
+[[bin]]
+name = "rustdb-walperf"
+path = "src/bin/walperf.rs"
