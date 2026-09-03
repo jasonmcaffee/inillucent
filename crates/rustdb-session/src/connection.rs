@@ -35,6 +35,7 @@ use rustdb_transaction::state::{
 use rustdb_vfs::os::OsVfs;
 use rustdb_vfs::path::DbPath;
 use rustdb_vfs::Vfs;
+use rustdb_vm::machine::{Progress, ProgressHandler};
 use rustdb_vm::program::{RowChange, RowChangeKind};
 
 /// How a database is opened.
@@ -331,6 +332,8 @@ pub struct Hooks {
     pub commit: Option<CommitHook>,
     /// Fired after a rollback.
     pub rollback: Option<RollbackHook>,
+    /// Asked every so many instructions whether to abandon the statement.
+    pub progress: Option<Progress>,
 }
 
 impl std::fmt::Debug for Hooks {
@@ -341,6 +344,7 @@ impl std::fmt::Debug for Hooks {
             .field("update", &self.update.is_some())
             .field("commit", &self.commit.is_some())
             .field("rollback", &self.rollback.is_some())
+            .field("progress", &self.progress.is_some())
             .finish()
     }
 }
@@ -486,6 +490,27 @@ impl Connection {
     /// Returns the connection's run-time limits.
     pub fn limits(&self) -> &Limits {
         &self.limits
+    }
+
+    /// Installs the callback a long statement is asked to stop by.
+    ///
+    /// `every` is how many virtual-machine instructions pass between two
+    /// calls; the callback returning `true` stops the statement with
+    /// `SQLITE_INTERRUPT`. It takes effect for statements prepared after it is
+    /// installed, which is the same rule SQLite follows and the same reason: a
+    /// machine already running has already been handed its handler.
+    pub fn set_progress_handler(&self, every: u64, handler: Option<ProgressHandler>) {
+        if let Ok(mut hooks) = self.hooks.try_borrow_mut() {
+            hooks.progress = handler.map(|handler| Progress { every, handler });
+        }
+    }
+
+    /// Returns the progress callback a new statement should be built with.
+    pub fn progress_handler(&self) -> Option<Progress> {
+        self.hooks
+            .try_borrow()
+            .ok()
+            .and_then(|hooks| hooks.progress.clone())
     }
 
     /// Returns the flag a caller sets to interrupt a running statement.

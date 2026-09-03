@@ -31,6 +31,28 @@ use crate::shm_locks::ShmLockTable;
 struct ShmEntry {
     table: ShmLockTable,
     applied: [SlotMode; SHM_LOCK_COUNT as usize],
+    /// How many handles in this process have the file mapped.
+    ///
+    /// The dead-man switch is a per-process kernel lock, so it is taken when
+    /// the count rises from zero and released when it falls back to zero.
+    /// Without the count a second connection here would take the switch
+    /// exclusively - byte-range locks do not exclude their own process - and
+    /// throw away an index the first connection was using.
+    handles: usize,
+    /// Whether this process holds the shared dead-man switch.
+    holds_switch: bool,
+    /// The one handle this process takes every kernel lock on and reads every
+    /// region through.
+    ///
+    /// One handle, not one per connection, and for two reasons that both bite
+    /// on Windows. A byte-range lock there belongs to the handle that took it,
+    /// so a slot locked through one connection's handle cannot be released
+    /// through another's; and a locked range is enforced against every *other*
+    /// handle, including this process's own, so a second connection reading the
+    /// wal-index through its own handle would be refused at the bytes the first
+    /// one has locked. Sharing the handle makes the process a single holder,
+    /// which is what the in-process table already assumes it is.
+    file: Option<Arc<File>>,
 }
 
 /// Which kernel lock this process currently holds on one slot.
@@ -82,6 +104,9 @@ struct SlotHold {
 
 impl FileShm {
     /// Opens or creates the shared-memory file for a database.
+    ///
+    /// A file left behind by a process that crashed is discarded here rather
+    /// than trusted; `claim_dead_mans_switch` says how that is decided.
     pub fn open(path: &DbPath) -> VfsResult<Arc<dyn SharedMemory>> {
         let file = FsOpenOptions::new()
             .read(true)
@@ -91,10 +116,12 @@ impl FileShm {
             .open(path.as_path())
             .map_err(|error| VfsError::from_io(VfsOperation::ShmOpen, &error))?;
         let identity = platform::file_identity(&file)?;
+        let entry = shm_entry_for(&identity);
+        let file = attach_to_shared_memory(&entry, file)?;
         Ok(Arc::new(FileShm {
             path: path.clone(),
-            file: Arc::new(file),
-            entry: shm_entry_for(&identity),
+            file,
+            entry,
             held: Mutex::new([SlotHold::default(); SHM_LOCK_COUNT as usize]),
             regions: Mutex::new(Vec::new()),
         }))
@@ -222,11 +249,7 @@ impl SharedMemory for FileShm {
         }
         let start = u64::from(index).saturating_mul(region_size as u64);
         let region = Arc::new(FileShmRegion {
-            file: self
-                .file
-                .try_clone()
-                .map_err(|error| VfsError::from_io(VfsOperation::ShmMap, &error))?,
-            start,
+            mapping: platform::map_shared(&self.file, start, region_size)?,
             len: region_size,
         });
         let mut regions = lock_or_recover(&self.regions);
@@ -285,10 +308,12 @@ impl SharedMemory for FileShm {
 
 impl Drop for FileShm {
     /// Releases every slot this handle still holds, so a connection going away
-    /// cannot leave the WAL write lock held forever.
+    /// cannot leave the WAL write lock held forever, and gives up this
+    /// process's share of the dead-man switch when the last handle goes.
     fn drop(&mut self) {
         let held = *lock_or_recover(&self.held);
         let mut entry = lock_or_recover(&self.entry);
+        detach_from_shared_memory(&self.file, &mut entry);
         for (index, hold) in held.iter().enumerate() {
             let Ok(slot) = u16::try_from(index) else {
                 continue;
@@ -314,6 +339,106 @@ impl Drop for FileShm {
     }
 }
 
+/// Joins this process's use of one shared-memory file, returning the handle to
+/// work through.
+///
+/// The first handle to arrive becomes the process's handle and takes the
+/// dead-man switch; every later one gives up the handle it opened and borrows
+/// that one. Getting the switch *exclusively* proves no other process has the
+/// file mapped, which means the wal-index in it belongs to a process that is
+/// gone; the file is truncated so that the next reader rebuilds the index from
+/// the log rather than believing a snapshot nobody can vouch for. The lock is
+/// then downgraded to shared and held for as long as this process has the file
+/// open, which is what stops anyone else truncating an index that is in use.
+fn attach_to_shared_memory(entry: &Arc<Mutex<ShmEntry>>, opened: File) -> VfsResult<Arc<File>> {
+    let mut state = lock_or_recover(entry);
+    let file = match state.file.as_ref() {
+        Some(existing) => Arc::clone(existing),
+        None => {
+            let adopted = Arc::new(opened);
+            state.file = Some(Arc::clone(&adopted));
+            adopted
+        }
+    };
+    state.handles = state.handles.saturating_add(1);
+    if state.handles > 1 {
+        return Ok(file);
+    }
+    if let Err(failure) = reset_if_abandoned(&file) {
+        detach(&mut state);
+        return Err(failure);
+    }
+    match platform::try_lock_bytes(
+        &file,
+        ranges::SHM_DEAD_MANS_SWITCH,
+        1,
+        false,
+        VfsOperation::ShmLock,
+    ) {
+        Ok(true) => {
+            state.holds_switch = true;
+            Ok(file)
+        }
+        Ok(false) => {
+            detach(&mut state);
+            Err(error::busy(
+                "another process is resetting the shared-memory index",
+            ))
+        }
+        Err(failure) => {
+            detach(&mut state);
+            Err(failure)
+        }
+    }
+}
+
+/// Truncates the shared memory when no other process has it mapped.
+///
+/// The exclusive lock is released before returning whatever happened, because
+/// holding it would block every other connection out of a file this one is
+/// about to use as an ordinary reader.
+fn reset_if_abandoned(file: &Arc<File>) -> VfsResult<()> {
+    let alone = platform::try_lock_bytes(
+        file,
+        ranges::SHM_DEAD_MANS_SWITCH,
+        1,
+        true,
+        VfsOperation::ShmLock,
+    )?;
+    if !alone {
+        return Ok(());
+    }
+    let truncated = file
+        .set_len(0)
+        .map_err(|error| VfsError::from_io(VfsOperation::ShmSize, &error));
+    let unlocked =
+        platform::unlock_bytes(file, ranges::SHM_DEAD_MANS_SWITCH, 1, VfsOperation::ShmLock);
+    truncated.and(unlocked)
+}
+
+/// Gives up this handle's share of the file, releasing the dead-man switch and
+/// the process's handle when it was the last one.
+fn detach_from_shared_memory(file: &Arc<File>, state: &mut ShmEntry) {
+    if state.handles > 1 {
+        state.handles = state.handles.saturating_sub(1);
+        return;
+    }
+    if state.holds_switch {
+        let _ =
+            platform::unlock_bytes(file, ranges::SHM_DEAD_MANS_SWITCH, 1, VfsOperation::ShmLock);
+    }
+    detach(&mut *state);
+}
+
+/// Drops one handle's claim, forgetting the process's handle when none is left.
+fn detach(state: &mut ShmEntry) {
+    state.handles = state.handles.saturating_sub(1);
+    if state.handles == 0 {
+        state.holds_switch = false;
+        state.file = None;
+    }
+}
+
 /// Locks a mutex, recovering from poisoning rather than propagating a panic.
 fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     match mutex.lock() {
@@ -322,11 +447,10 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     }
 }
 
-/// One region of a file-backed shared-memory file.
+/// One region of a shared-memory file, mapped into this process.
 #[derive(Debug)]
 struct FileShmRegion {
-    file: File,
-    start: u64,
+    mapping: platform::SharedMapping,
     len: usize,
 }
 
@@ -339,42 +463,13 @@ impl ShmRegion for FileShmRegion {
     /// Copies bytes out of the region.
     fn read(&self, offset: usize, output: &mut [u8]) -> VfsResult<()> {
         self.check_window(offset, output.len())?;
-        let at = self.start.saturating_add(offset as u64);
-        let mut filled = 0usize;
-        while filled < output.len() {
-            let Some(target) = output.get_mut(filled..) else {
-                break;
-            };
-            match platform::read_at(&self.file, at.saturating_add(filled as u64), target) {
-                Ok(0) => break,
-                Ok(count) => filled = filled.saturating_add(count),
-                Err(io) if io.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(io) => return Err(VfsError::from_io(VfsOperation::ShmMap, &io)),
-            }
-        }
-        for slot in output.iter_mut().skip(filled) {
-            *slot = 0;
-        }
-        Ok(())
+        self.mapping.read(offset, output)
     }
 
     /// Copies bytes into the region.
     fn write(&self, offset: usize, input: &[u8]) -> VfsResult<()> {
         self.check_window(offset, input.len())?;
-        let at = self.start.saturating_add(offset as u64);
-        let mut written = 0usize;
-        while written < input.len() {
-            let Some(source) = input.get(written..) else {
-                break;
-            };
-            match platform::write_at(&self.file, at.saturating_add(written as u64), source) {
-                Ok(0) => return Err(error::disk_full("shared-memory write stalled")),
-                Ok(count) => written = written.saturating_add(count),
-                Err(io) if io.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(io) => return Err(VfsError::from_io(VfsOperation::ShmMap, &io)),
-            }
-        }
-        Ok(())
+        self.mapping.write(offset, input)
     }
 }
 

@@ -76,7 +76,7 @@ pub mod window;
 
 pub use compile::{compile, compile_rows, compile_select};
 pub use compile_dml::{compile_delete, compile_insert, compile_update};
-pub use machine::{Machine, MachineState, StepOutcome};
+pub use machine::{Machine, MachineState, Progress, ProgressHandler, StepOutcome};
 pub use program::{
     Instruction, Opcode, Program, ProgramDependencies, ResultColumn, RowChange, RowChangeKind,
 };

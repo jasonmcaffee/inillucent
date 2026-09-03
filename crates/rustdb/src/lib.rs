@@ -182,6 +182,21 @@ impl Connection {
         self.inner.interrupt();
     }
 
+    /// Installs the callback a long statement is asked to stop by.
+    ///
+    /// `every` is how many virtual-machine instructions pass between two
+    /// calls, and the callback returning `true` stops the statement with
+    /// `SQLITE_INTERRUPT`. It is how a single-threaded application abandons a
+    /// query that is taking too long, and it takes effect for statements
+    /// prepared after it is installed.
+    pub fn set_progress_handler(
+        &self,
+        every: u64,
+        handler: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    ) {
+        self.inner.set_progress_handler(every, handler);
+    }
+
     /// Clears a pending interrupt.
     pub fn clear_interrupt(&self) {
         self.inner.clear_interrupt();

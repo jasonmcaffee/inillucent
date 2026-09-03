@@ -131,6 +131,37 @@ pub struct Machine {
     conflict: Option<i32>,
     record_changes: bool,
     row_changes: Vec<RowChange>,
+    /// The callback that may stop a long statement, and how often to ask it.
+    progress: Option<Progress>,
+}
+
+/// A callback the machine asks, now and then, whether to give up.
+///
+/// Returning `true` stops the statement with `SQLITE_INTERRUPT`, which is what
+/// SQLite's own progress handler does with a non-zero return. It is the only
+/// way for an application with one thread to abandon a query that is taking
+/// too long, so it has to be cheap enough to call often and safe to call from
+/// inside the machine - which is why it takes nothing and returns a bool.
+pub type ProgressHandler = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// How often the machine asks the progress callback, and who it asks.
+#[derive(Clone)]
+pub struct Progress {
+    /// Instructions between two calls. Zero would mean never, so it is raised
+    /// to one rather than silently disabling the handler a caller installed.
+    pub every: u64,
+    /// The callback.
+    pub handler: ProgressHandler,
+}
+
+impl std::fmt::Debug for Progress {
+    /// Reports the interval, since a closure has nothing else to say.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Progress")
+            .field("every", &self.every)
+            .finish()
+    }
 }
 
 impl Machine {
@@ -172,6 +203,7 @@ impl Machine {
             reported_total_changes: 0,
             last_insert_rowid: 0,
             conflict: None,
+            progress: None,
             record_changes: false,
             row_changes: Vec::new(),
         }
@@ -298,6 +330,31 @@ impl Machine {
         self.steps = 0;
     }
 
+    /// Installs, or clears, the callback that may stop a long statement.
+    pub fn set_progress(&mut self, progress: Option<Progress>) {
+        self.progress = progress.map(|progress| Progress {
+            every: progress.every.max(1),
+            handler: progress.handler,
+        });
+    }
+
+    /// Asks the progress callback whether to stop, at most once every `every`
+    /// instructions.
+    ///
+    /// It is asked at the same place the interrupt flag is read - an
+    /// instruction boundary - because that is where the machine is in a state
+    /// anything may be abandoned from. A callback asked in the middle of a
+    /// b-tree descent could not be honoured without unwinding a pinned page.
+    fn progress_says_stop(&self) -> bool {
+        let Some(progress) = self.progress.as_ref() else {
+            return false;
+        };
+        if self.steps % progress.every != 0 {
+            return false;
+        }
+        (progress.handler)()
+    }
+
     /// Runs until the program produces a row or finishes.
     pub fn step(&mut self, databases: &mut dyn PagerSet) -> DbResult<StepOutcome> {
         if self.state == MachineState::Failed {
@@ -321,7 +378,7 @@ impl Machine {
             // The interrupt is checked at instruction boundaries, which are the
             // machine's declared safe points: no page is pinned and no cursor
             // is half-moved between two instructions.
-            if self.interrupt.load(AtomicOrdering::Relaxed) {
+            if self.interrupt.load(AtomicOrdering::Relaxed) || self.progress_says_stop() {
                 self.state = MachineState::Failed;
                 return Err(rustdb_base::DbError::primary(PrimaryCode::Interrupt));
             }
