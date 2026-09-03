@@ -4,9 +4,9 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 
 | status | capabilities |
 |---|---|
-| missing | 45 |
+| missing | 46 |
 | pass | 217 |
-| **total** | **262** |
+| **total** | **263** |
 
 ## By phase
 
@@ -26,7 +26,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | phase 6: catalog, binder, expression VM, and read-only SELECT | 22 | 0 | 0 | 0 |
 | phase 7: single-database rollback transactions and DML | 29 | 0 | 0 | 0 |
 | phase 8: complete SELECT, planner, schema, and SQL semantics | 33 | 0 | 0 | 0 |
-| phase 9: foreign keys, ATTACH, and multi-database commit | 0 | 0 | 6 | 0 |
+| phase 9: foreign keys, ATTACH, and multi-database commit | 0 | 0 | 7 | 0 |
 
 ## Capabilities
 
@@ -197,6 +197,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `sql.foreign-keys.immediate` | missing | missing | - | 0 |
 | `sql.foreign-keys.deferred` | missing | missing | - | 0 |
 | `sql.foreign-keys.actions` | missing | missing | - | 0 |
+| `sql.temp-objects` | missing | missing | - | 0 |
 | `sql.attach-detach` | missing | missing | - | 0 |
 | `txn.multi-database-commit` | missing | missing | - | 0 |
 | `txn.master-journal` | missing | missing | - | 0 |

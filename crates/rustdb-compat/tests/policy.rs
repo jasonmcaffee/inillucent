@@ -35,16 +35,17 @@ const GOVERNED: [&str; 11] = [
 /// safe Rust. Everything else in the engine is safe code, and the crate-level
 /// `forbid(unsafe_code)` in `rustdb-base` says so to the compiler as well.
 ///
-/// The third is a measurement binary, not the engine: a global allocator is the
-/// only way to count heap allocations, and `GlobalAlloc` is an unsafe trait. It
-/// is admitted here rather than quietly because the charter is about what the
-/// engine is made of, and a baseline tool that never ships is not part of it -
-/// but a file with `unsafe` in it should still have to say why, in writing, in
-/// a list somebody reads.
-const UNSAFE_ALLOWED: [&str; 3] = [
+/// The last two are measurement binaries, not the engine: a global allocator is
+/// the only way to count heap allocations, and `GlobalAlloc` is an unsafe
+/// trait. They are admitted here rather than quietly because the charter is
+/// about what the engine is made of, and a baseline tool that never ships is
+/// not part of it - but a file with `unsafe` in it should still have to say
+/// why, in writing, in a list somebody reads.
+const UNSAFE_ALLOWED: [&str; 4] = [
     "crates/rustdb-vfs/src/os/windows.rs",
     "crates/rustdb-vfs/src/os/unix.rs",
     "crates/rustdb-compat/src/bin/sqlperf.rs",
+    "crates/rustdb-compat/src/bin/planperf.rs",
 ];
 
 /// Returns every `.rs` file under a directory.

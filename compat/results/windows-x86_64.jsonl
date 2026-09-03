@@ -649,7 +649,10 @@
 {"test_id": "rustdb-vm::program::tests::the_writing_opcodes_declare_themselves", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-vm::sorter::tests::an_empty_sorter_reports_empty", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-vm::sorter::tests::null_ordering_is_independent_of_direction", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-vm::sorter::tests::the_distinct_ordering_agrees_with_the_equality", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-vm::sorter::tests::the_distinct_ordering_is_a_total_order", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-vm::sorter::tests::the_distinct_set_folds_nulls_together", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-vm::sorter::tests::the_distinct_set_reports_repeats", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-vm::sorter::tests::the_distinct_set_uses_each_columns_collation", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-vm::sorter::tests::the_sort_is_stable", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-vm::verify::tests::a_cursor_kind_mismatch_is_rejected", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
