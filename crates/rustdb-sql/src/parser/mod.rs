@@ -257,6 +257,16 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Reports whether a token is a word, keyword or not.
+    ///
+    /// It is deliberately weaker than [`Parser::token_is_name`], which asks
+    /// whether a word may stand where an identifier is expected. Some
+    /// positions - a pragma's value is the one - accept the spelling of a
+    /// reserved word because nothing else can appear there.
+    fn token_is_word(token: Token) -> bool {
+        matches!(token.kind, TokenKind::Identifier { .. })
+    }
+
     /// Returns whether the next token may be read as an identifier.
     fn at_name(&mut self) -> Result<bool, ParseError> {
         Ok(Parser::token_is_name(self.peek()?))
@@ -562,10 +572,15 @@ impl<'a> Parser<'a> {
     }
 
     /// Parses the value half of a PRAGMA, which is a signed literal or a word.
+    ///
+    /// Any word is a word here, keyword or not. `PRAGMA journal_mode=DELETE`
+    /// names a mode, not the statement, and the same is true of `=FULL`,
+    /// `=TRUNCATE`, `=ON` and `=OFF` - there is nothing in this position that
+    /// could be a column, so there is nothing for a reserved word to shadow.
     fn parse_pragma_value(&mut self) -> Result<crate::ast::ExprId, ParseError> {
         use crate::ast::{Expr, Literal};
         let token = self.peek()?;
-        if Parser::token_is_name(token) && !self.peek_at(1)?.is(Punctuator::LeftParen) {
+        if Parser::token_is_word(token) && !self.peek_at(1)?.is(Punctuator::LeftParen) {
             self.bump()?;
             let text = lexer::identifier_text(self.source, token).into_owned();
             return Ok(self

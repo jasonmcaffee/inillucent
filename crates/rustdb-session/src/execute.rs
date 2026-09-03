@@ -19,6 +19,7 @@ use rustdb_catalog::{analyze, rename};
 use rustdb_sql::ast::ObjectKind;
 use rustdb_sql::directive::{AlterKind, BeginKind, Directive, PragmaArgument};
 use rustdb_storage::schema::SchemaKind;
+use rustdb_storage::wal::CheckpointMode;
 use rustdb_transaction::journal::{JournalMode, Synchronous};
 use rustdb_transaction::state::BeginMode;
 use rustdb_value::Value;
@@ -1127,6 +1128,16 @@ fn pragma(
             let pages = connection.with_state(|state| state.pager.page_count())?;
             Ok(vec![vec![Value::Integer(i64::from(pages))]])
         }
+        b"wal_checkpoint" => wal_checkpoint(connection, argument),
+        b"wal_autocheckpoint" => {
+            if let Some(argument) = argument {
+                let frames = argument_integer(argument).clamp(0, i64::from(u32::MAX)) as u32;
+                connection.set_wal_auto_checkpoint(frames)?;
+            }
+            Ok(vec![vec![Value::Integer(i64::from(
+                connection.wal_auto_checkpoint(),
+            ))]])
+        }
         _ => Ok(Vec::new()),
     }
 }
@@ -1141,6 +1152,35 @@ fn argument_text(argument: &PragmaArgument) -> String {
             _ => String::new(),
         },
     }
+}
+
+/// Runs `PRAGMA wal_checkpoint` and reports what it managed.
+///
+/// The three numbers are SQLite's: whether it was blocked, how long the log
+/// is, and how much of it is now in the database. A blocked checkpoint is not
+/// an error - it means a reader is still using frames it would have copied -
+/// so it reports one in the first column rather than failing the statement.
+fn wal_checkpoint(
+    connection: &Connection,
+    argument: Option<&PragmaArgument>,
+) -> DbResult<DirectiveRows> {
+    let mode = argument
+        .map(argument_text)
+        .and_then(|text| CheckpointMode::parse(&text))
+        .unwrap_or(CheckpointMode::Passive);
+    if !connection.is_wal() {
+        return Ok(vec![vec![
+            Value::Integer(0),
+            Value::Integer(-1),
+            Value::Integer(-1),
+        ]]);
+    }
+    let outcome = connection.checkpoint(mode)?;
+    Ok(vec![vec![
+        Value::Integer(i64::from(outcome.busy)),
+        Value::Integer(i64::from(outcome.log_frames)),
+        Value::Integer(i64::from(outcome.checkpointed_frames)),
+    ]])
 }
 
 /// Returns a pragma argument as an integer.
@@ -1167,6 +1207,8 @@ pub fn pragma_columns(name: &[u8]) -> Vec<Vec<u8>> {
         b"schema_version" => vec![b"schema_version".to_vec()],
         b"page_size" => vec![b"page_size".to_vec()],
         b"page_count" => vec![b"page_count".to_vec()],
+        b"wal_checkpoint" => vec![b"busy".to_vec(), b"log".to_vec(), b"checkpointed".to_vec()],
+        b"wal_autocheckpoint" => vec![b"wal_autocheckpoint".to_vec()],
         _ => Vec::new(),
     }
 }

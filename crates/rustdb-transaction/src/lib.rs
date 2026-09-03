@@ -8,16 +8,19 @@
 //! is the connection-level machine that decides when a transaction begins, what
 //! a savepoint costs, and what a statement failure is allowed to undo.
 //!
-//! The WAL half arrives in phase 10 and extends these structures rather than
-//! replacing them: a journal mode is already a value the pager is configured
-//! with, and `wal` is one more of them.
+//! Phase 10 filled the WAL half in, and it extended these structures rather
+//! than replacing them, exactly as phase 7 predicted: a journal mode is already
+//! a value the pager is configured with, and `wal` is one more of them. What a
+//! log adds that a journal does not is that it changes reading as well as
+//! writing, so [`wal`] answers questions on the read path too.
 //!
 //! Module map:
 //!
 //! - [`journal`] - the rollback journal codec, modes, and durability levels;
 //! - [`recovery`] - hot-journal detection and replay, and the opener that runs
 //!   it before a single page is exposed;
-//! - [`state`] - autocommit, begin modes, savepoints, and the change counters.
+//! - [`state`] - autocommit, begin modes, savepoints, and the change counters;
+//! - [`wal`] - the write-ahead log, its shared-memory index, and checkpoints.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -38,6 +41,7 @@
 pub mod journal;
 pub mod recovery;
 pub mod state;
+pub mod wal;
 
 pub use journal::{
     apply_playback, decode_journal, journal_is_hot, recover_hot_journal, DecodedJournal,
@@ -48,6 +52,7 @@ pub use state::{
     BeginMode, ChangeCounters, ConflictAlgorithm, Savepoint, Transaction, TransactionState,
     TransactionStats,
 };
+pub use wal::{Wal, WalOptions};
 
 /// The implementation phase that filled this crate in, as named by the TDD.
-pub const IMPLEMENTATION_PHASE: &str = "phase 7: single-database rollback transactions and DML";
+pub const IMPLEMENTATION_PHASE: &str = "phase 10: WAL and concurrent connection semantics";
