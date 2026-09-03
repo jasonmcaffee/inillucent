@@ -4,8 +4,8 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 
 | status | capabilities |
 |---|---|
-| missing | 76 |
-| pass | 184 |
+| missing | 52 |
+| pass | 208 |
 | **total** | **260** |
 
 ## By phase
@@ -14,7 +14,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 |---|---|---|---|---|
 | phase 0: contract, provenance, and harness foundation | 24 | 0 | 0 | 0 |
 | phase 10: WAL and concurrent connection semantics | 0 | 0 | 12 | 0 |
-| phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree | 0 | 0 | 15 | 0 |
+| phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree | 0 | 0 | 10 | 0 |
 | phase 12: C ABI and CLI completion | 0 | 0 | 12 | 0 |
 | phase 13: transactional rust-db search and legacy migration | 0 | 0 | 3 | 0 |
 | phase 14: performance qualification and release | 0 | 0 | 2 | 0 |
@@ -25,7 +25,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | phase 5: lexer, parser, AST, and syntax parity | 10 | 0 | 0 | 0 |
 | phase 6: catalog, binder, expression VM, and read-only SELECT | 22 | 0 | 0 | 0 |
 | phase 7: single-database rollback transactions and DML | 29 | 0 | 0 | 0 |
-| phase 8: complete SELECT, planner, schema, and SQL semantics | 0 | 0 | 26 | 0 |
+| phase 8: complete SELECT, planner, schema, and SQL semantics | 24 | 0 | 7 | 0 |
 | phase 9: foreign keys, ATTACH, and multi-database commit | 0 | 0 | 6 | 0 |
 
 ## Capabilities
@@ -153,7 +153,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `sql.expr.operators` | pass | pass | linux-x86_64, windows-x86_64 | 7 |
 | `sql.expr.case` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `sql.expr.like-glob` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
-| `sql.expr.in-subquery` | missing | missing | - | 0 |
+| `sql.expr.in-subquery` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `catalog.sqlite-schema` | pass | pass | linux-x86_64, windows-x86_64 | 8 |
 | `catalog.schema-cookie` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `catalog.prepared-statement-invalidation` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
@@ -170,28 +170,28 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `txn.savepoints` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
 | `txn.statement-journal` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
 | `txn.synchronous-modes` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
-| `sql.select.joins` | missing | missing | - | 0 |
-| `sql.select.compound` | missing | missing | - | 0 |
-| `sql.select.group-by-having` | missing | missing | - | 0 |
-| `sql.select.distinct` | missing | missing | - | 0 |
-| `sql.with.cte` | missing | missing | - | 0 |
-| `sql.with.recursive` | missing | missing | - | 0 |
-| `sql.select.window` | missing | missing | - | 0 |
+| `sql.select.joins` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `sql.select.compound` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `sql.select.group-by-having` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `sql.select.distinct` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `sql.with.cte` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `sql.with.recursive` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `sql.select.window` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `sql.upsert` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `sql.returning` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
-| `sql.create-view` | missing | missing | - | 0 |
+| `sql.create-view` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `sql.create-trigger` | missing | missing | - | 0 |
 | `sql.alter-table` | missing | missing | - | 0 |
 | `sql.generated-columns` | missing | missing | - | 0 |
 | `sql.without-rowid` | missing | missing | - | 0 |
-| `sql.strict-tables` | missing | missing | - | 0 |
-| `sql.explain` | missing | missing | - | 0 |
-| `sql.analyze` | missing | missing | - | 0 |
-| `sql.reindex` | missing | missing | - | 0 |
+| `sql.strict-tables` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `sql.explain` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `sql.analyze` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `sql.reindex` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `sql.vacuum` | missing | missing | - | 0 |
-| `planner.access-paths` | missing | missing | - | 0 |
-| `planner.join-order` | missing | missing | - | 0 |
-| `planner.statistics` | missing | missing | - | 0 |
+| `planner.access-paths` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `planner.join-order` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `planner.statistics` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `sql.foreign-keys.immediate` | missing | missing | - | 0 |
 | `sql.foreign-keys.deferred` | missing | missing | - | 0 |
 | `sql.foreign-keys.actions` | missing | missing | - | 0 |
@@ -210,12 +210,12 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `wal.recovery` | missing | missing | - | 0 |
 | `txn.busy-handler` | missing | missing | - | 0 |
 | `txn.isolation` | missing | missing | - | 0 |
-| `functions.core` | missing | missing | - | 0 |
-| `functions.aggregate` | missing | missing | - | 0 |
-| `functions.date-time` | missing | missing | - | 0 |
-| `functions.math` | missing | missing | - | 0 |
+| `functions.core` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `functions.aggregate` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `functions.date-time` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `functions.math` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `functions.json` | missing | missing | - | 0 |
-| `functions.window` | missing | missing | - | 0 |
+| `functions.window` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `pragma.schema` | missing | missing | - | 0 |
 | `pragma.pager` | missing | missing | - | 0 |
 | `pragma.integrity` | missing | missing | - | 0 |
@@ -242,11 +242,11 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `search.legacy-migration` | missing | missing | - | 0 |
 | `perf.qualified-measurement` | missing | missing | - | 0 |
 | `perf.regression-tracking` | missing | missing | - | 0 |
-| `sql.negative.right-outer-join-pre-3-39` | missing | missing | - | 0 |
-| `sql.negative.grant-revoke` | missing | missing | - | 0 |
+| `sql.negative.right-outer-join-pre-3-39` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `sql.negative.grant-revoke` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `sql.negative.full-alter-table` | missing | missing | - | 0 |
 | `sql.negative.trigger-for-each-statement` | missing | missing | - | 0 |
-| `sql.negative.writable-views` | missing | missing | - | 0 |
+| `sql.negative.writable-views` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `values.collation.registry` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `values.real-to-text` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
 | `values.text-encodings` | pass | pass | linux-x86_64, windows-x86_64 | 11 |

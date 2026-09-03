@@ -16,8 +16,24 @@
 
 use crate::ast::{self, ObjectKind, TransactionBehaviour};
 use crate::bind::{no_such_table, refused, unsupported, Binder, BoundExpr, BoundStatement};
+use crate::catalog_view::CatalogView;
 use crate::diagnostic::ParseError;
 use crate::lexer::Span;
+use rustdb_value::Collation;
+
+/// Returns the failure `REINDEX` gives for a name that is nothing it knows.
+fn no_such_collation_sequence(name: &[u8], span: Span) -> ParseError {
+    ParseError::new(
+        crate::diagnostic::ParseErrorKind::Unexpected {
+            found: format!(
+                "unable to identify the object to be reindexed: {}",
+                String::from_utf8_lossy(name)
+            ),
+            expected: Vec::new(),
+        },
+        span,
+    )
+}
 
 /// How an explicit `BEGIN` acquires its rights.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,6 +96,18 @@ pub enum Directive {
         name_offset: u32,
         /// Whether the table already exists.
         exists: bool,
+    },
+    /// `REINDEX`, over one index, one table's indexes, or everything.
+    Reindex {
+        /// Which attached database.
+        database: usize,
+        /// The indexes to rebuild, by name.
+        indexes: Vec<Vec<u8>>,
+    },
+    /// `VACUUM`, which rebuilds the database into a fresh file.
+    Vacuum {
+        /// Which attached database.
+        database: usize,
     },
     /// `ANALYZE`, over one object or the whole schema.
     Analyze {
@@ -195,6 +223,8 @@ impl<'a> Binder<'a> {
                 *filter,
             ),
             ast::Statement::Analyze { database, name } => self.bind_analyze(*database, *name),
+            ast::Statement::Reindex { database, name } => self.bind_reindex(*database, *name),
+            ast::Statement::Vacuum { database, into } => self.bind_vacuum(*database, *into),
             ast::Statement::CreateView {
                 temporary,
                 if_not_exists,
@@ -404,6 +434,101 @@ impl<'a> Binder<'a> {
             });
         }
         Err(no_such_table(self.ast.text(name), Span::default()))
+    }
+
+    /// Binds a `REINDEX`.
+    ///
+    /// The name is a collation, a table or an index, and SQLite works out which
+    /// from what it finds - so the resolution order is the same here. A bare
+    /// `REINDEX` rebuilds everything, which is the form that matters: it is what
+    /// a person runs after a collation's definition has changed underneath an
+    /// index that was built with the old one.
+    fn bind_reindex(
+        &mut self,
+        database: Option<ast::NameId>,
+        name: Option<ast::NameId>,
+    ) -> Result<Directive, ParseError> {
+        let index = self.resolve_database(database)?;
+        self.record_write_dependency(index);
+        let database_name = self.catalog.database_name(index).to_vec();
+        let everything = |catalog: &dyn CatalogView| -> Vec<Vec<u8>> {
+            catalog
+                .tables_of(index)
+                .into_iter()
+                .flat_map(|table| table.indexes.iter().map(|entry| entry.name.clone()))
+                .filter(|name| !name.is_empty())
+                .collect()
+        };
+        let Some(name) = name else {
+            return Ok(Directive::Reindex {
+                database: index,
+                indexes: everything(self.catalog),
+            });
+        };
+        let folded = self.ast.folded(name).to_vec();
+        if let Some(table) = self
+            .catalog
+            .find_table(Some(database_name.as_slice()), &folded)
+        {
+            return Ok(Directive::Reindex {
+                database: index,
+                indexes: table
+                    .indexes
+                    .iter()
+                    .map(|entry| entry.name.clone())
+                    .collect(),
+            });
+        }
+        if let Some((_, entry)) = self
+            .catalog
+            .find_index(Some(database_name.as_slice()), &folded)
+        {
+            return Ok(Directive::Reindex {
+                database: index,
+                indexes: vec![entry.name.clone()],
+            });
+        }
+        // A collation name rebuilds every index ordered by it. An unknown name
+        // is an error, and SQLite reports it against the collation because that
+        // is the last thing it tried.
+        if Collation::from_name(core::str::from_utf8(&folded).unwrap_or("")).is_some() {
+            let wanted = folded.clone();
+            let indexes = self
+                .catalog
+                .tables_of(index)
+                .into_iter()
+                .flat_map(|table| table.indexes.iter())
+                .filter(|entry| {
+                    entry
+                        .columns
+                        .iter()
+                        .any(|key| key.collation.eq_ignore_ascii_case(&wanted))
+                })
+                .map(|entry| entry.name.clone())
+                .collect();
+            return Ok(Directive::Reindex {
+                database: index,
+                indexes,
+            });
+        }
+        Err(no_such_collation_sequence(
+            self.ast.text(name),
+            Span::default(),
+        ))
+    }
+
+    /// Binds a `VACUUM`.
+    fn bind_vacuum(
+        &mut self,
+        database: Option<ast::NameId>,
+        into: Option<ast::ExprId>,
+    ) -> Result<Directive, ParseError> {
+        if into.is_some() {
+            return Err(unsupported("VACUUM INTO", Span::default()));
+        }
+        let index = self.resolve_database(database)?;
+        self.record_write_dependency(index);
+        Ok(Directive::Vacuum { database: index })
     }
 
     /// Binds a `CREATE VIEW`.
