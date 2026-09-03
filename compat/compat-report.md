@@ -4,8 +4,8 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 
 | status | capabilities |
 |---|---|
-| missing | 46 |
-| pass | 217 |
+| missing | 27 |
+| pass | 236 |
 | **total** | **263** |
 
 ## By phase
@@ -13,7 +13,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | phase | pass | partial | missing | deviation |
 |---|---|---|---|---|
 | phase 0: contract, provenance, and harness foundation | 24 | 0 | 0 | 0 |
-| phase 10: WAL and concurrent connection semantics | 0 | 0 | 12 | 0 |
+| phase 10: WAL and concurrent connection semantics | 12 | 0 | 0 | 0 |
 | phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree | 0 | 0 | 10 | 0 |
 | phase 12: C ABI and CLI completion | 0 | 0 | 12 | 0 |
 | phase 13: transactional rust-db search and legacy migration | 0 | 0 | 3 | 0 |
@@ -26,7 +26,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | phase 6: catalog, binder, expression VM, and read-only SELECT | 22 | 0 | 0 | 0 |
 | phase 7: single-database rollback transactions and DML | 29 | 0 | 0 | 0 |
 | phase 8: complete SELECT, planner, schema, and SQL semantics | 33 | 0 | 0 | 0 |
-| phase 9: foreign keys, ATTACH, and multi-database commit | 0 | 0 | 7 | 0 |
+| phase 9: foreign keys, ATTACH, and multi-database commit | 7 | 0 | 0 | 0 |
 
 ## Capabilities
 
@@ -194,25 +194,25 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `planner.access-paths` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `planner.join-order` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `planner.statistics` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
-| `sql.foreign-keys.immediate` | missing | missing | - | 0 |
-| `sql.foreign-keys.deferred` | missing | missing | - | 0 |
-| `sql.foreign-keys.actions` | missing | missing | - | 0 |
-| `sql.temp-objects` | missing | missing | - | 0 |
-| `sql.attach-detach` | missing | missing | - | 0 |
-| `txn.multi-database-commit` | missing | missing | - | 0 |
-| `txn.master-journal` | missing | missing | - | 0 |
-| `wal.mode-switch` | missing | missing | - | 0 |
-| `wal.frame-format` | missing | missing | - | 0 |
-| `wal.index` | missing | missing | - | 0 |
-| `wal.read-transactions` | missing | missing | - | 0 |
-| `wal.write-transactions` | missing | missing | - | 0 |
-| `wal.checkpoint.passive` | missing | missing | - | 0 |
-| `wal.checkpoint.full` | missing | missing | - | 0 |
-| `wal.checkpoint.restart` | missing | missing | - | 0 |
-| `wal.checkpoint.truncate` | missing | missing | - | 0 |
-| `wal.recovery` | missing | missing | - | 0 |
-| `txn.busy-handler` | missing | missing | - | 0 |
-| `txn.isolation` | missing | missing | - | 0 |
+| `sql.foreign-keys.immediate` | pass | pass | linux-x86_64, windows-x86_64 | 10 |
+| `sql.foreign-keys.deferred` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `sql.foreign-keys.actions` | pass | pass | linux-x86_64, windows-x86_64 | 7 |
+| `sql.temp-objects` | pass | pass | linux-x86_64, windows-x86_64 | 12 |
+| `sql.attach-detach` | pass | pass | linux-x86_64, windows-x86_64 | 13 |
+| `txn.multi-database-commit` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
+| `txn.master-journal` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
+| `wal.mode-switch` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `wal.frame-format` | pass | pass | linux-x86_64, windows-x86_64 | 9 |
+| `wal.index` | pass | pass | linux-x86_64, windows-x86_64 | 10 |
+| `wal.read-transactions` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `wal.write-transactions` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
+| `wal.checkpoint.passive` | pass | pass | linux-x86_64, windows-x86_64 | 7 |
+| `wal.checkpoint.full` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `wal.checkpoint.restart` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `wal.checkpoint.truncate` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `wal.recovery` | pass | pass | linux-x86_64, windows-x86_64 | 7 |
+| `txn.busy-handler` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `txn.isolation` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `functions.core` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `functions.aggregate` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `functions.date-time` | pass | pass | linux-x86_64, windows-x86_64 | 1 |

@@ -56,60 +56,36 @@ fn the_shipped_manifest_is_structurally_sound() {
 /// a phase nobody has reached yet does not. A row that quietly claims a phase
 /// it has not reached is the thing the report exists to prevent, and a phase
 /// added to this list without its rows moving is caught by the same assertion.
-const FINISHED_PHASES: [&str; 8] = [
-    "phase 0:", "phase 1:", "phase 2:", "phase 3:", "phase 4:", "phase 5:", "phase 6:", "phase 7:",
+const FINISHED_PHASES: [&str; 11] = [
+    "phase 0:",
+    "phase 1:",
+    "phase 2:",
+    "phase 3:",
+    "phase 4:",
+    "phase 5:",
+    "phase 6:",
+    "phase 7:",
+    "phase 8:",
+    "phase 9:",
+    "phase 10:",
 ];
 
 /// The phase that is under way, and exactly which of its rows have evidence.
 ///
-/// A phase is not a unit of work in practice - phase 8 is a dozen independent
+/// A phase is not a unit of work in practice - phase 8 was a dozen independent
 /// feature families - so "finished or untouched" cannot describe the state
 /// while one is being built. Naming the rows individually is *stricter* than
 /// the two-state rule it replaces: a row that moves to `pass` without being
 /// listed here fails, and a row listed here that has not moved fails too, so
 /// the manifest and this list cannot drift apart in either direction.
-const IN_PROGRESS_PHASE: &str = "phase 8:";
+///
+/// Nothing is in flight at the moment. The list stays, empty, because the next
+/// phase to be started will need it on its first day and rediscovering why it
+/// exists is worse than carrying two lines.
+const IN_PROGRESS_PHASE: &str = "phase 11:";
 
 /// The rows of [`IN_PROGRESS_PHASE`] that have evidence behind them.
-const IN_PROGRESS_ROWS: [&str; 33] = [
-    "sql.expr.in-subquery",
-    "sql.select.joins",
-    "sql.select.compound",
-    "sql.select.group-by-having",
-    "sql.select.distinct",
-    "sql.with.cte",
-    "sql.with.recursive",
-    "sql.select.window",
-    "sql.create-view",
-    "sql.strict-tables",
-    "sql.explain",
-    "sql.analyze",
-    "sql.reindex",
-    "sql.generated-columns",
-    "sql.alter-table",
-    "sql.create-trigger",
-    "sql.without-rowid",
-    "sql.vacuum",
-    "sql.autoincrement",
-    "sql.negative.autoincrement-placement",
-    "sql.negative.full-alter-table",
-    "sql.negative.trigger-for-each-statement",
-    "planner.access-paths",
-    "planner.join-order",
-    "planner.statistics",
-    "sql.negative.right-outer-join-pre-3-39",
-    "sql.negative.grant-revoke",
-    "sql.negative.writable-views",
-    // The built-ins phase 8 owes. The manifest had filed these under phase 11,
-    // which keeps the *generated* built-in manifest, JSON and the table-valued
-    // functions; the core, aggregate, date-time, math and window families are
-    // named in phase 8's deliverable and belong here.
-    "functions.core",
-    "functions.aggregate",
-    "functions.date-time",
-    "functions.math",
-    "functions.window",
-];
+const IN_PROGRESS_ROWS: [&str; 0] = [];
 
 /// Every row in a finished phase must claim `pass`, and every later row must
 /// not.

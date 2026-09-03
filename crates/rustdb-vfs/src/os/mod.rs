@@ -39,11 +39,27 @@ use crate::error::{self, VfsError, VfsOperation, VfsResult};
 use crate::locks::HandleId;
 use crate::path::DbPath;
 
+/// The counter every open file handle in this process takes its identity from.
+///
+/// Process-wide, and it has to be. The identity is what the POSIX in-process
+/// lock registry uses to tell one handle from another, and that registry is
+/// itself process-wide - so a counter that started again for each `OsVfs`
+/// would hand the same identity to two different files and the registry would
+/// treat them as one. It did: two connections opened through separate
+/// `Database::open` calls each got handle 1, so the second was told it already
+/// held the writer's reservation and both wrote at once. Windows never saw it,
+/// because its locks are the kernel's and it does not consult this at all.
+static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
+
+/// Returns the next handle identity, used by the in-process lock registry.
+fn next_handle() -> HandleId {
+    HandleId(NEXT_HANDLE.fetch_add(1, Ordering::Relaxed))
+}
+
 /// A VFS backed by the real file system.
 #[derive(Debug)]
 pub struct OsVfs {
     name: String,
-    next_handle: AtomicU64,
     temp_counter: AtomicU64,
 }
 
@@ -52,14 +68,8 @@ impl OsVfs {
     pub fn new() -> OsVfs {
         OsVfs {
             name: platform::VFS_NAME.to_string(),
-            next_handle: AtomicU64::new(1),
             temp_counter: AtomicU64::new(1),
         }
-    }
-
-    /// Returns the next handle identity, used by the in-process lock registry.
-    fn next_handle(&self) -> HandleId {
-        HandleId(self.next_handle.fetch_add(1, Ordering::Relaxed))
     }
 }
 
@@ -91,11 +101,7 @@ impl Vfs for OsVfs {
         let identity = platform::file_identity(&file)?;
         let file = Arc::new(file);
         Ok(Box::new(OsFile {
-            locks: platform::LockState::new(
-                identity.clone(),
-                self.next_handle(),
-                Arc::clone(&file),
-            ),
+            locks: platform::LockState::new(identity.clone(), next_handle(), Arc::clone(&file)),
             file,
             path: path.clone(),
             options,

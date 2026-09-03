@@ -369,7 +369,10 @@ impl Connection {
             Arc::clone(&vfs),
             path,
             DatabaseOptions {
-                pager: PagerOptions::default(),
+                pager: PagerOptions {
+                    busy_timeout: options.busy_timeout,
+                    ..PagerOptions::default()
+                },
                 journal: options.journal,
                 writable: options.writable,
             },
@@ -1009,7 +1012,10 @@ impl Connection {
             Arc::clone(&self.vfs),
             &self.path,
             DatabaseOptions {
-                pager: PagerOptions::default(),
+                pager: PagerOptions {
+                    busy_timeout: self.options.busy_timeout,
+                    ..PagerOptions::default()
+                },
                 journal: state.journal,
                 writable: self.options.writable,
             },
@@ -1114,7 +1120,10 @@ impl Connection {
             Arc::clone(&self.vfs),
             &path,
             DatabaseOptions {
-                pager: PagerOptions::default(),
+                pager: PagerOptions {
+                    busy_timeout: self.options.busy_timeout,
+                    ..PagerOptions::default()
+                },
                 journal: JournalOptions {
                     mode: JournalMode::Memory,
                     synchronous: rustdb_transaction::journal::Synchronous::Off,
@@ -1178,7 +1187,10 @@ impl Connection {
             Arc::clone(&self.vfs),
             &path,
             DatabaseOptions {
-                pager: PagerOptions::default(),
+                pager: PagerOptions {
+                    busy_timeout: self.options.busy_timeout,
+                    ..PagerOptions::default()
+                },
                 journal: options,
                 writable: self.options.writable,
             },
@@ -1541,6 +1553,9 @@ fn enter_wal_mode(
         vfs,
         path,
         DatabaseOptions {
+            // `attach_wal` reads the journal settings and nothing else out
+            // of these; the pager it is attaching to already exists and keeps
+            // the options it was opened with.
             pager: PagerOptions::default(),
             journal: options,
             writable: true,

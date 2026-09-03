@@ -1316,24 +1316,24 @@ id = "sql.foreign-keys.immediate"
 source = "https://sqlite.org/foreignkeys.html"
 profile = "default"
 phase = "phase 9: foreign keys, ATTACH, and multi-database commit"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::a_child_needs_its_parent", "rustdb-compat::enforcement_is_off_until_it_is_asked_for", "rustdb-compat::an_update_checks_the_new_key", "rustdb-compat::a_parent_with_children_cannot_be_deleted", "rustdb-compat::a_composite_key_matches_on_every_column", "rustdb-compat::a_missing_parent_fails_at_the_write", "rustdb-compat::a_parent_without_a_unique_key_is_a_mismatch", "rustdb-compat::a_unique_index_makes_a_parent_key", "rustdb-compat::the_key_list_reports_the_schema", "rustdb-compat::the_key_check_finds_what_enforcement_would_have_refused"]
 
 [[capability]]
 id = "sql.foreign-keys.deferred"
 source = "https://sqlite.org/foreignkeys.html"
 profile = "default"
 phase = "phase 9: foreign keys, ATTACH, and multi-database commit"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::a_deferred_key_is_checked_at_the_commit", "rustdb-compat::a_deferred_key_refuses_a_commit_it_cannot_satisfy"]
 
 [[capability]]
 id = "sql.foreign-keys.actions"
 source = "https://sqlite.org/foreignkeys.html"
 profile = "default"
 phase = "phase 9: foreign keys, ATTACH, and multi-database commit"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::a_cascade_takes_the_children", "rustdb-compat::a_cascade_moves_the_children", "rustdb-compat::set_null_and_set_default_keep_the_children", "rustdb-compat::restrict_refuses_where_no_action_would_not", "rustdb-compat::a_self_referencing_cascade_reaches_the_leaves", "rustdb-compat::triggers_and_keys_run_in_the_documented_order", "rustdb-compat::replace_fires_the_action_on_the_row_it_removes"]
 
 [[capability]]
 # TEMP objects live in the `temp` database, so they need a connection that can
@@ -1345,128 +1345,128 @@ id = "sql.temp-objects"
 source = "https://sqlite.org/lang_createtable.html"
 profile = "default"
 phase = "phase 9: foreign keys, ATTACH, and multi-database commit"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::a_temporary_table_holds_rows", "rustdb-compat::temporary_is_the_same_as_temp", "rustdb-compat::a_temporary_table_shadows_a_permanent_one", "rustdb-compat::a_temporary_table_is_not_in_the_file", "rustdb-compat::a_temporary_table_does_not_survive_the_connection", "rustdb-compat::each_connection_has_its_own_temporary_database", "rustdb-compat::a_temporary_name_may_not_be_qualified", "rustdb-compat::a_temporary_index_works", "rustdb-compat::a_temporary_view_works", "rustdb-compat::a_temporary_trigger_fires", "rustdb-compat::a_transaction_covers_the_temporary_database_too", "rustdb-compat::dropping_a_temporary_table_uncovers_the_permanent_one"]
 
 [[capability]]
 id = "sql.attach-detach"
 source = "https://sqlite.org/lang_attach.html"
 profile = "default"
 phase = "phase 9: foreign keys, ATTACH, and multi-database commit"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::an_attached_database_is_reachable", "rustdb-compat::main_wins_an_unqualified_name", "rustdb-compat::an_unqualified_name_finds_the_only_database_that_has_it", "rustdb-compat::a_join_spans_two_databases", "rustdb-compat::main_cannot_be_attached_over", "rustdb-compat::temp_cannot_be_attached_over", "rustdb-compat::a_name_can_only_be_attached_once", "rustdb-compat::main_cannot_be_detached", "rustdb-compat::an_unattached_name_cannot_be_detached", "rustdb-compat::detaching_twice_fails_the_second_time", "rustdb-compat::detaching_takes_the_names_with_it", "rustdb-compat::attaching_inside_a_transaction_is_allowed", "rustdb-compat::the_same_page_number_in_two_databases_is_two_pages"]
 
 [[capability]]
 id = "txn.multi-database-commit"
 source = "https://sqlite.org/atomiccommit.html"
 profile = "default"
 phase = "phase 9: foreign keys, ATTACH, and multi-database commit"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::a_transaction_spans_two_databases", "rustdb-compat::a_rollback_spans_two_databases", "rustdb-compat::a_savepoint_spans_two_databases", "rustdb-compat::every_cut_of_a_two_database_commit_leaves_one_state_or_the_other", "rustdb-compat::every_short_write_of_a_two_database_commit_leaves_one_state_or_the_other"]
 
 [[capability]]
 id = "txn.master-journal"
 source = "https://sqlite.org/atomiccommit.html"
 profile = "default"
 phase = "phase 9: foreign keys, ATTACH, and multi-database commit"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::a_two_database_commit_cleans_up_after_itself", "rustdb-compat::every_cut_of_a_two_database_commit_leaves_one_state_or_the_other", "rustdb-transaction::super_journal::tests::the_list_round_trips", "rustdb-transaction::super_journal::tests::committing_removes_the_file", "rustdb-transaction::super_journal::tests::it_is_removed_only_when_nobody_needs_it"]
 
 [[capability]]
 id = "wal.mode-switch"
 source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::switching_to_wal_stamps_the_file_and_creates_the_log", "rustdb-compat::a_wal_database_reopens_in_wal_mode", "rustdb-compat::switching_out_of_wal_mode_leaves_a_rollback_database"]
 
 [[capability]]
 id = "wal.frame-format"
 source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::sqlite_reads_a_log_rustdb_wrote", "rustdb-compat::rustdb_extends_a_wal_database_sqlite_wrote", "rustdb-transaction::wal::format::tests::a_header_round_trips_and_checks_itself", "rustdb-transaction::wal::format::tests::a_damaged_header_is_refused", "rustdb-transaction::wal::format::tests::the_magic_declares_the_byte_order", "rustdb-transaction::wal::format::tests::a_frame_only_verifies_in_its_own_place", "rustdb-transaction::wal::format::tests::a_commit_frame_carries_the_new_page_count", "rustdb-transaction::wal::format::tests::frame_offsets_follow_the_format", "rustdb-transaction::wal::format::tests::a_restart_changes_both_salts"]
 
 [[capability]]
 id = "wal.index"
 source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::a_wal_index_left_by_a_crash_is_rebuilt", "rustdb-vfs::an_abandoned_wal_index_is_discarded", "rustdb-transaction::wal::index::tests::the_layout_is_the_one_the_format_specifies", "rustdb-transaction::wal::index::tests::frames_map_to_their_regions", "rustdb-transaction::wal::index::tests::a_header_round_trips_and_both_copies_must_agree", "rustdb-transaction::wal::index::tests::entries_are_found_by_page_and_bounded_by_the_snapshot", "rustdb-transaction::wal::index::tests::truncating_drops_the_entries_above_the_limit", "rustdb-transaction::wal::index::tests::reader_marks_round_trip_and_reset", "rustdb-transaction::wal::index::tests::the_second_region_holds_the_frames_past_the_first", "rustdb-transaction::wal::tests::the_index_is_rebuilt_from_the_log"]
 
 [[capability]]
 id = "wal.read-transactions"
 source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::a_reader_keeps_its_snapshot_while_a_writer_commits", "rustdb-compat::a_second_connection_sees_the_commit", "rustdb-transaction::wal::tests::a_reader_keeps_its_snapshot_across_a_commit", "rustdb-transaction::wal::tests::a_committed_frame_is_visible_to_the_next_reader"]
 
 [[capability]]
 id = "wal.write-transactions"
 source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::a_committed_transaction_survives_reopening", "rustdb-compat::a_rolled_back_transaction_leaves_nothing", "rustdb-compat::every_explored_schedule_of_two_writers_is_serialisable", "rustdb-transaction::wal::tests::an_unpublished_append_is_not_a_commit", "rustdb-transaction::wal::tests::only_one_connection_writes", "rustdb-transaction::wal::tests::a_stale_writer_is_refused_with_busy_snapshot"]
 
 [[capability]]
 id = "wal.checkpoint.passive"
 source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::a_checkpoint_moves_the_data_into_the_database", "rustdb-compat::a_checkpoint_does_not_pass_a_reader", "rustdb-compat::every_checkpoint_mode_does_what_it_says", "rustdb-transaction::wal::checkpoint::tests::a_checkpoint_moves_pages_into_the_database", "rustdb-transaction::wal::checkpoint::tests::a_reader_holds_the_checkpoint_back", "rustdb-transaction::wal::checkpoint::tests::a_second_checkpoint_has_nothing_to_do", "rustdb-transaction::wal::checkpoint::tests::a_checkpoint_shortens_a_database_that_shrank"]
 
 [[capability]]
 id = "wal.checkpoint.full"
 source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::every_checkpoint_mode_does_what_it_says", "rustdb-compat::a_full_checkpoint_reports_a_reader_it_cannot_wait_out"]
 
 [[capability]]
 id = "wal.checkpoint.restart"
 source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::every_checkpoint_mode_does_what_it_says", "rustdb-compat::a_full_checkpoint_reports_a_reader_it_cannot_wait_out"]
 
 [[capability]]
 id = "wal.checkpoint.truncate"
 source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::every_checkpoint_mode_does_what_it_says", "rustdb-transaction::wal::checkpoint::tests::a_truncating_checkpoint_empties_the_log"]
 
 [[capability]]
 id = "wal.recovery"
 source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::rustdb_recovers_a_log_a_killed_sqlite_left", "rustdb-compat::every_cut_of_a_wal_commit_is_recoverable", "rustdb-compat::every_cut_of_a_wal_checkpoint_is_recoverable", "rustdb-compat::every_short_write_of_a_wal_commit_is_recoverable", "rustdb-compat::every_io_error_of_a_wal_commit_is_recoverable", "rustdb-compat::a_crash_during_wal_recovery_is_idempotent", "rustdb-transaction::wal::tests::a_torn_tail_is_discarded"]
 
 [[capability]]
 id = "txn.busy-handler"
 source = "https://sqlite.org/c3ref/funclist.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::a_busy_timeout_waits_for_the_writer", "rustdb-compat::a_second_writer_in_this_process_is_refused", "rustdb-compat::a_progress_handler_stops_a_long_statement", "rustdb-compat::an_interrupt_from_another_thread_stops_a_statement"]
 
 [[capability]]
 id = "txn.isolation"
 source = "https://sqlite.org/isolation.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::a_reader_keeps_its_snapshot_while_a_writer_commits", "rustdb-compat::every_explored_schedule_of_two_writers_is_serialisable", "rustdb-compat::a_recorded_schedule_reproduces_its_run"]
 
 [[capability]]
 id = "functions.core"

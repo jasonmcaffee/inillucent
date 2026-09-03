@@ -434,3 +434,156 @@ fn rustdb_recovers_a_log_a_killed_sqlite_left() {
     assert_eq!(lines.first().copied(), Some("3"));
     assert_eq!(lines.get(1).copied(), Some("ok"));
 }
+
+/// Each checkpoint mode does the thing its name claims and no more.
+///
+/// The four modes differ in two axes and it is easy to implement three of them
+/// as one: how hard they try to copy the log back, and what they leave the log
+/// file looking like afterwards. `PASSIVE` copies what it can and leaves the
+/// log where it is. `FULL` and `RESTART` copy everything; `RESTART` also makes
+/// the next writer begin again at frame one rather than appending, which is
+/// what stops a busy database's log growing without bound. `TRUNCATE` does
+/// that and takes the file back to nothing, which is the only one visible in
+/// the file system - so the file's size is what this test watches.
+#[test]
+fn every_checkpoint_mode_does_what_it_says() {
+    let path = scratch("modes");
+    let connection = connect(&path);
+    connection
+        .execute_batch("PRAGMA journal_mode=wal")
+        .expect("the mode changes");
+    connection
+        .execute_batch("CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT)")
+        .expect("the table is made");
+    let log = std::path::PathBuf::from(format!("{}-wal", path.display()));
+
+    // PASSIVE copies the log back and leaves the file where it is.
+    for key in 1..=4 {
+        connection
+            .execute_batch(&format!("INSERT INTO t VALUES({key}, 'passive')"))
+            .expect("a row");
+    }
+    let grown = log.metadata().expect("the log exists").len();
+    assert!(grown > 0, "the log is empty before a checkpoint");
+    let (busy, frames, copied) = checkpoint(&connection, "PASSIVE");
+    assert_eq!(
+        busy, 0,
+        "a passive checkpoint with nobody in the way was busy"
+    );
+    assert_eq!(copied, frames, "a passive checkpoint left frames behind");
+    assert_eq!(
+        log.metadata().expect("the log exists").len(),
+        grown,
+        "a passive checkpoint changed the size of the log"
+    );
+
+    // FULL copies everything and, like PASSIVE, leaves the file alone.
+    connection
+        .execute_batch("INSERT INTO t VALUES(5, 'full')")
+        .expect("a row");
+    let grown = log.metadata().expect("the log exists").len();
+    let (busy, frames, copied) = checkpoint(&connection, "FULL");
+    assert_eq!(busy, 0, "a full checkpoint with nobody in the way was busy");
+    assert_eq!(copied, frames, "a full checkpoint left frames behind");
+    assert_eq!(
+        log.metadata().expect("the log exists").len(),
+        grown,
+        "a full checkpoint changed the size of the log"
+    );
+
+    // RESTART sends the next writer back to the start of the log, so the file
+    // stops growing however many transactions follow.
+    connection
+        .execute_batch("INSERT INTO t VALUES(6, 'restart')")
+        .expect("a row");
+    let grown = log.metadata().expect("the log exists").len();
+    let (busy, frames, copied) = checkpoint(&connection, "RESTART");
+    assert_eq!(
+        busy, 0,
+        "a restart checkpoint with nobody in the way was busy"
+    );
+    assert_eq!(copied, frames, "a restart checkpoint left frames behind");
+    for key in 7..=10 {
+        connection
+            .execute_batch(&format!("INSERT INTO t VALUES({key}, 'after')"))
+            .expect("a row");
+    }
+    assert!(
+        log.metadata().expect("the log exists").len() <= grown,
+        "the log grew past its restart point"
+    );
+
+    // TRUNCATE is the one a file listing can see.
+    let (busy, frames, copied) = checkpoint(&connection, "TRUNCATE");
+    assert_eq!(busy, 0, "a truncating checkpoint was busy");
+    assert_eq!(copied, frames, "a truncating checkpoint left frames behind");
+    assert_eq!(
+        log.metadata().expect("the log exists").len(),
+        0,
+        "TRUNCATE left bytes in the log"
+    );
+
+    // Every row is in the database after all of that, and the pinned build
+    // agrees - which is the point of copying frames back at all.
+    assert_eq!(integer(&connection, "SELECT count(*) FROM t"), 10);
+    drop(connection);
+    if let Some(reported) = shell(
+        &path,
+        &["SELECT count(*) FROM t;", "PRAGMA integrity_check;"],
+    ) {
+        let reported: Vec<&str> = reported.lines().map(str::trim).collect();
+        assert_eq!(reported, ["10", "ok"], "SQLite disagreed");
+    }
+}
+
+/// A checkpoint that cannot finish says so rather than pretending.
+///
+/// `FULL` and `RESTART` have to wait for every reader to leave before they can
+/// promise the log is fully copied. A reader that is not going anywhere is
+/// therefore reported as busy, and the frames it protects stay in the log.
+#[test]
+fn a_full_checkpoint_reports_a_reader_it_cannot_wait_out() {
+    let path = scratch("modes-busy");
+    let writer = connect(&path);
+    writer
+        .execute_batch("PRAGMA journal_mode=wal")
+        .expect("the mode changes");
+    writer
+        .execute_batch("CREATE TABLE t(a INTEGER PRIMARY KEY)")
+        .expect("the table is made");
+    writer
+        .execute_batch("INSERT INTO t VALUES(1)")
+        .expect("a row");
+
+    let reader = connect(&path);
+    reader.execute_batch("BEGIN").expect("the read opens");
+    assert_eq!(integer(&reader, "SELECT count(*) FROM t"), 1);
+    writer
+        .execute_batch("INSERT INTO t VALUES(2)")
+        .expect("a row");
+
+    let (busy, frames, copied) = checkpoint(&writer, "FULL");
+    assert_eq!(busy, 1, "a full checkpoint ignored a reader in its way");
+    assert!(
+        copied < frames,
+        "a full checkpoint copied {copied} of {frames} frames past a live reader"
+    );
+    reader.execute_batch("COMMIT").expect("the read closes");
+
+    let (busy, frames, copied) = checkpoint(&writer, "RESTART");
+    assert_eq!(
+        busy, 0,
+        "the reader has gone and the checkpoint was still busy"
+    );
+    assert_eq!(copied, frames, "the log was not fully copied back");
+}
+
+/// Runs a checkpoint and returns what it reported.
+fn checkpoint(connection: &rustdb::Connection, mode: &str) -> (i64, i64, i64) {
+    let rows = connection
+        .query(&format!("PRAGMA wal_checkpoint({mode})"))
+        .expect("the checkpoint runs");
+    let row = rows.first().expect("the checkpoint reports a row");
+    let field = |index: usize| row.get(index).and_then(Value::as_integer).unwrap_or(-1);
+    (field(0), field(1), field(2))
+}
