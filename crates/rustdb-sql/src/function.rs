@@ -94,6 +94,151 @@ pub enum AggregateFunc {
     GroupConcat,
 }
 
+/// A date or time built-in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimeFunc {
+    /// `date(...)`
+    Date,
+    /// `time(...)`
+    Time,
+    /// `datetime(...)`
+    DateTime,
+    /// `julianday(...)`
+    JulianDay,
+    /// `unixepoch(...)`
+    UnixEpoch,
+    /// `strftime(format, ...)`
+    StrfTime,
+    /// `timediff(a, b)`
+    TimeDiff,
+}
+
+/// Returns the date or time function a folded name spells.
+pub fn lookup_time(folded: &[u8]) -> Option<TimeFunc> {
+    let func = match folded {
+        b"date" => TimeFunc::Date,
+        b"time" => TimeFunc::Time,
+        b"datetime" => TimeFunc::DateTime,
+        b"julianday" => TimeFunc::JulianDay,
+        b"unixepoch" => TimeFunc::UnixEpoch,
+        b"strftime" => TimeFunc::StrfTime,
+        b"timediff" => TimeFunc::TimeDiff,
+        _ => return None,
+    };
+    Some(func)
+}
+
+/// A math built-in.
+///
+/// They are their own enum rather than more `ScalarFunc` variants because they
+/// are a compile-time option in SQLite (`SQLITE_ENABLE_MATH_FUNCTIONS`) and
+/// share one rule the others do not: an argument outside the domain is NULL
+/// rather than an error or a NaN.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MathFunc {
+    /// `acos(x)`
+    Acos,
+    /// `acosh(x)`
+    Acosh,
+    /// `asin(x)`
+    Asin,
+    /// `asinh(x)`
+    Asinh,
+    /// `atan(x)`
+    Atan,
+    /// `atan2(y, x)`
+    Atan2,
+    /// `atanh(x)`
+    Atanh,
+    /// `ceil(x)` and `ceiling(x)`
+    Ceil,
+    /// `cos(x)`
+    Cos,
+    /// `cosh(x)`
+    Cosh,
+    /// `degrees(x)`
+    Degrees,
+    /// `exp(x)`
+    Exp,
+    /// `floor(x)`
+    Floor,
+    /// `ln(x)`
+    Ln,
+    /// `log(x)` base 10, or `log(b, x)` base b.
+    Log,
+    /// `log10(x)`
+    Log10,
+    /// `log2(x)`
+    Log2,
+    /// `mod(x, y)`
+    Mod,
+    /// `pi()`
+    Pi,
+    /// `pow(x, y)` and `power(x, y)`
+    Pow,
+    /// `radians(x)`
+    Radians,
+    /// `sin(x)`
+    Sin,
+    /// `sinh(x)`
+    Sinh,
+    /// `sqrt(x)`
+    Sqrt,
+    /// `tan(x)`
+    Tan,
+    /// `tanh(x)`
+    Tanh,
+    /// `trunc(x)`
+    Trunc,
+}
+
+impl MathFunc {
+    /// Returns how many arguments the function takes, as `(least, most)`.
+    pub fn arity(self) -> (usize, usize) {
+        match self {
+            MathFunc::Pi => (0, 0),
+            MathFunc::Atan2 | MathFunc::Mod | MathFunc::Pow => (2, 2),
+            MathFunc::Log => (1, 2),
+            _ => (1, 1),
+        }
+    }
+}
+
+/// Returns the math function a folded name spells.
+pub fn lookup_math(folded: &[u8]) -> Option<MathFunc> {
+    let func = match folded {
+        b"acos" => MathFunc::Acos,
+        b"acosh" => MathFunc::Acosh,
+        b"asin" => MathFunc::Asin,
+        b"asinh" => MathFunc::Asinh,
+        b"atan" => MathFunc::Atan,
+        b"atan2" => MathFunc::Atan2,
+        b"atanh" => MathFunc::Atanh,
+        b"ceil" | b"ceiling" => MathFunc::Ceil,
+        b"cos" => MathFunc::Cos,
+        b"cosh" => MathFunc::Cosh,
+        b"degrees" => MathFunc::Degrees,
+        b"exp" => MathFunc::Exp,
+        b"floor" => MathFunc::Floor,
+        b"ln" => MathFunc::Ln,
+        b"log" => MathFunc::Log,
+        b"log10" => MathFunc::Log10,
+        b"log2" => MathFunc::Log2,
+        b"mod" => MathFunc::Mod,
+        b"pi" => MathFunc::Pi,
+        b"pow" | b"power" => MathFunc::Pow,
+        b"radians" => MathFunc::Radians,
+        b"sin" => MathFunc::Sin,
+        b"sinh" => MathFunc::Sinh,
+        b"sqrt" => MathFunc::Sqrt,
+        b"tan" => MathFunc::Tan,
+        b"tanh" => MathFunc::Tanh,
+        b"trunc" => MathFunc::Trunc,
+        _ => return None,
+    };
+    Some(func)
+}
+
 /// A window function that is not an aggregate.
 ///
 /// The aggregates are the same functions in a different frame, so they are not
