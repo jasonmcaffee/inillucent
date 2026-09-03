@@ -8,7 +8,7 @@ has not arrived yet.
 | directory | what lands here | phase |
 |---|---|---|
 | `conformance/` | SQLLogicTest files whose expected values were recorded from the pinned binary; an upstream `.test` file dropped in here runs with no new code | 5 onward |
-| `crash/` | generated failure schedules and the state each one must recover to | 7 onward |
+| `crash/` | generated failure schedules and the state each one must recover to; written by the campaigns in `rustdb-compat/tests/durability.rs` and `faults.rs`, and described by its own README | 7 onward |
 | `interop/` | databases written by SQLite and read by rust-db, and the reverse: cross-open, cross-write, checkpoint, backup | 3 onward |
 | `workloads/` | deterministic benchmark and application traces, so a performance run is replayable | 14 |
 

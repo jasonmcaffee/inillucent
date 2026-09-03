@@ -19,8 +19,9 @@ use rustdb_base::limits::Limits;
 use rustdb_base::{error, DbResult, PrimaryCode};
 use rustdb_sql::ast::BinaryOp;
 use rustdb_storage::cursor::{BTreeCursor, SeekBias};
+use rustdb_storage::mutate;
 use rustdb_storage::pager::Pager;
-use rustdb_value::record::{KeyColumn, KeyInfo, RecordRef};
+use rustdb_value::record::{self, KeyColumn, KeyInfo, RecordRef};
 use rustdb_value::{affinity, cast, Affinity, Collation, TextEncoding, Value};
 
 use crate::aggregate::Accumulator;
@@ -83,7 +84,11 @@ pub struct Machine {
     interrupt: Arc<AtomicBool>,
     limits: Limits,
     encoding: TextEncoding,
+    file_format: u32,
     steps: u64,
+    changes: i64,
+    last_insert_rowid: i64,
+    conflict: Option<i32>,
 }
 
 impl Machine {
@@ -112,8 +117,31 @@ impl Machine {
             interrupt,
             limits,
             encoding: TextEncoding::Utf8,
+            file_format: 4,
             steps: 0,
+            changes: 0,
+            last_insert_rowid: 0,
+            conflict: None,
         }
+    }
+
+    /// Returns the conflict algorithm the failing constraint carried.
+    ///
+    /// It is `None` until a `HaltError` runs, so a failure that was not a
+    /// constraint - an I/O error, an interrupt - reports nothing and the
+    /// session falls back to aborting the statement.
+    pub fn conflict_action(&self) -> Option<i32> {
+        self.conflict
+    }
+
+    /// Returns how many rows the program has changed so far.
+    pub fn changes(&self) -> i64 {
+        self.changes
+    }
+
+    /// Returns the rowid the program's most recent insert allocated.
+    pub fn last_insert_rowid(&self) -> i64 {
+        self.last_insert_rowid
     }
 
     /// Returns the program being run.
@@ -157,6 +185,8 @@ impl Machine {
 
     /// Resets the machine so it can run again, keeping the bindings.
     pub fn reset(&mut self) {
+        self.changes = 0;
+        self.conflict = None;
         self.registers = vec![Value::Null; self.program.register_count as usize];
         self.cursors.clear();
         self.cursors
@@ -183,6 +213,7 @@ impl Machine {
             return Ok(StepOutcome::Done);
         }
         self.encoding = pager.text_encoding();
+        self.file_format = pager.header().schema_format.max(1);
         self.state = MachineState::Running;
         loop {
             // The interrupt is checked at instruction boundaries, which are the
@@ -501,7 +532,303 @@ impl Machine {
                 self.result = self.block(instruction.p1, instruction.p2);
                 Ok(Flow::Row)
             }
+            Opcode::OpenWrite => self.open_cursor(instruction, false),
+            Opcode::OpenWriteIndex => self.open_cursor(instruction, true),
+            Opcode::NewRowid => self.new_rowid(instruction, pager),
+            Opcode::MakeRecord => self.make_record(instruction),
+            Opcode::InsertRow => self.insert_row(instruction, pager),
+            Opcode::DeleteRow => self.delete_row(instruction, pager),
+            Opcode::IdxInsert => self.index_insert(instruction, pager),
+            Opcode::IdxDelete => self.index_delete(instruction, pager),
+            Opcode::NotExists => self.not_exists(instruction, pager),
+            Opcode::NoConflict => self.no_conflict(instruction, pager),
+            Opcode::RowData => self.row_data(instruction, pager),
+            Opcode::HaltError => self.halt_error(instruction),
+            Opcode::SetCookie => self.set_cookie(instruction, pager),
+            Opcode::CreateBtree => self.create_btree(instruction, pager),
+            Opcode::DestroyBtree => self.destroy_btree(instruction, pager),
+            Opcode::ClearBtree => self.clear_btree(instruction, pager),
+            Opcode::CountChange => {
+                self.changes = self.changes.saturating_add(1);
+                if instruction.p2 == 1 {
+                    self.last_insert_rowid = cast::integer_value(&self.register(instruction.p1));
+                }
+                Ok(Flow::Next)
+            }
         }
+    }
+
+    /// Allocates a rowid no row in the table is using.
+    ///
+    /// SQLite's rule, and the reason it is not simply "the largest plus one":
+    /// once the largest rowid is `i64::MAX` the next one cannot be larger, so
+    /// it falls back to picking at random until it finds a free one. A table
+    /// that has ever held `i64::MAX` therefore keeps working instead of
+    /// refusing every insert.
+    fn new_rowid(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
+        let largest = self.with_cursor_and_pager(instruction.p1, pager, |slot, pager| {
+            if slot.cursor.last(pager)? {
+                slot.moved();
+                return slot.cursor.rowid().map(Some);
+            }
+            Ok(None)
+        })?;
+        let rowid = match largest {
+            None => 1,
+            Some(largest) if largest < i64::MAX => largest.saturating_add(1),
+            Some(_) => self.random_free_rowid(instruction.p1, pager)?,
+        };
+        self.store(instruction.p2, Value::Integer(rowid));
+        Ok(Flow::Next)
+    }
+
+    /// Picks a rowid at random until it finds one no row is using.
+    ///
+    /// The attempts are bounded: a table that really is full of every possible
+    /// rowid has to report that rather than search for ever, and SQLite's own
+    /// answer to a full table is `SQLITE_FULL`.
+    fn random_free_rowid(&mut self, cursor: i32, pager: &mut Pager) -> DbResult<i64> {
+        let mut state = self
+            .steps
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        for _ in 0..100 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let candidate = ((state >> 1) as i64).saturating_abs().max(1);
+            let taken = self.with_cursor_and_pager(cursor, pager, |slot, pager| {
+                slot.moved();
+                slot.cursor
+                    .seek_rowid(pager, candidate, SeekBias::AtOrAfter)
+            })?;
+            if !taken {
+                return Ok(candidate);
+            }
+        }
+        Err(rustdb_base::DbError::primary(PrimaryCode::Full)
+            .with_message("database or disk is full")
+            .with_detail("no unused rowid could be found for this table"))
+    }
+
+    /// Encodes a block of registers into a record, applying each affinity.
+    fn make_record(&mut self, instruction: &Instruction) -> DbResult<Flow> {
+        let mut values = self.block(instruction.p1, instruction.p2);
+        if let Operand::Affinities(affinities) = &instruction.p4 {
+            for (index, affinity) in affinities.iter().enumerate() {
+                let Some(slot) = values.get_mut(index) else {
+                    break;
+                };
+                let taken = core::mem::replace(slot, Value::Null);
+                *slot = affinity::apply_affinity(taken, *affinity, self.encoding)?;
+            }
+        }
+        let bytes = record::encode_record_with_limits(
+            &values,
+            self.encoding,
+            self.file_format,
+            &self.limits,
+        )?;
+        self.store(instruction.p3, Value::owned_blob(&bytes)?);
+        Ok(Flow::Next)
+    }
+
+    /// Returns a register's bytes, which a record register always holds.
+    fn record_bytes(&self, index: i32) -> DbResult<Vec<u8>> {
+        match self.register(index) {
+            Value::Blob(blob) => Ok(blob.raw().to_vec()),
+            _ => Err(error::misuse(
+                "a record register does not hold an encoded record",
+            )),
+        }
+    }
+
+    /// Writes a row into a table B-tree.
+    fn insert_row(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
+        let payload = self.record_bytes(instruction.p2)?;
+        let rowid = cast::integer_value(&self.register(instruction.p3));
+        let root = self.cursor_root(instruction.p1)?;
+        let append = instruction.p5 == 1;
+        if append {
+            mutate::append_row(pager, root, rowid, &payload)?;
+        } else {
+            mutate::insert_row(pager, root, rowid, &payload)?;
+        }
+        self.invalidate_cursors_on(root);
+        Ok(Flow::Next)
+    }
+
+    /// Deletes the row a cursor is sitting on.
+    fn delete_row(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
+        let rowid = self.with_cursor(instruction.p1, |slot| slot.cursor.rowid())?;
+        let root = self.cursor_root(instruction.p1)?;
+        mutate::delete_row(pager, root, rowid)?;
+        self.invalidate_cursors_on(root);
+        Ok(Flow::Next)
+    }
+
+    /// Writes an entry into an index B-tree.
+    fn index_insert(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
+        let payload = self.record_bytes(instruction.p2)?;
+        let root = self.cursor_root(instruction.p1)?;
+        let key = self.cursor_key(instruction.p1)?;
+        mutate::insert_entry(pager, root, &key, &payload)?;
+        self.invalidate_cursors_on(root);
+        Ok(Flow::Next)
+    }
+
+    /// Removes an entry from an index B-tree.
+    ///
+    /// A missing entry is not an error. An UPDATE that does not change a key
+    /// deletes and reinserts the same entry, and a REPLACE may have removed it
+    /// already; refusing here would turn a no-op into a failure.
+    fn index_delete(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
+        let payload = self.record_bytes(instruction.p2)?;
+        let root = self.cursor_root(instruction.p1)?;
+        let key = self.cursor_key(instruction.p1)?;
+        mutate::delete_entry(pager, root, &key, &payload)?;
+        self.invalidate_cursors_on(root);
+        Ok(Flow::Next)
+    }
+
+    /// Jumps when no row has the rowid in a register.
+    fn not_exists(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
+        let value = self.register(instruction.p3);
+        let Value::Integer(rowid) = cast::numerify(value) else {
+            return Ok(Flow::Jump(instruction.p2.max(0) as usize));
+        };
+        let found = self.with_cursor_and_pager(instruction.p1, pager, |slot, pager| {
+            slot.moved();
+            slot.cursor.seek_rowid(pager, rowid, SeekBias::AtOrAfter)
+        })?;
+        if found {
+            return Ok(Flow::Next);
+        }
+        Ok(Flow::Jump(instruction.p2.max(0) as usize))
+    }
+
+    /// Jumps when an index holds no entry with this key prefix.
+    fn no_conflict(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
+        let key = self.block(instruction.p3, i32::from(instruction.p5));
+        // A NULL never equals anything, so a key containing one cannot
+        // conflict with an existing entry however many entries look like it.
+        if key.iter().any(|value| matches!(value, Value::Null)) {
+            return Ok(Flow::Jump(instruction.p2.max(0) as usize));
+        }
+        let found = self.with_cursor_and_pager(instruction.p1, pager, |slot, pager| {
+            slot.moved();
+            slot.cursor.seek_index(pager, &key, SeekBias::AtOrAfter)
+        })?;
+        if found {
+            return Ok(Flow::Next);
+        }
+        Ok(Flow::Jump(instruction.p2.max(0) as usize))
+    }
+
+    /// Copies the row a cursor is on into a register, as raw record bytes.
+    fn row_data(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
+        let limits = self.limits.clone();
+        let bytes = self.with_cursor_and_pager(instruction.p1, pager, |slot, pager| {
+            slot.cursor.payload(pager, &limits)
+        })?;
+        self.store(instruction.p2, Value::owned_blob(&bytes)?);
+        Ok(Flow::Next)
+    }
+
+    /// Stops the program with a named result code.
+    fn halt_error(&mut self, instruction: &Instruction) -> DbResult<Flow> {
+        let message = match &instruction.p4 {
+            Operand::Text(text) => String::from_utf8_lossy(text).into_owned(),
+            _ => String::new(),
+        };
+        let code = rustdb_base::error::ExtendedCode(instruction.p1);
+        self.conflict = Some(instruction.p3);
+        let mut failure = rustdb_base::DbError::new(code);
+        if !message.is_empty() {
+            failure = failure.with_message(message);
+        }
+        Err(failure)
+    }
+
+    /// Writes a new schema cookie into the database header.
+    fn set_cookie(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
+        let mut header = *pager.header();
+        header.schema_cookie = instruction.p3.max(0) as u32;
+        pager.set_header(header)?;
+        Ok(Flow::Next)
+    }
+
+    /// Allocates an empty B-tree and stores its root page in a register.
+    fn create_btree(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
+        let root = if instruction.p3 == 1 {
+            mutate::create_index(pager)?
+        } else {
+            mutate::create_table(pager)?
+        };
+        self.store(instruction.p2, Value::Integer(i64::from(root.get())));
+        Ok(Flow::Next)
+    }
+
+    /// Frees every page of a B-tree.
+    fn destroy_btree(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
+        let root = self.root_from_register(instruction.p1)?;
+        mutate::drop_tree(pager, root)?;
+        self.invalidate_cursors_on(root);
+        Ok(Flow::Next)
+    }
+
+    /// Empties a B-tree, keeping its root page.
+    fn clear_btree(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
+        let root = self.root_from_register(instruction.p1)?;
+        mutate::clear_tree(pager, root)?;
+        self.invalidate_cursors_on(root);
+        Ok(Flow::Next)
+    }
+
+    /// Reads a root page number out of a register.
+    fn root_from_register(&self, index: i32) -> DbResult<PageId> {
+        let value = cast::integer_value(&self.register(index));
+        let page = u32::try_from(value)
+            .map_err(|_| error::corrupt(format!("root page {value} is not a page number")))?;
+        PageId::from_persisted(page)
+    }
+
+    /// Returns the root page a cursor is open on.
+    fn cursor_root(&mut self, index: i32) -> DbResult<PageId> {
+        self.with_cursor(index, |slot| Ok(slot.cursor.root()))
+    }
+
+    /// Returns the key description a cursor was opened with.
+    fn cursor_key(&mut self, index: i32) -> DbResult<KeyInfo> {
+        self.with_cursor(index, |slot| Ok(slot.key.clone()))
+    }
+
+    /// Forgets every cached row on a tree that has just been rewritten.
+    ///
+    /// A B-tree write can move a cell to another page, so a cursor holding a
+    /// parsed position on that tree is describing a page that may no longer
+    /// hold what it did. The positions themselves are restored by the cursor's
+    /// own staleness check; what has to be dropped here is the cached payload,
+    /// which nothing else would notice was out of date.
+    fn invalidate_cursors_on(&mut self, root: PageId) {
+        for slot in self.cursors.iter_mut().flatten() {
+            if slot.cursor.root() == root {
+                slot.payload = None;
+            }
+        }
+    }
+
+    /// Runs a closure over one open cursor and the pager together.
+    fn with_cursor_and_pager<T>(
+        &mut self,
+        index: i32,
+        pager: &mut Pager,
+        body: impl FnOnce(&mut CursorSlot, &mut Pager) -> DbResult<T>,
+    ) -> DbResult<T> {
+        let Some(Some(slot)) = self.cursors.get_mut(index.max(0) as usize) else {
+            return Err(error::misuse(format!("cursor {index} is not open")));
+        };
+        body(slot, pager)
     }
 
     /// Turns a `p4` literal into a value.

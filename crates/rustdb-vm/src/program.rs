@@ -151,15 +151,78 @@ pub enum Opcode {
     DistinctCheck,
     /// `p1`: first register, `p2`: count. Emit a result row.
     ResultRow,
+    /// `p1`: cursor, `p2`: root page, `p3`: database, `p4`: column count.
+    ///
+    /// The write half of [`Opcode::OpenRead`]. It is a separate opcode rather
+    /// than a flag so that the verifier can refuse it in a read-only program
+    /// by asking the opcode alone, with nothing to read out of an operand and
+    /// therefore nothing to get wrong.
+    OpenWrite,
+    /// `p1`: cursor, `p2`: root page, `p3`: database, `p4`: key description.
+    OpenWriteIndex,
+    /// `p1`: cursor, `p2`: destination register. Allocate an unused rowid.
+    NewRowid,
+    /// `p1`: first register, `p2`: count, `p3`: destination,
+    /// `p4`: the affinity of each column, applied before encoding.
+    MakeRecord,
+    /// `p1`: cursor, `p2`: record register, `p3`: rowid register.
+    ///
+    /// `p5` of 1 promises the rowid is past every rowid already in the tree,
+    /// which lets the append path skip the descent.
+    InsertRow,
+    /// `p1`: cursor. Delete the row the cursor is on.
+    DeleteRow,
+    /// `p1`: cursor, `p2`: record register. Insert an index entry.
+    IdxInsert,
+    /// `p1`: cursor, `p2`: record register. Delete an index entry.
+    IdxDelete,
+    /// `p1`: cursor, `p2`: jump when no row has this rowid, `p3`: rowid.
+    NotExists,
+    /// `p1`: index cursor, `p2`: jump when no entry has this key prefix,
+    /// `p3`: first key register, `p5`: key column count.
+    ///
+    /// A NULL anywhere in the key also jumps, because a NULL never conflicts
+    /// with anything in a UNIQUE index - which is why a unique column can hold
+    /// any number of NULLs.
+    NoConflict,
+    /// `p1`: cursor, `p2`: destination register. The row's raw record bytes.
+    RowData,
+    /// `p1`: the extended result code, `p4`: the message. Stop, failing.
+    HaltError,
+    /// `p1`: database, `p3`: the new schema cookie.
+    SetCookie,
+    /// `p2`: destination register, `p3`: 0 for a table, 1 for an index.
+    CreateBtree,
+    /// `p1`: register holding the root page. Free every page of the tree.
+    DestroyBtree,
+    /// `p1`: register holding the root page. Empty the tree, keeping its root.
+    ClearBtree,
+    /// `p1`: register holding a rowid to add to the change count.
+    ///
+    /// `p2` of 1 also records the rowid as the last insert rowid.
+    CountChange,
 }
 
 impl Opcode {
     /// Returns whether the opcode writes to the database.
     ///
-    /// Nothing in the read-only engine does, and the verifier refuses any
-    /// opcode that says it does inside a program marked read-only.
+    /// The verifier refuses any opcode that says it does inside a program
+    /// marked read-only, so this list is what makes `is_readonly()` a promise
+    /// rather than a label the compiler attaches.
     pub fn writes(self) -> bool {
-        false
+        matches!(
+            self,
+            Opcode::OpenWrite
+                | Opcode::OpenWriteIndex
+                | Opcode::InsertRow
+                | Opcode::DeleteRow
+                | Opcode::IdxInsert
+                | Opcode::IdxDelete
+                | Opcode::SetCookie
+                | Opcode::CreateBtree
+                | Opcode::DestroyBtree
+                | Opcode::ClearBtree
+        )
     }
 
     /// Returns whether `p2` is a jump target.
@@ -187,6 +250,8 @@ impl Opcode {
                 | Opcode::SorterSort
                 | Opcode::SorterNext
                 | Opcode::DistinctCheck
+                | Opcode::NotExists
+                | Opcode::NoConflict
         )
     }
 
@@ -242,6 +307,23 @@ impl Opcode {
             Opcode::AggFinal => "AggFinal",
             Opcode::AggReset => "AggReset",
             Opcode::SorterOpen => "SorterOpen",
+            Opcode::OpenWrite => "OpenWrite",
+            Opcode::OpenWriteIndex => "OpenWriteIndex",
+            Opcode::NewRowid => "NewRowid",
+            Opcode::MakeRecord => "MakeRecord",
+            Opcode::InsertRow => "InsertRow",
+            Opcode::DeleteRow => "DeleteRow",
+            Opcode::IdxInsert => "IdxInsert",
+            Opcode::IdxDelete => "IdxDelete",
+            Opcode::NotExists => "NotExists",
+            Opcode::NoConflict => "NoConflict",
+            Opcode::RowData => "RowData",
+            Opcode::HaltError => "HaltError",
+            Opcode::SetCookie => "SetCookie",
+            Opcode::CreateBtree => "CreateBtree",
+            Opcode::DestroyBtree => "DestroyBtree",
+            Opcode::ClearBtree => "ClearBtree",
+            Opcode::CountChange => "CountChange",
             Opcode::SorterInsert => "SorterInsert",
             Opcode::SorterSort => "SorterSort",
             Opcode::SorterNext => "SorterNext",
@@ -335,6 +417,8 @@ pub enum Operand {
     Arithmetic(BinaryOp),
     /// A column count.
     Count(u32),
+    /// The affinity of each column of a record, in column order.
+    Affinities(Vec<Affinity>),
 }
 
 /// One instruction.
@@ -466,16 +550,50 @@ mod tests {
         assert!(!Opcode::ResultRow.jumps());
     }
 
-    /// Nothing in the read-only engine writes, and the opcode set says so.
+    /// Every opcode that touches the database declares that it writes, and no
+    /// opcode that only reads does.
+    ///
+    /// The list is spelled out rather than derived, because the whole value of
+    /// `readonly` is that it is checked against something independent of the
+    /// compiler that set it.
     #[test]
-    fn no_opcode_writes() {
+    fn the_writing_opcodes_declare_themselves() {
+        for opcode in [
+            Opcode::OpenWrite,
+            Opcode::OpenWriteIndex,
+            Opcode::InsertRow,
+            Opcode::DeleteRow,
+            Opcode::IdxInsert,
+            Opcode::IdxDelete,
+            Opcode::SetCookie,
+            Opcode::CreateBtree,
+            Opcode::DestroyBtree,
+            Opcode::ClearBtree,
+        ] {
+            assert!(
+                opcode.writes(),
+                "{} does not declare its writes",
+                opcode.name()
+            );
+        }
         for opcode in [
             Opcode::Init,
             Opcode::Column,
             Opcode::ResultRow,
             Opcode::SorterInsert,
+            Opcode::OpenRead,
+            Opcode::NewRowid,
+            Opcode::MakeRecord,
+            Opcode::RowData,
+            Opcode::NotExists,
+            Opcode::NoConflict,
+            Opcode::CountChange,
         ] {
-            assert!(!opcode.writes());
+            assert!(
+                !opcode.writes(),
+                "{} claims a write it does not make",
+                opcode.name()
+            );
         }
     }
 }

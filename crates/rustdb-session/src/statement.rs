@@ -6,6 +6,12 @@
 //! which is `prepare_v2` behaviour - and one that cannot be recompiled reports
 //! the failure rather than running against a shape that has changed.
 //!
+//! The second invariant is that a statement owns a transaction level for
+//! exactly as long as it is running. It opens one before its first step and
+//! closes it when it finishes, fails, is reset, or is dropped - so a write that
+//! stops half-way through a RETURNING loop is undone by the level it opened
+//! rather than by whatever the next statement happens to do.
+//!
 //! Prepare is the whole front end in one function: lex, parse, bind against the
 //! catalog snapshot, plan, compile, and verify. Nothing between those steps
 //! touches the file, so a statement that cannot be prepared costs no I/O.
@@ -14,13 +20,16 @@ use std::sync::Arc;
 
 use rustdb_base::{error, DbResult};
 use rustdb_sql::bind::{AllowAll, Authorizer, Binder, BoundStatement};
+use rustdb_sql::directive::Directive;
 use rustdb_sql::parser::parse_next_statement;
 use rustdb_value::Value;
+use rustdb_vm::compile_dml::{CONFLICT_FAIL, CONFLICT_ROLLBACK};
 use rustdb_vm::machine::{Machine, MachineState, StepOutcome};
 use rustdb_vm::program::{Program, ProgramDependencies};
-use rustdb_vm::{compile, verify, verify_operands};
+use rustdb_vm::{compile, compile_dml, verify, verify_operands};
 
-use crate::connection::Connection;
+use crate::connection::{Access, Connection, Outcome};
+use crate::execute;
 
 /// What a statement reports about one of its result columns.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,13 +42,27 @@ pub struct ColumnMetadata {
     pub declared_type: Vec<u8>,
 }
 
+/// What a prepared statement turned out to be.
+enum Body {
+    /// A compiled program the machine runs.
+    Program,
+    /// A statement the session carries out itself.
+    Directive(Box<Directive>),
+}
+
 /// A prepared statement.
 pub struct Statement<'connection> {
     connection: &'connection Connection,
     program: Arc<Program>,
     machine: Machine,
+    body: Body,
     sql: Vec<u8>,
     columns: Vec<ColumnMetadata>,
+    rows: Vec<Vec<Value<'static>>>,
+    row: usize,
+    current: Vec<Value<'static>>,
+    access: Access,
+    open: bool,
     finished: bool,
 }
 
@@ -62,8 +85,18 @@ impl<'connection> Statement<'connection> {
         sql: &[u8],
         authorizer: &dyn Authorizer,
     ) -> DbResult<(Statement<'connection>, usize)> {
-        let (program, consumed, statement_sql) = compile_sql(connection, sql, authorizer)?;
-        let columns = program
+        let compiled = compile_sql(connection, sql, authorizer)?;
+        let statement = Statement::from_compiled(connection, compiled.clone());
+        Ok((statement, compiled.consumed))
+    }
+
+    /// Builds a statement around a compiled program or directive.
+    fn from_compiled(
+        connection: &'connection Connection,
+        compiled: Compiled,
+    ) -> Statement<'connection> {
+        let columns = compiled
+            .program
             .result_columns
             .iter()
             .map(|column| ColumnMetadata {
@@ -73,21 +106,29 @@ impl<'connection> Statement<'connection> {
             })
             .collect();
         let machine = Machine::new(
-            program.clone(),
+            compiled.program.clone(),
             connection.interrupt_flag(),
             connection.limits().clone(),
         );
-        Ok((
-            Statement {
-                connection,
-                program,
-                machine,
-                sql: statement_sql,
-                columns,
-                finished: false,
-            },
-            consumed,
-        ))
+        let access = if compiled.program.readonly {
+            Access::Read
+        } else {
+            Access::Write
+        };
+        Statement {
+            connection,
+            program: compiled.program,
+            machine,
+            body: compiled.body,
+            sql: compiled.sql,
+            columns,
+            rows: Vec::new(),
+            row: 0,
+            current: Vec::new(),
+            access,
+            open: false,
+            finished: false,
+        }
     }
 
     /// Returns the statement's result columns.
@@ -112,7 +153,7 @@ impl<'connection> Statement<'connection> {
 
     /// Returns whether the statement writes.
     pub fn is_readonly(&self) -> bool {
-        self.program.readonly
+        self.program.readonly && matches!(self.body, Body::Program)
     }
 
     /// Binds a value to a one-based parameter index.
@@ -130,37 +171,106 @@ impl<'connection> Statement<'connection> {
         if self.finished {
             return Ok(false);
         }
-        if self.machine.state() == MachineState::Prepared {
-            self.check_schema()?;
+        match &self.body {
+            Body::Program => self.step_program(),
+            Body::Directive(_) => self.step_directive(),
+        }
+    }
+
+    /// Steps a compiled program.
+    fn step_program(&mut self) -> DbResult<bool> {
+        if !self.open {
+            if self.machine.state() == MachineState::Prepared {
+                self.check_schema()?;
+            }
+            self.connection.begin_statement(self.access)?;
+            self.open = true;
         }
         let outcome = self
             .connection
-            .with_reader(|pager| self.machine.step(pager));
+            .with_pager(|pager| self.machine.step(pager))?;
         match outcome {
-            Ok(StepOutcome::Row) => Ok(true),
+            Ok(StepOutcome::Row) => {
+                self.current = self.machine.row().to_vec();
+                Ok(true)
+            }
             Ok(StepOutcome::Done) => {
-                self.finished = true;
+                self.publish_counters();
+                self.close(Outcome::Done)?;
                 Ok(false)
             }
             Err(failure) => {
-                self.finished = true;
+                let ending = ending_for(&failure, self.machine.conflict_action());
+                if ending == Outcome::Fail {
+                    self.publish_counters();
+                }
+                let closed = self.close(ending);
+                closed?;
                 Err(failure)
             }
         }
     }
 
+    /// Runs a directive, which produces all of its rows at once.
+    fn step_directive(&mut self) -> DbResult<bool> {
+        if !self.open {
+            self.check_schema()?;
+            let Body::Directive(directive) = &self.body else {
+                return Err(error::misuse("not a directive"));
+            };
+            let directive = directive.clone();
+            let sql = self.sql.clone();
+            self.rows = execute::run_directive(self.connection, &directive, &sql)?;
+            self.row = 0;
+            self.open = true;
+        }
+        match self.rows.get(self.row) {
+            Some(row) => {
+                self.current = row.clone();
+                self.row = self.row.saturating_add(1);
+                Ok(true)
+            }
+            None => {
+                self.finished = true;
+                self.open = false;
+                Ok(false)
+            }
+        }
+    }
+
+    /// Folds the machine's counters into the connection's.
+    fn publish_counters(&mut self) {
+        let changes = self.machine.changes();
+        let rowid = self.machine.last_insert_rowid();
+        let _ = self.connection.with_state(|state| {
+            for _ in 0..changes {
+                state.transaction.record_change();
+            }
+            if rowid != 0 {
+                state.transaction.record_insert_rowid(rowid);
+            }
+        });
+    }
+
+    /// Closes the statement's transaction level.
+    fn close(&mut self, outcome: Outcome) -> DbResult<()> {
+        if !self.open {
+            self.finished = true;
+            return Ok(());
+        }
+        self.open = false;
+        self.finished = true;
+        self.connection.end_statement(self.access, outcome)
+    }
+
     /// Returns the current row.
     pub fn row(&self) -> &[Value<'static>] {
-        self.machine.row()
+        &self.current
     }
 
     /// Returns one column of the current row.
     pub fn value(&self, index: usize) -> Value<'static> {
-        self.machine
-            .row()
-            .get(index)
-            .cloned()
-            .unwrap_or(Value::Null)
+        self.current.get(index).cloned().unwrap_or(Value::Null)
     }
 
     /// Returns how many instructions the statement has run.
@@ -169,17 +279,36 @@ impl<'connection> Statement<'connection> {
     }
 
     /// Resets the statement so it can run again, keeping its bindings.
+    ///
+    /// A statement that is reset part-way through has not finished, so what it
+    /// wrote is undone: SQLite treats an abandoned statement as an aborted one,
+    /// and keeping half a statement's rows would be the one outcome no
+    /// conflict algorithm allows.
     pub fn reset(&mut self) -> DbResult<()> {
+        let closed = if self.open {
+            self.close(Outcome::Abort)
+        } else {
+            Ok(())
+        };
         self.machine.reset();
+        self.rows.clear();
+        self.row = 0;
+        self.current.clear();
         self.finished = false;
-        Ok(())
+        self.open = false;
+        closed
     }
 
     /// Finalises the statement, releasing everything it holds.
     pub fn finalize(mut self) -> DbResult<()> {
+        let closed = if self.open {
+            self.close(Outcome::Abort)
+        } else {
+            Ok(())
+        };
         self.machine.reset();
         self.finished = true;
-        Ok(())
+        closed
     }
 
     /// Recompiles the statement when the schema has moved under it.
@@ -204,8 +333,10 @@ impl<'connection> Statement<'connection> {
         if !stale {
             return Ok(());
         }
-        let (program, _, _) = compile_sql(self.connection, &self.sql, &AllowAll)?;
-        self.columns = program
+        let sql = self.sql.clone();
+        let compiled = compile_sql(self.connection, &sql, &AllowAll)?;
+        self.columns = compiled
+            .program
             .result_columns
             .iter()
             .map(|column| ColumnMetadata {
@@ -215,12 +346,65 @@ impl<'connection> Statement<'connection> {
             })
             .collect();
         self.machine = Machine::new(
-            program.clone(),
+            compiled.program.clone(),
             self.connection.interrupt_flag(),
             self.connection.limits().clone(),
         );
-        self.program = program;
+        self.access = if compiled.program.readonly {
+            Access::Read
+        } else {
+            Access::Write
+        };
+        self.program = compiled.program;
+        self.body = compiled.body;
         Ok(())
+    }
+}
+
+impl Drop for Statement<'_> {
+    /// Undoes a statement that was dropped part-way through.
+    fn drop(&mut self) {
+        if self.open {
+            self.open = false;
+            let _ = self.connection.end_statement(self.access, Outcome::Abort);
+        }
+    }
+}
+
+/// Returns what a failing statement's level does.
+///
+/// The conflict algorithm the failing constraint carried decides it: ABORT
+/// undoes the statement, FAIL keeps the rows it had already written, and
+/// ROLLBACK undoes the whole transaction. Any other failure - an I/O error, a
+/// corrupt page, an interrupt - is an abort, because a statement that could
+/// not finish must not leave half its rows behind.
+fn ending_for(failure: &rustdb_base::DbError, conflict: Option<i32>) -> Outcome {
+    if failure.transaction_rolled_back() {
+        return Outcome::Rollback;
+    }
+    match conflict {
+        Some(CONFLICT_ROLLBACK) => Outcome::Rollback,
+        Some(CONFLICT_FAIL) => Outcome::Fail,
+        _ => Outcome::Abort,
+    }
+}
+
+/// One compiled statement.
+#[derive(Clone)]
+struct Compiled {
+    program: Arc<Program>,
+    body: Body,
+    sql: Vec<u8>,
+    consumed: usize,
+}
+
+impl Clone for Body {
+    /// Clones a body, which a recompile needs.
+    fn clone(&self) -> Body {
+        match self {
+            Body::Program => Body::Program,
+            Body::Directive(directive) => Body::Directive(directive.clone()),
+        }
     }
 }
 
@@ -229,7 +413,7 @@ fn compile_sql(
     connection: &Connection,
     sql: &[u8],
     authorizer: &dyn Authorizer,
-) -> DbResult<(Arc<Program>, usize, Vec<u8>)> {
+) -> DbResult<Compiled> {
     let limits = connection.limits().clone();
     let parsed = parse_next_statement(sql, 0, &limits)?;
     let catalog = connection.catalog()?;
@@ -240,13 +424,29 @@ fn compile_sql(
         generation: binder.dependencies().generation,
     };
     let statement_sql = parsed.span.slice(sql).to_vec();
-    let program = match bound {
+    let parameters = parsed.parameters.count;
+    let (program, body) = match bound {
         BoundStatement::Select(select) => {
-            let (program, _) =
-                compile::compile_select(*select, dependencies, parsed.parameters.count)?;
-            program
+            let (program, _) = compile::compile_select(*select, dependencies, parameters)?;
+            (program, Body::Program)
         }
-        BoundStatement::Empty => empty_program(dependencies),
+        BoundStatement::Insert(insert) => (
+            compile_dml::compile_insert(&insert, dependencies, parameters)?,
+            Body::Program,
+        ),
+        BoundStatement::Update(update) => (
+            compile_dml::compile_update(&update, dependencies, parameters)?,
+            Body::Program,
+        ),
+        BoundStatement::Delete(delete) => (
+            compile_dml::compile_delete(&delete, dependencies, parameters)?,
+            Body::Program,
+        ),
+        BoundStatement::Directive(directive) => {
+            let program = directive_program(dependencies, &directive);
+            (program, Body::Directive(directive))
+        }
+        BoundStatement::Empty => (empty_program(dependencies), Body::Program),
     };
     let problems = verify(&program);
     if !problems.is_empty() {
@@ -260,7 +460,41 @@ fn compile_sql(
             "the compiler produced a program with bad operands: {operands:?}"
         )));
     }
-    Ok((Arc::new(program), parsed.consumed, statement_sql))
+    Ok(Compiled {
+        program: Arc::new(program),
+        body,
+        sql: statement_sql,
+        consumed: parsed.consumed,
+    })
+}
+
+/// Returns the placeholder program a directive carries.
+///
+/// A directive runs no bytecode, but it still has result columns - a `PRAGMA`
+/// answers with one - and the rest of the statement surface reads them off the
+/// program. Giving it an empty program keeps one path rather than two.
+fn directive_program(dependencies: ProgramDependencies, directive: &Directive) -> Program {
+    let mut program = empty_program(dependencies);
+    program.readonly = matches!(
+        directive,
+        Directive::Begin(_)
+            | Directive::Commit
+            | Directive::Rollback { .. }
+            | Directive::Savepoint(_)
+            | Directive::Release(_)
+            | Directive::Pragma { .. }
+    );
+    if let Directive::Pragma { name, .. } = directive {
+        program.result_columns = execute::pragma_columns(name)
+            .into_iter()
+            .map(|name| rustdb_vm::program::ResultColumn {
+                name,
+                origin: None,
+                declared_type: Vec::new(),
+            })
+            .collect();
+    }
+    program
 }
 
 /// Returns the program an empty statement compiles to.

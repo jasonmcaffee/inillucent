@@ -10,3 +10,4 @@ rustdb-base = { workspace = true }
 rustdb-value = { workspace = true }
 rustdb-catalog = { workspace = true }
 rustdb-session = { workspace = true }
+rustdb-storage = { workspace = true }

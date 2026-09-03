@@ -16,6 +16,7 @@
 //! Module map:
 //!
 //! - [`load`] - reading `sqlite_schema` and building the snapshot;
+//! - [`ddl`] - writing `sqlite_schema`, root pages, and the cookie;
 //! - [`snapshot`] - the snapshot itself and the view the binder sees.
 
 #![forbid(unsafe_code)]
@@ -36,9 +37,14 @@
     )
 )]
 
+pub mod ddl;
 pub mod load;
 pub mod snapshot;
 
+pub use ddl::{
+    allocate_index_root, allocate_table_root, automatic_index_name, bump_schema_cookie,
+    canonical_sql, delete_schema_rows, free_root, insert_schema_row, SchemaRow,
+};
 pub use load::{load_database_catalog, table_from_create_sql};
 pub use snapshot::{CatalogSnapshot, DatabaseCatalog};
 

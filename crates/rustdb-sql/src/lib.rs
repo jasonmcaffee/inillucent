@@ -46,6 +46,8 @@ pub mod ast;
 pub mod bind;
 pub mod catalog_view;
 pub mod diagnostic;
+pub mod directive;
+pub mod dml;
 pub mod function;
 pub mod keyword;
 pub mod lexer;

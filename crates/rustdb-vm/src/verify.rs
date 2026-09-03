@@ -157,7 +157,25 @@ fn check_operand_ranges(program: &Program, address: usize, problems: &mut Vec<Ve
         Opcode::AggFinal => registers.push((instruction.p2, "destination")),
         Opcode::SorterInsert => blocks.push((instruction.p2, instruction.p3)),
         Opcode::SorterColumn => registers.push((instruction.p3, "destination")),
-        Opcode::DistinctCheck => blocks.push((instruction.p3, i32::from(instruction.p5))),
+        Opcode::DistinctCheck | Opcode::NoConflict => {
+            blocks.push((instruction.p3, i32::from(instruction.p5)))
+        }
+        Opcode::NewRowid | Opcode::RowData | Opcode::CreateBtree => {
+            registers.push((instruction.p2, "destination"))
+        }
+        Opcode::MakeRecord => {
+            blocks.push((instruction.p1, instruction.p2));
+            registers.push((instruction.p3, "destination"));
+        }
+        Opcode::InsertRow => {
+            registers.push((instruction.p2, "record"));
+            registers.push((instruction.p3, "rowid"));
+        }
+        Opcode::IdxInsert | Opcode::IdxDelete => registers.push((instruction.p2, "record")),
+        Opcode::NotExists => registers.push((instruction.p3, "rowid")),
+        Opcode::DestroyBtree | Opcode::ClearBtree | Opcode::CountChange => {
+            registers.push((instruction.p1, "operand"))
+        }
         _ => {}
     }
     let count = program.register_count as i32;
@@ -207,8 +225,8 @@ fn check_cursors(program: &Program, problems: &mut Vec<VerifyError>) {
     let mut kinds: Vec<Option<CursorKind>> = vec![None; program.cursor_count as usize];
     for (address, instruction) in program.instructions.iter().enumerate() {
         let kind = match instruction.opcode {
-            Opcode::OpenRead => Some(CursorKind::Table),
-            Opcode::OpenIndex => Some(CursorKind::Index),
+            Opcode::OpenRead | Opcode::OpenWrite => Some(CursorKind::Table),
+            Opcode::OpenIndex | Opcode::OpenWriteIndex => Some(CursorKind::Index),
             _ => None,
         };
         let Some(kind) = kind else {
@@ -231,10 +249,18 @@ fn check_cursors(program: &Program, problems: &mut Vec<VerifyError>) {
     }
     for (address, instruction) in program.instructions.iter().enumerate() {
         let expected = match instruction.opcode {
-            Opcode::SeekRowid | Opcode::Column => Some(CursorKind::Table),
-            Opcode::IdxRowid | Opcode::IdxGe | Opcode::IdxGt | Opcode::IdxColumn => {
-                Some(CursorKind::Index)
-            }
+            Opcode::SeekRowid
+            | Opcode::Column
+            | Opcode::NewRowid
+            | Opcode::InsertRow
+            | Opcode::NotExists => Some(CursorKind::Table),
+            Opcode::IdxRowid
+            | Opcode::IdxGe
+            | Opcode::IdxGt
+            | Opcode::IdxColumn
+            | Opcode::IdxInsert
+            | Opcode::IdxDelete
+            | Opcode::NoConflict => Some(CursorKind::Index),
             _ => None,
         };
         let Some(expected) = expected else {
@@ -417,6 +443,8 @@ fn writes_of(program: &Program, address: usize) -> Vec<u32> {
         Opcode::Function | Opcode::Pattern => single(instruction.p3),
         Opcode::AggFinal => single(instruction.p2),
         Opcode::Gosub => single(instruction.p1),
+        Opcode::NewRowid | Opcode::RowData | Opcode::CreateBtree => single(instruction.p2),
+        Opcode::MakeRecord => single(instruction.p3),
         _ => Vec::new(),
     }
 }
@@ -466,6 +494,14 @@ fn reads_of(program: &Program, address: usize) -> Vec<u32> {
             let mut reads = vec![instruction.p1.max(0) as u32];
             reads.extend(block(instruction.p2, instruction.p5 as i32));
             reads
+        }
+        Opcode::MakeRecord => block(instruction.p1, instruction.p2),
+        Opcode::InsertRow => vec![instruction.p2.max(0) as u32, instruction.p3.max(0) as u32],
+        Opcode::IdxInsert | Opcode::IdxDelete => vec![instruction.p2.max(0) as u32],
+        Opcode::NotExists => vec![instruction.p3.max(0) as u32],
+        Opcode::NoConflict => block(instruction.p3, instruction.p5 as i32),
+        Opcode::DestroyBtree | Opcode::ClearBtree | Opcode::CountChange => {
+            vec![instruction.p1.max(0) as u32]
         }
         Opcode::SorterInsert => block(instruction.p2, instruction.p3),
         Opcode::DistinctCheck => block(instruction.p3, instruction.p5 as i32),

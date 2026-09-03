@@ -536,22 +536,41 @@ pub struct Dependencies {
 pub enum BoundStatement {
     /// A SELECT or VALUES.
     Select(Box<BoundSelect>),
+    /// An INSERT or REPLACE.
+    Insert(Box<crate::dml::BoundInsert>),
+    /// An UPDATE.
+    Update(Box<crate::dml::BoundUpdate>),
+    /// A DELETE.
+    Delete(Box<crate::dml::BoundDelete>),
+    /// A statement the session executes itself rather than compiling.
+    Directive(Box<crate::directive::Directive>),
     /// A statement that compiles to no program.
     Empty,
 }
 
 /// The binder's working state for one statement.
 pub struct Binder<'a> {
-    catalog: &'a dyn CatalogView,
-    ast: &'a Ast,
-    authorizer: &'a dyn Authorizer,
-    sources: Vec<BoundSource>,
+    pub(crate) catalog: &'a dyn CatalogView,
+    pub(crate) ast: &'a Ast,
+    pub(crate) authorizer: &'a dyn Authorizer,
+    pub(crate) sources: Vec<BoundSource>,
     aggregates: Vec<BoundAggregate>,
     result_aliases: Vec<(Vec<u8>, BoundExpr)>,
     dependencies: Dependencies,
     inside_aggregate: bool,
     allow_aggregates: bool,
+    /// The table `excluded` names while an upsert's `DO UPDATE` is bound.
+    pub(crate) excluded: Option<crate::catalog_view::TableInfo>,
 }
+
+/// The source number a column of an upsert's `excluded` row carries.
+///
+/// It is not a FROM term: `excluded` is the row the INSERT was about to write,
+/// which lives in registers rather than under a cursor. Giving it a number no
+/// real source can have means the compiler must substitute it - and a compiler
+/// that forgot to would try to open a cursor two billion and be refused by the
+/// verifier, rather than reading the wrong row.
+pub const EXCLUDED_SOURCE: usize = usize::MAX;
 
 impl<'a> Binder<'a> {
     /// Returns a binder over one catalog snapshot and one parse.
@@ -573,6 +592,7 @@ impl<'a> Binder<'a> {
             },
             inside_aggregate: false,
             allow_aggregates: false,
+            excluded: None,
         }
     }
 
@@ -592,11 +612,23 @@ impl<'a> Binder<'a> {
                 let bound = self.bind_select(*select)?;
                 Ok(BoundStatement::Select(Box::new(bound)))
             }
+            ast::Statement::Insert(insert) => {
+                let bound = self.bind_insert(insert)?;
+                Ok(BoundStatement::Insert(Box::new(bound)))
+            }
+            ast::Statement::Update(update) => {
+                let bound = self.bind_update(update)?;
+                Ok(BoundStatement::Update(Box::new(bound)))
+            }
+            ast::Statement::Delete(delete) => {
+                let bound = self.bind_delete(delete)?;
+                Ok(BoundStatement::Delete(Box::new(bound)))
+            }
             ast::Statement::Explain { .. } => Err(unsupported("EXPLAIN", Span::default())),
-            _ => Err(unsupported(
-                "this statement is not implemented in the read-only engine",
-                Span::default(),
-            )),
+            other => {
+                let directive = self.bind_directive(other)?;
+                Ok(BoundStatement::Directive(Box::new(directive)))
+            }
         }
     }
 
@@ -1191,6 +1223,23 @@ impl<'a> Binder<'a> {
         })
     }
 
+    /// Binds a result-column list against the current sources.
+    ///
+    /// `RETURNING` is a result-column list over the row a DML statement wrote,
+    /// so it is bound by the same code that binds a `SELECT` list rather than
+    /// by a second implementation that would have to be kept in step with it.
+    pub fn bind_result_columns_public(
+        &mut self,
+        columns: &[ast::ResultColumn],
+    ) -> Result<Vec<BoundResultColumn>, ParseError> {
+        self.bind_result_columns(columns)
+    }
+
+    /// Records that the statement depends on a database's schema.
+    pub(crate) fn record_write_dependency(&mut self, database: usize) {
+        self.record_dependency(database);
+    }
+
     /// Binds one expression.
     pub fn bind_expr(&mut self, id: ExprId) -> Result<BoundExpr, ParseError> {
         let span = self.ast.expr_span(id);
@@ -1403,6 +1452,42 @@ impl<'a> Binder<'a> {
         }
     }
 
+    /// Resolves `excluded.column` inside an upsert's `DO UPDATE`.
+    ///
+    /// `excluded` is only in scope there, so a query that uses the name
+    /// anywhere else gets the ordinary "no such table" answer rather than a
+    /// row that came from nowhere.
+    fn bind_excluded_column(&mut self, folded: &[u8], span: Span) -> Result<BoundExpr, ParseError> {
+        let Some(table) = self.excluded.clone() else {
+            return Err(no_such_table(b"excluded", span));
+        };
+        if let Some(position) = table.column_position(folded) {
+            if table.rowid_alias == Some(position) {
+                return Ok(BoundExpr::Rowid {
+                    source: EXCLUDED_SOURCE,
+                });
+            }
+            let Some(info) = table.column(position) else {
+                return Err(no_such_column(folded, span));
+            };
+            let collation =
+                Collation::from_name(core::str::from_utf8(&info.collation).unwrap_or("BINARY"))
+                    .unwrap_or(Collation::Binary);
+            return Ok(BoundExpr::Column {
+                source: EXCLUDED_SOURCE,
+                column: position,
+                affinity: info.affinity,
+                collation,
+            });
+        }
+        if table.is_rowid_name(folded) {
+            return Ok(BoundExpr::Rowid {
+                source: EXCLUDED_SOURCE,
+            });
+        }
+        Err(no_such_column(folded, span))
+    }
+
     /// Resolves a column reference against the scope.
     fn bind_column_reference(
         &mut self,
@@ -1414,6 +1499,9 @@ impl<'a> Binder<'a> {
         let folded = self.ast.folded(column).to_vec();
         let table_folded = table.map(|id| self.ast.folded(id).to_vec());
         let database_folded = database.map(|id| self.ast.folded(id).to_vec());
+        if table_folded.as_deref() == Some(b"excluded".as_slice()) {
+            return self.bind_excluded_column(&folded, span);
+        }
         let mut found: Option<(usize, u16)> = None;
         let mut rowid_of: Option<usize> = None;
         for (position, source) in self.sources.iter().enumerate() {
@@ -1715,13 +1803,30 @@ fn integer_literal(text: &[u8]) -> BoundExpr {
     BoundExpr::Real(parsed.value)
 }
 
+/// Returns a refusal whose text is computed rather than a fixed phrase.
+///
+/// `Unsupported` carries a `&'static str` because most refusals are one of a
+/// closed set of phrases and interning them keeps the error type cheap. A
+/// refusal that has to name a column or count something cannot be one of
+/// those, so it is reported as an unexpected-input failure carrying the whole
+/// sentence, which is the shape SQLite's own messages take.
+pub(crate) fn refused(detail: impl Into<String>, span: Span) -> ParseError {
+    ParseError::new(
+        ParseErrorKind::Unexpected {
+            found: detail.into(),
+            expected: Vec::new(),
+        },
+        span,
+    )
+}
+
 /// Returns an "unsupported construct" failure.
-fn unsupported(what: &'static str, span: Span) -> ParseError {
+pub(crate) fn unsupported(what: &'static str, span: Span) -> ParseError {
     ParseError::new(ParseErrorKind::Unsupported(what), span)
 }
 
 /// Returns a "no such table" failure in SQLite's wording.
-fn no_such_table(name: &[u8], span: Span) -> ParseError {
+pub(crate) fn no_such_table(name: &[u8], span: Span) -> ParseError {
     ParseError::new(
         ParseErrorKind::Unexpected {
             found: format!("no such table: {}", String::from_utf8_lossy(name)),
@@ -1732,7 +1837,7 @@ fn no_such_table(name: &[u8], span: Span) -> ParseError {
 }
 
 /// Returns a "no such column" failure in SQLite's wording.
-fn no_such_column(name: &[u8], span: Span) -> ParseError {
+pub(crate) fn no_such_column(name: &[u8], span: Span) -> ParseError {
     ParseError::new(
         ParseErrorKind::Unexpected {
             found: format!("no such column: {}", String::from_utf8_lossy(name)),

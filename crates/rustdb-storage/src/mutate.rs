@@ -1893,3 +1893,86 @@ mod tests {
         }
     }
 }
+
+/// Fills an index B-tree with an entry for every row of a table.
+///
+/// The values come straight out of each row's record, without affinity being
+/// applied again: a stored value has already had its column's affinity applied
+/// once, and applying it a second time is not idempotent for a text column
+/// holding a number. The rowid alias is the exception - it is not in the
+/// record at all, so it is read from the row's key.
+///
+/// Entries are appended in table order rather than inserted, which would be
+/// wrong for a general index; they are sorted first, so the append is into a
+/// tree that is already in key order. The sort is what makes the backfill of a
+/// large table one pass over the data rather than one descent per row.
+pub fn build_index(
+    pager: &mut Pager,
+    table_root: u32,
+    index_root: u32,
+    columns: &[u16],
+    key: &KeyInfo,
+    rowid_alias: Option<u16>,
+) -> DbResult<()> {
+    let limits = Limits::default();
+    let table = PageId::from_persisted(table_root)?;
+    let index = PageId::from_persisted(index_root)?;
+    let encoding = pager.text_encoding();
+    let format = pager.header().schema_format.max(1);
+    let mut entries: Vec<Vec<u8>> = Vec::new();
+    let mut cursor = crate::cursor::BTreeCursor::table(table);
+    let mut more = cursor.first(pager)?;
+    while more {
+        let rowid = cursor.rowid()?;
+        let values = cursor.record_values(pager, &limits)?;
+        let mut fields: Vec<rustdb_value::Value<'static>> = Vec::with_capacity(columns.len() + 1);
+        for column in columns {
+            if rowid_alias == Some(*column) {
+                fields.push(rustdb_value::Value::Integer(rowid));
+                continue;
+            }
+            fields.push(
+                values
+                    .get(*column as usize)
+                    .cloned()
+                    .unwrap_or(rustdb_value::Value::Null),
+            );
+        }
+        fields.push(rustdb_value::Value::Integer(rowid));
+        entries.push(record::encode_record(&fields, encoding, format)?);
+        more = cursor.next(pager)?;
+    }
+    let mut failure = None;
+    entries.sort_by(|left, right| {
+        if failure.is_some() {
+            return std::cmp::Ordering::Equal;
+        }
+        match compare_encoded(left, right, key, encoding, &limits) {
+            Ok(ordering) => ordering,
+            Err(error) => {
+                failure = Some(error);
+                std::cmp::Ordering::Equal
+            }
+        }
+    });
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    for entry in entries {
+        append_entry(pager, index, &entry)?;
+    }
+    Ok(())
+}
+
+/// Compares two encoded index entries the way the index orders them.
+fn compare_encoded(
+    left: &[u8],
+    right: &[u8],
+    key: &KeyInfo,
+    encoding: TextEncoding,
+    limits: &Limits,
+) -> DbResult<std::cmp::Ordering> {
+    let left = RecordRef::parse_with_limits(left, encoding, limits)?;
+    let right = RecordRef::parse_with_limits(right, encoding, limits)?;
+    record::compare_records(&left, &right, key)
+}

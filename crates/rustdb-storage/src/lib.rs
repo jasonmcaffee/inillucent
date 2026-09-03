@@ -23,6 +23,7 @@
 //! - [`btree`] - the four page kinds, their cells, and page validation;
 //! - [`overflow`] - reading a payload that did not fit on its page;
 //! - [`cursor`] - seeks and scans over a table or an index;
+//! - [`journal`] - the hook that makes a commit crash-atomic;
 //! - [`schema`] - reading `sqlite_schema` for root pages;
 //! - [`check`] - the raw quick and integrity checks.
 
@@ -51,6 +52,7 @@ pub mod check;
 pub mod cursor;
 pub mod edit;
 pub mod header;
+pub mod journal;
 pub mod mutate;
 pub mod overflow;
 pub mod pager;
@@ -64,6 +66,7 @@ pub use check::{CheckLevel, CheckReport};
 pub use cursor::{BTreeCursor, CursorState, SavedPosition, SeekBias, TreeKind};
 pub use edit::{encode_cell, rewrite_page};
 pub use header::{DatabaseHeader, VacuumMode};
+pub use journal::{Journal, JournalStats};
 pub use pager::{NewDatabase, Pager, PagerCounters, PagerOptions, PagerState};
 pub use schema::{SchemaKind, SchemaObject};
 
