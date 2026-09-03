@@ -76,7 +76,7 @@ pub fn run_directive(
         Directive::Reindex { .. } => {
             run_write(connection, |connection| reindex(connection, directive))
         }
-        Directive::Vacuum { .. } => vacuum(connection),
+        Directive::Vacuum { .. } => vacuum(connection, directive),
         Directive::CreateView { .. } => run_write(connection, |connection| {
             create_view(connection, directive, source)
         }),
@@ -440,27 +440,195 @@ fn reindex(connection: &Connection, directive: &Directive) -> DbResult<Directive
 /// rather than reported as having done something it did not do. A `VACUUM` that
 /// silently no-ops is worse than one that says it cannot: the first leaves a
 /// fragmented file and a person who believes otherwise.
-fn vacuum(connection: &Connection) -> DbResult<DirectiveRows> {
-    let auto = connection.with_state(|state| state.pager.header().vacuum_mode)?;
-    if auto != rustdb_storage::header::VacuumMode::Auto {
-        return Err(misuse(
-            "VACUUM on a database that is not in auto_vacuum mode is not implemented yet",
-        ));
+fn vacuum(connection: &Connection, directive: &Directive) -> DbResult<DirectiveRows> {
+    let Directive::Vacuum { into, .. } = directive else {
+        return Err(misuse("not a VACUUM"));
+    };
+    if !connection.autocommit() {
+        // `SQLITE_ERROR`, not misuse: the reference reports this as an ordinary
+        // statement error, and an application that switches on the primary code
+        // would see a different one.
+        return Err(
+            rustdb_base::DbError::primary(rustdb_base::PrimaryCode::Error)
+                .with_message("cannot VACUUM from within a transaction"),
+        );
     }
+    // One statement level for the whole thing. The rebuild reads every page of
+    // this database, so it needs the read transaction held across the copy; and
+    // holding the write lock for the duration is what stops another connection
+    // changing the file between the rebuild and the copy back.
     connection.begin_statement(Access::Schema)?;
-    let outcome = connection.with_state(|state| {
-        let pages = state.pager.page_count().saturating_add(1);
-        rustdb_storage::vacuum::incremental_vacuum(&mut state.pager, pages)
-    });
-    let ending = if matches!(outcome, Ok(Ok(_))) {
+    let outcome = match into {
+        Some(path) => vacuum_into(connection, path),
+        None => vacuum_in_place(connection),
+    };
+    let ending = if outcome.is_ok() {
         Outcome::Done
     } else {
         Outcome::Abort
     };
     let closed = connection.end_statement(Access::Schema, ending);
-    outcome??;
+    outcome?;
     closed?;
     Ok(Vec::new())
+}
+
+/// Runs `VACUUM INTO`: writes a rebuilt copy and leaves this database alone.
+fn vacuum_into(connection: &Connection, path: &[u8]) -> DbResult<()> {
+    let name = String::from_utf8_lossy(path).into_owned();
+    let target = std::path::PathBuf::from(&name);
+    if target.exists() {
+        // SQLite refuses rather than overwriting, and so must this: the whole
+        // point of INTO is that nothing existing is touched.
+        return Err(misuse(format!("output file already exists: {name}")));
+    }
+    build_rebuild(connection, &target)
+}
+
+/// Runs `VACUUM`: rebuilds the database into a temporary file and copies it
+/// back.
+///
+/// The copy back happens inside this database's own write transaction, so it is
+/// journalled like any other write and a crash half way through leaves the
+/// database it started with. Building the new file first and then copying is
+/// what makes that possible: a rebuild in place would have to move every root
+/// page while statements were still compiled against them.
+fn vacuum_in_place(connection: &Connection) -> DbResult<()> {
+    let scratch = scratch_path(connection)?;
+    let _ = std::fs::remove_file(&scratch);
+    let outcome = (|| -> DbResult<()> {
+        build_rebuild(connection, &scratch)?;
+        copy_back(connection, &scratch)?;
+        // Inside the statement, while the pager can still be read: every root
+        // page in the file is new, and loading the catalog needs a read
+        // transaction. Refreshing after the statement closed left the snapshot
+        // pointing at the roots the rebuild had just replaced.
+        connection.refresh_catalog()
+    })();
+    // The temporary file is this statement's own, so it goes whether the
+    // rebuild worked or not.
+    let _ = std::fs::remove_file(&scratch);
+    let mut journal = scratch.clone().into_os_string();
+    journal.push("-journal");
+    let _ = std::fs::remove_file(std::path::PathBuf::from(journal));
+    outcome
+}
+
+/// Returns the path the rebuilt copy is built at, beside the database itself.
+///
+/// Beside it rather than in the system temporary directory, because the rebuild
+/// is as large as the database and the directory holding one is the only place
+/// known to have room for the other.
+fn scratch_path(connection: &Connection) -> DbResult<std::path::PathBuf> {
+    let path = connection.with_state(|state| state.pager.path().as_path().to_path_buf())?;
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!("-vacuum-{}", std::process::id()));
+    Ok(std::path::PathBuf::from(name))
+}
+
+/// Builds the rebuilt database at a path, with this database's geometry.
+fn build_rebuild(connection: &Connection, target: &std::path::Path) -> DbResult<()> {
+    let header = connection.with_state(|state| *state.pager.header())?;
+    let vfs = connection.vfs();
+    let path = rustdb_vfs::DbPath::new(target.to_path_buf());
+    let mut fresh = rustdb_storage::pager::Pager::create(
+        vfs.as_ref(),
+        &path,
+        rustdb_storage::pager::PagerOptions {
+            cache_bytes: 2 * 1024 * 1024,
+            database: rustdb_base::ids::DatabaseId(1),
+        },
+        rustdb_storage::pager::NewDatabase {
+            page_size: header.page_size,
+            reserved_bytes: header.reserved_bytes,
+            text_encoding: header.text_encoding,
+            vacuum_mode: header.vacuum_mode,
+        },
+    )?;
+    fresh.attach_journal(Box::new(rustdb_transaction::journal::RollbackJournal::new(
+        std::sync::Arc::clone(&vfs),
+        &path,
+        rustdb_transaction::journal::JournalOptions::default(),
+    )));
+    // A read transaction first, then the write: a pager straight out of
+    // `create` is in the Open state, and `begin_write` alone leaves it there as
+    // far as reads are concerned - the first page it was asked for came back as
+    // "get_page from the Open state".
+    fresh.begin_read()?;
+    fresh.begin_write()?;
+    let outcome = connection
+        .with_state(|state| rustdb_catalog::rebuild::rebuild_into(&mut state.pager, &mut fresh))?;
+    match outcome {
+        Ok(published) => {
+            fresh.commit()?;
+            fresh.close()?;
+            if let Some(rowid) = published {
+                connection.with_state(|state| state.transaction.record_insert_rowid(rowid))?;
+            }
+            Ok(())
+        }
+        Err(failure) => {
+            let _ = fresh.rollback();
+            let _ = fresh.close();
+            Err(failure)
+        }
+    }
+}
+
+/// Copies a rebuilt file over this database, page for page.
+fn copy_back(connection: &Connection, scratch: &std::path::Path) -> DbResult<()> {
+    let vfs = connection.vfs();
+    let path = rustdb_vfs::DbPath::new(scratch.to_path_buf());
+    let mut rebuilt = rustdb_storage::pager::Pager::open_read_only(
+        vfs.as_ref(),
+        &path,
+        rustdb_storage::pager::PagerOptions {
+            cache_bytes: 2 * 1024 * 1024,
+            database: rustdb_base::ids::DatabaseId(2),
+        },
+    )?;
+    rebuilt.begin_read()?;
+    let count = rebuilt.page_count();
+    let header = *rebuilt.header();
+    let mut pages: Vec<Vec<u8>> = Vec::with_capacity(count as usize);
+    for number in 1..=count {
+        let Some(page) = rustdb_base::ids::PageId::new(number) else {
+            continue;
+        };
+        pages.push(rebuilt.get_page(page)?.bytes().to_vec());
+    }
+    rebuilt.end_read()?;
+    rebuilt.close()?;
+
+    connection.with_state(|state| -> DbResult<()> {
+        // Grown first, so page 1's header is written over a file that is
+        // already the right length: shrinking afterwards is what frees the
+        // space the vacuum reclaimed.
+        let existing = state.pager.page_count();
+        if count > existing {
+            state.pager.set_page_count(count)?;
+        }
+        for (index, bytes) in pages.iter().enumerate() {
+            let number = index.saturating_add(1) as u32;
+            let Some(page) = rustdb_base::ids::PageId::new(number) else {
+                continue;
+            };
+            state.pager.edit_page(page, |raw| {
+                let take = raw.len().min(bytes.len());
+                if let (Some(destination), Some(rest)) = (raw.get_mut(..take), bytes.get(..take)) {
+                    destination.copy_from_slice(rest);
+                }
+                Ok(())
+            })?;
+        }
+        if count < existing {
+            state.pager.set_page_count(count)?;
+        }
+        // The header the copy just wrote onto page 1 describes the rebuilt
+        // file. Writing it through the pager is what keeps its own idea of the
+        // page count, the free list and the cookie in step with the bytes.
+        state.pager.set_header(header)
+    })?
 }
 
 /// Runs `ANALYZE`: measures the schema, and writes what it measured.

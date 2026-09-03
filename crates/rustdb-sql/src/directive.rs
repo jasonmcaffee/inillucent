@@ -250,6 +250,13 @@ pub enum Directive {
     Vacuum {
         /// Which attached database.
         database: usize,
+        /// The file `VACUUM INTO` writes the rebuilt copy to.
+        ///
+        /// A string literal, as SQLite's grammar has it. `INTO` leaves the
+        /// database it was run on completely alone, which is the difference
+        /// between the two forms and the reason the path is carried rather
+        /// than resolved here.
+        into: Option<Vec<u8>>,
     },
     /// `ANALYZE`, over one object or the whole schema.
     Analyze {
@@ -1081,12 +1088,32 @@ impl<'a> Binder<'a> {
         database: Option<ast::NameId>,
         into: Option<ast::ExprId>,
     ) -> Result<Directive, ParseError> {
-        if into.is_some() {
-            return Err(unsupported("VACUUM INTO", Span::default()));
-        }
+        let target = match into {
+            Some(expr) => Some(self.literal_path(expr)?),
+            None => None,
+        };
         let index = self.resolve_database(database)?;
         self.record_write_dependency(index);
-        Ok(Directive::Vacuum { database: index })
+        Ok(Directive::Vacuum {
+            database: index,
+            into: target,
+        })
+    }
+
+    /// Reads the file name a `VACUUM INTO` was given.
+    ///
+    /// A literal only. SQLite evaluates the expression, but every other value
+    /// it could produce is a file name computed at run time, and a statement
+    /// that decides where to write a copy of the database from arithmetic is
+    /// not a shape worth supporting before it is asked for.
+    fn literal_path(&mut self, expr: ast::ExprId) -> Result<Vec<u8>, ParseError> {
+        match self.ast.expr(expr) {
+            Some(ast::Expr::Literal(ast::Literal::String(text))) => Ok(text.clone()),
+            _ => Err(unsupported(
+                "VACUUM INTO with a name that is not a literal",
+                Span::default(),
+            )),
+        }
     }
 
     /// Binds a `CREATE VIEW`.

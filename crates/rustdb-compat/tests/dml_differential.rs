@@ -856,3 +856,55 @@ fn without_rowid_matches_sqlite() {
     );
     assert!(compared == 0 || compared == 57, "compared {compared} steps");
 }
+
+/// `VACUUM` and `VACUUM INTO`, answering exactly what the reference answers.
+///
+/// The counters matter as much as the rows: `VACUUM` is not a row change, so it
+/// must leave `changes()` reading whatever the last write left, and it must not
+/// move `total_changes()` at all.
+#[test]
+fn vacuum_matches_sqlite() {
+    let compared = compare(
+        "vacuum",
+        &[
+            Step::Exec("CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT, pad TEXT)"),
+            Step::Exec("CREATE INDEX t_name ON t (name)"),
+            Step::Exec("CREATE VIEW v AS SELECT id, name FROM t"),
+            Step::Exec("CREATE TABLE w(k TEXT PRIMARY KEY, n INTEGER) WITHOUT ROWID"),
+            Step::Exec("INSERT INTO t VALUES(1,'a','p'),(2,'b','p'),(3,'c','p'),(4,'d','p')"),
+            Step::Exec("INSERT INTO w VALUES('a',1),('b',2),('c',3)"),
+            Step::Exec("DELETE FROM t WHERE id % 2 = 0"),
+            Step::Exec("PRAGMA user_version = 7"),
+            Step::Query("SELECT id, name FROM t ORDER BY id"),
+            Step::Exec("VACUUM"),
+            Step::Query("SELECT id, name, pad FROM t ORDER BY id"),
+            Step::Query("SELECT id FROM t WHERE name = 'c'"),
+            Step::Query("SELECT k, n FROM w ORDER BY k"),
+            Step::Query("SELECT n FROM w WHERE k = 'b'"),
+            Step::Query("SELECT id, name FROM v ORDER BY id"),
+            Step::Query("PRAGMA user_version"),
+            Step::Query("SELECT type, name FROM sqlite_schema ORDER BY name"),
+            // Writes still work against the rebuilt roots.
+            Step::Exec("INSERT INTO t VALUES(9,'i','p')"),
+            Step::Exec("INSERT INTO w VALUES('z',9)"),
+            Step::Exec("UPDATE t SET name = 'renamed' WHERE id = 1"),
+            Step::Exec("DELETE FROM w WHERE k = 'a'"),
+            Step::Query("SELECT id, name FROM t ORDER BY id"),
+            Step::Query("SELECT k, n FROM w ORDER BY k"),
+            Step::Query("SELECT id FROM t WHERE name = 'renamed'"),
+            // And it cannot run inside a transaction.
+            Step::Exec("BEGIN"),
+            Step::Exec("VACUUM"),
+            Step::Exec("COMMIT"),
+            Step::Query("SELECT count(*) FROM t"),
+            // An empty database vacuums to an empty database.
+            Step::Exec("DELETE FROM t"),
+            Step::Exec("DELETE FROM w"),
+            Step::Exec("VACUUM"),
+            Step::Query("SELECT count(*) FROM t"),
+            Step::Query("SELECT count(*) FROM w"),
+            Step::Query("SELECT count(*) FROM sqlite_schema"),
+        ],
+    );
+    assert!(compared == 0 || compared == 34, "compared {compared} steps");
+}

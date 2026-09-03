@@ -376,6 +376,15 @@ impl Connection {
             })
     }
 
+    /// Returns the VFS this connection's database is open through.
+    ///
+    /// `VACUUM` needs it: the rebuilt copy has to be created through the same
+    /// VFS as the database it came from, or a test running on a simulated one
+    /// would write its temporary file to the real disk.
+    pub fn vfs(&self) -> std::sync::Arc<dyn Vfs> {
+        std::sync::Arc::clone(&self.vfs)
+    }
+
     /// Returns what the connection's transactions have cost.
     pub fn transaction_stats(&self) -> TransactionStats {
         self.state
