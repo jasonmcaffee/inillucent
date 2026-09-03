@@ -21,7 +21,7 @@ use crate::ast::{
 use crate::ast::{FrameBound, FrameExclude, FrameUnit};
 use crate::catalog_view::{CatalogView, ColumnInfo, TableInfo, TableKind};
 use crate::diagnostic::{ParseError, ParseErrorKind};
-use crate::function::{self, AggregateFunc, ScalarFunc, WindowFunc};
+use crate::function::{self, AggregateFunc, MathFunc, ScalarFunc, TimeFunc, WindowFunc};
 use crate::lexer::Span;
 
 /// What an authorizer decided about one action.
@@ -230,6 +230,24 @@ pub enum BoundExpr {
         /// The `ESCAPE` argument.
         escape: Option<Box<BoundExpr>>,
     },
+    /// A date or time function call.
+    Time {
+        /// Which function.
+        func: TimeFunc,
+        /// The arguments.
+        arguments: Vec<BoundExpr>,
+    },
+    /// A math function call.
+    ///
+    /// It is its own variant rather than a `Function` with a different tag
+    /// because a math function has no collation to carry: none of them
+    /// compares anything.
+    Math {
+        /// Which function.
+        func: MathFunc,
+        /// The arguments.
+        arguments: Vec<BoundExpr>,
+    },
     /// A scalar function call.
     Function {
         /// Which function.
@@ -385,7 +403,9 @@ impl BoundExpr {
                     && pattern.is_constant()
                     && escape.as_ref().is_none_or(|e| e.is_constant())
             }
-            BoundExpr::Function { arguments, .. } => arguments.iter().all(BoundExpr::is_constant),
+            BoundExpr::Function { arguments, .. }
+            | BoundExpr::Math { arguments, .. }
+            | BoundExpr::Time { arguments, .. } => arguments.iter().all(BoundExpr::is_constant),
             // A subquery is never constant. It may read no column of the query
             // that encloses it, but it reads the database, and hoisting it out
             // of a loop is the compiler's decision to make from its correlation
@@ -457,7 +477,9 @@ impl BoundExpr {
                     escape.sources_used(into);
                 }
             }
-            BoundExpr::Function { arguments, .. } => {
+            BoundExpr::Function { arguments, .. }
+            | BoundExpr::Math { arguments, .. }
+            | BoundExpr::Time { arguments, .. } => {
                 for argument in arguments {
                     argument.sources_used(into);
                 }
@@ -2595,7 +2617,7 @@ impl<'a> Binder<'a> {
     }
 
     /// Binds a literal, converting its written text into a value.
-    fn bind_literal(&self, literal: &Literal, span: Span) -> Result<BoundExpr, ParseError> {
+    fn bind_literal(&self, literal: &Literal, _span: Span) -> Result<BoundExpr, ParseError> {
         match literal {
             Literal::Null => Ok(BoundExpr::Null),
             Literal::Boolean(value) => Ok(BoundExpr::Integer(i64::from(*value))),
@@ -2607,7 +2629,18 @@ impl<'a> Binder<'a> {
             Literal::String(text) => Ok(BoundExpr::Text(text.clone())),
             Literal::Blob(bytes) => Ok(BoundExpr::Blob(bytes.clone())),
             Literal::CurrentDate | Literal::CurrentTime | Literal::CurrentTimestamp => {
-                Err(unsupported("CURRENT_ date and time functions", span))
+                // The three keywords are the three functions with no argument,
+                // and `CURRENT_TIMESTAMP` is `datetime('now')` rather than a
+                // fourth thing that formats differently.
+                let func = match literal {
+                    Literal::CurrentDate => TimeFunc::Date,
+                    Literal::CurrentTime => TimeFunc::Time,
+                    _ => TimeFunc::DateTime,
+                };
+                Ok(BoundExpr::Time {
+                    func,
+                    arguments: Vec::new(),
+                })
             }
         }
     }
@@ -2882,6 +2915,48 @@ impl<'a> Binder<'a> {
             self.aggregates.push(candidate);
             return Ok(BoundExpr::Aggregate {
                 slot: self.aggregates.len().saturating_sub(1),
+            });
+        }
+        if let Some(func) = function::lookup_time(&folded) {
+            if star {
+                return Err(wrong_arguments(&folded, span));
+            }
+            if distinct {
+                return Err(unsupported("DISTINCT in a scalar function", span));
+            }
+            if func == function::TimeFunc::TimeDiff && list.len() != 2 {
+                return Err(wrong_arguments(&folded, span));
+            }
+            if func == function::TimeFunc::StrfTime && list.is_empty() {
+                return Err(wrong_arguments(&folded, span));
+            }
+            let mut bound = Vec::with_capacity(list.len());
+            for argument in &list {
+                bound.push(self.bind_expr(*argument)?);
+            }
+            return Ok(BoundExpr::Time {
+                func,
+                arguments: bound,
+            });
+        }
+        if let Some(func) = function::lookup_math(&folded) {
+            if star {
+                return Err(wrong_arguments(&folded, span));
+            }
+            if distinct {
+                return Err(unsupported("DISTINCT in a scalar function", span));
+            }
+            let (least, most) = func.arity();
+            if list.len() < least || list.len() > most {
+                return Err(wrong_arguments(&folded, span));
+            }
+            let mut bound = Vec::with_capacity(list.len());
+            for argument in &list {
+                bound.push(self.bind_expr(*argument)?);
+            }
+            return Ok(BoundExpr::Math {
+                func,
+                arguments: bound,
             });
         }
         let Some(func) = function::lookup_scalar(&folded) else {

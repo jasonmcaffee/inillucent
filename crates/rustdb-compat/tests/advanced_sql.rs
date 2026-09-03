@@ -359,3 +359,79 @@ fn windows_match_the_oracle() {
         ],
     );
 }
+
+/// The math built-ins, over a value matrix that includes the awkward cases:
+/// a domain error, a non-numeric argument, the integer/real boundary, and the
+/// two functions whose meaning changes with their argument count.
+#[test]
+fn math_functions_match_the_oracle() {
+    grade(
+        "math",
+        &[
+            "SELECT pi()",
+            "SELECT abs(-3), abs(-3.5), abs('x'), abs(NULL)",
+            "SELECT ceil(1.2), ceil(-1.2), ceiling(1.0), floor(1.8), floor(-1.8)",
+            "SELECT trunc(1.9), trunc(-1.9), trunc(2)",
+            "SELECT sqrt(4), sqrt(2), sqrt(0), sqrt(-1), sqrt('4'), sqrt('four'), sqrt(NULL)",
+            "SELECT exp(0), exp(1), ln(1), ln(0), ln(-1)",
+            "SELECT log(100), log(10, 1000), log(1, 5), log(0), log10(1000), log2(8)",
+            "SELECT sin(0), cos(0), tan(0)",
+            "SELECT asin(1), acos(1), atan(1), asin(2), acos(2)",
+            "SELECT sinh(0), cosh(0), tanh(0), asinh(0), acosh(1), atanh(0)",
+            "SELECT acosh(0), atanh(1), atanh(-1)",
+            "SELECT atan2(1, 1), atan2(0, 1)",
+            "SELECT degrees(pi()), radians(180)",
+            "SELECT mod(7, 3), mod(-7, 3), mod(7, -3), mod(7.5, 2), mod(7, 0)",
+            "SELECT pow(2, 10), power(2, 0.5), pow(-8, 2)",
+            "SELECT typeof(ceil(1)), typeof(floor(1)), typeof(sqrt(4))",
+            "SELECT ln(x'00'), sqrt(x'00')",
+            "SELECT round(2.5), round(-2.5), round(2.345, 2), round(1)",
+            "SELECT max(1, 2, 3), min(1, 2, 3), max(1, NULL), min(NULL, 1)",
+        ],
+    );
+}
+
+/// The date and time built-ins.
+///
+/// Nothing here names `'now'`: the two engines read the clock microseconds
+/// apart and a test that compared them would fail whenever those microseconds
+/// crossed a second. Every value is a fixed timestamp, and the wall clock is
+/// covered by the unit test in `datetime.rs` instead.
+#[test]
+fn date_and_time_functions_match_the_oracle() {
+    grade(
+        "datetime",
+        &[
+            "SELECT date('2026-09-03'), time('2026-09-03 14:30:15'), datetime('2026-09-03 14:30:15')",
+            "SELECT date('2026-09-03T14:30:15'), datetime('2026-09-03T14:30:15Z')",
+            "SELECT julianday('2026-09-03'), julianday('1970-01-01'), julianday('2000-01-01 12:00:00')",
+            "SELECT unixepoch('1970-01-01'), unixepoch('2026-09-03'), unixepoch('2026-09-03 14:30:15')",
+            "SELECT date(2451545.0), datetime(2451545.0)",
+            "SELECT datetime(0, 'unixepoch'), datetime(1000000000, 'unixepoch')",
+            "SELECT datetime('2026-09-03', '+1 day'), datetime('2026-09-03', '-1 day')",
+            "SELECT datetime('2026-09-03', '+3 hours'), datetime('2026-09-03', '+90 minutes')",
+            "SELECT datetime('2026-09-03 00:00:00', '+30 seconds')",
+            "SELECT date('2026-01-31', '+1 month'), date('2026-03-31', '-1 month')",
+            "SELECT date('2024-02-29', '+1 year'), date('2026-09-03', '-2 years')",
+            "SELECT date('2026-09-03', 'start of month'), date('2026-09-03', 'start of year')",
+            "SELECT datetime('2026-09-03 14:30:15', 'start of day')",
+            "SELECT date('2026-09-03', 'weekday 0'), date('2026-09-03', 'weekday 3'), date('2026-09-03', 'weekday 6')",
+            "SELECT date('2026-09-03', 'start of month', '+1 month', '-1 day')",
+            "SELECT strftime('%Y-%m-%d', '2026-09-03')",
+            "SELECT strftime('%Y/%m/%d %H:%M:%S', '2026-09-03 14:30:15')",
+            "SELECT strftime('%d %m %Y %H %M %S %j %w %W', '2026-09-03 14:30:15')",
+            "SELECT strftime('%s', '2026-09-03'), strftime('%J', '2026-09-03')",
+            "SELECT strftime('%f', '2026-09-03 14:30:15.250')",
+            "SELECT strftime('%%|%Y', '2026-09-03')",
+            "SELECT date('not a date'), time('nonsense'), julianday('xyz'), unixepoch('xyz')",
+            "SELECT date(NULL), datetime(NULL), strftime('%Y', NULL)",
+            "SELECT date('2026-09-03', 'bogus modifier')",
+            "SELECT timediff('2026-09-03', '2026-09-01')",
+            "SELECT timediff('2026-09-01', '2026-09-03')",
+            "SELECT timediff('2026-03-01', '2026-01-31')",
+            "SELECT date('1582-10-15'), julianday('1582-10-15'), date('1200-06-06')",
+            "SELECT datetime('2026-09-03 14:30:15+02:00'), datetime('2026-09-03 14:30:15-05:30')",
+            "SELECT date('2026-09-03 25:00:00'), date('2026-13-01'), date('2026-09-32')",
+        ],
+    );
+}

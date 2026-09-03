@@ -99,6 +99,13 @@ pub struct Machine {
     encoding: TextEncoding,
     file_format: u32,
     steps: u64,
+    /// The Julian day the statement's `'now'` resolves to.
+    ///
+    /// It is read once, when the machine is built, so a statement that names
+    /// `'now'` twice - or once per row of a scan - sees one time. SQLite makes
+    /// the same promise, and a clock read per call would make
+    /// `SELECT date('now') = date('now')` occasionally false.
+    now: f64,
     changes: i64,
     last_insert_rowid: i64,
     conflict: Option<i32>,
@@ -137,6 +144,7 @@ impl Machine {
             encoding: TextEncoding::Utf8,
             file_format: 4,
             steps: 0,
+            now: crate::datetime::julian_now(),
             changes: 0,
             last_insert_rowid: 0,
             conflict: None,
@@ -676,6 +684,24 @@ impl Machine {
                 if let Some(Some(store)) = self.ephemerals.get_mut(instruction.p1.max(0) as usize) {
                     store.dedup();
                 }
+                Ok(Flow::Next)
+            }
+            Opcode::MathCall => {
+                let Operand::Math(func) = instruction.p4 else {
+                    return Err(error::misuse("a math call without its function"));
+                };
+                let arguments = self.block(instruction.p1, instruction.p2);
+                let value = crate::mathfn::call(func, &arguments);
+                self.store(instruction.p3, value);
+                Ok(Flow::Next)
+            }
+            Opcode::TimeCall => {
+                let Operand::Time(func) = instruction.p4 else {
+                    return Err(error::misuse("a time call without its function"));
+                };
+                let arguments = self.block(instruction.p1, instruction.p2);
+                let value = crate::datetime::call(func, &arguments, self.now, self.encoding);
+                self.store(instruction.p3, value);
                 Ok(Flow::Next)
             }
             Opcode::TypeCheck => {

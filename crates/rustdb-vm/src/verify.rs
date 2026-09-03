@@ -188,7 +188,7 @@ fn check_operand_ranges(program: &Program, address: usize, problems: &mut Vec<Ve
             blocks.push((instruction.p3, i32::from(instruction.p5)))
         }
         Opcode::ResultRow | Opcode::ApplyAffinity => blocks.push((instruction.p1, instruction.p2)),
-        Opcode::Function | Opcode::Pattern => {
+        Opcode::Function | Opcode::Pattern | Opcode::MathCall | Opcode::TimeCall => {
             blocks.push((instruction.p1, instruction.p2));
             registers.push((instruction.p3, "destination"));
         }
@@ -493,7 +493,9 @@ fn writes_of(program: &Program, address: usize) -> Vec<u32> {
         | Opcode::And
         | Opcode::Or
         | Opcode::InList => single(instruction.p3),
-        Opcode::Function | Opcode::Pattern => single(instruction.p3),
+        Opcode::Function | Opcode::Pattern | Opcode::MathCall | Opcode::TimeCall => {
+            single(instruction.p3)
+        }
         Opcode::AggFinal => single(instruction.p2),
         Opcode::Gosub => single(instruction.p1),
         Opcode::NewRowid | Opcode::RowData | Opcode::CreateBtree => single(instruction.p2),
@@ -540,9 +542,11 @@ fn reads_of(program: &Program, address: usize) -> Vec<u32> {
             block(instruction.p3, instruction.p5 as i32)
         }
         Opcode::ResultRow | Opcode::ApplyAffinity => block(instruction.p1, instruction.p2),
-        Opcode::Function | Opcode::Pattern | Opcode::AggStep => {
-            block(instruction.p1, instruction.p2)
-        }
+        Opcode::Function
+        | Opcode::Pattern
+        | Opcode::MathCall
+        | Opcode::TimeCall
+        | Opcode::AggStep => block(instruction.p1, instruction.p2),
         Opcode::InList => {
             let mut reads = vec![instruction.p1.max(0) as u32];
             reads.extend(block(instruction.p2, instruction.p5 as i32));

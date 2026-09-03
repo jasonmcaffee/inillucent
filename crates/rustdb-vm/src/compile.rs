@@ -2336,7 +2336,9 @@ fn collect_subqueries(expr: &BoundExpr, into: &mut Vec<BoundExpr>) {
                 collect_subqueries(escape, into);
             }
         }
-        BoundExpr::Function { arguments, .. } => {
+        BoundExpr::Function { arguments, .. }
+        | BoundExpr::Math { arguments, .. }
+        | BoundExpr::Time { arguments, .. } => {
             for argument in arguments {
                 collect_subqueries(argument, into);
             }
@@ -2621,7 +2623,9 @@ fn children_of(expr: &BoundExpr) -> Vec<BoundExpr> {
                 out.push((**escape).clone());
             }
         }
-        BoundExpr::Function { arguments, .. } => out.extend(arguments.iter().cloned()),
+        BoundExpr::Function { arguments, .. }
+        | BoundExpr::Math { arguments, .. }
+        | BoundExpr::Time { arguments, .. } => out.extend(arguments.iter().cloned()),
         BoundExpr::Subquery { operand, .. } => {
             if let Some(operand) = operand {
                 out.push((**operand).clone());
@@ -3115,6 +3119,52 @@ impl Compiler {
                     Instruction::new(Opcode::Pattern, block as i32, count as i32, register as i32)
                         .with_p4(Operand::Pattern(*op))
                         .with_p5(u16::from(*negated)),
+                );
+                Ok(register)
+            }
+            BoundExpr::Time { func, arguments } => {
+                let block = self.register_block(arguments.len().max(1));
+                for (index, argument) in arguments.iter().enumerate() {
+                    let register = self.compile_expr(argument)?;
+                    self.emit(Instruction::new(
+                        Opcode::Copy,
+                        register as i32,
+                        block.saturating_add(index as u32) as i32,
+                        0,
+                    ));
+                }
+                let register = self.register();
+                self.emit(
+                    Instruction::new(
+                        Opcode::TimeCall,
+                        block as i32,
+                        arguments.len() as i32,
+                        register as i32,
+                    )
+                    .with_p4(Operand::Time(*func)),
+                );
+                Ok(register)
+            }
+            BoundExpr::Math { func, arguments } => {
+                let block = self.register_block(arguments.len().max(1));
+                for (index, argument) in arguments.iter().enumerate() {
+                    let register = self.compile_expr(argument)?;
+                    self.emit(Instruction::new(
+                        Opcode::Copy,
+                        register as i32,
+                        block.saturating_add(index as u32) as i32,
+                        0,
+                    ));
+                }
+                let register = self.register();
+                self.emit(
+                    Instruction::new(
+                        Opcode::MathCall,
+                        block as i32,
+                        arguments.len() as i32,
+                        register as i32,
+                    )
+                    .with_p4(Operand::Math(*func)),
                 );
                 Ok(register)
             }

@@ -11,7 +11,7 @@
 //! machine in this crate.
 
 use rustdb_sql::ast::{BinaryOp, FrameExclude, FrameUnit, PatternOp};
-use rustdb_sql::function::{AggregateFunc, ScalarFunc, WindowFunc};
+use rustdb_sql::function::{AggregateFunc, MathFunc, ScalarFunc, TimeFunc, WindowFunc};
 use rustdb_value::{Affinity, Collation};
 
 /// What an instruction does.
@@ -127,6 +127,12 @@ pub enum Opcode {
     /// `p1`: first argument register, `p2`: argument count, `p3`: destination,
     /// `p4`: the pattern operator, `p5`: 1 when negated.
     Pattern,
+    /// `p1`: first argument register, `p2`: argument count, `p3`: destination,
+    /// `p4`: the math function.
+    MathCall,
+    /// `p1`: first argument register, `p2`: argument count, `p3`: destination,
+    /// `p4`: the date or time function.
+    TimeCall,
     /// `p1`: first argument register, `p2`: argument count, `p3`: accumulator,
     /// `p4`: the aggregate.
     AggStep,
@@ -380,6 +386,8 @@ impl Opcode {
             Opcode::ApplyAffinity => "Affinity",
             Opcode::Function => "Function",
             Opcode::Pattern => "Pattern",
+            Opcode::MathCall => "Function",
+            Opcode::TimeCall => "Function",
             Opcode::AggStep => "AggStep",
             Opcode::AggFinal => "AggFinal",
             Opcode::AggReset => "AggReset",
@@ -600,6 +608,10 @@ pub enum Operand {
     Scalar(ScalarFunc, Collation),
     /// A pattern operator.
     Pattern(PatternOp),
+    /// A math function.
+    Math(MathFunc),
+    /// A date or time function.
+    Time(TimeFunc),
     /// An aggregate call.
     Aggregate(AggregateCall),
     /// A sorter key.

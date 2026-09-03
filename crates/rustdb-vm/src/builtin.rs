@@ -89,6 +89,13 @@ fn unary(
 
 /// `abs(x)`.
 fn absolute(value: Value<'static>) -> Value<'static> {
+    // Text and blobs answer as a real whatever they hold: `abs('3')` is 3.0 and
+    // `abs('x')` is 0.0, both real. Only a value that arrives as an integer
+    // leaves as one.
+    let textual = matches!(value, Value::Text(_) | Value::Blob(_));
+    if textual {
+        return Value::Real(cast::real_value(&value).abs());
+    }
     match cast::numerify(value) {
         Value::Integer(integer) => match integer.checked_abs() {
             Some(absolute) => Value::Integer(absolute),
