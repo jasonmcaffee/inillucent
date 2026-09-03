@@ -4,9 +4,9 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 
 | status | capabilities |
 |---|---|
-| missing | 107 |
-| pass | 123 |
-| **total** | **230** |
+| missing | 91 |
+| pass | 155 |
+| **total** | **246** |
 
 ## By phase
 
@@ -22,8 +22,8 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | phase 2: values, affinities, collations, and records | 17 | 0 | 0 | 0 |
 | phase 3: read-only header, pager, page cache, and B-tree | 19 | 0 | 0 | 0 |
 | phase 4: B-tree mutation, allocation, and rollback pages | 17 | 0 | 0 | 0 |
-| phase 5: lexer, parser, AST, and syntax parity | 0 | 0 | 6 | 0 |
-| phase 6: catalog, binder, expression VM, and read-only SELECT | 0 | 0 | 10 | 0 |
+| phase 5: lexer, parser, AST, and syntax parity | 10 | 0 | 0 | 0 |
+| phase 6: catalog, binder, expression VM, and read-only SELECT | 22 | 0 | 0 | 0 |
 | phase 7: single-database rollback transactions and DML | 0 | 0 | 13 | 0 |
 | phase 8: complete SELECT, planner, schema, and SQL semantics | 0 | 0 | 28 | 0 |
 | phase 9: foreign keys, ATTACH, and multi-database commit | 0 | 0 | 6 | 0 |
@@ -140,23 +140,23 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `storage.failure.statement-atomicity` | pass | pass | linux-x86_64, windows-x86_64 | 7 |
 | `harness.model.btree` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
 | `storage.integrity-check` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
-| `sql.lexer.tokens` | missing | missing | - | 0 |
-| `sql.lexer.string-literals` | missing | missing | - | 0 |
-| `sql.lexer.identifiers` | missing | missing | - | 0 |
-| `sql.parser.statement-splitting` | missing | missing | - | 0 |
-| `sql.parser.error-offsets` | missing | missing | - | 0 |
-| `sql.parser.keyword-set` | missing | missing | - | 0 |
-| `sql.select.basic` | missing | missing | - | 0 |
-| `sql.select.where` | missing | missing | - | 0 |
-| `sql.select.order-by` | missing | missing | - | 0 |
-| `sql.select.limit-offset` | missing | missing | - | 0 |
-| `sql.expr.operators` | missing | missing | - | 0 |
-| `sql.expr.case` | missing | missing | - | 0 |
-| `sql.expr.like-glob` | missing | missing | - | 0 |
+| `sql.lexer.tokens` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
+| `sql.lexer.string-literals` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `sql.lexer.identifiers` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `sql.parser.statement-splitting` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `sql.parser.error-offsets` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `sql.parser.keyword-set` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `sql.select.basic` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `sql.select.where` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `sql.select.order-by` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `sql.select.limit-offset` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `sql.expr.operators` | pass | pass | linux-x86_64, windows-x86_64 | 7 |
+| `sql.expr.case` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `sql.expr.like-glob` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
 | `sql.expr.in-subquery` | missing | missing | - | 0 |
-| `catalog.sqlite-schema` | missing | missing | - | 0 |
-| `catalog.schema-cookie` | missing | missing | - | 0 |
-| `catalog.prepared-statement-invalidation` | missing | missing | - | 0 |
+| `catalog.sqlite-schema` | pass | pass | linux-x86_64, windows-x86_64 | 8 |
+| `catalog.schema-cookie` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `catalog.prepared-statement-invalidation` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `sql.insert` | missing | missing | - | 0 |
 | `sql.update` | missing | missing | - | 0 |
 | `sql.delete` | missing | missing | - | 0 |
@@ -262,3 +262,19 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `storage.pointer-map.read` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `storage.without-rowid.read` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `harness.fixtures.corpus` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
+| `sql.parser.syntax-obligations` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `sql.parser.differential-fuzzing` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `sql.parser.limits` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `sql.parser.purity` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `sql.binder.name-resolution` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `sql.binder.collation-precedence` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `sql.select.distinct-basic` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `sql.select.aggregates-basic` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
+| `sql.select.group-by-basic` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `sql.select.inner-join-basic` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `sql.functions.scalar-core` | pass | pass | linux-x86_64, windows-x86_64 | 7 |
+| `vm.bytecode.verifier` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
+| `vm.statement.lifecycle` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `vm.statement.interrupt` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `api.rust.bind-step-reset` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `api.rust.read-only-open` | pass | pass | linux-x86_64, windows-x86_64 | 3 |

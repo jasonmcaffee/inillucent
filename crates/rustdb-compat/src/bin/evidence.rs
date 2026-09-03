@@ -24,13 +24,18 @@ use rustdb_vfs::memory::MemoryVfs;
 use rustdb_vfs::os::OsVfs;
 use rustdb_vfs::path::DbPath;
 
-/// The packages whose tests are evidence for phases 0 through 3.
-const PACKAGES: [&str; 6] = [
+/// The packages whose tests are evidence for phases 0 through 6.
+const PACKAGES: [&str; 11] = [
     "rustdb-base",
     "rustdb-vfs",
     "rustdb-sim",
     "rustdb-value",
     "rustdb-storage",
+    "rustdb-sql",
+    "rustdb-catalog",
+    "rustdb-vm",
+    "rustdb-session",
+    "rustdb",
     "rustdb-compat",
 ];
 

@@ -7,6 +7,9 @@ nothing in it is read by a production crate.
 |---|---|
 | `sqlite-3.53.4.toml` | the parity manifest: one row per capability rust-db owes, including the ones nothing is written for yet |
 | `sources.toml` | every documentation page a capability row may cite; a source that is not here is a dead link |
+| `syntax.toml` | the syntax obligation register: one row per published syntax diagram, with the statements that must parse and the ones that must not |
+| `syntax-report.md` | the register rendered, so the parser's coverage is readable rather than inferred |
+| `corpus/select/` | the foundational SELECT corpus: a schema the pinned binary builds and one query per line |
 | `errors.toml` | the stable error table, from which `rustdb-base`'s Rust table is generated at build time |
 | `limits.toml` | the run-time limits, generated the same way |
 | `reference/sqlite-3.53.4.toml` | the pinned oracle build: version, compile options, run-time settings, and a published SHA3-256 for every artifact |

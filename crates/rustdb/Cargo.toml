@@ -8,4 +8,5 @@ description = "Stable public Rust facade: Database, Connection, Statement, Rows,
 [dependencies]
 rustdb-base = { workspace = true }
 rustdb-value = { workspace = true }
+rustdb-catalog = { workspace = true }
 rustdb-session = { workspace = true }

@@ -33,6 +33,8 @@ pub mod model;
 pub mod oracle;
 pub mod report;
 pub mod results;
+pub mod slt;
+pub mod syntax;
 pub mod toml_lite;
 
 use std::path::{Path, PathBuf};

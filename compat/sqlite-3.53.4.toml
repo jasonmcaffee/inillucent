@@ -12,7 +12,7 @@
 
 schema_version = 1
 reference = "sqlite-3.53.4"
-generated_by = "task-1782, extended by task-1784"
+generated_by = "task-1782, extended by task-1784 and task-1785"
 
 [[capability]]
 id = "harness.manifest.schema"
@@ -883,104 +883,104 @@ id = "sql.lexer.tokens"
 source = "https://sqlite.org/lang.html"
 profile = "default"
 phase = "phase 5: lexer, parser, AST, and syntax parity"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-sql::lexer::tests::spans_are_ordered_disjoint_and_inside_the_source", "rustdb-sql::lexer::tests::operators_lex_longest_first", "rustdb-sql::lexer::tests::comments_are_trivia", "rustdb-sql::lexer::tests::every_parameter_form_lexes", "rustdb-compat::every_published_production_has_evidence"]
 
 [[capability]]
 id = "sql.lexer.string-literals"
 source = "https://sqlite.org/lang_expr.html"
 profile = "default"
 phase = "phase 5: lexer, parser, AST, and syntax parity"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-sql::lexer::tests::doubled_quotes_are_undoubled", "rustdb-sql::lexer::tests::blob_literals_decode", "rustdb-sql::lexer::tests::an_unterminated_quote_reports_its_opening_byte", "rustdb-sql::lexer::tests::every_numeric_form_lexes"]
 
 [[capability]]
 id = "sql.lexer.identifiers"
 source = "https://sqlite.org/lang.html"
 profile = "default"
 phase = "phase 5: lexer, parser, AST, and syntax parity"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-sql::lexer::tests::the_four_identifier_quote_forms_are_distinguished", "rustdb-sql::lexer::tests::high_bytes_are_identifier_characters", "rustdb-sql::lexer::tests::a_keyword_is_an_identifier_carrying_a_keyword"]
 
 [[capability]]
 id = "sql.parser.statement-splitting"
 source = "https://sqlite.org/lang.html"
 profile = "default"
 phase = "phase 5: lexer, parser, AST, and syntax parity"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::one_prepare_compiles_one_statement_and_reports_the_tail", "rustdb-compat::classification_reads_the_leading_keywords", "rustdb-compat::prepare_reports_the_tail"]
 
 [[capability]]
 id = "sql.parser.error-offsets"
 source = "https://sqlite.org/lang.html"
 profile = "default"
 phase = "phase 5: lexer, parser, AST, and syntax parity"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::syntax_errors_point_at_the_offending_byte", "rustdb-compat::adversarial_depth_is_refused_rather_than_crashing", "rustdb-compat::an_overlong_statement_is_refused", "rustdb-sql::diagnostic::tests::the_offset_reaches_the_engine_error"]
 
 [[capability]]
 id = "sql.parser.keyword-set"
 source = "https://sqlite.org/lang.html"
 profile = "default"
 phase = "phase 5: lexer, parser, AST, and syntax parity"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-sql::keyword::tests::the_table_holds_every_documented_keyword", "rustdb-sql::keyword::tests::every_keyword_round_trips", "rustdb-sql::keyword::tests::the_fallback_set_matches_the_grammar", "rustdb-compat::the_register_agrees_with_the_pinned_release"]
 
 [[capability]]
 id = "sql.select.basic"
 source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-compat::a_full_scan_returns_every_row_in_rowid_order", "rustdb-compat::every_storage_class_reads_back", "rustdb-compat::values_runs_without_a_table"]
 
 [[capability]]
 id = "sql.select.where"
 source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-compat::a_rowid_equality_becomes_a_seek", "rustdb-compat::a_rowid_range_stops_at_its_bound", "rustdb-compat::an_index_seek_returns_what_a_scan_returns"]
 
 [[capability]]
 id = "sql.select.order-by"
 source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-compat::order_limit_and_offset_work_together", "rustdb-compat::nulls_sort_where_sqlite_sorts_them", "rustdb-vm::sorter::tests::null_ordering_is_independent_of_direction"]
 
 [[capability]]
 id = "sql.select.limit-offset"
 source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-compat::order_limit_and_offset_work_together", "rustdb-vm::machine::tests::limit_and_offset_normalise_the_way_sqlite_reads_them"]
 
 [[capability]]
 id = "sql.expr.operators"
 source = "https://sqlite.org/lang_expr.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-vm::eval::tests::arithmetic_follows_sqlite_rather_than_rust", "rustdb-vm::eval::tests::division_keeps_the_class_sqlite_keeps", "rustdb-vm::eval::tests::shifts_saturate_and_reverse", "rustdb-vm::eval::tests::three_valued_logic_is_three_valued", "rustdb-vm::eval::tests::null_propagates_where_sqlite_says_it_does", "rustdb-vm::eval::tests::comparison_applies_its_affinity_to_both_sides"]
 
 [[capability]]
 id = "sql.expr.case"
 source = "https://sqlite.org/lang_expr.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-compat::every_published_production_has_evidence"]
 
 [[capability]]
 id = "sql.expr.like-glob"
 source = "https://sqlite.org/lang_expr.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-vm::pattern::tests::like_matches_the_documented_cases", "rustdb-vm::pattern::tests::like_honours_an_escape_character", "rustdb-vm::pattern::tests::glob_is_case_sensitive_and_has_classes", "rustdb-vm::pattern::tests::a_pathological_pattern_terminates", "rustdb-vm::pattern::tests::one_character_wildcards_consume_a_whole_character"]
 
 [[capability]]
 id = "sql.expr.in-subquery"
@@ -995,24 +995,24 @@ id = "catalog.sqlite-schema"
 source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_catalog_reads_a_real_schema", "rustdb-compat::an_automatic_index_gets_its_root_page", "rustdb-compat::unparseable_schema_sql_is_corruption", "rustdb-compat::a_corrupt_schema_row_names_its_object", "rustdb-catalog::load::tests::affinity_is_derived_from_the_declared_type", "rustdb-catalog::load::tests::only_integer_primary_key_aliases_the_rowid", "rustdb-catalog::load::tests::automatic_indexes_are_numbered_in_declaration_order", "rustdb-catalog::load::tests::without_rowid_primary_keys_are_not_null"]
 
 [[capability]]
 id = "catalog.schema-cookie"
 source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::a_schema_change_recompiles_a_prepared_statement", "rustdb-compat::an_unchanged_schema_does_not_recompile", "rustdb-catalog::snapshot::tests::temp_shadows_main_unless_the_name_is_qualified"]
 
 [[capability]]
 id = "catalog.prepared-statement-invalidation"
 source = "https://sqlite.org/c3ref/funclist.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::a_schema_change_recompiles_a_prepared_statement", "rustdb-compat::a_dropped_table_is_reported_rather_than_read", "rustdb-compat::an_unchanged_schema_does_not_recompile"]
 
 [[capability]]
 id = "sql.insert"
@@ -1859,3 +1859,130 @@ phase = "phase 3: read-only header, pager, page cache, and B-tree"
 status = "pass"
 tests = ["rustdb-compat::the_corpus_matches_its_manifest", "rustdb-compat::fixtures::tests::fixture_names_are_unique", "rustdb-compat::fixtures::tests::every_malformed_fixture_has_a_base", "rustdb-compat::fixtures::tests::page_sizes_are_readable_from_fixture_names", "rustdb-compat::fixtures::tests::damage_never_writes_past_the_end"]
 
+[[capability]]
+id = "sql.parser.syntax-obligations"
+source = "https://sqlite.org/lang.html"
+profile = "default"
+phase = "phase 5: lexer, parser, AST, and syntax parity"
+status = "pass"
+tests = ["rustdb-compat::the_register_is_structurally_sound", "rustdb-compat::every_published_production_has_evidence", "rustdb-compat::the_report_regenerates"]
+
+[[capability]]
+id = "sql.parser.differential-fuzzing"
+source = "https://sqlite.org/lang.html"
+profile = "default"
+phase = "phase 5: lexer, parser, AST, and syntax parity"
+status = "pass"
+tests = ["rustdb-compat::differential_parser_fuzzing_finds_no_divergence", "rustdb-compat::the_register_agrees_with_the_pinned_release"]
+
+[[capability]]
+id = "sql.parser.limits"
+source = "https://sqlite.org/limits.html"
+profile = "default"
+phase = "phase 5: lexer, parser, AST, and syntax parity"
+status = "pass"
+tests = ["rustdb-compat::adversarial_depth_is_refused_rather_than_crashing", "rustdb-compat::an_overlong_statement_is_refused", "rustdb-compat::parameters_are_numbered_the_way_sqlite_numbers_them"]
+
+[[capability]]
+id = "sql.parser.purity"
+source = "https://sqlite.org/c3ref/prepare.html"
+profile = "default"
+phase = "phase 5: lexer, parser, AST, and syntax parity"
+status = "pass"
+tests = ["rustdb-compat::the_parser_performs_no_io"]
+
+[[capability]]
+id = "sql.binder.name-resolution"
+source = "https://sqlite.org/lang_select.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "pass"
+tests = ["rustdb-compat::an_unknown_name_fails_at_prepare_with_an_offset", "rustdb-compat::result_metadata_names_the_column_and_its_origin", "rustdb-sql::catalog_view::tests::the_rowid_spellings_resolve_unless_shadowed", "rustdb-compat::the_foundational_select_suite_is_green"]
+
+[[capability]]
+id = "sql.binder.collation-precedence"
+source = "https://sqlite.org/datatype3.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "pass"
+tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-vm::sorter::tests::the_distinct_set_uses_each_columns_collation"]
+
+[[capability]]
+id = "sql.select.distinct-basic"
+source = "https://sqlite.org/lang_select.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "pass"
+tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-compat::distinct_emits_each_row_once", "rustdb-vm::sorter::tests::the_distinct_set_folds_nulls_together"]
+
+[[capability]]
+id = "sql.select.aggregates-basic"
+source = "https://sqlite.org/lang_aggfunc.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "pass"
+tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-compat::aggregates_answer_over_the_whole_table", "rustdb-vm::aggregate::tests::an_empty_group_gives_five_different_answers", "rustdb-vm::aggregate::tests::sum_stays_integral_until_it_cannot", "rustdb-vm::aggregate::tests::summation_is_compensated", "rustdb-vm::aggregate::tests::distinct_counts_nulls_once"]
+
+[[capability]]
+id = "sql.select.group-by-basic"
+source = "https://sqlite.org/lang_select.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "pass"
+tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-compat::group_by_groups_and_having_filters"]
+
+[[capability]]
+id = "sql.select.inner-join-basic"
+source = "https://sqlite.org/lang_select.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "pass"
+tests = ["rustdb-compat::the_foundational_select_suite_is_green"]
+
+[[capability]]
+id = "sql.functions.scalar-core"
+source = "https://sqlite.org/lang_corefunc.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "pass"
+tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-vm::builtin::tests::length_counts_characters_in_text_and_bytes_in_a_blob", "rustdb-vm::builtin::tests::substr_counts_from_one_and_accepts_negatives", "rustdb-vm::builtin::tests::scalar_max_is_null_if_any_argument_is_null", "rustdb-vm::builtin::tests::round_rounds_half_away_from_zero", "rustdb-vm::builtin::tests::quote_renders_sql_literals", "rustdb-vm::builtin::tests::the_reflective_builtins_do_not_propagate_null"]
+
+[[capability]]
+id = "vm.bytecode.verifier"
+source = "https://sqlite.org/opcode.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "pass"
+tests = ["rustdb-compat::the_verifier_rejects_generated_invalid_programs", "rustdb-compat::the_verifier_rejects_mismatched_operands", "rustdb-vm::verify::tests::a_jump_outside_the_program_is_rejected", "rustdb-vm::verify::tests::reading_an_unwritten_register_is_rejected", "rustdb-vm::verify::tests::a_cursor_kind_mismatch_is_rejected", "rustdb-vm::verify::tests::an_unopened_cursor_is_rejected"]
+
+[[capability]]
+id = "vm.statement.lifecycle"
+source = "https://sqlite.org/c3ref/step.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "pass"
+tests = ["rustdb-compat::a_statement_steps_to_done_and_stays_there", "rustdb-compat::reset_runs_again_and_keeps_bindings", "rustdb-compat::two_statements_interleave_on_one_connection", "rustdb-compat::lifecycle_and_metadata_match_the_oracle"]
+
+[[capability]]
+id = "vm.statement.interrupt"
+source = "https://sqlite.org/c3ref/interrupt.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "pass"
+tests = ["rustdb-compat::an_interrupt_stops_a_running_statement"]
+
+[[capability]]
+id = "api.rust.bind-step-reset"
+source = "https://sqlite.org/c3ref/bind_blob.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "pass"
+tests = ["rustdb-compat::every_class_binds_and_returns", "rustdb-compat::an_unknown_parameter_is_a_misuse", "rustdb-compat::parameters_bind_and_rebind"]
+
+[[capability]]
+id = "api.rust.read-only-open"
+source = "https://sqlite.org/c3ref/open.html"
+profile = "default"
+phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
+status = "pass"
+tests = ["rustdb-compat::reading_changes_no_byte_of_the_file", "rustdb-compat::a_long_session_changes_no_byte", "rustdb-compat::every_page_size_and_encoding_reads_the_same_rows"]

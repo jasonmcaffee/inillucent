@@ -14,24 +14,37 @@ use std::process::Command;
 
 use rustdb_compat::workspace_root;
 
-/// The crates the phase 0-1 policy applies to.
-const GOVERNED: [&str; 6] = [
+/// The crates the policy applies to.
+const GOVERNED: [&str; 11] = [
     "rustdb-base",
     "rustdb-vfs",
     "rustdb-sim",
     "rustdb-value",
     "rustdb-storage",
+    "rustdb-sql",
+    "rustdb-catalog",
+    "rustdb-vm",
+    "rustdb-session",
+    "rustdb",
     "rustdb-compat",
 ];
 
 /// The only files allowed to contain `unsafe`.
 ///
-/// Both are the operating-system boundary, which cannot be crossed in safe
-/// Rust. Everything else in the engine is safe code, and the crate-level
+/// The first two are the operating-system boundary, which cannot be crossed in
+/// safe Rust. Everything else in the engine is safe code, and the crate-level
 /// `forbid(unsafe_code)` in `rustdb-base` says so to the compiler as well.
-const UNSAFE_ALLOWED: [&str; 2] = [
+///
+/// The third is a measurement binary, not the engine: a global allocator is the
+/// only way to count heap allocations, and `GlobalAlloc` is an unsafe trait. It
+/// is admitted here rather than quietly because the charter is about what the
+/// engine is made of, and a baseline tool that never ships is not part of it -
+/// but a file with `unsafe` in it should still have to say why, in writing, in
+/// a list somebody reads.
+const UNSAFE_ALLOWED: [&str; 3] = [
     "crates/rustdb-vfs/src/os/windows.rs",
     "crates/rustdb-vfs/src/os/unix.rs",
+    "crates/rustdb-compat/src/bin/sqlperf.rs",
 ];
 
 /// Returns every `.rs` file under a directory.
