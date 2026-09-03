@@ -314,6 +314,8 @@
 {"test_id": "rustdb-compat::values_runs_without_a_table", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::views_match_the_oracle", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::windows_match_the_oracle", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::without_rowid_matches_sqlite", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::without_rowid_round_trips_through_sqlite", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::writes_survive_a_close_and_reopen", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-sim::a_recorded_schedule_replays_an_identical_event_trace", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-sim::a_short_write_reports_success_and_stores_half", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}

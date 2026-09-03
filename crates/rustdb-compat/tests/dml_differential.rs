@@ -770,3 +770,89 @@ fn insert_from_select_matches_sqlite() {
     );
     assert!(compared == 0 || compared == 27, "compared {compared} steps");
 }
+
+/// `WITHOUT ROWID` tables, whose b-tree is an index and whose rows have no rowid.
+///
+/// The record is permuted - primary key first, then the rest - so a reader that
+/// got the order wrong would answer every column with its neighbour's value and
+/// still look like it worked. Comparing against the reference row by row is the
+/// only way to see it.
+#[test]
+fn without_rowid_matches_sqlite() {
+    let compared = compare(
+        "without-rowid",
+        &[
+            Step::Exec(
+                "CREATE TABLE w(a TEXT, b INTEGER, c TEXT, PRIMARY KEY(b, a)) WITHOUT ROWID",
+            ),
+            Step::Exec("CREATE TABLE nokey(a) WITHOUT ROWID"),
+            Step::Exec("INSERT INTO w VALUES('x', 2, 'cx')"),
+            Step::Exec("INSERT INTO w VALUES('y', 1, 'cy')"),
+            Step::Exec("INSERT INTO w VALUES('z', 1, 'cz')"),
+            Step::Query("SELECT a, b, c FROM w"),
+            Step::Query("SELECT a, b, c FROM w ORDER BY b, a"),
+            Step::Query("SELECT a, b, c FROM w ORDER BY b DESC, a DESC"),
+            // The key is unique and NOT NULL, both implicitly.
+            Step::Exec("INSERT INTO w VALUES('x', 2, 'again')"),
+            Step::Exec("INSERT INTO w VALUES(NULL, 3, 'nullkey')"),
+            Step::Exec("INSERT INTO w(b, c) VALUES(4, 'nokeycol')"),
+            Step::Query("SELECT a, b, c FROM w ORDER BY b, a"),
+            // A seek on the key, and on a prefix of it.
+            Step::Query("SELECT c FROM w WHERE b = 2 AND a = 'x'"),
+            Step::Query("SELECT a, c FROM w WHERE b = 1 ORDER BY a"),
+            Step::Query("SELECT a, b FROM w WHERE b > 1 ORDER BY b, a"),
+            // The rowid is not a column of such a table, in any spelling.
+            Step::Exec("SELECT rowid FROM w"),
+            Step::Exec("SELECT _rowid_ FROM w"),
+            Step::Exec("SELECT oid FROM w"),
+            // Writes.
+            Step::Exec("UPDATE w SET c = 'updated' WHERE b = 1 AND a = 'y'"),
+            Step::Query("SELECT a, b, c FROM w ORDER BY b, a"),
+            Step::Exec("UPDATE w SET b = 7 WHERE a = 'z'"),
+            Step::Query("SELECT a, b, c FROM w ORDER BY b, a"),
+            Step::Exec("UPDATE w SET b = 7 WHERE a = 'x'"),
+            Step::Query("SELECT a, b, c FROM w ORDER BY b, a"),
+            Step::Exec("DELETE FROM w WHERE b = 7 AND a = 'z'"),
+            Step::Query("SELECT a, b, c FROM w ORDER BY b, a"),
+            // A secondary index, which locates a row by the primary key at the
+            // end of each entry rather than by a rowid.
+            Step::Exec("CREATE INDEX w_c ON w (c)"),
+            Step::Exec("INSERT INTO w VALUES('q', 9, 'cq')"),
+            Step::Query("SELECT a, b FROM w WHERE c = 'cq'"),
+            Step::Query("SELECT a, b, c FROM w WHERE c > 'cq' ORDER BY c"),
+            Step::Exec("UPDATE w SET c = 'cq2' WHERE a = 'q'"),
+            Step::Query("SELECT a, b FROM w WHERE c = 'cq2'"),
+            Step::Query("SELECT a, b FROM w WHERE c = 'cq'"),
+            Step::Exec("DELETE FROM w WHERE c = 'cq2'"),
+            Step::Query("SELECT a, b, c FROM w ORDER BY b, a"),
+            Step::Query("SELECT count(*) FROM w"),
+            // A unique secondary index, and the constraint it enforces.
+            Step::Exec("CREATE UNIQUE INDEX w_c2 ON w (c)"),
+            Step::Exec("INSERT INTO w VALUES('dup', 20, 'cx')"),
+            Step::Query("SELECT a, b, c FROM w ORDER BY b, a"),
+            // A single-column key, and a TEXT one - not an INTEGER PRIMARY KEY.
+            Step::Exec("CREATE TABLE k(id TEXT PRIMARY KEY, v INTEGER) WITHOUT ROWID"),
+            Step::Exec("INSERT INTO k VALUES('b', 2), ('a', 1), ('c', 3)"),
+            Step::Query("SELECT id, v FROM k"),
+            Step::Exec("UPDATE k SET v = v * 10 WHERE id = 'b'"),
+            Step::Query("SELECT id, v FROM k ORDER BY id"),
+            Step::Exec("DELETE FROM k WHERE id = 'a'"),
+            Step::Query("SELECT id, v FROM k ORDER BY id"),
+            // An INTEGER PRIMARY KEY on a WITHOUT ROWID table is *not* a rowid
+            // alias, so it stores an integer in the record like any column.
+            Step::Exec("CREATE TABLE i(id INTEGER PRIMARY KEY, v TEXT) WITHOUT ROWID"),
+            Step::Exec("INSERT INTO i VALUES(3, 'c'), (1, 'a')"),
+            Step::Query("SELECT id, v, typeof(id) FROM i ORDER BY id"),
+            Step::Exec("INSERT INTO i(v) VALUES('nokey')"),
+            Step::Query("SELECT id, v FROM i ORDER BY id"),
+            // A join with a rowid table, both directions.
+            Step::Exec("CREATE TABLE r(id INTEGER PRIMARY KEY, k TEXT)"),
+            Step::Exec("INSERT INTO r VALUES(1, 'b'), (2, 'c')"),
+            Step::Query("SELECT r.id, k.v FROM r JOIN k ON r.k = k.id ORDER BY r.id"),
+            Step::Query("SELECT k.id, r.id FROM k LEFT JOIN r ON r.k = k.id ORDER BY k.id"),
+            Step::Exec("DROP TABLE k"),
+            Step::Query("SELECT count(*) FROM sqlite_schema WHERE tbl_name = 'k'"),
+        ],
+    );
+    assert!(compared == 0 || compared == 57, "compared {compared} steps");
+}

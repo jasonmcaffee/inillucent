@@ -388,8 +388,44 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
     }
     info.checks = collect_checks(sql, &parsed.ast, columns, constraints);
     apply_table_constraints(&mut info, &parsed.ast, constraints);
+    if info.without_rowid {
+        // Every primary-key column of a WITHOUT ROWID table is implicitly NOT
+        // NULL, however the key was written. `apply_table_constraints` says so
+        // for a table-level `PRIMARY KEY(...)`; a column-level `id INTEGER
+        // PRIMARY KEY` is recorded while the column itself is built, and used
+        // to arrive here without it - so an INSERT that named no key was
+        // accepted where the reference reports NOT NULL on the key column.
+        for column in &mut info.columns {
+            if column.primary_key_position.is_some() {
+                column.not_null = true;
+            }
+        }
+    }
     info.rowid_alias = rowid_alias(&info, &parsed.ast, columns, constraints);
     info.indexes = automatic_indexes(&info, &parsed.ast, columns, constraints);
+    if info.without_rowid {
+        // A WITHOUT ROWID table *is* its primary-key index: SQLite writes no
+        // `sqlite_autoindex` row for it, so nothing would ever fill the root in
+        // and every seek on the key would open page zero. Pointing the entry at
+        // the table's own root is what makes the planner able to use the key,
+        // and is the truth about the file - the b-tree at that root is an index
+        // b-tree whose record is the whole row.
+        let root = info.root;
+        let keys = info.primary_key();
+        for index in &mut info.indexes {
+            if index.origin != IndexOrigin::PrimaryKey {
+                continue;
+            }
+            if index
+                .columns
+                .iter()
+                .map(|key| key.column)
+                .eq(keys.iter().copied().map(Some))
+            {
+                index.root = root;
+            }
+        }
+    }
     Ok(info)
 }
 

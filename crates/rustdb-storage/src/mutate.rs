@@ -1913,6 +1913,8 @@ pub fn build_index(
     columns: &[u16],
     key: &KeyInfo,
     rowid_alias: Option<u16>,
+    trailing: &[u16],
+    table_key: Option<&KeyInfo>,
 ) -> DbResult<()> {
     let limits = Limits::default();
     let table = PageId::from_persisted(table_root)?;
@@ -1920,10 +1922,18 @@ pub fn build_index(
     let encoding = pager.text_encoding();
     let format = pager.header().schema_format.max(1);
     let mut entries: Vec<Vec<u8>> = Vec::new();
-    let mut cursor = crate::cursor::BTreeCursor::table(table);
+    // `trailing` names the slots an entry ends with instead of a rowid, which
+    // is how a WITHOUT ROWID table's secondary indexes locate a row. It also
+    // says which kind of b-tree the table is, because such a table's root is an
+    // index b-tree and a table cursor on it would ask its pages for rowids.
+    let keyed = !trailing.is_empty();
+    let mut cursor = match table_key {
+        Some(key) => crate::cursor::BTreeCursor::index(table, key.clone()),
+        None => crate::cursor::BTreeCursor::table(table),
+    };
     let mut more = cursor.first(pager)?;
     while more {
-        let rowid = cursor.rowid()?;
+        let rowid = if keyed { 0 } else { cursor.rowid()? };
         let values = cursor.record_values(pager, &limits)?;
         let mut fields: Vec<rustdb_value::Value<'static>> = Vec::with_capacity(columns.len() + 1);
         for column in columns {
@@ -1938,7 +1948,18 @@ pub fn build_index(
                     .unwrap_or(rustdb_value::Value::Null),
             );
         }
-        fields.push(rustdb_value::Value::Integer(rowid));
+        if keyed {
+            for slot in trailing {
+                fields.push(
+                    values
+                        .get(*slot as usize)
+                        .cloned()
+                        .unwrap_or(rustdb_value::Value::Null),
+                );
+            }
+        } else {
+            fields.push(rustdb_value::Value::Integer(rowid));
+        }
         entries.push(record::encode_record(&fields, encoding, format)?);
         more = cursor.next(pager)?;
     }

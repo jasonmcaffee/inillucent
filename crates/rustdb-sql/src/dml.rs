@@ -562,9 +562,6 @@ impl<'a> Binder<'a> {
             TableKind::Subquery => return Err(unsupported("writing to a subquery", span)),
             TableKind::Table => {}
         }
-        if table.without_rowid {
-            return Err(unsupported("WITHOUT ROWID tables", span));
-        }
         if table.folded.starts_with(b"sqlite_") {
             return Err(unsupported(
                 "writing to a table whose name begins with sqlite_",

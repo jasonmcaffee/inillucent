@@ -487,14 +487,8 @@ impl<'a> Binder<'a> {
         else {
             return Err(unsupported("CREATE TABLE ... AS SELECT", Span::default()));
         };
-        if *without_rowid {
-            if !self.declares_primary_key(columns, constraints) {
-                return Err(refused("PRIMARY KEY missing on table", Span::default()));
-            }
-            return Err(unsupported(
-                "writing to a WITHOUT ROWID table",
-                Span::default(),
-            ));
+        if *without_rowid && !self.declares_primary_key(columns, constraints) {
+            return Err(refused("PRIMARY KEY missing on table", Span::default()));
         }
         if *strict {
             self.check_strict(columns)?;
@@ -1448,11 +1442,15 @@ impl<'a> Binder<'a> {
                     Span::default(),
                 ));
             }
+            // A WITHOUT ROWID table's primary key *is* the table's own b-tree,
+            // so its entry names the same root. Freeing it twice frees a page
+            // that is already on the free list, which reads back as a malformed
+            // database.
             let index_roots = table
                 .indexes
                 .iter()
                 .map(|index| index.root)
-                .filter(|root| *root != 0)
+                .filter(|root| *root != 0 && *root != table.root)
                 .collect();
             return Ok(Directive::Drop {
                 kind,

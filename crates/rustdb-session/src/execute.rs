@@ -141,7 +141,19 @@ fn create_table(
         return Ok(Vec::new());
     }
     let sql = ddl::canonical_sql("CREATE TABLE", source, *name_offset, source.len() as u32);
-    let root = connection.with_state(|state| ddl::allocate_table_root(&mut state.pager))??;
+    // A WITHOUT ROWID table's b-tree is an *index* b-tree - its cells carry a
+    // key and no rowid - so its root page has to be created as one. A table
+    // page here would be read back with the wrong cell format.
+    let without_rowid = rustdb_catalog::table_from_create_sql(&sql, 0, 0)
+        .map(|table| table.without_rowid)
+        .unwrap_or(false);
+    let root = connection.with_state(|state| {
+        if without_rowid {
+            ddl::allocate_index_root(&mut state.pager)
+        } else {
+            ddl::allocate_table_root(&mut state.pager)
+        }
+    })??;
     connection.with_state(|state| {
         ddl::insert_schema_row(
             &mut state.pager,
@@ -161,6 +173,12 @@ fn create_table(
     // catalog uses is what keeps the two in step.
     let table = rustdb_catalog::table_from_create_sql(&sql, 0, root)?;
     for (ordinal, index) in table.indexes.iter().enumerate() {
+        if index.root == root {
+            // The primary key of a WITHOUT ROWID table *is* the table's own
+            // b-tree. SQLite writes it no `sqlite_autoindex` row, and writing
+            // one would leave a second object claiming the same root page.
+            continue;
+        }
         let root = connection.with_state(|state| ddl::allocate_index_root(&mut state.pager))??;
         let index_name = ddl::automatic_index_name(name, ordinal.saturating_add(1) as u32);
         let _ = index;
@@ -671,18 +689,58 @@ fn backfill_index(connection: &Connection, name: &[u8]) -> DbResult<()> {
     let Some((table, index)) = found else {
         return Err(misuse("the index that was just created cannot be found"));
     };
+    let columns: Vec<u16> = if table.without_rowid {
+        // The scan reads *record* slots, and a WITHOUT ROWID table's record is
+        // permuted: its primary key comes first. Handing the declared positions
+        // through would index the wrong columns.
+        index
+            .columns
+            .iter()
+            .filter_map(|key| key.column)
+            .map(|column| table.record_slot(column).unwrap_or(usize::from(column)) as u16)
+            .collect()
+    } else {
+        index.columns.iter().filter_map(|key| key.column).collect()
+    };
+    let trailing: Vec<u16> = if table.without_rowid {
+        table
+            .primary_key()
+            .into_iter()
+            .map(|column| table.record_slot(column).unwrap_or(usize::from(column)) as u16)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // The scan's own ordering, which for a WITHOUT ROWID table is the primary
+    // key its root b-tree is sorted by.
+    let table_key = table.without_rowid.then(|| rustdb_value::record::KeyInfo {
+        columns: table
+            .primary_key()
+            .into_iter()
+            .map(|position| rustdb_value::record::KeyColumn {
+                collation: table
+                    .column(position)
+                    .map(|column| {
+                        rustdb_value::Collation::from_name(
+                            core::str::from_utf8(&column.collation).unwrap_or("BINARY"),
+                        )
+                        .unwrap_or(rustdb_value::Collation::Binary)
+                    })
+                    .unwrap_or(rustdb_value::Collation::Binary),
+                descending: false,
+            })
+            .collect(),
+    });
     connection.with_state(|state| {
         rustdb_storage::mutate::build_index(
             &mut state.pager,
             table.root,
             index.root,
-            &index
-                .columns
-                .iter()
-                .filter_map(|key| key.column)
-                .collect::<Vec<u16>>(),
+            &columns,
             &index_key_info(&index),
             table.rowid_alias,
+            &trailing,
+            table_key.as_ref(),
         )
     })?
 }

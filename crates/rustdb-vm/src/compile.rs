@@ -249,6 +249,18 @@ impl Compiler {
             .flatten()
     }
 
+    /// Returns whether a FROM term's rows come from an index B-tree.
+    ///
+    /// True for a `WITHOUT ROWID` table, whose root *is* an index. It is asked
+    /// of the recorded cursor rather than of the table, because the compiler
+    /// reads columns long after the decision to open one was made.
+    fn is_index_source(&self, id: usize) -> bool {
+        self.source_cursors
+            .get(id)
+            .and_then(Option::as_ref)
+            .is_some_and(|cursors| cursors.index_table)
+    }
+
     /// Returns whether a FROM term's rows come from an ephemeral store.
     fn is_ephemeral_source(&self, id: usize) -> bool {
         self.source_cursors
@@ -348,6 +360,8 @@ pub(crate) struct SourceCursors {
     index: Option<u32>,
     /// Whether `table` numbers an ephemeral store rather than a B-tree cursor.
     ephemeral: bool,
+    /// Whether `table` is an index cursor, which a `WITHOUT ROWID` table's is.
+    index_table: bool,
     /// The register holding whether an uncorrelated block has been built.
     ///
     /// It is allocated and zeroed before the loops, not inside them. Zeroing it
@@ -377,6 +391,19 @@ impl SourceCursors {
             table,
             index: None,
             ephemeral: false,
+            index_table: false,
+            built: None,
+            matched: None,
+        }
+    }
+
+    /// Returns the cursors of a `WITHOUT ROWID` target, whose root is an index.
+    pub(crate) fn index_only(table: u32) -> SourceCursors {
+        SourceCursors {
+            table,
+            index: Some(table),
+            ephemeral: false,
+            index_table: true,
             built: None,
             matched: None,
         }
@@ -453,6 +480,7 @@ impl Compiler {
                             table: store,
                             index: None,
                             ephemeral: true,
+                            index_table: false,
                             built,
                             matched: None,
                         },
@@ -477,6 +505,7 @@ impl Compiler {
                             table: store,
                             index: None,
                             ephemeral: true,
+                            index_table: false,
                             built: None,
                             matched: None,
                         },
@@ -498,16 +527,41 @@ impl Compiler {
                     let table = self.cursors;
                     self.cursors = self.cursors.saturating_add(1);
                     let columns = source.table.columns.len() as i32;
-                    self.emit(
-                        Instruction::new(
-                            Opcode::OpenRead,
-                            table as i32,
-                            source.table.root as i32,
-                            0,
-                        )
-                        .with_p4(Operand::Count(columns.max(0) as u32)),
-                    );
+                    // A WITHOUT ROWID table's root is an *index* b-tree - the
+                    // key is its primary key and the record is the whole row -
+                    // so it is opened as one. Opened as a table cursor it would
+                    // be asked for rowids no cell in it carries.
+                    if source.table.without_rowid {
+                        self.emit(
+                            Instruction::new(
+                                Opcode::OpenIndex,
+                                table as i32,
+                                source.table.root as i32,
+                                0,
+                            )
+                            .with_p4(Operand::IndexKey(primary_key_of(&source.table))),
+                        );
+                    } else {
+                        self.emit(
+                            Instruction::new(
+                                Opcode::OpenRead,
+                                table as i32,
+                                source.table.root as i32,
+                                0,
+                            )
+                            .with_p4(Operand::Count(columns.max(0) as u32)),
+                        );
+                    }
                     let index = match path {
+                        AccessPath::IndexSeek { index_root, .. }
+                            if source.table.without_rowid && *index_root == source.table.root =>
+                        {
+                            // The seek is on the table's own key, and the table
+                            // cursor is already that index. A second cursor on
+                            // the same root would work and would also make
+                            // every row read cost two descents.
+                            Some(table)
+                        }
                         AccessPath::IndexSeek {
                             index_root,
                             collations,
@@ -559,6 +613,7 @@ impl Compiler {
                             table,
                             index,
                             ephemeral: false,
+                            index_table: source.table.without_rowid,
                             built: None,
                             matched,
                         },
@@ -1884,6 +1939,7 @@ impl Compiler {
                 high,
                 columns,
                 without_rowid,
+                key_entry_slots,
                 ..
             } => {
                 self.compile_index_seek(
@@ -1895,6 +1951,7 @@ impl Compiler {
                     high,
                     &columns,
                     without_rowid,
+                    &key_entry_slots,
                     inner,
                 )?;
             }
@@ -1996,6 +2053,7 @@ impl Compiler {
         high: Option<RangeBound>,
         columns: &[u16],
         without_rowid: bool,
+        key_slots: &[usize],
         inner: &InnerBody,
     ) -> DbResult<()> {
         let Some(index_cursor) = cursors.index else {
@@ -2107,6 +2165,24 @@ impl Compiler {
                 -1,
                 rowid as i32,
             )));
+        } else if !key_slots.is_empty() {
+            // The entry ends with the row's primary key; read it back out and
+            // seek the table - which is itself an index - to that key.
+            let block = self.register_block(key_slots.len());
+            for (offset, slot) in key_slots.iter().enumerate() {
+                self.emit(Instruction::new(
+                    Opcode::IdxColumn,
+                    index_cursor as i32,
+                    *slot as i32,
+                    block.saturating_add(offset as u32) as i32,
+                ));
+            }
+            skip.push(
+                self.emit_jump(
+                    Instruction::new(Opcode::NoConflict, cursors.table as i32, -1, block as i32)
+                        .with_p5(key_slots.len() as u16),
+                ),
+            );
         }
         skip.extend(self.compile_residual(body, level)?);
         self.compile_level(body, level.saturating_add(1), inner)?;
@@ -2854,6 +2930,36 @@ fn constant_operand(sql: &[u8]) -> Option<Operand> {
     Some(operand)
 }
 
+/// Returns the key description of a table's primary key.
+///
+/// Only meaningful for a `WITHOUT ROWID` table, whose root is an index b-tree
+/// ordered by exactly these columns with exactly these collations. Getting the
+/// collations wrong here would order the table differently from the file.
+pub(crate) fn primary_key_of(table: &TableInfo) -> IndexKey {
+    IndexKey {
+        columns: table
+            .primary_key()
+            .into_iter()
+            .map(|position| {
+                let collation = table
+                    .column(position)
+                    .map(|column| {
+                        Collation::from_name(
+                            core::str::from_utf8(&column.collation).unwrap_or("BINARY"),
+                        )
+                        .unwrap_or(Collation::Binary)
+                    })
+                    .unwrap_or(Collation::Binary);
+                SortColumn {
+                    descending: false,
+                    nulls_first: true,
+                    collation,
+                }
+            })
+            .collect(),
+    }
+}
+
 /// Returns whether an expression reads a window value anywhere inside it.
 fn holds_window(expr: &BoundExpr) -> bool {
     if matches!(expr, BoundExpr::WindowRef { .. }) {
@@ -3239,6 +3345,13 @@ impl Compiler {
                 // record to parse, and no affinity to re-apply on the way out.
                 let opcode = if self.is_ephemeral_source(*source) {
                     Opcode::EphColumn
+                } else if self.is_index_source(*source) {
+                    // A WITHOUT ROWID table is read through an index cursor, so
+                    // its columns are read with the index opcode. Both read the
+                    // same record at the same slot; the verifier separates them
+                    // so that a table cursor is never asked for an index's key
+                    // and the other way round.
+                    Opcode::IdxColumn
                 } else {
                     Opcode::Column
                 };
