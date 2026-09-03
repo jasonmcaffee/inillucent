@@ -1,8 +1,8 @@
 {
   "reference": "sqlite-3.53.4",
   "counts": {
-    "missing": 46,
-    "pass": 214
+    "missing": 45,
+    "pass": 215
   },
   "capabilities": [
     {"id": "harness.manifest.schema", "claimed": "pass", "evidenced": "pass", "phase": "phase 0: contract, provenance, and harness foundation", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::toml_lite::tests::the_manifest_subset_parses", "rustdb-compat::toml_lite::tests::anything_outside_the_subset_is_refused", "rustdb-compat::manifest::tests::a_capability_row_parses"]},
@@ -161,7 +161,7 @@
     {"id": "sql.explain", "claimed": "pass", "evidenced": "pass", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::explain_reports_without_running"]},
     {"id": "sql.analyze", "claimed": "pass", "evidenced": "pass", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::analyze_writes_statistics_sqlite_reads", "rustdb-compat::statistics_sqlite_wrote_are_read_back"]},
     {"id": "sql.reindex", "claimed": "pass", "evidenced": "pass", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::reindex_rebuilds_an_index"]},
-    {"id": "sql.vacuum", "claimed": "missing", "evidenced": "missing", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": [], "tests": []},
+    {"id": "sql.vacuum", "claimed": "pass", "evidenced": "pass", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::vacuum_matches_sqlite", "rustdb-compat::vacuum_rebuilds_a_database_sqlite_still_reads", "rustdb-compat::vacuum_into_writes_a_copy_sqlite_reads"]},
     {"id": "planner.access-paths", "claimed": "pass", "evidenced": "pass", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::the_more_selective_index_wins", "rustdb-compat::the_foundational_select_suite_is_green"]},
     {"id": "planner.join-order", "claimed": "pass", "evidenced": "pass", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::statistics_reorder_the_join", "rustdb-compat::cross_join_pins_the_order"]},
     {"id": "planner.statistics", "claimed": "pass", "evidenced": "pass", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::statistics_reorder_the_join", "rustdb-compat::statistics_sqlite_wrote_are_read_back"]},

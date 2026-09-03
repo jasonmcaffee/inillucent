@@ -998,3 +998,174 @@ fn without_rowid_round_trips_through_sqlite() {
         Ok(vec!["text:r|int:4".to_string()])
     );
 }
+
+/// `VACUUM`, which rebuilds the database into a fresh file and copies it back.
+///
+/// Every root page in the file moves, so the only test that means anything is
+/// the reference opening what came out: a schema row left pointing at the old
+/// root, or a `WITHOUT ROWID` table's index tree rebuilt as a table tree, is
+/// something rust-db would read back perfectly well and SQLite would report as
+/// corrupt.
+#[test]
+fn vacuum_rebuilds_a_database_sqlite_still_reads() {
+    let path = scratch("vacuum");
+    let database = Database::open(&path).expect("the database opens");
+    let connection = database.connect().expect("the connection opens");
+    run_all(
+        &connection,
+        &[
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, pad TEXT)",
+            "CREATE INDEX t_name ON t (name)",
+            "CREATE VIEW v AS SELECT id, name FROM t",
+            "CREATE TABLE log (seq INTEGER PRIMARY KEY, what TEXT)",
+            "CREATE TRIGGER t_ai AFTER INSERT ON t BEGIN
+               INSERT INTO log (what) VALUES (new.name);
+             END",
+            "CREATE TABLE w (k TEXT PRIMARY KEY, n INTEGER) WITHOUT ROWID",
+            "PRAGMA user_version = 42",
+        ],
+    );
+    // Enough rows to need more than one page, then most of them deleted, so
+    // the file really has free space to reclaim.
+    for row in 0..300 {
+        let padding = "x".repeat(120);
+        run_all(
+            &connection,
+            &[
+                &format!("INSERT INTO t VALUES ({row}, 'n{row}', '{padding}')"),
+                &format!("INSERT INTO w VALUES ('k{row}', {row})"),
+            ],
+        );
+    }
+    run_all(
+        &connection,
+        &[
+            "DELETE FROM t WHERE id % 2 = 0",
+            "DELETE FROM w WHERE n % 2 = 0",
+        ],
+    );
+    let before = std::fs::metadata(&path).expect("the file is there").len();
+    run_all(&connection, &["VACUUM"]);
+    let after = std::fs::metadata(&path).expect("the file is there").len();
+    assert!(
+        after < before,
+        "VACUUM left the file at {after} bytes, from {before}"
+    );
+    // Everything still answers, through the table, through the index, through
+    // the view, and through the table with no rowid.
+    assert_eq!(
+        run(&connection, "SELECT count(*) FROM t"),
+        Ok(vec!["int:150".to_string()])
+    );
+    assert_eq!(
+        run(&connection, "SELECT id FROM t WHERE name = 'n101'"),
+        Ok(vec!["int:101".to_string()])
+    );
+    assert_eq!(
+        run(&connection, "SELECT count(*) FROM v"),
+        Ok(vec!["int:150".to_string()])
+    );
+    assert_eq!(
+        run(&connection, "SELECT n FROM w WHERE k = 'k101'"),
+        Ok(vec!["int:101".to_string()])
+    );
+    assert_eq!(
+        run(&connection, "SELECT count(*) FROM log"),
+        Ok(vec!["int:300".to_string()])
+    );
+    assert_eq!(
+        run(&connection, "PRAGMA user_version"),
+        Ok(vec!["int:42".to_string()])
+    );
+    // The trigger survived the rebuild and still fires.
+    run_all(&connection, &["INSERT INTO t VALUES (9001, 'after', '')"]);
+    assert_eq!(
+        run(
+            &connection,
+            "SELECT what FROM log ORDER BY seq DESC LIMIT 1"
+        ),
+        Ok(vec!["text:after".to_string()])
+    );
+    // It cannot run inside a transaction.
+    run_all(&connection, &["BEGIN"]);
+    assert!(run(&connection, "VACUUM").is_err());
+    run_all(&connection, &["COMMIT"]);
+    drop(connection);
+    drop(database);
+
+    sqlite_reads(
+        &path,
+        &[
+            ("SELECT count(*) FROM t", &["int:151"]),
+            ("SELECT id FROM t WHERE name = 'n101'", &["int:101"]),
+            ("SELECT count(*) FROM v", &["int:151"]),
+            ("SELECT n FROM w WHERE k = 'k101'", &["int:101"]),
+            ("PRAGMA user_version", &["int:42"]),
+            (
+                "SELECT type, name FROM sqlite_schema ORDER BY name",
+                &[
+                    "text:table|text:log",
+                    "text:table|text:t",
+                    "text:trigger|text:t_ai",
+                    "text:index|text:t_name",
+                    "text:view|text:v",
+                    "text:table|text:w",
+                ],
+            ),
+        ],
+    );
+}
+
+/// `VACUUM INTO`, which writes a rebuilt copy and leaves the original alone.
+#[test]
+fn vacuum_into_writes_a_copy_sqlite_reads() {
+    let path = scratch("vacuum-into");
+    let copy = path.with_extension("copy");
+    let _ = std::fs::remove_file(&copy);
+    let database = Database::open(&path).expect("the database opens");
+    let connection = database.connect().expect("the connection opens");
+    run_all(
+        &connection,
+        &[
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)",
+            "CREATE INDEX t_name ON t (name)",
+            "INSERT INTO t VALUES (1, 'ada'), (2, 'bob'), (3, 'cai')",
+            "DELETE FROM t WHERE id = 2",
+        ],
+    );
+    let target = copy
+        .display()
+        .to_string()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    run_all(&connection, &[&format!("VACUUM INTO '{target}'")]);
+    // The original is untouched and still works.
+    assert_eq!(
+        run(&connection, "SELECT id, name FROM t ORDER BY id"),
+        Ok(vec![
+            "int:1|text:ada".to_string(),
+            "int:3|text:cai".to_string()
+        ])
+    );
+    // And it refuses to overwrite, rather than replacing a file it was pointed
+    // at by mistake.
+    assert!(run(&connection, &format!("VACUUM INTO '{target}'")).is_err());
+    drop(connection);
+    drop(database);
+
+    sqlite_reads(
+        &copy,
+        &[
+            (
+                "SELECT id, name FROM t ORDER BY id",
+                &["int:1|text:ada", "int:3|text:cai"],
+            ),
+            ("SELECT id FROM t WHERE name = 'cai'", &["int:3"]),
+        ],
+    );
+    let reopened = Database::open(&copy).expect("the copy opens");
+    let connection = reopened.connect().expect("the copy connects");
+    assert_eq!(
+        run(&connection, "SELECT count(*) FROM t"),
+        Ok(vec!["int:2".to_string()])
+    );
+}

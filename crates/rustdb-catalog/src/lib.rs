@@ -17,7 +17,8 @@
 //!
 //! - [`load`] - reading `sqlite_schema` and building the snapshot;
 //! - [`ddl`] - writing `sqlite_schema`, root pages, and the cookie;
-//! - [`snapshot`] - the snapshot itself and the view the binder sees.
+//! - [`snapshot`] - the snapshot itself and the view the binder sees;
+//! - [`rebuild`] - copying a database into a fresh file, which is `VACUUM`.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -40,6 +41,7 @@
 pub mod analyze;
 pub mod ddl;
 pub mod load;
+pub mod rebuild;
 pub mod rename;
 pub mod snapshot;
 

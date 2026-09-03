@@ -1267,8 +1267,8 @@ id = "sql.vacuum"
 source = "https://sqlite.org/lang_vacuum.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::vacuum_matches_sqlite", "rustdb-compat::vacuum_rebuilds_a_database_sqlite_still_reads", "rustdb-compat::vacuum_into_writes_a_copy_sqlite_reads"]
 
 [[capability]]
 id = "planner.access-paths"

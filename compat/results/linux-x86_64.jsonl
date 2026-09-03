@@ -311,6 +311,9 @@
 {"test_id": "rustdb-compat::unparseable_schema_sql_is_corruption", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::unsafe_code_is_confined_and_justified", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::upsert_matches_sqlite", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::vacuum_into_writes_a_copy_sqlite_reads", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::vacuum_matches_sqlite", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::vacuum_rebuilds_a_database_sqlite_still_reads", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::values_runs_without_a_table", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::views_match_the_oracle", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::windows_match_the_oracle", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
