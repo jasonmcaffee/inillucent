@@ -19,6 +19,7 @@
 //! - [`aggregate`] - the accumulators;
 //! - [`sorter`] - the sorter and the distinct set;
 //! - [`ephemeral`] - the temporary row stores nested queries are built on;
+//! - [`window`] - partitions, peer groups and frames;
 //! - [`machine`] - registers, cursors, and the step loop.
 
 #![forbid(unsafe_code)]
@@ -68,6 +69,7 @@ pub mod pattern;
 pub mod program;
 pub mod sorter;
 pub mod verify;
+pub mod window;
 
 pub use compile::{compile, compile_select};
 pub use compile_dml::{compile_delete, compile_insert, compile_update};

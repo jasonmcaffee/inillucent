@@ -14,7 +14,10 @@
 
 use rustdb_base::{error, DbResult};
 use rustdb_sql::ast::{BinaryOp, CompoundOp, JoinKind, NullOrder, PatternOp, SortOrder, UnaryOp};
-use rustdb_sql::bind::{BoundAggregate, BoundExpr, BoundOrderTerm, BoundSelect, SubqueryKind};
+use rustdb_sql::bind::{
+    BoundAggregate, BoundExpr, BoundFrameBound, BoundOrderTerm, BoundResultColumn, BoundSelect,
+    SubqueryKind, WindowCall as BoundWindowCall,
+};
 use rustdb_sql::catalog_view::TableInfo;
 use rustdb_sql::plan::{
     plan_select, AccessPath, AggregationMode, BoundKind, PhysicalPlan, RangeBound,
@@ -22,8 +25,9 @@ use rustdb_sql::plan::{
 use rustdb_value::{Affinity, Collation};
 
 use crate::program::{
-    AggregateCall, Comparison, IndexKey, Instruction, Opcode, Operand, Program,
-    ProgramDependencies, ResultColumn, SortColumn, SortKey,
+    AggregateCall, Comparison, FrameEnd, IndexKey, Instruction, Opcode, Operand, Program,
+    ProgramDependencies, ResultColumn, SortColumn, SortKey, WindowCall, WindowFrame, WindowPlan,
+    WindowSlot,
 };
 
 /// A jump target that is patched once its address is known.
@@ -543,6 +547,9 @@ impl Compiler {
         if !plan.compounds.is_empty() {
             return self.compile_compound(plan, sink);
         }
+        if !plan.select.windows.is_empty() {
+            return self.compile_windowed(plan, sink);
+        }
         let (limit_register, offset_register) = self.compile_limits(plan)?;
         let sorter = self.open_order_sorter(plan);
         let distinct = self.open_distinct(plan);
@@ -555,6 +562,135 @@ impl Compiler {
             sink,
         };
         self.compile_statement(&body)
+    }
+
+    /// Compiles a block that computes window functions.
+    ///
+    /// A window runs after `WHERE`, `GROUP BY` and `HAVING` and before
+    /// `DISTINCT`, `ORDER BY` and `LIMIT`, so the block is compiled twice over:
+    /// once to collect a record per row into a store, and once to drain that
+    /// store through the ordinary tail. Everything the output needs is in the
+    /// record - the partition and order keys, the call arguments, the `FILTER`
+    /// values, the frame offsets, and every subexpression of the result columns
+    /// that is not itself a window value.
+    fn compile_windowed(&mut self, plan: &PhysicalPlan, sink: Sink) -> DbResult<()> {
+        let layout = WindowLayout::of(plan);
+        let store = self.ephemeral();
+        let width = layout.record.len();
+        self.emit(Instruction::new(
+            Opcode::EphOpen,
+            store as i32,
+            width as i32,
+            0,
+        ));
+
+        // The collecting pass keeps the block's FROM, WHERE, GROUP BY and
+        // HAVING and drops everything that belongs after the window.
+        let mut collect = plan.clone();
+        collect.select.order_by.clear();
+        collect.needs_sort = false;
+        collect.select.limit = None;
+        collect.select.offset = None;
+        collect.select.distinct = false;
+        collect.select.windows.clear();
+        collect.select.columns = layout
+            .record
+            .iter()
+            .map(|expr| BoundResultColumn {
+                expr: expr.clone(),
+                name: Vec::new(),
+                origin: None,
+                declared_type: Vec::new(),
+            })
+            .collect();
+        self.compile_block(&collect, Sink::Store(store))?;
+
+        for pass in &layout.passes {
+            self.emit(
+                Instruction::new(Opcode::EphSort, store as i32, 0, 0)
+                    .with_p4(Operand::SortOn(pass.sort.clone())),
+            );
+            self.emit(
+                Instruction::new(Opcode::Window, store as i32, 0, 0)
+                    .with_p4(Operand::Window(Box::new(pass.plan.clone()))),
+            );
+        }
+
+        // The draining pass reads the record and the window values back into
+        // registers, and compiles the real result columns against them.
+        let total = width.saturating_add(plan.select.windows.len());
+        let record = self.register_block(total.max(1));
+        let mut drain = plan.clone();
+        drain.sources.clear();
+        drain.residuals.clear();
+        drain.constant_filter = None;
+        drain.aggregation = AggregationMode::None;
+        drain.select.filter = None;
+        drain.select.group_by.clear();
+        drain.select.having = None;
+        drain.select.aggregates.clear();
+        drain.select.values.clear();
+        drain.select.windows.clear();
+        let (limit_register, offset_register) = self.compile_limits(&drain)?;
+
+        let saved = core::mem::take(&mut self.substitutions);
+        for (index, expr) in layout.record.iter().enumerate() {
+            self.substitutions
+                .push((expr.clone(), record.saturating_add(index as u32)));
+        }
+        for (slot, column) in layout.slots.iter().enumerate() {
+            self.substitutions.push((
+                BoundExpr::WindowRef { slot },
+                record.saturating_add(*column as u32),
+            ));
+        }
+        let sorter = self.open_order_sorter(&drain);
+        let distinct = self.open_distinct(&drain);
+        let body = Body {
+            plan: &drain,
+            sorter,
+            distinct,
+            limit_register,
+            offset_register,
+            sink,
+        };
+        let outcome = self.drain_window(&body, store, record, total);
+        self.substitutions = saved;
+        outcome
+    }
+
+    /// Reads each windowed row back and runs it through the block's tail.
+    fn drain_window(
+        &mut self,
+        body: &Body<'_>,
+        store: u32,
+        record: u32,
+        total: usize,
+    ) -> DbResult<()> {
+        let width = body.plan.select.columns.len();
+        let block = self.register_block(width.max(1));
+        let tail_return = self.register();
+        let skip = self.emit_jump(Instruction::new(Opcode::Goto, 0, -1, 0));
+        let tail = self.here();
+        self.compile_tail(body, block, width, true, tail_return)?;
+        self.patch_here(skip);
+        let empty = self.emit_jump(Instruction::new(Opcode::EphRewind, store as i32, -1, 0));
+        let start = self.here();
+        for index in 0..total {
+            self.emit(Instruction::new(
+                Opcode::EphColumn,
+                store as i32,
+                index as i32,
+                record.saturating_add(index as u32) as i32,
+            ));
+        }
+        self.build_result_row(body, block)?;
+        self.emit(Instruction::new(Opcode::Gosub, tail_return as i32, tail, 0));
+        let more = self.emit_jump(Instruction::new(Opcode::EphNext, store as i32, -1, 0));
+        self.patch(more, start);
+        self.patch_here(empty);
+        self.drain_sorter(body, width)?;
+        Ok(())
     }
 
     /// Compiles a compound: every arm into one store, then that store drained.
@@ -2209,6 +2345,293 @@ fn collect_subqueries(expr: &BoundExpr, into: &mut Vec<BoundExpr>) {
     }
 }
 
+/// The record one block's window passes collect, and where everything lives.
+///
+/// Every value a pass or the output needs gets one column, de-duplicated by
+/// expression: two calls over the same `PARTITION BY` share its columns, and a
+/// result column that also appears in an `ORDER BY` is stored once. The
+/// de-duplication is not only a saving - the drain substitutes *by expression*,
+/// so two columns holding the same expression would make which one is read
+/// arbitrary.
+///
+/// Calls are grouped into passes by the window they are computed over, because
+/// two windows in one `SELECT` may partition differently and each partitioning
+/// needs its own sort. Each pass appends its own calls' values to every row, so
+/// a call's slot number and the column its value ends up in are not the same
+/// number and the map between them is kept here.
+struct WindowLayout {
+    /// The expressions the record holds, in column order.
+    record: Vec<BoundExpr>,
+    /// The passes, in the order they run.
+    passes: Vec<WindowPass>,
+    /// For each window slot, the record column its value is appended at.
+    slots: Vec<usize>,
+}
+
+/// One sort-and-compute pass over the collected records.
+struct WindowPass {
+    /// The columns the pass sorts by, in order: partition keys then ordering.
+    sort: Vec<(usize, SortColumn)>,
+    /// The pass the machine runs.
+    plan: WindowPlan,
+}
+
+impl WindowLayout {
+    /// Works out the record and the passes for one block's windows.
+    fn of(plan: &PhysicalPlan) -> WindowLayout {
+        let mut layout = WindowLayout {
+            record: Vec::new(),
+            passes: Vec::new(),
+            slots: vec![0; plan.select.windows.len()],
+        };
+        // Whatever the output needs is interned first, so that the record's
+        // leading columns are stable whatever windows the query happens to
+        // carry - which keeps the drain's substitutions independent of the
+        // window layout.
+        for column in &plan.select.columns {
+            layout.intern_bases(&column.expr);
+        }
+        for term in &plan.select.order_by {
+            layout.intern_bases(&term.expr);
+        }
+
+        // One pass per distinct window: the same `PARTITION BY` and the same
+        // `ORDER BY` can share a sort, and anything else cannot.
+        let mut groups: Vec<(Vec<usize>, Vec<(usize, SortColumn)>, Vec<usize>)> = Vec::new();
+        for (slot, window) in plan.select.windows.iter().enumerate() {
+            let partition: Vec<usize> = window
+                .partition_by
+                .iter()
+                .map(|expr| layout.intern(expr))
+                .collect();
+            let order: Vec<(usize, SortColumn)> = window
+                .order_by
+                .iter()
+                .map(|term| (layout.intern(&term.expr), sort_column(term)))
+                .collect();
+            match groups
+                .iter_mut()
+                .find(|(existing, sort, _)| *existing == partition && *sort == order)
+            {
+                Some((_, _, members)) => members.push(slot),
+                None => groups.push((partition, order, vec![slot])),
+            }
+        }
+
+        // Which column each window value lands in cannot be known until every
+        // group has been walked: interning a call's arguments, its `FILTER` and
+        // its frame offsets all grow the record, and the appended values come
+        // after all of it. Numbering them as the loop went made the first
+        // window value read whichever expression happened to be interned next -
+        // a frame offset, most often, so `sum(x) OVER (ROWS 2 PRECEDING)`
+        // summed the number 2.
+        let mut order_of_append: Vec<usize> = Vec::new();
+        for (partition, order, members) in groups {
+            let mut calls = Vec::new();
+            for slot in &members {
+                let Some(window) = plan.select.windows.get(*slot) else {
+                    continue;
+                };
+                let arguments = window
+                    .arguments
+                    .iter()
+                    .map(|expr| layout.intern(expr))
+                    .collect();
+                let filter = window.filter.as_ref().map(|expr| layout.intern(expr));
+                let start = layout.frame_end(&window.start);
+                let end = layout.frame_end(&window.end);
+                calls.push(WindowCall {
+                    func: match window.call {
+                        BoundWindowCall::Aggregate(func) => WindowSlot::Aggregate(func),
+                        BoundWindowCall::Plain(func) => WindowSlot::Plain(func),
+                    },
+                    distinct: window.distinct,
+                    collation: window.collation,
+                    arguments,
+                    filter,
+                    order: order.clone(),
+                    frame: WindowFrame {
+                        unit: window.unit,
+                        start,
+                        end,
+                        exclude: window.exclude,
+                    },
+                });
+                order_of_append.push(*slot);
+            }
+            let mut sort: Vec<(usize, SortColumn)> = partition
+                .iter()
+                .map(|column| {
+                    (
+                        *column,
+                        SortColumn {
+                            descending: false,
+                            nulls_first: true,
+                            collation: layout.collation_of(*column),
+                        },
+                    )
+                })
+                .collect();
+            sort.extend(order.iter().copied());
+            let partition_key = partition
+                .iter()
+                .map(|column| (*column, layout.collation_of(*column)))
+                .collect();
+            layout.passes.push(WindowPass {
+                sort,
+                plan: WindowPlan {
+                    partition: partition_key,
+                    calls,
+                },
+            });
+        }
+        let width = layout.record.len();
+        for (position, slot) in order_of_append.iter().enumerate() {
+            if let Some(destination) = layout.slots.get_mut(*slot) {
+                *destination = width.saturating_add(position);
+            }
+        }
+        layout
+    }
+
+    /// Returns the collation the expression in one record column carries.
+    fn collation_of(&self, column: usize) -> Collation {
+        self.record
+            .get(column)
+            .map_or(Collation::Binary, rustdb_sql::bind::result_collation)
+    }
+
+    /// Returns the record column an expression lives in, adding it if new.
+    fn intern(&mut self, expr: &BoundExpr) -> usize {
+        if let Some(index) = self.record.iter().position(|existing| existing == expr) {
+            return index;
+        }
+        self.record.push(expr.clone());
+        self.record.len().saturating_sub(1)
+    }
+
+    /// Stores the maximal subexpressions of one output expression that hold no
+    /// window value.
+    ///
+    /// Maximal rather than leaf: `a + b` is one column, not two, so the sum is
+    /// computed once while the rows are collected instead of the operands being
+    /// carried through the pass and added again on the way out. `a + count(*)
+    /// OVER ()` holds a window value, so it recurses.
+    fn intern_bases(&mut self, expr: &BoundExpr) {
+        if !holds_window(expr) {
+            let literal = matches!(
+                expr,
+                BoundExpr::Null
+                    | BoundExpr::Integer(_)
+                    | BoundExpr::Real(_)
+                    | BoundExpr::Text(_)
+                    | BoundExpr::Blob(_)
+                    | BoundExpr::Parameter(_)
+            );
+            if !literal {
+                self.intern(expr);
+            }
+            return;
+        }
+        for child in children_of(expr) {
+            self.intern_bases(&child);
+        }
+    }
+
+    /// Returns the machine's form of one end of a frame.
+    fn frame_end(&mut self, bound: &BoundFrameBound) -> FrameEnd {
+        match bound {
+            BoundFrameBound::UnboundedPreceding => FrameEnd::UnboundedPreceding,
+            BoundFrameBound::UnboundedFollowing => FrameEnd::UnboundedFollowing,
+            BoundFrameBound::CurrentRow => FrameEnd::CurrentRow,
+            BoundFrameBound::Preceding(expr) => FrameEnd::Offset {
+                column: self.intern(expr),
+                preceding: true,
+            },
+            BoundFrameBound::Following(expr) => FrameEnd::Offset {
+                column: self.intern(expr),
+                preceding: false,
+            },
+        }
+    }
+}
+
+/// Returns whether an expression reads a window value anywhere inside it.
+fn holds_window(expr: &BoundExpr) -> bool {
+    if matches!(expr, BoundExpr::WindowRef { .. }) {
+        return true;
+    }
+    children_of(expr).iter().any(holds_window)
+}
+
+/// Returns an expression's direct children.
+fn children_of(expr: &BoundExpr) -> Vec<BoundExpr> {
+    let mut out = Vec::new();
+    match expr {
+        BoundExpr::Unary { operand, .. }
+        | BoundExpr::Not(operand)
+        | BoundExpr::IsNull { operand, .. }
+        | BoundExpr::Collate { operand, .. }
+        | BoundExpr::Cast { operand, .. } => out.push((**operand).clone()),
+        BoundExpr::Arithmetic { left, right, .. }
+        | BoundExpr::Compare { left, right, .. }
+        | BoundExpr::Is { left, right, .. }
+        | BoundExpr::And(left, right)
+        | BoundExpr::Or(left, right) => {
+            out.push((**left).clone());
+            out.push((**right).clone());
+        }
+        BoundExpr::Between {
+            operand, low, high, ..
+        } => {
+            out.push((**operand).clone());
+            out.push((**low).clone());
+            out.push((**high).clone());
+        }
+        BoundExpr::InList { operand, list, .. } => {
+            out.push((**operand).clone());
+            out.extend(list.iter().cloned());
+        }
+        BoundExpr::Case {
+            operand,
+            branches,
+            otherwise,
+            ..
+        } => {
+            if let Some(operand) = operand {
+                out.push((**operand).clone());
+            }
+            for (when, then) in branches {
+                out.push(when.clone());
+                out.push(then.clone());
+            }
+            if let Some(otherwise) = otherwise {
+                out.push((**otherwise).clone());
+            }
+        }
+        BoundExpr::Pattern {
+            operand,
+            pattern,
+            escape,
+            ..
+        } => {
+            out.push((**operand).clone());
+            out.push((**pattern).clone());
+            if let Some(escape) = escape {
+                out.push((**escape).clone());
+            }
+        }
+        BoundExpr::Function { arguments, .. } => out.extend(arguments.iter().cloned()),
+        BoundExpr::Subquery { operand, .. } => {
+            if let Some(operand) = operand {
+                out.push((**operand).clone());
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 /// Returns the sink one compound operator writes an arm's rows through.
 fn sink_for(op: CompoundOp, store: u32) -> Sink {
     match op {
@@ -2489,6 +2912,9 @@ impl Compiler {
                 operand,
                 ..
             } => self.compile_value_subquery(*id, *kind, *negated, operand.as_deref()),
+            BoundExpr::WindowRef { slot } => Err(error::misuse(format!(
+                "window value {slot} was read outside a window pass"
+            ))),
             BoundExpr::SorterColumn { column } => Err(error::misuse(format!(
                 "a sorter column {column} escaped its sorter"
             ))),

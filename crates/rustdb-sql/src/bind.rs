@@ -18,9 +18,10 @@ use crate::ast::{
     self, Ast, BinaryOp, CompoundOp, Expr, ExprId, FromSource, InRhs, JoinConstraint, JoinKind,
     Literal, NullOrder, PatternOp, SelectBody, SelectId, SortOrder, UnaryOp,
 };
+use crate::ast::{FrameBound, FrameExclude, FrameUnit};
 use crate::catalog_view::{CatalogView, ColumnInfo, TableInfo, TableKind};
 use crate::diagnostic::{ParseError, ParseErrorKind};
-use crate::function::{self, AggregateFunc, ScalarFunc};
+use crate::function::{self, AggregateFunc, ScalarFunc, WindowFunc};
 use crate::lexer::Span;
 
 /// What an authorizer decided about one action.
@@ -238,6 +239,11 @@ pub enum BoundExpr {
         /// The collation the function's comparisons use.
         collation: Collation,
     },
+    /// A reference to a window value computed for this row.
+    WindowRef {
+        /// Which window call, by position in the block's list.
+        slot: usize,
+    },
     /// A reference to an aggregate accumulator computed for this row group.
     Aggregate {
         /// Which accumulator, by position.
@@ -338,6 +344,7 @@ impl BoundExpr {
             BoundExpr::Column { .. }
             | BoundExpr::Rowid { .. }
             | BoundExpr::Aggregate { .. }
+            | BoundExpr::WindowRef { .. }
             | BoundExpr::SorterColumn { .. } => false,
             BoundExpr::Unary { operand, .. } => operand.is_constant(),
             BoundExpr::Collate { operand, .. } => operand.is_constant(),
@@ -594,6 +601,59 @@ pub struct BoundOrderTerm {
     pub collation: Collation,
 }
 
+/// What a window call computes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowCall {
+    /// An aggregate, over the frame.
+    Aggregate(AggregateFunc),
+    /// One of the eleven functions that only exist in a window.
+    Plain(WindowFunc),
+}
+
+/// One end of a window frame, bound.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BoundFrameBound {
+    /// `UNBOUNDED PRECEDING`.
+    UnboundedPreceding,
+    /// `expr PRECEDING`.
+    Preceding(BoundExpr),
+    /// `CURRENT ROW`.
+    CurrentRow,
+    /// `expr FOLLOWING`.
+    Following(BoundExpr),
+    /// `UNBOUNDED FOLLOWING`.
+    UnboundedFollowing,
+}
+
+/// One window function call, with the window it is computed over.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoundWindow {
+    /// What it computes.
+    pub call: WindowCall,
+    /// Whether `DISTINCT` was written, which only an aggregate may carry.
+    pub distinct: bool,
+    /// The collation its comparisons use.
+    pub collation: Collation,
+    /// The arguments.
+    pub arguments: Vec<BoundExpr>,
+    /// Whether the call was `count(*)`.
+    pub star: bool,
+    /// The `FILTER (WHERE ...)` predicate.
+    pub filter: Option<BoundExpr>,
+    /// `PARTITION BY`.
+    pub partition_by: Vec<BoundExpr>,
+    /// `ORDER BY`, which also decides the peer groups.
+    pub order_by: Vec<BoundOrderTerm>,
+    /// The frame unit.
+    pub unit: FrameUnit,
+    /// The frame start.
+    pub start: BoundFrameBound,
+    /// The frame end.
+    pub end: BoundFrameBound,
+    /// The `EXCLUDE` clause.
+    pub exclude: FrameExclude,
+}
+
 /// A bound SELECT.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoundSelect {
@@ -626,6 +686,8 @@ pub struct BoundSelect {
     /// which is exactly SQLite's rule, since an arm of a compound may not
     /// carry its own. `distinct` stays the first arm's own.
     pub compounds: Vec<(CompoundOp, BoundSelect)>,
+    /// The window calls the block computes, in the order they were bound.
+    pub windows: Vec<BoundWindow>,
     /// The FROM terms belonging to an enclosing block that this one reads.
     ///
     /// A block with an empty list is uncorrelated and can be evaluated once; a
@@ -711,6 +773,8 @@ struct RecursiveTarget {
 /// added to the enclosing block's accumulator list and finalised at the wrong
 /// level - which is a wrong answer rather than an error.
 struct BlockFrame {
+    windows: Vec<BoundWindow>,
+    named_windows: Vec<(Vec<u8>, ast::WindowId)>,
     aggregates: Vec<BoundAggregate>,
     result_aliases: Vec<(Vec<u8>, BoundExpr)>,
     allow_aggregates: bool,
@@ -752,6 +816,10 @@ pub struct Binder<'a> {
     depth: u32,
     /// How many nested queries used as values have been bound so far.
     subqueries: usize,
+    /// The window calls bound in the block being bound.
+    windows: Vec<BoundWindow>,
+    /// The windows the block's `WINDOW` clause named.
+    named_windows: Vec<(Vec<u8>, ast::WindowId)>,
     /// The table `excluded` names while an upsert's `DO UPDATE` is bound.
     pub(crate) excluded: Option<crate::catalog_view::TableInfo>,
 }
@@ -801,6 +869,8 @@ impl<'a> Binder<'a> {
             correlations: Vec::new(),
             depth: 0,
             subqueries: 0,
+            windows: Vec::new(),
+            named_windows: Vec::new(),
             excluded: None,
         }
     }
@@ -947,6 +1017,7 @@ impl<'a> Binder<'a> {
             None => None,
         };
         bound.aggregates = self.aggregates.clone();
+        bound.windows = self.windows.clone();
         bound.correlations = self.correlations.clone();
         Ok(())
     }
@@ -1057,6 +1128,8 @@ impl<'a> Binder<'a> {
     fn enter_block(&mut self) -> BlockFrame {
         self.scopes.push(Vec::new());
         BlockFrame {
+            windows: core::mem::take(&mut self.windows),
+            named_windows: core::mem::take(&mut self.named_windows),
             aggregates: core::mem::take(&mut self.aggregates),
             result_aliases: core::mem::take(&mut self.result_aliases),
             allow_aggregates: core::mem::replace(&mut self.allow_aggregates, false),
@@ -1082,6 +1155,8 @@ impl<'a> Binder<'a> {
                 self.correlations.push(id);
             }
         }
+        self.windows = frame.windows;
+        self.named_windows = frame.named_windows;
         self.aggregates = frame.aggregates;
         self.result_aliases = frame.result_aliases;
         self.allow_aggregates = frame.allow_aggregates;
@@ -1149,6 +1224,7 @@ impl<'a> Binder<'a> {
             aggregates: Vec::new(),
             values: bound_rows,
             compounds: Vec::new(),
+            windows: Vec::new(),
             correlations: Vec::new(),
         })
     }
@@ -1218,6 +1294,7 @@ impl<'a> Binder<'a> {
             aggregates: Vec::new(),
             values: Vec::new(),
             compounds: Vec::new(),
+            windows: Vec::new(),
             correlations: Vec::new(),
         })
     }
@@ -1539,6 +1616,7 @@ impl<'a> Binder<'a> {
         // they have to be read off the binder before the frame is restored.
         if let Ok(bound) = bound.as_mut() {
             bound.aggregates = self.aggregates.clone();
+            bound.windows = self.windows.clone();
             bound.correlations = self.correlations.clone();
         }
         let ids = self.leave_block(frame);
@@ -1653,10 +1731,204 @@ impl<'a> Binder<'a> {
         &mut self,
         windows: &[(ast::NameId, ast::WindowId)],
     ) -> Result<(), ParseError> {
-        if windows.is_empty() {
-            return Ok(());
+        for (name, window) in windows {
+            self.named_windows
+                .push((self.ast.folded(*name).to_vec(), *window));
         }
-        Err(unsupported("WINDOW", Span::default()))
+        Ok(())
+    }
+
+    /// Binds a call carrying an `OVER` clause.
+    ///
+    /// The window is resolved first, because a call over a named window that
+    /// does not exist is an error about the name rather than about the
+    /// function - and because `OVER w` and `OVER (w ORDER BY x)` both have to
+    /// end up as one fully-resolved specification before the frame defaults can
+    /// be applied.
+    fn bind_window_call(
+        &mut self,
+        name: ast::NameId,
+        distinct: bool,
+        arguments: Option<Vec<ExprId>>,
+        filter: Option<ExprId>,
+        over: ast::WindowId,
+        span: Span,
+    ) -> Result<BoundExpr, ParseError> {
+        let folded = self.ast.folded(name).to_vec();
+        let spec = self.resolve_window(over, span)?;
+        let star = arguments.is_none();
+        let mut bound_arguments = Vec::new();
+        for argument in arguments.unwrap_or_default() {
+            bound_arguments.push(self.bind_expr(argument)?);
+        }
+        let call = match function::lookup_window(&folded) {
+            Some(func) => {
+                let (least, most) = func.arity();
+                if bound_arguments.len() < least || bound_arguments.len() > most {
+                    return Err(wrong_arguments(&folded, span));
+                }
+                if distinct {
+                    return Err(unsupported("DISTINCT in a window function", span));
+                }
+                WindowCall::Plain(func)
+            }
+            None => match window_aggregate(&folded, bound_arguments.len()) {
+                Some(func) => WindowCall::Aggregate(func),
+                None => return Err(no_such_function(&folded, span)),
+            },
+        };
+        let bound_filter = match filter {
+            Some(expr) => Some(self.bind_expr(expr)?),
+            None => None,
+        };
+        let collation = bound_arguments
+            .first()
+            .and_then(BoundExpr::collation)
+            .unwrap_or(Collation::Binary);
+
+        let mut partition_by = Vec::new();
+        for expr in &spec.partition_by {
+            partition_by.push(self.bind_expr(*expr)?);
+        }
+        let order_by = self.bind_order_by(&spec.order_by, &[])?;
+        // SQLite's defaults, and they are not the same clause: with an
+        // `ORDER BY` the frame ends at the current row's peer group, and
+        // without one it covers the whole partition. Using one default for both
+        // makes every ordered `sum() OVER ()` a running total or none of them.
+        let unit = spec.unit.unwrap_or(FrameUnit::Range);
+        let (start, end) = match (spec.start, spec.end) {
+            (None, None) => (
+                BoundFrameBound::UnboundedPreceding,
+                if order_by.is_empty() {
+                    BoundFrameBound::UnboundedFollowing
+                } else {
+                    BoundFrameBound::CurrentRow
+                },
+            ),
+            (Some(start), None) => (
+                self.bind_frame_bound(start, span)?,
+                BoundFrameBound::CurrentRow,
+            ),
+            (Some(start), Some(end)) => (
+                self.bind_frame_bound(start, span)?,
+                self.bind_frame_bound(end, span)?,
+            ),
+            (None, Some(end)) => (
+                BoundFrameBound::UnboundedPreceding,
+                self.bind_frame_bound(end, span)?,
+            ),
+        };
+        if matches!(start, BoundFrameBound::UnboundedFollowing)
+            || matches!(end, BoundFrameBound::UnboundedPreceding)
+        {
+            return Err(ParseError::new(
+                ParseErrorKind::Unsupported("unsupported frame specification"),
+                span,
+            ));
+        }
+        if unit != FrameUnit::Rows
+            && matches!(
+                (&start, &end),
+                (BoundFrameBound::Preceding(_), _)
+                    | (BoundFrameBound::Following(_), _)
+                    | (_, BoundFrameBound::Preceding(_))
+                    | (_, BoundFrameBound::Following(_))
+            )
+            && order_by.len() != 1
+        {
+            return Err(ParseError::new(
+                ParseErrorKind::Unsupported(
+                    "RANGE with offset PRECEDING/FOLLOWING requires exactly one ORDER BY expression",
+                ),
+                span,
+            ));
+        }
+        let slot = self.windows.len();
+        self.windows.push(BoundWindow {
+            call,
+            distinct,
+            collation,
+            arguments: bound_arguments,
+            star,
+            filter: bound_filter,
+            partition_by,
+            order_by,
+            unit,
+            start,
+            end,
+            exclude: spec.exclude,
+        });
+        Ok(BoundExpr::WindowRef { slot })
+    }
+
+    /// Resolves an `OVER` clause into one fully-written window specification.
+    fn resolve_window(&self, id: ast::WindowId, span: Span) -> Result<ast::Window, ParseError> {
+        let Some(window) = self.ast.window(id) else {
+            return Err(unsupported("missing window", span));
+        };
+        let mut spec = window.clone();
+        let mut guard = 0usize;
+        while let Some(base) = spec.base {
+            guard = guard.saturating_add(1);
+            if guard > MAX_COMPOUND_SELECT {
+                return Err(unsupported("a window that inherits from itself", span));
+            }
+            let folded = self.ast.folded(base).to_vec();
+            let Some((_, id)) = self.named_windows.iter().find(|(name, _)| *name == folded) else {
+                return Err(no_such_window(&folded, span));
+            };
+            let Some(parent) = self.ast.window(*id) else {
+                return Err(unsupported("missing window", span));
+            };
+            // The inheriting window may add an `ORDER BY` and a frame; it may
+            // not replace the base's `PARTITION BY`, which is SQLite's rule and
+            // the reason the merge is one-directional.
+            let parent = parent.clone();
+            spec.base = parent.base;
+            spec.partition_by = parent.partition_by.clone();
+            if spec.order_by.is_empty() {
+                spec.order_by = parent.order_by.clone();
+            }
+            if spec.unit.is_none() {
+                spec.unit = parent.unit;
+                spec.start = parent.start;
+                spec.end = parent.end;
+                spec.exclude = parent.exclude;
+            }
+        }
+        Ok(spec)
+    }
+
+    /// Binds one end of a frame.
+    fn bind_frame_bound(
+        &mut self,
+        bound: FrameBound,
+        span: Span,
+    ) -> Result<BoundFrameBound, ParseError> {
+        let bound = match bound {
+            FrameBound::UnboundedPreceding => BoundFrameBound::UnboundedPreceding,
+            FrameBound::CurrentRow => BoundFrameBound::CurrentRow,
+            FrameBound::UnboundedFollowing => BoundFrameBound::UnboundedFollowing,
+            FrameBound::Preceding(expr) => {
+                BoundFrameBound::Preceding(self.bind_frame_offset(expr, span)?)
+            }
+            FrameBound::Following(expr) => {
+                BoundFrameBound::Following(self.bind_frame_offset(expr, span)?)
+            }
+        };
+        Ok(bound)
+    }
+
+    /// Binds a frame offset, which may not read a column.
+    fn bind_frame_offset(&mut self, expr: ExprId, span: Span) -> Result<BoundExpr, ParseError> {
+        let bound = self.bind_expr(expr)?;
+        if !bound.is_constant() {
+            return Err(ParseError::new(
+                ParseErrorKind::Unsupported("a frame offset must be a constant"),
+                span,
+            ));
+        }
+        Ok(bound)
     }
 
     /// Turns `ON`, `USING` and `NATURAL` into ordinary predicates.
@@ -2276,11 +2548,11 @@ impl<'a> Binder<'a> {
                 filter,
                 over,
             } => {
-                if over.is_some() {
-                    return Err(unsupported("window functions", span));
+                if let Some(over) = over {
+                    return self.bind_window_call(name, distinct, arguments, filter, over, span);
                 }
                 if filter.is_some() {
-                    return Err(unsupported("FILTER", span));
+                    return Err(unsupported("FILTER on a call with no OVER", span));
                 }
                 if !order_by.is_empty() {
                     return Err(unsupported("ORDER BY inside an aggregate", span));
@@ -2871,6 +3143,35 @@ fn subquery_table(alias: &[u8], names: &[Vec<u8>], select: &BoundSelect) -> Tabl
         })
         .collect();
     TableInfo::subquery(alias.to_vec(), 0, columns)
+}
+
+/// Returns the aggregate a name spells inside an `OVER` clause.
+///
+/// `min` and `max` are the awkward pair: with one argument they are aggregates
+/// and with two or more they are scalars, and only the argument count tells
+/// them apart. Inside a window the one-argument form is always the aggregate,
+/// which is why the ordinary aggregate lookup - which has to leave them out -
+/// is not enough here.
+fn window_aggregate(folded: &[u8], arguments: usize) -> Option<AggregateFunc> {
+    if let Some(func) = function::lookup_aggregate(folded) {
+        return Some(func);
+    }
+    match (folded, arguments) {
+        (b"min", 1) => Some(AggregateFunc::Min),
+        (b"max", 1) => Some(AggregateFunc::Max),
+        _ => None,
+    }
+}
+
+/// Returns a "no such window" failure.
+fn no_such_window(name: &[u8], span: Span) -> ParseError {
+    ParseError::new(
+        ParseErrorKind::Unexpected {
+            found: format!("no such window: {}", String::from_utf8_lossy(name)),
+            expected: Vec::new(),
+        },
+        span,
+    )
 }
 
 /// Returns an authorizer refusal.
