@@ -143,6 +143,60 @@ pub struct ViewBody {
     pub columns: Vec<Vec<u8>>,
 }
 
+/// What a trigger fires on, with `UPDATE OF` already folded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TriggerEventInfo {
+    /// `INSERT`.
+    Insert,
+    /// `DELETE`.
+    Delete,
+    /// `UPDATE`, optionally narrowed to a set of folded column names.
+    Update(Vec<Vec<u8>>),
+}
+
+/// A trigger's parsed definition.
+///
+/// Kept parsed here for the same reason a view body is: the arena belongs to
+/// the catalog snapshot, which the binder holds for the whole statement, so a
+/// body can be bound in place. A body re-parsed inside the binder would be a
+/// local whose borrow ends before the bound tree does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TriggerInfo {
+    /// The trigger name as declared.
+    pub name: Vec<u8>,
+    /// The ASCII-folded lookup key.
+    pub folded: Vec<u8>,
+    /// When it fires. `CREATE TRIGGER` with no time written means `BEFORE`.
+    pub time: crate::ast::TriggerTime,
+    /// What it fires on.
+    pub event: TriggerEventInfo,
+    /// The arena the `WHEN` guard and the body were parsed into.
+    pub ast: crate::ast::Ast,
+    /// The `WHEN` guard, when one was written.
+    pub when: Option<crate::ast::ExprId>,
+    /// The body statements, in written order.
+    pub body: Vec<crate::ast::Statement>,
+}
+
+impl TriggerInfo {
+    /// Returns whether this trigger fires for one event on one column set.
+    ///
+    /// `changed` is the folded names an UPDATE assigns, and is empty for the
+    /// other two events. `UPDATE OF a, b` fires only when the statement writes
+    /// `a` or `b` - which SQLite decides from the *statement*, not from whether
+    /// the value actually differs.
+    pub fn fires_for(&self, event: &TriggerEventInfo, changed: &[Vec<u8>]) -> bool {
+        match (&self.event, event) {
+            (TriggerEventInfo::Insert, TriggerEventInfo::Insert) => true,
+            (TriggerEventInfo::Delete, TriggerEventInfo::Delete) => true,
+            (TriggerEventInfo::Update(of), TriggerEventInfo::Update(_)) => {
+                of.is_empty() || of.iter().any(|name| changed.contains(name))
+            }
+            _ => false,
+        }
+    }
+}
+
 /// A table, view or virtual table.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableInfo {
@@ -170,6 +224,8 @@ pub struct TableInfo {
     pub indexes: Vec<IndexInfo>,
     /// The parsed body, when this is a view.
     pub view: Option<Box<ViewBody>>,
+    /// The triggers attached to this table or view, in schema order.
+    pub triggers: Vec<TriggerInfo>,
     /// How many rows `ANALYZE` counted, when it has run.
     pub analysed_rows: Option<i64>,
     /// Every `CHECK` constraint, as the source text it was written as.
@@ -231,6 +287,7 @@ impl TableInfo {
             kind: TableKind::Subquery,
             create_sql: Vec::new(),
             view: None,
+            triggers: Vec::new(),
             analysed_rows: None,
             indexes: Vec::new(),
             checks: Vec::new(),
@@ -318,6 +375,36 @@ pub trait CatalogView {
         folded: &[u8],
     ) -> Option<(&TableInfo, &IndexInfo)>;
 
+    /// Returns the table a trigger is attached to, together with the trigger.
+    ///
+    /// Triggers share the name namespace with tables and indexes and are stored
+    /// on the object they fire for, so this is `find_index` again for the other
+    /// kind of attached object: `DROP TRIGGER` and `CREATE TRIGGER` both have
+    /// only the name.
+    fn find_trigger(
+        &self,
+        database: Option<&[u8]>,
+        folded: &[u8],
+    ) -> Option<(&TableInfo, &TriggerInfo)> {
+        let wanted = database.and_then(|name| self.database_index(name));
+        for table in self.every_table() {
+            if wanted.is_some_and(|index| index != table.database) {
+                continue;
+            }
+            if let Some(trigger) = table.triggers.iter().find(|one| one.folded == folded) {
+                return Some((table, trigger));
+            }
+        }
+        None
+    }
+
+    /// Returns every table of every attached database.
+    ///
+    /// It exists so [`CatalogView::find_trigger`] can have one implementation
+    /// rather than one per catalog: a trigger search is the same walk whatever
+    /// the tables are stored in.
+    fn every_table(&self) -> Vec<&TableInfo>;
+
     /// Returns every table of one attached database, in no particular order.
     fn tables_of(&self, database: usize) -> Vec<&TableInfo>;
 
@@ -398,6 +485,10 @@ impl CatalogView for StaticCatalog {
     }
 
     /// Returns the table an index belongs to, and the index.
+    fn every_table(&self) -> Vec<&TableInfo> {
+        self.tables.iter().collect()
+    }
+
     fn find_index(
         &self,
         database: Option<&[u8]>,
@@ -489,6 +580,7 @@ mod tests {
             create_sql: Vec::new(),
             indexes: Vec::new(),
             view: None,
+            triggers: Vec::new(),
             analysed_rows: None,
             checks: Vec::new(),
         }

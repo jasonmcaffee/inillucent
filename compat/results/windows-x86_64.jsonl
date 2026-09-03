@@ -174,6 +174,9 @@
 {"test_id": "rustdb-compat::hash::tests::sha3_256_matches_its_published_vectors", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::index_maintenance_matches_sqlite", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::index_order_matches_sqlites_own_order_by", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::insert_from_select_matches_sqlite", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::instead_of_triggers_match_sqlite", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::instead_of_triggers_round_trip_through_sqlite", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::joins_match_the_oracle", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::layering::tests::a_conforming_workspace_passes", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::layering::tests::a_cycle_is_reported", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
@@ -230,6 +233,7 @@
 {"test_id": "rustdb-compat::results::tests::coverage_is_the_intersection_across_tests", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::returning_matches_sqlite", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::returning_reports_the_written_row", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::row_triggers_match_sqlite", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::rowid_allocation_matches_sqlite", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::rustdb_mutates_a_sqlite_file_and_sqlite_accepts_it", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::rustdb_writes_into_a_database_sqlite_built", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
@@ -287,6 +291,7 @@
 {"test_id": "rustdb-compat::the_schema_table_matches_sqlite", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_shipped_manifest_is_structurally_sound", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_shipped_report_is_reproducible", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::the_trigger_forms_sqlite_omits_are_refused", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_two_engines_take_turns_writing_the_same_file", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_update_hook_reports_every_changed_row", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_vacuum_fixtures_have_pointer_maps_that_the_check_accounts_for", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
@@ -298,6 +303,9 @@
 {"test_id": "rustdb-compat::toml_lite::tests::anything_outside_the_subset_is_refused", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::toml_lite::tests::the_manifest_subset_parses", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::transactions_match_sqlite", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::trigger_chains_match_sqlite", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::trigger_raise_matches_sqlite", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::triggers_round_trip_through_sqlite", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::two_readers_see_the_same_database", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::two_statements_interleave_on_one_connection", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::unparseable_schema_sql_is_corruption", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}

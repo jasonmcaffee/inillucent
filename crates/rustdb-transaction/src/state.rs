@@ -179,6 +179,14 @@ pub struct Transaction {
     levels: Vec<Savepoint>,
     counters: ChangeCounters,
     statement_changes: i64,
+    /// Rows the running statement's *triggers* changed.
+    ///
+    /// Kept apart from `statement_changes` because the two are reported
+    /// differently: `changes()` is the statement's own row count and excludes
+    /// what its triggers wrote, while `total_changes()` counts both. Measured
+    /// against 3.53.4 - an INSERT of one row whose triggers write two more
+    /// reports `changes` of 1 and moves `total_changes` by 3.
+    statement_trigger_changes: i64,
     stats: TransactionStats,
 }
 
@@ -200,6 +208,7 @@ impl Transaction {
             levels: Vec::new(),
             counters: ChangeCounters::default(),
             statement_changes: 0,
+            statement_trigger_changes: 0,
             stats: TransactionStats::default(),
         }
     }
@@ -358,6 +367,7 @@ impl Transaction {
     pub fn begin_statement(&mut self, counts: bool) {
         if counts {
             self.statement_changes = 0;
+            self.statement_trigger_changes = 0;
         }
         self.levels.push(Savepoint {
             name: None,
@@ -383,7 +393,8 @@ impl Transaction {
             self.counters.total_changes = self
                 .counters
                 .total_changes
-                .saturating_add(self.statement_changes);
+                .saturating_add(self.statement_changes)
+                .saturating_add(self.statement_trigger_changes);
         }
         Ok(())
     }
@@ -415,6 +426,7 @@ impl Transaction {
             self.counters.changes = 0;
         }
         self.statement_changes = 0;
+        self.statement_trigger_changes = 0;
         self.stats.statement_rollbacks = self.stats.statement_rollbacks.saturating_add(1);
         Ok(())
     }
@@ -431,6 +443,15 @@ impl Transaction {
     /// Counts one row changed by the running statement.
     pub fn record_change(&mut self) {
         self.statement_changes = self.statement_changes.saturating_add(1);
+    }
+
+    /// Records a row one of the statement's triggers changed.
+    ///
+    /// It counts towards `total_changes()` and not towards `changes()`, which
+    /// is the whole reason it is a separate call rather than a second
+    /// `record_change`.
+    pub fn record_trigger_change(&mut self) {
+        self.statement_trigger_changes = self.statement_trigger_changes.saturating_add(1);
     }
 
     /// Returns how many rows the running statement has changed.

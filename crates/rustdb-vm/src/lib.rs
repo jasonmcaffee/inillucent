@@ -58,9 +58,6 @@ macro_rules! assert_same {
     }};
 }
 
-#[cfg(test)]
-pub(crate) use assert_same;
-
 pub mod aggregate;
 pub mod builtin;
 pub mod compile;

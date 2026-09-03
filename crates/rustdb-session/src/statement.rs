@@ -204,6 +204,7 @@ impl<'connection> Statement<'connection> {
             }
             Ok(StepOutcome::Done) => {
                 self.publish_counters();
+                self.publish_insert_rowid();
                 self.close(Outcome::Done)?;
                 Ok(false)
             }
@@ -212,6 +213,7 @@ impl<'connection> Statement<'connection> {
                 if ending == Outcome::Fail {
                     self.publish_counters();
                 }
+                self.publish_insert_rowid();
                 let closed = self.close(ending);
                 closed?;
                 Err(failure)
@@ -246,18 +248,41 @@ impl<'connection> Statement<'connection> {
         }
     }
 
-    /// Folds the machine's counters into the connection's.
+    /// Folds the machine's row counts into the connection's.
+    ///
+    /// Only for a statement that finished or failed: an aborted one's rows are
+    /// undone, and the transaction layer zeroes `changes` when it rolls the
+    /// statement level back.
     fn publish_counters(&mut self) {
         let changes = self.machine.changes();
-        let rowid = self.machine.last_insert_rowid();
+        let trigger_changes = self.machine.trigger_changes();
         let _ = self.connection.with_state(|state| {
             for _ in 0..changes {
                 state.transaction.record_change();
             }
-            if rowid != 0 {
-                state.transaction.record_insert_rowid(rowid);
+            for _ in 0..trigger_changes {
+                state.transaction.record_trigger_change();
             }
         });
+    }
+
+    /// Publishes the rowid the statement's last insert allocated.
+    ///
+    /// Separate from the row counts, and done on *every* ending, because the
+    /// two are restored differently. Measured against 3.53.4: an
+    /// `INSERT INTO t VALUES(3, 7), (4, -7)` whose second row trips a
+    /// `RAISE(ABORT)` reports `changes` of 0 - the statement was undone - but
+    /// `last_insert_rowid()` of 3, the row that was written before the abort.
+    /// Publishing this alongside the counts left it reading the value from
+    /// whichever earlier statement last succeeded.
+    fn publish_insert_rowid(&mut self) {
+        let rowid = self.machine.last_insert_rowid();
+        if rowid == 0 {
+            return;
+        }
+        let _ = self
+            .connection
+            .with_state(|state| state.transaction.record_insert_rowid(rowid));
     }
 
     /// Closes the statement's transaction level.

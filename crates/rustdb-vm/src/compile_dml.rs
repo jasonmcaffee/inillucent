@@ -23,17 +23,17 @@
 
 use rustdb_base::error::ExtendedCode;
 use rustdb_base::{error, DbResult};
-use rustdb_sql::ast::ConflictAction;
-use rustdb_sql::bind::EXCLUDED_SOURCE;
+use rustdb_sql::ast::{ConflictAction, TriggerTime};
 use rustdb_sql::bind::{BoundExpr, BoundResultColumn};
-use rustdb_sql::catalog_view::{IndexInfo, TableInfo};
+use rustdb_sql::bind::{BoundSelect, EXCLUDED_SOURCE, NEW_SOURCE, OLD_SOURCE};
+use rustdb_sql::catalog_view::{IndexInfo, TableInfo, TableKind};
 use rustdb_sql::dml::{
-    BoundAssignment, BoundCheck, BoundDelete, BoundInsert, BoundInsertSource, BoundUpdate,
-    BoundUpsert, ColumnSource,
+    BoundAssignment, BoundCheck, BoundDelete, BoundInsert, BoundInsertSource, BoundTrigger,
+    BoundTriggerStatement, BoundUpdate, BoundUpsert, ColumnSource,
 };
 use rustdb_value::{Affinity, Collation};
 
-use crate::compile::{Compiler, Label};
+use crate::compile::{Compiler, Label, Sink};
 use crate::program::{
     IndexKey, Instruction, Opcode, Operand, Program, ProgramDependencies, ResultColumn,
     RowChangeKind, SortColumn, SortKey, StrictType,
@@ -60,6 +60,8 @@ pub(crate) mod codes {
     /// `SQLITE_MISMATCH`, which an `INTEGER PRIMARY KEY` reports for a value
     /// that is not an integer.
     pub const MISMATCH: i32 = 20;
+    /// `SQLITE_CONSTRAINT_TRIGGER`, which `RAISE()` reports.
+    pub const TRIGGER: i32 = 1811;
 }
 
 /// How a conflict is reported back to the session.
@@ -74,7 +76,7 @@ pub const CONFLICT_ABORT: i32 = 1;
 pub const CONFLICT_FAIL: i32 = 2;
 
 /// Returns the code a halt carries for one algorithm.
-fn conflict_code(action: ConflictAction) -> i32 {
+pub(crate) fn conflict_code(action: ConflictAction) -> i32 {
     match action {
         ConflictAction::Rollback => CONFLICT_ROLLBACK,
         ConflictAction::Fail => CONFLICT_FAIL,
@@ -121,14 +123,18 @@ struct Writer {
 
 impl Compiler {
     /// Opens the table and every index for writing.
-    fn open_for_write(&mut self, table: &TableInfo) -> Writer {
+    fn open_for_write(&mut self, table: &TableInfo, source: usize) -> Writer {
         let cursor = self.cursors;
         self.cursors = self.cursors.saturating_add(1);
         self.emit(
             Instruction::new(Opcode::OpenWrite, cursor as i32, table.root as i32, 0)
                 .with_p4(Operand::Count(table.columns.len() as u32)),
         );
-        self.source_cursors = vec![Some(crate::compile::SourceCursors::table_only(cursor))];
+        // Registered under the statement's own number for this term, not at
+        // slot zero. Two fires of one trigger open two cursors on the same
+        // table, and clobbering slot zero left the second fire's expressions
+        // reading the cursor the first fire had opened.
+        self.register_source(source, crate::compile::SourceCursors::table_only(cursor));
         let mut indexes = Vec::new();
         let mut definitions = Vec::new();
         for index in &table.indexes {
@@ -166,7 +172,8 @@ impl Compiler {
                 i32::from(is_insert),
                 kind.as_operand(),
             )
-            .with_p4(Operand::Change(kind, table.name.clone())),
+            .with_p4(Operand::Change(kind, table.name.clone()))
+            .with_p5(u16::from(self.firing_depth > 0)),
         );
     }
 
@@ -1105,6 +1112,62 @@ fn row_substitutions_for(
         .collect()
 }
 
+/// One row a trigger's `OLD` or `NEW` names, as the registers holding it.
+pub(crate) struct RowImage {
+    /// One register per declared column, in declaration order.
+    pub values: Vec<u32>,
+    /// The register holding the row's rowid.
+    pub rowid: u32,
+}
+
+/// Returns the substitutions one of a trigger's row aliases is compiled against.
+///
+/// The same mapping `excluded` uses, under a different source number: the row
+/// is a block of registers rather than a cursor, so every reference to it has
+/// to be substituted before the compiler tries to open a cursor for it.
+fn alias_substitutions(
+    source: usize,
+    table: &TableInfo,
+    image: &RowImage,
+) -> Vec<(BoundExpr, u32)> {
+    let mut substitutions = Vec::with_capacity(image.values.len().saturating_add(1));
+    for (position, register) in image.values.iter().enumerate() {
+        let Some(column) = table.column(position as u16) else {
+            continue;
+        };
+        if table.rowid_alias == Some(position as u16) {
+            // The alias *is* the rowid, and reading it out of the row image
+            // would answer NULL for the record slot SQLite leaves empty.
+            substitutions.push((
+                BoundExpr::Column {
+                    source,
+                    column: position as u16,
+                    slot: position as u16,
+                    affinity: column.affinity,
+                    collation: Collation::Binary,
+                },
+                image.rowid,
+            ));
+            continue;
+        }
+        let collation =
+            Collation::from_name(core::str::from_utf8(&column.collation).unwrap_or("BINARY"))
+                .unwrap_or(Collation::Binary);
+        substitutions.push((
+            BoundExpr::Column {
+                source,
+                column: position as u16,
+                slot: position as u16,
+                affinity: column.affinity,
+                collation,
+            },
+            *register,
+        ));
+    }
+    substitutions.push((BoundExpr::Rowid { source }, image.rowid));
+    substitutions
+}
+
 /// Returns the substitutions a row image is compiled against.
 ///
 /// A CHECK, a RETURNING and a DO UPDATE all read "the row being written",
@@ -1150,6 +1213,114 @@ fn returning_columns(columns: &[BoundResultColumn]) -> Vec<ResultColumn> {
         .collect()
 }
 
+impl Compiler {
+    /// Emits the triggers of one time that a write fires, in schema order.
+    ///
+    /// The substitution list is *replaced* rather than extended: inside a
+    /// trigger body only `OLD` and `NEW` live in registers, and leaving the
+    /// firing statement's own row image visible would let a body statement read
+    /// the wrong table's registers for a column that happened to match.
+    fn emit_triggers(
+        &mut self,
+        triggers: &[BoundTrigger],
+        time: TriggerTime,
+        table: &TableInfo,
+        old: Option<&RowImage>,
+        new: Option<&RowImage>,
+    ) -> DbResult<()> {
+        if triggers.is_empty() {
+            return Ok(());
+        }
+        let mut aliases = Vec::new();
+        if let Some(image) = old {
+            aliases.extend(alias_substitutions(OLD_SOURCE, table, image));
+        }
+        if let Some(image) = new {
+            aliases.extend(alias_substitutions(NEW_SOURCE, table, image));
+        }
+        // `last_insert_rowid()` sees a trigger body's own inserts while the body
+        // runs and reverts afterwards - SQLite gets that from the frame it
+        // pushes, and an inlined body has to save and restore it by hand.
+        let saved_rowid = self.register();
+        self.emit(Instruction::new(
+            Opcode::LastRowid,
+            saved_rowid as i32,
+            0,
+            0,
+        ));
+        for trigger in triggers.iter().filter(|trigger| trigger.time == time) {
+            let previous = core::mem::replace(&mut self.substitutions, aliases.clone());
+            let outcome = self.emit_trigger_body(trigger);
+            self.substitutions = previous;
+            outcome?;
+        }
+        self.emit(Instruction::new(
+            Opcode::LastRowid,
+            saved_rowid as i32,
+            1,
+            0,
+        ));
+        Ok(())
+    }
+
+    /// Emits one trigger's `WHEN` guard and its body statements.
+    fn emit_trigger_body(&mut self, trigger: &BoundTrigger) -> DbResult<()> {
+        let skip =
+            match &trigger.when {
+                Some(guard) => {
+                    let register = self.compile_expr(guard)?;
+                    // `p5` of 1 also jumps on NULL: an unknown guard does not fire,
+                    // which is the same rule a WHERE clause follows.
+                    Some(self.emit_jump(
+                        Instruction::new(Opcode::IfNot, register as i32, -1, 0).with_p5(1),
+                    ))
+                }
+                None => None,
+            };
+        self.firing_depth = self.firing_depth.saturating_add(1);
+        let mut outcome = Ok(());
+        for statement in &trigger.body {
+            outcome = match statement {
+                BoundTriggerStatement::Insert(insert) => self.emit_insert_body(insert),
+                BoundTriggerStatement::Update(update) => self.emit_update_body(update),
+                BoundTriggerStatement::Delete(delete) => self.emit_delete_body(delete),
+                BoundTriggerStatement::Select(select) => self.emit_discarded_select(select),
+            };
+            if outcome.is_err() {
+                break;
+            }
+        }
+        self.firing_depth = self.firing_depth.saturating_sub(1);
+        outcome?;
+        if let Some(label) = skip {
+            self.patch_here(label);
+        }
+        Ok(())
+    }
+
+    /// Runs a trigger body's `SELECT` for its effects and throws the rows away.
+    ///
+    /// A trigger body cannot return rows to the caller, so the block is compiled
+    /// into an ephemeral nobody reads. The rows still have to be *produced*: the
+    /// reason to write a SELECT in a trigger body is the `RAISE()` in it, and a
+    /// query that was optimised away would never reach it.
+    fn emit_discarded_select(&mut self, select: &BoundSelect) -> DbResult<()> {
+        let plan = rustdb_sql::plan::plan_select(select.clone());
+        let width = plan.select.columns.len().max(1);
+        let store = self.ephemeral();
+        self.emit(Instruction::new(
+            Opcode::EphOpen,
+            store as i32,
+            width as i32,
+            0,
+        ));
+        self.open_all_cursors(&plan)?;
+        self.compile_block(&plan, Sink::Store(store))?;
+        self.emit(Instruction::new(Opcode::EphClear, store as i32, 0, 0));
+        Ok(())
+    }
+}
+
 /// Wraps a compiled body in the program header and trailer.
 fn finish(
     compiler: Compiler,
@@ -1157,14 +1328,19 @@ fn finish(
     parameters: u32,
     result_columns: Vec<ResultColumn>,
 ) -> Program {
+    // Counted off the compiler rather than assumed to be zero. A DML statement
+    // had no use for an ephemeral, a DISTINCT set or an accumulator until it
+    // could fire a trigger and run `INSERT ... SELECT`; a hard zero here made
+    // the verifier reject the program it had just produced, which is exactly
+    // what the verifier is for.
     Program {
-        ephemeral_count: 0,
+        ephemeral_count: compiler.ephemerals,
         instructions: compiler.instructions,
         register_count: compiler.registers,
         cursor_count: compiler.cursors,
         sorter_count: compiler.sorters,
-        distinct_count: 0,
-        aggregate_count: 0,
+        distinct_count: compiler.distincts,
+        aggregate_count: compiler.aggregates,
         result_columns,
         dependencies,
         readonly: false,
@@ -1182,20 +1358,7 @@ pub fn compile_insert(
     let entry = compiler.emit_jump(Instruction::new(Opcode::Init, 0, -1, 0));
     compiler.patch_here(entry);
     compiler.emit(Instruction::new(Opcode::Transaction, 0, 0, 0));
-    let writer = compiler.open_for_write(&insert.table);
-    let rows = match &insert.source {
-        BoundInsertSource::Values(rows) => rows.clone(),
-        BoundInsertSource::Select(_) => {
-            return Err(error::misuse("INSERT ... SELECT is compiled separately"))
-        }
-    };
-    for row in &rows {
-        let mut sources = Vec::with_capacity(row.len());
-        for value in row {
-            sources.push(compiler.compile_expr(value)?);
-        }
-        compiler.emit_insert_row(&writer, insert, &sources)?;
-    }
+    compiler.emit_insert_body(insert)?;
     let halt = compiler.here();
     compiler.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
     for label in core::mem::take(&mut compiler.end_jumps) {
@@ -1210,6 +1373,353 @@ pub fn compile_insert(
 }
 
 impl Compiler {
+    /// Emits a whole `INSERT`: its cursors, its rows, and the triggers they fire.
+    ///
+    /// It is a method rather than the body of [`compile_insert`] because a
+    /// trigger body inlines one of these into the middle of another statement,
+    /// and the only difference between the two cases is the program header.
+    fn emit_insert_body(&mut self, insert: &BoundInsert) -> DbResult<()> {
+        if insert.table.kind == TableKind::View {
+            return self.emit_view_insert(insert);
+        }
+        let writer = self.open_for_write(&insert.table, insert.target_source);
+        match &insert.source {
+            BoundInsertSource::Values(rows) => {
+                let rows = rows.clone();
+                for row in &rows {
+                    let mut sources = Vec::with_capacity(row.len());
+                    for value in row {
+                        sources.push(self.compile_expr(value)?);
+                    }
+                    self.emit_insert_row(&writer, insert, &sources)?;
+                }
+                Ok(())
+            }
+            BoundInsertSource::Select(select) => {
+                self.emit_insert_from_select(&writer, insert, select)
+            }
+        }
+    }
+
+    /// Emits `INSERT INTO t SELECT ...`.
+    ///
+    /// The query's rows are collected into an ephemeral first and written from
+    /// there, rather than written as they are produced. That is not laziness: a
+    /// query is allowed to read the table being written - `INSERT INTO t SELECT
+    /// * FROM t` doubles a table - and a row written under the scan that is
+    /// reading it would be read again, forever. SQLite reaches for the same
+    /// temporary table whenever it cannot prove the two are unrelated; doing it
+    /// always costs a copy and can never be wrong.
+    fn emit_insert_from_select(
+        &mut self,
+        writer: &Writer,
+        insert: &BoundInsert,
+        select: &BoundSelect,
+    ) -> DbResult<()> {
+        let plan = rustdb_sql::plan::plan_select(select.clone());
+        let width = insert.arity.max(1);
+        let store = self.ephemeral();
+        self.emit(Instruction::new(
+            Opcode::EphOpen,
+            store as i32,
+            width as i32,
+            0,
+        ));
+        self.open_all_cursors(&plan)?;
+        self.compile_block(&plan, Sink::Store(store))?;
+
+        let block = self.register_block(width);
+        let empty = self.emit_jump(Instruction::new(Opcode::EphRewind, store as i32, -1, 0));
+        let top = self.here();
+        let mut sources = Vec::with_capacity(width);
+        for index in 0..width {
+            let register = block.saturating_add(index as u32);
+            self.emit(Instruction::new(
+                Opcode::EphColumn,
+                store as i32,
+                index as i32,
+                register as i32,
+            ));
+            sources.push(register);
+        }
+        self.emit_insert_row(writer, insert, &sources)?;
+        let more = self.emit_jump(Instruction::new(Opcode::EphNext, store as i32, -1, 0));
+        self.patch(more, top);
+        self.patch_here(empty);
+        self.emit(Instruction::new(Opcode::EphClear, store as i32, 0, 0));
+        Ok(())
+    }
+
+    /// Emits a whole `DELETE`: the rowid pass, then the row pass.
+    fn emit_delete_body(&mut self, delete: &BoundDelete) -> DbResult<()> {
+        if let Some(rows) = delete.view_rows.as_ref() {
+            return self.emit_view_write(&delete.table, rows, &delete.triggers, None);
+        }
+        let writer = self.open_for_write(&delete.table, delete.source);
+        let sorter = self.open_rowid_sorter();
+        self.emit_collect_rowids(&writer, delete.filter.as_ref(), sorter)?;
+
+        let empty = self.emit_jump(Instruction::new(Opcode::SorterSort, sorter as i32, -1, 0));
+        let top = self.here();
+        let rowid = self.register();
+        self.emit(Instruction::new(
+            Opcode::SorterColumn,
+            sorter as i32,
+            0,
+            rowid as i32,
+        ));
+        let missing = self.emit_jump(Instruction::new(
+            Opcode::NotExists,
+            writer.table as i32,
+            -1,
+            rowid as i32,
+        ));
+        self.emit_returning(&delete.returning)?;
+        // The row has to be read before it is deleted: OLD is the row that was
+        // there, and after the delete the cursor no longer points at it.
+        let old = self.read_row_image(&writer, &delete.table, rowid);
+        let ignored = core::mem::take(&mut self.ignore_jumps);
+        self.emit_triggers(
+            &delete.triggers,
+            TriggerTime::Before,
+            &delete.table,
+            Some(&old),
+            None,
+        )?;
+        self.emit_delete_current(&writer, &delete.table)?;
+        self.emit_count_change(&delete.table, rowid, RowChangeKind::Delete, false);
+        self.emit_triggers(
+            &delete.triggers,
+            TriggerTime::After,
+            &delete.table,
+            Some(&old),
+            None,
+        )?;
+        for label in core::mem::replace(&mut self.ignore_jumps, ignored) {
+            self.patch_here(label);
+        }
+        self.patch_here(missing);
+        self.emit(Instruction::new(Opcode::SorterNext, sorter as i32, top, 0));
+        self.patch_here(empty);
+        Ok(())
+    }
+
+    /// Emits a whole `UPDATE`: the rowid pass, then the row pass.
+    fn emit_update_body(&mut self, update: &BoundUpdate) -> DbResult<()> {
+        if let Some(rows) = update.view_rows.as_ref() {
+            return self.emit_view_write(
+                &update.table,
+                rows,
+                &update.triggers,
+                Some(&update.assignments),
+            );
+        }
+        let writer = self.open_for_write(&update.table, update.source);
+        let sorter = self.open_rowid_sorter();
+        self.emit_collect_rowids(&writer, update.filter.as_ref(), sorter)?;
+
+        let empty = self.emit_jump(Instruction::new(Opcode::SorterSort, sorter as i32, -1, 0));
+        let top = self.here();
+        let old_rowid = self.register();
+        self.emit(Instruction::new(
+            Opcode::SorterColumn,
+            sorter as i32,
+            0,
+            old_rowid as i32,
+        ));
+        let missing = self.emit_jump(Instruction::new(
+            Opcode::NotExists,
+            writer.table as i32,
+            -1,
+            old_rowid as i32,
+        ));
+        self.emit_update_row(&writer, update, old_rowid)?;
+        self.patch_here(missing);
+        self.emit(Instruction::new(Opcode::SorterNext, sorter as i32, top, 0));
+        self.patch_here(empty);
+        Ok(())
+    }
+
+    /// Emits an `INSERT` into a view, which is its `INSTEAD OF` trigger.
+    ///
+    /// Nothing is written and no cursor is opened: the trigger *is* the write.
+    /// The values are still computed, and still get the view's declared
+    /// affinities applied, because that is what `NEW` hands the body.
+    fn emit_view_insert(&mut self, insert: &BoundInsert) -> DbResult<()> {
+        let table = &insert.table;
+        let rows = match &insert.source {
+            BoundInsertSource::Values(rows) => rows.clone(),
+            BoundInsertSource::Select(_) => {
+                return Err(error::misuse(
+                    "INSERT ... SELECT into a view is not supported",
+                ))
+            }
+        };
+        for row in &rows {
+            let mut sources = Vec::with_capacity(row.len());
+            for value in row {
+                sources.push(self.compile_expr(value)?);
+            }
+            let mut values = Vec::with_capacity(insert.columns.len());
+            for column in &insert.columns {
+                let register = match column {
+                    ColumnSource::Row(index) => sources.get(*index).copied().unwrap_or(0),
+                    ColumnSource::Expr(expr) | ColumnSource::Generated(expr) => {
+                        self.compile_expr(expr)?
+                    }
+                };
+                values.push(register);
+            }
+            // A view has no rowid of its own, and SQLite reports NEW.rowid as
+            // NULL inside an INSTEAD OF trigger.
+            let rowid = self.register();
+            self.emit(Instruction::new(Opcode::Null, 0, rowid as i32, 0));
+            let new_row = RowImage { values, rowid };
+            let ignored = core::mem::take(&mut self.ignore_jumps);
+            self.emit_triggers(
+                &insert.triggers,
+                TriggerTime::InsteadOf,
+                table,
+                None,
+                Some(&new_row),
+            )?;
+            for label in core::mem::replace(&mut self.ignore_jumps, ignored) {
+                self.patch_here(label);
+            }
+        }
+        Ok(())
+    }
+
+    /// Emits an `UPDATE` or `DELETE` on a view, row by row.
+    ///
+    /// The view's rows are produced first, into an ephemeral, and the trigger is
+    /// fired once for each - so `OLD` is a row of the view as the statement's
+    /// `WHERE` selected it. Collecting them first rather than firing as they are
+    /// produced matters for the same reason it does for `INSERT ... SELECT`: the
+    /// trigger body writes the tables the view reads.
+    fn emit_view_write(
+        &mut self,
+        table: &TableInfo,
+        rows: &BoundSelect,
+        triggers: &[BoundTrigger],
+        assignments: Option<&[BoundAssignment]>,
+    ) -> DbResult<()> {
+        let plan = rustdb_sql::plan::plan_select(rows.clone());
+        let width = plan.select.columns.len().max(1);
+        let store = self.ephemeral();
+        self.emit(Instruction::new(
+            Opcode::EphOpen,
+            store as i32,
+            width as i32,
+            0,
+        ));
+        self.open_all_cursors(&plan)?;
+        self.compile_block(&plan, Sink::Store(store))?;
+
+        let block = self.register_block(width);
+        let empty = self.emit_jump(Instruction::new(Opcode::EphRewind, store as i32, -1, 0));
+        let top = self.here();
+        let mut old_values = Vec::with_capacity(width);
+        for index in 0..width {
+            let register = block.saturating_add(index as u32);
+            self.emit(Instruction::new(
+                Opcode::EphColumn,
+                store as i32,
+                index as i32,
+                register as i32,
+            ));
+            old_values.push(register);
+        }
+        // The assignments were bound against the view's own columns, so the
+        // substitutions are the result columns of the query that produced them.
+        let previous = core::mem::take(&mut self.substitutions);
+        for (index, column) in rows.columns.iter().enumerate() {
+            if let Some(register) = old_values.get(index) {
+                self.substitutions.push((column.expr.clone(), *register));
+            }
+        }
+        let assigned = self.compile_view_assignments(old_values.as_slice(), assignments);
+        self.substitutions = previous;
+        let new_values = assigned?;
+
+        let rowid = self.register();
+        self.emit(Instruction::new(Opcode::Null, 0, rowid as i32, 0));
+        let old_row = RowImage {
+            values: old_values,
+            rowid,
+        };
+        let ignored = core::mem::take(&mut self.ignore_jumps);
+        match new_values {
+            Some(values) => {
+                let new_row = RowImage { values, rowid };
+                self.emit_triggers(
+                    triggers,
+                    TriggerTime::InsteadOf,
+                    table,
+                    Some(&old_row),
+                    Some(&new_row),
+                )?;
+            }
+            None => {
+                self.emit_triggers(
+                    triggers,
+                    TriggerTime::InsteadOf,
+                    table,
+                    Some(&old_row),
+                    None,
+                )?;
+            }
+        }
+        for label in core::mem::replace(&mut self.ignore_jumps, ignored) {
+            self.patch_here(label);
+        }
+        let more = self.emit_jump(Instruction::new(Opcode::EphNext, store as i32, -1, 0));
+        self.patch(more, top);
+        self.patch_here(empty);
+        self.emit(Instruction::new(Opcode::EphClear, store as i32, 0, 0));
+        Ok(())
+    }
+
+    /// Builds the `NEW` row of an `UPDATE` on a view: assigned, or carried over.
+    fn compile_view_assignments(
+        &mut self,
+        old_values: &[u32],
+        assignments: Option<&[BoundAssignment]>,
+    ) -> DbResult<Option<Vec<u32>>> {
+        let Some(assignments) = assignments else {
+            return Ok(None);
+        };
+        let mut values = Vec::with_capacity(old_values.len());
+        for (position, carried) in old_values.iter().enumerate() {
+            let assigned = assignments
+                .iter()
+                .find(|assignment| usize::from(assignment.column) == position);
+            let register = match assigned {
+                Some(assignment) => {
+                    let value = self.compile_expr(&assignment.value)?;
+                    let copy = self.register();
+                    self.emit(Instruction::new(Opcode::Copy, value as i32, copy as i32, 0));
+                    copy
+                }
+                None => *carried,
+            };
+            values.push(register);
+        }
+        Ok(Some(values))
+    }
+
+    /// Reads every column of the row a cursor is on into fresh registers.
+    ///
+    /// This is what `OLD` is: a copy taken before the write, because after it
+    /// the row it describes is gone.
+    fn read_row_image(&mut self, writer: &Writer, table: &TableInfo, rowid: u32) -> RowImage {
+        let mut values = Vec::with_capacity(table.columns.len());
+        for position in 0..table.columns.len() as u16 {
+            values.push(self.read_column(writer.table, table, position));
+        }
+        RowImage { values, rowid }
+    }
+
     /// Emits everything one inserted row costs.
     fn emit_insert_row(
         &mut self,
@@ -1251,6 +1761,22 @@ impl Compiler {
         let rowid = self.emit_insert_rowid(writer, insert, &values)?;
         self.emit_generated_values(table, &generated, &mut values, rowid)?;
         let mut skip = Vec::new();
+        // A BEFORE trigger runs on the row as proposed - after the defaults, the
+        // rowid and the generated columns have been worked out, because it can
+        // read all three through NEW - and before the constraints, because
+        // SQLite lets one RAISE(IGNORE) a row that would otherwise fail one.
+        let new_row = RowImage {
+            values: values.clone(),
+            rowid,
+        };
+        let ignored = core::mem::take(&mut self.ignore_jumps);
+        self.emit_triggers(
+            &insert.triggers,
+            TriggerTime::Before,
+            table,
+            None,
+            Some(&new_row),
+        )?;
         let previous = core::mem::replace(
             &mut self.substitutions,
             row_substitutions(table, &values, rowid),
@@ -1278,6 +1804,13 @@ impl Compiler {
         )?;
         self.emit_write_row(writer, table, &values, rowid)?;
         self.emit_count_change(table, rowid, RowChangeKind::Insert, true);
+        self.emit_triggers(
+            &insert.triggers,
+            TriggerTime::After,
+            table,
+            None,
+            Some(&new_row),
+        )?;
         let previous = core::mem::replace(
             &mut self.substitutions,
             row_substitutions(table, &values, rowid),
@@ -1285,6 +1818,11 @@ impl Compiler {
         let returning = self.emit_returning(&insert.returning);
         self.substitutions = previous;
         returning?;
+        // `RAISE(IGNORE)` abandons this row and nothing else, so its jumps land
+        // exactly where a failed constraint's do.
+        for label in core::mem::replace(&mut self.ignore_jumps, ignored) {
+            self.patch_here(label);
+        }
         for label in skip {
             self.patch_here(label);
         }
@@ -1391,31 +1929,7 @@ pub fn compile_delete(
     let entry = compiler.emit_jump(Instruction::new(Opcode::Init, 0, -1, 0));
     compiler.patch_here(entry);
     compiler.emit(Instruction::new(Opcode::Transaction, 0, 0, 0));
-    let writer = compiler.open_for_write(&delete.table);
-    let sorter = compiler.open_rowid_sorter();
-    compiler.emit_collect_rowids(&writer, delete.filter.as_ref(), sorter)?;
-
-    let empty = compiler.emit_jump(Instruction::new(Opcode::SorterSort, sorter as i32, -1, 0));
-    let top = compiler.here();
-    let rowid = compiler.register();
-    compiler.emit(Instruction::new(
-        Opcode::SorterColumn,
-        sorter as i32,
-        0,
-        rowid as i32,
-    ));
-    let missing = compiler.emit_jump(Instruction::new(
-        Opcode::NotExists,
-        writer.table as i32,
-        -1,
-        rowid as i32,
-    ));
-    compiler.emit_returning(&delete.returning)?;
-    compiler.emit_delete_current(&writer, &delete.table)?;
-    compiler.emit_count_change(&delete.table, rowid, RowChangeKind::Delete, false);
-    compiler.patch_here(missing);
-    compiler.emit(Instruction::new(Opcode::SorterNext, sorter as i32, top, 0));
-    compiler.patch_here(empty);
+    compiler.emit_delete_body(delete)?;
     let halt = compiler.here();
     compiler.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
     for label in core::mem::take(&mut compiler.end_jumps) {
@@ -1496,29 +2010,7 @@ pub fn compile_update(
     let entry = compiler.emit_jump(Instruction::new(Opcode::Init, 0, -1, 0));
     compiler.patch_here(entry);
     compiler.emit(Instruction::new(Opcode::Transaction, 0, 0, 0));
-    let writer = compiler.open_for_write(&update.table);
-    let sorter = compiler.open_rowid_sorter();
-    compiler.emit_collect_rowids(&writer, update.filter.as_ref(), sorter)?;
-
-    let empty = compiler.emit_jump(Instruction::new(Opcode::SorterSort, sorter as i32, -1, 0));
-    let top = compiler.here();
-    let old_rowid = compiler.register();
-    compiler.emit(Instruction::new(
-        Opcode::SorterColumn,
-        sorter as i32,
-        0,
-        old_rowid as i32,
-    ));
-    let missing = compiler.emit_jump(Instruction::new(
-        Opcode::NotExists,
-        writer.table as i32,
-        -1,
-        old_rowid as i32,
-    ));
-    compiler.emit_update_row(&writer, update, old_rowid)?;
-    compiler.patch_here(missing);
-    compiler.emit(Instruction::new(Opcode::SorterNext, sorter as i32, top, 0));
-    compiler.patch_here(empty);
+    compiler.emit_update_body(update)?;
     let halt = compiler.here();
     compiler.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
     for label in core::mem::take(&mut compiler.end_jumps) {
@@ -1541,6 +2033,17 @@ impl Compiler {
         old_rowid: u32,
     ) -> DbResult<()> {
         let table = &update.table;
+        // OLD is read first, off the cursor the rowid pass left positioned. It
+        // has to be a copy: by the time an AFTER trigger reads it the row it
+        // describes has been deleted and rewritten.
+        let old_row = if update.triggers.is_empty() {
+            RowImage {
+                values: Vec::new(),
+                rowid: old_rowid,
+            }
+        } else {
+            self.read_row_image(writer, table, old_rowid)
+        };
         // The new values are computed before anything is deleted, because the
         // assignments read the old row through the cursor: `SET a = a + 1`
         // means the old `a`, and a row that had already been rewritten would
@@ -1575,6 +2078,18 @@ impl Compiler {
             None => old_rowid,
         };
         let mut skip = Vec::new();
+        let new_row = RowImage {
+            values: values.clone(),
+            rowid: new_rowid,
+        };
+        let ignored = core::mem::take(&mut self.ignore_jumps);
+        self.emit_triggers(
+            &update.triggers,
+            TriggerTime::Before,
+            table,
+            Some(&old_row),
+            Some(&new_row),
+        )?;
         let previous = core::mem::replace(
             &mut self.substitutions,
             row_substitutions(table, &values, new_rowid),
@@ -1613,6 +2128,13 @@ impl Compiler {
         self.patch_here(gone);
         self.emit_write_row(writer, table, &values, new_rowid)?;
         self.emit_count_change(table, new_rowid, RowChangeKind::Update, false);
+        self.emit_triggers(
+            &update.triggers,
+            TriggerTime::After,
+            table,
+            Some(&old_row),
+            Some(&new_row),
+        )?;
         let previous = core::mem::replace(
             &mut self.substitutions,
             row_substitutions(table, &values, new_rowid),
@@ -1620,6 +2142,9 @@ impl Compiler {
         let returning = self.emit_returning(&update.returning);
         self.substitutions = previous;
         returning?;
+        for label in core::mem::replace(&mut self.ignore_jumps, ignored) {
+            self.patch_here(label);
+        }
         for label in skip {
             self.patch_here(label);
         }

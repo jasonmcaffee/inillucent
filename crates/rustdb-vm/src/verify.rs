@@ -223,7 +223,7 @@ fn check_operand_ranges(program: &Program, address: usize, problems: &mut Vec<Ve
         }
         Opcode::IdxInsert | Opcode::IdxDelete => registers.push((instruction.p2, "record")),
         Opcode::NotExists => registers.push((instruction.p3, "rowid")),
-        Opcode::DestroyBtree | Opcode::ClearBtree | Opcode::CountChange => {
+        Opcode::DestroyBtree | Opcode::ClearBtree | Opcode::CountChange | Opcode::LastRowid => {
             registers.push((instruction.p1, "operand"))
         }
         _ => {}
@@ -476,6 +476,8 @@ fn writes_of(program: &Program, address: usize) -> Vec<u32> {
     };
     let single = |value: i32| vec![value.max(0) as u32];
     match instruction.opcode {
+        // The save direction fills its register; the restore direction reads it.
+        Opcode::LastRowid if instruction.p2 == 0 => single(instruction.p1),
         Opcode::Column | Opcode::IdxColumn | Opcode::SorterColumn | Opcode::EphColumn => {
             single(instruction.p3)
         }
@@ -560,6 +562,10 @@ fn reads_of(program: &Program, address: usize) -> Vec<u32> {
         Opcode::DestroyBtree | Opcode::ClearBtree | Opcode::CountChange => {
             vec![instruction.p1.max(0) as u32]
         }
+        // Only the restore direction reads its register; the save direction
+        // writes it, and listing it as a read would flag the save as reading an
+        // uninitialised register.
+        Opcode::LastRowid if instruction.p2 == 1 => vec![instruction.p1.max(0) as u32],
         Opcode::SorterInsert => block(instruction.p2, instruction.p3),
         Opcode::DistinctCheck => block(instruction.p3, instruction.p5 as i32),
         Opcode::EphInsert => block(instruction.p2, instruction.p3),

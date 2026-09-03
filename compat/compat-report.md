@@ -4,8 +4,8 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 
 | status | capabilities |
 |---|---|
-| missing | 50 |
-| pass | 210 |
+| missing | 47 |
+| pass | 213 |
 | **total** | **260** |
 
 ## By phase
@@ -25,7 +25,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | phase 5: lexer, parser, AST, and syntax parity | 10 | 0 | 0 | 0 |
 | phase 6: catalog, binder, expression VM, and read-only SELECT | 22 | 0 | 0 | 0 |
 | phase 7: single-database rollback transactions and DML | 29 | 0 | 0 | 0 |
-| phase 8: complete SELECT, planner, schema, and SQL semantics | 26 | 0 | 5 | 0 |
+| phase 8: complete SELECT, planner, schema, and SQL semantics | 29 | 0 | 2 | 0 |
 | phase 9: foreign keys, ATTACH, and multi-database commit | 0 | 0 | 6 | 0 |
 
 ## Capabilities
@@ -180,7 +180,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `sql.upsert` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `sql.returning` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `sql.create-view` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
-| `sql.create-trigger` | missing | missing | - | 0 |
+| `sql.create-trigger` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
 | `sql.alter-table` | pass | pass | linux-x86_64, windows-x86_64 | 8 |
 | `sql.generated-columns` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `sql.without-rowid` | missing | missing | - | 0 |
@@ -244,8 +244,8 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `perf.regression-tracking` | missing | missing | - | 0 |
 | `sql.negative.right-outer-join-pre-3-39` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `sql.negative.grant-revoke` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
-| `sql.negative.full-alter-table` | missing | missing | - | 0 |
-| `sql.negative.trigger-for-each-statement` | missing | missing | - | 0 |
+| `sql.negative.full-alter-table` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `sql.negative.trigger-for-each-statement` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `sql.negative.writable-views` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `values.collation.registry` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `values.real-to-text` | pass | pass | linux-x86_64, windows-x86_64 | 6 |

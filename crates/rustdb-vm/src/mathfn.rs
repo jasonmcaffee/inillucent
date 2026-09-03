@@ -143,7 +143,6 @@ fn positive(value: f64, body: fn(f64) -> f64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assert_same;
 
     /// Calls a function with owned arguments.
     fn run(func: MathFunc, arguments: Vec<Value<'static>>) -> Value<'static> {

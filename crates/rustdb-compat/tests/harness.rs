@@ -71,7 +71,7 @@ const FINISHED_PHASES: [&str; 8] = [
 const IN_PROGRESS_PHASE: &str = "phase 8:";
 
 /// The rows of [`IN_PROGRESS_PHASE`] that have evidence behind them.
-const IN_PROGRESS_ROWS: [&str; 26] = [
+const IN_PROGRESS_ROWS: [&str; 29] = [
     "sql.expr.in-subquery",
     "sql.select.joins",
     "sql.select.compound",
@@ -87,6 +87,9 @@ const IN_PROGRESS_ROWS: [&str; 26] = [
     "sql.reindex",
     "sql.generated-columns",
     "sql.alter-table",
+    "sql.create-trigger",
+    "sql.negative.full-alter-table",
+    "sql.negative.trigger-for-each-statement",
     "planner.access-paths",
     "planner.join-order",
     "planner.statistics",

@@ -103,6 +103,15 @@ fn run_all(connection: &rustdb::Connection, script: &[&str]) {
 /// shape produces a file SQLite opens and then reports as corrupt, and a test
 /// that only re-read the file with rust-db would agree with itself.
 fn sqlite_reads(path: &PathBuf, queries: &[(&str, &[&str])]) {
+    sqlite_writes_then_reads(path, &[], queries);
+}
+
+/// As [`sqlite_reads`], with statements the reference runs first.
+///
+/// A stored trigger is only really proved by having the *reference* fire it, and
+/// that needs the reference to write. The writes go through `exec` one statement
+/// at a time because the oracle prepares one statement per request.
+fn sqlite_writes_then_reads(path: &PathBuf, writes: &[&str], queries: &[(&str, &[&str])]) {
     let Some(program) = oracle_path() else {
         panic!("the pinned SQLite oracle is not built");
     };
@@ -120,6 +129,12 @@ fn sqlite_reads(path: &PathBuf, queries: &[(&str, &[&str])]) {
         .flat_map(|row| row.iter().map(render_tagged))
         .collect();
     assert_eq!(reported, vec!["text:ok".to_string()], "integrity_check");
+    for sql in writes {
+        let observation = driver
+            .send(&Op::Exec((*sql).to_string()))
+            .expect("the oracle answers");
+        assert!(observation.ok, "{sql}: {}", observation.message);
+    }
     for (sql, expected) in queries {
         let observation = driver
             .send(&Op::Query((*sql).to_string()))
@@ -679,4 +694,198 @@ fn alter_table_rewrites_the_schema() {
             ("SELECT id FROM renamed WHERE label = 'bob'", &["int:2"]),
         ],
     );
+}
+
+/// Triggers rust-db wrote, fired by SQLite itself.
+///
+/// The differential suite proves the two engines agree while each drives its
+/// own file. This proves the *stored* trigger is SQLite's: the pinned binary
+/// opens a database rust-db created, writes the table, and its own trigger
+/// programs run out of the schema text rust-db wrote. A trigger stored under
+/// the wrong `tbl_name`, or with SQL the reference cannot re-parse, passes every
+/// test in this engine and fails here.
+#[test]
+fn triggers_round_trip_through_sqlite() {
+    let path = scratch("triggers");
+    let database = Database::open(&path).expect("the database opens");
+    let connection = database.connect().expect("the connection opens");
+    run_all(
+        &connection,
+        &[
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, score INTEGER)",
+            "CREATE TABLE audit (seq INTEGER PRIMARY KEY, what TEXT, detail TEXT)",
+            "CREATE TRIGGER t_ai AFTER INSERT ON t BEGIN
+               INSERT INTO audit (what, detail) VALUES ('insert', new.name);
+             END",
+            "CREATE TRIGGER t_ad AFTER DELETE ON t BEGIN
+               INSERT INTO audit (what, detail) VALUES ('delete', old.name);
+             END",
+            "CREATE TRIGGER t_au AFTER UPDATE OF name ON t BEGIN
+               INSERT INTO audit (what, detail) VALUES ('rename', old.name || '>' || new.name);
+             END",
+            "CREATE TRIGGER t_guard BEFORE INSERT ON t WHEN new.score < 0 BEGIN
+               SELECT RAISE(ABORT, 'score must not be negative');
+             END",
+            "INSERT INTO t VALUES (1, 'ada', 10)",
+            "UPDATE t SET name = 'ada2' WHERE id = 1",
+            "DELETE FROM t WHERE id = 1",
+        ],
+    );
+    assert!(run(&connection, "INSERT INTO t VALUES (2, 'bob', -1)").is_err());
+    assert_eq!(
+        run(&connection, "SELECT what, detail FROM audit ORDER BY seq"),
+        Ok(vec![
+            "text:insert|text:ada".to_string(),
+            "text:rename|text:ada>ada2".to_string(),
+            "text:delete|text:ada2".to_string(),
+        ])
+    );
+    drop(connection);
+    drop(database);
+
+    sqlite_reads(
+        &path,
+        &[(
+            "SELECT name, tbl_name FROM sqlite_schema WHERE type = 'trigger' ORDER BY name",
+            &[
+                "text:t_ad|text:t",
+                "text:t_ai|text:t",
+                "text:t_au|text:t",
+                "text:t_guard|text:t",
+            ],
+        )],
+    );
+    // The reference writes the table, and its own trigger programs run out of
+    // the schema text rust-db wrote.
+    sqlite_writes_then_reads(
+        &path,
+        &["INSERT INTO t VALUES (9, 'zoe', 1)"],
+        &[(
+            "SELECT what, detail FROM audit ORDER BY seq",
+            &[
+                "text:insert|text:ada",
+                "text:rename|text:ada>ada2",
+                "text:delete|text:ada2",
+                "text:insert|text:zoe",
+            ],
+        )],
+    );
+}
+
+/// `INSTEAD OF` triggers, and the writable view they make.
+#[test]
+fn instead_of_triggers_round_trip_through_sqlite() {
+    let path = scratch("instead-of");
+    let database = Database::open(&path).expect("the database opens");
+    let connection = database.connect().expect("the connection opens");
+    run_all(
+        &connection,
+        &[
+            "CREATE TABLE person (id INTEGER PRIMARY KEY, name TEXT, secret TEXT)",
+            "INSERT INTO person VALUES (1, 'ada', 'hidden')",
+            "CREATE VIEW public AS SELECT id, name FROM person",
+            "CREATE TRIGGER public_ins INSTEAD OF INSERT ON public BEGIN
+               INSERT INTO person (id, name, secret) VALUES (new.id, new.name, 'unset');
+             END",
+            "CREATE TRIGGER public_upd INSTEAD OF UPDATE ON public BEGIN
+               UPDATE person SET name = new.name WHERE id = old.id;
+             END",
+            "CREATE TRIGGER public_del INSTEAD OF DELETE ON public BEGIN
+               DELETE FROM person WHERE id = old.id;
+             END",
+            "INSERT INTO public VALUES (2, 'bob')",
+            "UPDATE public SET name = 'robert' WHERE id = 2",
+            "INSERT INTO public VALUES (3, 'cai')",
+            "DELETE FROM public WHERE id = 3",
+        ],
+    );
+    assert_eq!(
+        run(
+            &connection,
+            "SELECT id, name, secret FROM person ORDER BY id"
+        ),
+        Ok(vec![
+            "int:1|text:ada|text:hidden".to_string(),
+            "int:2|text:robert|text:unset".to_string(),
+        ])
+    );
+    drop(connection);
+    drop(database);
+
+    sqlite_reads(
+        &path,
+        &[(
+            "SELECT id, name, secret FROM person ORDER BY id",
+            &["int:1|text:ada|text:hidden", "int:2|text:robert|text:unset"],
+        )],
+    );
+    // The reference writes the view through rust-db's stored INSTEAD OF trigger.
+    sqlite_writes_then_reads(
+        &path,
+        &["INSERT INTO public VALUES (4, 'dee')"],
+        &[(
+            "SELECT id, name, secret FROM person ORDER BY id",
+            &[
+                "int:1|text:ada|text:hidden",
+                "int:2|text:robert|text:unset",
+                "int:4|text:dee|text:unset",
+            ],
+        )],
+    );
+}
+
+/// The trigger shapes SQLite has no grammar for.
+///
+/// `FOR EACH STATEMENT` is the named one: SQLite has only row triggers, and it
+/// is a syntax error rather than a trigger that fires once per statement. An
+/// engine that accepted it would store a trigger the reference cannot read.
+#[test]
+fn the_trigger_forms_sqlite_omits_are_refused() {
+    let path = scratch("trigger-omissions");
+    let database = Database::open(&path).expect("the database opens");
+    let connection = database.connect().expect("the connection opens");
+    run_all(
+        &connection,
+        &[
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)",
+            "CREATE VIEW v AS SELECT id, name FROM t",
+        ],
+    );
+    for sql in [
+        "CREATE TRIGGER a AFTER INSERT ON t FOR EACH STATEMENT BEGIN SELECT 1; END",
+        "CREATE TRIGGER a BEFORE INSERT ON t FOR EACH STATEMENT BEGIN SELECT 1; END",
+        "CREATE TRIGGER a AFTER INSERT ON t BEGIN END",
+        "CREATE TRIGGER a AFTER INSERT ON t BEGIN SELECT 1 END",
+        "CREATE TRIGGER a AFTER INSERT ON t BEGIN CREATE TABLE u (a); END",
+        "CREATE TRIGGER a AFTER INSERT ON t BEGIN DROP TABLE t; END",
+        "CREATE TRIGGER a AFTER INSERT ON t BEGIN BEGIN; END",
+        "CREATE TRIGGER a AFTER INSERT ON t BEGIN INSERT INTO t VALUES (1, 'x') RETURNING id; END",
+        "CREATE TRIGGER a AFTER INSERT ON nosuchtable BEGIN SELECT 1; END",
+        "CREATE TRIGGER sqlite_a AFTER INSERT ON t BEGIN SELECT 1; END",
+        "CREATE TRIGGER a BEFORE INSERT ON v BEGIN SELECT 1; END",
+        "CREATE TRIGGER a AFTER INSERT ON v BEGIN SELECT 1; END",
+        "CREATE TRIGGER a INSTEAD OF INSERT ON t BEGIN SELECT 1; END",
+        "SELECT RAISE(ABORT, 'not in a trigger')",
+        "SELECT RAISE(IGNORE)",
+        "DROP TRIGGER nosuchtrigger",
+        "UPDATE v SET name = 'x'",
+        "DELETE FROM v",
+        "INSERT INTO v VALUES (1, 'x')",
+    ] {
+        assert!(
+            run(&connection, sql).is_err(),
+            "rust-db accepted `{sql}`, which SQLite 3.53.4 refuses"
+        );
+    }
+    // Nothing was created by any of them.
+    assert_eq!(
+        run(
+            &connection,
+            "SELECT count(*) FROM sqlite_schema WHERE type = 'trigger'"
+        ),
+        Ok(vec!["int:0".to_string()])
+    );
+    drop(connection);
+    drop(database);
+    sqlite_reads(&path, &[("SELECT count(*) FROM sqlite_schema", &["int:2"])]);
 }

@@ -484,3 +484,289 @@ fn upsert_matches_sqlite() {
     );
     assert!(compared == 0 || compared == 14, "compared {compared} steps");
 }
+
+/// Row triggers: every event, both times, OLD and NEW, WHEN, and UPDATE OF.
+///
+/// The counters are what make this worth running in lockstep rather than
+/// against written-out rows. `changes()` reports the *statement's* row count and
+/// not the rows its triggers wrote, and `last_insert_rowid()` moves while a
+/// trigger body is inserting - both are easy to get wrong in a way no SELECT
+/// would show, and both are compared after every step here.
+#[test]
+fn row_triggers_match_sqlite() {
+    let compared = compare(
+        "triggers",
+        &[
+            Step::Exec("CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT, score INTEGER)"),
+            Step::Exec("CREATE TABLE audit(seq INTEGER PRIMARY KEY, what TEXT, detail TEXT)"),
+            Step::Exec(
+                "CREATE TRIGGER t_ai AFTER INSERT ON t BEGIN
+                   INSERT INTO audit(what, detail) VALUES('after-insert', new.name);
+                 END",
+            ),
+            Step::Exec(
+                "CREATE TRIGGER t_bi BEFORE INSERT ON t BEGIN
+                   INSERT INTO audit(what, detail) VALUES('before-insert', new.name);
+                 END",
+            ),
+            Step::Exec(
+                "CREATE TRIGGER t_ad AFTER DELETE ON t BEGIN
+                   INSERT INTO audit(what, detail) VALUES('after-delete', old.name);
+                 END",
+            ),
+            Step::Exec(
+                "CREATE TRIGGER t_au AFTER UPDATE ON t BEGIN
+                   INSERT INTO audit(what, detail) VALUES('after-update', old.name || '->' || new.name);
+                 END",
+            ),
+            // Narrowed to one column: it must not fire when only `score` moves.
+            Step::Exec(
+                "CREATE TRIGGER t_auname AFTER UPDATE OF name ON t BEGIN
+                   INSERT INTO audit(what, detail) VALUES('name-changed', new.name);
+                 END",
+            ),
+            // A guard, and the rowid read through NEW.
+            Step::Exec(
+                "CREATE TRIGGER t_high AFTER INSERT ON t WHEN new.score > 100 BEGIN
+                   INSERT INTO audit(what, detail) VALUES('high', new.rowid);
+                 END",
+            ),
+            Step::Query("SELECT type, name, tbl_name FROM sqlite_schema WHERE type = 'trigger' ORDER BY name"),
+            Step::Exec("INSERT INTO t VALUES(1, 'ada', 10)"),
+            Step::Query("SELECT seq, what, detail FROM audit ORDER BY seq"),
+            Step::Exec("INSERT INTO t VALUES(2, 'bob', 500)"),
+            Step::Query("SELECT seq, what, detail FROM audit ORDER BY seq"),
+            Step::Exec("UPDATE t SET score = score + 1 WHERE id = 1"),
+            Step::Query("SELECT seq, what, detail FROM audit ORDER BY seq"),
+            Step::Exec("UPDATE t SET name = 'ada2' WHERE id = 1"),
+            Step::Query("SELECT seq, what, detail FROM audit ORDER BY seq"),
+            Step::Exec("DELETE FROM t WHERE id = 2"),
+            Step::Query("SELECT seq, what, detail FROM audit ORDER BY seq"),
+            // A multi-row write fires the trigger once per row.
+            Step::Exec("INSERT INTO t VALUES(7, 'g', 1), (8, 'h', 2), (9, 'i', 3)"),
+            Step::Query("SELECT count(*) FROM audit"),
+            Step::Exec("UPDATE t SET name = name || '!'"),
+            Step::Query("SELECT id, name FROM t ORDER BY id"),
+            Step::Query("SELECT what, count(*) FROM audit GROUP BY what ORDER BY what"),
+            Step::Exec("DELETE FROM t"),
+            Step::Query("SELECT count(*) FROM t"),
+            Step::Query("SELECT what, count(*) FROM audit GROUP BY what ORDER BY what"),
+            // Dropping one leaves the others.
+            Step::Exec("DROP TRIGGER t_bi"),
+            Step::Query("SELECT name FROM sqlite_schema WHERE type = 'trigger' ORDER BY name"),
+            Step::Exec("INSERT INTO t VALUES(20, 'z', 1)"),
+            Step::Query("SELECT what FROM audit ORDER BY seq DESC LIMIT 2"),
+            Step::Exec("DROP TRIGGER IF EXISTS nosuchtrigger"),
+            Step::Exec("DROP TRIGGER nosuchtrigger"),
+            // A dropped table takes its triggers with it.
+            Step::Exec("DROP TABLE t"),
+            Step::Query("SELECT count(*) FROM sqlite_schema WHERE type = 'trigger'"),
+        ],
+    );
+    assert!(compared == 0 || compared == 35, "compared {compared} steps");
+}
+
+/// `RAISE()`: the three that stop the statement and the one that skips the row.
+#[test]
+fn trigger_raise_matches_sqlite() {
+    let compared = compare(
+        "trigger-raise",
+        &[
+            Step::Exec("CREATE TABLE t(id INTEGER PRIMARY KEY, score INTEGER)"),
+            Step::Exec(
+                "CREATE TRIGGER no_negative BEFORE INSERT ON t WHEN new.score < 0 BEGIN
+                   SELECT RAISE(ABORT, 'score must not be negative');
+                 END",
+            ),
+            Step::Exec("INSERT INTO t VALUES(1, 5)"),
+            Step::Exec("INSERT INTO t VALUES(2, -1)"),
+            Step::Query("SELECT id, score FROM t ORDER BY id"),
+            // ABORT undoes the whole statement, so neither row of this one lands.
+            Step::Exec("INSERT INTO t VALUES(3, 7), (4, -7)"),
+            Step::Query("SELECT id, score FROM t ORDER BY id"),
+            // A guard written as a WHERE inside the body rather than as WHEN.
+            Step::Exec("CREATE TABLE u(id INTEGER PRIMARY KEY, score INTEGER)"),
+            Step::Exec(
+                "CREATE TRIGGER u_check BEFORE INSERT ON u BEGIN
+                   SELECT RAISE(FAIL, 'too big') WHERE new.score > 100;
+                 END",
+            ),
+            Step::Exec("INSERT INTO u VALUES(1, 5)"),
+            Step::Exec("INSERT INTO u VALUES(2, 500)"),
+            Step::Query("SELECT id, score FROM u ORDER BY id"),
+            // FAIL keeps the rows already written by the same statement.
+            Step::Exec("INSERT INTO u VALUES(3, 6), (4, 900), (5, 7)"),
+            Step::Query("SELECT id, score FROM u ORDER BY id"),
+            // IGNORE abandons the row and lets the statement carry on.
+            Step::Exec("CREATE TABLE v(id INTEGER PRIMARY KEY, score INTEGER)"),
+            Step::Exec(
+                "CREATE TRIGGER v_skip BEFORE INSERT ON v WHEN new.score < 0 BEGIN
+                   SELECT RAISE(IGNORE);
+                 END",
+            ),
+            Step::Exec("INSERT INTO v VALUES(1, 5), (2, -1), (3, 9)"),
+            Step::Query("SELECT id, score FROM v ORDER BY id"),
+            // RAISE outside a trigger body is not a statement at all.
+            Step::Exec("SELECT RAISE(ABORT, 'nope')"),
+            Step::Exec("INSERT INTO v VALUES(4, RAISE(IGNORE))"),
+        ],
+    );
+    assert!(compared == 0 || compared == 20, "compared {compared} steps");
+}
+
+/// A trigger whose body writes a table that has triggers of its own.
+///
+/// With SQLite's default `recursive_triggers = off` a trigger already on the
+/// stack is skipped rather than fired again, so a trigger that writes its own
+/// table terminates instead of recursing. That is the rule this checks, and it
+/// is also the reason the compiler can inline trigger bodies at all.
+#[test]
+fn trigger_chains_match_sqlite() {
+    let compared = compare(
+        "trigger-chains",
+        &[
+            Step::Exec("CREATE TABLE a(id INTEGER PRIMARY KEY, n INTEGER)"),
+            Step::Exec("CREATE TABLE b(id INTEGER PRIMARY KEY, n INTEGER)"),
+            Step::Exec("CREATE TABLE c(id INTEGER PRIMARY KEY, n INTEGER)"),
+            Step::Exec(
+                "CREATE TRIGGER a_to_b AFTER INSERT ON a BEGIN
+                   INSERT INTO b(n) VALUES(new.n * 10);
+                 END",
+            ),
+            Step::Exec(
+                "CREATE TRIGGER b_to_c AFTER INSERT ON b BEGIN
+                   INSERT INTO c(n) VALUES(new.n * 10);
+                 END",
+            ),
+            Step::Exec("INSERT INTO a(n) VALUES(1)"),
+            Step::Query("SELECT n FROM a ORDER BY n"),
+            Step::Query("SELECT n FROM b ORDER BY n"),
+            Step::Query("SELECT n FROM c ORDER BY n"),
+            // Self-recursion: the trigger writes its own table.
+            Step::Exec("CREATE TABLE r(id INTEGER PRIMARY KEY, depth INTEGER)"),
+            Step::Exec(
+                "CREATE TRIGGER r_deeper AFTER INSERT ON r WHEN new.depth < 5 BEGIN
+                   INSERT INTO r(depth) VALUES(new.depth + 1);
+                 END",
+            ),
+            Step::Exec("INSERT INTO r(depth) VALUES(0)"),
+            Step::Query("SELECT depth FROM r ORDER BY depth"),
+            // A trigger that deletes from the table it fires for.
+            Step::Exec("CREATE TABLE cap(id INTEGER PRIMARY KEY, n INTEGER)"),
+            Step::Exec(
+                "CREATE TRIGGER cap_trim AFTER INSERT ON cap BEGIN
+                   DELETE FROM cap WHERE n < new.n - 1;
+                 END",
+            ),
+            Step::Exec("INSERT INTO cap(n) VALUES(1), (2), (3), (4)"),
+            Step::Query("SELECT n FROM cap ORDER BY n"),
+            // An UPDATE trigger that updates a second table.
+            Step::Exec("CREATE TABLE total(id INTEGER PRIMARY KEY, sum INTEGER)"),
+            Step::Exec("INSERT INTO total VALUES(1, 0)"),
+            Step::Exec(
+                "CREATE TRIGGER a_sum AFTER UPDATE ON a BEGIN
+                   UPDATE total SET sum = sum + new.n - old.n WHERE id = 1;
+                 END",
+            ),
+            Step::Exec("UPDATE a SET n = n + 4"),
+            Step::Query("SELECT sum FROM total"),
+        ],
+    );
+    assert!(compared == 0 || compared == 22, "compared {compared} steps");
+}
+
+/// `INSTEAD OF` triggers, which are what makes a view writable.
+#[test]
+fn instead_of_triggers_match_sqlite() {
+    let compared = compare(
+        "instead-of",
+        &[
+            Step::Exec("CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT, hidden TEXT)"),
+            Step::Exec("INSERT INTO t VALUES(1, 'ada', 'x'), (2, 'bob', 'y')"),
+            Step::Exec("CREATE VIEW v AS SELECT id, name FROM t"),
+            // Without a trigger a view refuses every write.
+            Step::Exec("INSERT INTO v VALUES(3, 'cai')"),
+            Step::Exec("UPDATE v SET name = 'z'"),
+            Step::Exec("DELETE FROM v"),
+            Step::Exec(
+                "CREATE TRIGGER v_ins INSTEAD OF INSERT ON v BEGIN
+                   INSERT INTO t(id, name, hidden) VALUES(new.id, new.name, 'from-view');
+                 END",
+            ),
+            Step::Exec(
+                "CREATE TRIGGER v_upd INSTEAD OF UPDATE ON v BEGIN
+                   UPDATE t SET name = new.name WHERE id = old.id;
+                 END",
+            ),
+            Step::Exec(
+                "CREATE TRIGGER v_del INSTEAD OF DELETE ON v BEGIN
+                   DELETE FROM t WHERE id = old.id;
+                 END",
+            ),
+            Step::Exec("INSERT INTO v VALUES(3, 'cai')"),
+            Step::Query("SELECT id, name, hidden FROM t ORDER BY id"),
+            Step::Exec("UPDATE v SET name = 'robert' WHERE id = 2"),
+            Step::Query("SELECT id, name FROM t ORDER BY id"),
+            Step::Exec("DELETE FROM v WHERE id = 1"),
+            Step::Query("SELECT id, name FROM t ORDER BY id"),
+            // The shapes SQLite refuses.
+            Step::Exec("CREATE TRIGGER v_before BEFORE INSERT ON v BEGIN SELECT 1; END"),
+            Step::Exec("CREATE TRIGGER v_after AFTER INSERT ON v BEGIN SELECT 1; END"),
+            Step::Exec("CREATE TRIGGER t_instead INSTEAD OF INSERT ON t BEGIN SELECT 1; END"),
+            Step::Exec("CREATE TRIGGER t_stmt AFTER INSERT ON t FOR EACH STATEMENT BEGIN SELECT 1; END"),
+            Step::Exec("CREATE TRIGGER t_empty AFTER INSERT ON t BEGIN END"),
+            Step::Exec("CREATE TRIGGER t_nosuch AFTER INSERT ON nosuchtable BEGIN SELECT 1; END"),
+            Step::Exec("CREATE TRIGGER t_badcol AFTER UPDATE OF nosuchcolumn ON t BEGIN SELECT 1; END"),
+            Step::Exec("CREATE TRIGGER t_badbody AFTER INSERT ON t BEGIN INSERT INTO t(nosuch) VALUES(1); END"),
+            Step::Exec("CREATE TRIGGER t_badnew AFTER DELETE ON t BEGIN INSERT INTO t(name) VALUES(new.name); END"),
+            Step::Exec("CREATE TRIGGER t_badold AFTER INSERT ON t BEGIN INSERT INTO t(name) VALUES(old.name); END"),
+            Step::Exec("CREATE TRIGGER v_ins INSTEAD OF INSERT ON v BEGIN SELECT 1; END"),
+            Step::Exec("CREATE TRIGGER IF NOT EXISTS v_ins INSTEAD OF INSERT ON v BEGIN SELECT 1; END"),
+            Step::Query("SELECT name FROM sqlite_schema WHERE type = 'trigger' ORDER BY name"),
+        ],
+    );
+    assert!(compared == 0 || compared == 28, "compared {compared} steps");
+}
+
+/// `INSERT ... SELECT`, including the case where the query reads the target.
+#[test]
+fn insert_from_select_matches_sqlite() {
+    let compared = compare(
+        "insert-select",
+        &[
+            Step::Exec("CREATE TABLE src(id INTEGER PRIMARY KEY, n TEXT, v REAL)"),
+            Step::Exec("CREATE TABLE dst(id INTEGER PRIMARY KEY, n TEXT, v REAL)"),
+            Step::Exec("INSERT INTO src VALUES(1, 'a', 1.5), (2, 'b', 2.5), (3, NULL, NULL)"),
+            Step::Exec("INSERT INTO dst SELECT id, n, v FROM src"),
+            Step::Query("SELECT id, n, v FROM dst ORDER BY id"),
+            Step::Exec("DELETE FROM dst"),
+            Step::Exec("INSERT INTO dst(n) SELECT n FROM src WHERE n IS NOT NULL ORDER BY n DESC"),
+            Step::Query("SELECT id, n, v FROM dst ORDER BY id"),
+            // The query reads the table being written: it must see the rows that
+            // were there when it started and no more, or it never terminates.
+            Step::Exec("INSERT INTO dst(n, v) SELECT n, v FROM dst"),
+            Step::Query("SELECT count(*) FROM dst"),
+            Step::Exec("INSERT INTO dst(n, v) SELECT n, v FROM src JOIN dst USING (n)"),
+            Step::Query("SELECT count(*) FROM dst"),
+            // An aggregate, a compound and a CTE as the source.
+            Step::Exec("CREATE TABLE agg(k TEXT, total REAL)"),
+            Step::Exec("INSERT INTO agg SELECT n, sum(v) FROM src GROUP BY n"),
+            Step::Query("SELECT k, total FROM agg ORDER BY k"),
+            Step::Exec("INSERT INTO agg SELECT 'u', 1.0 UNION SELECT 'u', 1.0"),
+            Step::Query("SELECT k, total FROM agg ORDER BY k, total"),
+            Step::Exec("INSERT INTO agg WITH w AS (SELECT 'w' AS k, 9.0 AS t) SELECT k, t FROM w"),
+            Step::Query("SELECT k, total FROM agg ORDER BY k, total"),
+            // A width mismatch, and a constraint the query's rows break.
+            Step::Exec("INSERT INTO dst SELECT id FROM src"),
+            Step::Exec("INSERT INTO dst(id, n) SELECT id, n FROM src"),
+            Step::Query("SELECT count(*) FROM dst"),
+            // Fired triggers see rows the query produced.
+            Step::Exec("CREATE TABLE seen(seq INTEGER PRIMARY KEY, n TEXT)"),
+            Step::Exec("CREATE TRIGGER dst_ai AFTER INSERT ON dst BEGIN INSERT INTO seen(n) VALUES(new.n); END"),
+            Step::Exec("DELETE FROM dst"),
+            Step::Exec("INSERT INTO dst(n, v) SELECT n, v FROM src"),
+            Step::Query("SELECT n FROM seen ORDER BY seq"),
+        ],
+    );
+    assert!(compared == 0 || compared == 27, "compared {compared} steps");
+}

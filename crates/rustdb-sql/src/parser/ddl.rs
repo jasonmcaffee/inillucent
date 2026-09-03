@@ -586,7 +586,7 @@ impl Parser<'_> {
     /// better diagnostic than letting the general dispatcher accept a `CREATE`
     /// and having the catalog refuse it much later.
     fn parse_trigger_body_statement(&mut self) -> Result<Statement, ParseError> {
-        match self.peek()?.keyword() {
+        let statement = match self.peek()?.keyword() {
             Some(Keyword::UPDATE) => self.parse_update(),
             Some(Keyword::INSERT) | Some(Keyword::REPLACE) => self.parse_insert(),
             Some(Keyword::DELETE) => self.parse_delete(),
@@ -594,7 +594,23 @@ impl Parser<'_> {
                 self.parse_select_statement()
             }
             _ => Err(self.unexpected(&["UPDATE", "INSERT", "DELETE", "SELECT"])?),
+        }?;
+        // A trigger body has no caller to return rows to, so SQLite refuses
+        // `RETURNING` in one - and refuses it while parsing, which is why the
+        // check is here rather than in the binder.
+        let returning = match &statement {
+            Statement::Insert(insert) => !insert.returning.is_empty(),
+            Statement::Update(update) => !update.returning.is_empty(),
+            Statement::Delete(delete) => !delete.returning.is_empty(),
+            _ => false,
+        };
+        if returning {
+            return Err(ParseError::new(
+                ParseErrorKind::Unsupported("RETURNING is not available in triggers"),
+                Span::at(self.cursor()),
+            ));
         }
+        Ok(statement)
     }
 
     /// Parses `CREATE VIRTUAL TABLE`, whose module arguments are opaque text.
