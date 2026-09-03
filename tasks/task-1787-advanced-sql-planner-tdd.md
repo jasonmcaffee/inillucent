@@ -518,3 +518,80 @@ after the language, because a cost model over features that do not run cannot be
 6. `EXPLAIN` / `EXPLAIN QUERY PLAN`
 7. limits, quirks, negatives, spill governance, interrupt, OOM, plan-cache invalidation
 8. benchmarks, manifest and evidence regeneration, commit and push
+
+---
+
+## What actually happened
+
+Written after the phase shipped, because a design document that only records what was intended is
+half a record. Everything below is a place where building it taught something the plan did not know.
+
+### Trigger bodies are inlined, not framed
+
+The plan said "compiled as subprograms invoked from the DML row loop", which implies frames: a
+program with its own register and cursor space, entered and left. They are **inlined into the firing
+statement** instead, and the reason is a decision phase 6 had already made. FROM terms carry a
+*statement-wide* number, so a trigger body's sources take the numbers after the firing statement's
+and the compiler's one flat cursor map serves both. `OLD` and `NEW` are register blocks substituted
+exactly the way an upsert's `excluded` row already was.
+
+Inlining terminates only because SQLite's default `recursive_triggers = off` skips a trigger already
+on the stack — so the parity rule and the termination argument are the same rule. That is a happier
+accident than it sounds: had the default been *on*, this design would not have been available.
+
+### Five defects that no `SELECT` could have shown
+
+Four of these were found by comparing the *counters* after every statement, not the rows.
+
+1. `changes()` counted rows the triggers wrote. It reports the statement's own rows; `total_changes()`
+   counts both. They are separate tallies now.
+2. `last_insert_rowid()` was published only when a statement succeeded. The reference keeps the rowid
+   of a row written before an abort, and reverts a trigger body's own inserts once the body ends.
+3. `open_for_write` replaced the whole source-to-cursor map with one entry at slot zero. Two fires of
+   one trigger open two cursors on one table, and the second fire was reading the first fire's cursor.
+4. A write left every other cursor on that tree standing on a page that had been rebalanced under it.
+   Nothing could hold two cursors on a tree it wrote until triggers; the save/restore machinery had
+   been in the storage layer since phase 4 and had never been wired to the VM.
+5. Triggers fire in **reverse creation order**. The most recently created one runs first, which the
+   pinned build confirms and no document this phase started from mentioned.
+
+`changes()`, `total_changes()` and `last_insert_rowid()` also all answered zero as *SQL functions*:
+`Machine::set_counters` existed and had never been called.
+
+### `WITHOUT ROWID` reads were wrong in three ways at once
+
+The table's b-tree is an **index** b-tree and its record is the row with the primary key moved to the
+front — `PRIMARY KEY(b, a)` over `(a, b, c)` stores `(b, a, c)`, confirmed by decoding a page the
+pinned build wrote rather than by reading the documentation. Before this phase, asking for `a, b, c`
+returned the record's order, so every column held its neighbour's value; `ORDER BY b` ordered by the
+wrong column; and a seek on the key opened page zero, because the primary key's catalog entry had a
+root of zero that nothing filled in. SQLite writes no `sqlite_autoindex` row for it: the table's own
+root *is* that index.
+
+### `VACUUM` moves `last_insert_rowid()`, but only sometimes
+
+Only when the schema holds a view or a trigger. SQLite copies those schema rows in a final pass, and
+that INSERT leaves the value at the number of rows in the rebuilt schema. Measured on six schemas
+before it was believed. It is an artefact of the reference's implementation, reproduced deliberately,
+because an application can see it.
+
+### `DISTINCT` was quadratic
+
+Found by the benchmarks, which is what they are for: 447 ms against 18 ms for the `GROUP BY` of the
+same shape, on *fewer* bytecode instructions. Time out of line with the instruction count is time
+being spent where the VM is not looking — here, a linear scan of every row the distinct set had kept.
+An ordered index and a binary search took it to 18.5 ms on identical instruction and allocation
+counts. The ordering is proved to say `Equal` exactly where the equality it replaced said `true`.
+
+### Two places the plan was stricter than the reference
+
+`UPDATE OF nosuchcolumn` is accepted by SQLite, and so is a trigger body naming a column the table has
+not got — the latter reported on the first write that fires it. Both were refused here at first.
+Refusing them makes rust-db's language *smaller* than the reference's, which means a schema SQLite
+wrote that rust-db cannot load, and that is a worse failure than a late error.
+
+### What was deferred, and where the debt is recorded
+
+`TEMP` objects. They live in the `temp` database, so they need a connection that can hold more than
+one, which is what `ATTACH` brings in phase 9. They are refused rather than put in `main` under a
+different name, and `sql.temp-objects` now sits in the phase-9 rows so the debt is visible.
