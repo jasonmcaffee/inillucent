@@ -206,6 +206,8 @@ pub struct Pager {
     journalled: BTreeSet<u32>,
     wrote_database: bool,
     journal_totals: JournalStats,
+    /// The pages phase one wrote, which phase two marks clean.
+    committing: Vec<u32>,
     wal: Option<Box<dyn WriteAheadLog>>,
     /// The snapshot the open read transaction is pinned to, in WAL mode.
     ///
@@ -298,6 +300,7 @@ impl Pager {
             journalled: BTreeSet::new(),
             wrote_database: false,
             journal_totals: JournalStats::default(),
+            committing: Vec::new(),
             wal: None,
             wal_snapshot: None,
         })
@@ -577,6 +580,15 @@ impl Pager {
         self.state = PagerState::Closed;
         closed
     }
+}
+
+/// Whether a commit still owes its second phase.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommitPhase {
+    /// There was nothing to commit, and the transaction is already over.
+    Nothing,
+    /// The database is durable and the journal is still hot.
+    Owed,
 }
 
 /// What a new database file starts as.
@@ -1027,10 +1039,28 @@ impl Pager {
     /// A crash after it finds none and keeps the new database. There is no
     /// window in between, because step 6 is a single file operation.
     pub fn commit(&mut self) -> DbResult<()> {
+        if self.commit_phase_one()? == CommitPhase::Nothing {
+            return Ok(());
+        }
+        self.commit_phase_two()
+    }
+
+    /// Everything up to and including making the new database durable.
+    ///
+    /// After this the file holds the transaction and the journal holds what it
+    /// replaced, both synced. A crash here finds a hot journal and undoes the
+    /// transaction; the step that makes it *not* hot is phase two, and for a
+    /// commit across several databases that step happens after every one of
+    /// them has finished phase one.
+    ///
+    /// It reports whether there was anything to do, so a caller driving the two
+    /// phases by hand knows whether the second is still owed.
+    pub fn commit_phase_one(&mut self) -> DbResult<CommitPhase> {
         self.check_usable()?;
         self.require_writer()?;
         if self.wal.is_some() {
-            return self.commit_to_wal();
+            self.commit_to_wal()?;
+            return Ok(CommitPhase::Nothing);
         }
         if self.dirty.is_empty() && self.journalled.is_empty() {
             if let Some(journal) = self.journal.as_mut() {
@@ -1038,7 +1068,8 @@ impl Pager {
                 self.collect_journal_stats();
                 outcome?;
             }
-            return self.finish_transaction();
+            self.finish_transaction()?;
+            return Ok(CommitPhase::Nothing);
         }
         self.reach_failpoint(FailSite::Commit)?;
         let mut header = self.header;
@@ -1096,7 +1127,17 @@ impl Pager {
                 return Err(self.fail(error.into_db_error()));
             }
         }
+        self.committing = pages;
+        Ok(CommitPhase::Owed)
+    }
 
+    /// The step that makes the journal non-hot, which is the commit point.
+    ///
+    /// For one database this is the commit. For several it is the cleanup
+    /// after one: the super-journal's deletion has already decided the
+    /// outcome, and what is left here is to stop each journal claiming a
+    /// transaction that is over.
+    pub fn commit_phase_two(&mut self) -> DbResult<()> {
         if let Some(journal) = self.journal.as_mut() {
             let outcome = journal.commit_point();
             self.collect_journal_stats();
@@ -1104,8 +1145,7 @@ impl Pager {
                 return Err(self.fail(error));
             }
         }
-
-        for page in pages {
+        for page in core::mem::take(&mut self.committing) {
             if let Ok(page_id) = PageId::from_persisted(page) {
                 self.cache.mark_clean(PageKey {
                     database: self.database,
@@ -1115,6 +1155,23 @@ impl Pager {
         }
         self.counters.commits = self.counters.commits.saturating_add(1);
         self.finish_transaction()
+    }
+
+    /// Tells the journal which super-journal decides its transaction.
+    ///
+    /// A journal that names one is replayed only while that file exists, so
+    /// this is what makes several databases commit or roll back together. It
+    /// is set before phase one, because the name has to be in the journal
+    /// before the journal is synced.
+    pub fn set_super_journal(&mut self, path: Option<DbPath>) {
+        if let Some(journal) = self.journal.as_mut() {
+            journal.set_super_journal(path);
+        }
+    }
+
+    /// Returns the path of the journal this pager writes, when it has one.
+    pub fn journal_path(&self) -> Option<DbPath> {
+        self.journal.as_ref().and_then(|journal| journal.path())
     }
 
     /// Undoes the whole transaction and releases the writer's locks.

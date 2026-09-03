@@ -258,6 +258,18 @@ pub enum Directive {
         /// than resolved here.
         into: Option<Vec<u8>>,
     },
+    /// `ATTACH`, which adds a database file to this connection.
+    Attach {
+        /// The file to open, as the literal it was written as.
+        file: Vec<u8>,
+        /// The name it will be known by.
+        schema: Vec<u8>,
+    },
+    /// `DETACH`, which removes one.
+    Detach {
+        /// The name it was attached under.
+        schema: Vec<u8>,
+    },
     /// `ANALYZE`, over one object or the whole schema.
     Analyze {
         /// Which attached database.
@@ -418,6 +430,8 @@ impl<'a> Binder<'a> {
             } => self.bind_alter(*database, *table, action),
             ast::Statement::Reindex { database, name } => self.bind_reindex(*database, *name),
             ast::Statement::Vacuum { database, into } => self.bind_vacuum(*database, *into),
+            ast::Statement::Attach { file, schema, key } => self.bind_attach(*file, *schema, *key),
+            ast::Statement::Detach { schema } => self.bind_detach(*schema),
             ast::Statement::CreateView {
                 temporary,
                 if_not_exists,
@@ -1099,6 +1113,56 @@ impl<'a> Binder<'a> {
             database: index,
             into: target,
         })
+    }
+
+    /// Binds an `ATTACH`.
+    ///
+    /// Both operands are literals. SQLite evaluates them, and every other
+    /// value they could produce is a file name computed at run time - a
+    /// statement that decides which database to open from arithmetic is not a
+    /// shape worth supporting before it is asked for, and it is one an
+    /// authorizer could not check.
+    pub(crate) fn bind_attach(
+        &mut self,
+        file: ast::ExprId,
+        schema: ast::ExprId,
+        key: Option<ast::ExprId>,
+    ) -> Result<Directive, ParseError> {
+        if key.is_some() {
+            return Err(unsupported("ATTACH ... KEY", Span::default()));
+        }
+        Ok(Directive::Attach {
+            file: self.literal_path(file)?,
+            schema: self.literal_or_name(schema)?,
+        })
+    }
+
+    /// Binds a `DETACH`.
+    pub(crate) fn bind_detach(&mut self, schema: ast::ExprId) -> Result<Directive, ParseError> {
+        Ok(Directive::Detach {
+            schema: self.literal_or_name(schema)?,
+        })
+    }
+
+    /// Reads a name written either as a word or as a string.
+    ///
+    /// `ATTACH 'file.db' AS aux` and `ATTACH 'file.db' AS 'aux'` name the same
+    /// schema. The grammar parses that position as an expression, so a bare
+    /// word arrives as a reference to a column that does not exist - and what
+    /// the statement meant is the word.
+    fn literal_or_name(&mut self, expr: ast::ExprId) -> Result<Vec<u8>, ParseError> {
+        match self.ast.expr(expr) {
+            Some(ast::Expr::Literal(ast::Literal::String(text))) => Ok(text.clone()),
+            Some(ast::Expr::Column {
+                table: None,
+                column,
+                ..
+            }) => Ok(self.ast.text(*column).to_vec()),
+            _ => Err(unsupported(
+                "a schema name that is not a word or a string",
+                Span::default(),
+            )),
+        }
     }
 
     /// Reads the file name a `VACUUM INTO` was given.

@@ -183,7 +183,8 @@ impl<'connection> Statement<'connection> {
             if self.machine.state() == MachineState::Prepared {
                 self.check_schema()?;
             }
-            self.connection.begin_statement(self.access)?;
+            self.connection
+                .begin_statement_on(self.access, &databases_written(self.machine.program()))?;
             self.machine
                 .record_row_changes(self.connection.wants_row_changes());
             // What `changes()`, `total_changes()` and `last_insert_rowid()`
@@ -200,7 +201,7 @@ impl<'connection> Statement<'connection> {
         }
         let outcome = self
             .connection
-            .with_pager(|pager| self.machine.step(pager))?;
+            .with_state(|state| self.machine.step(state))?;
         // The hook fires for the rows this step changed, in the order they
         // changed, and before the statement's own result reaches the caller.
         // It runs outside the pager borrow, so a hook may read the connection.
@@ -557,6 +558,35 @@ impl Clone for Body {
             Body::Directive(directive) => Body::Directive(directive.clone()),
         }
     }
+}
+
+/// Returns the databases a program opens a write cursor on.
+///
+/// A statement takes a writer on the databases it writes and no others: a
+/// RESERVED lock on a file nobody is changing is a lock somebody else is
+/// waiting for. The program is where the answer is, because every write cursor
+/// it opens names its database - which is also what the machine reads when it
+/// runs the instruction.
+fn databases_written(program: &rustdb_vm::program::Program) -> Vec<usize> {
+    let mut databases = Vec::new();
+    let mut index = 0;
+    while let Some(instruction) = program.instruction(index) {
+        index = index.saturating_add(1);
+        if !matches!(
+            instruction.opcode,
+            rustdb_vm::program::Opcode::OpenWrite | rustdb_vm::program::Opcode::OpenWriteIndex
+        ) {
+            continue;
+        }
+        let database = instruction.p3.max(0) as usize;
+        if !databases.contains(&database) {
+            databases.push(database);
+        }
+    }
+    if databases.is_empty() {
+        databases.push(rustdb_storage::MAIN_DATABASE);
+    }
+    databases
 }
 
 /// Lexes, parses, binds, plans, compiles and verifies one statement.

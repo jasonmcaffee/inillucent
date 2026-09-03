@@ -227,6 +227,7 @@ pub struct RollbackJournal {
     next_offset: u64,
     stats: JournalStats,
     header_written: bool,
+    super_journal: Option<DbPath>,
 }
 
 impl RollbackJournal {
@@ -245,6 +246,7 @@ impl RollbackJournal {
             next_offset: 0,
             stats: JournalStats::default(),
             header_written: false,
+            super_journal: None,
         }
     }
 
@@ -378,6 +380,38 @@ impl RollbackJournal {
         Ok(())
     }
 
+    /// Writes the super-journal's name after the records, when there is one.
+    ///
+    /// The tail is the format's: a page number no real page can have, the name,
+    /// its length, a checksum over it, and the journal magic. It is read
+    /// backwards from the end of the file, which is why the length comes after
+    /// the name rather than before it.
+    fn write_super_journal_name(&mut self) -> DbResult<()> {
+        let Some(path) = self.super_journal.clone() else {
+            return Ok(());
+        };
+        let Some(text) = path.to_str() else {
+            return Err(misuse(
+                "a super-journal whose name is not valid UTF-8 cannot be recorded",
+            ));
+        };
+        let name = text.as_bytes();
+        let mut tail = Vec::with_capacity(name.len().saturating_add(20));
+        let mut marker = [0u8; 4];
+        bytes::write_u32(&mut marker, 0, super_journal_page(self.page_size))?;
+        tail.extend_from_slice(&marker);
+        tail.extend_from_slice(name);
+        let mut trailer = [0u8; 8];
+        bytes::write_u32(&mut trailer, 0, name.len() as u32)?;
+        bytes::write_u32(&mut trailer, 4, super_journal_checksum(name))?;
+        tail.extend_from_slice(&trailer);
+        tail.extend_from_slice(&JOURNAL_MAGIC);
+        let offset = self.next_offset;
+        self.write_at(offset, &tail)?;
+        self.stats.bytes_written = self.stats.bytes_written.saturating_add(tail.len() as u64);
+        Ok(())
+    }
+
     /// Removes every trace of the journal, whatever mode it is in.
     fn finalize(&mut self) -> DbResult<()> {
         if !self.header_written {
@@ -502,6 +536,7 @@ impl Journal for RollbackJournal {
         if !self.header_written || self.records.is_empty() {
             return Ok(());
         }
+        self.write_super_journal_name()?;
         self.sync()?;
         let count = self.records.len() as u32;
         let header = self.header_bytes(true, count)?;
@@ -520,6 +555,16 @@ impl Journal for RollbackJournal {
     /// Returns how the database file is synced before the commit point.
     fn database_sync(&self) -> Option<SyncMode> {
         self.options.synchronous.sync_mode()
+    }
+
+    /// Returns the path this journal is written to.
+    fn path(&self) -> Option<DbPath> {
+        self.options.mode.writes_a_file().then(|| self.path.clone())
+    }
+
+    /// Names the super-journal that decides this transaction.
+    fn set_super_journal(&mut self, path: Option<DbPath>) {
+        self.super_journal = path;
     }
 
     /// Finalises the journal, which is the atomic commit point.
@@ -703,6 +748,29 @@ pub fn recover_hot_journal(
         vfs.delete(&journal_path, false)?;
         return Ok(None);
     };
+    if let Some(name) = read_super_journal(&raw)? {
+        let path = DbPath::new(std::path::PathBuf::from(
+            String::from_utf8_lossy(&name).into_owned(),
+        ));
+        if !vfs.access(&path, AccessMode::Exists)? {
+            // The transaction this journal belongs to committed: the file that
+            // would have undone it is gone, and it went only after every
+            // database in the transaction was durable. Replaying now would undo
+            // a commit that has already been reported.
+            vfs.delete(&journal_path, false)?;
+            return Ok(None);
+        }
+        // The super-journal is still there, so the transaction did not reach
+        // its commit point. Every database in it rolls back, and the file goes
+        // once none of them still names it.
+        apply_playback(&raw, &decoded, database)?;
+        finish_recovery(vfs, database_path, database, &decoded, synchronous)?;
+        let _ = crate::super_journal::remove_if_unused(vfs, &path, |child| {
+            let raw = read_journal_bytes(vfs, child)?;
+            Ok(read_super_journal(&raw)?.is_some_and(|named| named == name))
+        });
+        return Ok(Some(decoded.original_page_count));
+    }
     apply_playback(&raw, &decoded, database)?;
     let wanted =
         u64::from(decoded.original_page_count).saturating_mul(u64::from(decoded.page_size));
@@ -714,6 +782,92 @@ pub fn recover_hot_journal(
     }
     vfs.delete(&journal_path, synchronous.syncs_directory())?;
     Ok(Some(decoded.original_page_count))
+}
+
+/// Truncates, syncs and removes the journal after a playback.
+fn finish_recovery(
+    vfs: &dyn Vfs,
+    database_path: &DbPath,
+    database: &dyn VfsFile,
+    decoded: &DecodedJournal,
+    synchronous: Synchronous,
+) -> DbResult<()> {
+    let wanted =
+        u64::from(decoded.original_page_count).saturating_mul(u64::from(decoded.page_size));
+    if database.file_size()? > wanted {
+        database.truncate(wanted)?;
+    }
+    if let Some(mode) = synchronous.sync_mode() {
+        database.sync(mode)?;
+    }
+    vfs.delete(&database_path.journal(), synchronous.syncs_directory())
+        .map_err(|error| error.into_db_error())
+}
+
+/// Reads a journal file whole, answering with nothing when it is not there.
+fn read_journal_bytes(vfs: &dyn Vfs, path: &DbPath) -> DbResult<Vec<u8>> {
+    if !vfs.access(path, AccessMode::Exists)? {
+        return Ok(Vec::new());
+    }
+    let file = vfs.open(
+        path,
+        OpenOptions::of_kind(FileKind::MainJournal).read_only(),
+    )?;
+    let size = file.file_size()?;
+    let mut raw = vec![0u8; usize::try_from(size).unwrap_or(0)];
+    if !raw.is_empty() {
+        file.read_exact_at(0, &mut raw)?;
+    }
+    Ok(raw)
+}
+
+/// Returns the page number the super-journal record is written under.
+///
+/// It is derived from the byte the locking protocol reserves, so it is a page
+/// no database can hold data in: a record under it cannot be confused with a
+/// page image however the journal is read.
+pub fn super_journal_page(page_size: u32) -> u32 {
+    const PENDING_BYTE: u32 = 0x4000_0000;
+    PENDING_BYTE
+        .checked_div(page_size.max(1))
+        .unwrap_or(0)
+        .saturating_add(1)
+}
+
+/// Returns the checksum a super-journal name is recorded with.
+///
+/// The sum of its bytes, which is what the format specifies. It is not there to
+/// resist tampering - it is there so that a torn write of the tail is
+/// recognised as one rather than read as a name that happens to parse.
+pub fn super_journal_checksum(name: &[u8]) -> u32 {
+    name.iter()
+        .fold(0u32, |sum, byte| sum.wrapping_add(u32::from(*byte)))
+}
+
+/// Reads the super-journal a journal names, if it names one.
+///
+/// The tail is read backwards from the end: magic, checksum, length, and then
+/// the name that many bytes before them. Anything that does not line up means
+/// the journal names none, which is the ordinary case and not an error.
+pub fn read_super_journal(raw: &[u8]) -> DbResult<Option<Vec<u8>>> {
+    if raw.len() < 16 {
+        return Ok(None);
+    }
+    let end = raw.len();
+    let magic = bytes::window(raw, end.saturating_sub(8), 8)?;
+    if magic != JOURNAL_MAGIC {
+        return Ok(None);
+    }
+    let length = bytes::read_u32(raw, end.saturating_sub(16))? as usize;
+    let recorded = bytes::read_u32(raw, end.saturating_sub(12))?;
+    if length == 0 || length.saturating_add(16) > end {
+        return Ok(None);
+    }
+    let name = bytes::window(raw, end.saturating_sub(16).saturating_sub(length), length)?;
+    if super_journal_checksum(name) != recorded {
+        return Ok(None);
+    }
+    Ok(Some(name.to_vec()))
 }
 
 /// Reports whether a journal beside a database would be replayed.

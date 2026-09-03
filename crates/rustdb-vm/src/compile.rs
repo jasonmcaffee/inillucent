@@ -545,7 +545,7 @@ impl Compiler {
                                 Opcode::OpenIndex,
                                 table as i32,
                                 source.table.root as i32,
-                                0,
+                                source.table.database as i32,
                             )
                             .with_p4(Operand::IndexKey(primary_key_of(&source.table))),
                         );
@@ -555,7 +555,7 @@ impl Compiler {
                                 Opcode::OpenRead,
                                 table as i32,
                                 source.table.root as i32,
-                                0,
+                                source.table.database as i32,
                             )
                             .with_p4(Operand::Count(columns.max(0) as u32)),
                         );
@@ -594,7 +594,7 @@ impl Compiler {
                                     Opcode::OpenIndex,
                                     cursor as i32,
                                     *index_root as i32,
-                                    0,
+                                    source.table.database as i32,
                                 )
                                 .with_p4(Operand::IndexKey(key)),
                             );
