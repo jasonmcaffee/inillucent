@@ -678,6 +678,25 @@ impl Machine {
                 }
                 Ok(Flow::Next)
             }
+            Opcode::EphSort => {
+                let Operand::SortOn(key) = instruction.p4.clone() else {
+                    return Err(error::misuse("EphSort without a key"));
+                };
+                if let Some(Some(store)) = self.ephemerals.get_mut(instruction.p1.max(0) as usize) {
+                    store.sort_on(&key);
+                }
+                Ok(Flow::Next)
+            }
+            Opcode::Window => {
+                let Operand::Window(plan) = instruction.p4.clone() else {
+                    return Err(error::misuse("Window without a plan"));
+                };
+                let encoding = self.encoding;
+                if let Some(Some(store)) = self.ephemerals.get_mut(instruction.p1.max(0) as usize) {
+                    crate::window::compute(store, &plan, encoding);
+                }
+                Ok(Flow::Next)
+            }
             Opcode::EphSawNull => {
                 let saw = match self.ephemerals.get(instruction.p1.max(0) as usize) {
                     Some(Some(store)) => store.saw_null(),

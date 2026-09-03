@@ -102,6 +102,27 @@ pub fn compare_rows_by_key(
     compare_rows(key, left, right)
 }
 
+/// Compares two rows by columns the caller names.
+///
+/// The window record is built once and sorted several times, by a different
+/// set of its columns each time, so its comparator addresses columns rather
+/// than assuming the key and the row line up position for position.
+pub fn compare_named(
+    left: &[Value<'static>],
+    right: &[Value<'static>],
+    key: &[(usize, SortColumn)],
+) -> std::cmp::Ordering {
+    for (column, rules) in key {
+        let a = left.get(*column).cloned().unwrap_or(Value::Null);
+        let b = right.get(*column).cloned().unwrap_or(Value::Null);
+        let ordering = compare_one(rules, &a, &b);
+        if ordering != std::cmp::Ordering::Equal {
+            return ordering;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
 /// Compares two rows by a sort key.
 fn compare_rows(
     key: &SortKey,

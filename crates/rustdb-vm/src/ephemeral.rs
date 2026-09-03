@@ -14,8 +14,8 @@
 
 use rustdb_value::Value;
 
-use crate::program::SortKey;
-use crate::sorter::compare_rows_by_key;
+use crate::program::{SortColumn, SortKey};
+use crate::sorter::{compare_named, compare_rows_by_key};
 
 /// Whether a store keeps an index, and what it is keyed by.
 #[derive(Clone, Debug)]
@@ -171,6 +171,32 @@ impl Ephemeral {
                 continue;
             }
             self.insert_unique(row);
+        }
+    }
+
+    /// Takes every live row out of the store, leaving it empty.
+    ///
+    /// The window operator rewrites every row, so it takes them rather than
+    /// reading and then clearing: the rows are moved once instead of copied
+    /// twice, and a store half-rewritten by a failure is not a state anything
+    /// can observe.
+    pub fn take_rows(&mut self) -> Vec<Vec<Value<'static>>> {
+        let rows = core::mem::take(&mut self.rows);
+        let live = core::mem::take(&mut self.live);
+        self.clear();
+        rows.into_iter()
+            .enumerate()
+            .filter(|(number, _)| live.get(*number).copied().unwrap_or(false))
+            .map(|(_, row)| row)
+            .collect()
+    }
+
+    /// Orders the store's rows in place, by columns the caller names.
+    pub fn sort_on(&mut self, key: &[(usize, SortColumn)]) {
+        let mut rows = self.take_rows();
+        rows.sort_by(|left, right| compare_named(left, right, key));
+        for row in rows {
+            self.insert(row);
         }
     }
 

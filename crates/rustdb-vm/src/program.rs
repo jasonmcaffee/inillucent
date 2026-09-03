@@ -10,8 +10,8 @@
 //! compatibility promise here; the only contract is with the verifier and the
 //! machine in this crate.
 
-use rustdb_sql::ast::{BinaryOp, PatternOp};
-use rustdb_sql::function::{AggregateFunc, ScalarFunc};
+use rustdb_sql::ast::{BinaryOp, FrameExclude, FrameUnit, PatternOp};
+use rustdb_sql::function::{AggregateFunc, ScalarFunc, WindowFunc};
 use rustdb_value::{Affinity, Collation};
 
 /// What an instruction does.
@@ -181,6 +181,15 @@ pub enum Opcode {
     EphDedup,
     /// `p1`: store, `p2`: destination register. Whether the store holds a NULL.
     EphSawNull,
+    /// `p1`: store, `p4`: the sort key. Order the store's rows in place.
+    EphSort,
+    /// `p1`: store, `p4`: the window pass. Append each row's window values.
+    ///
+    /// The store must already be sorted by the partition keys and then by the
+    /// window's own `ORDER BY`, which is what `EphSort` immediately before it
+    /// is for: the operator reads partitions and peer groups off the order
+    /// rather than re-deriving them.
+    Window,
     /// `p1`: set. Open a distinct set.
     DistinctOpen,
     /// `p1`: set, `p2`: jump when the row has been seen, `p3`: first register,
@@ -351,6 +360,8 @@ impl Opcode {
             Opcode::EphClear => "EphClear",
             Opcode::EphDedup => "EphDedup",
             Opcode::EphSawNull => "EphSawNull",
+            Opcode::EphSort => "EphSort",
+            Opcode::Window => "Window",
             Opcode::If => "If",
             Opcode::IfNot => "IfNot",
             Opcode::IfNull => "IfNull",
@@ -440,6 +451,80 @@ pub struct AggregateCall {
     pub collation: Collation,
 }
 
+/// Which family a window call belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowSlot {
+    /// An aggregate over the frame.
+    Aggregate(AggregateFunc),
+    /// One of the eleven functions that only exist in a window.
+    Plain(WindowFunc),
+}
+
+/// One end of a frame, as the machine reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameEnd {
+    /// `UNBOUNDED PRECEDING`.
+    UnboundedPreceding,
+    /// `CURRENT ROW`.
+    CurrentRow,
+    /// `UNBOUNDED FOLLOWING`.
+    UnboundedFollowing,
+    /// `expr PRECEDING` or `expr FOLLOWING`.
+    Offset {
+        /// The record column holding the offset, evaluated once per row.
+        column: usize,
+        /// Whether the offset counts backwards.
+        preceding: bool,
+    },
+}
+
+/// A frame specification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowFrame {
+    /// `ROWS`, `RANGE` or `GROUPS`.
+    pub unit: FrameUnit,
+    /// The start.
+    pub start: FrameEnd,
+    /// The end.
+    pub end: FrameEnd,
+    /// The `EXCLUDE` clause.
+    pub exclude: FrameExclude,
+}
+
+/// One window call, addressed entirely by record column numbers.
+///
+/// Nothing here is an expression. Every value the call needs - its arguments,
+/// its `FILTER`, its frame offsets - was computed into the record while the
+/// rows were being collected, so the operator reads values rather than
+/// evaluating anything, and cannot reach a cursor that has since moved.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowCall {
+    /// What it computes.
+    pub func: WindowSlot,
+    /// Whether `DISTINCT` was written.
+    pub distinct: bool,
+    /// The collation its comparisons use.
+    pub collation: Collation,
+    /// The record columns holding its arguments.
+    pub arguments: Vec<usize>,
+    /// The record column holding its `FILTER` value.
+    pub filter: Option<usize>,
+    /// The record columns holding the window's `ORDER BY` values, with the
+    /// rules each is ordered by.
+    pub order: Vec<(usize, SortColumn)>,
+    /// The frame.
+    pub frame: WindowFrame,
+}
+
+/// Everything one window pass needs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowPlan {
+    /// The record columns holding the partition keys, with their collations.
+    pub partition: Vec<(usize, Collation)>,
+    /// The calls, in the order their values are appended to each row.
+    pub calls: Vec<WindowCall>,
+}
+
 /// The `p4` operand of an instruction.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Operand {
@@ -479,6 +564,15 @@ pub enum Operand {
     Affinities(Vec<Affinity>),
     /// A row change: which operation, and the table it happened to.
     Change(RowChangeKind, Vec<u8>),
+    /// A window pass.
+    Window(Box<WindowPlan>),
+    /// A sort that names the columns it orders by.
+    ///
+    /// The ordinary sort key compares column `i` of the key against column `i`
+    /// of the row, which is right for a sorter whose record was built for it.
+    /// A window record is built once and sorted several times, by different
+    /// columns each time, so its sort has to name them.
+    SortOn(Vec<(usize, SortColumn)>),
 }
 
 /// What a row change did, as the update hook reports it.

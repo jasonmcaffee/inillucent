@@ -94,6 +94,85 @@ pub enum AggregateFunc {
     GroupConcat,
 }
 
+/// A window function that is not an aggregate.
+///
+/// The aggregates are the same functions in a different frame, so they are not
+/// listed again here: `sum(x) OVER (...)` is `AggregateFunc::Sum` with a frame,
+/// and giving it a second spelling would mean two implementations of `sum`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowFunc {
+    /// `row_number()`
+    RowNumber,
+    /// `rank()`
+    Rank,
+    /// `dense_rank()`
+    DenseRank,
+    /// `percent_rank()`
+    PercentRank,
+    /// `cume_dist()`
+    CumeDist,
+    /// `ntile(n)`
+    Ntile,
+    /// `lag(x[, offset[, default]])`
+    Lag,
+    /// `lead(x[, offset[, default]])`
+    Lead,
+    /// `first_value(x)`
+    FirstValue,
+    /// `last_value(x)`
+    LastValue,
+    /// `nth_value(x, n)`
+    NthValue,
+}
+
+impl WindowFunc {
+    /// Returns how many arguments the function takes, as `(least, most)`.
+    pub fn arity(self) -> (usize, usize) {
+        match self {
+            WindowFunc::RowNumber
+            | WindowFunc::Rank
+            | WindowFunc::DenseRank
+            | WindowFunc::PercentRank
+            | WindowFunc::CumeDist => (0, 0),
+            WindowFunc::Ntile | WindowFunc::FirstValue | WindowFunc::LastValue => (1, 1),
+            WindowFunc::NthValue => (2, 2),
+            WindowFunc::Lag | WindowFunc::Lead => (1, 3),
+        }
+    }
+
+    /// Returns whether the function reads the frame or the whole partition.
+    ///
+    /// `lag` and `lead` are defined on the partition and ignore the frame
+    /// entirely; the ranking functions are defined on the peer groups. Only
+    /// `first_value`, `last_value` and `nth_value` read the frame, and treating
+    /// them alike is a wrong answer for every query with a narrow frame.
+    pub fn reads_frame(self) -> bool {
+        matches!(
+            self,
+            WindowFunc::FirstValue | WindowFunc::LastValue | WindowFunc::NthValue
+        )
+    }
+}
+
+/// Returns the window function a folded name spells.
+pub fn lookup_window(folded: &[u8]) -> Option<WindowFunc> {
+    let func = match folded {
+        b"row_number" => WindowFunc::RowNumber,
+        b"rank" => WindowFunc::Rank,
+        b"dense_rank" => WindowFunc::DenseRank,
+        b"percent_rank" => WindowFunc::PercentRank,
+        b"cume_dist" => WindowFunc::CumeDist,
+        b"ntile" => WindowFunc::Ntile,
+        b"lag" => WindowFunc::Lag,
+        b"lead" => WindowFunc::Lead,
+        b"first_value" => WindowFunc::FirstValue,
+        b"last_value" => WindowFunc::LastValue,
+        b"nth_value" => WindowFunc::NthValue,
+        _ => return None,
+    };
+    Some(func)
+}
+
 /// Returns the scalar function a folded name spells.
 pub fn lookup_scalar(folded: &[u8]) -> Option<ScalarFunc> {
     let func = match folded {

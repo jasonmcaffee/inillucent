@@ -130,6 +130,8 @@ fn check_store_range(program: &Program, address: usize, problems: &mut Vec<Verif
             | Opcode::EphClear
             | Opcode::EphDedup
             | Opcode::EphSawNull
+            | Opcode::EphSort
+            | Opcode::Window
     );
     if !uses_store {
         return;
