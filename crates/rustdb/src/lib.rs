@@ -182,6 +182,17 @@ impl Connection {
         self.inner.interrupt();
     }
 
+    /// Returns the flag `interrupt` sets, for a caller on another thread.
+    ///
+    /// A connection is not `Send`, and an interrupt is only ever useful from
+    /// somewhere else - the whole point is that the thread running the
+    /// statement is busy. The flag is the part that crosses, which is the same
+    /// shape `sqlite3_interrupt` has: the caller holds something that outlives
+    /// the call and refers to the connection without owning it.
+    pub fn interrupt_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.inner.interrupt_flag()
+    }
+
     /// Installs the callback a long statement is asked to stop by.
     ///
     /// `every` is how many virtual-machine instructions pass between two
