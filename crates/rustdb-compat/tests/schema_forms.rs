@@ -477,3 +477,82 @@ fn reindex_rebuilds_an_index() {
         ],
     );
 }
+
+/// Generated columns, `VIRTUAL` and `STORED`.
+///
+/// The `VIRTUAL` half is the one that can go quietly wrong: the column takes no
+/// slot in the record, so every column declared after it sits one place
+/// earlier, and a reader that used the declared position would return the
+/// neighbouring column's value rather than fail.
+#[test]
+fn generated_columns_round_trip_through_sqlite() {
+    let path = scratch("generated");
+    let database = Database::open(&path).expect("the database opens");
+    let connection = database.connect().expect("the connection opens");
+    run_all(
+        &connection,
+        &[
+            "CREATE TABLE t (
+               a INTEGER PRIMARY KEY,
+               b INTEGER,
+               doubled INTEGER GENERATED ALWAYS AS (b * 2) VIRTUAL,
+               c TEXT,
+               shouted TEXT GENERATED ALWAYS AS (upper(c)) STORED,
+               chained INTEGER AS (doubled + 1) VIRTUAL
+             )",
+            "CREATE INDEX t_shouted ON t (shouted)",
+            "INSERT INTO t (a, b, c) VALUES (1, 21, 'ada')",
+            "INSERT INTO t (a, b, c) VALUES (2, 5, 'bob')",
+            "INSERT INTO t (a, b, c) VALUES (3, NULL, NULL)",
+        ],
+    );
+    // The column after the VIRTUAL one still reads as itself.
+    assert_eq!(
+        run(
+            &connection,
+            "SELECT a, b, doubled, c, shouted, chained FROM t ORDER BY a"
+        ),
+        Ok(vec![
+            "int:1|int:21|int:42|text:ada|text:ADA|int:43".to_string(),
+            "int:2|int:5|int:10|text:bob|text:BOB|int:11".to_string(),
+            "int:3|null|null|null|null|null".to_string(),
+        ])
+    );
+    assert_eq!(
+        run(&connection, "SELECT a FROM t WHERE doubled = 42"),
+        Ok(vec!["int:1".to_string()])
+    );
+    // A STORED generated column is indexable, and the index finds it.
+    assert_eq!(
+        run(&connection, "SELECT a FROM t WHERE shouted = 'BOB'"),
+        Ok(vec!["int:2".to_string()])
+    );
+
+    // Writing one is refused, and so are the shapes SQLite refuses.
+    assert!(run(&connection, "INSERT INTO t (a, doubled) VALUES (9, 1)").is_err());
+    assert!(run(&connection, "CREATE TABLE bad (a, b AS (a) DEFAULT 1)").is_err());
+    assert!(run(
+        &connection,
+        "CREATE TABLE bad (a, b INTEGER PRIMARY KEY AS (a))"
+    )
+    .is_err());
+    assert!(run(&connection, "CREATE TABLE bad (a, b AS (nosuch))").is_err());
+    assert!(run(&connection, "CREATE TABLE bad (a, b AS (c), c AS (b))").is_err());
+    drop(connection);
+    drop(database);
+
+    sqlite_reads(
+        &path,
+        &[
+            (
+                "SELECT a, b, doubled, c, shouted, chained FROM t ORDER BY a",
+                &[
+                    "int:1|int:21|int:42|text:ada|text:ADA|int:43",
+                    "int:2|int:5|int:10|text:bob|text:BOB|int:11",
+                    "int:3|null|null|null|null|null",
+                ],
+            ),
+            ("SELECT a FROM t WHERE shouted = 'BOB'", &["int:2"]),
+        ],
+    );
+}

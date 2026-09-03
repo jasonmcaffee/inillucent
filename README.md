@@ -202,11 +202,12 @@ rollback journal that survives a power loss at every cut point.
 
 Phase 8 is under way and most of it has landed: every join form including `RIGHT` and `FULL`,
 compound selects, subqueries in every position, ordinary and recursive CTEs, window functions with
-all three frame units and all four `EXCLUDE` forms, views, `STRICT` tables, `EXPLAIN`, `REINDEX`,
+all three frame units and all four `EXCLUDE` forms, views, `STRICT` tables, generated columns both
+`VIRTUAL` and `STORED`, `EXPLAIN`, `REINDEX`,
 `ANALYZE` with a costed planner that reorders joins on what it measured, and the core, aggregate,
-date-time and math built-ins. Triggers, generated columns, `WITHOUT ROWID` writes, `ALTER TABLE` and
-a full `VACUUM` are the parts still to come, and the manifest says so - 24 of phase 8's 31 rows read
-`pass`, and the other seven read `missing`.
+date-time and math built-ins. Triggers, `WITHOUT ROWID` writes, `ALTER TABLE` and
+a full `VACUUM` are the parts still to come, and the manifest says so - 25 of phase 8's 31 rows read
+`pass`, and the other six read `missing`.
 
 ```sql
 CREATE TABLE people(id INTEGER PRIMARY KEY, name TEXT UNIQUE, score REAL CHECK (score >= 0));
@@ -250,7 +251,7 @@ commit rather than retrofitted once the edges exist.
 ### The compatibility report
 
 `compat/sqlite-3.53.4.toml` carries one row per capability rust-db owes, including the ones nothing
-has been written for yet: 260 rows, of which 208 pass and 52 are missing. That is the denominator on
+has been written for yet: 260 rows, of which 209 pass and 51 are missing. That is the denominator on
 purpose. A capability with no row cannot be reported as owed.
 
 A row reaches `pass` only when a test run recorded a passing result for every test it cites, on both

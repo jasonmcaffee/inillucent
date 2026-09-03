@@ -156,6 +156,7 @@
 {"test_id": "rustdb-compat::fixtures::tests::every_malformed_fixture_has_a_base", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::fixtures::tests::fixture_names_are_unique", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::fixtures::tests::page_sizes_are_readable_from_fixture_names", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::generated_columns_round_trip_through_sqlite", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::generated_index_sequences_match_the_model", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::generated_sequences_match_the_model_under_a_vacuum", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::generated_table_sequences_match_the_model", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}

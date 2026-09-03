@@ -104,8 +104,17 @@ pub enum BoundExpr {
     Column {
         /// Which FROM term, by position.
         source: usize,
-        /// Which column of it.
+        /// Which column of it, by declared position.
         column: u16,
+        /// Which slot of the row's record holds it.
+        ///
+        /// Not the same number as the declared position once the table has a
+        /// `VIRTUAL` generated column: that column takes no slot, so every
+        /// column after it sits one place earlier in the record. Carrying both
+        /// is what keeps an index key - which names declared positions - and a
+        /// record read - which names slots - from being confused for each
+        /// other.
+        slot: u16,
         /// The column's affinity.
         affinity: Affinity,
         /// The column's declared collation.
@@ -412,6 +421,92 @@ impl BoundExpr {
             // list rather than one this predicate can make.
             BoundExpr::Subquery { .. } => false,
         }
+    }
+
+    /// Returns which declared column positions the expression reads.
+    ///
+    /// The declared position rather than the record slot, because the callers
+    /// that ask - a generated column's dependency order, and the index-key
+    /// matcher - both think in declared positions.
+    pub fn columns_used(&self, into: &mut Vec<u16>) {
+        if let BoundExpr::Column { column, .. } = self {
+            if !into.contains(column) {
+                into.push(*column);
+            }
+        }
+        for child in self.children() {
+            child.columns_used(into);
+        }
+    }
+
+    /// Returns the expression's direct children.
+    pub fn children(&self) -> Vec<BoundExpr> {
+        let mut out = Vec::new();
+        match self {
+            BoundExpr::Unary { operand, .. }
+            | BoundExpr::Not(operand)
+            | BoundExpr::IsNull { operand, .. }
+            | BoundExpr::Collate { operand, .. }
+            | BoundExpr::Cast { operand, .. } => out.push((**operand).clone()),
+            BoundExpr::Arithmetic { left, right, .. }
+            | BoundExpr::Compare { left, right, .. }
+            | BoundExpr::Is { left, right, .. }
+            | BoundExpr::And(left, right)
+            | BoundExpr::Or(left, right) => {
+                out.push((**left).clone());
+                out.push((**right).clone());
+            }
+            BoundExpr::Between {
+                operand, low, high, ..
+            } => {
+                out.push((**operand).clone());
+                out.push((**low).clone());
+                out.push((**high).clone());
+            }
+            BoundExpr::InList { operand, list, .. } => {
+                out.push((**operand).clone());
+                out.extend(list.iter().cloned());
+            }
+            BoundExpr::Case {
+                operand,
+                branches,
+                otherwise,
+                ..
+            } => {
+                if let Some(operand) = operand {
+                    out.push((**operand).clone());
+                }
+                for (when, then) in branches {
+                    out.push(when.clone());
+                    out.push(then.clone());
+                }
+                if let Some(otherwise) = otherwise {
+                    out.push((**otherwise).clone());
+                }
+            }
+            BoundExpr::Pattern {
+                operand,
+                pattern,
+                escape,
+                ..
+            } => {
+                out.push((**operand).clone());
+                out.push((**pattern).clone());
+                if let Some(escape) = escape {
+                    out.push((**escape).clone());
+                }
+            }
+            BoundExpr::Function { arguments, .. }
+            | BoundExpr::Math { arguments, .. }
+            | BoundExpr::Time { arguments, .. } => out.extend(arguments.iter().cloned()),
+            BoundExpr::Subquery { operand, .. } => {
+                if let Some(operand) = operand {
+                    out.push((**operand).clone());
+                }
+            }
+            _ => {}
+        }
+        out
     }
 
     /// Returns which FROM terms the expression reads.
@@ -838,6 +933,8 @@ pub struct Binder<'a> {
     depth: u32,
     /// How many nested queries used as values have been bound so far.
     subqueries: usize,
+    /// How deep the binder is inside a generated column's own expression.
+    generating: u32,
     /// The window calls bound in the block being bound.
     windows: Vec<BoundWindow>,
     /// The windows the block's `WINDOW` clause named.
@@ -855,6 +952,14 @@ pub const MAX_SELECT_DEPTH: u32 = 64;
 
 /// How many arms a compound SELECT may have, which is `SQLITE_MAX_COMPOUND_SELECT`.
 pub const MAX_COMPOUND_SELECT: usize = 500;
+
+/// How deep one generated column may reach through others.
+///
+/// A cycle is refused when the table is created, so this is a second line of
+/// defence for a schema that arrived from somewhere else: a file whose
+/// `CREATE TABLE` describes a cycle would otherwise recurse until the stack ran
+/// out, and a corrupt file must not be able to do that.
+pub const MAX_GENERATED_DEPTH: u32 = 32;
 
 /// The source number a column of an upsert's `excluded` row carries.
 ///
@@ -891,6 +996,7 @@ impl<'a> Binder<'a> {
             correlations: Vec::new(),
             depth: 0,
             subqueries: 0,
+            generating: 0,
             windows: Vec::new(),
             named_windows: Vec::new(),
             excluded: None,
@@ -2362,12 +2468,52 @@ impl<'a> Binder<'a> {
             // through the record would read a NULL placeholder.
             return Ok(BoundExpr::Rowid { source });
         }
+        // A `VIRTUAL` generated column is not in the record at all: it is its
+        // own expression, so the reference is replaced by the expression here
+        // and nothing below the binder ever sees the column.
+        if info.generated && !info.stored {
+            let Some(sql) = info.generated_sql.clone() else {
+                return Err(unsupported(
+                    "a generated column with no expression",
+                    Span::default(),
+                ));
+            };
+            self.generating = self.generating.saturating_add(1);
+            if self.generating > MAX_GENERATED_DEPTH {
+                self.generating = self.generating.saturating_sub(1);
+                return Err(ParseError::new(
+                    ParseErrorKind::Unsupported("a generated column refers to itself"),
+                    Span::default(),
+                ));
+            }
+            let bound = self.bind_schema_expr_for(source, &sql);
+            self.generating = self.generating.saturating_sub(1);
+            return bound;
+        }
+        let slot = bound
+            .table
+            .record_slot(column)
+            .unwrap_or(usize::from(column)) as u16;
         Ok(BoundExpr::Column {
             source,
             column,
+            slot,
             affinity,
             collation,
         })
+    }
+
+    /// Binds a schema expression against one FROM term's scope.
+    ///
+    /// A generated column's expression names other columns of its own table, so
+    /// it is bound with exactly that term visible and nothing else - a name it
+    /// cannot resolve there is an error rather than something it picks up from
+    /// the query that happened to read it.
+    fn bind_schema_expr_for(&mut self, source: usize, sql: &[u8]) -> Result<BoundExpr, ParseError> {
+        let saved = core::mem::replace(&mut self.scopes, vec![vec![source]]);
+        let bound = self.bind_schema_expr(sql);
+        self.scopes = saved;
+        bound
     }
 
     /// Binds a result-column list against the current sources.
@@ -2672,6 +2818,9 @@ impl<'a> Binder<'a> {
             return Ok(BoundExpr::Column {
                 source: EXCLUDED_SOURCE,
                 column: position,
+                // `excluded` is a row in registers rather than a record, so the
+                // compiler substitutes it wholesale and the slot is never read.
+                slot: position,
                 affinity: info.affinity,
                 collation,
             });
@@ -3217,6 +3366,8 @@ fn subquery_table(alias: &[u8], names: &[Vec<u8>], select: &BoundSelect) -> Tabl
                 primary_key_position: None,
                 hidden: false,
                 generated: false,
+                stored: false,
+                generated_sql: None,
             }
         })
         .collect();

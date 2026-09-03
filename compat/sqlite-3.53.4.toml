@@ -1219,8 +1219,8 @@ id = "sql.generated-columns"
 source = "https://sqlite.org/lang_createtable.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::generated_columns_round_trip_through_sqlite"]
 
 [[capability]]
 id = "sql.without-rowid"

@@ -3088,10 +3088,11 @@ impl Compiler {
             BoundExpr::Parameter(index) => Ok(self.emit_load(Operand::Parameter(*index))),
             BoundExpr::Column {
                 source,
-                column,
+                slot,
                 affinity,
                 ..
             } => {
+                let column = slot;
                 let register = self.register();
                 // A REAL column widens an integer back to a real on read; see
                 // the note on the opcode.
