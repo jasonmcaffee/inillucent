@@ -54,12 +54,82 @@ pub fn load_database_catalog(
         }
         attach_index(&mut tables, row)?;
     }
+    load_statistics(pager, &mut tables)?;
     tables.extend(schema_table_aliases(database));
     Ok(DatabaseCatalog {
         name: name.to_vec(),
         schema_cookie,
         tables,
     })
+}
+
+/// Reads `sqlite_stat1`, when there is one, onto the tables it describes.
+///
+/// A missing, empty or unreadable statistics table is not an error: statistics
+/// are a hint, and a planner that refused to run without them - or refused to
+/// run on a stale one - would turn `ANALYZE` from an optimisation into a
+/// dependency. Anything it cannot read leaves the defaults in place.
+fn load_statistics(pager: &mut Pager, tables: &mut [TableInfo]) -> DbResult<()> {
+    let root = tables
+        .iter()
+        .find(|table| table.folded == crate::analyze::STAT1.as_bytes())
+        .map(|table| table.root)
+        .unwrap_or(0);
+    let Some(root) = rustdb_base::ids::PageId::new(root) else {
+        return Ok(());
+    };
+    let limits = Limits::default();
+    let encoding = pager.text_encoding();
+    let mut cursor = rustdb_storage::cursor::BTreeCursor::table(root);
+    let mut present = cursor.first(pager)?;
+    while present {
+        let payload = cursor.payload(pager, &limits)?;
+        if let Ok(record) =
+            rustdb_value::record::RecordRef::parse_with_limits(&payload, encoding, &limits)
+        {
+            let table = text_of(&record, 0);
+            let index = text_of(&record, 1);
+            let stat = text_of(&record, 2);
+            if let (Some(table), Some(stat)) = (table, stat) {
+                apply_statistic(tables, &table, index.as_deref(), &stat);
+            }
+        }
+        present = cursor.next(pager)?;
+    }
+    Ok(())
+}
+
+/// Returns one column of a statistics row as text, when it is text.
+fn text_of(record: &rustdb_value::record::RecordRef<'_>, column: usize) -> Option<Vec<u8>> {
+    let value = record.value(column).ok()?;
+    match value {
+        rustdb_value::Value::Text(text) => Some(text.utf8_bytes().to_vec()),
+        _ => None,
+    }
+}
+
+/// Attaches one `sqlite_stat1` row to the object it is about.
+fn apply_statistic(tables: &mut [TableInfo], table: &[u8], index: Option<&[u8]>, stat: &[u8]) {
+    let folded = table.to_ascii_lowercase();
+    let Some(info) = tables
+        .iter_mut()
+        .find(|candidate| candidate.folded == folded)
+    else {
+        return;
+    };
+    let (rows, prefixes) = crate::analyze::parse_stat(stat);
+    info.analysed_rows = Some(rows);
+    let Some(index) = index else {
+        return;
+    };
+    let index_folded = index.to_ascii_lowercase();
+    if let Some(entry) = info
+        .indexes
+        .iter_mut()
+        .find(|candidate| candidate.folded == index_folded)
+    {
+        entry.prefix_rows = prefixes;
+    }
 }
 
 /// The `CREATE` text SQLite reports for the schema table itself.
@@ -124,6 +194,7 @@ fn table_from_row(row: &SchemaObject, database: usize) -> DbResult<TableInfo> {
             kind: TableKind::View,
             create_sql,
             view: Some(Box::new(view)),
+            analysed_rows: None,
             indexes: Vec::new(),
             checks: Vec::new(),
         });
@@ -143,6 +214,7 @@ fn table_from_row(row: &SchemaObject, database: usize) -> DbResult<TableInfo> {
             kind: TableKind::Virtual,
             create_sql: Vec::new(),
             view: None,
+            analysed_rows: None,
             indexes: Vec::new(),
             checks: Vec::new(),
         });
@@ -203,6 +275,7 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
                 kind: TableKind::Virtual,
                 create_sql: sql.to_vec(),
                 view: None,
+                analysed_rows: None,
                 indexes: Vec::new(),
                 checks: Vec::new(),
             });
@@ -231,6 +304,7 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
         kind: TableKind::Table,
         create_sql: sql.to_vec(),
         view: None,
+        analysed_rows: None,
         indexes: Vec::new(),
         checks: Vec::new(),
     };
@@ -467,6 +541,7 @@ fn automatic_indexes(
                 partial_sql: None,
                 origin,
                 conflict,
+                prefix_rows: Vec::new(),
             });
         }
     }
@@ -521,6 +596,7 @@ fn automatic_indexes(
             partial_sql: None,
             origin,
             conflict,
+            prefix_rows: Vec::new(),
         });
     }
     indexes
@@ -617,6 +693,7 @@ fn index_from_create_sql(sql: &[u8], table: &TableInfo, root: u32) -> DbResult<I
         // a violation of one always resolves as ABORT unless the statement
         // overrides it.
         conflict: None,
+        prefix_rows: Vec::new(),
     })
 }
 

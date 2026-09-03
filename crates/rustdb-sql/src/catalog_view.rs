@@ -89,6 +89,13 @@ pub struct IndexInfo {
     pub origin: IndexOrigin,
     /// The `ON CONFLICT` clause the constraint that created it carried.
     pub conflict: Option<ConflictAction>,
+    /// For each leading prefix of the key, the average number of rows sharing
+    /// it, as `ANALYZE` measured.
+    ///
+    /// Empty until the schema has been analysed, which is the *usual* state and
+    /// not an error: the planner falls back to SQLite's own guesses, and those
+    /// guesses are what make an unanalysed plan match the reference's.
+    pub prefix_rows: Vec<i64>,
 }
 
 /// What kind of schema object a name resolves to.
@@ -154,6 +161,8 @@ pub struct TableInfo {
     pub indexes: Vec<IndexInfo>,
     /// The parsed body, when this is a view.
     pub view: Option<Box<ViewBody>>,
+    /// How many rows `ANALYZE` counted, when it has run.
+    pub analysed_rows: Option<i64>,
     /// Every `CHECK` constraint, as the source text it was written as.
     ///
     /// The text rather than a bound expression, for the same reason
@@ -213,6 +222,7 @@ impl TableInfo {
             kind: TableKind::Subquery,
             create_sql: Vec::new(),
             view: None,
+            analysed_rows: None,
             indexes: Vec::new(),
             checks: Vec::new(),
         }
@@ -432,6 +442,7 @@ mod tests {
             create_sql: Vec::new(),
             indexes: Vec::new(),
             view: None,
+            analysed_rows: None,
             checks: Vec::new(),
         }
     }
