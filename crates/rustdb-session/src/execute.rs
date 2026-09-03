@@ -504,7 +504,7 @@ fn reindex(connection: &Connection, directive: &Directive) -> DbResult<Directive
         connection.with_database(*database, |pager| {
             rustdb_storage::mutate::clear_tree(pager, root)
         })??;
-        backfill_index(connection, name)?;
+        backfill_index(connection, *database, name)?;
         let _ = table;
     }
     Ok(Vec::new())
@@ -925,7 +925,7 @@ fn create_index(
     })??;
     connection.with_database(*database, |pager| ddl::bump_schema_cookie(pager))??;
     connection.refresh_catalog()?;
-    backfill_index(connection, name)?;
+    backfill_index(connection, *database, name)?;
     Ok(Vec::new())
 }
 
@@ -935,13 +935,14 @@ fn create_index(
 /// just published, which is what the TDD's DDL protocol asks for: the backfill
 /// is a VM program like any other rather than a second implementation of index
 /// maintenance that could disagree with the first.
-fn backfill_index(connection: &Connection, name: &[u8]) -> DbResult<()> {
+fn backfill_index(connection: &Connection, database: usize, name: &[u8]) -> DbResult<()> {
     let catalog = connection.catalog()?;
     let folded = name.to_ascii_lowercase();
     let found = {
         use rustdb_sql::catalog_view::CatalogView;
+        let name = catalog.database_name(database).to_vec();
         catalog
-            .find_index(None, &folded)
+            .find_index(Some(&name), &folded)
             .map(|(table, index)| (table.clone(), index.clone()))
     };
     let Some((table, index)) = found else {
@@ -989,9 +990,9 @@ fn backfill_index(connection: &Connection, name: &[u8]) -> DbResult<()> {
             })
             .collect(),
     });
-    connection.with_state(|state| {
+    connection.with_database(database, |pager| {
         rustdb_storage::mutate::build_index(
-            &mut state.pager,
+            pager,
             table.root,
             index.root,
             &columns,

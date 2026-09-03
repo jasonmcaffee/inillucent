@@ -150,6 +150,13 @@ pub const MAX_ATTACHED: usize = 10;
 pub struct ConnectionState {
     /// The pager, which owns the file and the page cache.
     pub pager: Pager,
+    /// The connection's temporary database, once something has needed one.
+    ///
+    /// It is created on demand rather than at connect: a connection that never
+    /// writes a temporary object should not pay for a file, and most do not.
+    /// Its *name* is always there, though - the catalog carries an empty
+    /// `temp` so that `CREATE TEMP TABLE` has something to resolve against.
+    pub temp: Option<Pager>,
     /// The databases `ATTACH` added, in the order it added them.
     pub attached: Vec<AttachedDatabase>,
     /// The databases this transaction has a writer on, in the order they
@@ -188,8 +195,14 @@ impl rustdb_storage::PagerSet for ConnectionState {
         if database == rustdb_storage::MAIN_DATABASE {
             return Ok(&mut self.pager);
         }
+        if database == rustdb_storage::TEMP_DATABASE {
+            return self
+                .temp
+                .as_mut()
+                .ok_or_else(|| error::misuse("there is no temporary database on this connection"));
+        }
         self.attached
-            .get_mut(database.saturating_sub(1))
+            .get_mut(database.saturating_sub(2))
             .map(|attached| &mut attached.pager)
             .ok_or_else(|| {
                 error::misuse(format!(
@@ -198,9 +211,9 @@ impl rustdb_storage::PagerSet for ConnectionState {
             })
     }
 
-    /// One for `main`, plus whatever is attached.
+    /// `main`, `temp`, and whatever is attached.
     fn count(&self) -> usize {
-        self.attached.len().saturating_add(1)
+        self.attached.len().saturating_add(2)
     }
 }
 
@@ -215,10 +228,25 @@ impl ConnectionState {
         mut body: impl FnMut(usize, &mut Pager) -> DbResult<T>,
     ) -> DbResult<()> {
         body(rustdb_storage::MAIN_DATABASE, &mut self.pager)?;
+        if let Some(temp) = self.temp.as_mut() {
+            body(rustdb_storage::TEMP_DATABASE, temp)?;
+        }
         for (position, attached) in self.attached.iter_mut().enumerate() {
-            body(position.saturating_add(1), &mut attached.pager)?;
+            body(position.saturating_add(2), &mut attached.pager)?;
         }
         Ok(())
+    }
+
+    /// Reports whether database `index` exists on this connection.
+    ///
+    /// Only the temporary one can be absent, and it is absent until something
+    /// needs it.
+    pub fn database_exists(&self, index: usize) -> bool {
+        match index {
+            rustdb_storage::MAIN_DATABASE => true,
+            rustdb_storage::TEMP_DATABASE => self.temp.is_some(),
+            other => self.attached.len() > other.saturating_sub(2),
+        }
     }
 
     /// Returns the number a name is attached under.
@@ -226,10 +254,13 @@ impl ConnectionState {
         if folded.eq_ignore_ascii_case(main) {
             return Some(rustdb_storage::MAIN_DATABASE);
         }
+        if folded.eq_ignore_ascii_case(b"temp") {
+            return Some(rustdb_storage::TEMP_DATABASE);
+        }
         self.attached
             .iter()
             .position(|attached| attached.name.eq_ignore_ascii_case(folded))
-            .map(|position| position.saturating_add(1))
+            .map(|position| position.saturating_add(2))
     }
 }
 
@@ -352,6 +383,7 @@ impl Connection {
             state: RefCell::new(ConnectionState {
                 pager,
                 active: 0,
+                temp: None,
                 attached: Vec::new(),
                 writing: Vec::new(),
                 transaction: Transaction::new(),
@@ -582,6 +614,9 @@ impl Connection {
     /// RESERVED lock on a file nobody is changing is a lock somebody else is
     /// waiting for.
     pub fn begin_statement_on(&self, access: Access, writes: &[usize]) -> DbResult<()> {
+        if access.writes() && writes.contains(&rustdb_storage::TEMP_DATABASE) {
+            self.ensure_temp_database()?;
+        }
         let timeout = self.options.busy_timeout;
         let mut state = self
             .state
@@ -593,6 +628,9 @@ impl Connection {
         }
         let count = rustdb_storage::PagerSet::count(&*state);
         for database in 0..count {
+            if !state.database_exists(database) {
+                continue;
+            }
             let pager = rustdb_storage::PagerSet::pager(&mut *state, database)?;
             if !pager.state().can_read() {
                 begin_read_with_timeout(pager, timeout)?;
@@ -902,14 +940,26 @@ impl Connection {
                 .try_borrow_mut()
                 .map_err(|_| error::misuse("the connection is running a statement"))?;
             let count = rustdb_storage::PagerSet::count(&*state);
+            let mut opened = Vec::new();
             for database in 0..count {
+                if !state.database_exists(database) {
+                    continue;
+                }
                 let pager = rustdb_storage::PagerSet::pager(&mut *state, database)?;
                 if !pager.state().can_read() {
                     begin_read_with_timeout(pager, timeout)?;
+                    opened.push(database);
                 }
             }
             let read = read_every_catalog(&mut state, &name, generation);
-            let released = end_reads(&mut state);
+            let mut released = Ok(());
+            for database in opened {
+                let outcome = rustdb_storage::PagerSet::pager(&mut *state, database)
+                    .and_then(|pager| pager.end_read());
+                if released.is_ok() {
+                    released = outcome;
+                }
+            }
             let loaded = read?;
             released?;
             loaded
@@ -1030,6 +1080,50 @@ impl Connection {
             state.pager.end_read()?;
         }
         state.pager.checkpoint(mode)
+    }
+
+    /// Creates the temporary database if this connection has not needed one.
+    ///
+    /// It is a file with no name that the operating system removes when the
+    /// last handle closes, and it is journalled in memory: nothing in it
+    /// outlives the connection, so there is nothing for a durable journal to
+    /// protect. That is also why it takes no part in a commit across several
+    /// databases - a file whose contents cannot survive a crash has nothing to
+    /// be atomic with.
+    pub fn ensure_temp_database(&self) -> DbResult<()> {
+        {
+            let state = self
+                .state
+                .try_borrow()
+                .map_err(|_| error::misuse("the connection is running a statement"))?;
+            if state.temp.is_some() {
+                return Ok(());
+            }
+        }
+        let path = self.vfs.temp_path("rustdb-temp")?;
+        let pager = open_database(
+            Arc::clone(&self.vfs),
+            &path,
+            DatabaseOptions {
+                pager: PagerOptions::default(),
+                journal: JournalOptions {
+                    mode: JournalMode::Memory,
+                    synchronous: rustdb_transaction::journal::Synchronous::Off,
+                },
+                writable: true,
+            },
+        )?;
+        {
+            let mut state = self
+                .state
+                .try_borrow_mut()
+                .map_err(|_| error::misuse("the connection is running a statement"))?;
+            if state.temp.is_some() {
+                return Ok(());
+            }
+            state.temp = Some(pager);
+        }
+        self.reload_schema()
     }
 
     /// Opens a database file and attaches it under a name.
@@ -1329,6 +1423,9 @@ impl Connection {
         let text = String::from_utf8_lossy(name).into_owned();
         let count = rustdb_storage::PagerSet::count(&*state);
         for database in 0..count {
+            if !state.database_exists(database) {
+                continue;
+            }
             let pager = rustdb_storage::PagerSet::pager(&mut *state, database)?;
             if !pager.state().can_read() {
                 begin_read_with_timeout(pager, timeout)?;
@@ -1505,20 +1602,77 @@ fn read_every_catalog(
     main_name: &[u8],
     generation: u64,
 ) -> DbResult<CatalogSnapshot> {
-    let mut databases = Vec::with_capacity(state.attached.len().saturating_add(1));
-    databases.push(load_database_catalog(&mut state.pager, main_name, 0)?);
+    let mut databases = Vec::with_capacity(state.attached.len().saturating_add(2));
+    let mut strays = Vec::new();
+    let (main, mut orphans) =
+        rustdb_catalog::load::load_database_catalog_with_strays(&mut state.pager, main_name, 0)?;
+    databases.push(main);
+    strays.append(&mut orphans);
+    match state.temp.as_mut() {
+        Some(temp) => {
+            let (catalog, mut orphans) = rustdb_catalog::load::load_database_catalog_with_strays(
+                temp,
+                b"temp",
+                rustdb_storage::TEMP_DATABASE,
+            )?;
+            databases.push(catalog);
+            strays.append(&mut orphans);
+        }
+        None => databases.push(empty_temp_catalog()),
+    }
     for position in 0..state.attached.len() {
-        let index = position.saturating_add(1);
+        let index = position.saturating_add(2);
         let Some(attached) = state.attached.get_mut(position) else {
             continue;
         };
         let name = attached.name.clone();
-        databases.push(load_database_catalog(&mut attached.pager, &name, index)?);
+        let (catalog, mut orphans) = rustdb_catalog::load::load_database_catalog_with_strays(
+            &mut attached.pager,
+            &name,
+            index,
+        )?;
+        databases.push(catalog);
+        strays.append(&mut orphans);
     }
+    attach_strays(&mut databases, &strays)?;
     Ok(CatalogSnapshot {
         databases,
         generation,
     })
+}
+
+/// Puts every trigger that fires for a table in another database on that table.
+///
+/// `CREATE TEMP TRIGGER ... ON t` is stored in the temporary database and
+/// fires for `main.t`. The row cannot be attached while one database is being
+/// read - the table is not in it - so it comes back here, where every database
+/// is in hand. The search order is the one a name follows: the temporary
+/// database first, then `main`, then the rest.
+fn attach_strays(
+    databases: &mut [rustdb_catalog::snapshot::DatabaseCatalog],
+    strays: &[rustdb_storage::schema::SchemaObject],
+) -> DbResult<()> {
+    if strays.is_empty() {
+        return Ok(());
+    }
+    let order: Vec<usize> = core::iter::once(rustdb_storage::TEMP_DATABASE)
+        .chain(core::iter::once(rustdb_storage::MAIN_DATABASE))
+        .chain(2..databases.len())
+        .collect();
+    for row in strays {
+        let wanted = row.table_name.to_ascii_lowercase().into_bytes();
+        for index in order.iter().copied() {
+            let Some(catalog) = databases.get_mut(index) else {
+                continue;
+            };
+            if !catalog.tables.iter().any(|table| table.folded == wanted) {
+                continue;
+            }
+            rustdb_catalog::load::attach_trigger(&mut catalog.tables, row)?;
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// Runs a closure over the pager of every database the transaction writes.
@@ -1538,6 +1692,9 @@ fn end_reads(state: &mut ConnectionState) -> DbResult<()> {
     let count = rustdb_storage::PagerSet::count(state);
     let mut outcome = Ok(());
     for database in 0..count {
+        if !state.database_exists(database) {
+            continue;
+        }
         let released =
             rustdb_storage::PagerSet::pager(state, database).and_then(|pager| pager.end_read());
         if outcome.is_ok() {
@@ -1555,6 +1712,9 @@ fn rollback_writers(state: &mut ConnectionState) -> DbResult<()> {
     let count = rustdb_storage::PagerSet::count(state);
     let mut outcome = Ok(());
     for database in 0..count {
+        if !state.database_exists(database) {
+            continue;
+        }
         let rolled =
             rustdb_storage::PagerSet::pager(state, database).and_then(|pager| pager.rollback());
         if outcome.is_ok() {
@@ -1578,6 +1738,16 @@ fn rollback_writers(state: &mut ConnectionState) -> DbResult<()> {
 /// that is gone and undoes none of them. There is no third outcome, because a
 /// deletion is one operation and there is nothing to observe inside it.
 fn commit_writers(state: &mut ConnectionState, vfs: &Arc<dyn Vfs>, main: &DbPath) -> DbResult<()> {
+    // The temporary database is committed first and on its own. Nothing in it
+    // survives the connection, so it has no durability to be atomic with - and
+    // it journals in memory, which a super-journal could not name anyway.
+    if state.writing.contains(&rustdb_storage::TEMP_DATABASE) {
+        let temp = rustdb_storage::PagerSet::pager(state, rustdb_storage::TEMP_DATABASE)?;
+        temp.commit()?;
+        state
+            .writing
+            .retain(|database| *database != rustdb_storage::TEMP_DATABASE);
+    }
     if state.writing.len() <= 1 {
         let outcome = for_each_writer(state, |pager| pager.commit());
         state.writing.clear();
@@ -1713,5 +1883,20 @@ fn load_catalog(
     let released = pager.end_read();
     let database = loaded?;
     released?;
-    Ok(CatalogSnapshot::single(database, generation))
+    Ok(CatalogSnapshot {
+        databases: vec![database, empty_temp_catalog()],
+        generation,
+    })
+}
+
+/// Returns the schema of a temporary database nobody has created yet.
+///
+/// The name is what matters: `CREATE TEMP TABLE` resolves against it, and the
+/// file behind it is made at that moment rather than at connect.
+fn empty_temp_catalog() -> rustdb_catalog::snapshot::DatabaseCatalog {
+    rustdb_catalog::snapshot::DatabaseCatalog {
+        name: b"temp".to_vec(),
+        schema_cookie: 0,
+        tables: rustdb_catalog::load::schema_table_aliases(rustdb_storage::TEMP_DATABASE),
+    }
 }

@@ -41,6 +41,22 @@ pub fn load_database_catalog(
     name: &[u8],
     database: usize,
 ) -> DbResult<DatabaseCatalog> {
+    Ok(load_database_catalog_with_strays(pager, name, database)?.0)
+}
+
+/// Reads one database's schema, and hands back the triggers it could not
+/// attach.
+///
+/// A temporary trigger on a permanent table is the case: the trigger is stored
+/// in the temporary database and the table it fires for is in another one, so
+/// the table cannot be found while this database is being read. The row is
+/// returned rather than dropped, and the caller - which has every database -
+/// puts it where it belongs.
+pub fn load_database_catalog_with_strays(
+    pager: &mut Pager,
+    name: &[u8],
+    database: usize,
+) -> DbResult<(DatabaseCatalog, Vec<SchemaObject>)> {
     let schema_cookie = pager.header().schema_cookie;
     let rows = load_schema(pager)?;
     let mut tables = Vec::new();
@@ -56,11 +72,14 @@ pub fn load_database_catalog(
         }
         attach_index(&mut tables, row)?;
     }
+    let mut strays = Vec::new();
     for row in &rows {
         if row.kind != SchemaKind::Trigger {
             continue;
         }
-        attach_trigger(&mut tables, row)?;
+        if !attach_trigger_if_present(&mut tables, row)? {
+            strays.push(row.clone());
+        }
     }
     load_statistics(pager, &mut tables)?;
     // The keys are planned once the whole database is in hand: a key records
@@ -68,11 +87,14 @@ pub fn load_database_catalog(
     // table what it points at, and that cannot be answered one table at a time.
     rustdb_sql::foreign_key::plan_schema(&mut tables, name, &Limits::default());
     tables.extend(schema_table_aliases(database));
-    Ok(DatabaseCatalog {
-        name: name.to_vec(),
-        schema_cookie,
-        tables,
-    })
+    Ok((
+        DatabaseCatalog {
+            name: name.to_vec(),
+            schema_cookie,
+            tables,
+        },
+        strays,
+    ))
 }
 
 /// Reads `sqlite_stat1`, when there is one, onto the tables it describes.
@@ -160,14 +182,22 @@ const SCHEMA_TABLE_SQL: &[u8] =
 /// The entries are deliberately not part of what `SELECT ... FROM
 /// sqlite_schema` returns, because they are not rows in the file; they exist
 /// only so a name resolves.
-fn schema_table_aliases(database: usize) -> Vec<TableInfo> {
+pub fn schema_table_aliases(database: usize) -> Vec<TableInfo> {
     let mut aliases = Vec::new();
-    for name in [
-        b"sqlite_schema".as_slice(),
-        b"sqlite_master".as_slice(),
-        b"sqlite_temp_schema".as_slice(),
-        b"sqlite_temp_master".as_slice(),
-    ] {
+    // The temporary database answers to the temporary names and the others to
+    // the plain ones. An unqualified name is searched in `temp` first, so a
+    // temporary database that also answered to `sqlite_schema` would make
+    // `SELECT name FROM sqlite_schema` list the temporary objects - which is
+    // not what it means anywhere else.
+    let names: &[&[u8]] = if database == rustdb_storage::TEMP_DATABASE {
+        &[
+            b"sqlite_temp_schema".as_slice(),
+            b"sqlite_temp_master".as_slice(),
+        ]
+    } else {
+        &[b"sqlite_schema".as_slice(), b"sqlite_master".as_slice()]
+    };
+    for name in names.iter().copied() {
         let Ok(mut table) = table_from_create_sql(
             SCHEMA_TABLE_SQL,
             database,
@@ -277,15 +307,24 @@ pub fn view_from_create_sql(sql: &[u8]) -> DbResult<rustdb_sql::catalog_view::Vi
 /// The body is parsed once, here, for the reason a view body is: the arena
 /// belongs to the snapshot, so the binder can bind the body in place instead of
 /// re-parsing it on every write to the table.
-fn attach_trigger(tables: &mut [TableInfo], row: &SchemaObject) -> DbResult<()> {
+pub fn attach_trigger(tables: &mut [TableInfo], row: &SchemaObject) -> DbResult<()> {
+    attach_trigger_if_present(tables, row).map(|_| ())
+}
+
+/// Attaches a trigger to its table, reporting whether the table was there.
+///
+/// A missing table is not a failure to report: in one database it means a
+/// corrupt schema, and refusing to open the file would be a worse answer than
+/// opening it without the trigger; across databases it means the trigger fires
+/// for a table somewhere else, which is what a temporary trigger on a
+/// permanent table is.
+fn attach_trigger_if_present(tables: &mut [TableInfo], row: &SchemaObject) -> DbResult<bool> {
     let table_folded = row.table_name.to_ascii_lowercase().into_bytes();
     let Some(table) = tables.iter_mut().find(|table| table.folded == table_folded) else {
-        // A trigger whose table is missing is a corrupt schema, but refusing to
-        // open the file is a worse answer than opening it without the trigger.
-        return Ok(());
+        return Ok(false);
     };
     let Some(sql) = row.sql.as_ref() else {
-        return Ok(());
+        return Ok(true);
     };
     let trigger = trigger_from_create_sql(sql.as_bytes())
         .map_err(|error| error.with_detail(format!("in trigger {}", row.name)))?;
@@ -294,7 +333,7 @@ fn attach_trigger(tables: &mut [TableInfo], row: &SchemaObject) -> DbResult<()> 
     // recently created one runs first. Measured against 3.53.4: three AFTER
     // INSERT triggers created as t1, t2, t3 log three, two, one.
     table.triggers.insert(0, trigger);
-    Ok(())
+    Ok(true)
 }
 
 /// Parses a `CREATE TRIGGER` statement into the definition a write fires.

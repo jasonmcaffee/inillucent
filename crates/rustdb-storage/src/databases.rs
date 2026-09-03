@@ -19,6 +19,15 @@ use crate::pager::Pager;
 /// The number every statement uses for the database it was opened on.
 pub const MAIN_DATABASE: usize = 0;
 
+/// The number the connection's temporary database always has.
+///
+/// It is fixed rather than assigned, and it is one for the same reason SQLite
+/// makes it one: a statement bound before an `ATTACH` carries the numbers it
+/// resolved against, and a temporary database that moved when something was
+/// attached would move underneath them. Nothing is attached at one; the
+/// attached databases start at two.
+pub const TEMP_DATABASE: usize = 1;
+
 /// The databases a statement can reach, addressed by number.
 pub trait PagerSet {
     /// Returns the pager of one attached database.
