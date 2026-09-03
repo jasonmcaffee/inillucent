@@ -81,6 +81,19 @@ pub enum Directive {
         /// Whether the table already exists.
         exists: bool,
     },
+    /// `CREATE VIEW`.
+    CreateView {
+        /// Whether `IF NOT EXISTS` was written.
+        if_not_exists: bool,
+        /// Which attached database.
+        database: usize,
+        /// The view name as written.
+        name: Vec<u8>,
+        /// The byte the name starts at in the statement's source.
+        name_offset: u32,
+        /// Whether the view already exists.
+        exists: bool,
+    },
     /// `CREATE INDEX`.
     CreateIndex {
         /// Whether `UNIQUE` was written.
@@ -174,6 +187,21 @@ impl<'a> Binder<'a> {
                 columns,
                 *filter,
             ),
+            ast::Statement::CreateView {
+                temporary,
+                if_not_exists,
+                database,
+                name,
+                columns,
+                select,
+            } => self.bind_create_view(
+                *temporary,
+                *if_not_exists,
+                *database,
+                *name,
+                columns,
+                *select,
+            ),
             ast::Statement::Drop {
                 kind,
                 if_exists,
@@ -206,14 +234,24 @@ impl<'a> Binder<'a> {
         }
         let ast::CreateTableBody::Columns {
             columns,
+            constraints,
             without_rowid,
-            ..
+            strict,
         } = body
         else {
             return Err(unsupported("CREATE TABLE ... AS SELECT", Span::default()));
         };
         if *without_rowid {
-            return Err(unsupported("WITHOUT ROWID tables", Span::default()));
+            if !self.declares_primary_key(columns, constraints) {
+                return Err(refused("PRIMARY KEY missing on table", Span::default()));
+            }
+            return Err(unsupported(
+                "writing to a WITHOUT ROWID table",
+                Span::default(),
+            ));
+        }
+        if *strict {
+            self.check_strict(columns)?;
         }
         if columns.is_empty() {
             return Err(refused(
@@ -246,6 +284,128 @@ impl<'a> Binder<'a> {
         }
         self.record_write_dependency(index);
         Ok(Directive::CreateTable {
+            if_not_exists,
+            database: index,
+            name: written,
+            name_offset: self.name_offset(name),
+            exists,
+        })
+    }
+
+    /// Returns whether a `CREATE TABLE` declares a primary key anywhere.
+    fn declares_primary_key(
+        &self,
+        columns: &[ast::ColumnDef],
+        constraints: &[(Option<ast::NameId>, ast::TableConstraint)],
+    ) -> bool {
+        let on_column = columns.iter().any(|column| {
+            column.constraints.iter().any(|(_, constraint)| {
+                matches!(constraint, ast::ColumnConstraint::PrimaryKey { .. })
+            })
+        });
+        on_column
+            || constraints.iter().any(|(_, constraint)| {
+                matches!(constraint, ast::TableConstraint::PrimaryKey { .. })
+            })
+    }
+
+    /// Checks the rules a `STRICT` table adds to its column list.
+    ///
+    /// Every column must name one of six types, and the check is on the
+    /// declared text rather than on the affinity it maps to: `VARCHAR(10)` has
+    /// TEXT affinity and is still refused, because STRICT is about what was
+    /// written and not about what it means.
+    fn check_strict(&self, columns: &[ast::ColumnDef]) -> Result<(), ParseError> {
+        for column in columns {
+            let Some(declared) = column.declared_type.as_ref() else {
+                return Err(refused(
+                    format!(
+                        "missing datatype for {}",
+                        String::from_utf8_lossy(self.ast.text(column.name))
+                    ),
+                    Span::default(),
+                ));
+            };
+            let folded = declared.to_ascii_uppercase();
+            let allowed = matches!(
+                folded.as_slice(),
+                b"INT" | b"INTEGER" | b"REAL" | b"TEXT" | b"BLOB" | b"ANY"
+            );
+            if !allowed {
+                return Err(refused(
+                    format!(
+                        "unknown datatype for {}: \"{}\"",
+                        String::from_utf8_lossy(self.ast.text(column.name)),
+                        String::from_utf8_lossy(declared)
+                    ),
+                    Span::default(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Binds a `CREATE VIEW`.
+    ///
+    /// The body is bound here, and thrown away, purely to refuse a view whose
+    /// query does not resolve. SQLite does the same: the definition is checked
+    /// when the view is created rather than when it is first read, so a typo
+    /// fails at `CREATE VIEW` rather than in whatever statement happens to
+    /// select from it next.
+    fn bind_create_view(
+        &mut self,
+        temporary: bool,
+        if_not_exists: bool,
+        database: Option<ast::NameId>,
+        name: ast::NameId,
+        columns: &[ast::NameId],
+        select: ast::SelectId,
+    ) -> Result<Directive, ParseError> {
+        if temporary {
+            return Err(unsupported("TEMP views", Span::default()));
+        }
+        let index = self.resolve_database(database)?;
+        let written = self.ast.text(name).to_vec();
+        if written.to_ascii_lowercase().starts_with(b"sqlite_") {
+            return Err(refused(
+                format!(
+                    "object name reserved for internal use: {}",
+                    String::from_utf8_lossy(&written)
+                ),
+                Span::default(),
+            ));
+        }
+        let folded = self.ast.folded(name).to_vec();
+        let database_name = self.catalog.database_name(index).to_vec();
+        let exists = self
+            .catalog
+            .find_table(Some(database_name.as_slice()), &folded)
+            .is_some();
+        if exists && !if_not_exists {
+            return Err(refused(
+                format!("table {} already exists", String::from_utf8_lossy(&written)),
+                Span::default(),
+            ));
+        }
+        if !exists {
+            let saved = core::mem::take(&mut self.scopes);
+            let bound = self.bind_select(select);
+            self.scopes = saved;
+            let bound = bound?;
+            if !columns.is_empty() && columns.len() != bound.columns.len() {
+                return Err(refused(
+                    format!(
+                        "expected {} columns for {} but got {}",
+                        columns.len(),
+                        String::from_utf8_lossy(&written),
+                        bound.columns.len()
+                    ),
+                    Span::default(),
+                ));
+            }
+        }
+        self.record_write_dependency(index);
+        Ok(Directive::CreateView {
             if_not_exists,
             database: index,
             name: written,
@@ -347,14 +507,41 @@ impl<'a> Binder<'a> {
         database: Option<ast::NameId>,
         name: ast::NameId,
     ) -> Result<Directive, ParseError> {
-        if matches!(kind, ObjectKind::View | ObjectKind::Trigger) {
-            return Err(unsupported("DROP VIEW and DROP TRIGGER", Span::default()));
+        if kind == ObjectKind::Trigger {
+            return Err(unsupported("DROP TRIGGER", Span::default()));
         }
         let index = self.resolve_database(database)?;
         let database_name = self.catalog.database_name(index).to_vec();
         let written = self.ast.text(name).to_vec();
         let folded = self.ast.folded(name).to_vec();
         self.record_write_dependency(index);
+        if kind == ObjectKind::View {
+            // A view owns no B-tree, so dropping one is the schema row and
+            // nothing else - and it must refuse a table, because `DROP VIEW t`
+            // on a table is an error rather than a drop.
+            let found = self
+                .catalog
+                .find_table(Some(database_name.as_slice()), &folded)
+                .cloned();
+            let exists = found
+                .as_ref()
+                .is_some_and(|table| table.kind == crate::catalog_view::TableKind::View);
+            if !exists && !if_exists {
+                return Err(refused(
+                    format!("no such view: {}", String::from_utf8_lossy(&written)),
+                    Span::default(),
+                ));
+            }
+            return Ok(Directive::Drop {
+                kind,
+                if_exists,
+                database: index,
+                name: written,
+                root: 0,
+                index_roots: Vec::new(),
+                exists,
+            });
+        }
         if kind == ObjectKind::Table {
             let found = self
                 .catalog
@@ -374,6 +561,15 @@ impl<'a> Binder<'a> {
                 }
                 return Err(no_such_table(&written, Span::default()));
             };
+            if table.kind == crate::catalog_view::TableKind::View {
+                return Err(refused(
+                    format!(
+                        "use DROP VIEW to delete view {}",
+                        String::from_utf8_lossy(&written)
+                    ),
+                    Span::default(),
+                ));
+            }
             let index_roots = table
                 .indexes
                 .iter()

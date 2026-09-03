@@ -36,7 +36,7 @@ use rustdb_value::{Affinity, Collation};
 use crate::compile::{Compiler, Label};
 use crate::program::{
     IndexKey, Instruction, Opcode, Operand, Program, ProgramDependencies, ResultColumn,
-    RowChangeKind, SortColumn, SortKey,
+    RowChangeKind, SortColumn, SortKey, StrictType,
 };
 
 /// The result codes a constraint failure reports.
@@ -44,9 +44,11 @@ use crate::program::{
 /// The numbers are SQLite's own extended codes. They are written out rather
 /// than derived because an application matches on them, and a code that was
 /// computed from an enum's discriminant would change the day the enum did.
-mod codes {
+pub(crate) mod codes {
     /// `SQLITE_CONSTRAINT_CHECK`.
     pub const CHECK: i32 = 275;
+    /// `SQLITE_CONSTRAINT_DATATYPE`, which a STRICT table reports.
+    pub const DATATYPE: i32 = 3091;
     /// `SQLITE_CONSTRAINT_NOTNULL`.
     pub const NOT_NULL: i32 = 1299;
     /// `SQLITE_CONSTRAINT_PRIMARYKEY`.
@@ -302,6 +304,40 @@ impl Compiler {
         Ok(())
     }
 
+    /// Emits the type test a `STRICT` table's columns owe.
+    ///
+    /// The affinity is applied first, because STRICT checks the storage class
+    /// the value will actually be stored as: `'123'` written to an `INT` column
+    /// is an integer by the time it reaches the record, and refusing it before
+    /// the conversion would refuse a value SQLite accepts.
+    fn emit_strict_checks(&mut self, table: &TableInfo, values: &[u32]) -> DbResult<()> {
+        for (position, column) in table.columns.iter().enumerate() {
+            let Some(register) = values.get(position).copied() else {
+                continue;
+            };
+            let Some(kind) = StrictType::of(&column.declared_type) else {
+                continue;
+            };
+            if kind == StrictType::Any {
+                continue;
+            }
+            self.emit(
+                Instruction::new(Opcode::ApplyAffinity, register as i32, 1, 0)
+                    .with_p4(Operand::Affinity(column.affinity)),
+            );
+            let name = format!(
+                "{}.{}",
+                String::from_utf8_lossy(&table.name),
+                String::from_utf8_lossy(&column.name)
+            );
+            self.emit(
+                Instruction::new(Opcode::TypeCheck, register as i32, 0, 0)
+                    .with_p4(Operand::Strict(kind, name.into_bytes())),
+            );
+        }
+        Ok(())
+    }
+
     /// Emits the NOT NULL and CHECK tests over a row image.
     ///
     /// `skip` is where an IGNORE resolution jumps to, which is the top of the
@@ -356,6 +392,9 @@ impl Compiler {
                 ),
             }
             self.patch_here(past);
+        }
+        if table.strict {
+            self.emit_strict_checks(table, values)?;
         }
         for check in checks {
             let register = self.compile_expr(&check.expr)?;
