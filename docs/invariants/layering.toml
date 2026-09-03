@@ -101,16 +101,37 @@ may_depend_on = [
   "rustdb-sql",
 ]
 
+# `rustdb-ext` sitting *above* `rustdb-sql` and `rustdb-storage` is a
+# refinement made in task-1789, and it is what a virtual table actually is. A
+# module has to answer three questions the old position could not express: what
+# schema does `CREATE VIRTUAL TABLE ... USING fts5(a, b)` declare, which needs
+# the parser; what does a `MATCH` constraint cost, which needs the planner's own
+# vocabulary; and where are my shadow rows, which needs a b-tree cursor. FTS5
+# and R-Tree are databases inside a database - their indexes live in ordinary
+# tables and are read and written a page at a time - so an extension crate that
+# may not name a pager can only be a table of pure functions.
+#
+# The direction is still downward and still acyclic: `rustdb-ext` reads the
+# front end and the storage engine, and `rustdb-vm` reads `rustdb-ext`. What it
+# still may not reach is the catalog or the session; a module never resolves a
+# name or opens a transaction of its own, and is handed the roots of its shadow
+# tables by the host that already resolved them.
 [[crate]]
 name = "rustdb-ext"
 kind = "production"
-layer = 4
-may_depend_on = ["rustdb-base", "rustdb-value"]
+layer = 6
+may_depend_on = [
+  "rustdb-base",
+  "rustdb-value",
+  "rustdb-storage",
+  "rustdb-transaction",
+  "rustdb-sql",
+]
 
 [[crate]]
 name = "rustdb-vm"
 kind = "production"
-layer = 6
+layer = 7
 may_depend_on = [
   "rustdb-base",
   "rustdb-value",
@@ -124,7 +145,7 @@ may_depend_on = [
 [[crate]]
 name = "rustdb-session"
 kind = "production"
-layer = 7
+layer = 8
 may_depend_on = [
   "rustdb-base",
   "rustdb-value",
@@ -145,7 +166,7 @@ may_depend_on = [
 [[crate]]
 name = "rustdb"
 kind = "production"
-layer = 8
+layer = 9
 may_depend_on = [
   "rustdb-base",
   "rustdb-value",
@@ -157,13 +178,13 @@ may_depend_on = [
 [[crate]]
 name = "rustdb-capi"
 kind = "production"
-layer = 9
+layer = 10
 may_depend_on = ["rustdb"]
 
 [[crate]]
 name = "rustdb-cli"
 kind = "production"
-layer = 9
+layer = 10
 may_depend_on = ["rustdb"]
 
 [[crate]]
@@ -175,19 +196,19 @@ may_depend_on = []
 [[crate]]
 name = "rustdb-search"
 kind = "production"
-layer = 5
+layer = 7
 may_depend_on = ["rustdb-base", "rustdb-ext", "rustdb-core"]
 
 [[crate]]
 name = "rustdb-sim"
 kind = "test-only"
-layer = 10
+layer = 11
 may_depend_on = ["rustdb-base", "rustdb-vfs"]
 
 [[crate]]
 name = "rustdb-compat"
 kind = "test-only"
-layer = 11
+layer = 12
 may_depend_on = [
   "rustdb-base",
   "rustdb-value",
@@ -205,7 +226,7 @@ may_depend_on = [
 [[crate]]
 name = "rustdb-bench"
 kind = "test-only"
-layer = 11
+layer = 12
 may_depend_on = ["rustdb-core"]
 
 # ---------------------------------------------------------------------------

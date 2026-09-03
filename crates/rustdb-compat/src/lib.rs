@@ -25,6 +25,7 @@
 )]
 
 pub mod corpus;
+pub mod differential;
 pub mod fixtures;
 pub mod hash;
 pub mod layering;

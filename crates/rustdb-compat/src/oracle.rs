@@ -498,15 +498,11 @@ fn string_list(line: &str, key: &str) -> Vec<String> {
     let Some(body) = raw.strip_prefix('[') else {
         return Vec::new();
     };
-    let Some(end) = body.find(']') else {
-        return Vec::new();
-    };
-    let inner = body.get(..end).unwrap_or("");
     let mut items = Vec::new();
     let mut current = String::new();
     let mut in_string = false;
     let mut escaped = false;
-    for character in inner.chars() {
+    for character in body.chars() {
         if escaped {
             current.push(character);
             escaped = false;
@@ -521,6 +517,10 @@ fn string_list(line: &str, key: &str) -> Vec<String> {
                 in_string = !in_string;
             }
             other if in_string => current.push(other),
+            // The list ends at the first bracket that is not inside a string.
+            // Stopping at the first bracket of any kind is what made a column
+            // called `json('[1,2,3]')` parse as no columns at all.
+            ']' => break,
             _ => {}
         }
     }

@@ -303,8 +303,12 @@ impl Parser<'_> {
     /// Parses a function call, including `count(*)`, `DISTINCT`, an argument
     /// `ORDER BY`, `FILTER` and `OVER`.
     fn parse_function_call(&mut self) -> Result<ExprId, ParseError> {
+        // The span is taken before the name is interned. Interning reuses
+        // an equal entry, so the interned span of `hex` in
+        // `SELECT hex(a), hex(b)` is the first one's - and a call that
+        // reported that as its own start would cover both columns.
+        let start = self.peek()?.span;
         let name = self.parse_function_name()?;
-        let start = self.ast.name(name).map(|n| n.span).unwrap_or_default();
         self.expect(Punctuator::LeftParen)?;
         let mut distinct = false;
         let mut arguments = Some(Vec::new());

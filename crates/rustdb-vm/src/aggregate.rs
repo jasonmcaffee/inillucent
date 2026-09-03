@@ -16,6 +16,8 @@
 //! disappears into the exponent of the 1e300 and does not come back. The
 //! compensation term is what carries it across.
 
+use rustdb_base::DbResult;
+use rustdb_ext::json::{self, Answer, Argument, Node};
 use rustdb_sql::function::AggregateFunc;
 use rustdb_value::{cast, compare, Collation, TextEncoding, Value};
 
@@ -38,6 +40,10 @@ pub struct Accumulator {
     joined: Vec<u8>,
     separator: Option<Vec<u8>>,
     seen: Vec<Value<'static>>,
+    /// The elements a `json_group_array` has collected.
+    json_items: Vec<Node>,
+    /// The members a `json_group_object` has collected.
+    json_members: Vec<(Node, Node)>,
 }
 
 impl Accumulator {
@@ -58,6 +64,8 @@ impl Accumulator {
             joined: Vec::new(),
             separator: None,
             seen: Vec::new(),
+            json_items: Vec::new(),
+            json_members: Vec::new(),
         }
     }
 
@@ -68,11 +76,23 @@ impl Accumulator {
     }
 
     /// Feeds one row into the accumulator.
-    pub fn step(&mut self, arguments: &[Value<'static>], encoding: TextEncoding) {
+    ///
+    /// `json_marks` says, per argument, whether the value carries the JSON
+    /// mark; it is what makes `json_group_array(json('[1]'))` an array of
+    /// arrays rather than an array of strings.
+    pub fn step(
+        &mut self,
+        arguments: &[Value<'static>],
+        json_marks: &[bool],
+        encoding: TextEncoding,
+    ) -> DbResult<()> {
+        if self.is_json_group() {
+            return self.json_step(arguments, json_marks);
+        }
         let value = arguments.first().cloned().unwrap_or(Value::Null);
         if self.func != AggregateFunc::Count && value.is_null() {
             // Every aggregate but `count(*)` ignores NULL inputs entirely.
-            return;
+            return Ok(());
         }
         if self.distinct {
             if self
@@ -80,7 +100,7 @@ impl Accumulator {
                 .iter()
                 .any(|candidate| identical(candidate, &value, self.collation))
             {
-                return;
+                return Ok(());
             }
             self.seen.push(value.clone());
         }
@@ -144,6 +164,41 @@ impl Accumulator {
                 self.joined
                     .extend_from_slice(&eval::text_bytes(&value, encoding));
             }
+            AggregateFunc::JsonGroupArray
+            | AggregateFunc::JsonbGroupArray
+            | AggregateFunc::JsonGroupObject
+            | AggregateFunc::JsonbGroupObject => {}
+        }
+        Ok(())
+    }
+
+    /// Returns whether this accumulator builds a JSON document.
+    fn is_json_group(&self) -> bool {
+        matches!(
+            self.func,
+            AggregateFunc::JsonGroupArray
+                | AggregateFunc::JsonbGroupArray
+                | AggregateFunc::JsonGroupObject
+                | AggregateFunc::JsonbGroupObject
+        )
+    }
+
+    /// Feeds one row into a JSON group aggregate.
+    ///
+    /// A NULL is a member here rather than a row to skip: `json_group_array`
+    /// over one NULL is `[null]` and not `[]`, because the document records
+    /// what the rows held and a JSON null is a value.
+    fn json_step(&mut self, arguments: &[Value<'static>], json_marks: &[bool]) -> DbResult<()> {
+        let null = Value::Null;
+        let mark = |index: usize| Argument {
+            value: arguments.get(index).unwrap_or(&null),
+            json: json_marks.get(index).copied().unwrap_or(false),
+        };
+        match self.func {
+            AggregateFunc::JsonGroupArray | AggregateFunc::JsonbGroupArray => {
+                json::group_array_step(&mut self.json_items, &mark(0))
+            }
+            _ => json::group_object_step(&mut self.json_members, &mark(0), &mark(1)),
         }
     }
 
@@ -168,33 +223,58 @@ impl Accumulator {
     }
 
     /// Produces the aggregate's value for the group.
-    pub fn finish(&self) -> Value<'static> {
-        match self.func {
+    ///
+    /// The answer carries the JSON mark, because a group aggregate that has
+    /// built a document has to hand that fact on to whatever consumes it.
+    pub fn finish(&self) -> DbResult<Answer> {
+        Ok(Answer {
+            value: self.finish_value()?,
+            json: self.is_json_group(),
+        })
+    }
+
+    /// Produces the aggregate's value, without the mark.
+    fn finish_value(&self) -> DbResult<Value<'static>> {
+        Ok(match self.func {
             AggregateFunc::Count => Value::Integer(self.count),
             AggregateFunc::Sum => {
                 if !self.saw_value {
-                    return Value::Null;
+                    return Ok(Value::Null);
                 }
                 if self.saw_real || self.overflowed {
-                    return Value::Real(self.total());
+                    return Ok(Value::Real(self.total()));
                 }
                 Value::Integer(self.integer_sum)
             }
             AggregateFunc::Total => Value::Real(self.total()),
             AggregateFunc::Avg => {
                 if !self.saw_value || self.count == 0 {
-                    return Value::Null;
+                    return Ok(Value::Null);
                 }
                 Value::Real(self.total() / self.count as f64)
             }
             AggregateFunc::Min | AggregateFunc::Max => self.extreme.clone().unwrap_or(Value::Null),
             AggregateFunc::GroupConcat => {
                 if !self.saw_value {
-                    return Value::Null;
+                    return Ok(Value::Null);
                 }
                 Value::owned_text(&self.joined).unwrap_or(Value::Null)
             }
-        }
+            AggregateFunc::JsonGroupArray | AggregateFunc::JsonbGroupArray => {
+                json::group_array_final(
+                    self.json_items.clone(),
+                    self.func == AggregateFunc::JsonbGroupArray,
+                )?
+                .value
+            }
+            AggregateFunc::JsonGroupObject | AggregateFunc::JsonbGroupObject => {
+                json::group_object_final(
+                    self.json_members.clone(),
+                    self.func == AggregateFunc::JsonbGroupObject,
+                )?
+                .value
+            }
+        })
     }
 }
 
@@ -217,9 +297,11 @@ mod tests {
     fn run(func: AggregateFunc, values: Vec<Value<'static>>) -> Value<'static> {
         let mut accumulator = Accumulator::new(func, false, Collation::Binary);
         for value in values {
-            accumulator.step(&[value], TextEncoding::Utf8);
+            accumulator
+                .step(&[value], &[false], TextEncoding::Utf8)
+                .expect("the aggregate accepts the value");
         }
-        accumulator.finish()
+        accumulator.finish().expect("the aggregate finishes").value
     }
 
     /// The five different answers to "there were no rows".
@@ -297,9 +379,14 @@ mod tests {
             Value::Integer(2)
         );
         let mut star = Accumulator::new(AggregateFunc::Count, false, Collation::Binary);
-        star.step(&[], TextEncoding::Utf8);
-        star.step(&[], TextEncoding::Utf8);
-        assert_same!(star.finish(), Value::Integer(2));
+        star.step(&[], &[], TextEncoding::Utf8)
+            .expect("the aggregate accepts the row");
+        star.step(&[], &[], TextEncoding::Utf8)
+            .expect("the aggregate accepts the row");
+        assert_same!(
+            star.finish().expect("the aggregate finishes").value,
+            Value::Integer(2)
+        );
     }
 
     /// `DISTINCT` treats two NULLs as the same value, which ordinary equality
@@ -313,9 +400,14 @@ mod tests {
             Value::Integer(2),
             Value::Null,
         ] {
-            accumulator.step(&[value], TextEncoding::Utf8);
+            accumulator
+                .step(&[value], &[false], TextEncoding::Utf8)
+                .expect("the aggregate accepts the value");
         }
-        assert_same!(accumulator.finish(), Value::Integer(2));
+        assert_same!(
+            accumulator.finish().expect("the aggregate finishes").value,
+            Value::Integer(2)
+        );
     }
 
     /// `group_concat` joins with a comma unless told otherwise.
@@ -324,35 +416,49 @@ mod tests {
         let mut accumulator =
             Accumulator::new(AggregateFunc::GroupConcat, false, Collation::Binary);
         for value in [b"a".to_vec(), b"b".to_vec()] {
-            accumulator.step(
-                &[Value::owned_text(&value).expect("owned")],
-                TextEncoding::Utf8,
-            );
+            accumulator
+                .step(
+                    &[Value::owned_text(&value).expect("owned")],
+                    &[false],
+                    TextEncoding::Utf8,
+                )
+                .expect("the aggregate accepts the value");
         }
         assert_same!(
-            accumulator.finish(),
+            accumulator.finish().expect("the aggregate finishes").value,
             Value::owned_text(b"a,b").expect("owned")
         );
 
         let mut custom = Accumulator::new(AggregateFunc::GroupConcat, false, Collation::Binary);
         for value in [b"a".to_vec(), b"b".to_vec()] {
-            custom.step(
-                &[
-                    Value::owned_text(&value).expect("owned"),
-                    Value::owned_text(b"-").expect("owned"),
-                ],
-                TextEncoding::Utf8,
-            );
+            custom
+                .step(
+                    &[
+                        Value::owned_text(&value).expect("owned"),
+                        Value::owned_text(b"-").expect("owned"),
+                    ],
+                    &[false, false],
+                    TextEncoding::Utf8,
+                )
+                .expect("the aggregate accepts the value");
         }
-        assert_same!(custom.finish(), Value::owned_text(b"a-b").expect("owned"));
+        assert_same!(
+            custom.finish().expect("the aggregate finishes").value,
+            Value::owned_text(b"a-b").expect("owned")
+        );
     }
 
     /// Resetting starts a genuinely new group.
     #[test]
     fn reset_starts_a_new_group() {
         let mut accumulator = Accumulator::new(AggregateFunc::Sum, false, Collation::Binary);
-        accumulator.step(&[Value::Integer(5)], TextEncoding::Utf8);
+        accumulator
+            .step(&[Value::Integer(5)], &[false], TextEncoding::Utf8)
+            .expect("the aggregate accepts the value");
         accumulator.reset();
-        assert_same!(accumulator.finish(), Value::Null);
+        assert_same!(
+            accumulator.finish().expect("the aggregate finishes").value,
+            Value::Null
+        );
     }
 }

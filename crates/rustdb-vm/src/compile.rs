@@ -2700,6 +2700,7 @@ fn collect_subqueries(expr: &BoundExpr, into: &mut Vec<BoundExpr>) {
         }
         BoundExpr::Function { arguments, .. }
         | BoundExpr::Math { arguments, .. }
+        | BoundExpr::Json { arguments, .. }
         | BoundExpr::Time { arguments, .. } => {
             for argument in arguments {
                 collect_subqueries(argument, into);
@@ -3054,6 +3055,7 @@ fn children_of(expr: &BoundExpr) -> Vec<BoundExpr> {
         }
         BoundExpr::Function { arguments, .. }
         | BoundExpr::Math { arguments, .. }
+        | BoundExpr::Json { arguments, .. }
         | BoundExpr::Time { arguments, .. } => out.extend(arguments.iter().cloned()),
         BoundExpr::Subquery { operand, .. } => {
             if let Some(operand) = operand {
@@ -3686,6 +3688,29 @@ impl Compiler {
                         register as i32,
                     )
                     .with_p4(Operand::Math(*func)),
+                );
+                Ok(register)
+            }
+            BoundExpr::Json { func, arguments } => {
+                let block = self.register_block(arguments.len().max(1));
+                for (index, argument) in arguments.iter().enumerate() {
+                    let register = self.compile_expr(argument)?;
+                    self.emit(Instruction::new(
+                        Opcode::Copy,
+                        register as i32,
+                        block.saturating_add(index as u32) as i32,
+                        0,
+                    ));
+                }
+                let register = self.register();
+                self.emit(
+                    Instruction::new(
+                        Opcode::JsonCall,
+                        block as i32,
+                        arguments.len() as i32,
+                        register as i32,
+                    )
+                    .with_p4(Operand::Json(*func)),
                 );
                 Ok(register)
             }

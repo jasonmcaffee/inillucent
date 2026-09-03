@@ -108,6 +108,14 @@ pub enum AggregateFunc {
     Max,
     /// `group_concat(x[, sep])` and `string_agg(x, sep)`
     GroupConcat,
+    /// `json_group_array(x)`
+    JsonGroupArray,
+    /// `jsonb_group_array(x)`
+    JsonbGroupArray,
+    /// `json_group_object(label, x)`
+    JsonGroupObject,
+    /// `jsonb_group_object(label, x)`
+    JsonbGroupObject,
 }
 
 /// A date or time built-in.
@@ -334,6 +342,170 @@ pub fn lookup_window(folded: &[u8]) -> Option<WindowFunc> {
     Some(func)
 }
 
+/// A JSON built-in.
+///
+/// They are their own enum for the same reason the math functions are: they
+/// share a rule none of the others has. Every one of them can fail - a document
+/// that will not parse is an error and not a NULL - and every one of them cares
+/// whether its arguments are already JSON, which is a property of the value
+/// rather than of the expression. Folding them into `ScalarFunc` would push
+/// both facts onto eighty functions that have neither.
+///
+/// The `b` spellings return the binary format rather than text. They are
+/// separate identities rather than a flag because `json_extract` and
+/// `jsonb_extract` differ in more than their output: the text form answers a
+/// SQL value for a leaf and the binary form answers a document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JsonFunc {
+    /// `json(X)`
+    Json,
+    /// `jsonb(X)`
+    Jsonb,
+    /// `json_array(...)`
+    Array,
+    /// `jsonb_array(...)`
+    ArrayB,
+    /// `json_array_length(X[, P])`
+    ArrayLength,
+    /// `json_error_position(X)`
+    ErrorPosition,
+    /// `json_extract(X, P, ...)`
+    Extract,
+    /// `jsonb_extract(X, P, ...)`
+    ExtractB,
+    /// The `->` operator.
+    Arrow,
+    /// The `->>` operator.
+    ArrowShift,
+    /// `json_insert(X, P, V, ...)`
+    Insert,
+    /// `jsonb_insert(X, P, V, ...)`
+    InsertB,
+    /// `json_object(...)`
+    Object,
+    /// `jsonb_object(...)`
+    ObjectB,
+    /// `json_patch(T, P)`
+    Patch,
+    /// `jsonb_patch(T, P)`
+    PatchB,
+    /// `json_pretty(X[, indent])`
+    Pretty,
+    /// `json_remove(X, P, ...)`
+    Remove,
+    /// `jsonb_remove(X, P, ...)`
+    RemoveB,
+    /// `json_replace(X, P, V, ...)`
+    Replace,
+    /// `jsonb_replace(X, P, V, ...)`
+    ReplaceB,
+    /// `json_set(X, P, V, ...)`
+    Set,
+    /// `jsonb_set(X, P, V, ...)`
+    SetB,
+    /// `json_type(X[, P])`
+    Type,
+    /// `json_valid(X[, flags])`
+    Valid,
+    /// `json_quote(X)`
+    Quote,
+}
+
+impl JsonFunc {
+    /// Returns how many arguments the function takes, as `(least, most)`.
+    ///
+    /// `usize::MAX` as the upper bound means "any number", which the editing
+    /// functions further restrict to an odd count in
+    /// [`JsonFunc::arity_ok`] - a rule a pair of bounds cannot express.
+    pub fn arity(self) -> (usize, usize) {
+        match self {
+            JsonFunc::Json | JsonFunc::Jsonb | JsonFunc::ErrorPosition | JsonFunc::Quote => (1, 1),
+            JsonFunc::Array | JsonFunc::ArrayB | JsonFunc::Object | JsonFunc::ObjectB => {
+                (0, usize::MAX)
+            }
+            JsonFunc::ArrayLength | JsonFunc::Type | JsonFunc::Valid | JsonFunc::Pretty => (1, 2),
+            JsonFunc::Patch | JsonFunc::PatchB | JsonFunc::Arrow | JsonFunc::ArrowShift => (2, 2),
+            JsonFunc::Extract | JsonFunc::ExtractB | JsonFunc::Remove | JsonFunc::RemoveB => {
+                (2, usize::MAX)
+            }
+            JsonFunc::Insert
+            | JsonFunc::InsertB
+            | JsonFunc::Replace
+            | JsonFunc::ReplaceB
+            | JsonFunc::Set
+            | JsonFunc::SetB => (3, usize::MAX),
+        }
+    }
+
+    /// Returns whether an argument count is legal for this function.
+    pub fn arity_ok(self, count: usize) -> bool {
+        let (least, most) = self.arity();
+        if count < least || count > most {
+            return false;
+        }
+        match self {
+            // A path and a value go together, so the count past the document
+            // has to be even and the whole count therefore odd.
+            JsonFunc::Insert
+            | JsonFunc::InsertB
+            | JsonFunc::Replace
+            | JsonFunc::ReplaceB
+            | JsonFunc::Set
+            | JsonFunc::SetB => count % 2 == 1,
+            JsonFunc::Object | JsonFunc::ObjectB => count % 2 == 0,
+            _ => true,
+        }
+    }
+
+    /// Returns whether the function answers the binary format.
+    pub fn is_binary(self) -> bool {
+        matches!(
+            self,
+            JsonFunc::Jsonb
+                | JsonFunc::ArrayB
+                | JsonFunc::ExtractB
+                | JsonFunc::InsertB
+                | JsonFunc::ObjectB
+                | JsonFunc::PatchB
+                | JsonFunc::RemoveB
+                | JsonFunc::ReplaceB
+                | JsonFunc::SetB
+        )
+    }
+}
+
+/// Returns the JSON function a folded name spells.
+pub fn lookup_json(folded: &[u8]) -> Option<JsonFunc> {
+    let func = match folded {
+        b"json" => JsonFunc::Json,
+        b"jsonb" => JsonFunc::Jsonb,
+        b"json_array" => JsonFunc::Array,
+        b"jsonb_array" => JsonFunc::ArrayB,
+        b"json_array_length" => JsonFunc::ArrayLength,
+        b"json_error_position" => JsonFunc::ErrorPosition,
+        b"json_extract" => JsonFunc::Extract,
+        b"jsonb_extract" => JsonFunc::ExtractB,
+        b"json_insert" => JsonFunc::Insert,
+        b"jsonb_insert" => JsonFunc::InsertB,
+        b"json_object" => JsonFunc::Object,
+        b"jsonb_object" => JsonFunc::ObjectB,
+        b"json_patch" => JsonFunc::Patch,
+        b"jsonb_patch" => JsonFunc::PatchB,
+        b"json_pretty" => JsonFunc::Pretty,
+        b"json_remove" => JsonFunc::Remove,
+        b"jsonb_remove" => JsonFunc::RemoveB,
+        b"json_replace" => JsonFunc::Replace,
+        b"jsonb_replace" => JsonFunc::ReplaceB,
+        b"json_set" => JsonFunc::Set,
+        b"jsonb_set" => JsonFunc::SetB,
+        b"json_type" => JsonFunc::Type,
+        b"json_valid" => JsonFunc::Valid,
+        b"json_quote" => JsonFunc::Quote,
+        _ => return None,
+    };
+    Some(func)
+}
+
 /// Returns the scalar function a folded name spells.
 pub fn lookup_scalar(folded: &[u8]) -> Option<ScalarFunc> {
     let func = match folded {
@@ -393,6 +565,10 @@ pub fn lookup_aggregate(folded: &[u8]) -> Option<AggregateFunc> {
         b"total" => AggregateFunc::Total,
         b"avg" => AggregateFunc::Avg,
         b"group_concat" | b"string_agg" => AggregateFunc::GroupConcat,
+        b"json_group_array" => AggregateFunc::JsonGroupArray,
+        b"jsonb_group_array" => AggregateFunc::JsonbGroupArray,
+        b"json_group_object" => AggregateFunc::JsonGroupObject,
+        b"jsonb_group_object" => AggregateFunc::JsonbGroupObject,
         _ => return None,
     };
     Some(func)
@@ -442,6 +618,8 @@ pub fn aggregate_arity_ok(func: AggregateFunc, count: usize, star: bool) -> bool
         AggregateFunc::Sum | AggregateFunc::Total | AggregateFunc::Avg => !star && count == 1,
         AggregateFunc::Min | AggregateFunc::Max => !star && count == 1,
         AggregateFunc::GroupConcat => !star && (count == 1 || count == 2),
+        AggregateFunc::JsonGroupArray | AggregateFunc::JsonbGroupArray => !star && count == 1,
+        AggregateFunc::JsonGroupObject | AggregateFunc::JsonbGroupObject => !star && count == 2,
     }
 }
 
