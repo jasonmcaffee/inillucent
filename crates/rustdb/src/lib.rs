@@ -34,7 +34,7 @@
 use std::path::Path;
 
 pub use rustdb_base::{DbError, DbResult, ExtendedCode, PrimaryCode};
-pub use rustdb_session::ColumnMetadata;
+pub use rustdb_session::{Backup, BackupProgress, Blob, ColumnMetadata};
 pub use rustdb_value::{Affinity, Collation, StorageClass, TextEncoding, Value};
 
 use rustdb_session::{
@@ -71,6 +71,23 @@ impl Database {
     pub fn open_with(path: impl AsRef<Path>, options: OpenOptions) -> DbResult<Database> {
         Ok(Database {
             inner: SessionDatabase::open_with_options(path, options)?,
+        })
+    }
+
+    /// Opens a database from the bytes of one.
+    ///
+    /// The bytes are the file: what `Connection::serialize` produced, or what
+    /// any engine wrote to disk. Nothing is copied out of them into a temporary
+    /// file - the database lives in the memory they were read into, which is
+    /// what makes this worth having over writing them to a path.
+    pub fn deserialize(bytes: &[u8]) -> DbResult<Database> {
+        Database::deserialize_with(bytes, OpenOptions::default())
+    }
+
+    /// Opens a database from bytes with explicit options.
+    pub fn deserialize_with(bytes: &[u8], options: OpenOptions) -> DbResult<Database> {
+        Ok(Database {
+            inner: rustdb_session::Deserialized::open(bytes, options)?.into_database(),
         })
     }
 
@@ -119,6 +136,45 @@ impl Connection {
             rows.push(statement.row().to_vec());
         }
         Ok(rows)
+    }
+
+    /// Copies this connection's main database into another connection's.
+    ///
+    /// The whole thing, in one call. A caller that wants to copy a large
+    /// database a few pages at a time - so that the process stays responsive,
+    /// or so that it can be abandoned - uses `rustdb_session::Backup` directly.
+    pub fn backup_into(&self, destination: &Connection) -> DbResult<()> {
+        let mut backup = rustdb_session::Backup::begin(&self.inner, 0, &destination.inner, 0)?;
+        while !backup.step(64)?.is_complete() {}
+        backup.finish()
+    }
+
+    /// Returns the main database's bytes, exactly as the file holds them.
+    pub fn serialize(&self) -> DbResult<Vec<u8>> {
+        rustdb_session::serialize(&self.inner, 0)
+    }
+
+    /// Opens a handle on one value of one row.
+    ///
+    /// The handle reads and writes ranges of that value without materialising
+    /// it, which is what makes a hundred-megabyte blob usable: one byte of it
+    /// costs one page rather than the whole value.
+    pub fn blob_open<'connection>(
+        &'connection self,
+        database: &str,
+        table: &str,
+        column: &str,
+        rowid: i64,
+        writable: bool,
+    ) -> DbResult<rustdb_session::Blob<'connection>> {
+        rustdb_session::Blob::open(
+            &self.inner,
+            database.as_bytes(),
+            table.as_bytes(),
+            column.as_bytes(),
+            rowid,
+            writable,
+        )
     }
 
     /// Asks the running statement to stop at its next safe point.
