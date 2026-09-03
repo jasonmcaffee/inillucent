@@ -175,6 +175,8 @@ mod tests {
             triggers: Vec::new(),
             analysed_rows: None,
             checks: Vec::new(),
+            foreign_keys: Vec::new(),
+            foreign_key_triggers: Vec::new(),
         }
     }
 

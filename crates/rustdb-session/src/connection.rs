@@ -133,6 +133,19 @@ pub struct ConnectionState {
     pub transaction: Transaction,
     /// The journal mode and durability level in force.
     pub journal: JournalOptions,
+    /// Whether foreign keys are enforced.
+    ///
+    /// Off is the default, and it is SQLite's: a constraint that has never
+    /// been enforced on an existing database would start refusing writes the
+    /// application has always made, so the application asks for it.
+    pub foreign_keys: bool,
+    /// Whether every key's checks wait for the transaction to commit.
+    ///
+    /// `PRAGMA defer_foreign_keys` is a property of the transaction, not of
+    /// the connection: SQLite clears it at every commit and rollback, so a
+    /// statement that deferred a check cannot leave the next transaction
+    /// deferring them too.
+    pub defer_foreign_keys: bool,
 }
 
 /// What a statement needs from its connection.
@@ -256,6 +269,8 @@ impl Connection {
                 active: 0,
                 transaction: Transaction::new(),
                 journal,
+                foreign_keys: false,
+                defer_foreign_keys: false,
             }),
             catalog: RefCell::new(Arc::new(catalog)),
             interrupt: Arc::new(AtomicBool::new(false)),
@@ -483,6 +498,26 @@ impl Connection {
     /// Closes the level a statement ran inside, and commits when the statement
     /// was the whole transaction.
     pub fn end_statement(&self, access: Access, outcome: Outcome) -> DbResult<()> {
+        // A deferred foreign key is checked where the transaction ends, and the
+        // check is a query - so it has to run before the connection's state is
+        // borrowed for the commit. A violation turns the implicit commit into a
+        // rollback and is reported once everything is closed, which is what
+        // SQLite does and is why the error is carried rather than returned
+        // here: returning it now would leave the statement level open.
+        let mut outcome = outcome;
+        let mut deferred = None;
+        if self.write_statement_is_finishing(access, outcome)? {
+            if let Err(error) = self.settle_foreign_keys() {
+                deferred = Some(error);
+                outcome = Outcome::Rollback;
+            }
+        }
+        if deferred.is_none() && self.implicit_transaction_is_ending(access, outcome)? {
+            if let Err(error) = self.check_deferred_foreign_keys() {
+                deferred = Some(error);
+                outcome = Outcome::Rollback;
+            }
+        }
         let mut state = self
             .state
             .try_borrow_mut()
@@ -549,7 +584,117 @@ impl Connection {
                 state.transaction.end_read();
             }
         }
-        state.pager.end_read()
+        let released = state.pager.end_read();
+        drop(state);
+        if let Some(error) = deferred {
+            return Err(error);
+        }
+        released
+    }
+
+    /// Applies the actions of every key that can lead back to its own table.
+    ///
+    /// It runs after the statement rather than inside it: a key whose action
+    /// can fire itself cannot be inlined to a depth the data decides, so the
+    /// first level happens in the statement and the rest happens here, before
+    /// anything else can look.
+    ///
+    /// It runs after every write on a schema that has such a key, which is one
+    /// query per key per write. The alternative was to ask first whether the
+    /// statement changed anything, and the counter that would answer is only
+    /// published when the statement ends - which is after this. The cost is
+    /// paid only by a schema whose keys form a cycle.
+    ///
+    /// One divergence is worth naming: a row that was already orphaned before
+    /// enforcement was turned on is repaired by the next write rather than
+    /// left alone. It can only exist in a database that already violates the
+    /// constraint, and `PRAGMA foreign_key_check` is what finds those.
+    fn settle_foreign_keys(&self) -> DbResult<()> {
+        if !self.foreign_keys() || !self.has_cyclic_foreign_keys()? {
+            return Ok(());
+        }
+        crate::execute::sweep_cyclic_foreign_keys(self)
+    }
+
+    /// Reports whether any key can lead back to the table that declares it.
+    fn has_cyclic_foreign_keys(&self) -> DbResult<bool> {
+        use rustdb_sql::catalog_view::CatalogView;
+        let catalog = self.catalog()?;
+        Ok(catalog
+            .tables_of(0)
+            .iter()
+            .any(|table| table.foreign_keys.iter().any(|key| key.cyclic)))
+    }
+
+    /// Reports whether a write statement is finishing at the outermost level.
+    fn write_statement_is_finishing(&self, access: Access, outcome: Outcome) -> DbResult<bool> {
+        if !access.writes() || !matches!(outcome, Outcome::Done | Outcome::Fail) {
+            return Ok(false);
+        }
+        let state = self
+            .state
+            .try_borrow()
+            .map_err(|_| error::misuse("the connection is already running a statement"))?;
+        Ok(state.active == 1 && state.pager.is_writing())
+    }
+
+    /// Reports whether this statement's own transaction is about to commit.
+    ///
+    /// It is asked before the state is borrowed, because what happens next is
+    /// a query. The three facts are: this is the outermost statement, the
+    /// transaction is the statement's own rather than an explicit one, and it
+    /// wrote something.
+    fn implicit_transaction_is_ending(&self, access: Access, outcome: Outcome) -> DbResult<bool> {
+        if !access.writes() || !matches!(outcome, Outcome::Done | Outcome::Fail) {
+            return Ok(false);
+        }
+        let state = self
+            .state
+            .try_borrow()
+            .map_err(|_| error::misuse("the connection is already running a statement"))?;
+        Ok(state.active == 1
+            && !state.transaction.outlives_a_statement()
+            && state.pager.is_writing())
+    }
+
+    /// Checks every deferred foreign key, and reports the first violation.
+    ///
+    /// The check is a full one rather than a running count. SQLite keeps a
+    /// counter of outstanding violations and moves it as rows appear and
+    /// disappear; a counter that drifts by one reports a violation that is not
+    /// there, or misses one that is, and neither is visible until a commit
+    /// fails for a reason nobody can reproduce. Asking the question directly
+    /// costs a query per deferred key per commit and cannot drift.
+    pub fn check_deferred_foreign_keys(&self) -> DbResult<()> {
+        if !self.foreign_keys() || !self.has_deferred_foreign_keys()? {
+            return Ok(());
+        }
+        for query in crate::execute::violation_queries(self, None)? {
+            if crate::execute::internal_query(self, &query.sql)?.is_empty() {
+                continue;
+            }
+            return Err(error::DbError::new(rustdb_base::ExtendedCode(787))
+                .with_message("FOREIGN KEY constraint failed")
+                .with_detail(format!(
+                    "deferred key {} of {}",
+                    query.key,
+                    String::from_utf8_lossy(&query.child)
+                )));
+        }
+        Ok(())
+    }
+
+    /// Reports whether any key's checks are waiting for the commit.
+    fn has_deferred_foreign_keys(&self) -> DbResult<bool> {
+        if self.defer_foreign_keys() {
+            return Ok(true);
+        }
+        use rustdb_sql::catalog_view::CatalogView;
+        let catalog = self.catalog()?;
+        Ok(catalog
+            .tables_of(0)
+            .iter()
+            .any(|table| table.foreign_keys.iter().any(|key| key.is_deferred())))
     }
 
     /// Runs a closure with the pager, which a stepping statement does.
@@ -717,6 +862,47 @@ impl Connection {
         state.pager.checkpoint(mode)
     }
 
+    /// Reports whether foreign keys are enforced.
+    pub fn foreign_keys(&self) -> bool {
+        self.state
+            .try_borrow()
+            .is_ok_and(|state| state.foreign_keys)
+    }
+
+    /// Turns foreign-key enforcement on or off.
+    ///
+    /// SQLite refuses the change inside a transaction rather than applying it
+    /// half way through one, and so does this: a statement already bound
+    /// carries the constraints that were in force when it was bound.
+    pub fn set_foreign_keys(&self, enforced: bool) -> DbResult<bool> {
+        let mut state = self
+            .state
+            .try_borrow_mut()
+            .map_err(|_| error::misuse("the connection is running a statement"))?;
+        if state.transaction.state() != TransactionState::Autocommit {
+            return Ok(state.foreign_keys);
+        }
+        state.foreign_keys = enforced;
+        Ok(enforced)
+    }
+
+    /// Reports whether every key's checks wait for the commit.
+    pub fn defer_foreign_keys(&self) -> bool {
+        self.state
+            .try_borrow()
+            .is_ok_and(|state| state.defer_foreign_keys)
+    }
+
+    /// Defers every key's checks until the transaction commits.
+    pub fn set_defer_foreign_keys(&self, deferred: bool) -> DbResult<bool> {
+        let mut state = self
+            .state
+            .try_borrow_mut()
+            .map_err(|_| error::misuse("the connection is running a statement"))?;
+        state.defer_foreign_keys = deferred;
+        Ok(deferred)
+    }
+
     /// Reports whether the connection's database is in WAL mode.
     pub fn is_wal(&self) -> bool {
         self.state
@@ -797,6 +983,7 @@ impl Connection {
 
     /// Commits an explicit transaction.
     pub fn commit_transaction(&self) -> DbResult<()> {
+        self.check_deferred_foreign_keys()?;
         let mut state = self
             .state
             .try_borrow_mut()
@@ -829,6 +1016,7 @@ impl Connection {
             let _ = state.pager.rollback();
         }
         state.transaction.finish(committed.is_ok());
+        state.defer_foreign_keys = false;
         let released = state.pager.end_read();
         if committed.is_err() {
             self.fire_rollback_hook();

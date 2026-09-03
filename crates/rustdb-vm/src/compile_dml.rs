@@ -62,6 +62,8 @@ pub(crate) mod codes {
     pub const MISMATCH: i32 = 20;
     /// `SQLITE_CONSTRAINT_TRIGGER`, which `RAISE()` reports.
     pub const TRIGGER: i32 = 1811;
+    /// `SQLITE_CONSTRAINT_FOREIGNKEY`.
+    pub const FOREIGN_KEY: i32 = 787;
 }
 
 /// How a conflict is reported back to the session.
@@ -402,6 +404,38 @@ impl Compiler {
         Ok(())
     }
 
+    /// Deletes the row a `REPLACE` is making room for, firing the foreign-key
+    /// actions its removal implies.
+    ///
+    /// The row is read before it goes, because that copy is what `OLD` means to
+    /// the actions - a cascade has to know which children to take with it, and
+    /// after the delete the cursor has nothing left to read.
+    fn emit_replace_delete(&mut self, writer: &Writer, table: &TableInfo) -> DbResult<()> {
+        if self.replace_triggers.is_empty() {
+            return self.emit_delete_current(writer, table);
+        }
+        let rowid = self.register();
+        if table.without_rowid {
+            self.emit(Instruction::new(Opcode::Null, 0, rowid as i32, 0));
+        } else {
+            self.emit(Instruction::new(
+                Opcode::Rowid,
+                writer.table as i32,
+                rowid as i32,
+                0,
+            ));
+        }
+        let old = self.read_row_image(writer, table, rowid);
+        let triggers = core::mem::take(&mut self.replace_triggers);
+        let before = self.emit_triggers(&triggers, TriggerTime::Before, table, Some(&old), None);
+        let deleted = before.and_then(|()| self.emit_delete_current(writer, table));
+        let after = deleted.and_then(|()| {
+            self.emit_triggers(&triggers, TriggerTime::After, table, Some(&old), None)
+        });
+        self.replace_triggers = triggers;
+        after
+    }
+
     /// Builds the record a `WITHOUT ROWID` table's entry is, from its columns.
     ///
     /// The same permutation `emit_write_row` uses, because a delete has to
@@ -662,7 +696,7 @@ impl Compiler {
                         -1,
                         victim as i32,
                     ));
-                    self.emit_delete_current(writer, table)?;
+                    self.emit_replace_delete(writer, table)?;
                     self.patch_here(absent);
                 }
                 Resolution::Upsert => {
@@ -748,7 +782,7 @@ impl Compiler {
                 skip.push(label);
             }
             Resolution::Replace => {
-                self.emit_delete_current(writer, table)?;
+                self.emit_replace_delete(writer, table)?;
             }
             Resolution::Upsert => {
                 let Some(clause) = upsert else {
@@ -1516,6 +1550,29 @@ impl Compiler {
     /// trigger body inlines one of these into the middle of another statement,
     /// and the only difference between the two cases is the program header.
     fn emit_insert_body(&mut self, insert: &BoundInsert) -> DbResult<()> {
+        let outer = core::mem::replace(&mut self.replace_triggers, insert.replace_triggers.clone());
+        let outcome = self.emit_insert_body_inner(insert);
+        self.replace_triggers = outer;
+        outcome
+    }
+
+    /// The body of [`Compiler::emit_insert_body`], with the replace actions in
+    /// place.
+    fn emit_insert_body_inner(&mut self, insert: &BoundInsert) -> DbResult<()> {
+        let mut exprs: Vec<&BoundExpr> = Vec::new();
+        exprs.extend(insert.checks.iter().map(|check| &check.expr));
+        exprs.extend(insert.returning.iter().map(|column| &column.expr));
+        for column in &insert.columns {
+            if let ColumnSource::Expr(expr) | ColumnSource::Generated(expr) = column {
+                exprs.push(expr);
+            }
+        }
+        if let BoundInsertSource::Values(rows) = &insert.source {
+            for row in rows {
+                exprs.extend(row.iter());
+            }
+        }
+        self.open_subqueries_in(&exprs)?;
         if insert.table.kind == TableKind::View {
             return self.emit_view_insert(insert);
         }
@@ -1589,6 +1646,12 @@ impl Compiler {
 
     /// Emits a whole `DELETE`: the rowid pass, then the row pass.
     fn emit_delete_body(&mut self, delete: &BoundDelete) -> DbResult<()> {
+        let mut exprs: Vec<&BoundExpr> = Vec::new();
+        exprs.extend(delete.filter.as_ref());
+        exprs.extend(delete.limit.as_ref());
+        exprs.extend(delete.offset.as_ref());
+        exprs.extend(delete.returning.iter().map(|column| &column.expr));
+        self.open_subqueries_in(&exprs)?;
         if let Some(rows) = delete.view_rows.as_ref() {
             return self.emit_view_write(&delete.table, rows, &delete.triggers, None);
         }
@@ -1652,6 +1715,14 @@ impl Compiler {
 
     /// Emits a whole `UPDATE`: the rowid pass, then the row pass.
     fn emit_update_body(&mut self, update: &BoundUpdate) -> DbResult<()> {
+        let mut exprs: Vec<&BoundExpr> = Vec::new();
+        exprs.extend(update.filter.as_ref());
+        exprs.extend(update.limit.as_ref());
+        exprs.extend(update.offset.as_ref());
+        exprs.extend(update.assignments.iter().map(|set| &set.value));
+        exprs.extend(update.checks.iter().map(|check| &check.expr));
+        exprs.extend(update.returning.iter().map(|column| &column.expr));
+        self.open_subqueries_in(&exprs)?;
         if let Some(rows) = update.view_rows.as_ref() {
             return self.emit_view_write(
                 &update.table,

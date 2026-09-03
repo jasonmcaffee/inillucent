@@ -568,7 +568,8 @@ fn compile_sql(
     let limits = connection.limits().clone();
     let parsed = parse_next_statement(sql, 0, &limits)?;
     let catalog = connection.catalog()?;
-    let mut binder = Binder::new(catalog.as_ref(), &parsed.ast, authorizer);
+    let mut binder = Binder::new(catalog.as_ref(), &parsed.ast, authorizer)
+        .with_foreign_keys(connection.foreign_keys(), connection.defer_foreign_keys());
     if let rustdb_sql::ast::Statement::Explain { query_plan, inner } = &parsed.statement {
         return explain(
             connection,

@@ -47,6 +47,13 @@ pub struct Compiler {
     pub(crate) ephemerals: u32,
     pub(crate) aggregates: u32,
     pub(crate) substitutions: Vec<(BoundExpr, u32)>,
+    /// The foreign-key actions a `REPLACE` fires for the row it removes.
+    ///
+    /// It is compiler state rather than an argument because the two places a
+    /// REPLACE deletes from are four calls below the statement that knows
+    /// them, and threading one more parameter through those would say less
+    /// than this does.
+    pub(crate) replace_triggers: Vec<rustdb_sql::dml::BoundTrigger>,
     /// Where a `RAISE(IGNORE)` in the trigger body being compiled jumps to.
     ///
     /// `IGNORE` abandons the rest of the trigger program and, for a BEFORE
@@ -132,6 +139,7 @@ impl Compiler {
             ephemerals: 0,
             aggregates: 0,
             substitutions: Vec::new(),
+            replace_triggers: Vec::new(),
             ignore_jumps: Vec::new(),
             firing_depth: 0,
             source_cursors: Vec::new(),
@@ -638,6 +646,25 @@ impl Compiler {
     fn open_value_subqueries(&mut self, plan: &PhysicalPlan) -> DbResult<()> {
         let mut found = Vec::new();
         collect_subqueries_of_plan(plan, &mut found);
+        self.open_found_subqueries(found)
+    }
+
+    /// Opens a store for every subquery in a list of expressions.
+    ///
+    /// A write statement has no query block to walk: its `WHERE`, its
+    /// assignments and its `CHECK`s hang off the statement itself, so it hands
+    /// the expressions over directly. Without this, `DELETE FROM t WHERE id IN
+    /// (SELECT ...)` compiles a probe against a store nobody opened.
+    pub(crate) fn open_subqueries_in(&mut self, exprs: &[&BoundExpr]) -> DbResult<()> {
+        let mut found = Vec::new();
+        for expr in exprs {
+            collect_subqueries(expr, &mut found);
+        }
+        self.open_found_subqueries(found)
+    }
+
+    /// Opens the stores for subqueries that have already been collected.
+    fn open_found_subqueries(&mut self, found: Vec<BoundExpr>) -> DbResult<()> {
         for expr in found {
             let BoundExpr::Subquery {
                 id,
@@ -654,7 +681,7 @@ impl Compiler {
                 continue;
             }
             let nested = plan_select((*block).clone());
-            let correlated = !block.correlations.is_empty();
+            let correlated = !block.correlations.is_empty() || !self.substitutions.is_empty();
             let store = self.ephemeral();
             let width = block.columns.len().max(1);
             // Only an `IN` set is ever probed, so only an `IN` set pays for an
@@ -3282,7 +3309,12 @@ impl Compiler {
     /// is never read; `IGNORE` jumps instead, to a label the enclosing write
     /// patches once it knows where the row ends. Returning a register anyway is
     /// what lets RAISE sit in a result column like any other expression.
-    fn emit_raise(&mut self, action: RaiseAction, message: Option<&[u8]>) -> DbResult<u32> {
+    fn emit_raise(
+        &mut self,
+        action: RaiseAction,
+        message: Option<&[u8]>,
+        foreign_key: bool,
+    ) -> DbResult<u32> {
         let register = self.register();
         self.emit(Instruction::new(Opcode::Null, 0, register as i32, 0));
         match action {
@@ -3297,10 +3329,18 @@ impl Compiler {
                     _ => ConflictAction::Abort,
                 };
                 let text = message.unwrap_or_default().to_vec();
+                // Which constraint asked is the only difference between the
+                // two: a foreign key reports its own code, and a written
+                // RAISE reports the trigger one.
+                let code = if foreign_key {
+                    crate::compile_dml::codes::FOREIGN_KEY
+                } else {
+                    crate::compile_dml::codes::TRIGGER
+                };
                 self.emit(
                     Instruction::new(
                         Opcode::HaltError,
-                        crate::compile_dml::codes::TRIGGER,
+                        code,
                         0,
                         crate::compile_dml::conflict_code(conflict),
                     )
@@ -3321,7 +3361,11 @@ impl Compiler {
             return Ok(*register);
         }
         match expr {
-            BoundExpr::Raise { action, message } => self.emit_raise(*action, message.as_deref()),
+            BoundExpr::Raise {
+                action,
+                message,
+                foreign_key,
+            } => self.emit_raise(*action, message.as_deref(), *foreign_key),
             BoundExpr::Null => Ok(self.emit_load(Operand::Null)),
             BoundExpr::Integer(value) => Ok(self.emit_load(Operand::Integer(*value))),
             BoundExpr::Real(value) => Ok(self.emit_load(Operand::Real(*value))),
