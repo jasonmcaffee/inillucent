@@ -137,6 +137,13 @@ pub struct BoundInsert {
     pub returning: Vec<BoundResultColumn>,
     /// The triggers this write fires, in schema order.
     pub triggers: Vec<BoundTrigger>,
+    /// The foreign-key actions a `REPLACE` fires for the row it removes.
+    ///
+    /// A `REPLACE` that deletes a row to make room for another is a delete,
+    /// and the keys pointing at that row have to be told. Written `DELETE`
+    /// triggers are *not* fired - that is SQLite's rule with its default
+    /// `recursive_triggers = off` - so these are only the ones a key implies.
+    pub replace_triggers: Vec<BoundTrigger>,
 }
 
 /// A bound `ON CONFLICT ... DO UPDATE` clause.
@@ -225,6 +232,63 @@ pub struct BoundDelete {
     pub view_rows: Option<Box<BoundSelect>>,
 }
 
+/// Reports whether an `INSERT` can resolve a conflict by deleting a row.
+///
+/// Either the statement said so, or one of the table's own constraints did.
+/// It is asked before the delete's keys are bound, because binding them costs
+/// a parse and a bind each and the answer is no for almost every insert.
+fn can_replace(table: &TableInfo, statement: Option<ConflictAction>) -> bool {
+    if statement == Some(ConflictAction::Replace) {
+        return true;
+    }
+    table
+        .indexes
+        .iter()
+        .any(|index| index.conflict == Some(ConflictAction::Replace))
+        || table
+            .columns
+            .iter()
+            .any(|column| column.not_null_conflict == Some(ConflictAction::Replace))
+}
+
+/// Reports whether an unusable key's fault is one this write has to report.
+///
+/// A child's write reports a missing parent; a parent's write reports a
+/// mismatch. A statement that touches neither side of the broken key does not
+/// have to care, which is why the fault is carried rather than raised when the
+/// schema was read.
+fn fault_applies(
+    planned: &crate::catalog_view::ForeignKeyTrigger,
+    event: &TriggerEventInfo,
+) -> bool {
+    match event {
+        TriggerEventInfo::Insert => planned.is_check,
+        TriggerEventInfo::Delete => !planned.is_check,
+        TriggerEventInfo::Update(_) => true,
+    }
+}
+
+/// Marks a synthesised body's aborts as the foreign key's rather than a
+/// trigger's.
+///
+/// The generated text says `RAISE(ABORT, ...)` because that is what a person
+/// would have written, and what a person writes reports
+/// `SQLITE_CONSTRAINT_TRIGGER`. A foreign key reports its own code, and the
+/// only difference between the two is which constraint asked - so it is set
+/// here, on the bodies this binder generated, and nowhere else.
+fn report_as_foreign_key(trigger: &mut BoundTrigger) {
+    for statement in &mut trigger.body {
+        let BoundTriggerStatement::Select(select) = statement else {
+            continue;
+        };
+        for column in &mut select.columns {
+            if let BoundExpr::Raise { foreign_key, .. } = &mut column.expr {
+                *foreign_key = true;
+            }
+        }
+    }
+}
+
 /// Returns whether a view has an `INSTEAD OF` trigger for one event.
 fn has_instead_of(table: &TableInfo, event: &TriggerEventInfo) -> bool {
     table
@@ -268,7 +332,13 @@ impl<'a> Binder<'a> {
         let checks = self.bind_checks(&table)?;
         let upsert = self.bind_upsert(&table, insert)?;
         let returning = self.bind_returning(&insert.returning)?;
-        let triggers = self.bind_triggers(&table, TriggerEventInfo::Insert, &[])?;
+        let mut triggers = self.bind_triggers(&table, TriggerEventInfo::Insert, &[])?;
+        triggers.extend(self.bind_foreign_keys(&table, TriggerEventInfo::Insert, &[])?);
+        let replace_triggers = if can_replace(&table, insert.on_conflict) {
+            self.bind_foreign_keys(&table, TriggerEventInfo::Delete, &[])?
+        } else {
+            Vec::new()
+        };
         let sequence_root = if table.autoincrement {
             self.catalog
                 .find_table(None, b"sqlite_sequence")
@@ -289,6 +359,7 @@ impl<'a> Binder<'a> {
             sequence_root,
             returning,
             triggers,
+            replace_triggers,
         })
     }
 
@@ -351,8 +422,13 @@ impl<'a> Binder<'a> {
             .filter_map(|assignment| table.column(assignment.column))
             .map(|column| column.folded.clone())
             .collect();
-        let triggers =
+        let mut triggers =
             self.bind_triggers(&table, TriggerEventInfo::Update(Vec::new()), &changed)?;
+        triggers.extend(self.bind_foreign_keys(
+            &table,
+            TriggerEventInfo::Update(Vec::new()),
+            &changed,
+        )?);
         let view_rows = self.view_rows(&table, filter.clone());
         Ok(BoundUpdate {
             table,
@@ -392,7 +468,8 @@ impl<'a> Binder<'a> {
             Some(expr) => Some(self.bind_expr(expr)?),
             None => None,
         };
-        let triggers = self.bind_triggers(&table, TriggerEventInfo::Delete, &[])?;
+        let mut triggers = self.bind_triggers(&table, TriggerEventInfo::Delete, &[])?;
+        triggers.extend(self.bind_foreign_keys(&table, TriggerEventInfo::Delete, &[])?);
         let view_rows = self.view_rows(&table, filter.clone());
         Ok(BoundDelete {
             table,
@@ -468,6 +545,101 @@ impl<'a> Binder<'a> {
             self.firing.pop();
             bound.push(result?);
         }
+        Ok(bound)
+    }
+
+    /// Binds the triggers this write's foreign keys imply.
+    ///
+    /// The triggers themselves were generated when the schema was read - both
+    /// directions of every key, since nothing in the file records the reverse
+    /// one. What is decided here is which of them apply: whether keys are
+    /// enforced at all, whether a check waits for the commit, and whether this
+    /// particular write touches the columns a check is about.
+    fn bind_foreign_keys(
+        &mut self,
+        table: &TableInfo,
+        event: TriggerEventInfo,
+        changed: &[Vec<u8>],
+    ) -> Result<Vec<BoundTrigger>, ParseError> {
+        if !self.foreign_keys || table.kind != TableKind::Table {
+            return Ok(Vec::new());
+        }
+        let catalog = self.catalog;
+        let database = catalog.database_name(table.database).to_vec();
+        let Some(live) = catalog.find_table(Some(database.as_slice()), &table.folded) else {
+            return Ok(Vec::new());
+        };
+        let mut bound = Vec::new();
+        for planned in &live.foreign_key_triggers {
+            if planned.is_check && (planned.deferred || self.defer_foreign_keys) {
+                continue;
+            }
+            let Some(trigger) = planned.trigger.as_ref() else {
+                if fault_applies(planned, &event) {
+                    return Err(crate::bind::schema_refused(
+                        String::from_utf8_lossy(&planned.fault).into_owned(),
+                        Span::default(),
+                    ));
+                }
+                continue;
+            };
+            if !trigger.fires_for(&event, changed) {
+                continue;
+            }
+            if self.firing_foreign_keys.contains(&trigger.folded) {
+                continue;
+            }
+            bound.push(self.bind_foreign_key_trigger(table, trigger, &event)?);
+        }
+        Ok(bound)
+    }
+
+    /// Binds one synthesised trigger, inside the recursion budget.
+    ///
+    /// The budget is spent here rather than where the trigger was generated,
+    /// because what a cascade costs is the *bound* body: one copy per level it
+    /// can reach, and it can reach itself only when the keys form a cycle.
+    fn bind_foreign_key_trigger(
+        &mut self,
+        table: &TableInfo,
+        trigger: &'a TriggerInfo,
+        event: &TriggerEventInfo,
+    ) -> Result<BoundTrigger, ParseError> {
+        if self.foreign_key_depth >= crate::bind::MAX_FOREIGN_KEY_DEPTH
+            || self.foreign_key_budget == 0
+        {
+            return Err(refused(
+                "too many levels of foreign key recursion",
+                Span::default(),
+            ));
+        }
+        self.foreign_key_depth = self.foreign_key_depth.saturating_add(1);
+        self.foreign_key_budget = self.foreign_key_budget.saturating_sub(1);
+        self.firing_foreign_keys.push(trigger.folded.clone());
+        let (old, new) = match event {
+            TriggerEventInfo::Insert => (false, true),
+            TriggerEventInfo::Delete => (true, false),
+            TriggerEventInfo::Update(_) => (true, true),
+        };
+        let saved_ast = self.ast;
+        let saved_scopes = core::mem::take(&mut self.scopes);
+        let saved_aliases = self.row_aliases.take();
+        let saved_target = self.view_target.take();
+        self.ast = &trigger.ast;
+        self.row_aliases = Some(crate::bind::RowAliases {
+            table: table.clone(),
+            old,
+            new,
+        });
+        let result = self.bind_trigger_body(trigger);
+        self.ast = saved_ast;
+        self.scopes = saved_scopes;
+        self.row_aliases = saved_aliases;
+        self.view_target = saved_target;
+        self.foreign_key_depth = self.foreign_key_depth.saturating_sub(1);
+        self.firing_foreign_keys.pop();
+        let mut bound = result?;
+        report_as_foreign_key(&mut bound);
         Ok(bound)
     }
 

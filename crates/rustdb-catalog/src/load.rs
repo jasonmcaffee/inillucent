@@ -17,11 +17,12 @@
 use rustdb_base::limits::Limits;
 use rustdb_base::{error, DbError, DbResult};
 use rustdb_sql::ast::{
-    ColumnConstraint, CreateTableBody, Expr, IndexedColumn, Statement, TableConstraint,
+    ColumnConstraint, CreateTableBody, Expr, IndexedColumn, ReferentialAction, Statement,
+    TableConstraint,
 };
 use rustdb_sql::catalog_view::{
-    CheckInfo, ColumnInfo, IndexColumnInfo, IndexInfo, IndexOrigin, TableInfo, TableKind,
-    TriggerEventInfo, TriggerInfo,
+    CheckInfo, ColumnInfo, ForeignKeyInfo, IndexColumnInfo, IndexInfo, IndexOrigin, TableInfo,
+    TableKind, TriggerEventInfo, TriggerInfo,
 };
 use rustdb_sql::parser::parse_next_statement;
 use rustdb_sql::Ast;
@@ -62,6 +63,10 @@ pub fn load_database_catalog(
         attach_trigger(&mut tables, row)?;
     }
     load_statistics(pager, &mut tables)?;
+    // The keys are planned once the whole database is in hand: a key records
+    // only the child's side, so the parent's side is found by asking every
+    // table what it points at, and that cannot be answered one table at a time.
+    rustdb_sql::foreign_key::plan_schema(&mut tables, name, &Limits::default());
     tables.extend(schema_table_aliases(database));
     Ok(DatabaseCatalog {
         name: name.to_vec(),
@@ -206,6 +211,8 @@ fn table_from_row(row: &SchemaObject, database: usize) -> DbResult<TableInfo> {
             analysed_rows: None,
             indexes: Vec::new(),
             checks: Vec::new(),
+            foreign_keys: Vec::new(),
+            foreign_key_triggers: Vec::new(),
         });
     }
     if sql.is_empty() {
@@ -228,6 +235,8 @@ fn table_from_row(row: &SchemaObject, database: usize) -> DbResult<TableInfo> {
             analysed_rows: None,
             indexes: Vec::new(),
             checks: Vec::new(),
+            foreign_keys: Vec::new(),
+            foreign_key_triggers: Vec::new(),
         });
     }
     let mut table = table_from_create_sql(sql.as_bytes(), database, root)
@@ -355,6 +364,8 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
                 analysed_rows: None,
                 indexes: Vec::new(),
                 checks: Vec::new(),
+                foreign_keys: Vec::new(),
+                foreign_key_triggers: Vec::new(),
             });
         }
         return Err(error::corrupt("schema SQL is not a CREATE TABLE"));
@@ -386,11 +397,14 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
         analysed_rows: None,
         indexes: Vec::new(),
         checks: Vec::new(),
+        foreign_keys: Vec::new(),
+        foreign_key_triggers: Vec::new(),
     };
     for column in columns {
         info.columns.push(column_info(sql, &parsed.ast, column));
     }
     info.checks = collect_checks(sql, &parsed.ast, columns, constraints);
+    info.foreign_keys = collect_foreign_keys(&info, &parsed.ast, columns, constraints);
     apply_table_constraints(&mut info, &parsed.ast, constraints);
     if info.without_rowid {
         // Every primary-key column of a WITHOUT ROWID table is implicitly NOT
@@ -523,6 +537,102 @@ fn collect_checks(
         }
     }
     checks
+}
+
+/// Collects the foreign keys a table declares, column clauses first.
+///
+/// The order matters and is SQLite's: `PRAGMA foreign_key_list` numbers them,
+/// and a constraint with no name of its own is identified by that number in
+/// every diagnostic about it.
+///
+/// A clause naming no parent columns keeps naming none. Resolving it to the
+/// parent's primary key needs the parent, and the catalog reads one table at a
+/// time - the parent may come later in the file, or may not exist at all,
+/// which stays legal until something writes a row.
+fn collect_foreign_keys(
+    info: &TableInfo,
+    ast: &Ast,
+    columns: &[rustdb_sql::ast::ColumnDef],
+    constraints: &[(Option<rustdb_sql::ast::NameId>, TableConstraint)],
+) -> Vec<ForeignKeyInfo> {
+    let mut keys = Vec::new();
+    for (position, column) in columns.iter().enumerate() {
+        for (_, constraint) in &column.constraints {
+            let ColumnConstraint::References(clause) = constraint else {
+                continue;
+            };
+            let Ok(position) = u16::try_from(position) else {
+                continue;
+            };
+            if let Some(key) = foreign_key(ast, clause, vec![position], keys.len()) {
+                keys.push(key);
+            }
+        }
+    }
+    for (_, constraint) in constraints {
+        let TableConstraint::ForeignKey {
+            columns: names,
+            clause,
+        } = constraint
+        else {
+            continue;
+        };
+        let mut positions = Vec::with_capacity(names.len());
+        for name in names {
+            let Some(position) = info.column_position(ast.folded(*name)) else {
+                positions.clear();
+                break;
+            };
+            positions.push(position);
+        }
+        if positions.is_empty() {
+            continue;
+        }
+        if let Some(key) = foreign_key(ast, clause, positions, keys.len()) {
+            keys.push(key);
+        }
+    }
+    keys
+}
+
+/// Builds one foreign key from its clause.
+fn foreign_key(
+    ast: &Ast,
+    clause: &rustdb_sql::ast::ForeignKeyClause,
+    columns: Vec<u16>,
+    id: usize,
+) -> Option<ForeignKeyInfo> {
+    let parent = ast.text(clause.table).to_vec();
+    let mut on_delete = ReferentialAction::NoAction;
+    let mut on_update = ReferentialAction::NoAction;
+    let mut match_clause = Vec::new();
+    for action in &clause.actions {
+        match action {
+            rustdb_sql::ast::ForeignKeyAction::OnDelete(action) => on_delete = *action,
+            rustdb_sql::ast::ForeignKeyAction::OnUpdate(action) => on_update = *action,
+            rustdb_sql::ast::ForeignKeyAction::Match(name) => {
+                match_clause = ast.text(*name).to_vec()
+            }
+        }
+    }
+    Some(ForeignKeyInfo {
+        id: u32::try_from(id).ok()?,
+        columns,
+        parent_folded: parent.to_ascii_lowercase(),
+        parent,
+        parent_columns: clause
+            .columns
+            .iter()
+            .map(|name| ast.text(*name).to_vec())
+            .collect(),
+        on_delete,
+        on_update,
+        match_clause,
+        deferrable: clause.deferrable.unwrap_or(false),
+        initially_deferred: clause.initially_deferred,
+        // Filled in once the whole schema is in hand, by plan_schema.
+        cyclic: false,
+    })
 }
 
 /// Applies table-level `PRIMARY KEY` and `NOT NULL` implications.

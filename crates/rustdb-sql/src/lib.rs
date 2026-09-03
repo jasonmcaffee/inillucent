@@ -49,6 +49,7 @@ pub mod cost;
 pub mod diagnostic;
 pub mod directive;
 pub mod dml;
+pub mod foreign_key;
 pub mod function;
 pub mod keyword;
 pub mod lexer;

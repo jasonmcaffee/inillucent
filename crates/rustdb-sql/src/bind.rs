@@ -112,6 +112,12 @@ pub enum BoundExpr {
         action: crate::ast::RaiseAction,
         /// The message, when the action takes one.
         message: Option<Vec<u8>>,
+        /// Whether the abort is a foreign key's rather than a trigger's.
+        ///
+        /// The two are the same expression and report different codes, and
+        /// nothing in the SQL says which: the foreign-key bodies the binder
+        /// synthesises set it, and `RAISE` as anybody writes it does not.
+        foreign_key: bool,
     },
     /// A column of a FROM term.
     Column {
@@ -967,6 +973,30 @@ pub struct Binder<'a> {
     /// that produces `OLD` be built out of the very same term, with no
     /// re-pointing of anything already bound.
     pub(crate) view_target: Option<usize>,
+    /// Whether foreign keys are enforced, which `PRAGMA foreign_keys` decides.
+    pub(crate) foreign_keys: bool,
+    /// Whether every key's checks wait for the commit, which
+    /// `PRAGMA defer_foreign_keys` decides for the transaction.
+    pub(crate) defer_foreign_keys: bool,
+    /// The synthesised triggers whose bodies are being bound.
+    ///
+    /// A key that can lead back to its own table would inline its body once per
+    /// level the data happens to be deep, which is not knowable when the
+    /// statement is compiled. Re-entry stops here instead, and the connection
+    /// repeats the action after the statement until nothing changes.
+    pub(crate) firing_foreign_keys: Vec<Vec<u8>>,
+    /// How many foreign-key action bodies are currently being inlined.
+    pub(crate) foreign_key_depth: usize,
+    /// How many more foreign-key action bodies may be inlined at all.
+    ///
+    /// A foreign key's action is inlined rather than called, so a cascade that
+    /// can reach the same table again - a tree with `ON DELETE CASCADE` on its
+    /// parent column is the everyday case - needs the body once per level it
+    /// can reach. An acyclic set of keys never touches this: each level is a
+    /// different table and the inlining stops on its own. A cycle spends the
+    /// budget, and running out is reported rather than silently leaving the
+    /// rows the cascade did not reach.
+    pub(crate) foreign_key_budget: usize,
     /// The folded names of the triggers whose bodies are being bound, outermost
     /// first.
     ///
@@ -1025,6 +1055,22 @@ pub const NEW_SOURCE: usize = usize::MAX - 2;
 /// the compiler ran out of memory.
 pub const MAX_TRIGGER_DEPTH: usize = 32;
 
+/// How deep one chain of foreign-key actions may go.
+///
+/// A cascade reaches this only when the keys form a cycle, which in practice
+/// means a table whose parent column points at itself. SQLite's own limit is a
+/// run-time recursion depth; this one is a compile-time inlining depth, and it
+/// is smaller for that reason.
+pub const MAX_FOREIGN_KEY_DEPTH: usize = 64;
+
+/// How many foreign-key action bodies one statement may inline in total.
+///
+/// The depth limit alone is not enough: a table with three keys that all cycle
+/// would inline three bodies per level, so the limit that matters is the total.
+/// A chain, which is what a self-referencing tree produces, spends one per
+/// level and reaches the depth limit first.
+pub const MAX_FOREIGN_KEY_STATEMENTS: usize = 256;
+
 /// The row a trigger body's `OLD` and `NEW` name.
 ///
 /// Which of the two are in scope is decided by the event: an INSERT has no
@@ -1073,7 +1119,23 @@ impl<'a> Binder<'a> {
             row_aliases: None,
             view_target: None,
             firing: Vec::new(),
+            foreign_keys: false,
+            defer_foreign_keys: false,
+            firing_foreign_keys: Vec::new(),
+            foreign_key_depth: 0,
+            foreign_key_budget: MAX_FOREIGN_KEY_STATEMENTS,
         }
+    }
+
+    /// Turns foreign-key enforcement on, and says whether it is deferred.
+    ///
+    /// Off is the default, and it is SQLite's: a constraint that has never been
+    /// enforced on an existing database would refuse writes the application has
+    /// always made, so the application asks for it.
+    pub fn with_foreign_keys(mut self, enforced: bool, deferred: bool) -> Binder<'a> {
+        self.foreign_keys = enforced;
+        self.defer_foreign_keys = deferred;
+        self
     }
 
     /// Returns what the bound statement depends on.
@@ -2843,6 +2905,7 @@ impl<'a> Binder<'a> {
                 Ok(BoundExpr::Raise {
                     action: action.clone(),
                     message: message.clone(),
+                    foreign_key: false,
                 })
             }
         }
@@ -3375,6 +3438,11 @@ pub(crate) fn refused(detail: impl Into<String>, span: Span) -> ParseError {
         },
         span,
     )
+}
+
+/// Returns a refusal that carries its own wording.
+pub(crate) fn schema_refused(message: impl Into<String>, span: Span) -> ParseError {
+    ParseError::new(ParseErrorKind::Refused(message.into()), span)
 }
 
 /// Returns an "unsupported construct" failure.

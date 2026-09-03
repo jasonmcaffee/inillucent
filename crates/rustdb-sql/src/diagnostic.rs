@@ -32,6 +32,12 @@ pub enum ParseErrorKind {
     },
     /// A construct the grammar has but this phase does not implement.
     Unsupported(&'static str),
+    /// A statement the schema refuses, in the reference's own wording.
+    ///
+    /// It is not a syntax error and does not read as one: the statement parsed
+    /// and the schema will not have it, which is what `foreign key mismatch`
+    /// says.
+    Refused(String),
     /// A hard limit was exceeded.
     LimitExceeded(&'static str),
 }
@@ -78,6 +84,7 @@ impl ParseError {
                 }
             }
             ParseErrorKind::Unsupported(what) => format!("unsupported: {what}"),
+            ParseErrorKind::Refused(message) => message.clone(),
             ParseErrorKind::LimitExceeded(what) => format!("{what} exceeded"),
         }
     }

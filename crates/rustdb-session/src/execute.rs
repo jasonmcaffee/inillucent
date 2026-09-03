@@ -1128,6 +1128,26 @@ fn pragma(
             let pages = connection.with_state(|state| state.pager.page_count())?;
             Ok(vec![vec![Value::Integer(i64::from(pages))]])
         }
+        b"foreign_keys" => {
+            if let Some(argument) = argument {
+                connection.set_foreign_keys(argument_boolean(argument))?;
+                return Ok(Vec::new());
+            }
+            Ok(vec![vec![Value::Integer(i64::from(
+                connection.foreign_keys(),
+            ))]])
+        }
+        b"defer_foreign_keys" => {
+            if let Some(argument) = argument {
+                connection.set_defer_foreign_keys(argument_boolean(argument))?;
+                return Ok(Vec::new());
+            }
+            Ok(vec![vec![Value::Integer(i64::from(
+                connection.defer_foreign_keys(),
+            ))]])
+        }
+        b"foreign_key_list" => foreign_key_list(connection, argument),
+        b"foreign_key_check" => foreign_key_check(connection, argument),
         b"wal_checkpoint" => wal_checkpoint(connection, argument),
         b"wal_autocheckpoint" => {
             if let Some(argument) = argument {
@@ -1183,6 +1203,232 @@ fn wal_checkpoint(
     ]])
 }
 
+/// Reads a pragma argument as the boolean SQLite accepts.
+///
+/// `ON`, `TRUE`, `YES` and any non-zero number are on; everything else is off,
+/// which is SQLite's rule and is why `PRAGMA foreign_keys = maybe` turns them
+/// off rather than failing.
+fn argument_boolean(argument: &PragmaArgument) -> bool {
+    let text = argument_text(argument).to_ascii_lowercase();
+    match text.as_str() {
+        "on" | "true" | "yes" => true,
+        "off" | "false" | "no" => false,
+        _ => text.parse::<i64>().is_ok_and(|value| value != 0),
+    }
+}
+
+/// Reports the foreign keys one table declares.
+fn foreign_key_list(
+    connection: &Connection,
+    argument: Option<&PragmaArgument>,
+) -> DbResult<DirectiveRows> {
+    use rustdb_sql::catalog_view::CatalogView;
+    let Some(argument) = argument else {
+        return Ok(Vec::new());
+    };
+    let wanted = argument_text(argument).to_ascii_lowercase();
+    let catalog = connection.catalog()?;
+    let Some(table) = catalog.find_table(None, wanted.as_bytes()) else {
+        return Ok(Vec::new());
+    };
+    let mut rows = Vec::new();
+    for key in &table.foreign_keys {
+        let parent = catalog.find_table(None, &key.parent_folded);
+        let targets = parent
+            .and_then(|parent| rustdb_sql::foreign_key::parent_columns(key, parent))
+            .unwrap_or_default();
+        for (position, column) in key.columns.iter().enumerate() {
+            let from = table
+                .columns
+                .get(usize::from(*column))
+                .map(|info| info.name.clone())
+                .unwrap_or_default();
+            let to = targets.get(position).cloned();
+            rows.push(vec![
+                Value::Integer(i64::from(key.id)),
+                Value::Integer(position as i64),
+                Value::owned_text(&key.parent)?,
+                Value::owned_text(&from)?,
+                match to.as_deref() {
+                    Some(name) => Value::owned_text(name)?,
+                    None => Value::Null,
+                },
+                Value::owned_text(action_name(key.on_update).as_bytes())?,
+                Value::owned_text(action_name(key.on_delete).as_bytes())?,
+                Value::owned_text(if key.match_clause.is_empty() {
+                    b"NONE"
+                } else {
+                    key.match_clause.as_slice()
+                })?,
+            ]);
+        }
+    }
+    Ok(rows)
+}
+
+/// Reports every child row whose foreign key has no parent.
+///
+/// The check is written as a query and run through the ordinary planner, so it
+/// uses whatever index the child has on its key rather than a second scan
+/// written by hand - and so that what it reports is what a `SELECT` would say.
+fn foreign_key_check(
+    connection: &Connection,
+    argument: Option<&PragmaArgument>,
+) -> DbResult<DirectiveRows> {
+    let wanted = argument.map(|argument| argument_text(argument).to_ascii_lowercase());
+    let catalog = connection.catalog()?;
+    let mut rows = Vec::new();
+    for query in violation_queries(connection, wanted.as_deref())? {
+        for row in internal_query(connection, &query.sql)? {
+            rows.push(vec![
+                Value::owned_text(&query.child)?,
+                row.first().cloned().unwrap_or(Value::Null),
+                Value::owned_text(&query.parent)?,
+                Value::Integer(i64::from(query.key)),
+            ]);
+        }
+    }
+    let _ = catalog;
+    Ok(rows)
+}
+
+/// One foreign key's check, and what to report about the rows it finds.
+pub struct ViolationQuery {
+    /// The query that finds the offending child rows.
+    pub sql: String,
+    /// The child table's name.
+    pub child: Vec<u8>,
+    /// The parent table's name.
+    pub parent: Vec<u8>,
+    /// The key's position in the child table.
+    pub key: u32,
+}
+
+/// Builds the checks for one table, or for every table when none is named.
+///
+/// `deferred_only` is what a commit asks for: an immediate key was checked when
+/// the row was written and re-checking it would be work with a known answer.
+pub fn violation_queries(
+    connection: &Connection,
+    only: Option<&str>,
+) -> DbResult<Vec<ViolationQuery>> {
+    use rustdb_sql::catalog_view::{CatalogView, TableKind};
+    let catalog = connection.catalog()?;
+    let database = catalog.database_name(0).to_vec();
+    let mut queries = Vec::new();
+    for child in catalog.tables_of(0) {
+        if child.kind != TableKind::Table || child.folded.starts_with(b"sqlite_") {
+            continue;
+        }
+        if only.is_some_and(|name| child.folded != name.as_bytes()) {
+            continue;
+        }
+        for key in &child.foreign_keys {
+            let Some(parent) = catalog.find_table(Some(&database), &key.parent_folded) else {
+                continue;
+            };
+            let Some(sql) = rustdb_sql::foreign_key::violation_query(child, parent, key, &database)
+            else {
+                continue;
+            };
+            queries.push(ViolationQuery {
+                sql,
+                child: child.name.clone(),
+                parent: parent.name.clone(),
+                key: key.id,
+            });
+        }
+    }
+    Ok(queries)
+}
+
+/// Applies the actions of every key that can lead back to its own table.
+///
+/// A cyclic action - a tree with `ON DELETE CASCADE` on its parent column is
+/// the case - cannot be inlined into the statement that fires it, because the
+/// body would have to appear once per level the data happens to be deep and
+/// that is not known when the statement is compiled. The trigger takes the
+/// first level; this takes what it leaves, by repeating the action until
+/// nothing changes.
+///
+/// It terminates because every pass either changes a row or stops, and a pass
+/// only ever removes a row or clears a key. The bound is there for the case
+/// nobody has thought of rather than for one anybody has seen.
+pub fn sweep_cyclic_foreign_keys(connection: &Connection) -> DbResult<()> {
+    use rustdb_sql::catalog_view::{CatalogView, TableKind};
+    let catalog = connection.catalog()?;
+    let database = catalog.database_name(0).to_vec();
+    let mut statements = Vec::new();
+    for child in catalog.tables_of(0) {
+        if child.kind != TableKind::Table {
+            continue;
+        }
+        for key in &child.foreign_keys {
+            if !key.cyclic {
+                continue;
+            }
+            let Some(parent) = catalog.find_table(Some(&database), &key.parent_folded) else {
+                continue;
+            };
+            if let Some(sql) =
+                rustdb_sql::foreign_key::sweep_statement(child, parent, key, &database)
+            {
+                statements.push(sql);
+            }
+        }
+    }
+    if statements.is_empty() {
+        return Ok(());
+    }
+    for _ in 0..MAX_SWEEP_PASSES {
+        // The running total is what says whether a pass did anything: it moves
+        // as each statement finishes, so comparing it across a pass asks
+        // exactly "did any of these change a row" without the sweep having to
+        // count them itself.
+        let before = connection.counters().total_changes;
+        for sql in &statements {
+            internal_query(connection, sql)?;
+        }
+        if connection.counters().total_changes == before {
+            return Ok(());
+        }
+    }
+    Err(misuse(
+        "a foreign key's action did not settle; the schema may have a cycle that cannot resolve",
+    ))
+}
+
+/// How many times the cyclic sweep repeats before it gives up.
+///
+/// One pass per level of the deepest chain in the data. A tree deeper than this
+/// is a tree with a million levels, which is a different problem.
+const MAX_SWEEP_PASSES: usize = 1_000_000;
+
+/// Runs one internal query and returns its rows.
+///
+/// The engine asking itself a question. A foreign-key check *is* a query, and
+/// writing it as one means the planner, the indexes and the collations are the
+/// ones a user's query would get rather than a second implementation of them.
+pub fn internal_query(connection: &Connection, sql: &str) -> DbResult<Vec<Vec<Value<'static>>>> {
+    let (mut statement, _) = crate::statement::Statement::prepare(connection, sql.as_bytes())?;
+    let mut rows = Vec::new();
+    while statement.step()? {
+        rows.push(statement.row().to_vec());
+    }
+    Ok(rows)
+}
+
+/// Returns the spelling `PRAGMA foreign_key_list` reports for an action.
+fn action_name(action: rustdb_sql::ast::ReferentialAction) -> &'static str {
+    match action {
+        rustdb_sql::ast::ReferentialAction::NoAction => "NO ACTION",
+        rustdb_sql::ast::ReferentialAction::Restrict => "RESTRICT",
+        rustdb_sql::ast::ReferentialAction::SetNull => "SET NULL",
+        rustdb_sql::ast::ReferentialAction::SetDefault => "SET DEFAULT",
+        rustdb_sql::ast::ReferentialAction::Cascade => "CASCADE",
+    }
+}
+
 /// Returns a pragma argument as an integer.
 fn argument_integer(argument: &PragmaArgument) -> i64 {
     match argument {
@@ -1209,6 +1455,24 @@ pub fn pragma_columns(name: &[u8]) -> Vec<Vec<u8>> {
         b"page_count" => vec![b"page_count".to_vec()],
         b"wal_checkpoint" => vec![b"busy".to_vec(), b"log".to_vec(), b"checkpointed".to_vec()],
         b"wal_autocheckpoint" => vec![b"wal_autocheckpoint".to_vec()],
+        b"foreign_keys" => vec![b"foreign_keys".to_vec()],
+        b"defer_foreign_keys" => vec![b"defer_foreign_keys".to_vec()],
+        b"foreign_key_list" => vec![
+            b"id".to_vec(),
+            b"seq".to_vec(),
+            b"table".to_vec(),
+            b"from".to_vec(),
+            b"to".to_vec(),
+            b"on_update".to_vec(),
+            b"on_delete".to_vec(),
+            b"match".to_vec(),
+        ],
+        b"foreign_key_check" => vec![
+            b"table".to_vec(),
+            b"rowid".to_vec(),
+            b"parent".to_vec(),
+            b"fkid".to_vec(),
+        ],
         _ => Vec::new(),
     }
 }

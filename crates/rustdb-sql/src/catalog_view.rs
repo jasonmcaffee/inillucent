@@ -10,7 +10,7 @@
 //! binder can be compiled and tested against a hand-built schema with no file
 //! anywhere near it.
 
-use crate::ast::ConflictAction;
+use crate::ast::{ConflictAction, ReferentialAction};
 use rustdb_value::Affinity;
 
 /// Where an index came from, which decides whether it can be dropped and how
@@ -235,6 +235,23 @@ pub struct TableInfo {
     pub triggers: Vec<TriggerInfo>,
     /// How many rows `ANALYZE` counted, when it has run.
     pub analysed_rows: Option<i64>,
+    /// The triggers this table's writes fire because of a foreign key.
+    ///
+    /// Both directions are here, because both are things that happen when
+    /// *this* table is written: the checks its own keys need when a row
+    /// arrives, and the actions the keys pointing at it need when a row
+    /// leaves. They are built once when the schema is read rather than once
+    /// per statement, because generating and parsing them is the same work
+    /// every time and the schema is what decides them.
+    pub foreign_key_triggers: Vec<ForeignKeyTrigger>,
+    /// Every foreign key declared on this table, in declaration order.
+    ///
+    /// The child's side of the relationship, which is the side the table
+    /// carries. Finding the keys that point *at* a table means walking the
+    /// database's tables and asking each one, which is what
+    /// [`CatalogView::foreign_keys_referencing`] does - and is what SQLite does
+    /// too, because nothing in the file records the reverse direction.
+    pub foreign_keys: Vec<ForeignKeyInfo>,
     /// Every `CHECK` constraint, as the source text it was written as.
     ///
     /// The text rather than a bound expression, for the same reason
@@ -243,6 +260,79 @@ pub struct TableInfo {
     /// way through would be a second source of truth beside the `CREATE`
     /// statement the file actually stores.
     pub checks: Vec<CheckInfo>,
+}
+
+/// One trigger a foreign key implies, or the reason there is not one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForeignKeyTrigger {
+    /// Whether it refuses a write rather than repairing one.
+    ///
+    /// Only a check can be deferred. An action is what the constraint *does*,
+    /// and doing it at commit time instead would leave the rows in between
+    /// visible to the statements that come after.
+    pub is_check: bool,
+    /// Whether the key it enforces was declared `INITIALLY DEFERRED`.
+    pub deferred: bool,
+    /// The trigger, or `None` when the key cannot be enforced at all.
+    pub trigger: Option<TriggerInfo>,
+    /// Why it cannot be, when it cannot.
+    ///
+    /// A key whose parent table is missing, or whose parent columns are not a
+    /// key of the parent, is legal to declare: SQLite reports it when
+    /// something writes, not when the schema is read, so that a schema can be
+    /// loaded in any order. The message is kept here and reported then.
+    pub fault: Vec<u8>,
+}
+
+/// One foreign key, from the child table that declares it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForeignKeyInfo {
+    /// The constraint's position in its table, counting from zero.
+    ///
+    /// `PRAGMA foreign_key_list` reports it, and it is how a diagnostic names
+    /// a constraint that was written without a name - which is most of them.
+    pub id: u32,
+    /// The child columns, in the order they were written.
+    pub columns: Vec<u16>,
+    /// The parent table's name as written.
+    pub parent: Vec<u8>,
+    /// The parent table's folded name.
+    pub parent_folded: Vec<u8>,
+    /// The parent columns as written, or empty when the clause named none.
+    ///
+    /// Empty means the parent's primary key, and it stays empty rather than
+    /// being resolved here: the catalog builds one table at a time and the
+    /// parent may not have been read yet - or may not exist, which is legal
+    /// until something writes a row.
+    pub parent_columns: Vec<Vec<u8>>,
+    /// What happens to the child rows when a parent row is deleted.
+    pub on_delete: ReferentialAction,
+    /// What happens to the child rows when a parent key changes.
+    pub on_update: ReferentialAction,
+    /// The `MATCH` clause as written, which SQLite parses and ignores.
+    pub match_clause: Vec<u8>,
+    /// Whether `DEFERRABLE` was written.
+    pub deferrable: bool,
+    /// Whether `INITIALLY DEFERRED` was written.
+    pub initially_deferred: bool,
+    /// Whether following this key can lead back to the table that declares it.
+    ///
+    /// A tree with `ON DELETE CASCADE` on its parent column is the everyday
+    /// case, and it is the one case an action cannot simply be inlined into
+    /// the statement that fires it: the body would have to appear once per
+    /// level the data happens to be deep, which is not known when the
+    /// statement is compiled. A cyclic key's action is applied by repeating it
+    /// until nothing changes instead, and this is what says which keys need
+    /// that.
+    pub cyclic: bool,
+}
+
+impl ForeignKeyInfo {
+    /// Reports whether the constraint's checks wait until the transaction
+    /// commits.
+    pub fn is_deferred(&self) -> bool {
+        self.deferrable && self.initially_deferred
+    }
 }
 
 /// One `CHECK` constraint.
@@ -294,6 +384,8 @@ impl TableInfo {
             autoincrement: false,
             kind: TableKind::Subquery,
             create_sql: Vec::new(),
+            foreign_keys: Vec::new(),
+            foreign_key_triggers: Vec::new(),
             view: None,
             triggers: Vec::new(),
             analysed_rows: None,
@@ -648,6 +740,8 @@ mod tests {
             triggers: Vec::new(),
             analysed_rows: None,
             checks: Vec::new(),
+            foreign_keys: Vec::new(),
+            foreign_key_triggers: Vec::new(),
         }
     }
 
