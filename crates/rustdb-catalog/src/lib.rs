@@ -1,14 +1,47 @@
-//! Schema objects, the schema loader, DDL catalog mutation, cookies, invalidation, and statistics.
+//! Schema objects, the schema loader, cookies, invalidation, and statistics.
 //!
-//! Invariant: the catalog maps schema objects to storage roots only through transaction interfaces.
+//! Invariant: a catalog is a *snapshot*. It is built inside one read
+//! transaction, from one consistent set of pages, and never changes afterwards;
+//! a schema change produces a new snapshot with a new generation rather than
+//! mutating the one prepared statements are holding. That is what makes
+//! invalidation a comparison of two numbers.
 //!
-//! Status: this crate is a declared layer of the engine graph described in
-//! `tasks/task-1781-sqlite-feature-parity-tdd.md`. Its behaviour lands in
-//! phase 6: catalog, binder, expression VM, and read-only SELECT; task-1782 creates it so that the dependency-direction contract is
-//! enforced from the first commit rather than retrofitted once edges exist.
+//! The catalog is where `sqlite_schema`'s stored CREATE text becomes something
+//! the binder can resolve names against. It parses that text with the
+//! first-party parser — the same one that parsed the user's statement, so a
+//! schema SQLite wrote and a statement the user typed are read by one grammar —
+//! and derives affinity, collation, the rowid alias and the primary key from
+//! the declaration rather than from any side table.
+//!
+//! Module map:
+//!
+//! - [`load`] - reading `sqlite_schema` and building the snapshot;
+//! - [`snapshot`] - the snapshot itself and the view the binder sees.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+#![deny(clippy::indexing_slicing)]
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used)]
+#![deny(clippy::panic)]
+// Tests assert on exact values and are allowed to fail loudly; the bans above
+// exist to keep panics and wrapping out of paths that read persistent bytes.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_used
+    )
+)]
 
-/// The implementation phase that fills this crate in, as named by the TDD.
-pub const IMPLEMENTATION_PHASE: &str = "phase 6: catalog, binder, expression VM, and read-only SELECT";
+pub mod load;
+pub mod snapshot;
+
+pub use load::{load_database_catalog, table_from_create_sql};
+pub use snapshot::{CatalogSnapshot, DatabaseCatalog};
+
+/// The implementation phase that filled this crate in, as named by the TDD.
+pub const IMPLEMENTATION_PHASE: &str =
+    "phase 6: catalog, binder, expression VM, and read-only SELECT";

@@ -8,4 +8,3 @@ description = "First-party lexer, parser, AST, binder, semantic rewrites, and lo
 [dependencies]
 rustdb-base = { workspace = true }
 rustdb-value = { workspace = true }
-rustdb-catalog = { workspace = true }

@@ -11,6 +11,19 @@ rustdb-value = { workspace = true }
 rustdb-storage = { workspace = true }
 rustdb-vfs = { workspace = true }
 rustdb-sim = { workspace = true }
+rustdb-sql = { workspace = true }
+rustdb-catalog = { workspace = true }
+rustdb-vm = { workspace = true }
+rustdb-session = { workspace = true }
+rustdb = { workspace = true }
+
+[[bin]]
+name = "rustdb-sqlperf"
+path = "src/bin/sqlperf.rs"
+
+[[bin]]
+name = "rustdb-slt"
+path = "src/bin/slt.rs"
 
 [[bin]]
 name = "rustdb-manifest"

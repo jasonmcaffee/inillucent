@@ -56,11 +56,38 @@ kind = "production"
 layer = 3
 may_depend_on = ["rustdb-base", "rustdb-vfs", "rustdb-storage"]
 
+# `rustdb-sql` sitting *below* `rustdb-catalog` is a refinement made in
+# task-1785. The TDD places the binder in `rustdb-sql` and says it is pure over
+# an immutable catalog snapshot, and it also says the catalog parses the CREATE
+# SQL stored in `sqlite_schema` with the first-party parser. Both cannot be true
+# of two crates in the same direction. The parser is the more fundamental of the
+# two - a catalog cannot be built without it, but a parse does not need a
+# catalog - so the parser, the AST and the binder live below, and the binder is
+# written against `rustdb_sql::catalog_view::CatalogView` rather than against
+# the concrete snapshot. `rustdb-catalog` implements that view over what it
+# reads from the file. The binder is still pure and still performs no I/O; it
+# now says so in its types.
+[[crate]]
+name = "rustdb-sql"
+kind = "production"
+layer = 4
+may_depend_on = ["rustdb-base", "rustdb-value"]
+
+# The catalog reads `sqlite_schema` through the pager. Phase 7 introduces
+# `rustdb-transaction` between them; until it exists, a read transaction is a
+# pager read transaction, and the edge to storage is the same downward edge the
+# transaction crate will later carry.
 [[crate]]
 name = "rustdb-catalog"
 kind = "production"
-layer = 4
-may_depend_on = ["rustdb-base", "rustdb-value", "rustdb-transaction"]
+layer = 5
+may_depend_on = [
+  "rustdb-base",
+  "rustdb-value",
+  "rustdb-storage",
+  "rustdb-transaction",
+  "rustdb-sql",
+]
 
 [[crate]]
 name = "rustdb-ext"
@@ -69,18 +96,13 @@ layer = 4
 may_depend_on = ["rustdb-base", "rustdb-value"]
 
 [[crate]]
-name = "rustdb-sql"
-kind = "production"
-layer = 5
-may_depend_on = ["rustdb-base", "rustdb-value", "rustdb-catalog"]
-
-[[crate]]
 name = "rustdb-vm"
 kind = "production"
-layer = 5
+layer = 6
 may_depend_on = [
   "rustdb-base",
   "rustdb-value",
+  "rustdb-sql",
   "rustdb-catalog",
   "rustdb-storage",
   "rustdb-transaction",
@@ -90,33 +112,42 @@ may_depend_on = [
 [[crate]]
 name = "rustdb-session"
 kind = "production"
-layer = 6
+layer = 7
 may_depend_on = [
   "rustdb-base",
   "rustdb-value",
   "rustdb-vfs",
+  "rustdb-storage",
   "rustdb-catalog",
   "rustdb-transaction",
   "rustdb-sql",
   "rustdb-vm",
 ]
 
+# The facade names `CatalogSnapshot` in one accessor, so it depends on the
+# crate that defines it. The edge is downward and adds nothing the facade could
+# not already reach through the session; naming the type is the point.
 [[crate]]
 name = "rustdb"
 kind = "production"
-layer = 7
-may_depend_on = ["rustdb-base", "rustdb-value", "rustdb-session"]
+layer = 8
+may_depend_on = [
+  "rustdb-base",
+  "rustdb-value",
+  "rustdb-catalog",
+  "rustdb-session",
+]
 
 [[crate]]
 name = "rustdb-capi"
 kind = "production"
-layer = 8
+layer = 9
 may_depend_on = ["rustdb"]
 
 [[crate]]
 name = "rustdb-cli"
 kind = "production"
-layer = 8
+layer = 9
 may_depend_on = ["rustdb"]
 
 [[crate]]
@@ -134,25 +165,30 @@ may_depend_on = ["rustdb-base", "rustdb-ext", "rustdb-core"]
 [[crate]]
 name = "rustdb-sim"
 kind = "test-only"
-layer = 9
+layer = 10
 may_depend_on = ["rustdb-base", "rustdb-vfs"]
 
 [[crate]]
 name = "rustdb-compat"
 kind = "test-only"
-layer = 10
+layer = 11
 may_depend_on = [
   "rustdb-base",
   "rustdb-value",
   "rustdb-storage",
   "rustdb-vfs",
   "rustdb-sim",
+  "rustdb-sql",
+  "rustdb-catalog",
+  "rustdb-vm",
+  "rustdb-session",
+  "rustdb",
 ]
 
 [[crate]]
 name = "rustdb-bench"
 kind = "test-only"
-layer = 10
+layer = 11
 may_depend_on = ["rustdb-core"]
 
 # ---------------------------------------------------------------------------

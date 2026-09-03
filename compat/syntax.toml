@@ -1,0 +1,689 @@
+# The syntax obligation register.
+#
+# One row per syntax diagram SQLite publishes on lang.html and the pages it
+# links. A row carries a positive example that must parse, an optional negative
+# example that must be refused, and — where rust-db deliberately does not
+# implement a production yet — the reason and the phase that will.
+#
+# The point of the file is that a production with no row cannot be forgotten:
+# `syntax.every_published_production_has_evidence` fails on a row with no
+# example, and `rustdb-syntax` renders the whole register into
+# compat/syntax-report.md so the coverage is readable rather than inferred.
+#
+# `status` is one of:
+#   parsed   - the parser accepts the production and the AST records it
+#   omitted  - deliberately not accepted; `reason` says why and `phase` says when
+
+schema_version = 1
+reference = "sqlite-3.53.4"
+source = "https://sqlite.org/lang.html"
+
+# ---------------------------------------------------------------------------
+# Statements
+# ---------------------------------------------------------------------------
+
+[[production]]
+name = "alter-table-stmt"
+source = "https://sqlite.org/lang_altertable.html"
+status = "parsed"
+positive = [
+  "ALTER TABLE t RENAME TO u",
+  "ALTER TABLE main.t RENAME COLUMN a TO b",
+  "ALTER TABLE t RENAME a TO b",
+  "ALTER TABLE t ADD COLUMN c TEXT NOT NULL DEFAULT 'x'",
+  "ALTER TABLE t ADD c",
+  "ALTER TABLE t DROP COLUMN c",
+  "ALTER TABLE t DROP c",
+]
+negative = ["ALTER TABLE t", "ALTER INDEX i RENAME TO j"]
+
+[[production]]
+name = "analyze-stmt"
+source = "https://sqlite.org/lang_analyze.html"
+status = "parsed"
+positive = ["ANALYZE", "ANALYZE main", "ANALYZE main.t"]
+negative = ["ANALYZE main."]
+
+[[production]]
+name = "attach-stmt"
+source = "https://sqlite.org/lang_attach.html"
+status = "parsed"
+positive = [
+  "ATTACH DATABASE 'other.db' AS other",
+  "ATTACH 'other.db' AS other",
+  "ATTACH ? AS other KEY 'secret'",
+]
+negative = ["ATTACH 'other.db'"]
+
+[[production]]
+name = "begin-stmt"
+source = "https://sqlite.org/lang_transaction.html"
+status = "parsed"
+positive = [
+  "BEGIN",
+  "BEGIN TRANSACTION",
+  "BEGIN DEFERRED",
+  "BEGIN IMMEDIATE TRANSACTION",
+  "BEGIN EXCLUSIVE",
+]
+negative = ["BEGIN SOMETHING"]
+
+[[production]]
+name = "commit-stmt"
+source = "https://sqlite.org/lang_transaction.html"
+status = "parsed"
+positive = ["COMMIT", "COMMIT TRANSACTION", "END", "END TRANSACTION"]
+negative = []
+
+[[production]]
+name = "create-index-stmt"
+source = "https://sqlite.org/lang_createindex.html"
+status = "parsed"
+positive = [
+  "CREATE INDEX i ON t (a)",
+  "CREATE UNIQUE INDEX IF NOT EXISTS main.i ON t (a COLLATE NOCASE DESC, b ASC)",
+  "CREATE INDEX i ON t (a + b) WHERE a IS NOT NULL",
+]
+negative = ["CREATE INDEX i ON t", "CREATE INDEX ON t (a)"]
+
+[[production]]
+name = "create-table-stmt"
+source = "https://sqlite.org/lang_createtable.html"
+status = "parsed"
+positive = [
+  "CREATE TABLE t (a)",
+  "CREATE TEMP TABLE IF NOT EXISTS main.t (a INTEGER PRIMARY KEY AUTOINCREMENT, b TEXT)",
+  "CREATE TABLE t (a, b, PRIMARY KEY (a, b)) WITHOUT ROWID",
+  "CREATE TABLE t (a INT, b TEXT) STRICT",
+  "CREATE TABLE t (a, b) WITHOUT ROWID, STRICT",
+  "CREATE TABLE t AS SELECT 1",
+]
+negative = ["CREATE TABLE t", "CREATE TABLE t ()"]
+
+[[production]]
+name = "create-trigger-stmt"
+source = "https://sqlite.org/lang_createtrigger.html"
+status = "parsed"
+positive = [
+  "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END",
+  "CREATE TEMP TRIGGER IF NOT EXISTS main.tr BEFORE UPDATE OF a, b ON t FOR EACH ROW WHEN new.a > 1 BEGIN UPDATE t SET a = 1; DELETE FROM t; END",
+  "CREATE TRIGGER tr INSTEAD OF DELETE ON v BEGIN SELECT RAISE(ABORT, 'no'); END",
+]
+negative = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN END"]
+
+[[production]]
+name = "create-view-stmt"
+source = "https://sqlite.org/lang_createview.html"
+status = "parsed"
+positive = [
+  "CREATE VIEW v AS SELECT 1",
+  "CREATE TEMP VIEW IF NOT EXISTS main.v (x, y) AS SELECT 1, 2",
+]
+negative = ["CREATE VIEW v"]
+
+[[production]]
+name = "create-virtual-table-stmt"
+source = "https://sqlite.org/lang_createvtab.html"
+status = "parsed"
+positive = [
+  "CREATE VIRTUAL TABLE t USING fts5(body)",
+  "CREATE VIRTUAL TABLE IF NOT EXISTS main.t USING rtree(id, minx, maxx)",
+  "CREATE VIRTUAL TABLE t USING mod",
+]
+negative = ["CREATE VIRTUAL TABLE t"]
+
+[[production]]
+name = "delete-stmt"
+source = "https://sqlite.org/lang_delete.html"
+status = "parsed"
+positive = [
+  "DELETE FROM t",
+  "DELETE FROM main.t AS x WHERE x.a = 1",
+  "WITH c AS (SELECT 1) DELETE FROM t WHERE a IN (SELECT 1 FROM c)",
+  "DELETE FROM t RETURNING *",
+]
+negative = ["DELETE t", "DELETE FROM"]
+
+[[production]]
+name = "delete-stmt-limited"
+source = "https://sqlite.org/lang_delete.html"
+status = "parsed"
+oracle = "the reference build is not compiled with SQLITE_ENABLE_UPDATE_DELETE_LIMIT"
+positive = [
+  "DELETE FROM t WHERE a > 1 ORDER BY a LIMIT 5",
+  "DELETE FROM t LIMIT 5 OFFSET 2",
+]
+negative = []
+
+[[production]]
+name = "detach-stmt"
+source = "https://sqlite.org/lang_detach.html"
+status = "parsed"
+positive = ["DETACH other", "DETACH DATABASE other"]
+negative = ["DETACH"]
+
+[[production]]
+name = "drop-index-stmt"
+source = "https://sqlite.org/lang_dropindex.html"
+status = "parsed"
+positive = ["DROP INDEX i", "DROP INDEX IF EXISTS main.i"]
+negative = ["DROP INDEX"]
+
+[[production]]
+name = "drop-table-stmt"
+source = "https://sqlite.org/lang_droptable.html"
+status = "parsed"
+positive = ["DROP TABLE t", "DROP TABLE IF EXISTS main.t"]
+negative = ["DROP TABLE"]
+
+[[production]]
+name = "drop-trigger-stmt"
+source = "https://sqlite.org/lang_droptrigger.html"
+status = "parsed"
+positive = ["DROP TRIGGER tr", "DROP TRIGGER IF EXISTS main.tr"]
+negative = ["DROP TRIGGER"]
+
+[[production]]
+name = "drop-view-stmt"
+source = "https://sqlite.org/lang_dropview.html"
+status = "parsed"
+positive = ["DROP VIEW v", "DROP VIEW IF EXISTS main.v"]
+negative = ["DROP VIEW"]
+
+[[production]]
+name = "insert-stmt"
+source = "https://sqlite.org/lang_insert.html"
+status = "parsed"
+positive = [
+  "INSERT INTO t VALUES (1)",
+  "INSERT OR REPLACE INTO main.t AS x (a, b) VALUES (1, 2), (3, 4)",
+  "REPLACE INTO t (a) VALUES (1)",
+  "INSERT INTO t DEFAULT VALUES",
+  "INSERT INTO t SELECT * FROM u",
+  "WITH c AS (SELECT 1) INSERT INTO t SELECT * FROM c",
+  "INSERT INTO t (a) VALUES (1) RETURNING a AS x",
+]
+negative = ["INSERT t VALUES (1)", "INSERT INTO t VALUES"]
+
+[[production]]
+name = "pragma-stmt"
+source = "https://sqlite.org/pragma.html"
+status = "parsed"
+positive = [
+  "PRAGMA page_size",
+  "PRAGMA main.page_size = 4096",
+  "PRAGMA journal_mode = WAL",
+  "PRAGMA table_info(t)",
+  "PRAGMA foreign_keys(1)",
+]
+negative = ["PRAGMA"]
+
+[[production]]
+name = "reindex-stmt"
+source = "https://sqlite.org/lang_reindex.html"
+status = "parsed"
+positive = ["REINDEX", "REINDEX NOCASE", "REINDEX main.t"]
+negative = []
+
+[[production]]
+name = "release-stmt"
+source = "https://sqlite.org/lang_savepoint.html"
+status = "parsed"
+positive = ["RELEASE s", "RELEASE SAVEPOINT s"]
+negative = ["RELEASE"]
+
+[[production]]
+name = "rollback-stmt"
+source = "https://sqlite.org/lang_transaction.html"
+status = "parsed"
+positive = [
+  "ROLLBACK",
+  "ROLLBACK TRANSACTION",
+  "ROLLBACK TO s",
+  "ROLLBACK TRANSACTION TO SAVEPOINT s",
+]
+negative = ["ROLLBACK TO"]
+
+[[production]]
+name = "savepoint-stmt"
+source = "https://sqlite.org/lang_savepoint.html"
+status = "parsed"
+positive = ["SAVEPOINT s"]
+negative = ["SAVEPOINT"]
+
+[[production]]
+name = "select-stmt"
+source = "https://sqlite.org/lang_select.html"
+status = "parsed"
+positive = [
+  "SELECT 1",
+  "SELECT * FROM t",
+  "SELECT DISTINCT a, b AS c, t.* FROM t WHERE a > 1 GROUP BY a HAVING count(*) > 1 ORDER BY a DESC NULLS LAST LIMIT 10 OFFSET 2",
+  "SELECT 1 UNION ALL SELECT 2 UNION SELECT 3 EXCEPT SELECT 4 INTERSECT SELECT 5",
+  "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT x FROM c",
+  "VALUES (1, 2), (3, 4)",
+  "SELECT a FROM t LIMIT 1, 2",
+]
+negative = ["SELECT FROM t", "SELECT * FROM"]
+
+[[production]]
+name = "update-stmt"
+source = "https://sqlite.org/lang_update.html"
+status = "parsed"
+positive = [
+  "UPDATE t SET a = 1",
+  "UPDATE OR IGNORE main.t AS x SET a = 1, b = 2 WHERE x.a IS NULL",
+  "UPDATE t SET (a, b) = (SELECT 1, 2)",
+  "UPDATE t SET a = 1 FROM u WHERE t.id = u.id",
+  "WITH c AS (SELECT 1) UPDATE t SET a = 1",
+  "UPDATE t SET a = 1 RETURNING *",
+]
+negative = ["UPDATE t SET", "UPDATE SET a = 1"]
+
+[[production]]
+name = "update-stmt-limited"
+source = "https://sqlite.org/lang_update.html"
+status = "parsed"
+oracle = "the reference build is not compiled with SQLITE_ENABLE_UPDATE_DELETE_LIMIT"
+positive = ["UPDATE t SET a = 1 ORDER BY a LIMIT 5 OFFSET 1"]
+negative = []
+
+[[production]]
+name = "vacuum-stmt"
+source = "https://sqlite.org/lang_vacuum.html"
+status = "parsed"
+positive = ["VACUUM", "VACUUM main", "VACUUM INTO 'copy.db'", "VACUUM main INTO 'copy.db'"]
+negative = ["VACUUM INTO"]
+
+[[production]]
+name = "explain-stmt"
+source = "https://sqlite.org/lang_explain.html"
+status = "parsed"
+positive = ["EXPLAIN SELECT 1", "EXPLAIN QUERY PLAN SELECT 1"]
+negative = ["EXPLAIN QUERY SELECT 1"]
+
+# ---------------------------------------------------------------------------
+# Sub-productions
+# ---------------------------------------------------------------------------
+
+[[production]]
+name = "column-def"
+source = "https://sqlite.org/syntax/column-def.html"
+status = "parsed"
+positive = [
+  "CREATE TABLE t (a)",
+  "CREATE TABLE t (a INTEGER)",
+  "CREATE TABLE t (a UNSIGNED BIG INT)",
+  "CREATE TABLE t (a VARCHAR(255))",
+  "CREATE TABLE t (a DECIMAL(10, 5))",
+]
+negative = []
+
+[[production]]
+name = "column-constraint"
+source = "https://sqlite.org/syntax/column-constraint.html"
+status = "parsed"
+positive = [
+  "CREATE TABLE t (a PRIMARY KEY DESC ON CONFLICT ROLLBACK AUTOINCREMENT)",
+  "CREATE TABLE t (a NOT NULL ON CONFLICT FAIL)",
+  "CREATE TABLE t (a NULL)",
+  "CREATE TABLE t (a UNIQUE ON CONFLICT IGNORE)",
+  "CREATE TABLE t (a CHECK (a > 0))",
+  "CREATE TABLE t (a DEFAULT 1, b DEFAULT -1, c DEFAULT 'x', d DEFAULT (1 + 1), e DEFAULT NULL)",
+  "CREATE TABLE t (a COLLATE NOCASE)",
+  "CREATE TABLE t (a REFERENCES u (b))",
+  "CREATE TABLE t (a, b GENERATED ALWAYS AS (a + 1) STORED, c AS (a + 2) VIRTUAL)",
+  "CREATE TABLE t (a CONSTRAINT c NOT NULL)",
+]
+negative = ["CREATE TABLE t (a CONSTRAINT c)"]
+
+[[production]]
+name = "table-constraint"
+source = "https://sqlite.org/syntax/table-constraint.html"
+status = "parsed"
+positive = [
+  "CREATE TABLE t (a, PRIMARY KEY (a) ON CONFLICT ABORT)",
+  "CREATE TABLE t (a, UNIQUE (a COLLATE NOCASE DESC))",
+  "CREATE TABLE t (a, CHECK (a > 0))",
+  "CREATE TABLE t (a, FOREIGN KEY (a) REFERENCES u (b) ON DELETE CASCADE)",
+  "CREATE TABLE t (a, CONSTRAINT c UNIQUE (a))",
+]
+negative = []
+
+[[production]]
+name = "foreign-key-clause"
+source = "https://sqlite.org/syntax/foreign-key-clause.html"
+status = "parsed"
+positive = [
+  "CREATE TABLE t (a REFERENCES u)",
+  "CREATE TABLE t (a REFERENCES u (b) ON DELETE SET NULL ON UPDATE SET DEFAULT)",
+  "CREATE TABLE t (a REFERENCES u ON DELETE RESTRICT ON UPDATE NO ACTION MATCH SIMPLE)",
+  "CREATE TABLE t (a REFERENCES u DEFERRABLE INITIALLY DEFERRED)",
+  "CREATE TABLE t (a REFERENCES u NOT DEFERRABLE INITIALLY IMMEDIATE)",
+]
+negative = []
+
+[[production]]
+name = "conflict-clause"
+source = "https://sqlite.org/syntax/conflict-clause.html"
+status = "parsed"
+positive = [
+  "CREATE TABLE t (a UNIQUE ON CONFLICT ROLLBACK)",
+  "CREATE TABLE t (a UNIQUE ON CONFLICT ABORT)",
+  "CREATE TABLE t (a UNIQUE ON CONFLICT FAIL)",
+  "CREATE TABLE t (a UNIQUE ON CONFLICT IGNORE)",
+  "CREATE TABLE t (a UNIQUE ON CONFLICT REPLACE)",
+]
+negative = ["CREATE TABLE t (a UNIQUE ON CONFLICT NOTHING)"]
+
+[[production]]
+name = "type-name"
+source = "https://sqlite.org/syntax/type-name.html"
+status = "parsed"
+positive = [
+  "SELECT CAST(1 AS INTEGER)",
+  "SELECT CAST(1 AS UNSIGNED BIG INT)",
+  "SELECT CAST(1 AS VARCHAR(10))",
+  "SELECT CAST(1 AS DECIMAL(10, 5))",
+  "SELECT CAST(1 AS FLOAT(-1))",
+  "SELECT CAST(1 AS)",
+]
+negative = ["SELECT CAST(1 AS 1)"]
+
+[[production]]
+name = "indexed-column"
+source = "https://sqlite.org/syntax/indexed-column.html"
+status = "parsed"
+positive = [
+  "CREATE INDEX i ON t (a)",
+  "CREATE INDEX i ON t (a COLLATE NOCASE)",
+  "CREATE INDEX i ON t (a DESC)",
+  "CREATE INDEX i ON t (a + 1)",
+]
+negative = []
+
+[[production]]
+name = "common-table-expression"
+source = "https://sqlite.org/syntax/common-table-expression.html"
+status = "parsed"
+positive = [
+  "WITH c AS (SELECT 1) SELECT * FROM c",
+  "WITH c (x, y) AS (SELECT 1, 2) SELECT * FROM c",
+  "WITH c AS MATERIALIZED (SELECT 1) SELECT * FROM c",
+  "WITH c AS NOT MATERIALIZED (SELECT 1) SELECT * FROM c",
+  "WITH RECURSIVE c AS (SELECT 1), d AS (SELECT 2) SELECT * FROM c",
+]
+negative = ["WITH c SELECT 1"]
+
+[[production]]
+name = "compound-operator"
+source = "https://sqlite.org/syntax/compound-operator.html"
+status = "parsed"
+positive = [
+  "SELECT 1 UNION SELECT 2",
+  "SELECT 1 UNION ALL SELECT 2",
+  "SELECT 1 INTERSECT SELECT 2",
+  "SELECT 1 EXCEPT SELECT 2",
+]
+negative = ["SELECT 1 UNION"]
+
+[[production]]
+name = "expr"
+source = "https://sqlite.org/lang_expr.html"
+status = "parsed"
+positive = [
+  "SELECT 1 + 2 * 3 - 4 / 5 % 6",
+  "SELECT a || b, a -> b, a ->> b",
+  "SELECT ~a, -a, +a, NOT a",
+  "SELECT a & b | c << d >> e",
+  "SELECT a < b, a <= b, a > b, a >= b, a = b, a == b, a <> b, a != b",
+  "SELECT a IS b, a IS NOT b, a IS DISTINCT FROM b, a IS NOT DISTINCT FROM b",
+  "SELECT a ISNULL, a NOTNULL, a NOT NULL, a IS NULL, a IS NOT NULL",
+  "SELECT a BETWEEN 1 AND 2, a NOT BETWEEN 1 AND 2",
+  "SELECT a IN (1, 2), a NOT IN (), a IN t, a IN main.t, a IN (SELECT 1)",
+  "SELECT a LIKE 'x' ESCAPE '\\', a NOT LIKE 'x', a GLOB 'x', a REGEXP 'x', a MATCH 'x'",
+  "SELECT CASE WHEN a THEN 1 ELSE 2 END, CASE a WHEN 1 THEN 2 END",
+  "SELECT CAST(a AS TEXT), a COLLATE NOCASE",
+  "SELECT (SELECT 1), EXISTS (SELECT 1), NOT EXISTS (SELECT 1)",
+  "SELECT (1, 2)",
+  "SELECT ?, ?1, :name, @name, $name",
+  "SELECT x'00ff', 1.5e10, 0x1f, .5, 1_000",
+  "SELECT CURRENT_DATE, CURRENT_TIME, CURRENT_TIMESTAMP",
+  "SELECT main.t.a, t.a, a",
+]
+negative = ["SELECT 1 +", "SELECT a BETWEEN 1", "SELECT CASE END"]
+
+[[production]]
+name = "filter-clause"
+source = "https://sqlite.org/syntax/filter-clause.html"
+status = "parsed"
+positive = ["SELECT count(*) FILTER (WHERE a > 1) FROM t"]
+negative = ["SELECT count(*) FILTER (a > 1) FROM t"]
+
+[[production]]
+name = "frame-spec"
+source = "https://sqlite.org/syntax/frame-spec.html"
+status = "parsed"
+positive = [
+  "SELECT count(*) OVER (ROWS UNBOUNDED PRECEDING) FROM t",
+  "SELECT count(*) OVER (RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM t",
+  "SELECT count(*) OVER (GROUPS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING EXCLUDE TIES) FROM t",
+  "SELECT count(*) OVER (ROWS CURRENT ROW EXCLUDE NO OTHERS) FROM t",
+  "SELECT count(*) OVER (ROWS UNBOUNDED PRECEDING EXCLUDE GROUP) FROM t",
+  "SELECT count(*) OVER (ROWS UNBOUNDED PRECEDING EXCLUDE CURRENT ROW) FROM t",
+]
+negative = ["SELECT count(*) OVER (ROWS BETWEEN 1 PRECEDING) FROM t"]
+
+[[production]]
+name = "join-clause"
+source = "https://sqlite.org/syntax/join-clause.html"
+status = "parsed"
+positive = [
+  "SELECT * FROM a, b",
+  "SELECT * FROM a JOIN b",
+  "SELECT * FROM a INNER JOIN b ON a.x = b.x",
+  "SELECT * FROM a CROSS JOIN b",
+  "SELECT * FROM a LEFT JOIN b USING (x)",
+  "SELECT * FROM a LEFT OUTER JOIN b ON 1",
+  "SELECT * FROM a RIGHT JOIN b ON 1",
+  "SELECT * FROM a FULL OUTER JOIN b ON 1",
+  "SELECT * FROM a NATURAL JOIN b",
+  "SELECT * FROM (a JOIN b ON 1) JOIN c ON 1",
+]
+negative = ["SELECT * FROM a JOIN"]
+
+[[production]]
+name = "join-constraint"
+source = "https://sqlite.org/syntax/join-constraint.html"
+status = "parsed"
+positive = ["SELECT * FROM a JOIN b ON a.x = b.x", "SELECT * FROM a JOIN b USING (x, y)"]
+negative = ["SELECT * FROM a JOIN b USING x"]
+
+[[production]]
+name = "literal-value"
+source = "https://sqlite.org/syntax/literal-value.html"
+status = "parsed"
+positive = [
+  "SELECT 1, 1.5, 'text', x'0a', NULL, TRUE, FALSE, CURRENT_TIMESTAMP",
+]
+negative = ["SELECT x'0'", "SELECT x'zz'"]
+
+[[production]]
+name = "numeric-literal"
+source = "https://sqlite.org/syntax/numeric-literal.html"
+status = "parsed"
+positive = ["SELECT 1, 1., .1, 1.5, 1e10, 1E+10, 1e-10, 0x1f, 0XFF, 1_000_000"]
+negative = ["SELECT 1abc", "SELECT 0x"]
+
+[[production]]
+name = "ordering-term"
+source = "https://sqlite.org/syntax/ordering-term.html"
+status = "parsed"
+positive = [
+  "SELECT a FROM t ORDER BY a",
+  "SELECT a FROM t ORDER BY a COLLATE NOCASE DESC NULLS FIRST",
+  "SELECT a FROM t ORDER BY 1 ASC NULLS LAST",
+]
+negative = ["SELECT a FROM t ORDER BY"]
+
+[[production]]
+name = "over-clause"
+source = "https://sqlite.org/syntax/over-clause.html"
+status = "parsed"
+positive = [
+  "SELECT count(*) OVER w FROM t WINDOW w AS (PARTITION BY a)",
+  "SELECT count(*) OVER () FROM t",
+  "SELECT count(*) OVER (PARTITION BY a ORDER BY b) FROM t",
+  "SELECT count(*) OVER (w ORDER BY b) FROM t WINDOW w AS (PARTITION BY a)",
+]
+negative = []
+
+[[production]]
+name = "qualified-table-name"
+source = "https://sqlite.org/syntax/qualified-table-name.html"
+status = "parsed"
+positive = [
+  "DELETE FROM main.t AS x INDEXED BY i",
+  "DELETE FROM t NOT INDEXED",
+  "UPDATE t AS x SET a = 1",
+]
+negative = ["DELETE FROM t INDEXED"]
+
+[[production]]
+name = "raise-function"
+source = "https://sqlite.org/syntax/raise-function.html"
+status = "parsed"
+positive = [
+  "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT RAISE(IGNORE); END",
+  "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT RAISE(ROLLBACK, 'x'); END",
+  "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT RAISE(ABORT, 'x'); END",
+  "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT RAISE(FAIL, 'x'); END",
+]
+negative = ["CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT RAISE(ABORT); END"]
+
+[[production]]
+name = "result-column"
+source = "https://sqlite.org/syntax/result-column.html"
+status = "parsed"
+positive = ["SELECT *, t.*, a, a AS b, a b FROM t"]
+negative = ["SELECT * AS x FROM t"]
+
+[[production]]
+name = "returning-clause"
+source = "https://sqlite.org/syntax/returning-clause.html"
+status = "parsed"
+positive = [
+  "DELETE FROM t RETURNING *",
+  "INSERT INTO t VALUES (1) RETURNING a, b AS c",
+  "UPDATE t SET a = 1 RETURNING t.*",
+]
+negative = ["DELETE FROM t RETURNING"]
+
+[[production]]
+name = "select-core"
+source = "https://sqlite.org/syntax/select-core.html"
+status = "parsed"
+positive = [
+  "SELECT ALL a FROM t",
+  "SELECT DISTINCT a FROM t",
+  "SELECT a FROM t WINDOW w AS (PARTITION BY a)",
+  "VALUES (1)",
+]
+negative = []
+
+[[production]]
+name = "signed-number"
+source = "https://sqlite.org/syntax/signed-number.html"
+status = "parsed"
+positive = ["PRAGMA cache_size = -2000", "PRAGMA cache_size = 2000", "PRAGMA cache_size = +1"]
+negative = []
+
+[[production]]
+name = "table-or-subquery"
+source = "https://sqlite.org/syntax/table-or-subquery.html"
+status = "parsed"
+positive = [
+  "SELECT * FROM t",
+  "SELECT * FROM main.t AS x",
+  "SELECT * FROM t INDEXED BY i",
+  "SELECT * FROM t NOT INDEXED",
+  "SELECT * FROM f(1, 2)",
+  "SELECT * FROM (SELECT 1) AS x",
+  "SELECT * FROM (t, u)",
+]
+negative = ["SELECT * FROM (SELECT 1"]
+
+[[production]]
+name = "upsert-clause"
+source = "https://sqlite.org/lang_upsert.html"
+status = "parsed"
+positive = [
+  "INSERT INTO t VALUES (1) ON CONFLICT DO NOTHING",
+  "INSERT INTO t VALUES (1) ON CONFLICT (a) DO UPDATE SET b = 1",
+  "INSERT INTO t VALUES (1) ON CONFLICT (a COLLATE NOCASE) WHERE a > 0 DO UPDATE SET b = excluded.b WHERE b IS NULL",
+  "INSERT INTO t VALUES (1) ON CONFLICT (a) DO NOTHING ON CONFLICT DO UPDATE SET b = 1",
+]
+negative = ["INSERT INTO t VALUES (1) ON CONFLICT"]
+
+[[production]]
+name = "window-defn"
+source = "https://sqlite.org/syntax/window-defn.html"
+status = "parsed"
+positive = [
+  "SELECT 1 FROM t WINDOW w AS ()",
+  "SELECT 1 FROM t WINDOW w AS (PARTITION BY a ORDER BY b ROWS UNBOUNDED PRECEDING)",
+  "SELECT 1 FROM t WINDOW w AS (base PARTITION BY a), v AS (w)",
+]
+negative = ["SELECT 1 FROM t WINDOW w"]
+
+[[production]]
+name = "window-function-invocation"
+source = "https://sqlite.org/syntax/window-function-invocation.html"
+status = "parsed"
+positive = [
+  "SELECT row_number() OVER () FROM t",
+  "SELECT sum(a) FILTER (WHERE a > 0) OVER (PARTITION BY b) FROM t",
+  "SELECT count(*) OVER w FROM t WINDOW w AS ()",
+]
+negative = []
+
+[[production]]
+name = "comment"
+source = "https://sqlite.org/lang_comment.html"
+status = "parsed"
+positive = [
+  "SELECT 1 -- trailing",
+  "SELECT /* inline */ 1",
+  "SELECT 1 /* unterminated",
+  "-- leading\nSELECT 1",
+]
+negative = []
+
+[[production]]
+name = "quoted-identifier"
+source = "https://sqlite.org/lang_keywords.html"
+status = "parsed"
+positive = [
+  "SELECT \"a\", [b], `c`, d FROM t",
+  "SELECT \"a\"\"b\" FROM t",
+  "SELECT key, match, rows, abort FROM t",
+]
+negative = ["SELECT \"a FROM t", "SELECT [a FROM t"]
+
+[[production]]
+name = "statement-tail"
+source = "https://sqlite.org/c3ref/prepare.html"
+status = "parsed"
+positive = ["SELECT 1; SELECT 2", "SELECT 1;", ";", "  "]
+negative = ["SELECT 1 SELECT 2"]
+
+# ---------------------------------------------------------------------------
+# Deliberate omissions
+# ---------------------------------------------------------------------------
+
+[[production]]
+name = "bind-parameter-tcl-suffix"
+source = "https://sqlite.org/lang_expr.html"
+status = "parsed"
+positive = ["SELECT $name(suffix)"]
+negative = []

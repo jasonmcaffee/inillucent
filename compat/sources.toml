@@ -16,13 +16,28 @@ url = "https://sqlite.org/atomiccommit.html"
 url = "https://sqlite.org/backup.html"
 
 [[source]]
+url = "https://sqlite.org/c3ref/bind_blob.html"
+
+[[source]]
 url = "https://sqlite.org/c3ref/blob_open.html"
 
 [[source]]
 url = "https://sqlite.org/c3ref/funclist.html"
 
 [[source]]
+url = "https://sqlite.org/c3ref/interrupt.html"
+
+[[source]]
+url = "https://sqlite.org/c3ref/open.html"
+
+[[source]]
+url = "https://sqlite.org/c3ref/prepare.html"
+
+[[source]]
 url = "https://sqlite.org/c3ref/serialize.html"
+
+[[source]]
+url = "https://sqlite.org/c3ref/step.html"
 
 [[source]]
 url = "https://sqlite.org/cli.html"
@@ -136,6 +151,9 @@ url = "https://sqlite.org/lockingv3.html"
 url = "https://sqlite.org/omitted.html"
 
 [[source]]
+url = "https://sqlite.org/opcode.html"
+
+[[source]]
 url = "https://sqlite.org/pragma.html"
 
 [[source]]
@@ -167,4 +185,3 @@ url = "https://sqlite.org/windowfunctions.html"
 
 [[source]]
 url = "https://sqlite.org/withoutrowid.html"
-title = "The WITHOUT ROWID Optimization"

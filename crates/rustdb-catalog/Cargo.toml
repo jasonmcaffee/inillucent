@@ -8,4 +8,5 @@ description = "Schema objects, the schema loader, DDL catalog mutation, cookies,
 [dependencies]
 rustdb-base = { workspace = true }
 rustdb-value = { workspace = true }
-rustdb-transaction = { workspace = true }
+rustdb-storage = { workspace = true }
+rustdb-sql = { workspace = true }
