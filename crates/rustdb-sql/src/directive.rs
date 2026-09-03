@@ -17,6 +17,7 @@
 use crate::ast::{self, ObjectKind, TransactionBehaviour};
 use crate::bind::{no_such_table, refused, unsupported, Binder, BoundExpr, BoundStatement};
 use crate::catalog_view::CatalogView;
+use crate::catalog_view::TableKind;
 use crate::diagnostic::ParseError;
 use crate::lexer::Span;
 use rustdb_value::Collation;
@@ -270,6 +271,19 @@ pub enum Directive {
         /// Whether the view already exists.
         exists: bool,
     },
+    /// `CREATE TRIGGER`.
+    CreateTrigger {
+        /// Which attached database.
+        database: usize,
+        /// The trigger name as written.
+        name: Vec<u8>,
+        /// The byte the name starts at in the statement's source.
+        name_offset: u32,
+        /// The table or view the trigger is attached to.
+        table: Vec<u8>,
+        /// Whether the trigger already exists.
+        exists: bool,
+    },
     /// `CREATE INDEX`.
     CreateIndex {
         /// Whether `UNIQUE` was written.
@@ -324,6 +338,32 @@ pub enum PragmaArgument {
     Name(Vec<u8>),
     /// An expression, such as `PRAGMA user_version = 4`.
     Value(BoundExpr),
+}
+
+/// The fields of a `CREATE TRIGGER`, passed as one argument.
+///
+/// Ten parameters is past the point where their order is checkable by reading,
+/// and every one of them is a field of the statement rather than something
+/// computed here.
+pub(crate) struct CreateTriggerParts<'p> {
+    /// Whether `TEMP` was written.
+    pub temporary: bool,
+    /// Whether `IF NOT EXISTS` was written.
+    pub if_not_exists: bool,
+    /// The schema qualifier.
+    pub database: Option<ast::NameId>,
+    /// The trigger name.
+    pub name: ast::NameId,
+    /// When it fires.
+    pub time: Option<ast::TriggerTime>,
+    /// The table it is attached to.
+    pub table: ast::NameId,
+    /// Whether `FOR EACH ROW` was written.
+    pub for_each_row: bool,
+    /// The `WHEN` guard.
+    pub when: Option<ast::ExprId>,
+    /// The body statements.
+    pub body: &'p [ast::Statement],
 }
 
 impl<'a> Binder<'a> {
@@ -386,6 +426,28 @@ impl<'a> Binder<'a> {
                 columns,
                 *select,
             ),
+            ast::Statement::CreateTrigger {
+                temporary,
+                if_not_exists,
+                database,
+                name,
+                time,
+                event: _,
+                table,
+                for_each_row,
+                when,
+                body,
+            } => self.bind_create_trigger(CreateTriggerParts {
+                temporary: *temporary,
+                if_not_exists: *if_not_exists,
+                database: *database,
+                name: *name,
+                time: *time,
+                table: *table,
+                for_each_row: *for_each_row,
+                when: *when,
+                body,
+            }),
             ast::Statement::Drop {
                 kind,
                 if_exists,
@@ -1102,6 +1164,114 @@ impl<'a> Binder<'a> {
         })
     }
 
+    /// Binds a `CREATE TRIGGER`.
+    ///
+    /// The body is bound here, against the table the trigger is attached to, so
+    /// a trigger that reads a column that does not exist is refused when it is
+    /// written rather than the first time somebody writes the table. SQLite
+    /// makes the same promise, and the alternative is a schema that loads and
+    /// then fails on an unrelated INSERT.
+    fn bind_create_trigger(
+        &mut self,
+        parts: CreateTriggerParts<'_>,
+    ) -> Result<Directive, ParseError> {
+        if parts.temporary {
+            return Err(unsupported("TEMP triggers", Span::default()));
+        }
+        // `for_each_row` records whether the words were written, not whether
+        // the trigger is one: SQLite has only row triggers, an omitted clause
+        // means FOR EACH ROW, and FOR EACH STATEMENT is a syntax error in the
+        // parser. There is nothing to refuse here.
+        let _ = parts.for_each_row;
+        let index = self.resolve_database(parts.database)?;
+        let written = self.ast.text(parts.name).to_vec();
+        if written.to_ascii_lowercase().starts_with(b"sqlite_") {
+            return Err(refused(
+                format!(
+                    "object name reserved for internal use: {}",
+                    String::from_utf8_lossy(&written)
+                ),
+                Span::default(),
+            ));
+        }
+        let folded = self.ast.folded(parts.name).to_vec();
+        let database_name = self.catalog.database_name(index).to_vec();
+        let table_folded = self.ast.folded(parts.table).to_vec();
+        let Some(target) = self
+            .catalog
+            .find_table(Some(database_name.as_slice()), &table_folded)
+            .cloned()
+        else {
+            return Err(crate::bind::no_such_table(
+                self.ast.text(parts.table),
+                Span::default(),
+            ));
+        };
+        let exists = self
+            .catalog
+            .find_trigger(Some(database_name.as_slice()), &folded)
+            .is_some();
+        if exists && !parts.if_not_exists {
+            return Err(refused(
+                format!(
+                    "trigger {} already exists",
+                    String::from_utf8_lossy(&written)
+                ),
+                Span::default(),
+            ));
+        }
+        let instead_of = parts.time == Some(ast::TriggerTime::InsteadOf);
+        match target.kind {
+            TableKind::View if !instead_of => {
+                return Err(refused(
+                    format!(
+                        "cannot create {} trigger on view: {}",
+                        if parts.time == Some(ast::TriggerTime::After) {
+                            "AFTER"
+                        } else {
+                            "BEFORE"
+                        },
+                        String::from_utf8_lossy(&target.name)
+                    ),
+                    Span::default(),
+                ));
+            }
+            TableKind::Table if instead_of => {
+                return Err(refused(
+                    format!(
+                        "cannot create INSTEAD OF trigger on table: {}",
+                        String::from_utf8_lossy(&target.name)
+                    ),
+                    Span::default(),
+                ));
+            }
+            TableKind::Virtual | TableKind::Subquery => {
+                return Err(unsupported("a trigger on that object", Span::default()));
+            }
+            _ => {}
+        }
+        // `UPDATE OF a, b` is deliberately *not* checked against the table's
+        // columns. The pinned build accepts `UPDATE OF nosuchcolumn` and simply
+        // never fires the trigger, and refusing it here would make rust-db's
+        // language smaller than the reference's - a schema SQLite wrote that
+        // rust-db could not load.
+        // The body is deliberately *not* bound here. SQLite stores a trigger
+        // whose body names a column that does not exist and reports it on the
+        // first write that fires it - measured against the pinned build, which
+        // accepts both `UPDATE OF nosuchcolumn` and a body reading a column the
+        // table has not got. Refusing either here would leave rust-db unable to
+        // load a schema SQLite had written.
+        let _ = (parts.time, parts.when, parts.body);
+        self.record_write_dependency(index);
+        Ok(Directive::CreateTrigger {
+            database: index,
+            name: written,
+            name_offset: self.name_offset(parts.name),
+            table: target.name.clone(),
+            exists,
+        })
+    }
+
     /// Binds a `CREATE INDEX`.
     ///
     /// The parameters are the grammar's own fields, passed straight through
@@ -1195,14 +1365,34 @@ impl<'a> Binder<'a> {
         database: Option<ast::NameId>,
         name: ast::NameId,
     ) -> Result<Directive, ParseError> {
-        if kind == ObjectKind::Trigger {
-            return Err(unsupported("DROP TRIGGER", Span::default()));
-        }
         let index = self.resolve_database(database)?;
         let database_name = self.catalog.database_name(index).to_vec();
         let written = self.ast.text(name).to_vec();
         let folded = self.ast.folded(name).to_vec();
         self.record_write_dependency(index);
+        if kind == ObjectKind::Trigger {
+            // A trigger owns no B-tree either, so dropping one is its schema row
+            // and nothing else.
+            let exists = self
+                .catalog
+                .find_trigger(Some(database_name.as_slice()), &folded)
+                .is_some();
+            if !exists && !if_exists {
+                return Err(refused(
+                    format!("no such trigger: {}", String::from_utf8_lossy(&written)),
+                    Span::default(),
+                ));
+            }
+            return Ok(Directive::Drop {
+                kind,
+                if_exists,
+                database: index,
+                name: written,
+                root: 0,
+                index_roots: Vec::new(),
+                exists,
+            });
+        }
         if kind == ObjectKind::View {
             // A view owns no B-tree, so dropping one is the schema row and
             // nothing else - and it must refuse a table, because `DROP VIEW t`

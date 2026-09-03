@@ -100,6 +100,19 @@ pub enum BoundExpr {
     Blob(Vec<u8>),
     /// A bound parameter.
     Parameter(u32),
+    /// `RAISE(...)` inside a trigger body.
+    ///
+    /// It is an expression in the grammar and it never produces a value: every
+    /// action either stops the statement or abandons the row. It is bound as one
+    /// anyway because that is where it is written - `SELECT RAISE(ABORT, 'no')
+    /// WHERE new.x < 0` puts it in a result column, guarded by a WHERE - and a
+    /// statement form would not reach that position.
+    Raise {
+        /// Which action.
+        action: crate::ast::RaiseAction,
+        /// The message, when the action takes one.
+        message: Option<Vec<u8>>,
+    },
     /// A column of a FROM term.
     Column {
         /// Which FROM term, by position.
@@ -368,7 +381,10 @@ impl BoundExpr {
             | BoundExpr::Text(_)
             | BoundExpr::Blob(_)
             | BoundExpr::Parameter(_) => true,
-            BoundExpr::Column { .. }
+            // RAISE never produces a value, so it is not constant: folding it
+            // away would delete the abort it exists to perform.
+            BoundExpr::Raise { .. }
+            | BoundExpr::Column { .. }
             | BoundExpr::Rowid { .. }
             | BoundExpr::Aggregate { .. }
             | BoundExpr::WindowRef { .. }
@@ -941,6 +957,24 @@ pub struct Binder<'a> {
     named_windows: Vec<(Vec<u8>, ast::WindowId)>,
     /// The table `excluded` names while an upsert's `DO UPDATE` is bound.
     pub(crate) excluded: Option<crate::catalog_view::TableInfo>,
+    /// The row `OLD` and `NEW` name while a trigger body is bound.
+    pub(crate) row_aliases: Option<RowAliases>,
+    /// The FROM term a write to a view runs against, when the target is one.
+    ///
+    /// A view has no rows of its own, so an `UPDATE` or `DELETE` on one is
+    /// pushed as an ordinary subquery term and the statement's `WHERE` and
+    /// `SET` bind against that. Remembering its number is what lets the block
+    /// that produces `OLD` be built out of the very same term, with no
+    /// re-pointing of anything already bound.
+    pub(crate) view_target: Option<usize>,
+    /// The folded names of the triggers whose bodies are being bound, outermost
+    /// first.
+    ///
+    /// SQLite's default is `recursive_triggers = off`, which skips a trigger
+    /// that is already on the stack rather than firing it again. Skipping is
+    /// also what makes inlining terminate, so the two agree: this list is both
+    /// the parity rule and the recursion guard.
+    pub(crate) firing: Vec<Vec<u8>>,
 }
 
 /// How deeply query blocks may nest.
@@ -969,6 +1003,42 @@ pub const MAX_GENERATED_DEPTH: u32 = 32;
 /// that forgot to would try to open a cursor two billion and be refused by the
 /// verifier, rather than reading the wrong row.
 pub const EXCLUDED_SOURCE: usize = usize::MAX;
+
+/// The source number a column of a trigger's `OLD` row carries.
+///
+/// Like [`EXCLUDED_SOURCE`], it is not a FROM term: `OLD` and `NEW` are the row
+/// the write is about, which the compiler already holds in registers by the
+/// time a trigger fires. Numbering them where no real source can reach means a
+/// compiler that forgot to substitute one is caught by the verifier rather than
+/// quietly reading whatever cursor happened to be open.
+pub const OLD_SOURCE: usize = usize::MAX - 1;
+
+/// The source number a column of a trigger's `NEW` row carries.
+pub const NEW_SOURCE: usize = usize::MAX - 2;
+
+/// How deep one write may drive triggers firing other triggers.
+///
+/// SQLite's own limit is `SQLITE_MAX_TRIGGER_DEPTH`, enforced when the frame is
+/// pushed. Trigger bodies are inlined here rather than run as frames, so the
+/// same limit is enforced where the inlining happens - and it has to be, or a
+/// schema in which two triggers write each other's tables would compile until
+/// the compiler ran out of memory.
+pub const MAX_TRIGGER_DEPTH: usize = 32;
+
+/// The row a trigger body's `OLD` and `NEW` name.
+///
+/// Which of the two are in scope is decided by the event: an INSERT has no
+/// previous row and a DELETE has no next one, and SQLite refuses the name that
+/// does not apply rather than reading NULLs out of it.
+#[derive(Clone, Debug)]
+pub(crate) struct RowAliases {
+    /// The table the trigger is attached to, whose columns the names carry.
+    pub(crate) table: crate::catalog_view::TableInfo,
+    /// Whether `OLD` is in scope.
+    pub(crate) old: bool,
+    /// Whether `NEW` is in scope.
+    pub(crate) new: bool,
+}
 
 impl<'a> Binder<'a> {
     /// Returns a binder over one catalog snapshot and one parse.
@@ -1000,6 +1070,9 @@ impl<'a> Binder<'a> {
             windows: Vec::new(),
             named_windows: Vec::new(),
             excluded: None,
+            row_aliases: None,
+            view_target: None,
+            firing: Vec::new(),
         }
     }
 
@@ -2761,7 +2834,17 @@ impl<'a> Binder<'a> {
                 })
             }
             Expr::RowValue(_) => Err(unsupported("row values", span)),
-            Expr::Raise { .. } => Err(unsupported("RAISE outside a trigger", span)),
+            Expr::Raise { action, message } => {
+                // Outside a trigger body there is nothing for it to abandon, so
+                // SQLite refuses it there rather than treating it as a no-op.
+                if self.row_aliases.is_none() {
+                    return Err(unsupported("RAISE outside a trigger", span));
+                }
+                Ok(BoundExpr::Raise {
+                    action: action.clone(),
+                    message: message.clone(),
+                })
+            }
         }
     }
 
@@ -2833,6 +2916,57 @@ impl<'a> Binder<'a> {
         Err(no_such_column(folded, span))
     }
 
+    /// Resolves `old.column` or `new.column` inside a trigger body.
+    ///
+    /// The event decides which of the two exists: an INSERT has no previous row
+    /// and a DELETE has no next one. Naming the missing one is the ordinary
+    /// "no such table" error, because that is what it is - outside a trigger
+    /// body neither name resolves at all.
+    fn bind_row_alias_column(
+        &mut self,
+        source: usize,
+        folded: &[u8],
+        span: Span,
+    ) -> Result<BoundExpr, ParseError> {
+        let written: &[u8] = if source == OLD_SOURCE { b"old" } else { b"new" };
+        let Some(aliases) = self.row_aliases.clone() else {
+            return Err(no_such_table(written, span));
+        };
+        let available = if source == OLD_SOURCE {
+            aliases.old
+        } else {
+            aliases.new
+        };
+        if !available {
+            return Err(no_such_table(written, span));
+        }
+        let table = &aliases.table;
+        if let Some(position) = table.column_position(folded) {
+            if table.rowid_alias == Some(position) {
+                return Ok(BoundExpr::Rowid { source });
+            }
+            let Some(info) = table.column(position) else {
+                return Err(no_such_column(folded, span));
+            };
+            let collation =
+                Collation::from_name(core::str::from_utf8(&info.collation).unwrap_or("BINARY"))
+                    .unwrap_or(Collation::Binary);
+            return Ok(BoundExpr::Column {
+                source,
+                column: position,
+                // The row lives in registers rather than in a record, so the
+                // compiler substitutes it wholesale and the slot is never read.
+                slot: position,
+                affinity: info.affinity,
+                collation,
+            });
+        }
+        if table.is_rowid_name(folded) {
+            return Ok(BoundExpr::Rowid { source });
+        }
+        Err(no_such_column(folded, span))
+    }
+
     /// Resolves a column reference against the scope stack.
     ///
     /// The innermost block is searched first and a hit there ends the search,
@@ -2851,6 +2985,15 @@ impl<'a> Binder<'a> {
         let database_folded = database.map(|id| self.ast.folded(id).to_vec());
         if table_folded.as_deref() == Some(b"excluded".as_slice()) {
             return self.bind_excluded_column(&folded, span);
+        }
+        // `OLD` and `NEW` shadow a table of the same name only inside a trigger
+        // body, which is the one place they mean anything.
+        if self.row_aliases.is_some() && database.is_none() {
+            match table_folded.as_deref() {
+                Some(b"old") => return self.bind_row_alias_column(OLD_SOURCE, &folded, span),
+                Some(b"new") => return self.bind_row_alias_column(NEW_SOURCE, &folded, span),
+                _ => {}
+            }
         }
         let mut resolved: Option<(usize, u16)> = None;
         let mut rowid_of: Option<usize> = None;
@@ -3342,8 +3485,12 @@ fn compound_order_unmatched(span: Span) -> ParseError {
 /// column applies the rules it would have applied one level down; a column with
 /// no affinity of its own gets none, which is what SQLite does for an
 /// expression that is not a bare column or a cast.
-fn subquery_table(alias: &[u8], names: &[Vec<u8>], select: &BoundSelect) -> TableInfo {
-    let columns = select
+/// Returns the columns a nested query's result presents to a reader.
+///
+/// Public because a write to a view needs them before there is a FROM term to
+/// hang them on: the view's catalog entry carries no column list at all.
+pub fn subquery_columns(select: &BoundSelect, names: &[Vec<u8>]) -> Vec<ColumnInfo> {
+    select
         .columns
         .iter()
         .enumerate()
@@ -3370,8 +3517,39 @@ fn subquery_table(alias: &[u8], names: &[Vec<u8>], select: &BoundSelect) -> Tabl
                 generated_sql: None,
             }
         })
-        .collect();
-    TableInfo::subquery(alias.to_vec(), 0, columns)
+        .collect()
+}
+
+/// Returns a block that reads one FROM term and nothing else.
+///
+/// Everything a `SELECT` can carry is empty here on purpose: this exists to
+/// wrap a term the binder has already produced so the compiler can iterate it,
+/// not to stand in for a query somebody wrote.
+pub fn block_over(
+    source: BoundSource,
+    filter: Option<BoundExpr>,
+    columns: Vec<BoundResultColumn>,
+) -> BoundSelect {
+    BoundSelect {
+        sources: vec![source],
+        filter,
+        group_by: Vec::new(),
+        having: None,
+        columns,
+        distinct: false,
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        aggregates: Vec::new(),
+        values: Vec::new(),
+        compounds: Vec::new(),
+        windows: Vec::new(),
+        correlations: Vec::new(),
+    }
+}
+
+fn subquery_table(alias: &[u8], names: &[Vec<u8>], select: &BoundSelect) -> TableInfo {
+    TableInfo::subquery(alias.to_vec(), 0, subquery_columns(select, names))
 }
 
 /// Returns the aggregate a name spells inside an `OVER` clause.

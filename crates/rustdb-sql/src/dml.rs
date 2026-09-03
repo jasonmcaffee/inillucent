@@ -24,7 +24,7 @@ use crate::bind::{
     no_such_column, refused, unsupported, Binder, BoundExpr, BoundResultColumn, BoundSelect,
     BoundSource,
 };
-use crate::catalog_view::{TableInfo, TableKind};
+use crate::catalog_view::{TableInfo, TableKind, TriggerEventInfo, TriggerInfo};
 use crate::diagnostic::ParseError;
 use crate::lexer::Span;
 use crate::parser::parse_expression;
@@ -63,11 +63,55 @@ pub struct BoundCheck {
     pub expr: BoundExpr,
 }
 
+/// One statement of a trigger body, bound.
+///
+/// The four the grammar allows and no more. A trigger body is not a general
+/// statement list: it cannot create objects, cannot open transactions, and
+/// cannot return rows to the caller, so a variant for anything else would be a
+/// shape the binder is required to refuse.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BoundTriggerStatement {
+    /// `INSERT`.
+    Insert(Box<BoundInsert>),
+    /// `UPDATE`.
+    Update(Box<BoundUpdate>),
+    /// `DELETE`.
+    Delete(Box<BoundDelete>),
+    /// `SELECT`, which a body runs for its side effects - in practice for the
+    /// `RAISE()` inside it.
+    Select(Box<BoundSelect>),
+}
+
+/// A trigger, bound against the write that fires it.
+///
+/// It is bound per statement rather than once per schema because the body's
+/// FROM terms take statement-wide source numbers, and those only exist relative
+/// to the statement they are inlined into.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoundTrigger {
+    /// The trigger's name, for the diagnostic when its body fails.
+    pub name: Vec<u8>,
+    /// Whether it fires before or after the row is written.
+    pub time: ast::TriggerTime,
+    /// The `WHEN` guard, when one was written.
+    pub when: Option<BoundExpr>,
+    /// The body statements, in written order.
+    pub body: Vec<BoundTriggerStatement>,
+}
+
 /// A bound `INSERT`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoundInsert {
     /// The table being written.
     pub table: TableInfo,
+    /// The statement-wide number of the FROM term being written.
+    ///
+    /// It used to be implicitly zero, because a DML statement had exactly one
+    /// source. A trigger body is compiled into the statement that fires it, so
+    /// its target takes the next number after the firing statement's - and a
+    /// compiler that assumed zero read the wrong cursor for every fire after
+    /// the first.
+    pub target_source: usize,
     /// Where each table column's value comes from, in column order.
     pub columns: Vec<ColumnSource>,
     /// Where the rowid comes from, when the statement supplies one.
@@ -84,6 +128,8 @@ pub struct BoundInsert {
     pub upsert: Option<BoundUpsert>,
     /// The `RETURNING` columns.
     pub returning: Vec<BoundResultColumn>,
+    /// The triggers this write fires, in schema order.
+    pub triggers: Vec<BoundTrigger>,
 }
 
 /// A bound `ON CONFLICT ... DO UPDATE` clause.
@@ -113,6 +159,14 @@ pub struct BoundAssignment {
 pub struct BoundUpdate {
     /// The table being written.
     pub table: TableInfo,
+    /// The statement-wide number of the FROM term being written.
+    ///
+    /// It used to be implicitly zero, because a DML statement had exactly one
+    /// source. A trigger body is compiled into the statement that fires it, so
+    /// its target takes the next number after the firing statement's - and a
+    /// compiler that assumed zero read the wrong cursor for every fire after
+    /// the first.
+    pub source: usize,
     /// The assignments, in table column order with duplicates already refused.
     pub assignments: Vec<BoundAssignment>,
     /// The `WHERE` clause.
@@ -127,6 +181,14 @@ pub struct BoundUpdate {
     pub limit: Option<BoundExpr>,
     /// The `OFFSET`.
     pub offset: Option<BoundExpr>,
+    /// The triggers this write fires, in schema order.
+    pub triggers: Vec<BoundTrigger>,
+    /// The rows to fire an `INSTEAD OF` trigger for, when the target is a view.
+    ///
+    /// A view has no rows of its own, so `OLD` has to come from running the
+    /// view. This is that query, with the statement's `WHERE` on it and one
+    /// result column per view column.
+    pub view_rows: Option<Box<BoundSelect>>,
 }
 
 /// A bound `DELETE`.
@@ -134,6 +196,14 @@ pub struct BoundUpdate {
 pub struct BoundDelete {
     /// The table being written.
     pub table: TableInfo,
+    /// The statement-wide number of the FROM term being written.
+    ///
+    /// It used to be implicitly zero, because a DML statement had exactly one
+    /// source. A trigger body is compiled into the statement that fires it, so
+    /// its target takes the next number after the firing statement's - and a
+    /// compiler that assumed zero read the wrong cursor for every fire after
+    /// the first.
+    pub source: usize,
     /// The `WHERE` clause.
     pub filter: Option<BoundExpr>,
     /// The `RETURNING` columns.
@@ -142,6 +212,18 @@ pub struct BoundDelete {
     pub limit: Option<BoundExpr>,
     /// The `OFFSET`.
     pub offset: Option<BoundExpr>,
+    /// The triggers this write fires, in schema order.
+    pub triggers: Vec<BoundTrigger>,
+    /// The rows to fire an `INSTEAD OF` trigger for, when the target is a view.
+    pub view_rows: Option<Box<BoundSelect>>,
+}
+
+/// Returns whether a view has an `INSTEAD OF` trigger for one event.
+fn has_instead_of(table: &TableInfo, event: &TriggerEventInfo) -> bool {
+    table
+        .triggers
+        .iter()
+        .any(|trigger| trigger.time == ast::TriggerTime::InsteadOf && trigger.fires_for(event, &[]))
 }
 
 impl<'a> Binder<'a> {
@@ -150,12 +232,17 @@ impl<'a> Binder<'a> {
         if !insert.with.ctes.is_empty() {
             return Err(unsupported("WITH on INSERT", Span::default()));
         }
-        let table = self.writable_target(insert.database, insert.table, Span::default())?;
+        let table = self.writable_target(
+            insert.database,
+            insert.table,
+            Span::default(),
+            &TriggerEventInfo::Insert,
+        )?;
         let alias = match insert.alias {
             Some(alias) => self.ast.text(alias).to_vec(),
             None => table.name.clone(),
         };
-        self.push_write_source(table.clone(), alias);
+        let target_source = self.push_write_source(table.clone(), alias);
         // `DEFAULT VALUES` supplies nothing, so every column takes its default
         // - which is what an empty target list means here. The grammar does
         // not allow a column list with it, so there is none to honour.
@@ -174,8 +261,10 @@ impl<'a> Binder<'a> {
         let checks = self.bind_checks(&table)?;
         let upsert = self.bind_upsert(&table, insert)?;
         let returning = self.bind_returning(&insert.returning)?;
+        let triggers = self.bind_triggers(&table, TriggerEventInfo::Insert, &[])?;
         Ok(BoundInsert {
             table,
+            target_source,
             columns,
             rowid,
             source,
@@ -184,6 +273,7 @@ impl<'a> Binder<'a> {
             checks,
             upsert,
             returning,
+            triggers,
         })
     }
 
@@ -198,7 +288,8 @@ impl<'a> Binder<'a> {
         if !update.order_by.is_empty() {
             return Err(unsupported("ORDER BY on UPDATE", Span::default()));
         }
-        let table = self.write_target_from_term(update.target)?;
+        let (table, source) =
+            self.write_target_from_term(update.target, &TriggerEventInfo::Update(Vec::new()))?;
         let mut assignments = Vec::new();
         for (names, value) in &update.assignments {
             let bound = self.bind_expr(*value)?;
@@ -240,8 +331,17 @@ impl<'a> Binder<'a> {
             Some(expr) => Some(self.bind_expr(expr)?),
             None => None,
         };
+        let changed: Vec<Vec<u8>> = assignments
+            .iter()
+            .filter_map(|assignment| table.column(assignment.column))
+            .map(|column| column.folded.clone())
+            .collect();
+        let triggers =
+            self.bind_triggers(&table, TriggerEventInfo::Update(Vec::new()), &changed)?;
+        let view_rows = self.view_rows(&table, filter.clone());
         Ok(BoundUpdate {
             table,
+            source,
             assignments,
             filter,
             on_conflict: update.on_conflict,
@@ -249,6 +349,8 @@ impl<'a> Binder<'a> {
             returning,
             limit,
             offset,
+            triggers,
+            view_rows,
         })
     }
 
@@ -260,7 +362,8 @@ impl<'a> Binder<'a> {
         if !delete.order_by.is_empty() {
             return Err(unsupported("ORDER BY on DELETE", Span::default()));
         }
-        let table = self.write_target_from_term(delete.target)?;
+        let (table, source) =
+            self.write_target_from_term(delete.target, &TriggerEventInfo::Delete)?;
         let filter = match delete.filter {
             Some(expr) => Some(self.bind_expr(expr)?),
             None => None,
@@ -274,13 +377,156 @@ impl<'a> Binder<'a> {
             Some(expr) => Some(self.bind_expr(expr)?),
             None => None,
         };
+        let triggers = self.bind_triggers(&table, TriggerEventInfo::Delete, &[])?;
+        let view_rows = self.view_rows(&table, filter.clone());
         Ok(BoundDelete {
             table,
+            source,
             filter,
             returning,
             limit,
             offset,
+            triggers,
+            view_rows,
         })
+    }
+
+    /// Binds the triggers one write fires, bodies and all.
+    ///
+    /// The bodies are bound here, into the same binder, so their FROM terms take
+    /// statement-wide source numbers alongside the write's own. That is what
+    /// lets the compiler inline them: a trigger body is not a separate program
+    /// with a separate cursor space, it is more of this statement.
+    ///
+    /// A trigger already being bound is skipped rather than bound again, which
+    /// is SQLite's behaviour with its default `recursive_triggers = off` and is
+    /// also the only reason inlining terminates.
+    fn bind_triggers(
+        &mut self,
+        table: &TableInfo,
+        event: TriggerEventInfo,
+        changed: &[Vec<u8>],
+    ) -> Result<Vec<BoundTrigger>, ParseError> {
+        // The catalog reference is copied out of `self` first: the trigger's
+        // arena has to outlive the binder for the body to be bound in place,
+        // and a borrow taken through `&self` would end at the first `&mut self`.
+        let catalog = self.catalog;
+        let database = catalog.database_name(table.database).to_vec();
+        let Some(live) = catalog.find_table(Some(database.as_slice()), &table.folded) else {
+            return Ok(Vec::new());
+        };
+        let (old, new) = match event {
+            TriggerEventInfo::Insert => (false, true),
+            TriggerEventInfo::Delete => (true, false),
+            TriggerEventInfo::Update(_) => (true, true),
+        };
+        let mut bound = Vec::new();
+        for trigger in &live.triggers {
+            if !trigger.fires_for(&event, changed) {
+                continue;
+            }
+            if self.firing.iter().any(|name| *name == trigger.folded) {
+                continue;
+            }
+            if self.firing.len() >= crate::bind::MAX_TRIGGER_DEPTH {
+                return Err(refused(
+                    "too many levels of trigger recursion",
+                    Span::default(),
+                ));
+            }
+            self.firing.push(trigger.folded.clone());
+            let saved_ast = self.ast;
+            let saved_scopes = core::mem::take(&mut self.scopes);
+            let saved_aliases = self.row_aliases.take();
+            let saved_target = self.view_target.take();
+            self.ast = &trigger.ast;
+            self.row_aliases = Some(crate::bind::RowAliases {
+                table: table.clone(),
+                old,
+                new,
+            });
+            let result = self.bind_trigger_body(trigger);
+            self.ast = saved_ast;
+            self.scopes = saved_scopes;
+            self.row_aliases = saved_aliases;
+            self.view_target = saved_target;
+            self.firing.pop();
+            bound.push(result?);
+        }
+        Ok(bound)
+    }
+
+    /// Binds one trigger's guard and body statements.
+    fn bind_trigger_body(&mut self, trigger: &TriggerInfo) -> Result<BoundTrigger, ParseError> {
+        let when = match trigger.when {
+            Some(expr) => Some(self.bind_expr(expr)?),
+            None => None,
+        };
+        let mut body = Vec::new();
+        for statement in &trigger.body {
+            // Each statement gets a fresh scope stack. A body statement's names
+            // resolve against its own tables and against OLD and NEW, never
+            // outward into the statement that fired it.
+            let saved = core::mem::take(&mut self.scopes);
+            let one = self.bind_trigger_statement(statement);
+            self.scopes = saved;
+            body.push(one?);
+        }
+        Ok(BoundTrigger {
+            name: trigger.name.clone(),
+            time: trigger.time,
+            when,
+            body,
+        })
+    }
+
+    /// Binds one statement of a trigger body.
+    pub(crate) fn bind_trigger_statement(
+        &mut self,
+        statement: &ast::Statement,
+    ) -> Result<BoundTriggerStatement, ParseError> {
+        match statement {
+            ast::Statement::Insert(insert) => {
+                if !insert.returning.is_empty() {
+                    return Err(refused(
+                        "RETURNING is not allowed on a trigger body statement",
+                        Span::default(),
+                    ));
+                }
+                Ok(BoundTriggerStatement::Insert(Box::new(
+                    self.bind_insert(insert)?,
+                )))
+            }
+            ast::Statement::Update(update) => {
+                if !update.returning.is_empty() {
+                    return Err(refused(
+                        "RETURNING is not allowed on a trigger body statement",
+                        Span::default(),
+                    ));
+                }
+                Ok(BoundTriggerStatement::Update(Box::new(
+                    self.bind_update(update)?,
+                )))
+            }
+            ast::Statement::Delete(delete) => {
+                if !delete.returning.is_empty() {
+                    return Err(refused(
+                        "RETURNING is not allowed on a trigger body statement",
+                        Span::default(),
+                    ));
+                }
+                Ok(BoundTriggerStatement::Delete(Box::new(
+                    self.bind_delete(delete)?,
+                )))
+            }
+            ast::Statement::Select(select) => Ok(BoundTriggerStatement::Select(Box::new(
+                self.bind_select(*select)?,
+            ))),
+            _ => Err(unsupported(
+                "that statement in a trigger body",
+                Span::default(),
+            )),
+        }
     }
 
     /// Resolves a write target and refuses the things that cannot be written.
@@ -289,6 +535,7 @@ impl<'a> Binder<'a> {
         database: Option<ast::NameId>,
         name: ast::NameId,
         span: Span,
+        event: &TriggerEventInfo,
     ) -> Result<TableInfo, ParseError> {
         let qualifier = database.map(|id| self.ast.folded(id).to_vec());
         let folded = self.ast.folded(name).to_vec();
@@ -300,7 +547,17 @@ impl<'a> Binder<'a> {
             return Err(crate::bind::no_such_table(self.ast.text(name), span));
         };
         match table.kind {
-            TableKind::View => return Err(unsupported("writing to a view", span)),
+            TableKind::View => {
+                // A view is writable exactly when it has an `INSTEAD OF`
+                // trigger for this event: the trigger *is* the write, and the
+                // view itself is never touched.
+                if !has_instead_of(&table, event) {
+                    return Err(unsupported("writing to a view", span));
+                }
+                let expanded = self.expanded_view(&table, span)?;
+                self.record_write_dependency(table.database);
+                return Ok(expanded);
+            }
             TableKind::Virtual => return Err(unsupported("writing to a virtual table", span)),
             TableKind::Subquery => return Err(unsupported("writing to a subquery", span)),
             TableKind::Table => {}
@@ -319,20 +576,134 @@ impl<'a> Binder<'a> {
     }
 
     /// Resolves the target of an UPDATE or DELETE, which is a FROM term.
-    fn write_target_from_term(&mut self, id: ast::FromTermId) -> Result<TableInfo, ParseError> {
+    fn write_target_from_term(
+        &mut self,
+        id: ast::FromTermId,
+        event: &TriggerEventInfo,
+    ) -> Result<(TableInfo, usize), ParseError> {
         let Some(term) = self.ast.from_term(id) else {
             return Err(unsupported("missing target", Span::default()));
         };
         let ast::FromSource::Table { database, name, .. } = term.source else {
             return Err(unsupported("a target that is not a table", term.span));
         };
-        let table = self.writable_target(database, name, term.span)?;
+        let table = self.writable_target(database, name, term.span, event)?;
         let alias = match term.alias {
             Some(alias) => self.ast.text(alias).to_vec(),
             None => table.name.clone(),
         };
-        self.push_write_source(table.clone(), alias);
-        Ok(table)
+        if table.kind == TableKind::View {
+            // The view goes in as an ordinary nested query, so the statement's
+            // WHERE and SET bind against the view's own columns and against the
+            // term the block producing OLD will iterate. Binding first and
+            // re-pointing afterwards would be two chances to disagree.
+            let inner = self.view_query(&table, term.span)?;
+            let source = BoundSource {
+                id: self.sources.len(),
+                rows: crate::bind::SourceRows::Subquery(Box::new(inner)),
+                table: table.clone(),
+                alias,
+                join: ast::JoinKind::Comma,
+                constraint: None,
+                suppressed: Vec::new(),
+            };
+            self.view_target = Some(source.id);
+            let scope = source.id;
+            self.sources.push(source);
+            self.scopes.push(vec![scope]);
+            return Ok((table, scope));
+        }
+        let scope = self.push_write_source(table.clone(), alias);
+        Ok((table, scope))
+    }
+
+    /// Returns a view's `TableInfo` with the columns its body produces.
+    ///
+    /// A view's catalog entry carries no column list - its columns are whatever
+    /// binding its `SELECT` says they are - so a statement that writes one needs
+    /// the body bound before `new.column` can resolve to anything at all.
+    pub(crate) fn expanded_view(
+        &mut self,
+        table: &TableInfo,
+        span: Span,
+    ) -> Result<TableInfo, ParseError> {
+        let bound = self.view_query(table, span)?;
+        let mut expanded = table.clone();
+        expanded.columns = crate::bind::subquery_columns(&bound, &[]);
+        Ok(expanded)
+    }
+
+    /// Binds a view's body, out of the arena the catalog snapshot holds.
+    fn view_query(&mut self, table: &TableInfo, span: Span) -> Result<BoundSelect, ParseError> {
+        let catalog = self.catalog;
+        let database = catalog.database_name(table.database).to_vec();
+        let Some(live) = catalog.find_table(Some(database.as_slice()), &table.folded) else {
+            return Err(crate::bind::no_such_table(&table.name, span));
+        };
+        let Some(body) = live.view.as_ref() else {
+            return Err(unsupported(
+                "a view whose definition could not be parsed",
+                span,
+            ));
+        };
+        let names = body.columns.clone();
+        let saved_ast = self.ast;
+        let saved_scopes = core::mem::take(&mut self.scopes);
+        self.ast = &body.ast;
+        let bound = self.bind_select(body.select);
+        self.ast = saved_ast;
+        self.scopes = saved_scopes;
+        let mut bound = bound?;
+        // `CREATE VIEW v (a, b)` renames the body's columns, and those are the
+        // names `new.a` resolves against.
+        for (position, name) in names.iter().enumerate() {
+            if let Some(column) = bound.columns.get_mut(position) {
+                column.name = name.clone();
+            }
+        }
+        Ok(bound)
+    }
+
+    /// Builds the block whose rows an `INSTEAD OF UPDATE` or `DELETE` fires for.
+    ///
+    /// It reads the term `write_target_from_term` already pushed, so the filter
+    /// handed in here - bound against that same term - needs no adjustment.
+    fn view_rows(
+        &mut self,
+        table: &TableInfo,
+        filter: Option<BoundExpr>,
+    ) -> Option<Box<BoundSelect>> {
+        // The kind is checked before the target is taken. A trigger body's own
+        // UPDATE binds through here too, and taking first meant the body's
+        // statement - whose target is an ordinary table - consumed the view
+        // target belonging to the statement that fired it, which then compiled
+        // as a write to a view's root page of zero.
+        if table.kind != TableKind::View {
+            return None;
+        }
+        let id = self.view_target.take()?;
+        let source = self.sources.get(id)?.clone();
+        let columns = table
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(position, column)| BoundResultColumn {
+                expr: BoundExpr::Column {
+                    source: id,
+                    column: position as u16,
+                    slot: position as u16,
+                    affinity: column.affinity,
+                    collation: Collation::from_name(
+                        core::str::from_utf8(&column.collation).unwrap_or("BINARY"),
+                    )
+                    .unwrap_or(Collation::Binary),
+                },
+                name: column.name.clone(),
+                origin: None,
+                declared_type: column.declared_type.clone(),
+            })
+            .collect();
+        Some(Box::new(crate::bind::block_over(source, filter, columns)))
     }
 
     /// Makes the target table the statement's one visible source.
@@ -340,7 +711,7 @@ impl<'a> Binder<'a> {
     /// It opens a scope holding just the target, so every name in the
     /// statement's `SET`, `WHERE` and `RETURNING` resolves against the table
     /// being written and nothing else.
-    fn push_write_source(&mut self, table: TableInfo, alias: Vec<u8>) {
+    fn push_write_source(&mut self, table: TableInfo, alias: Vec<u8>) -> usize {
         let id = self.sources.len();
         self.sources.push(BoundSource {
             id,
@@ -352,6 +723,7 @@ impl<'a> Binder<'a> {
             suppressed: Vec::new(),
         });
         self.scopes.push(vec![id]);
+        id
     }
 
     /// Refuses an attempt to write a generated column.

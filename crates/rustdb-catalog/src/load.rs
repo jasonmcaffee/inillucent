@@ -21,6 +21,7 @@ use rustdb_sql::ast::{
 };
 use rustdb_sql::catalog_view::{
     CheckInfo, ColumnInfo, IndexColumnInfo, IndexInfo, IndexOrigin, TableInfo, TableKind,
+    TriggerEventInfo, TriggerInfo,
 };
 use rustdb_sql::parser::parse_next_statement;
 use rustdb_sql::Ast;
@@ -53,6 +54,12 @@ pub fn load_database_catalog(
             continue;
         }
         attach_index(&mut tables, row)?;
+    }
+    for row in &rows {
+        if row.kind != SchemaKind::Trigger {
+            continue;
+        }
+        attach_trigger(&mut tables, row)?;
     }
     load_statistics(pager, &mut tables)?;
     tables.extend(schema_table_aliases(database));
@@ -194,6 +201,7 @@ fn table_from_row(row: &SchemaObject, database: usize) -> DbResult<TableInfo> {
             kind: TableKind::View,
             create_sql,
             view: Some(Box::new(view)),
+            triggers: Vec::new(),
             analysed_rows: None,
             indexes: Vec::new(),
             checks: Vec::new(),
@@ -214,6 +222,7 @@ fn table_from_row(row: &SchemaObject, database: usize) -> DbResult<TableInfo> {
             kind: TableKind::Virtual,
             create_sql: Vec::new(),
             view: None,
+            triggers: Vec::new(),
             analysed_rows: None,
             indexes: Vec::new(),
             checks: Vec::new(),
@@ -252,6 +261,70 @@ pub fn view_from_create_sql(sql: &[u8]) -> DbResult<rustdb_sql::catalog_view::Vi
     })
 }
 
+/// Puts one trigger on the table or view it fires for.
+///
+/// The body is parsed once, here, for the reason a view body is: the arena
+/// belongs to the snapshot, so the binder can bind the body in place instead of
+/// re-parsing it on every write to the table.
+fn attach_trigger(tables: &mut [TableInfo], row: &SchemaObject) -> DbResult<()> {
+    let table_folded = row.table_name.to_ascii_lowercase().into_bytes();
+    let Some(table) = tables.iter_mut().find(|table| table.folded == table_folded) else {
+        // A trigger whose table is missing is a corrupt schema, but refusing to
+        // open the file is a worse answer than opening it without the trigger.
+        return Ok(());
+    };
+    let Some(sql) = row.sql.as_ref() else {
+        return Ok(());
+    };
+    let trigger = trigger_from_create_sql(sql.as_bytes())
+        .map_err(|error| error.with_detail(format!("in trigger {}", row.name)))?;
+    // Newest first. SQLite pushes each trigger onto the front of the table's
+    // list as it reads the schema, and fires them in that order, so the most
+    // recently created one runs first. Measured against 3.53.4: three AFTER
+    // INSERT triggers created as t1, t2, t3 log three, two, one.
+    table.triggers.insert(0, trigger);
+    Ok(())
+}
+
+/// Parses a `CREATE TRIGGER` statement into the definition a write fires.
+pub fn trigger_from_create_sql(sql: &[u8]) -> DbResult<TriggerInfo> {
+    let limits = Limits::default();
+    let parsed = parse_next_statement(sql, 0, &limits)
+        .map_err(|error| error::corrupt(format!("malformed trigger SQL: {}", error.message())))?;
+    let Statement::CreateTrigger {
+        name,
+        time,
+        event,
+        when,
+        body,
+        ..
+    } = &parsed.statement
+    else {
+        return Err(error::corrupt("schema SQL is not a CREATE TRIGGER"));
+    };
+    let text = parsed.ast.text(*name).to_vec();
+    let event = match event {
+        rustdb_sql::ast::TriggerEvent::Insert => TriggerEventInfo::Insert,
+        rustdb_sql::ast::TriggerEvent::Delete => TriggerEventInfo::Delete,
+        rustdb_sql::ast::TriggerEvent::Update(columns) => TriggerEventInfo::Update(
+            columns
+                .iter()
+                .map(|column| parsed.ast.folded(*column).to_vec())
+                .collect(),
+        ),
+    };
+    Ok(TriggerInfo {
+        folded: text.to_ascii_lowercase(),
+        name: text,
+        // `CREATE TRIGGER` with no time written is a BEFORE trigger.
+        time: time.unwrap_or(rustdb_sql::ast::TriggerTime::Before),
+        event,
+        when: *when,
+        body: body.clone(),
+        ast: parsed.ast,
+    })
+}
+
 /// Parses a `CREATE TABLE` statement into a table entry.
 ///
 /// This is public because it is how a test builds a catalog without a file, and
@@ -275,6 +348,7 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
                 kind: TableKind::Virtual,
                 create_sql: sql.to_vec(),
                 view: None,
+                triggers: Vec::new(),
                 analysed_rows: None,
                 indexes: Vec::new(),
                 checks: Vec::new(),
@@ -304,6 +378,7 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
         kind: TableKind::Table,
         create_sql: sql.to_vec(),
         view: None,
+        triggers: Vec::new(),
         analysed_rows: None,
         indexes: Vec::new(),
         checks: Vec::new(),

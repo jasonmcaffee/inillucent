@@ -122,6 +122,14 @@ impl CatalogView for CatalogSnapshot {
         None
     }
 
+    /// Returns every table of every attached database.
+    fn every_table(&self) -> Vec<&TableInfo> {
+        self.databases
+            .iter()
+            .flat_map(|catalog| catalog.tables.iter())
+            .collect()
+    }
+
     /// Returns every table of one attached database.
     fn tables_of(&self, database: usize) -> Vec<&TableInfo> {
         self.databases
@@ -163,6 +171,7 @@ mod tests {
             create_sql: Vec::new(),
             indexes: Vec::new(),
             view: None,
+            triggers: Vec::new(),
             analysed_rows: None,
             checks: Vec::new(),
         }

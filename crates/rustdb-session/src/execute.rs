@@ -83,6 +83,9 @@ pub fn run_directive(
         Directive::CreateIndex { .. } => run_write(connection, |connection| {
             create_index(connection, directive, source)
         }),
+        Directive::CreateTrigger { .. } => run_write(connection, |connection| {
+            create_trigger(connection, directive, source)
+        }),
         Directive::Drop { .. } => {
             run_write(connection, |connection| drop_object(connection, directive))
         }
@@ -552,6 +555,49 @@ fn create_view(
                 kind: SchemaKind::View,
                 name: name.clone(),
                 table: name.clone(),
+                root: 0,
+                sql: Some(sql.clone()),
+            },
+        )
+    })??;
+    connection.with_state(|state| ddl::bump_schema_cookie(&mut state.pager))??;
+    connection.refresh_catalog()?;
+    Ok(Vec::new())
+}
+
+/// Writes a `CREATE TRIGGER`'s schema row.
+///
+/// A trigger owns no B-tree - it is the stored text and nothing else, like a
+/// view - so creating one is a schema row and a cookie bump. Its `tbl_name` is
+/// the table it fires for rather than its own name, which is what makes
+/// `DROP TABLE` take its triggers with it and what lets the catalog attach it
+/// to the right object on the next load.
+fn create_trigger(
+    connection: &Connection,
+    directive: &Directive,
+    source: &[u8],
+) -> DbResult<DirectiveRows> {
+    let Directive::CreateTrigger {
+        name,
+        name_offset,
+        table,
+        exists,
+        ..
+    } = directive
+    else {
+        return Err(misuse("not a CREATE TRIGGER"));
+    };
+    if *exists {
+        return Ok(Vec::new());
+    }
+    let sql = ddl::canonical_sql("CREATE TRIGGER", source, *name_offset, source.len() as u32);
+    connection.with_state(|state| {
+        ddl::insert_schema_row(
+            &mut state.pager,
+            &SchemaRow {
+                kind: SchemaKind::Trigger,
+                name: name.clone(),
+                table: table.clone(),
                 root: 0,
                 sql: Some(sql.clone()),
             },

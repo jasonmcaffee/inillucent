@@ -18,7 +18,7 @@ use rustdb_base::ids::PageId;
 use rustdb_base::limits::Limits;
 use rustdb_base::{error, DbResult, PrimaryCode};
 use rustdb_sql::ast::BinaryOp;
-use rustdb_storage::cursor::{BTreeCursor, SeekBias};
+use rustdb_storage::cursor::{BTreeCursor, SavedPosition, SeekBias};
 use rustdb_storage::mutate;
 use rustdb_storage::pager::Pager;
 use rustdb_value::record::{self, KeyColumn, KeyInfo, RecordRef};
@@ -109,6 +109,12 @@ pub struct Machine {
     /// The state the random built-ins draw from.
     entropy: u64,
     changes: i64,
+    /// How many rows this statement's triggers have changed.
+    ///
+    /// `changes()` reports the statement's own rows and not its triggers', so
+    /// the two are counted separately and folded together only where
+    /// `total_changes()` is worked out.
+    trigger_changes: i64,
     /// How many rows every statement on this connection has changed.
     total_changes: i64,
     last_insert_rowid: i64,
@@ -151,6 +157,7 @@ impl Machine {
             now: crate::datetime::julian_now(),
             entropy: crate::datetime::julian_now().to_bits(),
             changes: 0,
+            trigger_changes: 0,
             total_changes: 0,
             last_insert_rowid: 0,
             conflict: None,
@@ -197,6 +204,11 @@ impl Machine {
     }
 
     /// Returns how many rows the program has changed so far.
+    pub fn trigger_changes(&self) -> i64 {
+        self.trigger_changes
+    }
+
+    /// Returns how many rows the statement itself changed.
     pub fn changes(&self) -> i64 {
         self.changes
     }
@@ -820,8 +832,24 @@ impl Machine {
             Opcode::CreateBtree => self.create_btree(instruction, pager),
             Opcode::DestroyBtree => self.destroy_btree(instruction, pager),
             Opcode::ClearBtree => self.clear_btree(instruction, pager),
+            Opcode::LastRowid => {
+                if instruction.p2 == 1 {
+                    self.last_insert_rowid = cast::integer_value(&self.register(instruction.p1));
+                } else {
+                    let value = Value::Integer(self.last_insert_rowid);
+                    self.store(instruction.p1, value);
+                }
+                Ok(Flow::Next)
+            }
             Opcode::CountChange => {
-                self.changes = self.changes.saturating_add(1);
+                // `p5` of 1 marks a row a trigger body wrote. It counts towards
+                // `total_changes()` but not `changes()`, which reports what the
+                // statement itself did.
+                if instruction.p5 == 1 {
+                    self.trigger_changes = self.trigger_changes.saturating_add(1);
+                } else {
+                    self.changes = self.changes.saturating_add(1);
+                }
                 let rowid = cast::integer_value(&self.register(instruction.p1));
                 if instruction.p2 == 1 {
                     self.last_insert_rowid = rowid;
@@ -934,12 +962,14 @@ impl Machine {
         let rowid = cast::integer_value(&self.register(instruction.p3));
         let root = self.cursor_root(instruction.p1)?;
         let append = instruction.p5 == 1;
+        let saved = self.save_cursors_on(root, instruction.p1, pager)?;
         if append {
             mutate::append_row(pager, root, rowid, &payload)?;
         } else {
             mutate::insert_row(pager, root, rowid, &payload)?;
         }
         self.invalidate_cursors_on(root);
+        self.restore_cursors(saved, pager)?;
         Ok(Flow::Next)
     }
 
@@ -947,8 +977,10 @@ impl Machine {
     fn delete_row(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
         let rowid = self.with_cursor(instruction.p1, |slot| slot.cursor.rowid())?;
         let root = self.cursor_root(instruction.p1)?;
+        let saved = self.save_cursors_on(root, instruction.p1, pager)?;
         mutate::delete_row(pager, root, rowid)?;
         self.invalidate_cursors_on(root);
+        self.restore_cursors(saved, pager)?;
         Ok(Flow::Next)
     }
 
@@ -957,8 +989,10 @@ impl Machine {
         let payload = self.record_bytes(instruction.p2)?;
         let root = self.cursor_root(instruction.p1)?;
         let key = self.cursor_key(instruction.p1)?;
+        let saved = self.save_cursors_on(root, instruction.p1, pager)?;
         mutate::insert_entry(pager, root, &key, &payload)?;
         self.invalidate_cursors_on(root);
+        self.restore_cursors(saved, pager)?;
         Ok(Flow::Next)
     }
 
@@ -971,8 +1005,10 @@ impl Machine {
         let payload = self.record_bytes(instruction.p2)?;
         let root = self.cursor_root(instruction.p1)?;
         let key = self.cursor_key(instruction.p1)?;
+        let saved = self.save_cursors_on(root, instruction.p1, pager)?;
         mutate::delete_entry(pager, root, &key, &payload)?;
         self.invalidate_cursors_on(root);
+        self.restore_cursors(saved, pager)?;
         Ok(Flow::Next)
     }
 
@@ -1101,6 +1137,74 @@ impl Machine {
                 slot.payload = None;
             }
         }
+    }
+
+    /// Records where every *other* cursor on one tree is sitting.
+    ///
+    /// A cursor's stack is page numbers and slot indices, and a write moves
+    /// cells between pages: after it, slot four of page nine is a different
+    /// entry or none at all. Until triggers there was never a second cursor on
+    /// a tree being written, so clearing the cached row was enough. A trigger
+    /// whose body writes the table that fired it has two, and the outer one was
+    /// left standing on a page that had been rebalanced underneath it - which
+    /// surfaced as `an unpositioned cursor was read`, reported as a malformed
+    /// database.
+    ///
+    /// The work is skipped unless a second cursor really is on the tree, so the
+    /// ordinary single-cursor write pays a comparison and nothing else.
+    fn save_cursors_on(
+        &mut self,
+        root: PageId,
+        writer: i32,
+        pager: &mut Pager,
+    ) -> DbResult<Vec<(usize, SavedPosition)>> {
+        let index = writer.max(0) as usize;
+        let sharing = self
+            .cursors
+            .iter()
+            .enumerate()
+            .filter(|(position, slot)| {
+                *position != index && slot.as_ref().is_some_and(|slot| slot.cursor.root() == root)
+            })
+            .count();
+        if sharing == 0 {
+            return Ok(Vec::new());
+        }
+        let limits = self.limits.clone();
+        let mut saved = Vec::with_capacity(sharing);
+        for (position, slot) in self.cursors.iter_mut().enumerate() {
+            if position == index {
+                continue;
+            }
+            let Some(slot) = slot else { continue };
+            if slot.cursor.root() != root {
+                continue;
+            }
+            saved.push((position, slot.cursor.save_position(pager, &limits)?));
+        }
+        Ok(saved)
+    }
+
+    /// Puts the saved cursors back on the entries they were reading.
+    ///
+    /// A cursor whose own row the write removed lands on the next entry, which
+    /// is what `restore` reports by returning false - and is the right answer:
+    /// SQLite's `sqlite3BtreeCursorHasMoved` leaves such a cursor needing a
+    /// step rather than pointing at a row that is gone.
+    fn restore_cursors(
+        &mut self,
+        saved: Vec<(usize, SavedPosition)>,
+        pager: &mut Pager,
+    ) -> DbResult<()> {
+        let limits = self.limits.clone();
+        for (position, where_it_was) in saved {
+            let Some(Some(slot)) = self.cursors.get_mut(position) else {
+                continue;
+            };
+            slot.payload = None;
+            slot.cursor.restore(pager, &where_it_was, &limits)?;
+        }
+        Ok(())
     }
 
     /// Runs a closure over one open cursor and the pager together.

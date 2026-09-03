@@ -13,7 +13,10 @@
 //! the row into a sorter there and drains it afterwards.
 
 use rustdb_base::{error, DbResult};
-use rustdb_sql::ast::{BinaryOp, CompoundOp, JoinKind, NullOrder, PatternOp, SortOrder, UnaryOp};
+use rustdb_sql::ast::{
+    BinaryOp, CompoundOp, ConflictAction, JoinKind, NullOrder, PatternOp, RaiseAction, SortOrder,
+    UnaryOp,
+};
 use rustdb_sql::bind::{
     BoundAggregate, BoundExpr, BoundFrameBound, BoundOrderTerm, BoundResultColumn, BoundSelect,
     SubqueryKind, WindowCall as BoundWindowCall,
@@ -40,10 +43,22 @@ pub struct Compiler {
     pub(crate) registers: u32,
     pub(crate) cursors: u32,
     pub(crate) sorters: u32,
-    distincts: u32,
-    ephemerals: u32,
-    aggregates: u32,
+    pub(crate) distincts: u32,
+    pub(crate) ephemerals: u32,
+    pub(crate) aggregates: u32,
     pub(crate) substitutions: Vec<(BoundExpr, u32)>,
+    /// Where a `RAISE(IGNORE)` in the trigger body being compiled jumps to.
+    ///
+    /// `IGNORE` abandons the rest of the trigger program and, for a BEFORE
+    /// trigger, the row that fired it - so the jump target is decided by the
+    /// write that is emitting the body, not by the expression, and the labels
+    /// collect here until that write patches them.
+    pub(crate) ignore_jumps: Vec<Label>,
+    /// How many trigger bodies enclose the code being emitted.
+    ///
+    /// Anything written at a depth above zero is a trigger's doing, which
+    /// decides whether its row counts towards `changes()`.
+    pub(crate) firing_depth: u32,
     /// The table cursor each FROM term reads through.
     ///
     /// A source's number and its cursor's number are not the same thing, and
@@ -117,6 +132,8 @@ impl Compiler {
             ephemerals: 0,
             aggregates: 0,
             substitutions: Vec::new(),
+            ignore_jumps: Vec::new(),
+            firing_depth: 0,
             source_cursors: Vec::new(),
             stop_at: None,
             source_defaults: Vec::new(),
@@ -180,14 +197,14 @@ impl Compiler {
     }
 
     /// Allocates one ephemeral row store.
-    fn ephemeral(&mut self) -> u32 {
+    pub(crate) fn ephemeral(&mut self) -> u32 {
         let store = self.ephemerals;
         self.ephemerals = self.ephemerals.saturating_add(1);
         store
     }
 
     /// Records the cursors one statement-wide FROM term reads through.
-    fn register_source(&mut self, id: usize, cursors: SourceCursors) {
+    pub(crate) fn register_source(&mut self, id: usize, cursors: SourceCursors) {
         if self.source_cursors.len() <= id {
             self.source_cursors.resize(id.saturating_add(1), None);
         }
@@ -407,7 +424,7 @@ struct Body<'a> {
 
 impl Compiler {
     /// Opens every cursor the plan and everything nested inside it will use.
-    fn open_all_cursors(&mut self, plan: &PhysicalPlan) -> DbResult<()> {
+    pub(crate) fn open_all_cursors(&mut self, plan: &PhysicalPlan) -> DbResult<()> {
         for source in &plan.sources {
             match &source.path {
                 AccessPath::RecursiveSelf { cte } => {
@@ -3153,6 +3170,41 @@ impl Compiler {
         self.patch_here(done_hit);
     }
 
+    /// Emits a `RAISE(...)`, which never returns a value.
+    ///
+    /// Three of the four actions stop the statement, so the register handed back
+    /// is never read; `IGNORE` jumps instead, to a label the enclosing write
+    /// patches once it knows where the row ends. Returning a register anyway is
+    /// what lets RAISE sit in a result column like any other expression.
+    fn emit_raise(&mut self, action: RaiseAction, message: Option<&[u8]>) -> DbResult<u32> {
+        let register = self.register();
+        self.emit(Instruction::new(Opcode::Null, 0, register as i32, 0));
+        match action {
+            RaiseAction::Ignore => {
+                let label = self.emit_jump(Instruction::new(Opcode::Goto, 0, -1, 0));
+                self.ignore_jumps.push(label);
+            }
+            RaiseAction::Rollback | RaiseAction::Abort | RaiseAction::Fail => {
+                let conflict = match action {
+                    RaiseAction::Rollback => ConflictAction::Rollback,
+                    RaiseAction::Fail => ConflictAction::Fail,
+                    _ => ConflictAction::Abort,
+                };
+                let text = message.unwrap_or_default().to_vec();
+                self.emit(
+                    Instruction::new(
+                        Opcode::HaltError,
+                        crate::compile_dml::codes::TRIGGER,
+                        0,
+                        crate::compile_dml::conflict_code(conflict),
+                    )
+                    .with_p4(Operand::Text(text)),
+                );
+            }
+        }
+        Ok(register)
+    }
+
     /// Compiles one expression into a register.
     pub fn compile_expr(&mut self, expr: &BoundExpr) -> DbResult<u32> {
         if let Some((_, register)) = self
@@ -3163,6 +3215,7 @@ impl Compiler {
             return Ok(*register);
         }
         match expr {
+            BoundExpr::Raise { action, message } => self.emit_raise(*action, message.as_deref()),
             BoundExpr::Null => Ok(self.emit_load(Operand::Null)),
             BoundExpr::Integer(value) => Ok(self.emit_load(Operand::Integer(*value))),
             BoundExpr::Real(value) => Ok(self.emit_load(Operand::Real(*value))),

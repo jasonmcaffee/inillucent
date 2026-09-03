@@ -1203,8 +1203,8 @@ id = "sql.create-trigger"
 source = "https://sqlite.org/lang_createtrigger.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::row_triggers_match_sqlite", "rustdb-compat::trigger_raise_matches_sqlite", "rustdb-compat::trigger_chains_match_sqlite", "rustdb-compat::instead_of_triggers_match_sqlite", "rustdb-compat::triggers_round_trip_through_sqlite", "rustdb-compat::instead_of_triggers_round_trip_through_sqlite"]
 
 [[capability]]
 id = "sql.alter-table"
@@ -1717,18 +1717,18 @@ id = "sql.negative.full-alter-table"
 source = "https://sqlite.org/omitted.html"
 profile = "negative-parity"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
+status = "pass"
 expected = "syntax-error"
-tests = []
+tests = ["rustdb-compat::alter_table_rewrites_the_schema"]
 
 [[capability]]
 id = "sql.negative.trigger-for-each-statement"
 source = "https://sqlite.org/omitted.html"
 profile = "negative-parity"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
+status = "pass"
 expected = "syntax-error"
-tests = []
+tests = ["rustdb-compat::the_trigger_forms_sqlite_omits_are_refused"]
 
 [[capability]]
 id = "sql.negative.writable-views"

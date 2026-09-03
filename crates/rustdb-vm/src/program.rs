@@ -262,6 +262,14 @@ pub enum Opcode {
     /// the operation for the update hook - 0 delete, 1 insert, 2 update - and
     /// `p4` carries the table it happened to.
     CountChange,
+    /// `p1`: register, `p2`: 0 to read the last insert rowid into it, 1 to
+    /// write it back from it.
+    ///
+    /// A trigger body's own inserts are visible to `last_insert_rowid()` while
+    /// the body runs and not afterwards, which SQLite gets from the frame it
+    /// pushes. Trigger bodies are inlined here, so the save and the restore are
+    /// emitted around the body instead.
+    LastRowid,
 }
 
 impl Opcode {
@@ -409,6 +417,7 @@ impl Opcode {
             Opcode::DestroyBtree => "DestroyBtree",
             Opcode::ClearBtree => "ClearBtree",
             Opcode::CountChange => "CountChange",
+            Opcode::LastRowid => "LastRowid",
             Opcode::SorterInsert => "SorterInsert",
             Opcode::SorterSort => "SorterSort",
             Opcode::SorterNext => "SorterNext",
