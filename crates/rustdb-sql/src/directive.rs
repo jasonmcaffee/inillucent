@@ -496,9 +496,7 @@ impl<'a> Binder<'a> {
         name: ast::NameId,
         body: &ast::CreateTableBody,
     ) -> Result<Directive, ParseError> {
-        if temporary {
-            return Err(unsupported("TEMP tables", Span::default()));
-        }
+        let temp = self.temporary_database(temporary, database)?;
         let ast::CreateTableBody::Columns {
             columns,
             constraints,
@@ -522,7 +520,10 @@ impl<'a> Binder<'a> {
                 Span::default(),
             ));
         }
-        let index = self.resolve_database(database)?;
+        let index = match temp {
+            Some(index) => index,
+            None => self.resolve_database(database)?,
+        };
         let written = self.ast.text(name).to_vec();
         if written.to_ascii_lowercase().starts_with(b"sqlite_") {
             return Err(refused(
@@ -1197,10 +1198,11 @@ impl<'a> Binder<'a> {
         columns: &[ast::NameId],
         select: ast::SelectId,
     ) -> Result<Directive, ParseError> {
-        if temporary {
-            return Err(unsupported("TEMP views", Span::default()));
-        }
-        let index = self.resolve_database(database)?;
+        let temp = self.temporary_database(temporary, database)?;
+        let index = match temp {
+            Some(index) => index,
+            None => self.resolve_database(database)?,
+        };
         let written = self.ast.text(name).to_vec();
         if written.to_ascii_lowercase().starts_with(b"sqlite_") {
             return Err(refused(
@@ -1299,15 +1301,16 @@ impl<'a> Binder<'a> {
         &mut self,
         parts: CreateTriggerParts<'_>,
     ) -> Result<Directive, ParseError> {
-        if parts.temporary {
-            return Err(unsupported("TEMP triggers", Span::default()));
-        }
+        let temp = self.temporary_database(parts.temporary, parts.database)?;
         // `for_each_row` records whether the words were written, not whether
         // the trigger is one: SQLite has only row triggers, an omitted clause
         // means FOR EACH ROW, and FOR EACH STATEMENT is a syntax error in the
         // parser. There is nothing to refuse here.
         let _ = parts.for_each_row;
-        let index = self.resolve_database(parts.database)?;
+        let index = match temp {
+            Some(index) => index,
+            None => self.resolve_database(parts.database)?,
+        };
         let written = self.ast.text(parts.name).to_vec();
         if written.to_ascii_lowercase().starts_with(b"sqlite_") {
             return Err(refused(
@@ -1321,11 +1324,12 @@ impl<'a> Binder<'a> {
         let folded = self.ast.folded(parts.name).to_vec();
         let database_name = self.catalog.database_name(index).to_vec();
         let table_folded = self.ast.folded(parts.table).to_vec();
-        let Some(target) = self
-            .catalog
-            .find_table(Some(database_name.as_slice()), &table_folded)
-            .cloned()
-        else {
+        // A trigger created in a named database fires for a table in that
+        // database. A temporary one fires for whatever the name finds, which
+        // is the whole point of `CREATE TEMP TRIGGER ... ON t`: the trigger is
+        // the connection's and the table is everybody's.
+        let scope = temp.map_or(Some(database_name.as_slice()), |_| None);
+        let Some(target) = self.catalog.find_table(scope, &table_folded).cloned() else {
             return Err(crate::bind::no_such_table(
                 self.ast.text(parts.table),
                 Span::default(),
@@ -1639,6 +1643,31 @@ impl<'a> Binder<'a> {
             name: self.ast.folded(name).to_vec(),
             argument,
         })
+    }
+
+    /// Returns the temporary database's number when `TEMP` was written.
+    ///
+    /// A temporary object's name may not be qualified: `CREATE TEMP TABLE
+    /// main.t` says two different things about where the table goes, and
+    /// SQLite refuses it rather than picking one.
+    fn temporary_database(
+        &self,
+        temporary: bool,
+        database: Option<ast::NameId>,
+    ) -> Result<Option<usize>, ParseError> {
+        if !temporary {
+            return Ok(None);
+        }
+        if database.is_some() {
+            return Err(refused(
+                "temporary table name must be unqualified",
+                Span::default(),
+            ));
+        }
+        self.catalog
+            .database_index(b"temp")
+            .map(Some)
+            .ok_or_else(|| refused("no temporary database", Span::default()))
     }
 
     /// Resolves a schema qualifier to an attached database index.

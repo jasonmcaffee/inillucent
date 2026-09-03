@@ -68,7 +68,7 @@ pub use btree::{BTreePage, CellRef, PageKind, PageLayout};
 pub use cache::{CacheCounters, PageCache, PageKey, PagePin, PageVersion};
 pub use check::{CheckLevel, CheckReport};
 pub use cursor::{BTreeCursor, CursorState, SavedPosition, SeekBias, TreeKind};
-pub use databases::{PagerSet, MAIN_DATABASE};
+pub use databases::{PagerSet, MAIN_DATABASE, TEMP_DATABASE};
 pub use edit::{encode_cell, rewrite_page};
 pub use header::{DatabaseHeader, VacuumMode};
 pub use journal::{Journal, JournalStats};
