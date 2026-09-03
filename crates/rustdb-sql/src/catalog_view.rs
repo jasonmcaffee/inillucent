@@ -100,6 +100,31 @@ pub enum TableKind {
     View,
     /// A virtual table.
     Virtual,
+    /// A nested query standing in for a table: a FROM subquery, a CTE
+    /// reference, or an expanded view.
+    ///
+    /// It is a kind rather than a flag because every question the binder asks
+    /// of a table - has it a rowid, can it be written to, may an index be used
+    /// on it - has the same answer for all three, and a kind makes the answer
+    /// one match arm instead of three conditions that can drift apart.
+    Subquery,
+}
+
+/// A view's parsed definition.
+///
+/// The arena lives here, in the catalog snapshot, rather than being re-parsed
+/// on every reference. That is not only a saving: the binder holds the snapshot
+/// for the whole statement, so a body kept here outlives the bind and can be
+/// bound in place, while one parsed inside the binder would be a local whose
+/// borrow ends before the bound tree does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ViewBody {
+    /// The arena the view's `SELECT` was parsed into.
+    pub ast: crate::ast::Ast,
+    /// The `SELECT` inside the arena.
+    pub select: crate::ast::SelectId,
+    /// The explicit column list, when the `CREATE VIEW` wrote one.
+    pub columns: Vec<Vec<u8>>,
 }
 
 /// A table, view or virtual table.
@@ -127,6 +152,8 @@ pub struct TableInfo {
     pub create_sql: Vec<u8>,
     /// The indexes over this table.
     pub indexes: Vec<IndexInfo>,
+    /// The parsed body, when this is a view.
+    pub view: Option<Box<ViewBody>>,
     /// Every `CHECK` constraint, as the source text it was written as.
     ///
     /// The text rather than a bound expression, for the same reason
@@ -163,6 +190,32 @@ impl TableInfo {
     /// Returns whether the table has a rowid a query may refer to.
     pub fn has_rowid(&self) -> bool {
         self.kind == TableKind::Table && !self.without_rowid
+    }
+
+    /// Returns a table that stands for a nested query's result.
+    ///
+    /// The column list is the block's result columns: their names are what a
+    /// reference to the subquery resolves against, and their affinity and
+    /// collation are the ones the expressions behind them carry, so a
+    /// comparison against a subquery column applies the same rules it would
+    /// have applied one level down.
+    pub fn subquery(name: Vec<u8>, database: usize, columns: Vec<ColumnInfo>) -> TableInfo {
+        let folded = name.to_ascii_lowercase();
+        TableInfo {
+            name,
+            folded,
+            database,
+            root: 0,
+            columns,
+            rowid_alias: None,
+            without_rowid: true,
+            strict: false,
+            kind: TableKind::Subquery,
+            create_sql: Vec::new(),
+            view: None,
+            indexes: Vec::new(),
+            checks: Vec::new(),
+        }
     }
 
     /// Returns whether a name is one of the rowid's three spellings and is not
@@ -378,6 +431,7 @@ mod tests {
             kind: TableKind::Table,
             create_sql: Vec::new(),
             indexes: Vec::new(),
+            view: None,
             checks: Vec::new(),
         }
     }

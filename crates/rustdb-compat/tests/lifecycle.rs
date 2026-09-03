@@ -224,6 +224,7 @@ fn two_statements_interleave_on_one_connection() {
 /// Builds a minimal valid program for the verifier tests to damage.
 fn valid_program() -> Program {
     Program {
+        ephemeral_count: 0,
         instructions: vec![
             Instruction::new(Opcode::Init, 0, 1, 0),
             Instruction::new(Opcode::Load, 0, 1, 0).with_p4(Operand::Integer(7)),

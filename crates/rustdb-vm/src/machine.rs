@@ -26,6 +26,7 @@ use rustdb_value::{affinity, cast, Affinity, Collation, TextEncoding, Value};
 
 use crate::aggregate::Accumulator;
 use crate::builtin;
+use crate::ephemeral::Ephemeral;
 use crate::eval;
 use crate::program::{Instruction, Opcode, Operand, Program, RowChange};
 use crate::sorter::{DistinctSet, Sorter};
@@ -60,12 +61,23 @@ struct CursorSlot {
     payload: Option<Vec<u8>>,
     is_index: bool,
     key: KeyInfo,
+    /// Whether the cursor is standing on the null row an outer join emits.
+    ///
+    /// While it is set, every column read off the cursor answers NULL and the
+    /// rowid answers NULL, without the body having to know it is running for
+    /// an unmatched row.
+    null_row: bool,
 }
 
 impl CursorSlot {
     /// Forgets the cached row, which every move must do.
+    ///
+    /// A move also leaves the null row: the cursor is on a real entry again,
+    /// and a flag left set would turn the whole of the rest of the scan into
+    /// NULLs.
     fn moved(&mut self) {
         self.payload = None;
+        self.null_row = false;
     }
 }
 
@@ -76,6 +88,7 @@ pub struct Machine {
     cursors: Vec<Option<CursorSlot>>,
     sorters: Vec<Option<Sorter>>,
     distincts: Vec<DistinctSet>,
+    ephemerals: Vec<Option<Ephemeral>>,
     accumulators: Vec<Option<Accumulator>>,
     bindings: Vec<Value<'static>>,
     counter: usize,
@@ -102,6 +115,8 @@ impl Machine {
         let mut sorters = Vec::new();
         sorters.resize_with(program.sorter_count as usize, || None);
         let distincts = vec![DistinctSet::new(); program.distinct_count as usize];
+        let mut ephemerals = Vec::new();
+        ephemerals.resize_with(program.ephemeral_count as usize, || None);
         let mut accumulators = Vec::new();
         accumulators.resize_with(program.aggregate_count as usize, || None);
         let bindings = vec![Value::Null; program.parameter_count as usize];
@@ -111,6 +126,7 @@ impl Machine {
             cursors,
             sorters,
             distincts,
+            ephemerals,
             accumulators,
             bindings,
             counter: 0,
@@ -326,6 +342,15 @@ impl Machine {
             Opcode::Column => self.column(instruction, pager),
             Opcode::IdxColumn => self.column(instruction, pager),
             Opcode::Rowid => {
+                let null_row = self
+                    .cursors
+                    .get(instruction.p1.max(0) as usize)
+                    .and_then(|slot| slot.as_ref())
+                    .is_some_and(|slot| slot.null_row);
+                if null_row {
+                    self.store(instruction.p2, Value::Null);
+                    return Ok(Flow::Next);
+                }
                 let rowid = self.with_cursor(instruction.p1, |slot| slot.cursor.rowid())?;
                 self.store(instruction.p2, Value::Integer(rowid));
                 Ok(Flow::Next)
@@ -548,6 +573,117 @@ impl Machine {
                 if seen {
                     return Ok(Flow::Jump(instruction.p2.max(0) as usize));
                 }
+                Ok(Flow::Next)
+            }
+            Opcode::NullRow => {
+                if let Some(Some(slot)) = self.cursors.get_mut(instruction.p1.max(0) as usize) {
+                    slot.payload = None;
+                    slot.null_row = true;
+                }
+                Ok(Flow::Next)
+            }
+            Opcode::EphOpen => {
+                let key = match (&instruction.p4, instruction.p5) {
+                    (Operand::SortKey(key), 1) => Some(key.clone()),
+                    _ => None,
+                };
+                let width = instruction.p2.max(0) as usize;
+                if let Some(slot) = self.ephemerals.get_mut(instruction.p1.max(0) as usize) {
+                    *slot = Some(Ephemeral::new(width, key));
+                }
+                Ok(Flow::Next)
+            }
+            Opcode::EphInsert => {
+                let row = self.block(instruction.p2, instruction.p3);
+                if let Some(Some(store)) = self.ephemerals.get_mut(instruction.p1.max(0) as usize) {
+                    store.insert(row);
+                }
+                Ok(Flow::Next)
+            }
+            Opcode::EphInsertUnique => {
+                let row = self.block(instruction.p3, i32::from(instruction.p5));
+                let inserted = match self.ephemerals.get_mut(instruction.p1.max(0) as usize) {
+                    Some(Some(store)) => store.insert_unique(row),
+                    _ => false,
+                };
+                if !inserted {
+                    return Ok(Flow::Jump(instruction.p2.max(0) as usize));
+                }
+                Ok(Flow::Next)
+            }
+            Opcode::EphRewind => {
+                let has_rows = match self.ephemerals.get_mut(instruction.p1.max(0) as usize) {
+                    Some(Some(store)) => store.rewind(),
+                    _ => false,
+                };
+                if !has_rows {
+                    return Ok(Flow::Jump(instruction.p2.max(0) as usize));
+                }
+                Ok(Flow::Next)
+            }
+            Opcode::EphNext => {
+                let more = match self.ephemerals.get_mut(instruction.p1.max(0) as usize) {
+                    Some(Some(store)) => store.next(),
+                    _ => false,
+                };
+                if more {
+                    return Ok(Flow::Jump(instruction.p2.max(0) as usize));
+                }
+                Ok(Flow::Next)
+            }
+            Opcode::EphColumn => {
+                let value = match self.ephemerals.get(instruction.p1.max(0) as usize) {
+                    Some(Some(store)) => store.column(instruction.p2.max(0) as usize),
+                    _ => Value::Null,
+                };
+                self.store(instruction.p3, value);
+                Ok(Flow::Next)
+            }
+            Opcode::EphFound | Opcode::EphNotFound => {
+                let row = self.block(instruction.p3, i32::from(instruction.p5));
+                let present = match self.ephemerals.get(instruction.p1.max(0) as usize) {
+                    Some(Some(store)) => store.contains(&row),
+                    _ => false,
+                };
+                let jump = if instruction.opcode == Opcode::EphFound {
+                    present
+                } else {
+                    !present
+                };
+                if jump {
+                    return Ok(Flow::Jump(instruction.p2.max(0) as usize));
+                }
+                Ok(Flow::Next)
+            }
+            Opcode::EphRemove => {
+                let row = self.block(instruction.p3, i32::from(instruction.p5));
+                let removed = match self.ephemerals.get_mut(instruction.p1.max(0) as usize) {
+                    Some(Some(store)) => store.remove(&row),
+                    _ => false,
+                };
+                if removed {
+                    return Ok(Flow::Jump(instruction.p2.max(0) as usize));
+                }
+                Ok(Flow::Next)
+            }
+            Opcode::EphClear => {
+                if let Some(Some(store)) = self.ephemerals.get_mut(instruction.p1.max(0) as usize) {
+                    store.clear();
+                }
+                Ok(Flow::Next)
+            }
+            Opcode::EphDedup => {
+                if let Some(Some(store)) = self.ephemerals.get_mut(instruction.p1.max(0) as usize) {
+                    store.dedup();
+                }
+                Ok(Flow::Next)
+            }
+            Opcode::EphSawNull => {
+                let saw = match self.ephemerals.get(instruction.p1.max(0) as usize) {
+                    Some(Some(store)) => store.saw_null(),
+                    _ => false,
+                };
+                self.store(instruction.p2, Value::Integer(i64::from(saw)));
                 Ok(Flow::Next)
             }
             Opcode::ResultRow => {
@@ -907,6 +1043,7 @@ impl Machine {
         };
         if let Some(slot) = self.cursors.get_mut(instruction.p1.max(0) as usize) {
             *slot = Some(CursorSlot {
+                null_row: false,
                 cursor,
                 payload: None,
                 is_index,
@@ -1102,6 +1239,10 @@ impl Machine {
             let Some(Some(slot)) = self.cursors.get_mut(instruction.p1.max(0) as usize) else {
                 return Err(error::misuse("cursor is not open"));
             };
+            if slot.null_row {
+                self.store(instruction.p3, Value::Null);
+                return Ok(Flow::Next);
+            }
             if slot.payload.is_none() {
                 slot.payload = Some(slot.cursor.payload(pager, &limits)?);
             }

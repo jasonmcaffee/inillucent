@@ -126,7 +126,7 @@ impl Compiler {
             Instruction::new(Opcode::OpenWrite, cursor as i32, table.root as i32, 0)
                 .with_p4(Operand::Count(table.columns.len() as u32)),
         );
-        self.source_cursors = vec![cursor];
+        self.source_cursors = vec![Some(crate::compile::SourceCursors::table_only(cursor))];
         let mut indexes = Vec::new();
         let mut definitions = Vec::new();
         for index in &table.indexes {
@@ -1010,6 +1010,7 @@ fn finish(
     result_columns: Vec<ResultColumn>,
 ) -> Program {
     Program {
+        ephemeral_count: 0,
         instructions: compiler.instructions,
         register_count: compiler.registers,
         cursor_count: compiler.cursors,

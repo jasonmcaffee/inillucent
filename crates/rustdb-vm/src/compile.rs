@@ -13,10 +13,12 @@
 //! the row into a sorter there and drains it afterwards.
 
 use rustdb_base::{error, DbResult};
-use rustdb_sql::ast::{BinaryOp, NullOrder, PatternOp, SortOrder, UnaryOp};
-use rustdb_sql::bind::{BoundAggregate, BoundExpr, BoundOrderTerm, BoundSelect};
+use rustdb_sql::ast::{BinaryOp, CompoundOp, JoinKind, NullOrder, PatternOp, SortOrder, UnaryOp};
+use rustdb_sql::bind::{BoundAggregate, BoundExpr, BoundOrderTerm, BoundSelect, SubqueryKind};
 use rustdb_sql::catalog_view::TableInfo;
-use rustdb_sql::plan::{AccessPath, AggregationMode, BoundKind, PhysicalPlan, RangeBound};
+use rustdb_sql::plan::{
+    plan_select, AccessPath, AggregationMode, BoundKind, PhysicalPlan, RangeBound,
+};
 use rustdb_value::{Affinity, Collation};
 
 use crate::program::{
@@ -35,6 +37,7 @@ pub struct Compiler {
     pub(crate) cursors: u32,
     pub(crate) sorters: u32,
     distincts: u32,
+    ephemerals: u32,
     aggregates: u32,
     pub(crate) substitutions: Vec<(BoundExpr, u32)>,
     /// The table cursor each FROM term reads through.
@@ -45,7 +48,26 @@ pub struct Compiler {
     /// the second FROM term's table cursor is number two rather than number
     /// one, and `SELECT b.label FROM a, b WHERE a.k = 'x'` addressed `a`'s
     /// index cursor as if it were `b`'s table.
-    pub(crate) source_cursors: Vec<u32>,
+    pub(crate) source_cursors: Vec<Option<SourceCursors>>,
+    /// The level an outer join's loop must stop descending at.
+    ///
+    /// The levels below an outer join are emitted once, as a continuation the
+    /// matched row and the null-extended row both enter, so the loop itself
+    /// must not descend into them a second time.
+    stop_at: Option<usize>,
+    /// Everything a nested query used as a value needs, by its bound number.
+    ///
+    /// The map is keyed by the binder's own number rather than by position,
+    /// because one expression can be compiled more than once - an `ORDER BY`
+    /// term that is also a result column, for instance - and the store must be
+    /// opened exactly once however many times the expression is emitted.
+    subquery_plans: std::collections::BTreeMap<usize, ValueSubquery>,
+    /// The level whose residual predicate the loop must not test.
+    ///
+    /// An outer join's `WHERE` runs after the join, not inside it: testing it
+    /// in the loop would skip the row, leave the match flag clear, and emit a
+    /// null-extended row for a row that did match.
+    bare_level: Option<usize>,
     aggregate_registers: Vec<u32>,
     pub(crate) end_jumps: Vec<Label>,
 }
@@ -68,9 +90,13 @@ impl Compiler {
             cursors: 0,
             sorters: 0,
             distincts: 0,
+            ephemerals: 0,
             aggregates: 0,
             substitutions: Vec::new(),
             source_cursors: Vec::new(),
+            stop_at: None,
+            bare_level: None,
+            subquery_plans: std::collections::BTreeMap::new(),
             aggregate_registers: Vec::new(),
             end_jumps: Vec::new(),
         }
@@ -123,7 +149,43 @@ impl Compiler {
         self.source_cursors
             .get(source)
             .copied()
-            .map_or(source as i32, |cursor| cursor as i32)
+            .flatten()
+            .map_or(source as i32, |cursors| cursors.table as i32)
+    }
+
+    /// Allocates one ephemeral row store.
+    fn ephemeral(&mut self) -> u32 {
+        let store = self.ephemerals;
+        self.ephemerals = self.ephemerals.saturating_add(1);
+        store
+    }
+
+    /// Records the cursors one statement-wide FROM term reads through.
+    fn register_source(&mut self, id: usize, cursors: SourceCursors) {
+        if self.source_cursors.len() <= id {
+            self.source_cursors.resize(id.saturating_add(1), None);
+        }
+        if let Some(slot) = self.source_cursors.get_mut(id) {
+            *slot = Some(cursors);
+        }
+    }
+
+    /// Returns whether a FROM term's rows come from an ephemeral store.
+    fn is_ephemeral_source(&self, id: usize) -> bool {
+        self.source_cursors
+            .get(id)
+            .copied()
+            .flatten()
+            .is_some_and(|cursors| cursors.ephemeral)
+    }
+
+    /// Returns the cursors a statement-wide FROM term reads through.
+    fn cursors_of(&self, id: usize) -> DbResult<SourceCursors> {
+        self.source_cursors
+            .get(id)
+            .copied()
+            .flatten()
+            .ok_or_else(|| error::misuse("a FROM term with no cursor"))
     }
 
     /// Returns the address the next instruction will be emitted at.
@@ -142,19 +204,14 @@ pub fn compile(
     let entry = compiler.emit_jump(Instruction::new(Opcode::Init, 0, -1, 0));
     compiler.patch_here(entry);
     compiler.emit(Instruction::new(Opcode::Transaction, 0, 0, 0));
-    let cursors = compiler.open_cursors(plan);
-    let (limit_register, offset_register) = compiler.compile_limits(plan)?;
-    let sorter = compiler.open_order_sorter(plan);
-    let distinct = compiler.open_distinct(plan);
-    let body = Body {
-        plan,
-        cursors: cursors.clone(),
-        sorter,
-        distinct,
-        limit_register,
-        offset_register,
-    };
-    compiler.compile_statement(&body)?;
+    // Every cursor in the whole statement is opened before anything runs,
+    // including the cursors of blocks nested inside it. A correlated subquery
+    // rewinds its cursors each time it is re-run, so opening once is not only
+    // cheaper - it is what makes the cursor map one flat vector indexed by the
+    // statement-wide FROM-term number rather than a stack that has to be kept
+    // in step with the recursion.
+    compiler.open_all_cursors(plan)?;
+    compiler.compile_block(plan, Sink::Result)?;
     let halt = compiler.here();
     compiler.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
     for label in core::mem::take(&mut compiler.end_jumps) {
@@ -177,6 +234,7 @@ pub fn compile(
         cursor_count: compiler.cursors,
         sorter_count: compiler.sorters,
         distinct_count: compiler.distincts,
+        ephemeral_count: compiler.ephemerals,
         aggregate_count: compiler.aggregates,
         result_columns,
         dependencies,
@@ -185,67 +243,468 @@ pub fn compile(
     })
 }
 
-/// The cursors one FROM term uses.
-#[derive(Clone, Copy, Debug)]
-struct SourceCursors {
-    table: u32,
-    index: Option<u32>,
+/// Where the rows a block produces go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Sink {
+    /// Out of the statement, as a result row.
+    Result,
+    /// Into an ephemeral store, keeping duplicates.
+    Store(u32),
+    /// Into an ephemeral store, dropping a row equal to one already there.
+    UniqueStore(u32),
+    /// Into an ephemeral store, with an affinity applied on the way in.
+    ///
+    /// `x IN (SELECT y ...)` compares `x` and `y` under one affinity, and
+    /// applying it to `x` alone would compare a converted left against an
+    /// unconverted right - which is how `'1' IN (SELECT 1)` comes back false.
+    TypedStore(u32, Option<Affinity>),
 }
 
-/// Everything the loop nest needs to know.
+/// The cursors one FROM term uses.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SourceCursors {
+    /// The table cursor, or the ephemeral store when the term is a subquery.
+    table: u32,
+    /// The index cursor an index path reads through.
+    index: Option<u32>,
+    /// Whether `table` numbers an ephemeral store rather than a B-tree cursor.
+    ephemeral: bool,
+    /// The register holding whether an uncorrelated block has been built.
+    ///
+    /// It is allocated and zeroed before the loops, not inside them. Zeroing it
+    /// where the block is materialised put the initialisation *inside* the
+    /// enclosing loop, so the flag was cleared on every outer row and the store
+    /// accumulated one copy of the subquery per row of the query above it.
+    built: Option<u32>,
+}
+
+impl SourceCursors {
+    /// Returns the cursors of a term read through a table cursor alone.
+    ///
+    /// A DML statement opens exactly one cursor for its target and registers it
+    /// here, so that the expression compiler asks the same map a SELECT does
+    /// rather than assuming a FROM term's number and its cursor's number are
+    /// the same thing.
+    pub(crate) fn table_only(table: u32) -> SourceCursors {
+        SourceCursors {
+            table,
+            index: None,
+            ephemeral: false,
+            built: None,
+        }
+    }
+}
+
+/// A nested query used as a value, prepared before the block that reads it.
+#[derive(Clone, Debug)]
+struct ValueSubquery {
+    /// The store its rows are collected in.
+    store: u32,
+    /// The plan that fills the store.
+    plan: PhysicalPlan,
+    /// Whether it reads a FROM term outside itself.
+    correlated: bool,
+    /// The register holding whether an uncorrelated block has been built.
+    built: Option<u32>,
+    /// The affinity applied to its rows, for an `IN`.
+    affinity: Option<Affinity>,
+}
+
+/// Everything the loop nest of one block needs to know.
 struct Body<'a> {
     plan: &'a PhysicalPlan,
-    cursors: Vec<SourceCursors>,
     sorter: Option<u32>,
     distinct: Option<u32>,
     limit_register: Option<u32>,
     offset_register: Option<u32>,
+    sink: Sink,
 }
 
 impl Compiler {
-    /// Opens one cursor per FROM term, and a second for an index path.
-    fn open_cursors(&mut self, plan: &PhysicalPlan) -> Vec<SourceCursors> {
-        let mut cursors = Vec::with_capacity(plan.sources.len());
+    /// Opens every cursor the plan and everything nested inside it will use.
+    fn open_all_cursors(&mut self, plan: &PhysicalPlan) -> DbResult<()> {
         for source in &plan.sources {
-            let table = self.cursors;
-            self.cursors = self.cursors.saturating_add(1);
-            let columns = source.table.columns.len() as i32;
-            self.emit(
-                Instruction::new(Opcode::OpenRead, table as i32, source.table.root as i32, 0)
-                    .with_p4(Operand::Count(columns.max(0) as u32)),
-            );
-            let index = match &source.path {
-                AccessPath::IndexSeek {
-                    index_root,
-                    collations,
-                    descending,
-                    ..
-                } => {
-                    let cursor = self.cursors;
-                    self.cursors = self.cursors.saturating_add(1);
-                    let key = IndexKey {
-                        columns: collations
-                            .iter()
-                            .zip(descending.iter())
-                            .map(|(collation, descending)| SortColumn {
-                                descending: *descending,
-                                nulls_first: true,
-                                collation: *collation,
-                            })
-                            .collect(),
-                    };
-                    self.emit(
-                        Instruction::new(Opcode::OpenIndex, cursor as i32, *index_root as i32, 0)
-                            .with_p4(Operand::IndexKey(key)),
-                    );
-                    Some(cursor)
+            match &source.path {
+                AccessPath::RecursiveSelf { cte } => {
+                    // It reads the CTE's own store, at whatever row the fill
+                    // loop is on, so it opens nothing of its own.
+                    let cursors = self.cursors_of(*cte)?;
+                    self.register_source(source.id, cursors);
                 }
-                _ => None,
-            };
-            cursors.push(SourceCursors { table, index });
-            self.source_cursors.push(table);
+                AccessPath::Subquery {
+                    plan: nested,
+                    width,
+                    correlated,
+                } => {
+                    let store = self.ephemeral();
+                    let built = (!*correlated).then(|| {
+                        let flag = self.register();
+                        self.emit(
+                            Instruction::new(Opcode::Load, 0, flag as i32, 0)
+                                .with_p4(Operand::Integer(0)),
+                        );
+                        flag
+                    });
+                    self.register_source(
+                        source.id,
+                        SourceCursors {
+                            table: store,
+                            index: None,
+                            ephemeral: true,
+                            built,
+                        },
+                    );
+                    self.emit(Instruction::new(
+                        Opcode::EphOpen,
+                        store as i32,
+                        *width as i32,
+                        0,
+                    ));
+                    self.open_all_cursors(nested)?;
+                }
+                AccessPath::Recursive {
+                    seeds,
+                    steps,
+                    width,
+                } => {
+                    let store = self.ephemeral();
+                    self.register_source(
+                        source.id,
+                        SourceCursors {
+                            table: store,
+                            index: None,
+                            ephemeral: true,
+                            built: None,
+                        },
+                    );
+                    // The store keeps an index: a `UNION` step has to be able
+                    // to ask whether a row it just produced is one the queue
+                    // has already seen, which is the only thing that makes the
+                    // recursion terminate.
+                    self.emit(
+                        Instruction::new(Opcode::EphOpen, store as i32, *width as i32, 0)
+                            .with_p4(Operand::SortKey(store_key(*width)))
+                            .with_p5(1),
+                    );
+                    for (_, arm) in seeds.iter().chain(steps.iter()) {
+                        self.open_all_cursors(arm)?;
+                    }
+                }
+                path => {
+                    let table = self.cursors;
+                    self.cursors = self.cursors.saturating_add(1);
+                    let columns = source.table.columns.len() as i32;
+                    self.emit(
+                        Instruction::new(
+                            Opcode::OpenRead,
+                            table as i32,
+                            source.table.root as i32,
+                            0,
+                        )
+                        .with_p4(Operand::Count(columns.max(0) as u32)),
+                    );
+                    let index = match path {
+                        AccessPath::IndexSeek {
+                            index_root,
+                            collations,
+                            descending,
+                            ..
+                        } => {
+                            let cursor = self.cursors;
+                            self.cursors = self.cursors.saturating_add(1);
+                            let key = IndexKey {
+                                columns: collations
+                                    .iter()
+                                    .zip(descending.iter())
+                                    .map(|(collation, descending)| SortColumn {
+                                        descending: *descending,
+                                        nulls_first: true,
+                                        collation: *collation,
+                                    })
+                                    .collect(),
+                            };
+                            self.emit(
+                                Instruction::new(
+                                    Opcode::OpenIndex,
+                                    cursor as i32,
+                                    *index_root as i32,
+                                    0,
+                                )
+                                .with_p4(Operand::IndexKey(key)),
+                            );
+                            Some(cursor)
+                        }
+                        _ => None,
+                    };
+                    self.register_source(
+                        source.id,
+                        SourceCursors {
+                            table,
+                            index,
+                            ephemeral: false,
+                            built: None,
+                        },
+                    );
+                }
+            }
         }
-        cursors
+        for (_, arm) in &plan.compounds {
+            self.open_all_cursors(arm)?;
+        }
+        self.open_value_subqueries(plan)?;
+        Ok(())
+    }
+
+    /// Opens a store and cursors for every nested query used as a value.
+    ///
+    /// This runs before any body is compiled, for the same reason the FROM
+    /// terms' cursors do: an expression may be emitted more than once, and a
+    /// store opened at the point of use would be opened twice - which the
+    /// verifier refuses, and rightly.
+    fn open_value_subqueries(&mut self, plan: &PhysicalPlan) -> DbResult<()> {
+        let mut found = Vec::new();
+        collect_subqueries_of_plan(plan, &mut found);
+        for expr in found {
+            let BoundExpr::Subquery {
+                id,
+                kind,
+                block,
+                affinity,
+                collation,
+                ..
+            } = expr
+            else {
+                continue;
+            };
+            if self.subquery_plans.contains_key(&id) {
+                continue;
+            }
+            let nested = plan_select((*block).clone());
+            let correlated = !block.correlations.is_empty();
+            let store = self.ephemeral();
+            let width = block.columns.len().max(1);
+            // Only an `IN` set is ever probed, so only an `IN` set pays for an
+            // index. `EXISTS` asks whether the store is empty and a scalar
+            // reads its first row; both are answered by a scan.
+            let indexed = kind == SubqueryKind::In;
+            let mut open = Instruction::new(Opcode::EphOpen, store as i32, width as i32, 0);
+            if indexed {
+                open = open
+                    .with_p4(Operand::SortKey(SortKey {
+                        columns: vec![SortColumn {
+                            descending: false,
+                            nulls_first: true,
+                            collation,
+                        }],
+                    }))
+                    .with_p5(1);
+            }
+            self.emit(open);
+            let built = (!correlated).then(|| {
+                let flag = self.register();
+                self.emit(
+                    Instruction::new(Opcode::Load, 0, flag as i32, 0).with_p4(Operand::Integer(0)),
+                );
+                flag
+            });
+            self.subquery_plans.insert(
+                id,
+                ValueSubquery {
+                    store,
+                    plan: nested.clone(),
+                    correlated,
+                    built,
+                    affinity: (kind == SubqueryKind::In).then_some(affinity).flatten(),
+                },
+            );
+            self.open_all_cursors(&nested)?;
+        }
+        Ok(())
+    }
+
+    /// Compiles one query block, sending its rows wherever the sink says.
+    ///
+    /// A block owns its `LIMIT`: exhausting a subquery's limit ends that
+    /// subquery, not the statement, so the jumps a limit produces are patched
+    /// to the end of *this* block rather than to the program's `Halt`.
+    pub(crate) fn compile_block(&mut self, plan: &PhysicalPlan, sink: Sink) -> DbResult<()> {
+        let outer_jumps = core::mem::take(&mut self.end_jumps);
+        let result = self.compile_block_inner(plan, sink);
+        let block_end = self.here();
+        for label in core::mem::take(&mut self.end_jumps) {
+            self.patch(label, block_end);
+        }
+        self.end_jumps = outer_jumps;
+        result
+    }
+
+    /// Compiles a block's compound arms, or its single arm.
+    fn compile_block_inner(&mut self, plan: &PhysicalPlan, sink: Sink) -> DbResult<()> {
+        if !plan.compounds.is_empty() {
+            return self.compile_compound(plan, sink);
+        }
+        let (limit_register, offset_register) = self.compile_limits(plan)?;
+        let sorter = self.open_order_sorter(plan);
+        let distinct = self.open_distinct(plan);
+        let body = Body {
+            plan,
+            sorter,
+            distinct,
+            limit_register,
+            offset_register,
+            sink,
+        };
+        self.compile_statement(&body)
+    }
+
+    /// Compiles a compound: every arm into one store, then that store drained.
+    ///
+    /// The arms are combined left to right, which is the only associativity
+    /// SQLite gives compound operators. `UNION`, `INTERSECT` and `EXCEPT` each
+    /// de-duplicate everything to their left before they apply, so a chain that
+    /// starts `UNION ALL` and later meets a `UNION` loses the duplicates the
+    /// first operator kept - exactly as SQLite does.
+    fn compile_compound(&mut self, plan: &PhysicalPlan, sink: Sink) -> DbResult<()> {
+        let width = plan.select.columns.len();
+        let key = compound_key(plan);
+        let left = self.ephemeral();
+        self.emit(
+            Instruction::new(Opcode::EphOpen, left as i32, width as i32, 0)
+                .with_p4(Operand::SortKey(key.clone()))
+                .with_p5(1),
+        );
+        let mut arm = plan.clone();
+        let arms = core::mem::take(&mut arm.compounds);
+        // The first arm and the compound are the same struct, so the tail
+        // clauses have to be taken off the arm before it is compiled. Leaving
+        // them made `a UNION b ORDER BY 1 LIMIT 2 OFFSET 1` apply the limit to
+        // `a` alone and then again to the union, which silently dropped a row.
+        arm.select.order_by.clear();
+        arm.select.limit = None;
+        arm.select.offset = None;
+        arm.needs_sort = false;
+        self.compile_block(&arm, Sink::Store(left))?;
+        for (op, next) in &arms {
+            if *op != CompoundOp::UnionAll {
+                self.emit(Instruction::new(Opcode::EphDedup, left as i32, 0, 0));
+            }
+            match op {
+                CompoundOp::UnionAll => {
+                    self.compile_block(next, Sink::Store(left))?;
+                }
+                CompoundOp::Union => {
+                    self.compile_block(next, Sink::UniqueStore(left))?;
+                }
+                CompoundOp::Intersect | CompoundOp::Except => {
+                    let right = self.ephemeral();
+                    self.emit(
+                        Instruction::new(Opcode::EphOpen, right as i32, width as i32, 0)
+                            .with_p4(Operand::SortKey(key.clone()))
+                            .with_p5(1),
+                    );
+                    self.compile_block(next, Sink::UniqueStore(right))?;
+                    self.filter_against(left, right, width, *op == CompoundOp::Intersect)?;
+                }
+            }
+        }
+        // The compound's own ORDER BY, LIMIT and OFFSET apply to the combined
+        // rows, so they are compiled here rather than on any arm.
+        let mut drain = plan.clone();
+        drain.compounds.clear();
+        drain.sources.clear();
+        drain.residuals.clear();
+        drain.constant_filter = None;
+        drain.aggregation = AggregationMode::None;
+        drain.select.distinct = false;
+        drain.select.filter = None;
+        drain.select.group_by.clear();
+        drain.select.having = None;
+        drain.select.aggregates.clear();
+        drain.select.values.clear();
+        let (limit_register, offset_register) = self.compile_limits(&drain)?;
+        let sorter = self.open_order_sorter(&drain);
+        let body = Body {
+            plan: &drain,
+            sorter,
+            distinct: None,
+            limit_register,
+            offset_register,
+            sink,
+        };
+        self.drain_store(&body, left, width)?;
+        Ok(())
+    }
+
+    /// Rewrites the left store to the rows that are, or are not, in the right.
+    fn filter_against(
+        &mut self,
+        left: u32,
+        right: u32,
+        width: usize,
+        keep_present: bool,
+    ) -> DbResult<()> {
+        let block = self.register_block(width.max(1));
+        let empty = self.emit_jump(Instruction::new(Opcode::EphRewind, left as i32, -1, 0));
+        let start = self.here();
+        for index in 0..width {
+            self.emit(Instruction::new(
+                Opcode::EphColumn,
+                left as i32,
+                index as i32,
+                block.saturating_add(index as u32) as i32,
+            ));
+        }
+        let opcode = if keep_present {
+            Opcode::EphFound
+        } else {
+            Opcode::EphNotFound
+        };
+        // A row that fails the test is deleted from the left store, so what is
+        // left at the end is the answer and no third store is needed.
+        let keep = self.emit_jump(
+            Instruction::new(opcode, right as i32, -1, block as i32).with_p5(width as u16),
+        );
+        self.emit_jump(Instruction::new(
+            Opcode::EphRemove,
+            left as i32,
+            self.here().saturating_add(1),
+            block as i32,
+        ))
+        .0;
+        if let Some(instruction) = self.instructions.last_mut() {
+            instruction.p5 = width as u16;
+        }
+        self.patch_here(keep);
+        let more = self.emit_jump(Instruction::new(Opcode::EphNext, left as i32, -1, 0));
+        self.patch(more, start);
+        self.patch_here(empty);
+        Ok(())
+    }
+
+    /// Drains an ephemeral store through a block's tail.
+    fn drain_store(&mut self, body: &Body<'_>, store: u32, width: usize) -> DbResult<()> {
+        let block = self.register_block(width.max(1));
+        let tail_return = self.register();
+        let skip = self.emit_jump(Instruction::new(Opcode::Goto, 0, -1, 0));
+        let tail = self.here();
+        self.compile_tail(body, block, width, true, tail_return)?;
+        self.patch_here(skip);
+        let empty = self.emit_jump(Instruction::new(Opcode::EphRewind, store as i32, -1, 0));
+        let start = self.here();
+        for index in 0..width {
+            self.emit(Instruction::new(
+                Opcode::EphColumn,
+                store as i32,
+                index as i32,
+                block.saturating_add(index as u32) as i32,
+            ));
+        }
+        self.emit(Instruction::new(Opcode::Gosub, tail_return as i32, tail, 0));
+        let more = self.emit_jump(Instruction::new(Opcode::EphNext, store as i32, -1, 0));
+        self.patch(more, start);
+        self.patch_here(empty);
+        self.drain_sorter(body, width)?;
+        Ok(())
     }
 
     /// Evaluates LIMIT and OFFSET into counter registers.
@@ -259,10 +718,6 @@ impl Compiler {
                 let source = self.compile_expr(expr)?;
                 let counter = self.register();
                 self.emit(
-                    Instruction::new(Opcode::Cast, source as i32, source as i32, 0)
-                        .with_p4(Operand::Affinity(Affinity::Integer)),
-                );
-                self.emit(
                     Instruction::new(Opcode::Copy, source as i32, counter as i32, 0).with_p5(1),
                 );
                 Some(counter)
@@ -274,10 +729,6 @@ impl Compiler {
                 let source = self.compile_expr(expr)?;
                 let counter = self.register();
                 self.emit(
-                    Instruction::new(Opcode::Cast, source as i32, source as i32, 0)
-                        .with_p4(Operand::Affinity(Affinity::Integer)),
-                );
-                self.emit(
                     Instruction::new(Opcode::Copy, source as i32, counter as i32, 0).with_p5(2),
                 );
                 Some(counter)
@@ -287,9 +738,9 @@ impl Compiler {
         Ok((limit, offset))
     }
 
-    /// Opens the sorter an ORDER BY needs.
+    /// Opens the ORDER BY sorter, when the statement needs one.
     fn open_order_sorter(&mut self, plan: &PhysicalPlan) -> Option<u32> {
-        if plan.select.order_by.is_empty() {
+        if !plan.needs_sort {
             return None;
         }
         let sorter = self.sorters;
@@ -304,7 +755,7 @@ impl Compiler {
         Some(sorter)
     }
 
-    /// Opens the set a DISTINCT needs, with one collation per result column.
+    /// Opens the DISTINCT set, when the statement needs one.
     fn open_distinct(&mut self, plan: &PhysicalPlan) -> Option<u32> {
         if !plan.select.distinct {
             return None;
@@ -721,14 +1172,9 @@ impl Compiler {
         }
         let skip = self.emit_offset_check(body);
         let done = self.emit_limit_precheck(body);
-        self.emit(Instruction::new(
-            Opcode::ResultRow,
-            block as i32,
-            width as i32,
-            0,
-        ));
+        let dropped = self.emit_sink(body, block, width);
         let exhausted = self.emit_limit_decrement(body);
-        for label in skip {
+        for label in skip.into_iter().chain(dropped) {
             self.patch_here(label);
         }
         let more = self.emit_jump(Instruction::new(Opcode::SorterNext, sorter as i32, -1, 0));
@@ -804,14 +1250,9 @@ impl Compiler {
         }
         let offset_skip = self.emit_offset_check(body);
         let done = self.emit_limit_precheck(body);
-        self.emit(Instruction::new(
-            Opcode::ResultRow,
-            block as i32,
-            width as i32,
-            0,
-        ));
+        let dropped = self.emit_sink(body, block, width);
         let exhausted = self.emit_limit_decrement(body);
-        for label in skip.into_iter().chain(offset_skip) {
+        for label in skip.into_iter().chain(offset_skip).chain(dropped) {
             self.patch_here(label);
         }
         if subroutine {
@@ -836,6 +1277,12 @@ impl Compiler {
         block: u32,
         body: &Body<'_>,
     ) -> DbResult<u32> {
+        // A compound's `ORDER BY` names a result column by number, because the
+        // arms do not share a FROM clause for it to name anything else in. The
+        // number indexes the block the row was just read into.
+        if let BoundExpr::SorterColumn { column } = &term.expr {
+            return Ok(block.saturating_add(u32::from(*column)));
+        }
         if let Some(index) = body
             .plan
             .select
@@ -846,6 +1293,56 @@ impl Compiler {
             return Ok(block.saturating_add(index as u32));
         }
         self.compile_expr(&term.expr)
+    }
+
+    /// Emits whatever the block does with a finished row.
+    ///
+    /// The returned labels jump past the limit decrement: a row the sink
+    /// dropped as a duplicate did not count against `LIMIT`, and counting it
+    /// would make `SELECT a UNION SELECT b LIMIT 1` stop after the duplicate
+    /// rather than after the row.
+    fn emit_sink(&mut self, body: &Body<'_>, block: u32, width: usize) -> Vec<Label> {
+        match body.sink {
+            Sink::Result => {
+                self.emit(Instruction::new(
+                    Opcode::ResultRow,
+                    block as i32,
+                    width as i32,
+                    0,
+                ));
+                Vec::new()
+            }
+            Sink::Store(store) => {
+                self.emit(Instruction::new(
+                    Opcode::EphInsert,
+                    store as i32,
+                    block as i32,
+                    width as i32,
+                ));
+                Vec::new()
+            }
+            Sink::UniqueStore(store) => {
+                vec![self.emit_jump(
+                    Instruction::new(Opcode::EphInsertUnique, store as i32, -1, block as i32)
+                        .with_p5(width as u16),
+                )]
+            }
+            Sink::TypedStore(store, affinity) => {
+                if let Some(affinity) = affinity {
+                    self.emit(
+                        Instruction::new(Opcode::ApplyAffinity, block as i32, width as i32, 0)
+                            .with_p4(Operand::Affinity(affinity)),
+                    );
+                }
+                self.emit(Instruction::new(
+                    Opcode::EphInsert,
+                    store as i32,
+                    block as i32,
+                    width as i32,
+                ));
+                Vec::new()
+            }
+        }
     }
 
     /// Emits the OFFSET test, returning the jump that skips a row.
@@ -876,6 +1373,10 @@ impl Compiler {
     }
 
     /// Compiles the loop for one FROM term, and then the level inside it.
+    ///
+    /// An outer join splits in two: the levels below it become a subroutine,
+    /// so that the matched row and the null-extended row can both run the same
+    /// body without a second copy of it in the program.
     fn compile_level(&mut self, body: &Body<'_>, level: usize, inner: &InnerBody) -> DbResult<()> {
         if level >= body.plan.sources.len() {
             return self.compile_inner(body, inner);
@@ -883,10 +1384,108 @@ impl Compiler {
         let Some(source) = body.plan.sources.get(level) else {
             return Err(error::misuse("plan level out of range"));
         };
-        let Some(cursors) = body.cursors.get(level).copied() else {
-            return Err(error::misuse("cursor level out of range"));
+        if self.stop_at == Some(level) {
+            return self.compile_inner(body, inner);
+        }
+        if source.join == JoinKind::Left {
+            return self.compile_left_join(body, level, inner);
+        }
+        self.compile_loop(body, level, inner)
+    }
+
+    /// Compiles a `LEFT JOIN` level: the loop, then the row it owes.
+    fn compile_left_join(
+        &mut self,
+        body: &Body<'_>,
+        level: usize,
+        inner: &InnerBody,
+    ) -> DbResult<()> {
+        let matched = self.register();
+        let ret = self.register();
+        let on = body
+            .plan
+            .sources
+            .get(level)
+            .and_then(|source| source.on.clone());
+        // The continuation is emitted with the join's own limits cleared, so
+        // that a nested outer join inside it is compiled as a whole rather than
+        // stopping where this one stops.
+        let saved = (self.stop_at.take(), self.bare_level.take());
+        let skip = self.emit_jump(Instruction::new(Opcode::Goto, 0, -1, 0));
+        let continuation = self.here();
+        let residual = self.compile_residual(body, level)?;
+        self.compile_level(body, level.saturating_add(1), inner)?;
+        for label in residual {
+            self.patch_here(label);
+        }
+        self.emit(Instruction::new(Opcode::Return, ret as i32, 0, 0));
+        self.patch_here(skip);
+        self.emit(
+            Instruction::new(Opcode::Load, 0, matched as i32, 0).with_p4(Operand::Integer(0)),
+        );
+        let entered = InnerBody::JoinMatch {
+            matched,
+            ret,
+            continuation,
+            on,
         };
+        self.stop_at = Some(level.saturating_add(1));
+        self.bare_level = Some(level);
+        let outcome = self.compile_loop(body, level, &entered);
+        self.stop_at = saved.0;
+        self.bare_level = saved.1;
+        outcome?;
+        let done = self.emit_jump(Instruction::new(Opcode::If, matched as i32, -1, 0));
+        let cursors = self.cursors_of(source_id(body, level)?)?;
+        if !cursors.ephemeral {
+            self.emit(Instruction::new(
+                Opcode::NullRow,
+                cursors.table as i32,
+                0,
+                0,
+            ));
+        }
+        self.emit(Instruction::new(Opcode::Gosub, ret as i32, continuation, 0));
+        self.patch_here(done);
+        Ok(())
+    }
+
+    /// Compiles one FROM term's loop, whatever the join that attached it.
+    fn compile_loop(&mut self, body: &Body<'_>, level: usize, inner: &InnerBody) -> DbResult<()> {
+        let Some(source) = body.plan.sources.get(level) else {
+            return Err(error::misuse("plan level out of range"));
+        };
+        let cursors = self.cursors_of(source.id)?;
         let path = source.path.clone();
+        if let AccessPath::Subquery {
+            plan,
+            width,
+            correlated,
+        } = &path
+        {
+            return self.compile_subquery_level(
+                body,
+                level,
+                cursors,
+                plan,
+                *width,
+                *correlated,
+                inner,
+            );
+        }
+        if let AccessPath::Recursive { seeds, steps, .. } = &path {
+            return self.compile_recursive_level(body, level, cursors, seeds, steps, inner);
+        }
+        if let AccessPath::RecursiveSelf { .. } = &path {
+            // One row, already positioned: the body runs once, against the row
+            // the enclosing fill loop is standing on.
+            let skip = self.compile_residual(body, level)?;
+            self.compile_level(body, level.saturating_add(1), inner)?;
+            for label in skip {
+                self.patch_here(label);
+            }
+            return Ok(());
+        }
         match path {
             AccessPath::TableScan { .. } => {
                 let empty = self.emit_jump(Instruction::new(
@@ -943,6 +1542,11 @@ impl Compiler {
                     without_rowid,
                     inner,
                 )?;
+            }
+            AccessPath::Subquery { .. }
+            | AccessPath::Recursive { .. }
+            | AccessPath::RecursiveSelf { .. } => {
+                return Err(error::misuse("a materialised path reached the table loop"));
             }
         }
         Ok(())
@@ -1187,6 +1791,9 @@ impl Compiler {
 
     /// Emits the residual predicate for one loop level.
     fn compile_residual(&mut self, body: &Body<'_>, level: usize) -> DbResult<Vec<Label>> {
+        if self.bare_level == Some(level) {
+            return Ok(Vec::new());
+        }
         let Some(Some(residual)) = body.plan.residuals.get(level) else {
             return Ok(Vec::new());
         };
@@ -1197,9 +1804,132 @@ impl Compiler {
         )])
     }
 
+    /// Materialises a nested block into its store, then scans the store.
+    ///
+    /// An uncorrelated block is built once, guarded by a flag register; a
+    /// correlated one is cleared and rebuilt every time the loop that encloses
+    /// it produces a row, because the outer cursors it reads have moved.
+    #[allow(clippy::too_many_arguments)]
+    fn compile_subquery_level(
+        &mut self,
+        body: &Body<'_>,
+        level: usize,
+        cursors: SourceCursors,
+        plan: &PhysicalPlan,
+        width: usize,
+        correlated: bool,
+        inner: &InnerBody,
+    ) -> DbResult<()> {
+        let store = cursors.table;
+        let mut built: Option<Label> = None;
+        if correlated {
+            self.emit(Instruction::new(Opcode::EphClear, store as i32, 0, 0));
+        } else if let Some(once) = cursors.built {
+            // The flag was zeroed before the loops, so a block with no
+            // correlation is built exactly once however many times the loop
+            // that encloses it runs.
+            built = Some(self.emit_jump(Instruction::new(Opcode::If, once as i32, -1, 0)));
+            self.emit(
+                Instruction::new(Opcode::Load, 0, once as i32, 0).with_p4(Operand::Integer(1)),
+            );
+        }
+        self.compile_block(plan, Sink::Store(store))?;
+        if let Some(label) = built {
+            self.patch_here(label);
+        }
+        let empty = self.emit_jump(Instruction::new(Opcode::EphRewind, store as i32, -1, 0));
+        let start = self.here();
+        let skip = self.compile_residual(body, level)?;
+        self.compile_level(body, level.saturating_add(1), inner)?;
+        for label in skip {
+            self.patch_here(label);
+        }
+        let more = self.emit_jump(Instruction::new(Opcode::EphNext, store as i32, -1, 0));
+        self.patch(more, start);
+        self.patch_here(empty);
+        let _ = width;
+        Ok(())
+    }
+
+    /// Fills a recursive CTE's store, then scans it.
+    ///
+    /// The queue is the store itself. The seed arms append to it, and the fill
+    /// loop walks it forward with the step arms appending behind the cursor -
+    /// so a row produced by a step is visited in its turn without a second
+    /// structure, and the walk ends exactly when nothing new was appended.
+    fn compile_recursive_level(
+        &mut self,
+        body: &Body<'_>,
+        level: usize,
+        cursors: SourceCursors,
+        seeds: &[(CompoundOp, PhysicalPlan)],
+        steps: &[(CompoundOp, PhysicalPlan)],
+        inner: &InnerBody,
+    ) -> DbResult<()> {
+        let store = cursors.table;
+        self.emit(Instruction::new(Opcode::EphClear, store as i32, 0, 0));
+        for (op, arm) in seeds {
+            let sink = sink_for(*op, store);
+            self.compile_block(arm, sink)?;
+        }
+        if !steps.is_empty() {
+            let idle = self.emit_jump(Instruction::new(Opcode::EphRewind, store as i32, -1, 0));
+            let again = self.here();
+            for (op, arm) in steps {
+                let sink = sink_for(*op, store);
+                self.compile_block(arm, sink)?;
+            }
+            let more = self.emit_jump(Instruction::new(Opcode::EphNext, store as i32, -1, 0));
+            self.patch(more, again);
+            self.patch_here(idle);
+        }
+        let empty = self.emit_jump(Instruction::new(Opcode::EphRewind, store as i32, -1, 0));
+        let start = self.here();
+        let skip = self.compile_residual(body, level)?;
+        self.compile_level(body, level.saturating_add(1), inner)?;
+        for label in skip {
+            self.patch_here(label);
+        }
+        let more = self.emit_jump(Instruction::new(Opcode::EphNext, store as i32, -1, 0));
+        self.patch(more, start);
+        self.patch_here(empty);
+        Ok(())
+    }
+
     /// Emits whatever the innermost loop body does.
     fn compile_inner(&mut self, body: &Body<'_>, inner: &InnerBody) -> DbResult<()> {
         match inner {
+            InnerBody::JoinMatch {
+                matched,
+                ret,
+                continuation,
+                on,
+            } => {
+                // The `ON` condition is tested here rather than as a residual:
+                // a row that fails it is not a match, and the loop has to carry
+                // on looking rather than the statement dropping the row.
+                let mut refused = Vec::new();
+                if let Some(on) = on {
+                    let register = self.compile_expr(&on.clone())?;
+                    refused.push(self.emit_jump(
+                        Instruction::new(Opcode::IfNot, register as i32, -1, 0).with_p5(1),
+                    ));
+                }
+                self.emit(
+                    Instruction::new(Opcode::Load, 0, *matched as i32, 0)
+                        .with_p4(Operand::Integer(1)),
+                );
+                self.emit(Instruction::new(
+                    Opcode::Gosub,
+                    *ret as i32,
+                    *continuation,
+                    0,
+                ));
+                for label in refused {
+                    self.patch_here(label);
+                }
+                Ok(())
+            }
             InnerBody::Row {
                 block,
                 tail,
@@ -1295,8 +2025,28 @@ impl Compiler {
     }
 }
 
+/// Returns the statement-wide id of one level of a block.
+fn source_id(body: &Body<'_>, level: usize) -> DbResult<usize> {
+    body.plan
+        .sources
+        .get(level)
+        .map(|source| source.id)
+        .ok_or_else(|| error::misuse("plan level out of range"))
+}
+
 /// What the innermost loop body does with a row.
 enum InnerBody {
+    /// Record that this outer-join level matched, and run the continuation.
+    JoinMatch {
+        /// The register holding whether any row matched.
+        matched: u32,
+        /// The register holding the continuation's return address.
+        ret: u32,
+        /// The continuation's address.
+        continuation: i32,
+        /// The join's `ON` condition, which decides what counts as a match.
+        on: Option<BoundExpr>,
+    },
     /// Build a result row and run the tail.
     Row {
         /// The register block the row is built in.
@@ -1331,6 +2081,180 @@ fn group_substitutions(group_by: &[BoundExpr], previous: u32) -> Vec<(BoundExpr,
         .collect()
 }
 
+/// Collects every nested query used as a value anywhere in a plan.
+///
+/// It walks the whole block - the filter, the residuals, the result columns,
+/// the group and order keys, the aggregate arguments and the join conditions -
+/// because a subquery may appear in any of them and one that is missed is a
+/// store the compiler never opens.
+fn collect_subqueries_of_plan(plan: &PhysicalPlan, into: &mut Vec<BoundExpr>) {
+    if let Some(filter) = &plan.constant_filter {
+        collect_subqueries(filter, into);
+    }
+    for residual in plan.residuals.iter().flatten() {
+        collect_subqueries(residual, into);
+    }
+    for source in &plan.sources {
+        if let Some(on) = &source.on {
+            collect_subqueries(on, into);
+        }
+    }
+    let select = &plan.select;
+    if let Some(filter) = &select.filter {
+        collect_subqueries(filter, into);
+    }
+    if let Some(having) = &select.having {
+        collect_subqueries(having, into);
+    }
+    for expr in &select.group_by {
+        collect_subqueries(expr, into);
+    }
+    for column in &select.columns {
+        collect_subqueries(&column.expr, into);
+    }
+    for term in &select.order_by {
+        collect_subqueries(&term.expr, into);
+    }
+    for aggregate in &select.aggregates {
+        for argument in &aggregate.arguments {
+            collect_subqueries(argument, into);
+        }
+    }
+    for row in &select.values {
+        for value in row {
+            collect_subqueries(value, into);
+        }
+    }
+    if let Some(expr) = &select.limit {
+        collect_subqueries(expr, into);
+    }
+    if let Some(expr) = &select.offset {
+        collect_subqueries(expr, into);
+    }
+    for (_, arm) in &plan.compounds {
+        collect_subqueries_of_plan(arm, into);
+    }
+}
+
+/// Collects every nested query used as a value inside one expression.
+fn collect_subqueries(expr: &BoundExpr, into: &mut Vec<BoundExpr>) {
+    match expr {
+        BoundExpr::Subquery { operand, .. } => {
+            if let Some(operand) = operand {
+                collect_subqueries(operand, into);
+            }
+            into.push(expr.clone());
+        }
+        BoundExpr::Unary { operand, .. }
+        | BoundExpr::Not(operand)
+        | BoundExpr::IsNull { operand, .. }
+        | BoundExpr::Collate { operand, .. }
+        | BoundExpr::Cast { operand, .. } => collect_subqueries(operand, into),
+        BoundExpr::Arithmetic { left, right, .. }
+        | BoundExpr::Compare { left, right, .. }
+        | BoundExpr::Is { left, right, .. }
+        | BoundExpr::And(left, right)
+        | BoundExpr::Or(left, right) => {
+            collect_subqueries(left, into);
+            collect_subqueries(right, into);
+        }
+        BoundExpr::Between {
+            operand, low, high, ..
+        } => {
+            collect_subqueries(operand, into);
+            collect_subqueries(low, into);
+            collect_subqueries(high, into);
+        }
+        BoundExpr::InList { operand, list, .. } => {
+            collect_subqueries(operand, into);
+            for item in list {
+                collect_subqueries(item, into);
+            }
+        }
+        BoundExpr::Case {
+            operand,
+            branches,
+            otherwise,
+            ..
+        } => {
+            if let Some(operand) = operand {
+                collect_subqueries(operand, into);
+            }
+            for (when, then) in branches {
+                collect_subqueries(when, into);
+                collect_subqueries(then, into);
+            }
+            if let Some(otherwise) = otherwise {
+                collect_subqueries(otherwise, into);
+            }
+        }
+        BoundExpr::Pattern {
+            operand,
+            pattern,
+            escape,
+            ..
+        } => {
+            collect_subqueries(operand, into);
+            collect_subqueries(pattern, into);
+            if let Some(escape) = escape {
+                collect_subqueries(escape, into);
+            }
+        }
+        BoundExpr::Function { arguments, .. } => {
+            for argument in arguments {
+                collect_subqueries(argument, into);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Returns the sink one compound operator writes an arm's rows through.
+fn sink_for(op: CompoundOp, store: u32) -> Sink {
+    match op {
+        CompoundOp::UnionAll => Sink::Store(store),
+        _ => Sink::UniqueStore(store),
+    }
+}
+
+/// Returns a binary-collated key over a given number of columns.
+///
+/// A recursive CTE's queue de-duplicates on the whole row, and it has no
+/// declared collations to consult: the columns came from a compound whose arms
+/// need not agree about one. BINARY is the collation SQLite falls back to for
+/// exactly the same reason.
+fn store_key(width: usize) -> SortKey {
+    SortKey {
+        columns: (0..width)
+            .map(|_| SortColumn {
+                descending: false,
+                nulls_first: true,
+                collation: Collation::Binary,
+            })
+            .collect(),
+    }
+}
+
+/// Returns the key a compound's set operations compare rows with.
+///
+/// Every column's collation comes from the left-most arm, which is SQLite's
+/// rule: the arms may disagree about a column's declared collation, and the
+/// operator has to pick one before it can say whether two rows are the same.
+fn compound_key(plan: &PhysicalPlan) -> SortKey {
+    SortKey {
+        columns: plan
+            .select
+            .columns
+            .iter()
+            .map(|column| SortColumn {
+                descending: false,
+                nulls_first: true,
+                collation: rustdb_sql::bind::result_collation(&column.expr),
+            })
+            .collect(),
+    }
+}
+
 /// Returns the sorter column description one ORDER BY term needs.
 fn sort_column(term: &BoundOrderTerm) -> SortColumn {
     SortColumn {
@@ -1341,6 +2265,160 @@ fn sort_column(term: &BoundOrderTerm) -> SortColumn {
 }
 
 impl Compiler {
+    /// Fills a value subquery's store, and answers the question it stands for.
+    ///
+    /// A block with no correlation is built once, behind a flag: it cannot
+    /// change while the statement runs, and rebuilding it per row of the
+    /// enclosing query is the difference between one scan and one scan per row.
+    /// A correlated block is cleared and rebuilt, because the outer cursors it
+    /// reads have moved.
+    fn compile_value_subquery(
+        &mut self,
+        id: usize,
+        kind: SubqueryKind,
+        negated: bool,
+        operand: Option<&BoundExpr>,
+    ) -> DbResult<u32> {
+        let Some(prepared) = self.subquery_plans.get(&id).cloned() else {
+            return Err(error::misuse("a subquery with no prepared store"));
+        };
+        let store = prepared.store;
+        // The `IN` operand is evaluated before the store is filled, because a
+        // correlated block clears the store and the operand may not read it.
+        let probe = match operand {
+            Some(operand) => {
+                let register = self.compile_expr(operand)?;
+                let slot = self.register();
+                self.emit(Instruction::new(
+                    Opcode::Copy,
+                    register as i32,
+                    slot as i32,
+                    0,
+                ));
+                if let Some(affinity) = prepared.affinity {
+                    self.emit(
+                        Instruction::new(Opcode::ApplyAffinity, slot as i32, 1, 0)
+                            .with_p4(Operand::Affinity(affinity)),
+                    );
+                }
+                Some(slot)
+            }
+            None => None,
+        };
+        let mut skip_fill = None;
+        if prepared.correlated {
+            self.emit(Instruction::new(Opcode::EphClear, store as i32, 0, 0));
+        } else if let Some(flag) = prepared.built {
+            skip_fill = Some(self.emit_jump(Instruction::new(Opcode::If, flag as i32, -1, 0)));
+            self.emit(
+                Instruction::new(Opcode::Load, 0, flag as i32, 0).with_p4(Operand::Integer(1)),
+            );
+        }
+        let sink = match kind {
+            SubqueryKind::In => Sink::TypedStore(store, prepared.affinity),
+            _ => Sink::Store(store),
+        };
+        self.compile_block(&prepared.plan, sink)?;
+        if let Some(label) = skip_fill {
+            self.patch_here(label);
+        }
+        let answer = self.register();
+        match kind {
+            SubqueryKind::Exists => {
+                let empty =
+                    self.emit_jump(Instruction::new(Opcode::EphRewind, store as i32, -1, 0));
+                self.emit(
+                    Instruction::new(Opcode::Load, 0, answer as i32, 0)
+                        .with_p4(Operand::Integer(i64::from(!negated))),
+                );
+                let done = self.emit_jump(Instruction::new(Opcode::Goto, 0, -1, 0));
+                self.patch_here(empty);
+                self.emit(
+                    Instruction::new(Opcode::Load, 0, answer as i32, 0)
+                        .with_p4(Operand::Integer(i64::from(negated))),
+                );
+                self.patch_here(done);
+            }
+            SubqueryKind::Scalar => {
+                let empty =
+                    self.emit_jump(Instruction::new(Opcode::EphRewind, store as i32, -1, 0));
+                self.emit(Instruction::new(
+                    Opcode::EphColumn,
+                    store as i32,
+                    0,
+                    answer as i32,
+                ));
+                let done = self.emit_jump(Instruction::new(Opcode::Goto, 0, -1, 0));
+                self.patch_here(empty);
+                self.emit(Instruction::new(Opcode::Null, 0, answer as i32, 0));
+                self.patch_here(done);
+            }
+            SubqueryKind::In => {
+                let Some(probe) = probe else {
+                    return Err(error::misuse("an IN subquery with no operand"));
+                };
+                self.compile_in_answer(store, probe, answer, negated);
+            }
+        }
+        Ok(answer)
+    }
+
+    /// Emits the three-valued answer an `IN` over a materialised set gives.
+    ///
+    /// The order of the tests is the whole of the semantics. A hit is true
+    /// whatever else the set holds. A miss is *unknown* rather than false when
+    /// either the operand or the set holds a NULL, and false only when neither
+    /// does - which is why `x NOT IN (empty set)` is true even for a NULL `x`.
+    fn compile_in_answer(&mut self, store: u32, probe: u32, answer: u32, negated: bool) {
+        let yes = i64::from(!negated);
+        let no = i64::from(negated);
+        // An empty set is decided before anything else: `NULL NOT IN ()` is
+        // true, even though `NULL` compares with nothing. Testing nullness
+        // first would answer unknown, which is the classic way to get this
+        // wrong in both directions at once.
+        let empty = self.emit_jump(Instruction::new(Opcode::EphRewind, store as i32, -1, 0));
+        // Not empty. A NULL operand matches nothing and excludes nothing, so
+        // the answer is unknown whatever the set holds.
+        let null_operand = self.emit_jump(Instruction::new(Opcode::IfNull, probe as i32, -1, 0));
+        let hit = self.emit_jump(
+            Instruction::new(Opcode::EphFound, store as i32, -1, probe as i32).with_p5(1),
+        );
+        // A miss is false only when the set holds no NULL; with one, the row
+        // it stands for might have been the match, so the answer is unknown.
+        let saw_null = self.register();
+        self.emit(Instruction::new(
+            Opcode::EphSawNull,
+            store as i32,
+            saw_null as i32,
+            0,
+        ));
+        let unknown = self.emit_jump(Instruction::new(Opcode::If, saw_null as i32, -1, 0));
+        self.emit(
+            Instruction::new(Opcode::Load, 0, answer as i32, 0).with_p4(Operand::Integer(no)),
+        );
+        let done_miss = self.emit_jump(Instruction::new(Opcode::Goto, 0, -1, 0));
+
+        self.patch_here(empty);
+        self.emit(
+            Instruction::new(Opcode::Load, 0, answer as i32, 0).with_p4(Operand::Integer(no)),
+        );
+        let done_empty = self.emit_jump(Instruction::new(Opcode::Goto, 0, -1, 0));
+
+        self.patch_here(hit);
+        self.emit(
+            Instruction::new(Opcode::Load, 0, answer as i32, 0).with_p4(Operand::Integer(yes)),
+        );
+        let done_hit = self.emit_jump(Instruction::new(Opcode::Goto, 0, -1, 0));
+
+        self.patch_here(null_operand);
+        self.patch_here(unknown);
+        self.emit(Instruction::new(Opcode::Null, 0, answer as i32, 0));
+
+        self.patch_here(done_miss);
+        self.patch_here(done_empty);
+        self.patch_here(done_hit);
+    }
+
     /// Compiles one expression into a register.
     pub fn compile_expr(&mut self, expr: &BoundExpr) -> DbResult<u32> {
         if let Some((_, register)) = self
@@ -1368,15 +2446,34 @@ impl Compiler {
                 // the note on the opcode.
                 let widen = u16::from(*affinity == Affinity::Real);
                 let cursor = self.cursor_for_source(*source);
+                // A subquery's rows live in an ephemeral store rather than
+                // under a B-tree cursor, and the value is already a value: no
+                // record to parse, and no affinity to re-apply on the way out.
+                let opcode = if self.is_ephemeral_source(*source) {
+                    Opcode::EphColumn
+                } else {
+                    Opcode::Column
+                };
                 self.emit(
-                    Instruction::new(Opcode::Column, cursor, *column as i32, register as i32)
-                        .with_p5(widen),
+                    Instruction::new(opcode, cursor, *column as i32, register as i32).with_p5(
+                        if opcode == Opcode::EphColumn {
+                            0
+                        } else {
+                            widen
+                        },
+                    ),
                 );
                 Ok(register)
             }
             BoundExpr::Rowid { source } => {
                 let register = self.register();
                 let cursor = self.cursor_for_source(*source);
+                if self.is_ephemeral_source(*source) {
+                    // A materialised block has no rowid; nothing can have named
+                    // one, because the binder refuses `rowid` on a subquery.
+                    self.emit(Instruction::new(Opcode::Null, 0, register as i32, 0));
+                    return Ok(register);
+                }
                 self.emit(Instruction::new(Opcode::Rowid, cursor, register as i32, 0));
                 Ok(register)
             }
@@ -1385,6 +2482,13 @@ impl Compiler {
                 .get(*slot)
                 .copied()
                 .ok_or_else(|| error::misuse("an aggregate referenced before it was finalised")),
+            BoundExpr::Subquery {
+                id,
+                kind,
+                negated,
+                operand,
+                ..
+            } => self.compile_value_subquery(*id, *kind, *negated, operand.as_deref()),
             BoundExpr::SorterColumn { column } => Err(error::misuse(format!(
                 "a sorter column {column} escaped its sorter"
             ))),

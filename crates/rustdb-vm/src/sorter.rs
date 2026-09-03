@@ -88,6 +88,20 @@ impl Sorter {
     }
 }
 
+/// Compares two rows by a sort key, for callers outside this module.
+///
+/// The ephemeral store's index needs exactly the sorter's comparison - each
+/// column's own collation, and two NULLs equal - and a second implementation
+/// of it would be a second place for a set operation to disagree with an
+/// `ORDER BY` about what "the same row" means.
+pub fn compare_rows_by_key(
+    left: &[Value<'static>],
+    right: &[Value<'static>],
+    key: &SortKey,
+) -> std::cmp::Ordering {
+    compare_rows(key, left, right)
+}
+
 /// Compares two rows by a sort key.
 fn compare_rows(
     key: &SortKey,

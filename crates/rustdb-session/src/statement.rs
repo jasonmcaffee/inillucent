@@ -509,6 +509,7 @@ fn directive_program(dependencies: ProgramDependencies, directive: &Directive) -
 fn empty_program(dependencies: ProgramDependencies) -> Program {
     use rustdb_vm::program::{Instruction, Opcode};
     Program {
+        ephemeral_count: 0,
         instructions: vec![
             Instruction::new(Opcode::Init, 0, 1, 0),
             Instruction::new(Opcode::Halt, 0, 0, 0),

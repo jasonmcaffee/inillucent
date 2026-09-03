@@ -295,6 +295,7 @@ impl<'a> Binder<'a> {
         match table.kind {
             TableKind::View => return Err(unsupported("writing to a view", span)),
             TableKind::Virtual => return Err(unsupported("writing to a virtual table", span)),
+            TableKind::Subquery => return Err(unsupported("writing to a subquery", span)),
             TableKind::Table => {}
         }
         if table.without_rowid {
@@ -328,15 +329,22 @@ impl<'a> Binder<'a> {
     }
 
     /// Makes the target table the statement's one visible source.
+    ///
+    /// It opens a scope holding just the target, so every name in the
+    /// statement's `SET`, `WHERE` and `RETURNING` resolves against the table
+    /// being written and nothing else.
     fn push_write_source(&mut self, table: TableInfo, alias: Vec<u8>) {
-        self.sources.clear();
+        let id = self.sources.len();
         self.sources.push(BoundSource {
+            id,
+            rows: crate::bind::SourceRows::Table,
             table,
             alias,
             join: ast::JoinKind::Comma,
             constraint: None,
             suppressed: Vec::new(),
         });
+        self.scopes.push(vec![id]);
     }
 
     /// Returns the target column positions an INSERT writes, in source order.
@@ -390,16 +398,20 @@ impl<'a> Binder<'a> {
                 // that `INSERT INTO t SELECT ... FROM u` resolves `u`'s columns
                 // and not `t`'s. Binding a SELECT replaces the source list, and
                 // the target is pushed back afterwards.
-                let saved = core::mem::take(&mut self.sources);
+                // The scope stack is emptied rather than pushed to, because a
+                // pushed scope would still be searched *outward* into the
+                // target's, and `INSERT INTO t SELECT a FROM u` would then
+                // resolve `a` against `t` when `u` has no such column.
+                let saved = core::mem::take(&mut self.scopes);
                 let select = self.bind_select(*id);
                 let bound = match select {
                     Ok(bound) => bound,
                     Err(error) => {
-                        self.sources = saved;
+                        self.scopes = saved;
                         return Err(error);
                     }
                 };
-                self.sources = saved;
+                self.scopes = saved;
                 if bound.values.is_empty() {
                     let arity = bound.columns.len();
                     return Ok((BoundInsertSource::Select(Box::new(bound)), arity));
@@ -483,6 +495,7 @@ impl<'a> Binder<'a> {
         let (ast, expr) = parse_expression(sql, &limits)?;
         let mut nested = Binder::new(self.catalog, &ast, self.authorizer);
         nested.sources = self.sources.clone();
+        nested.scopes = self.scopes.clone();
         let bound = nested.bind_expr(expr)?;
         Ok(bound)
     }

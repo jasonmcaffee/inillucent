@@ -102,6 +102,48 @@ fn check_shape(program: &Program, problems: &mut Vec<VerifyError>) {
             }
         }
         check_operand_ranges(program, address, problems);
+        check_store_range(program, address, problems);
+    }
+}
+
+/// Checks that every ephemeral-store operand is one the program declared.
+///
+/// The stores are a separate numbering space from the cursors: a program with
+/// one cursor and three stores is ordinary, and checking a store number against
+/// the cursor count would either reject it or, worse, accept a store number
+/// that indexes past the end of the store vector.
+fn check_store_range(program: &Program, address: usize, problems: &mut Vec<VerifyError>) {
+    let Some(instruction) = program.instructions.get(address) else {
+        return;
+    };
+    let uses_store = matches!(
+        instruction.opcode,
+        Opcode::EphOpen
+            | Opcode::EphInsert
+            | Opcode::EphInsertUnique
+            | Opcode::EphRewind
+            | Opcode::EphNext
+            | Opcode::EphColumn
+            | Opcode::EphFound
+            | Opcode::EphNotFound
+            | Opcode::EphRemove
+            | Opcode::EphClear
+            | Opcode::EphDedup
+            | Opcode::EphSawNull
+    );
+    if !uses_store {
+        return;
+    }
+    let count = program.ephemeral_count as i32;
+    if instruction.p1 < 0 || instruction.p1 >= count {
+        problems.push(VerifyError::at(
+            address,
+            format!(
+                "{} uses store {}, which is outside the {count} declared",
+                instruction.opcode.name(),
+                instruction.p1
+            ),
+        ));
     }
 }
 
@@ -160,6 +202,12 @@ fn check_operand_ranges(program: &Program, address: usize, problems: &mut Vec<Ve
         Opcode::DistinctCheck | Opcode::NoConflict => {
             blocks.push((instruction.p3, i32::from(instruction.p5)))
         }
+        Opcode::EphInsert => blocks.push((instruction.p2, instruction.p3)),
+        Opcode::EphInsertUnique | Opcode::EphFound | Opcode::EphNotFound | Opcode::EphRemove => {
+            blocks.push((instruction.p3, i32::from(instruction.p5)))
+        }
+        Opcode::EphColumn => registers.push((instruction.p3, "destination")),
+        Opcode::EphSawNull => registers.push((instruction.p2, "destination")),
         Opcode::NewRowid | Opcode::RowData | Opcode::CreateBtree => {
             registers.push((instruction.p2, "destination"))
         }
@@ -426,7 +474,10 @@ fn writes_of(program: &Program, address: usize) -> Vec<u32> {
     };
     let single = |value: i32| vec![value.max(0) as u32];
     match instruction.opcode {
-        Opcode::Column | Opcode::IdxColumn | Opcode::SorterColumn => single(instruction.p3),
+        Opcode::Column | Opcode::IdxColumn | Opcode::SorterColumn | Opcode::EphColumn => {
+            single(instruction.p3)
+        }
+        Opcode::EphSawNull => single(instruction.p2),
         Opcode::Rowid | Opcode::IdxRowid | Opcode::Null | Opcode::Load => single(instruction.p2),
         Opcode::Copy
         | Opcode::Not
@@ -505,6 +556,10 @@ fn reads_of(program: &Program, address: usize) -> Vec<u32> {
         }
         Opcode::SorterInsert => block(instruction.p2, instruction.p3),
         Opcode::DistinctCheck => block(instruction.p3, instruction.p5 as i32),
+        Opcode::EphInsert => block(instruction.p2, instruction.p3),
+        Opcode::EphInsertUnique | Opcode::EphFound | Opcode::EphNotFound | Opcode::EphRemove => {
+            block(instruction.p3, instruction.p5 as i32)
+        }
         _ => Vec::new(),
     }
 }
@@ -557,6 +612,7 @@ mod tests {
     /// Builds a minimal well-formed program for the tests to damage.
     fn program(instructions: Vec<Instruction>, registers: u32, cursors: u32) -> Program {
         Program {
+            ephemeral_count: 0,
             instructions,
             register_count: registers,
             cursor_count: cursors,

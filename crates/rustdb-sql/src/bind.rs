@@ -15,10 +15,10 @@
 use rustdb_value::{Affinity, Collation};
 
 use crate::ast::{
-    self, Ast, BinaryOp, Expr, ExprId, FromSource, InRhs, JoinConstraint, JoinKind, Literal,
-    NullOrder, PatternOp, SelectBody, SelectId, SortOrder, UnaryOp,
+    self, Ast, BinaryOp, CompoundOp, Expr, ExprId, FromSource, InRhs, JoinConstraint, JoinKind,
+    Literal, NullOrder, PatternOp, SelectBody, SelectId, SortOrder, UnaryOp,
 };
-use crate::catalog_view::{CatalogView, TableInfo, TableKind};
+use crate::catalog_view::{CatalogView, ColumnInfo, TableInfo, TableKind};
 use crate::diagnostic::{ParseError, ParseErrorKind};
 use crate::function::{self, AggregateFunc, ScalarFunc};
 use crate::lexer::Span;
@@ -70,6 +70,18 @@ impl Authorizer for AllowAll {
     fn authorize(&self, _action: AuthAction<'_>) -> Authorization {
         Authorization::Allow
     }
+}
+
+/// What a nested query used as a value does with its rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SubqueryKind {
+    /// `EXISTS (...)`: true when the block produced a row.
+    Exists,
+    /// `(SELECT ...)` in a value position: the first row's first column, or
+    /// NULL when it produced nothing.
+    Scalar,
+    /// The right side of an `IN`.
+    In,
 }
 
 /// A bound expression, with every name resolved and every rule decided.
@@ -236,6 +248,31 @@ pub enum BoundExpr {
         /// Which column of the sorted record.
         column: u16,
     },
+    /// A nested query used as a value: `EXISTS`, a scalar, or the right side
+    /// of an `IN`.
+    ///
+    /// The three are one variant because they differ only in what they do with
+    /// the block's rows, and the machinery underneath - a store, filled once or
+    /// once per outer row depending on correlation - is identical. Splitting
+    /// them would mean three copies of the correlation rule, which is the part
+    /// that is easy to get wrong.
+    Subquery {
+        /// The statement-wide number of this subquery, so the compiler can
+        /// build it once even when the expression is compiled twice.
+        id: usize,
+        /// What the rows are used for.
+        kind: SubqueryKind,
+        /// Whether `NOT` was written.
+        negated: bool,
+        /// The left side of an `IN`.
+        operand: Option<Box<BoundExpr>>,
+        /// The block.
+        block: Box<BoundSelect>,
+        /// The affinity an `IN` applies to both sides before comparing.
+        affinity: Option<Affinity>,
+        /// The collation an `IN` compares with.
+        collation: Collation,
+    },
     /// An explicit `COLLATE` on an expression that is not a column.
     ///
     /// The node exists so the collation survives to the comparison that uses
@@ -342,6 +379,11 @@ impl BoundExpr {
                     && escape.as_ref().is_none_or(|e| e.is_constant())
             }
             BoundExpr::Function { arguments, .. } => arguments.iter().all(BoundExpr::is_constant),
+            // A subquery is never constant. It may read no column of the query
+            // that encloses it, but it reads the database, and hoisting it out
+            // of a loop is the compiler's decision to make from its correlation
+            // list rather than one this predicate can make.
+            BoundExpr::Subquery { .. } => false,
         }
     }
 
@@ -413,14 +455,80 @@ impl BoundExpr {
                     argument.sources_used(into);
                 }
             }
+            BoundExpr::Subquery { operand, block, .. } => {
+                if let Some(operand) = operand {
+                    operand.sources_used(into);
+                }
+                // The block's correlations are terms of the *enclosing* query,
+                // so they decide which loop level the subquery can first be
+                // evaluated at. Leaving them out put a correlated `EXISTS`
+                // before the loop whose row it reads.
+                for source in &block.correlations {
+                    if !into.contains(source) {
+                        into.push(*source);
+                    }
+                }
+            }
             _ => {}
         }
     }
 }
 
+/// Where one FROM term's rows come from.
+///
+/// A subquery, a view and a CTE are all the same thing to everything below the
+/// binder: a block of SQL whose rows are materialised into an ephemeral table
+/// and then scanned like any other. Keeping them one variant is what stops the
+/// planner and the compiler growing three nearly-identical paths.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SourceRows {
+    /// A real table's B-tree.
+    Table,
+    /// A nested query, materialised before the loop that scans it.
+    Subquery(Box<BoundSelect>),
+    /// A recursive CTE, filled by running its seed and then its step arms
+    /// until the step arms stop producing rows that are new.
+    Recursive(Box<RecursiveBody>),
+    /// A reference to the recursive CTE being filled, which stands for exactly
+    /// the one row the fill loop is currently on.
+    ///
+    /// It shares the enclosing CTE's store, so it is not a source that produces
+    /// rows of its own: it is a window onto the row the queue is at.
+    RecursiveSelf {
+        /// The statement-wide number of the CTE term whose store it reads.
+        cte: usize,
+    },
+}
+
+/// A recursive CTE's arms, split by whether they refer to the CTE.
+///
+/// SQLite's rule is that the arms which do not reference the CTE are its seed
+/// and run once, and the arms which do are its step and run against each row
+/// the seed and earlier steps produced. Splitting them at bind time rather than
+/// at compile time is what lets the compiler emit one queue walk rather than
+/// re-deciding per arm what each one is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecursiveBody {
+    /// The arms that do not reference the CTE, with the operator before each.
+    pub seeds: Vec<(CompoundOp, BoundSelect)>,
+    /// The arms that do.
+    pub steps: Vec<(CompoundOp, BoundSelect)>,
+}
+
 /// One FROM term, bound to a table.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoundSource {
+    /// The statement-wide number every bound expression refers to it by.
+    ///
+    /// A block's own position in its FROM clause is not enough: a correlated
+    /// subquery reads a column of a term belonging to an enclosing block, and
+    /// the two numbering schemes would collide. One number per FROM term in
+    /// the whole statement means a column reference is unambiguous wherever it
+    /// is evaluated, and the compiler can map it to the cursor that is already
+    /// open.
+    pub id: usize,
+    /// Where the rows come from.
+    pub rows: SourceRows,
     /// The table, view or virtual table.
     pub table: TableInfo,
     /// The name the query refers to it by.
@@ -511,6 +619,20 @@ pub struct BoundSelect {
     pub aggregates: Vec<BoundAggregate>,
     /// The rows of a `VALUES` arm, when the statement is one.
     pub values: Vec<Vec<BoundExpr>>,
+    /// The later arms of a compound, each with the operator that joined it.
+    ///
+    /// When this is not empty, the `order_by`, `limit` and `offset` on *this*
+    /// block belong to the compound as a whole rather than to the first arm -
+    /// which is exactly SQLite's rule, since an arm of a compound may not
+    /// carry its own. `distinct` stays the first arm's own.
+    pub compounds: Vec<(CompoundOp, BoundSelect)>,
+    /// The FROM terms belonging to an enclosing block that this one reads.
+    ///
+    /// A block with an empty list is uncorrelated and can be evaluated once; a
+    /// block with a non-empty one has to be re-evaluated for each row of the
+    /// outermost term it names. The compiler needs no more than that, because
+    /// the outer cursors are still open and positioned when the child runs.
+    pub correlations: Vec<usize>,
 }
 
 impl BoundSelect {
@@ -548,20 +670,101 @@ pub enum BoundStatement {
     Empty,
 }
 
+/// One common table expression visible to a block.
+///
+/// The definition is kept as an AST id rather than a bound block because two
+/// references to the same CTE are two independent scans: each gets its own
+/// FROM-term numbers and its own materialisation. Binding once and cloning
+/// would give both references the same source ids, and the second scan would
+/// then read the first one's cursors.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CteBinding {
+    /// The folded name a FROM term matches against.
+    pub folded: Vec<u8>,
+    /// The name as written, which the expansion is aliased to.
+    pub name: Vec<u8>,
+    /// The explicit column list, when the `WITH` wrote one.
+    pub columns: Vec<Vec<u8>>,
+    /// The query the name stands for.
+    pub select: SelectId,
+    /// Whether the `WITH` said `RECURSIVE`.
+    pub recursive: bool,
+}
+
+/// One recursive CTE whose definition is being bound.
+#[derive(Clone, Debug)]
+struct RecursiveTarget {
+    /// The CTE's folded name.
+    folded: Vec<u8>,
+    /// The statement-wide number of the FROM term that will hold its store.
+    id: usize,
+    /// The columns a reference to it exposes, taken from the seed arm.
+    table: TableInfo,
+    /// Whether any arm bound so far referred to it.
+    referenced: bool,
+}
+
+/// The per-block binder state saved while a nested block is bound.
+///
+/// Aggregates, result aliases and the correlation list all belong to one query
+/// block. Without a frame, an aggregate written inside a subquery would be
+/// added to the enclosing block's accumulator list and finalised at the wrong
+/// level - which is a wrong answer rather than an error.
+struct BlockFrame {
+    aggregates: Vec<BoundAggregate>,
+    result_aliases: Vec<(Vec<u8>, BoundExpr)>,
+    allow_aggregates: bool,
+    inside_aggregate: bool,
+    correlations: Vec<usize>,
+}
+
 /// The binder's working state for one statement.
 pub struct Binder<'a> {
     pub(crate) catalog: &'a dyn CatalogView,
     pub(crate) ast: &'a Ast,
     pub(crate) authorizer: &'a dyn Authorizer,
     pub(crate) sources: Vec<BoundSource>,
+    /// One entry per query block currently being bound, innermost last, each
+    /// holding the ids of the FROM terms that block owns.
+    ///
+    /// Resolution walks it from the back, so an inner name shadows an outer one
+    /// and a name that only an outer block can satisfy makes the inner block
+    /// correlated - which is exactly the information the compiler needs to
+    /// decide whether the child runs once or once per outer row.
+    pub(crate) scopes: Vec<Vec<usize>>,
     aggregates: Vec<BoundAggregate>,
     result_aliases: Vec<(Vec<u8>, BoundExpr)>,
     dependencies: Dependencies,
     inside_aggregate: bool,
     allow_aggregates: bool,
+    /// The CTEs visible to the block being bound, innermost `WITH` last.
+    pub(crate) ctes: Vec<Vec<CteBinding>>,
+    /// The recursive CTEs whose own definition is being bound right now.
+    ///
+    /// A reference to a name on this stack is the recursion itself, and binding
+    /// its definition again would not terminate - which is exactly what it did
+    /// before this existed: the depth guard tripped a hundred frames down, in a
+    /// function large enough that a hundred frames overflowed the stack.
+    recursing: Vec<RecursiveTarget>,
+    /// The enclosing FROM terms the block being bound has read.
+    correlations: Vec<usize>,
+    /// How deep the binder is inside nested query blocks.
+    depth: u32,
+    /// How many nested queries used as values have been bound so far.
+    subqueries: usize,
     /// The table `excluded` names while an upsert's `DO UPDATE` is bound.
     pub(crate) excluded: Option<crate::catalog_view::TableInfo>,
 }
+
+/// How deeply query blocks may nest.
+///
+/// SQLite's own limit is expression depth rather than a separate select depth,
+/// but a subquery per level costs a scope, a frame and a compiled subprogram,
+/// so the recursion is bounded here where the recursion happens.
+pub const MAX_SELECT_DEPTH: u32 = 64;
+
+/// How many arms a compound SELECT may have, which is `SQLITE_MAX_COMPOUND_SELECT`.
+pub const MAX_COMPOUND_SELECT: usize = 500;
 
 /// The source number a column of an upsert's `excluded` row carries.
 ///
@@ -584,6 +787,7 @@ impl<'a> Binder<'a> {
             ast,
             authorizer,
             sources: Vec::new(),
+            scopes: Vec::new(),
             aggregates: Vec::new(),
             result_aliases: Vec::new(),
             dependencies: Dependencies {
@@ -592,6 +796,11 @@ impl<'a> Binder<'a> {
             },
             inside_aggregate: false,
             allow_aggregates: false,
+            ctes: Vec::new(),
+            recursing: Vec::new(),
+            correlations: Vec::new(),
+            depth: 0,
+            subqueries: 0,
             excluded: None,
         }
     }
@@ -632,30 +841,103 @@ impl<'a> Binder<'a> {
         }
     }
 
-    /// Binds a SELECT.
+    /// Binds a SELECT, including its `WITH` prefix and every compound arm.
+    ///
+    /// The block's scope is pushed here rather than in the arm binder because
+    /// `ORDER BY` belongs to the statement and resolves in the first arm's
+    /// scope: pushing and popping around the arm alone made every qualified
+    /// name in an `ORDER BY` report "no such table".
     pub fn bind_select(&mut self, id: SelectId) -> Result<BoundSelect, ParseError> {
         let Some(select) = self.ast.select(id) else {
             return Err(unsupported("missing select", Span::default()));
         };
-        if !select.with.ctes.is_empty() {
-            return Err(unsupported("WITH", select.span));
-        }
-        if !select.compounds.is_empty() {
-            return Err(unsupported("compound SELECT", select.span));
-        }
         if self.authorizer.authorize(AuthAction::Select) == Authorization::Deny {
             return Err(denied("not authorized", select.span));
         }
-        let Some(core) = self.ast.core(select.first) else {
-            return Err(unsupported("missing select core", select.span));
+        self.depth = self.depth.saturating_add(1);
+        if self.depth > MAX_SELECT_DEPTH {
+            self.depth = self.depth.saturating_sub(1);
+            return Err(ParseError::new(
+                ParseErrorKind::Unsupported("too many levels of nested SELECT"),
+                select.span,
+            ));
+        }
+        let result = self.bind_select_body(id);
+        self.depth = self.depth.saturating_sub(1);
+        result
+    }
+
+    /// Binds one SELECT's `WITH`, arms and tail clauses.
+    fn bind_select_body(&mut self, id: SelectId) -> Result<BoundSelect, ParseError> {
+        let Some(select) = self.ast.select(id) else {
+            return Err(unsupported("missing select", Span::default()));
         };
-        let mut bound = match &core.body {
-            SelectBody::Values(rows) => self.bind_values(rows, core.span)?,
-            SelectBody::Select { .. } => self.bind_select_core(select.first)?,
+        let pushed = self.push_ctes(&select.with)?;
+        let bound = self.bind_arms(select);
+        if pushed {
+            self.ctes.pop();
+        }
+        bound
+    }
+
+    /// Binds the first arm, every compound arm, and the tail clauses.
+    fn bind_arms(&mut self, select: &'a ast::Select) -> Result<BoundSelect, ParseError> {
+        if select.compounds.len() > MAX_COMPOUND_SELECT {
+            return Err(ParseError::new(
+                ParseErrorKind::Unsupported("too many terms in compound SELECT"),
+                select.span,
+            ));
+        }
+        let frame = self.enter_block();
+        let bound = self.bind_arm(select.first);
+        let mut bound = match bound {
+            Ok(bound) => bound,
+            Err(reason) => {
+                self.leave_block(frame);
+                return Err(reason);
+            }
         };
+        let outcome = self.finish_select(select, &mut bound);
+        let ids = self.leave_block(frame);
+        outcome?;
+        bound.sources = ids
+            .iter()
+            .filter_map(|id| self.sources.get(*id).cloned())
+            .collect();
+        Ok(bound)
+    }
+
+    /// Binds the compound arms and the tail clauses onto a first arm.
+    fn finish_select(
+        &mut self,
+        select: &'a ast::Select,
+        bound: &mut BoundSelect,
+    ) -> Result<(), ParseError> {
+        for (op, arm) in &select.compounds {
+            let arm_frame = self.enter_block();
+            let armed = self.bind_arm(*arm);
+            let arm_ids = self.leave_block(arm_frame);
+            let mut armed = armed?;
+            armed.sources = arm_ids
+                .iter()
+                .filter_map(|id| self.sources.get(*id).cloned())
+                .collect();
+            if armed.columns.len() != bound.columns.len() {
+                return Err(ParseError::new(
+                    ParseErrorKind::Unsupported(
+                        "SELECTs to the left and right of a compound operator do not have the same number of result columns",
+                    ),
+                    select.span,
+                ));
+            }
+            bound.compounds.push((*op, armed));
+        }
         let columns = bound.columns.clone();
-        bound.order_by = self.bind_order_by(&select.order_by, &columns)?;
-        bound.sources = core::mem::take(&mut self.sources);
+        bound.order_by = if bound.compounds.is_empty() {
+            self.bind_order_by(&select.order_by, &columns)?
+        } else {
+            self.bind_compound_order_by(&select.order_by, &columns)?
+        };
         bound.limit = match select.limit {
             Some(expr) => Some(self.bind_expr(expr)?),
             None => None,
@@ -665,7 +947,164 @@ impl<'a> Binder<'a> {
             None => None,
         };
         bound.aggregates = self.aggregates.clone();
+        bound.correlations = self.correlations.clone();
+        Ok(())
+    }
+
+    /// Binds one arm of a compound: a `SELECT` core or a `VALUES` list.
+    fn bind_arm(&mut self, id: ast::SelectCoreId) -> Result<BoundSelect, ParseError> {
+        let Some(core) = self.ast.core(id) else {
+            return Err(unsupported("missing select core", Span::default()));
+        };
+        match &core.body {
+            SelectBody::Values(rows) => self.bind_values(rows, core.span),
+            SelectBody::Select { .. } => self.bind_select_core(id),
+        }
+    }
+
+    /// Binds a compound's `ORDER BY`, which may only name a result column.
+    ///
+    /// SQLite resolves a compound's `ORDER BY` against the output of the
+    /// compound rather than against any arm's FROM clause, because the arms do
+    /// not share one. A term that is neither an ordinal nor the name of a
+    /// result column is an error there and is an error here.
+    fn bind_compound_order_by(
+        &mut self,
+        terms: &[ast::OrderTerm],
+        columns: &[BoundResultColumn],
+    ) -> Result<Vec<BoundOrderTerm>, ParseError> {
+        let mut bound = Vec::with_capacity(terms.len());
+        for term in terms {
+            let span = self.ast.expr_span(term.expr);
+            let index = match self.as_ordinal(term.expr) {
+                Some(ordinal) => match ordinal.checked_sub(1) {
+                    Some(index) if index < columns.len() => index,
+                    _ => return Err(order_out_of_range(ordinal, span)),
+                },
+                None => {
+                    let Some(Expr::Column {
+                        database: None,
+                        table: None,
+                        column,
+                    }) = self.ast.expr(term.expr)
+                    else {
+                        return Err(compound_order_unmatched(span));
+                    };
+                    let folded = self.ast.folded(*column).to_vec();
+                    let Some(index) = columns
+                        .iter()
+                        .position(|candidate| candidate.name.eq_ignore_ascii_case(&folded))
+                    else {
+                        return Err(compound_order_unmatched(span));
+                    };
+                    index
+                }
+            };
+            let Some(column) = columns.get(index) else {
+                return Err(order_out_of_range(index.saturating_add(1), span));
+            };
+            let collation = column.expr.collation().unwrap_or(Collation::Binary);
+            let nulls = term.nulls.unwrap_or(match term.order {
+                SortOrder::Ascending => NullOrder::First,
+                SortOrder::Descending => NullOrder::Last,
+            });
+            bound.push(BoundOrderTerm {
+                expr: BoundExpr::SorterColumn {
+                    column: index as u16,
+                },
+                order: term.order,
+                nulls,
+                collation,
+            });
+        }
         Ok(bound)
+    }
+
+    /// Pushes the CTEs of a `WITH` prefix, returning whether it pushed any.
+    fn push_ctes(&mut self, with: &ast::With) -> Result<bool, ParseError> {
+        if with.ctes.is_empty() {
+            return Ok(false);
+        }
+        let mut bindings = Vec::with_capacity(with.ctes.len());
+        for cte in &with.ctes {
+            bindings.push(CteBinding {
+                folded: self.ast.folded(cte.name).to_vec(),
+                name: self.ast.text(cte.name).to_vec(),
+                columns: cte
+                    .columns
+                    .iter()
+                    .map(|name| self.ast.text(*name).to_vec())
+                    .collect(),
+                select: cte.select,
+                recursive: with.recursive,
+            });
+        }
+        self.ctes.push(bindings);
+        Ok(true)
+    }
+
+    /// Returns the innermost CTE a folded name matches.
+    fn find_cte(&self, folded: &[u8]) -> Option<CteBinding> {
+        for level in self.ctes.iter().rev() {
+            if let Some(found) = level.iter().find(|cte| cte.folded == folded) {
+                return Some(found.clone());
+            }
+        }
+        None
+    }
+
+    /// Opens a query block: a fresh scope, and fresh per-block state.
+    fn enter_block(&mut self) -> BlockFrame {
+        self.scopes.push(Vec::new());
+        BlockFrame {
+            aggregates: core::mem::take(&mut self.aggregates),
+            result_aliases: core::mem::take(&mut self.result_aliases),
+            allow_aggregates: core::mem::replace(&mut self.allow_aggregates, false),
+            inside_aggregate: core::mem::replace(&mut self.inside_aggregate, false),
+            correlations: core::mem::take(&mut self.correlations),
+        }
+    }
+
+    /// Closes a query block, returning the FROM terms it owned.
+    ///
+    /// A correlation the closing block recorded is passed outward when the
+    /// block that is now innermost does not own the term either, which is what
+    /// makes correlation transitive through two levels of nesting.
+    fn leave_block(&mut self, frame: BlockFrame) -> Vec<usize> {
+        let ids = self.scopes.pop().unwrap_or_default();
+        let inner = core::mem::replace(&mut self.correlations, frame.correlations);
+        for id in inner {
+            if ids.contains(&id) {
+                continue;
+            }
+            let owned = self.scopes.last().is_some_and(|scope| scope.contains(&id));
+            if !owned && !self.correlations.contains(&id) {
+                self.correlations.push(id);
+            }
+        }
+        self.aggregates = frame.aggregates;
+        self.result_aliases = frame.result_aliases;
+        self.allow_aggregates = frame.allow_aggregates;
+        self.inside_aggregate = frame.inside_aggregate;
+        ids
+    }
+
+    /// Returns the FROM-term ids the innermost block owns.
+    pub(crate) fn scope(&self) -> &[usize] {
+        self.scopes.last().map_or(&[], |scope| scope.as_slice())
+    }
+
+    /// Returns the statement-wide id of the innermost block's nth FROM term.
+    fn scope_id(&self, position: usize) -> Option<usize> {
+        self.scope().get(position).copied()
+    }
+
+    /// Records that the block being bound reads a FROM term it does not own.
+    fn note_correlation(&mut self, id: usize) {
+        if self.scope().contains(&id) || self.correlations.contains(&id) {
+            return;
+        }
+        self.correlations.push(id);
     }
 
     /// Binds a `VALUES` arm, which has no FROM and no names to resolve.
@@ -709,6 +1148,8 @@ impl<'a> Binder<'a> {
             offset: None,
             aggregates: Vec::new(),
             values: bound_rows,
+            compounds: Vec::new(),
+            correlations: Vec::new(),
         })
     }
 
@@ -730,9 +1171,7 @@ impl<'a> Binder<'a> {
         else {
             return Err(unsupported("expected a select core", core.span));
         };
-        if !windows.is_empty() {
-            return Err(unsupported("WINDOW", core.span));
-        }
+        self.declare_windows(windows)?;
         for term in from {
             self.bind_from_term(*term)?;
         }
@@ -763,10 +1202,9 @@ impl<'a> Binder<'a> {
                 core.span,
             ));
         }
-        // The sources stay in the binder: `ORDER BY` and `LIMIT` belong to the
-        // whole statement and are bound after this returns, and `ORDER BY b.id`
-        // needs the same scope the result columns had. Moving the scope out
-        // here made every qualified name in an ORDER BY report "no such table".
+        // The sources stay in the binder's scope: `ORDER BY` and `LIMIT` belong
+        // to the whole statement and are bound after this returns, and
+        // `ORDER BY b.id` needs the same scope the result columns had.
         Ok(BoundSelect {
             sources: Vec::new(),
             filter: bound_filter,
@@ -779,15 +1217,23 @@ impl<'a> Binder<'a> {
             offset: None,
             aggregates: Vec::new(),
             values: Vec::new(),
+            compounds: Vec::new(),
+            correlations: Vec::new(),
         })
     }
 
-    /// Binds one FROM term, registering it as a source.
+    /// Binds one FROM term, registering it as a source of the current block.
+    ///
+    /// A table, a CTE reference, a view and a parenthesised subquery all end up
+    /// as one entry in the block's scope. The last three carry the block they
+    /// stand for, and everything below the binder treats them alike.
     fn bind_from_term(&mut self, id: ast::FromTermId) -> Result<(), ParseError> {
         let Some(term) = self.ast.from_term(id) else {
             return Err(unsupported("missing FROM term", Span::default()));
         };
-        let (database, name) = match &term.source {
+        let join = term.join;
+        let span = term.span;
+        match &term.source {
             FromSource::Table {
                 database,
                 name,
@@ -795,47 +1241,422 @@ impl<'a> Binder<'a> {
                 ..
             } => {
                 if arguments.is_some() {
-                    return Err(unsupported("table-valued functions", term.span));
+                    return Err(unsupported("table-valued functions", span));
                 }
-                (*database, *name)
+                self.bind_table_term(*database, *name, term.alias, join, span)
             }
-            FromSource::Subquery(_) => return Err(unsupported("subqueries in FROM", term.span)),
-            FromSource::Join(_) => return Err(unsupported("parenthesised joins", term.span)),
-        };
-        let database_name = database.map(|id| self.ast.folded(id).to_vec());
-        let folded = self.ast.folded(name).to_vec();
-        let Some(table) = self
-            .catalog
-            .find_table(database_name.as_deref(), &folded)
-            .cloned()
-        else {
-            return Err(no_such_table(self.ast.text(name), term.span));
-        };
-        if table.kind == TableKind::View {
-            return Err(unsupported("views", term.span));
+            FromSource::Subquery(select) => {
+                let alias = term.alias.map(|alias| self.ast.text(alias).to_vec());
+                self.bind_subquery_term(*select, alias, Vec::new(), join, span)
+            }
+            FromSource::Join(terms) => {
+                // A parenthesised join is a term to whatever contains it, and
+                // SQLite flattens it into the enclosing FROM list. The first
+                // inner term inherits the join that attached the parentheses;
+                // the rest keep their own.
+                let inner = terms.clone();
+                for (position, nested) in inner.iter().enumerate() {
+                    let before = self.scope().len();
+                    self.bind_from_term(*nested)?;
+                    if position == 0 {
+                        if let Some(id) = self.scope_id(before) {
+                            if let Some(source) = self.sources.get_mut(id) {
+                                source.join = join;
+                            }
+                        }
+                    }
+                }
+                self.desugar_join_constraints(&inner)?;
+                Ok(())
+            }
         }
+    }
+
+    /// Binds a named FROM term: a CTE, a view, or a real table.
+    fn bind_table_term(
+        &mut self,
+        database: Option<ast::NameId>,
+        name: ast::NameId,
+        alias: Option<ast::NameId>,
+        join: JoinKind,
+        span: Span,
+    ) -> Result<(), ParseError> {
+        let folded = self.ast.folded(name).to_vec();
+        let written = self.ast.text(name).to_vec();
+        if database.is_none() {
+            // A reference to the CTE whose own definition is being bound is
+            // the recursion. It reads the row the fill loop is on rather than
+            // being another materialisation of the same query.
+            if let Some(position) = self
+                .recursing
+                .iter()
+                .rposition(|target| target.folded == folded)
+            {
+                return self.push_recursive_self(position, alias, join);
+            }
+            if let Some(cte) = self.find_cte(&folded) {
+                let alias = match alias {
+                    Some(alias) => self.ast.text(alias).to_vec(),
+                    None => cte.name.clone(),
+                };
+                if cte.recursive {
+                    return self.bind_recursive_cte(&cte, alias, join, span);
+                }
+                return self.bind_subquery_term(
+                    cte.select,
+                    Some(alias),
+                    cte.columns.clone(),
+                    join,
+                    span,
+                );
+            }
+        }
+        let database_name = database.map(|id| self.ast.folded(id).to_vec());
+        let Some(table) = self.catalog.find_table(database_name.as_deref(), &folded) else {
+            return Err(no_such_table(&written, span));
+        };
         if table.kind == TableKind::Virtual {
-            return Err(unsupported("virtual tables", term.span));
+            return Err(unsupported("virtual tables", span));
+        }
+        if table.kind == TableKind::View {
+            let view_alias = match alias {
+                Some(alias) => self.ast.text(alias).to_vec(),
+                None => table.name.clone(),
+            };
+            let database_index = table.database;
+            let Some(body) = table.view.as_ref() else {
+                return Err(ParseError::new(
+                    ParseErrorKind::Unsupported("the view's definition could not be parsed"),
+                    span,
+                ));
+            };
+            self.record_dependency(database_index);
+            // The view's own arena outlives the binder because it belongs to
+            // the catalog snapshot the binder holds, which is what lets the
+            // body be bound in place rather than re-parsed here.
+            let columns = body.columns.clone();
+            let saved = self.ast;
+            self.ast = &body.ast;
+            let bound = self.bind_select(body.select);
+            self.ast = saved;
+            let bound = bound?;
+            return self.push_subquery_source(bound, view_alias, columns, join, span);
         }
         self.record_dependency(table.database);
-        let alias = match term.alias {
+        let alias = match alias {
             Some(alias) => self.ast.text(alias).to_vec(),
             None => table.name.clone(),
         };
-        if matches!(term.join, JoinKind::Right | JoinKind::Full) {
-            return Err(unsupported("RIGHT and FULL joins", term.span));
-        }
-        if matches!(term.join, JoinKind::Left) {
-            return Err(unsupported("LEFT joins", term.span));
-        }
+        let table = table.clone();
+        let id = self.sources.len();
         self.sources.push(BoundSource {
+            id,
+            rows: SourceRows::Table,
             table,
             alias,
-            join: term.join,
+            join,
             constraint: None,
             suppressed: Vec::new(),
         });
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.push(id);
+        }
         Ok(())
+    }
+
+    /// Registers a reference to the recursive CTE currently being bound.
+    fn push_recursive_self(
+        &mut self,
+        position: usize,
+        alias: Option<ast::NameId>,
+        join: JoinKind,
+    ) -> Result<(), ParseError> {
+        let Some(target) = self.recursing.get_mut(position) else {
+            return Err(unsupported("unknown recursive reference", Span::default()));
+        };
+        target.referenced = true;
+        let cte = target.id;
+        let table = target.table.clone();
+        let alias = match alias {
+            Some(alias) => self.ast.text(alias).to_vec(),
+            None => table.name.clone(),
+        };
+        let id = self.sources.len();
+        self.sources.push(BoundSource {
+            id,
+            rows: SourceRows::RecursiveSelf { cte },
+            table,
+            alias,
+            join,
+            constraint: None,
+            suppressed: Vec::new(),
+        });
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.push(id);
+        }
+        Ok(())
+    }
+
+    /// Binds a `WITH RECURSIVE` CTE reference.
+    ///
+    /// The seed arm is bound first, alone, because until it is bound nothing
+    /// knows what columns the CTE has - and the step arm cannot be bound until
+    /// a reference to the CTE has columns to resolve against. A CTE declared
+    /// `RECURSIVE` that turns out not to reference itself is an ordinary
+    /// compound, and is rebuilt as one rather than run through a queue that
+    /// would never be fed.
+    fn bind_recursive_cte(
+        &mut self,
+        cte: &CteBinding,
+        alias: Vec<u8>,
+        join: JoinKind,
+        span: Span,
+    ) -> Result<(), ParseError> {
+        let Some(select) = self.ast.select(cte.select) else {
+            return Err(unsupported("missing select", span));
+        };
+        if select.compounds.is_empty() {
+            return self.bind_subquery_term(
+                cte.select,
+                Some(alias),
+                cte.columns.clone(),
+                join,
+                span,
+            );
+        }
+        let arms: Vec<(CompoundOp, ast::SelectCoreId)> = select.compounds.clone();
+        let order_by = select.order_by.clone();
+        let limit = select.limit;
+        let offset = select.offset;
+        let first = select.first;
+        if !order_by.is_empty() || limit.is_some() || offset.is_some() {
+            return Err(ParseError::new(
+                ParseErrorKind::Unsupported(
+                    "ORDER BY and LIMIT are not allowed on a recursive CTE",
+                ),
+                span,
+            ));
+        }
+
+        let id = self.sources.len();
+        // The store's FROM-term number is reserved before anything is bound, so
+        // that a self-reference inside the step arm can name the store it will
+        // read without the two being bound in an impossible order.
+        self.sources.push(BoundSource {
+            id,
+            rows: SourceRows::Table,
+            table: TableInfo::subquery(alias.clone(), 0, Vec::new()),
+            alias: alias.clone(),
+            join,
+            constraint: None,
+            suppressed: Vec::new(),
+        });
+
+        let seed = self.bind_isolated_arm(first)?;
+        let table = subquery_table(&alias, &cte.columns, &seed);
+        if !cte.columns.is_empty() && cte.columns.len() != seed.columns.len() {
+            return Err(ParseError::new(
+                ParseErrorKind::Unsupported("the named column list does not match the query"),
+                span,
+            ));
+        }
+        self.recursing.push(RecursiveTarget {
+            folded: cte.folded.clone(),
+            id,
+            table: table.clone(),
+            referenced: false,
+        });
+        let mut seeds = vec![(CompoundOp::UnionAll, seed)];
+        let mut steps = Vec::new();
+        let mut outcome = Ok(());
+        for (op, arm) in &arms {
+            if !matches!(op, CompoundOp::Union | CompoundOp::UnionAll) {
+                outcome = Err(ParseError::new(
+                    ParseErrorKind::Unsupported("recursive query does not use UNION or UNION ALL"),
+                    span,
+                ));
+                break;
+            }
+            if let Some(target) = self.recursing.last_mut() {
+                target.referenced = false;
+            }
+            let bound = match self.bind_isolated_arm(*arm) {
+                Ok(bound) => bound,
+                Err(reason) => {
+                    outcome = Err(reason);
+                    break;
+                }
+            };
+            let referenced = self
+                .recursing
+                .last()
+                .is_some_and(|target| target.referenced);
+            if referenced {
+                steps.push((*op, bound));
+            } else {
+                seeds.push((*op, bound));
+            }
+        }
+        self.recursing.pop();
+        outcome?;
+
+        let mut source = BoundSource {
+            id,
+            rows: SourceRows::Recursive(Box::new(RecursiveBody { seeds, steps })),
+            table,
+            alias,
+            join,
+            constraint: None,
+            suppressed: Vec::new(),
+        };
+        if let SourceRows::Recursive(body) = &mut source.rows {
+            if body.steps.is_empty() {
+                // Declared recursive, never refers to itself: an ordinary
+                // compound wearing the keyword.
+                let mut arms = core::mem::take(&mut body.seeds);
+                if arms.is_empty() {
+                    return Err(unsupported("missing select core", span));
+                }
+                let mut head = arms.remove(0).1;
+                head.compounds = arms;
+                source.rows = SourceRows::Subquery(Box::new(head));
+            }
+        }
+        if let Some(slot) = self.sources.get_mut(id) {
+            *slot = source;
+        }
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.push(id);
+        }
+        Ok(())
+    }
+
+    /// Binds one compound arm in a scope of its own.
+    fn bind_isolated_arm(&mut self, arm: ast::SelectCoreId) -> Result<BoundSelect, ParseError> {
+        let frame = self.enter_block();
+        let mut bound = self.bind_arm(arm);
+        // The arm owns whatever aggregates and correlations it accumulated, and
+        // they have to be read off the binder before the frame is restored.
+        if let Ok(bound) = bound.as_mut() {
+            bound.aggregates = self.aggregates.clone();
+            bound.correlations = self.correlations.clone();
+        }
+        let ids = self.leave_block(frame);
+        let mut bound = bound?;
+        bound.sources = ids
+            .iter()
+            .filter_map(|id| self.sources.get(*id).cloned())
+            .collect();
+        Ok(bound)
+    }
+
+    /// Returns the next statement-wide number for a nested query used as a
+    /// value.
+    fn next_subquery_id(&mut self) -> usize {
+        let id = self.subqueries;
+        self.subqueries = self.subqueries.saturating_add(1);
+        id
+    }
+
+    /// Binds a nested query that is used as a value rather than as a source.
+    ///
+    /// It gets a scope of its own, so its own FROM terms shadow the enclosing
+    /// query's, and a name it can only resolve outward is recorded as a
+    /// correlation - which is what tells the compiler to rebuild it per row.
+    fn bind_value_subquery(
+        &mut self,
+        select: SelectId,
+        span: Span,
+    ) -> Result<BoundSelect, ParseError> {
+        let _ = span;
+        self.bind_select(select)
+    }
+
+    /// Binds `x IN (SELECT ...)`.
+    fn bind_in_subquery(
+        &mut self,
+        operand: BoundExpr,
+        select: SelectId,
+        negated: bool,
+        span: Span,
+    ) -> Result<BoundExpr, ParseError> {
+        let block = self.bind_value_subquery(select, span)?;
+        if block.columns.len() != 1 {
+            return Err(ParseError::new(
+                ParseErrorKind::Unsupported("sub-select returns more than one column"),
+                span,
+            ));
+        }
+        let Some(column) = block.columns.first() else {
+            return Err(unsupported("a subquery with no result column", span));
+        };
+        let (affinity, collation) = comparison_rules(&operand, &column.expr);
+        Ok(BoundExpr::Subquery {
+            id: self.next_subquery_id(),
+            kind: SubqueryKind::In,
+            negated,
+            operand: Some(Box::new(operand)),
+            block: Box::new(block),
+            affinity,
+            collation,
+        })
+    }
+
+    /// Binds a subquery FROM term and registers it as a source.
+    fn bind_subquery_term(
+        &mut self,
+        select: SelectId,
+        alias: Option<Vec<u8>>,
+        columns: Vec<Vec<u8>>,
+        join: JoinKind,
+        span: Span,
+    ) -> Result<(), ParseError> {
+        let bound = self.bind_select(select)?;
+        let alias = alias.unwrap_or_else(|| b"subquery".to_vec());
+        self.push_subquery_source(bound, alias, columns, join, span)
+    }
+
+    /// Registers a bound block as one FROM term of the current block.
+    fn push_subquery_source(
+        &mut self,
+        bound: BoundSelect,
+        alias: Vec<u8>,
+        columns: Vec<Vec<u8>>,
+        join: JoinKind,
+        span: Span,
+    ) -> Result<(), ParseError> {
+        if !columns.is_empty() && columns.len() != bound.columns.len() {
+            return Err(ParseError::new(
+                ParseErrorKind::Unsupported("the named column list does not match the query"),
+                span,
+            ));
+        }
+        let table = subquery_table(&alias, &columns, &bound);
+        let id = self.sources.len();
+        self.sources.push(BoundSource {
+            id,
+            rows: SourceRows::Subquery(Box::new(bound)),
+            table,
+            alias,
+            join,
+            constraint: None,
+            suppressed: Vec::new(),
+        });
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.push(id);
+        }
+        Ok(())
+    }
+
+    /// Records the named windows a `WINDOW` clause declares.
+    fn declare_windows(
+        &mut self,
+        windows: &[(ast::NameId, ast::WindowId)],
+    ) -> Result<(), ParseError> {
+        if windows.is_empty() {
+            return Ok(());
+        }
+        Err(unsupported("WINDOW", Span::default()))
     }
 
     /// Turns `ON`, `USING` and `NATURAL` into ordinary predicates.
@@ -844,11 +1665,25 @@ impl<'a> Binder<'a> {
     /// column is suppressed from the right-hand term's contribution to `*`,
     /// which is the only visible difference between a `USING` join and the
     /// equality predicate it means.
+    ///
+    /// The terms are addressed by their position in *this block's* FROM list,
+    /// which the scope turns into the statement-wide source id. A parenthesised
+    /// join has already flattened itself into the same list by the time this
+    /// runs, so a position is always a real term.
     fn desugar_join_constraints(&mut self, terms: &[ast::FromTermId]) -> Result<(), ParseError> {
-        for (position, id) in terms.iter().enumerate() {
+        let base = self
+            .scope()
+            .len()
+            .saturating_sub(terms.iter().map(|_| 1usize).sum::<usize>());
+        for (offset, id) in terms.iter().enumerate() {
             let Some(term) = self.ast.from_term(*id) else {
                 continue;
             };
+            if matches!(term.source, FromSource::Join(_)) {
+                // Its own constraints were desugared when it was flattened.
+                continue;
+            }
+            let position = base.saturating_add(offset);
             let constraint = term.constraint.clone();
             let natural = term.natural;
             let span = term.span;
@@ -885,17 +1720,20 @@ impl<'a> Binder<'a> {
         Ok(())
     }
 
-    /// Stores a join constraint on a source.
+    /// Stores a join constraint on a source of the current block.
     fn set_constraint(&mut self, position: usize, constraint: Option<BoundExpr>) {
-        if let Some(source) = self.sources.get_mut(position) {
+        let Some(id) = self.scope_id(position) else {
+            return;
+        };
+        if let Some(source) = self.sources.get_mut(id) {
             source.constraint = constraint;
         }
     }
 
     /// Returns the column names a NATURAL join equates: every name the right
-    /// term shares with any term to its left.
+    /// term shares with any term to its left in the same block.
     fn natural_columns(&self, position: usize) -> Vec<Vec<u8>> {
-        let Some(right) = self.sources.get(position) else {
+        let Some(right) = self.source_at(position) else {
             return Vec::new();
         };
         let mut names = Vec::new();
@@ -903,17 +1741,21 @@ impl<'a> Binder<'a> {
             if column.hidden {
                 continue;
             }
-            let shared = self
-                .sources
-                .get(..position)
-                .unwrap_or(&[])
-                .iter()
-                .any(|left| left.table.column_position(&column.folded).is_some());
+            let shared = (0..position).any(|earlier| {
+                self.source_at(earlier)
+                    .is_some_and(|left| left.table.column_position(&column.folded).is_some())
+            });
             if shared {
                 names.push(column.folded.clone());
             }
         }
         names
+    }
+
+    /// Returns one source of the current block by its position in the block.
+    fn source_at(&self, position: usize) -> Option<&BoundSource> {
+        let id = self.scope_id(position)?;
+        self.sources.get(id)
     }
 
     /// Builds `left.name = right.name AND ...` for a USING or NATURAL join,
@@ -931,8 +1773,10 @@ impl<'a> Binder<'a> {
             let Some((right_source, right_column)) = self.find_column_in(position, name) else {
                 continue;
             };
-            if let Some(source) = self.sources.get_mut(position) {
-                source.suppressed.push(right_column);
+            if let Some(id) = self.scope_id(position) {
+                if let Some(source) = self.sources.get_mut(id) {
+                    source.suppressed.push(right_column);
+                }
             }
             let left = self.column_expr(left_source, left_column)?;
             let right = self.column_expr(right_source, right_column)?;
@@ -952,13 +1796,11 @@ impl<'a> Binder<'a> {
         Ok(predicate)
     }
 
-    /// Finds a column by folded name in one source.
+    /// Finds a column by folded name in one source, returning its source id.
     fn find_column_in(&self, position: usize, folded: &[u8]) -> Option<(usize, u16)> {
-        let source = self.sources.get(position)?;
-        source
-            .table
-            .column_position(folded)
-            .map(|column| (position, column))
+        let id = self.scope_id(position)?;
+        let source = self.sources.get(id)?;
+        source.table.column_position(folded).map(|c| (id, c))
     }
 
     /// Finds a column by folded name in the sources before one.
@@ -1023,13 +1865,18 @@ impl<'a> Binder<'a> {
     }
 
     /// Expands `*` or `table.*` into one bound column per visible column.
+    ///
+    /// Only the block's own FROM terms are expanded. An enclosing block's terms
+    /// are visible to a *name*, which is what makes a subquery correlated, but
+    /// they are not part of this block's `*`.
     fn expand_star(
         &mut self,
         qualifier: Option<&[u8]>,
         span: Span,
         into: &mut Vec<BoundResultColumn>,
     ) -> Result<(), ParseError> {
-        if self.sources.is_empty() {
+        let scope: Vec<usize> = self.scope().to_vec();
+        if scope.is_empty() {
             return Err(ParseError::new(
                 ParseErrorKind::Unexpected {
                     found: "*".to_string(),
@@ -1039,8 +1886,8 @@ impl<'a> Binder<'a> {
             ));
         }
         let mut matched = false;
-        for position in 0..self.sources.len() {
-            let Some(source) = self.sources.get(position) else {
+        for id in scope {
+            let Some(source) = self.sources.get(id) else {
                 continue;
             };
             if let Some(qualifier) = qualifier {
@@ -1051,9 +1898,9 @@ impl<'a> Binder<'a> {
             matched = true;
             let columns = source.table.columns.clone();
             let suppressed = source.suppressed.clone();
-            let alias = source.alias.clone();
             let database = self.catalog.database_name(source.table.database).to_vec();
             let table_name = source.table.name.clone();
+            let synthetic = source.table.kind == TableKind::Subquery;
             for (index, column) in columns.iter().enumerate() {
                 let position_u16 = index as u16;
                 if column.hidden || suppressed.contains(&position_u16) {
@@ -1067,15 +1914,18 @@ impl<'a> Binder<'a> {
                 {
                     return Err(denied("not authorized", span));
                 }
-                let expr = self.column_expr(position, position_u16)?;
+                let expr = self.column_expr(id, position_u16)?;
                 into.push(BoundResultColumn {
                     expr,
                     name: column.name.clone(),
-                    origin: Some((database.clone(), table_name.clone(), column.name.clone())),
+                    // A subquery's column has no table of origin: it came from
+                    // an expression, and reporting the synthetic name as one
+                    // would make `sqlite3_column_table_name` invent a table.
+                    origin: (!synthetic)
+                        .then(|| (database.clone(), table_name.clone(), column.name.clone())),
                     declared_type: column.declared_type.clone(),
                 });
             }
-            let _ = alias;
         }
         if !matched {
             return Err(no_such_table(qualifier.unwrap_or(b"*"), span));
@@ -1341,6 +2191,15 @@ impl<'a> Binder<'a> {
                 rhs,
             } => {
                 let operand = self.bind_expr(operand)?;
+                let rhs = match rhs {
+                    InRhs::Select(select) => {
+                        return self.bind_in_subquery(operand, select, negated, span)
+                    }
+                    InRhs::Table { .. } => {
+                        return Err(unsupported("IN over a table name", span));
+                    }
+                    other => other,
+                };
                 let InRhs::List(items) = rhs else {
                     return Err(unsupported("IN over a subquery or table", span));
                 };
@@ -1428,7 +2287,36 @@ impl<'a> Binder<'a> {
                 }
                 self.bind_call(name, distinct, arguments, span)
             }
-            Expr::Exists { .. } | Expr::Subquery(_) => Err(unsupported("subqueries", span)),
+            Expr::Exists { negated, select } => {
+                let block = self.bind_value_subquery(select, span)?;
+                Ok(BoundExpr::Subquery {
+                    id: self.next_subquery_id(),
+                    kind: SubqueryKind::Exists,
+                    negated,
+                    operand: None,
+                    block: Box::new(block),
+                    affinity: None,
+                    collation: Collation::Binary,
+                })
+            }
+            Expr::Subquery(select) => {
+                let block = self.bind_value_subquery(select, span)?;
+                if block.columns.len() != 1 {
+                    return Err(ParseError::new(
+                        ParseErrorKind::Unsupported("sub-select returns more than one column"),
+                        span,
+                    ));
+                }
+                Ok(BoundExpr::Subquery {
+                    id: self.next_subquery_id(),
+                    kind: SubqueryKind::Scalar,
+                    negated: false,
+                    operand: None,
+                    block: Box::new(block),
+                    affinity: None,
+                    collation: Collation::Binary,
+                })
+            }
             Expr::RowValue(_) => Err(unsupported("row values", span)),
             Expr::Raise { .. } => Err(unsupported("RAISE outside a trigger", span)),
         }
@@ -1488,7 +2376,12 @@ impl<'a> Binder<'a> {
         Err(no_such_column(folded, span))
     }
 
-    /// Resolves a column reference against the scope.
+    /// Resolves a column reference against the scope stack.
+    ///
+    /// The innermost block is searched first and a hit there ends the search,
+    /// so an inner name shadows an outer one. A hit in an enclosing block is
+    /// recorded as a correlation, which is the fact the compiler uses to decide
+    /// whether the block runs once or once per outer row.
     fn bind_column_reference(
         &mut self,
         database: Option<ast::NameId>,
@@ -1502,35 +2395,55 @@ impl<'a> Binder<'a> {
         if table_folded.as_deref() == Some(b"excluded".as_slice()) {
             return self.bind_excluded_column(&folded, span);
         }
-        let mut found: Option<(usize, u16)> = None;
+        let mut resolved: Option<(usize, u16)> = None;
         let mut rowid_of: Option<usize> = None;
-        for (position, source) in self.sources.iter().enumerate() {
-            if let Some(qualifier) = table_folded.as_deref() {
-                if !source.alias.eq_ignore_ascii_case(qualifier) {
+        let levels = self.scopes.len();
+        for level in (0..levels).rev() {
+            let ids: Vec<usize> = self
+                .scopes
+                .get(level)
+                .map_or(Vec::new(), |scope| scope.clone());
+            let mut found: Option<(usize, u16)> = None;
+            let mut rowid_here: Option<usize> = None;
+            for id in ids {
+                let Some(source) = self.sources.get(id) else {
+                    continue;
+                };
+                if let Some(qualifier) = table_folded.as_deref() {
+                    if !source.alias.eq_ignore_ascii_case(qualifier) {
+                        continue;
+                    }
+                }
+                if let Some(qualifier) = database_folded.as_deref() {
+                    if !self
+                        .catalog
+                        .database_name(source.table.database)
+                        .eq_ignore_ascii_case(qualifier)
+                    {
+                        continue;
+                    }
+                }
+                if let Some(index) = source.table.column_position(&folded) {
+                    if found.is_some() {
+                        return Err(ambiguous_column(self.ast.text(column), span));
+                    }
+                    found = Some((id, index));
                     continue;
                 }
-            }
-            if let Some(qualifier) = database_folded.as_deref() {
-                if !self
-                    .catalog
-                    .database_name(source.table.database)
-                    .eq_ignore_ascii_case(qualifier)
-                {
-                    continue;
+                if source.table.is_rowid_name(&folded) && rowid_here.is_none() {
+                    rowid_here = Some(id);
                 }
             }
-            if let Some(index) = source.table.column_position(&folded) {
-                if found.is_some() {
-                    return Err(ambiguous_column(self.ast.text(column), span));
-                }
-                found = Some((position, index));
-                continue;
+            if found.is_some() {
+                resolved = found;
+                break;
             }
-            if source.table.is_rowid_name(&folded) && rowid_of.is_none() {
-                rowid_of = Some(position);
+            if let Some(id) = rowid_here {
+                rowid_of = Some(id);
+                break;
             }
         }
-        if let Some((source, index)) = found {
+        if let Some((source, index)) = resolved {
             let (database_name, table_name, column_name) = {
                 let Some(bound) = self.sources.get(source) else {
                     return Err(unsupported("unknown source", span));
@@ -1553,9 +2466,11 @@ impl<'a> Binder<'a> {
                 Authorization::Deny => return Err(denied("not authorized", span)),
                 Authorization::Ignore => return Ok(BoundExpr::Null),
             }
+            self.note_correlation(source);
             return self.column_expr(source, index);
         }
         if let Some(source) = rowid_of {
+            self.note_correlation(source);
             return Ok(BoundExpr::Rowid { source });
         }
         // A result alias is visible to GROUP BY, HAVING and ORDER BY, and only
@@ -1908,6 +2823,54 @@ fn order_out_of_range(ordinal: usize, span: Span) -> ParseError {
         },
         span,
     )
+}
+
+/// Returns the failure a compound's `ORDER BY` gives when it names nothing.
+fn compound_order_unmatched(span: Span) -> ParseError {
+    ParseError::new(
+        ParseErrorKind::Unexpected {
+            found: "ORDER BY term does not match any column in the result set".to_string(),
+            expected: Vec::new(),
+        },
+        span,
+    )
+}
+
+/// Builds the table a nested query's rows are read through.
+///
+/// The columns are the block's result columns. Their affinity and collation
+/// come from the expressions behind them, so a comparison against a subquery
+/// column applies the rules it would have applied one level down; a column with
+/// no affinity of its own gets none, which is what SQLite does for an
+/// expression that is not a bare column or a cast.
+fn subquery_table(alias: &[u8], names: &[Vec<u8>], select: &BoundSelect) -> TableInfo {
+    let columns = select
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| {
+            let name = names
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| column.name.clone());
+            let folded = name.to_ascii_lowercase();
+            let collation = column.expr.collation().unwrap_or(Collation::Binary);
+            ColumnInfo {
+                name,
+                folded,
+                declared_type: column.declared_type.clone(),
+                affinity: column.expr.affinity().unwrap_or(Affinity::Blob),
+                collation: collation.name().as_bytes().to_ascii_lowercase(),
+                not_null: false,
+                not_null_conflict: None,
+                default_sql: None,
+                primary_key_position: None,
+                hidden: false,
+                generated: false,
+            }
+        })
+        .collect();
+    TableInfo::subquery(alias.to_vec(), 0, columns)
 }
 
 /// Returns an authorizer refusal.
