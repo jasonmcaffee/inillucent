@@ -21,7 +21,7 @@ use rustdb_storage::cursor::{BTreeCursor, SeekBias};
 use rustdb_storage::mutate;
 use rustdb_storage::pager::Pager;
 use rustdb_storage::schema::{SchemaKind, SCHEMA_ROOT};
-use rustdb_value::record::encode_record;
+use rustdb_value::record::{encode_record, RecordRef};
 use rustdb_value::Value;
 
 /// One row to write into `sqlite_schema`.
@@ -85,6 +85,75 @@ fn next_schema_rowid(pager: &mut Pager) -> DbResult<i64> {
         return Ok(1);
     }
     Ok(cursor.rowid()?.saturating_add(1))
+}
+
+/// Reads every `sqlite_schema` row, with the rowid each is stored under.
+///
+/// `ALTER TABLE` needs the whole table rather than one row: a rename touches
+/// the object's own row and the row of everything that names it, and the set of
+/// those is only known by looking at all of them.
+pub fn read_schema_rows(pager: &mut Pager) -> DbResult<Vec<(i64, SchemaRow)>> {
+    let limits = Limits::default();
+    let mut out = Vec::new();
+    let mut cursor = BTreeCursor::table(schema_root()?);
+    let mut more = cursor.first(pager)?;
+    while more {
+        let rowid = cursor.rowid()?;
+        let payload = cursor.payload(pager, &limits)?;
+        let record = RecordRef::parse_with_limits(&payload, pager.text_encoding(), &limits)?;
+        let kind = SchemaKind::from_text(&text_field(&record, 0)).unwrap_or(SchemaKind::Table);
+        out.push((
+            rowid,
+            SchemaRow {
+                kind,
+                name: text_field(&record, 1),
+                table: text_field(&record, 2),
+                root: record
+                    .value(3)
+                    .ok()
+                    .map(|value| rustdb_value::cast::integer_value(&value))
+                    .unwrap_or(0)
+                    .max(0) as u32,
+                sql: match record.value(4) {
+                    Ok(rustdb_value::Value::Text(text)) => Some(text.utf8_bytes().to_vec()),
+                    _ => None,
+                },
+            },
+        ));
+        more = cursor.next(pager)?;
+    }
+    Ok(out)
+}
+
+/// Returns one text column of a schema record, or an empty vector.
+fn text_field(record: &RecordRef<'_>, column: usize) -> Vec<u8> {
+    match record.value(column) {
+        Ok(rustdb_value::Value::Text(text)) => text.utf8_bytes().to_vec(),
+        _ => Vec::new(),
+    }
+}
+
+/// Rewrites one `sqlite_schema` row in place, keeping its rowid.
+///
+/// In place rather than delete-and-insert: the rowid is the row's identity, and
+/// a re-inserted row lands at the end of the table where a reader that had
+/// saved a position would not find it.
+pub fn update_schema_row(pager: &mut Pager, rowid: i64, row: &SchemaRow) -> DbResult<()> {
+    let values = [
+        Value::owned_text(row.kind.as_text().as_bytes())?,
+        Value::owned_text(&row.name)?,
+        Value::owned_text(&row.table)?,
+        Value::Integer(i64::from(row.root)),
+        match &row.sql {
+            Some(sql) => Value::owned_text(sql)?,
+            None => Value::Null,
+        },
+    ];
+    let encoding = pager.text_encoding();
+    let format = pager.header().schema_format.max(1);
+    let payload = encode_record(&values, encoding, format)?;
+    mutate::insert_row(pager, schema_root()?, rowid, &payload)?;
+    Ok(())
 }
 
 /// Removes every `sqlite_schema` row belonging to one object.

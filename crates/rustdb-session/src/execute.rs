@@ -14,10 +14,10 @@
 
 use rustdb_base::error::misuse;
 use rustdb_base::DbResult;
-use rustdb_catalog::analyze;
 use rustdb_catalog::ddl::{self, SchemaRow};
+use rustdb_catalog::{analyze, rename};
 use rustdb_sql::ast::ObjectKind;
-use rustdb_sql::directive::{BeginKind, Directive, PragmaArgument};
+use rustdb_sql::directive::{AlterKind, BeginKind, Directive, PragmaArgument};
 use rustdb_storage::schema::SchemaKind;
 use rustdb_transaction::journal::{JournalMode, Synchronous};
 use rustdb_transaction::state::BeginMode;
@@ -70,6 +70,9 @@ pub fn run_directive(
         Directive::Analyze { .. } => {
             run_write(connection, |connection| analyze(connection, directive))
         }
+        Directive::Alter { .. } => run_write(connection, |connection| {
+            alter_table(connection, directive, source)
+        }),
         Directive::Reindex { .. } => {
             run_write(connection, |connection| reindex(connection, directive))
         }
@@ -174,6 +177,197 @@ fn create_table(
     connection.with_state(|state| ddl::bump_schema_cookie(&mut state.pager))??;
     connection.refresh_catalog()?;
     Ok(Vec::new())
+}
+
+/// Runs `ALTER TABLE`.
+///
+/// Every form is the same three steps: rewrite the stored `CREATE` text of the
+/// table and of everything that names it, check each rewrite still parses, and
+/// only then write them all. The check before the write is what makes it safe:
+/// an `ALTER` that produced text the parser cannot read would leave a database
+/// whose schema fails to load, which is not recoverable from inside the engine.
+fn alter_table(
+    connection: &Connection,
+    directive: &Directive,
+    source: &[u8],
+) -> DbResult<DirectiveRows> {
+    let Directive::Alter { table, action, .. } = directive else {
+        return Err(misuse("not an ALTER TABLE"));
+    };
+    let folded = table.to_ascii_lowercase();
+    let rows = connection.with_state(|state| ddl::read_schema_rows(&mut state.pager))??;
+
+    // Every rewrite is computed first, and one that fails aborts the whole
+    // statement before anything is written.
+    let mut updates: Vec<(i64, SchemaRow)> = Vec::new();
+    for (rowid, row) in &rows {
+        let Some(sql) = row.sql.as_ref() else {
+            // An automatic index has no SQL of its own - the table's own text is
+            // its definition - so there is nothing to rewrite, but its
+            // `tbl_name` still follows a rename.
+            if row.table.to_ascii_lowercase() == folded {
+                if let AlterKind::RenameTable { to } = action {
+                    let mut moved = row.clone();
+                    moved.table = to.clone();
+                    moved.name = renamed_automatic(&row.name, table, to);
+                    updates.push((*rowid, moved));
+                }
+            }
+            continue;
+        };
+        let owns = row.table.to_ascii_lowercase() == folded;
+        let itself = row.name.to_ascii_lowercase() == folded && row.kind == SchemaKind::Table;
+        let rewritten = match action {
+            AlterKind::RenameTable { to } => {
+                // A view or trigger anywhere in the schema may name the table in
+                // its body, so every row is offered the rewrite; one that does
+                // not mention it comes back unchanged.
+                let next = rename::rewrite(sql, rename::Rename::Table, table, to)?;
+                if next == *sql && !owns {
+                    continue;
+                }
+                let mut moved = row.clone();
+                moved.sql = Some(rename::reparsed(next)?);
+                if itself {
+                    moved.name = to.clone();
+                    moved.table = to.clone();
+                } else if owns {
+                    moved.table = to.clone();
+                }
+                moved
+            }
+            AlterKind::RenameColumn { from, to } => {
+                // The table's own text, its indexes and its triggers all name
+                // its columns unambiguously. So does a view or trigger that
+                // reads only this table; one that reads two is ambiguous - a
+                // bare column name in it could belong to either - and is
+                // refused rather than rewritten on a guess.
+                if !owns {
+                    let reads = rename::referenced_tables(sql);
+                    if !reads.iter().any(|name| *name == folded) {
+                        continue;
+                    }
+                    if reads.len() > 1 {
+                        return Err(misuse(format!(
+                            "error in {}: cannot rename a column it reads alongside another table",
+                            String::from_utf8_lossy(&row.name)
+                        )));
+                    }
+                }
+                let next = rename::rewrite(sql, rename::Rename::Column, from, to)?;
+                if next == *sql {
+                    continue;
+                }
+                let mut moved = row.clone();
+                moved.sql = Some(rename::reparsed(next)?);
+                moved
+            }
+            AlterKind::AddColumn { start, end } => {
+                if !itself {
+                    continue;
+                }
+                let definition = source
+                    .get(*start as usize..*end as usize)
+                    .unwrap_or_default()
+                    .to_vec();
+                let mut moved = row.clone();
+                moved.sql = Some(rename::reparsed(rename::add_column(sql, &definition)?)?);
+                moved
+            }
+            AlterKind::DropColumn { position, .. } => {
+                if !itself {
+                    continue;
+                }
+                let mut moved = row.clone();
+                moved.sql = Some(rename::reparsed(rename::drop_column(
+                    sql,
+                    usize::from(*position),
+                )?)?);
+                moved
+            }
+        };
+        updates.push((*rowid, rewritten));
+    }
+
+    if let AlterKind::DropColumn { position, .. } = action {
+        let root = rows
+            .iter()
+            .find(|(_, row)| {
+                row.kind == SchemaKind::Table && row.name.to_ascii_lowercase() == folded
+            })
+            .map(|(_, row)| row.root)
+            .unwrap_or(0);
+        drop_column_values(connection, root, usize::from(*position))?;
+    }
+
+    for (rowid, row) in &updates {
+        connection.with_state(|state| ddl::update_schema_row(&mut state.pager, *rowid, row))??;
+    }
+    connection.with_state(|state| ddl::bump_schema_cookie(&mut state.pager))??;
+    connection.refresh_catalog()?;
+    Ok(Vec::new())
+}
+
+/// Returns the new name of an automatic index when its table is renamed.
+///
+/// SQLite names them `sqlite_autoindex_<table>_<n>`, so the name has to follow
+/// the table or the next `CREATE TABLE` of the old name would collide with it.
+fn renamed_automatic(name: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+    let prefix = b"sqlite_autoindex_";
+    let Some(rest) = name.strip_prefix(prefix.as_slice()) else {
+        return name.to_vec();
+    };
+    let Some(suffix) = rest.strip_prefix(from) else {
+        return name.to_vec();
+    };
+    let mut out = prefix.to_vec();
+    out.extend_from_slice(to);
+    out.extend_from_slice(suffix);
+    out
+}
+
+/// Rewrites every row of a table with one record slot removed.
+///
+/// The rows are read whole before any is written: rewriting under the cursor
+/// that is reading them would have the scan walk over pages the write had just
+/// rebalanced.
+fn drop_column_values(connection: &Connection, root: u32, position: usize) -> DbResult<()> {
+    let Some(root) = rustdb_base::ids::PageId::new(root) else {
+        return Ok(());
+    };
+    let rewritten = connection.with_state(|state| -> DbResult<Vec<(i64, Vec<u8>)>> {
+        let limits = rustdb_base::limits::Limits::default();
+        let encoding = state.pager.text_encoding();
+        let format = state.pager.header().schema_format.max(1);
+        let mut cursor = rustdb_storage::cursor::BTreeCursor::table(root);
+        let mut out = Vec::new();
+        let mut more = cursor.first(&mut state.pager)?;
+        while more {
+            let rowid = cursor.rowid()?;
+            let payload = cursor.payload(&mut state.pager, &limits)?;
+            let record =
+                rustdb_value::record::RecordRef::parse_with_limits(&payload, encoding, &limits)?;
+            let mut values = Vec::with_capacity(record.field_count());
+            for column in 0..record.field_count() {
+                if column == position {
+                    continue;
+                }
+                values.push(record.value(column)?.into_owned()?);
+            }
+            out.push((
+                rowid,
+                rustdb_value::record::encode_record(&values, encoding, format)?,
+            ));
+            more = cursor.next(&mut state.pager)?;
+        }
+        Ok(out)
+    })??;
+    for (rowid, payload) in &rewritten {
+        connection.with_state(|state| {
+            rustdb_storage::mutate::insert_row(&mut state.pager, root, *rowid, payload)
+        })??;
+    }
+    Ok(())
 }
 
 /// Runs `REINDEX`: empties each index and fills it from its table again.

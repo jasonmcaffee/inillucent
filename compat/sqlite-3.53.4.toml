@@ -1211,8 +1211,8 @@ id = "sql.alter-table"
 source = "https://sqlite.org/lang_altertable.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::alter_table_rewrites_the_schema", "rustdb-catalog::rename::tests::a_rename_replaces_tokens_rather_than_bytes", "rustdb-catalog::rename::tests::an_index_follows_its_table", "rustdb-catalog::rename::tests::a_column_is_added_inside_the_list", "rustdb-catalog::rename::tests::a_dropped_column_takes_its_comma", "rustdb-catalog::rename::tests::the_tables_a_statement_reads_are_listed", "rustdb-catalog::rename::tests::an_unparseable_rewrite_is_refused", "rustdb-compat::a_schema_change_recompiles_a_prepared_statement"]
 
 [[capability]]
 id = "sql.generated-columns"

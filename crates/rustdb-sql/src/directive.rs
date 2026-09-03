@@ -94,6 +94,28 @@ fn expression_children(ast: &crate::ast::Ast, expr: ast::ExprId) -> Vec<ast::Exp
     out
 }
 
+/// Returns whether a stored expression names an identifier.
+///
+/// It lexes rather than searches, so a column called `a` is not found inside
+/// `abc` or inside the text of a string literal.
+fn mentions_name(sql: &[u8], folded: &[u8]) -> bool {
+    let mut lexer = crate::lexer::Lexer::at(sql, 0);
+    loop {
+        let Ok(token) = lexer.next_token() else {
+            return false;
+        };
+        match token.kind {
+            crate::lexer::TokenKind::EndOfInput => return false,
+            crate::lexer::TokenKind::Identifier { keyword: None, .. } => {
+                if token.span.slice(sql).to_ascii_lowercase() == folded {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Returns the failure `REINDEX` gives for a name that is nothing it knows.
 fn no_such_collation_sequence(name: &[u8], span: Span) -> ParseError {
     ParseError::new(
@@ -128,6 +150,43 @@ impl BeginKind {
             Some(TransactionBehaviour::Exclusive) => BeginKind::Exclusive,
         }
     }
+}
+
+/// What an `ALTER TABLE` does, with every name already resolved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AlterKind {
+    /// `RENAME TO`.
+    RenameTable {
+        /// The new name, as written.
+        to: Vec<u8>,
+    },
+    /// `RENAME COLUMN a TO b`.
+    RenameColumn {
+        /// The column's current name, as stored.
+        from: Vec<u8>,
+        /// Its new name, as written.
+        to: Vec<u8>,
+    },
+    /// `ADD COLUMN`.
+    AddColumn {
+        /// Where the definition starts in the statement's own source.
+        ///
+        /// The offsets rather than the text, for the same reason `CREATE TABLE`
+        /// carries an offset: the executor has the statement's source and
+        /// slicing it there keeps the *written* definition - its spacing, its
+        /// case and its comments - rather than something re-rendered from the
+        /// parse.
+        start: u32,
+        /// Where it ends.
+        end: u32,
+    },
+    /// `DROP COLUMN`.
+    DropColumn {
+        /// The column's name, as stored.
+        name: Vec<u8>,
+        /// Its declared position, which is the record slot to remove.
+        position: u16,
+    },
 }
 
 /// One key column of an index being created.
@@ -169,6 +228,15 @@ pub enum Directive {
         name_offset: u32,
         /// Whether the table already exists.
         exists: bool,
+    },
+    /// `ALTER TABLE`.
+    Alter {
+        /// Which attached database.
+        database: usize,
+        /// The table being altered, by its stored name.
+        table: Vec<u8>,
+        /// What to do to it.
+        action: AlterKind,
     },
     /// `REINDEX`, over one index, one table's indexes, or everything.
     Reindex {
@@ -296,6 +364,11 @@ impl<'a> Binder<'a> {
                 *filter,
             ),
             ast::Statement::Analyze { database, name } => self.bind_analyze(*database, *name),
+            ast::Statement::AlterTable {
+                database,
+                table,
+                action,
+            } => self.bind_alter(*database, *table, action),
             ast::Statement::Reindex { database, name } => self.bind_reindex(*database, *name),
             ast::Statement::Vacuum { database, into } => self.bind_vacuum(*database, *into),
             ast::Statement::CreateView {
@@ -611,6 +684,258 @@ impl<'a> Binder<'a> {
             });
         }
         Err(no_such_table(self.ast.text(name), Span::default()))
+    }
+
+    /// Binds an `ALTER TABLE`.
+    ///
+    /// Every refusal SQLite makes is made here, where the catalog is available,
+    /// rather than half-way through rewriting the schema: a rename that is
+    /// going to fail must fail before anything has been written.
+    fn bind_alter(
+        &mut self,
+        database: Option<ast::NameId>,
+        table: ast::NameId,
+        action: &ast::AlterAction,
+    ) -> Result<Directive, ParseError> {
+        let index = self.resolve_database(database)?;
+        let database_name = self.catalog.database_name(index).to_vec();
+        let folded = self.ast.folded(table).to_vec();
+        let Some(target) = self
+            .catalog
+            .find_table(Some(database_name.as_slice()), &folded)
+            .cloned()
+        else {
+            return Err(no_such_table(self.ast.text(table), Span::default()));
+        };
+        if target.kind != crate::catalog_view::TableKind::Table {
+            return Err(refused(
+                format!(
+                    "cannot alter {}: not a table",
+                    String::from_utf8_lossy(&target.name)
+                ),
+                Span::default(),
+            ));
+        }
+        if target.folded.starts_with(b"sqlite_") {
+            return Err(refused(
+                format!(
+                    "table {} may not be altered",
+                    String::from_utf8_lossy(&target.name)
+                ),
+                Span::default(),
+            ));
+        }
+        self.record_write_dependency(index);
+        let kind = match action {
+            ast::AlterAction::RenameTo(name) => {
+                let to = self.ast.text(*name).to_vec();
+                let to_folded = self.ast.folded(*name).to_vec();
+                if self
+                    .catalog
+                    .find_table(Some(database_name.as_slice()), &to_folded)
+                    .is_some()
+                {
+                    return Err(refused(
+                        format!(
+                            "there is already another table or index with this name: {}",
+                            String::from_utf8_lossy(&to)
+                        ),
+                        Span::default(),
+                    ));
+                }
+                AlterKind::RenameTable { to }
+            }
+            ast::AlterAction::RenameColumn { from, to } => {
+                let from_folded = self.ast.folded(*from).to_vec();
+                let Some(position) = target.column_position(&from_folded) else {
+                    return Err(crate::bind::no_such_column(
+                        self.ast.text(*from),
+                        Span::default(),
+                    ));
+                };
+                let to_folded = self.ast.folded(*to).to_vec();
+                if target.column_position(&to_folded).is_some() {
+                    return Err(refused(
+                        format!(
+                            "duplicate column name: {}",
+                            String::from_utf8_lossy(self.ast.text(*to))
+                        ),
+                        Span::default(),
+                    ));
+                }
+                let stored = target
+                    .column(position)
+                    .map(|column| column.name.clone())
+                    .unwrap_or_default();
+                AlterKind::RenameColumn {
+                    from: stored,
+                    to: self.ast.text(*to).to_vec(),
+                }
+            }
+            ast::AlterAction::AddColumn(definition) => {
+                self.check_added_column(&target, definition)?;
+                AlterKind::AddColumn {
+                    start: definition.span.start,
+                    end: definition.span.end,
+                }
+            }
+            ast::AlterAction::DropColumn(name) => {
+                let folded = self.ast.folded(*name).to_vec();
+                let Some(position) = target.column_position(&folded) else {
+                    return Err(crate::bind::no_such_column(
+                        self.ast.text(*name),
+                        Span::default(),
+                    ));
+                };
+                self.check_dropped_column(&target, position)?;
+                let stored = target
+                    .column(position)
+                    .map(|column| column.name.clone())
+                    .unwrap_or_default();
+                AlterKind::DropColumn {
+                    name: stored,
+                    position,
+                }
+            }
+        };
+        Ok(Directive::Alter {
+            database: index,
+            table: target.name.clone(),
+            action: kind,
+        })
+    }
+
+    /// Checks what `ADD COLUMN` may not add.
+    ///
+    /// Every one of these is refused because the existing rows have no value
+    /// for the new column and cannot be given one: a `PRIMARY KEY` or `UNIQUE`
+    /// column would need an index built over values that are all the same
+    /// default, and a `NOT NULL` column with no default would make every
+    /// existing row violate its own table.
+    fn check_added_column(
+        &self,
+        table: &crate::catalog_view::TableInfo,
+        definition: &ast::ColumnDef,
+    ) -> Result<(), ParseError> {
+        let folded = self.ast.folded(definition.name).to_vec();
+        if table.column_position(&folded).is_some() {
+            return Err(refused(
+                format!(
+                    "duplicate column name: {}",
+                    String::from_utf8_lossy(self.ast.text(definition.name))
+                ),
+                Span::default(),
+            ));
+        }
+        let mut not_null = false;
+        let mut has_default = false;
+        for (_, constraint) in &definition.constraints {
+            match constraint {
+                ast::ColumnConstraint::PrimaryKey { .. } => {
+                    return Err(refused("cannot add a PRIMARY KEY column", Span::default()))
+                }
+                ast::ColumnConstraint::Unique(_) => {
+                    return Err(refused("cannot add a UNIQUE column", Span::default()))
+                }
+                ast::ColumnConstraint::NotNull(_) => not_null = true,
+                ast::ColumnConstraint::Default(expr) => {
+                    has_default = true;
+                    if !self.constant_default(*expr) {
+                        return Err(refused(
+                            "cannot add a column with a non-constant default",
+                            Span::default(),
+                        ));
+                    }
+                }
+                ast::ColumnConstraint::Generated { stored, .. } => {
+                    if *stored {
+                        return Err(refused("cannot add a STORED column", Span::default()));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if not_null && !has_default {
+            return Err(refused(
+                "cannot add a NOT NULL column with default value NULL",
+                Span::default(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Returns whether a `DEFAULT` is a constant an existing row can be given.
+    fn constant_default(&self, expr: ast::ExprId) -> bool {
+        match self.ast.expr(expr) {
+            Some(ast::Expr::Literal(_)) => true,
+            Some(ast::Expr::Unary { operand, .. }) => self.constant_default(*operand),
+            _ => false,
+        }
+    }
+
+    /// Checks what `DROP COLUMN` may not drop.
+    fn check_dropped_column(
+        &self,
+        table: &crate::catalog_view::TableInfo,
+        position: u16,
+    ) -> Result<(), ParseError> {
+        let named = table
+            .column(position)
+            .map(|column| String::from_utf8_lossy(&column.name).into_owned())
+            .unwrap_or_default();
+        if table.columns.len() <= 1 {
+            return Err(refused(
+                format!("cannot drop column \"{named}\": no other columns exist"),
+                Span::default(),
+            ));
+        }
+        if table.rowid_alias == Some(position)
+            || table
+                .column(position)
+                .is_some_and(|column| column.primary_key_position.is_some())
+        {
+            return Err(refused(
+                format!("cannot drop column \"{named}\": PRIMARY KEY"),
+                Span::default(),
+            ));
+        }
+        let indexed = table
+            .indexes
+            .iter()
+            .any(|index| index.columns.iter().any(|key| key.column == Some(position)));
+        if indexed {
+            return Err(refused(
+                format!("cannot drop column \"{named}\": indexed"),
+                Span::default(),
+            ));
+        }
+        // A CHECK or a generated column that reads it would be left naming a
+        // column that is gone, and the table would stop loading.
+        let folded = table
+            .column(position)
+            .map(|column| column.folded.clone())
+            .unwrap_or_default();
+        let referenced = table
+            .checks
+            .iter()
+            .any(|check| mentions_name(&check.expr_sql, &folded))
+            || table.columns.iter().enumerate().any(|(other, column)| {
+                other != usize::from(position)
+                    && column
+                        .generated_sql
+                        .as_ref()
+                        .is_some_and(|sql| mentions_name(sql, &folded))
+            });
+        if referenced {
+            return Err(refused(
+                format!(
+                    "error in table {}: cannot drop column \"{named}\"",
+                    String::from_utf8_lossy(&table.name)
+                ),
+                Span::default(),
+            ));
+        }
+        Ok(())
     }
 
     /// Binds a `REINDEX`.

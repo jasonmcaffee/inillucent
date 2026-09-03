@@ -59,6 +59,14 @@ pub struct Compiler {
     /// matched row and the null-extended row both enter, so the loop itself
     /// must not descend into them a second time.
     stop_at: Option<usize>,
+    /// What each FROM term's columns read as when the record is too short.
+    ///
+    /// `ALTER TABLE ... ADD COLUMN c DEFAULT 5` does not rewrite the rows that
+    /// already existed, so their records stop before `c`. SQLite reads the
+    /// *default* back for those rows rather than NULL, and answering NULL would
+    /// disagree with the reference on every row written before the column was
+    /// added.
+    source_defaults: Vec<Vec<Option<Operand>>>,
     /// Everything a nested query used as a value needs, by its bound number.
     ///
     /// The map is keyed by the binder's own number rather than by position,
@@ -111,6 +119,7 @@ impl Compiler {
             substitutions: Vec::new(),
             source_cursors: Vec::new(),
             stop_at: None,
+            source_defaults: Vec::new(),
             deferred: Vec::new(),
             antijoins: Vec::new(),
             subquery_plans: std::collections::BTreeMap::new(),
@@ -185,6 +194,42 @@ impl Compiler {
         if let Some(slot) = self.source_cursors.get_mut(id) {
             *slot = Some(cursors);
         }
+    }
+
+    /// Records what a FROM term's columns read as when the record is short.
+    fn register_defaults(&mut self, id: usize, table: &TableInfo) {
+        let defaults: Vec<Option<Operand>> = table
+            .columns
+            .iter()
+            .filter(|column| !(column.generated && !column.stored))
+            .map(|column| {
+                column
+                    .default_sql
+                    .as_ref()
+                    .filter(|sql| !sql.is_empty())
+                    .and_then(|sql| constant_operand(sql))
+            })
+            .collect();
+        if defaults.iter().all(Option::is_none) {
+            return;
+        }
+        if self.source_defaults.len() <= id {
+            self.source_defaults
+                .resize(id.saturating_add(1), Vec::new());
+        }
+        if let Some(slot) = self.source_defaults.get_mut(id) {
+            *slot = defaults;
+        }
+    }
+
+    /// Returns the default one FROM term's record slot reads as, when it has
+    /// one.
+    fn default_of(&self, id: usize, slot: u16) -> Option<Operand> {
+        self.source_defaults
+            .get(id)?
+            .get(usize::from(slot))
+            .cloned()
+            .flatten()
     }
 
     /// Returns whether a FROM term's rows come from an ephemeral store.
@@ -501,6 +546,7 @@ impl Compiler {
                             matched,
                         },
                     );
+                    self.register_defaults(source.id, &source.table);
                 }
             }
         }
@@ -2754,6 +2800,43 @@ impl WindowLayout {
     }
 }
 
+/// Returns a stored `DEFAULT` as a constant operand, when it is one.
+///
+/// Only a constant can be read back for a row that predates the column, and
+/// only a constant is allowed on `ADD COLUMN` - so anything else leaves the
+/// column reading NULL, which is what SQLite does for a default that was legal
+/// when the table was created and is not constant.
+fn constant_operand(sql: &[u8]) -> Option<Operand> {
+    let limits = rustdb_base::limits::Limits::default();
+    let (ast, expr) = rustdb_sql::parser::parse_expression(sql, &limits).ok()?;
+    let (node, negate) = match ast.expr(expr)? {
+        rustdb_sql::ast::Expr::Unary {
+            op: rustdb_sql::ast::UnaryOp::Negate,
+            operand,
+        } => (ast.expr(*operand)?, true),
+        other => (other, false),
+    };
+    let rustdb_sql::ast::Expr::Literal(literal) = node else {
+        return None;
+    };
+    let operand = match literal {
+        rustdb_sql::ast::Literal::Null => return None,
+        rustdb_sql::ast::Literal::Boolean(value) => Operand::Integer(i64::from(*value)),
+        rustdb_sql::ast::Literal::Integer(text) => {
+            let value = core::str::from_utf8(text).ok()?.parse::<i64>().ok()?;
+            Operand::Integer(if negate { value.checked_neg()? } else { value })
+        }
+        rustdb_sql::ast::Literal::Float(text) => {
+            let value = core::str::from_utf8(text).ok()?.parse::<f64>().ok()?;
+            Operand::Real(if negate { -value } else { value })
+        }
+        rustdb_sql::ast::Literal::String(text) if !negate => Operand::Text(text.clone()),
+        rustdb_sql::ast::Literal::Blob(bytes) if !negate => Operand::Blob(bytes.clone()),
+        _ => return None,
+    };
+    Some(operand)
+}
+
 /// Returns whether an expression reads a window value anywhere inside it.
 fn holds_window(expr: &BoundExpr) -> bool {
     if matches!(expr, BoundExpr::WindowRef { .. }) {
@@ -3106,15 +3189,18 @@ impl Compiler {
                 } else {
                     Opcode::Column
                 };
-                self.emit(
-                    Instruction::new(opcode, cursor, *column as i32, register as i32).with_p5(
-                        if opcode == Opcode::EphColumn {
-                            0
-                        } else {
-                            widen
-                        },
-                    ),
-                );
+                let mut read = Instruction::new(opcode, cursor, *column as i32, register as i32)
+                    .with_p5(if opcode == Opcode::EphColumn {
+                        0
+                    } else {
+                        widen
+                    });
+                if opcode == Opcode::Column {
+                    if let Some(default) = self.default_of(*source, *slot) {
+                        read = read.with_p4(default);
+                    }
+                }
+                self.emit(read);
                 Ok(register)
             }
             BoundExpr::Rowid { source } => {

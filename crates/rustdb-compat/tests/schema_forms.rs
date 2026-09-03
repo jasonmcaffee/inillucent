@@ -556,3 +556,127 @@ fn generated_columns_round_trip_through_sqlite() {
         ],
     );
 }
+
+/// `ALTER TABLE`, all four forms, with the dependent objects rewritten.
+///
+/// The rewrite is the part that matters. A rename has to change the table's own
+/// `CREATE` text and the text of every index, view and trigger that names it -
+/// and it has to leave alone the string literal that happens to contain the
+/// same word. A file whose schema was rewritten wrongly still opens; it fails
+/// later, when something reads it.
+#[test]
+fn alter_table_rewrites_the_schema() {
+    let path = scratch("alter");
+    let database = Database::open(&path).expect("the database opens");
+    let connection = database.connect().expect("the connection opens");
+    run_all(
+        &connection,
+        &[
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, note TEXT DEFAULT 'about t')",
+            "CREATE INDEX t_name ON t (name)",
+            "CREATE VIEW t_view AS SELECT id, name FROM t WHERE name IS NOT NULL",
+            "INSERT INTO t VALUES (1, 'ada', 'first')",
+            "INSERT INTO t VALUES (2, 'bob', 'second')",
+        ],
+    );
+
+    // ADD COLUMN: existing rows read the default back rather than NULL, which
+    // is the half a reader that answered NULL would get wrong.
+    run_all(
+        &connection,
+        &[
+            "ALTER TABLE t ADD COLUMN score INTEGER DEFAULT 7",
+            "ALTER TABLE t ADD COLUMN spare TEXT",
+        ],
+    );
+    assert_eq!(
+        run(&connection, "SELECT id, score, spare FROM t ORDER BY id"),
+        Ok(vec![
+            "int:1|int:7|null".to_string(),
+            "int:2|int:7|null".to_string(),
+        ])
+    );
+    run_all(&connection, &["INSERT INTO t (id, name) VALUES (3, 'cai')"]);
+    assert_eq!(
+        run(&connection, "SELECT score FROM t WHERE id = 3"),
+        Ok(vec!["int:7".to_string()])
+    );
+    // The shapes SQLite refuses.
+    assert!(run(
+        &connection,
+        "ALTER TABLE t ADD COLUMN k INTEGER PRIMARY KEY"
+    )
+    .is_err());
+    assert!(run(&connection, "ALTER TABLE t ADD COLUMN u TEXT UNIQUE").is_err());
+    assert!(run(&connection, "ALTER TABLE t ADD COLUMN n TEXT NOT NULL").is_err());
+    assert!(run(&connection, "ALTER TABLE t ADD COLUMN name TEXT").is_err());
+    assert!(run(&connection, "ALTER TABLE nosuch ADD COLUMN a").is_err());
+    assert!(run(&connection, "ALTER TABLE t_view ADD COLUMN a").is_err());
+
+    // RENAME COLUMN: the table's own text and the index that names it.
+    run_all(&connection, &["ALTER TABLE t RENAME COLUMN name TO label"]);
+    assert_eq!(
+        run(&connection, "SELECT label FROM t WHERE id = 1"),
+        Ok(vec!["text:ada".to_string()])
+    );
+    assert_eq!(
+        run(&connection, "SELECT id FROM t WHERE label = 'bob'"),
+        Ok(vec!["int:2".to_string()])
+    );
+    assert!(run(&connection, "SELECT name FROM t").is_err());
+    assert!(run(&connection, "ALTER TABLE t RENAME COLUMN nosuch TO x").is_err());
+    assert!(run(&connection, "ALTER TABLE t RENAME COLUMN label TO id").is_err());
+
+    // DROP COLUMN: the definition and every row's record.
+    run_all(&connection, &["ALTER TABLE t DROP COLUMN spare"]);
+    assert!(run(&connection, "SELECT spare FROM t").is_err());
+    assert_eq!(
+        run(
+            &connection,
+            "SELECT id, label, note, score FROM t ORDER BY id"
+        ),
+        Ok(vec![
+            "int:1|text:ada|text:first|int:7".to_string(),
+            "int:2|text:bob|text:second|int:7".to_string(),
+            "int:3|text:cai|text:about t|int:7".to_string(),
+        ])
+    );
+    assert!(run(&connection, "ALTER TABLE t DROP COLUMN id").is_err());
+    assert!(run(&connection, "ALTER TABLE t DROP COLUMN label").is_err());
+
+    // RENAME TO: the table, its index, and the view that selects from it.
+    run_all(&connection, &["ALTER TABLE t RENAME TO renamed"]);
+    assert_eq!(
+        run(&connection, "SELECT id FROM renamed WHERE label = 'ada'"),
+        Ok(vec!["int:1".to_string()])
+    );
+    assert_eq!(
+        run(&connection, "SELECT count(*) FROM t_view"),
+        Ok(vec!["int:3".to_string()])
+    );
+    assert!(run(&connection, "SELECT * FROM t").is_err());
+    // The default's string literal still says `t`: a byte substitution would
+    // have rewritten it along with the name.
+    assert_eq!(
+        run(&connection, "SELECT note FROM renamed WHERE id = 3"),
+        Ok(vec!["text:about t".to_string()])
+    );
+    drop(connection);
+    drop(database);
+
+    sqlite_reads(
+        &path,
+        &[
+            (
+                "SELECT id, label, note, score FROM renamed ORDER BY id",
+                &[
+                    "int:1|text:ada|text:first|int:7",
+                    "int:2|text:bob|text:second|int:7",
+                    "int:3|text:cai|text:about t|int:7",
+                ],
+            ),
+            ("SELECT count(*) FROM t_view", &["int:3"]),
+            ("SELECT id FROM renamed WHERE label = 'bob'", &["int:2"]),
+        ],
+    );
+}
