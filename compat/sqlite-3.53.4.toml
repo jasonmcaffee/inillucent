@@ -1336,6 +1336,19 @@ status = "missing"
 tests = []
 
 [[capability]]
+# TEMP objects live in the `temp` database, so they need a connection that can
+# hold more than one - which is what ATTACH brings. Phase 8 refuses `CREATE
+# TEMP TABLE`, `TEMP VIEW` and `TEMP TRIGGER` rather than putting them in
+# `main` under a different name, and the debt is recorded here against the
+# phase that will own the second database.
+id = "sql.temp-objects"
+source = "https://sqlite.org/lang_createtable.html"
+profile = "default"
+phase = "phase 9: foreign keys, ATTACH, and multi-database commit"
+status = "missing"
+tests = []
+
+[[capability]]
 id = "sql.attach-detach"
 source = "https://sqlite.org/lang_attach.html"
 profile = "default"

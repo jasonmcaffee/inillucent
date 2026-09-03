@@ -1,0 +1,29 @@
+{
+  "platform": "windows-x86_64",
+  "measurements": [
+    {"workload": "plan-join-2", "scale": "2-terms", "operations": 2000, "nanos_per_operation": 25363.0, "allocations_per_operation": 669.0, "bytes_per_operation": 31054.0, "instructions_per_operation": 1.0},
+    {"workload": "plan-join-5", "scale": "5-terms", "operations": 2000, "nanos_per_operation": 636822.1, "allocations_per_operation": 15361.0, "bytes_per_operation": 360458.0, "instructions_per_operation": 1.0},
+    {"workload": "plan-join-12", "scale": "12-terms", "operations": 200, "nanos_per_operation": 75419.5, "allocations_per_operation": 1763.0, "bytes_per_operation": 102200.0, "instructions_per_operation": 1.0},
+    {"workload": "plan-join-32", "scale": "32-terms", "operations": 200, "nanos_per_operation": 209963.0, "allocations_per_operation": 4046.0, "bytes_per_operation": 301384.0, "instructions_per_operation": 1.0},
+    {"workload": "run-join-2", "scale": "2-terms", "operations": 50, "nanos_per_operation": 35944.0, "allocations_per_operation": 256.0, "bytes_per_operation": 21208.0, "instructions_per_operation": 518.0},
+    {"workload": "run-join-5", "scale": "5-terms", "operations": 50, "nanos_per_operation": 70726.0, "allocations_per_operation": 559.0, "bytes_per_operation": 50584.0, "instructions_per_operation": 821.0},
+    {"workload": "run-join-12", "scale": "12-terms", "operations": 50, "nanos_per_operation": 153336.0, "allocations_per_operation": 1266.0, "bytes_per_operation": 119128.0, "instructions_per_operation": 1528.0},
+    {"workload": "correlated-exists", "scale": "20000-rows", "operations": 20, "nanos_per_operation": 10641795.0, "allocations_per_operation": 80751.2, "bytes_per_operation": 5888039.6, "instructions_per_operation": 300014.0},
+    {"workload": "correlated-scalar", "scale": "20000-rows", "operations": 5, "nanos_per_operation": 1111196400.0, "allocations_per_operation": 12987904.0, "bytes_per_operation": 819012308.8, "instructions_per_operation": 8260764.0},
+    {"workload": "in-subquery", "scale": "20000-rows", "operations": 50, "nanos_per_operation": 8548024.0, "allocations_per_operation": 80771.8, "bytes_per_operation": 5892326.2, "instructions_per_operation": 240137.0},
+    {"workload": "aggregate-grouped", "scale": "20000-rows", "operations": 50, "nanos_per_operation": 18114124.0, "allocations_per_operation": 200786.9, "bytes_per_operation": 18183552.3, "instructions_per_operation": 360264.0},
+    {"workload": "aggregate-having", "scale": "20000-rows", "operations": 50, "nanos_per_operation": 8784888.0, "allocations_per_operation": 80810.4, "bytes_per_operation": 7943460.2, "instructions_per_operation": 200334.0},
+    {"workload": "window-row-number", "scale": "20000-rows", "operations": 20, "nanos_per_operation": 24276670.0, "allocations_per_operation": 200844.0, "bytes_per_operation": 26159774.0, "instructions_per_operation": 400011.0},
+    {"workload": "window-frame", "scale": "20000-rows", "operations": 20, "nanos_per_operation": 29375565.0, "allocations_per_operation": 440792.0, "bytes_per_operation": 33837998.0, "instructions_per_operation": 400011.0},
+    {"workload": "sort-indexed", "scale": "20000-rows", "operations": 50, "nanos_per_operation": 11745628.0, "allocations_per_operation": 120952.8, "bytes_per_operation": 9406895.6, "instructions_per_operation": 180509.0},
+    {"workload": "sort-full", "scale": "20000-rows", "operations": 20, "nanos_per_operation": 12584220.0, "allocations_per_operation": 120752.9, "bytes_per_operation": 10500718.4, "instructions_per_operation": 260008.0},
+    {"workload": "distinct", "scale": "20000-rows", "operations": 50, "nanos_per_operation": 18860896.0, "allocations_per_operation": 174765.0, "bytes_per_operation": 14495243.9, "instructions_per_operation": 197007.0},
+    {"workload": "compound-union", "scale": "20000-rows", "operations": 20, "nanos_per_operation": 4081785.0, "allocations_per_operation": 24444.0, "bytes_per_operation": 2641365.6, "instructions_per_operation": 32981.0},
+    {"workload": "recursive-cte", "scale": "20000-rows", "operations": 200, "nanos_per_operation": 144949.0, "allocations_per_operation": 528.0, "bytes_per_operation": 50238.0, "instructions_per_operation": 7513.0},
+    {"workload": "analyze", "scale": "35-objects", "operations": 3, "nanos_per_operation": 12619866.7, "allocations_per_operation": 164814.0, "bytes_per_operation": 9894436.0, "instructions_per_operation": 1.0},
+    {"workload": "ddl-create-drop", "scale": "one-table", "operations": 200, "nanos_per_operation": 2566803.0, "allocations_per_operation": 4585.0, "bytes_per_operation": 509709.7, "instructions_per_operation": 1.0},
+    {"workload": "vacuum", "scale": "20000-rows", "operations": 2, "nanos_per_operation": 682007250.0, "allocations_per_operation": 10915479.0, "bytes_per_operation": 1271235728.0, "instructions_per_operation": 1.0},
+    {"workload": "insert-plain", "scale": "one-row", "operations": 2000, "nanos_per_operation": 1247797.5, "allocations_per_operation": 159.7, "bytes_per_operation": 66241.6, "instructions_per_operation": 17.0},
+    {"workload": "insert-triggered", "scale": "one-row", "operations": 2000, "nanos_per_operation": 1270562.2, "allocations_per_operation": 296.4, "bytes_per_operation": 102263.5, "instructions_per_operation": 34.0}
+  ]
+}

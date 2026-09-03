@@ -23,6 +23,10 @@ name = "rustdb-sqlperf"
 path = "src/bin/sqlperf.rs"
 
 [[bin]]
+name = "rustdb-planperf"
+path = "src/bin/planperf.rs"
+
+[[bin]]
 name = "rustdb-slt"
 path = "src/bin/slt.rs"
 

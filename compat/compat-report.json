@@ -1,7 +1,7 @@
 {
   "reference": "sqlite-3.53.4",
   "counts": {
-    "missing": 45,
+    "missing": 46,
     "pass": 217
   },
   "capabilities": [
@@ -170,6 +170,7 @@
     {"id": "sql.foreign-keys.immediate", "claimed": "missing", "evidenced": "missing", "phase": "phase 9: foreign keys, ATTACH, and multi-database commit", "profile": "default", "platforms": [], "tests": []},
     {"id": "sql.foreign-keys.deferred", "claimed": "missing", "evidenced": "missing", "phase": "phase 9: foreign keys, ATTACH, and multi-database commit", "profile": "default", "platforms": [], "tests": []},
     {"id": "sql.foreign-keys.actions", "claimed": "missing", "evidenced": "missing", "phase": "phase 9: foreign keys, ATTACH, and multi-database commit", "profile": "default", "platforms": [], "tests": []},
+    {"id": "sql.temp-objects", "claimed": "missing", "evidenced": "missing", "phase": "phase 9: foreign keys, ATTACH, and multi-database commit", "profile": "default", "platforms": [], "tests": []},
     {"id": "sql.attach-detach", "claimed": "missing", "evidenced": "missing", "phase": "phase 9: foreign keys, ATTACH, and multi-database commit", "profile": "default", "platforms": [], "tests": []},
     {"id": "txn.multi-database-commit", "claimed": "missing", "evidenced": "missing", "phase": "phase 9: foreign keys, ATTACH, and multi-database commit", "profile": "default", "platforms": [], "tests": []},
     {"id": "txn.master-journal", "claimed": "missing", "evidenced": "missing", "phase": "phase 9: foreign keys, ATTACH, and multi-database commit", "profile": "default", "platforms": [], "tests": []},

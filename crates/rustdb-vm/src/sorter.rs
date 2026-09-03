@@ -175,6 +175,16 @@ fn compare_one(column: &SortColumn, left: &Value<'_>, right: &Value<'_>) -> std:
 #[derive(Clone, Debug, Default)]
 pub struct DistinctSet {
     seen: Vec<Vec<Value<'static>>>,
+    /// Positions into `seen`, ordered by [`rows_ordering`].
+    ///
+    /// Membership used to be a linear scan of `seen`, which made `DISTINCT`
+    /// cost one comparison per row already kept - quadratic in the number of
+    /// distinct values, and measured at 447 ms for a two-column `DISTINCT` over
+    /// twenty thousand rows against 18 ms for the `GROUP BY` of the same shape.
+    /// The order here is only a search structure: it is never read back, so it
+    /// does not decide what order rows come out in, and `seen` still keeps them
+    /// in the order they arrived.
+    order: Vec<u32>,
     key: SortKey,
 }
 
@@ -192,6 +202,7 @@ impl DistinctSet {
     pub fn with_key(key: SortKey) -> DistinctSet {
         DistinctSet {
             seen: Vec::new(),
+            order: Vec::new(),
             key,
         }
     }
@@ -199,14 +210,23 @@ impl DistinctSet {
     /// Records a row, returning whether it had been seen before.
     pub fn check(&mut self, row: Vec<Value<'static>>) -> bool {
         let key = self.key.clone();
-        let seen = self
-            .seen
-            .iter()
-            .any(|candidate| rows_identical(candidate, &row, &key));
-        if !seen {
-            self.seen.push(row);
+        let found = self.order.binary_search_by(|position| {
+            let candidate = self
+                .seen
+                .get(*position as usize)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            rows_ordering(candidate, &row, &key)
+        });
+        match found {
+            Ok(_) => true,
+            Err(at) => {
+                let position = self.seen.len() as u32;
+                self.seen.push(row);
+                self.order.insert(at, position);
+                false
+            }
         }
-        seen
     }
 
     /// Returns how many distinct rows have been seen.
@@ -224,6 +244,55 @@ impl DistinctSet {
 ///
 /// Two NULLs are the same row here, which is what `SELECT DISTINCT` does even
 /// though `NULL = NULL` is not true.
+/// Orders two rows the way [`rows_identical`] compares them.
+///
+/// A total order whose `Equal` is exactly that function's `true`, which is the
+/// only property the distinct set needs of it: NULLs are equal to each other
+/// and sort before everything, and every other value compares under the key's
+/// collation for its column. Direction is deliberately ignored - the set never
+/// reads its order back, so a descending key would only be a way for the
+/// ordering and the equality to disagree.
+fn rows_ordering(
+    left: &[Value<'static>],
+    right: &[Value<'static>],
+    key: &SortKey,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let width = left.len().max(right.len());
+    for index in 0..width {
+        let a = left.get(index);
+        let b = right.get(index);
+        let (Some(a), Some(b)) = (a, b) else {
+            // A row that ran out of columns is the shorter one, which is what
+            // `rows_identical` calls unequal.
+            return left.len().cmp(&right.len());
+        };
+        let ordering = match (a.is_null(), b.is_null()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            (false, false) => {
+                let collation = key
+                    .columns
+                    .get(index)
+                    .map_or(rustdb_value::Collation::Binary, |column| column.collation);
+                compare::compare_values(a, b, collation)
+            }
+        };
+        if ordering != Ordering::Equal {
+            return ordering;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// Returns whether two rows are the same value to `DISTINCT`.
+///
+/// The definition of equality the distinct set is built on. It is only called
+/// from the test that proves [`rows_ordering`] agrees with it, because the set
+/// itself searches by that ordering - and the whole reason the ordering is safe
+/// to search by is that its `Equal` is this.
+#[cfg(test)]
 fn rows_identical(left: &[Value<'static>], right: &[Value<'static>], key: &SortKey) -> bool {
     if left.len() != right.len() {
         return false;
@@ -247,6 +316,111 @@ fn rows_identical(left: &[Value<'static>], right: &[Value<'static>], key: &SortK
 mod tests {
     use super::*;
     use rustdb_value::Collation;
+
+    /// Every row the distinct set could be asked about, for the property below.
+    fn spread() -> Vec<Vec<Value<'static>>> {
+        let text = |bytes: &[u8]| Value::owned_text(bytes).expect("text");
+        vec![
+            vec![Value::Null],
+            vec![Value::Integer(1)],
+            vec![Value::Real(1.0)],
+            vec![Value::Real(1.5)],
+            vec![Value::Integer(-1)],
+            vec![text(b"a")],
+            vec![text(b"A")],
+            vec![text(b"b")],
+            vec![Value::owned_blob(&[1, 2]).expect("blob")],
+            vec![Value::Null, Value::Integer(1)],
+            vec![Value::Integer(1), Value::Null],
+            vec![Value::Integer(1), Value::Integer(1)],
+            vec![Value::Integer(1), text(b"a")],
+            vec![Value::Integer(1)],
+        ]
+    }
+
+    /// The ordering the distinct set searches by says `Equal` exactly when the
+    /// equality it replaced says `true`.
+    ///
+    /// This is the whole safety argument for searching instead of scanning: a
+    /// binary search finds a row only if the ordering puts it where the
+    /// equality would have. It is checked under both collations, because
+    /// `NOCASE` is where the two could most easily part company.
+    #[test]
+    fn the_distinct_ordering_agrees_with_the_equality() {
+        for collation in [Collation::Binary, Collation::NoCase] {
+            let key = SortKey {
+                columns: vec![
+                    SortColumn {
+                        descending: false,
+                        nulls_first: true,
+                        collation,
+                    },
+                    SortColumn {
+                        descending: true,
+                        nulls_first: false,
+                        collation,
+                    },
+                ],
+            };
+            let rows = spread();
+            for left in &rows {
+                for right in &rows {
+                    let ordered = rows_ordering(left, right, &key) == std::cmp::Ordering::Equal;
+                    let identical = rows_identical(left, right, &key);
+                    assert_eq!(ordered, identical, "{collation:?}: {left:?} vs {right:?}");
+                }
+            }
+        }
+    }
+
+    /// And it is a total order, or a binary search over it would be nonsense.
+    #[test]
+    fn the_distinct_ordering_is_a_total_order() {
+        let key = SortKey {
+            columns: vec![SortColumn {
+                descending: false,
+                nulls_first: true,
+                collation: Collation::NoCase,
+            }],
+        };
+        let rows = spread();
+        for left in &rows {
+            for right in &rows {
+                let forward = rows_ordering(left, right, &key);
+                let backward = rows_ordering(right, left, &key);
+                assert_eq!(forward, backward.reverse(), "{left:?} vs {right:?}");
+                for middle in &rows {
+                    let a = rows_ordering(left, middle, &key);
+                    let b = rows_ordering(middle, right, &key);
+                    if a == std::cmp::Ordering::Less && b == std::cmp::Ordering::Less {
+                        assert_eq!(forward, std::cmp::Ordering::Less);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The set answers what it answered before, on the shapes that matter.
+    #[test]
+    fn the_distinct_set_reports_repeats() {
+        let key = SortKey {
+            columns: vec![SortColumn {
+                descending: false,
+                nulls_first: true,
+                collation: Collation::NoCase,
+            }],
+        };
+        let mut set = DistinctSet::with_key(key);
+        let text = |bytes: &[u8]| Value::owned_text(bytes).expect("text");
+        assert!(!set.check(vec![text(b"a")]));
+        assert!(set.check(vec![text(b"A")]), "NOCASE makes these one value");
+        assert!(!set.check(vec![text(b"b")]));
+        assert!(!set.check(vec![Value::Null]));
+        assert!(set.check(vec![Value::Null]), "NULLs are one value here");
+        assert!(!set.check(vec![Value::Integer(1)]));
+        assert!(set.check(vec![Value::Real(1.0)]), "1 and 1.0 are one value");
+        assert_eq!(set.len(), 4);
+    }
 
     /// Builds a one-column key.
     fn key(descending: bool, nulls_first: bool) -> SortKey {
