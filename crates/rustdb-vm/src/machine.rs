@@ -678,6 +678,49 @@ impl Machine {
                 }
                 Ok(Flow::Next)
             }
+            Opcode::TypeCheck => {
+                let Operand::Strict(kind, name) = instruction.p4.clone() else {
+                    return Err(error::misuse("TypeCheck without a column"));
+                };
+                let value = self.register(instruction.p1);
+                let class = match &value {
+                    Value::Null => return Ok(Flow::Next),
+                    Value::Integer(_) => "INTEGER",
+                    Value::Real(_) => "REAL",
+                    Value::Text(_) => "TEXT",
+                    Value::Blob(_) => "BLOB",
+                };
+                let allowed = match kind {
+                    crate::program::StrictType::Any => true,
+                    crate::program::StrictType::Int => matches!(value, Value::Integer(_)),
+                    // A REAL column takes an integer. SQLite stores a real
+                    // whose value is exactly an integer with an *integer*
+                    // serial type and widens it back on read, so the register
+                    // here legitimately still holds an integer and `typeof()`
+                    // still answers 'real'. Refusing it would refuse
+                    // `INSERT INTO t(r) VALUES (2)`.
+                    crate::program::StrictType::Real => {
+                        matches!(value, Value::Real(_) | Value::Integer(_))
+                    }
+                    crate::program::StrictType::Text => matches!(value, Value::Text(_)),
+                    crate::program::StrictType::Blob => matches!(value, Value::Blob(_)),
+                };
+                if allowed {
+                    return Ok(Flow::Next);
+                }
+                // The message names the storage class the value actually had,
+                // which is only known here: the compiler knows the column and
+                // its declared type, and nothing else.
+                let failure = rustdb_base::DbError::new(rustdb_base::error::ExtendedCode(
+                    crate::compile_dml::codes::DATATYPE,
+                ))
+                .with_message(format!(
+                    "cannot store {class} value in {} column {}",
+                    kind.as_str(),
+                    String::from_utf8_lossy(&name)
+                ));
+                Err(failure)
+            }
             Opcode::EphSort => {
                 let Operand::SortOn(key) = instruction.p4.clone() else {
                     return Err(error::misuse("EphSort without a key"));

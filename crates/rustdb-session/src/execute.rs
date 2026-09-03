@@ -66,6 +66,9 @@ pub fn run_directive(
         Directive::CreateTable { .. } => run_write(connection, |connection| {
             create_table(connection, directive, source)
         }),
+        Directive::CreateView { .. } => run_write(connection, |connection| {
+            create_view(connection, directive, source)
+        }),
         Directive::CreateIndex { .. } => run_write(connection, |connection| {
             create_index(connection, directive, source)
         }),
@@ -160,6 +163,46 @@ fn create_table(
             )
         })??;
     }
+    connection.with_state(|state| ddl::bump_schema_cookie(&mut state.pager))??;
+    connection.refresh_catalog()?;
+    Ok(Vec::new())
+}
+
+/// Creates a view: one `sqlite_schema` row, and no B-tree at all.
+///
+/// A view's root page is zero, which is how every reader tells it from a table
+/// without consulting the row's kind twice. Nothing is allocated and nothing is
+/// backfilled, so the whole of `CREATE VIEW` is the row and the cookie.
+fn create_view(
+    connection: &Connection,
+    directive: &Directive,
+    source: &[u8],
+) -> DbResult<DirectiveRows> {
+    let Directive::CreateView {
+        name,
+        name_offset,
+        exists,
+        ..
+    } = directive
+    else {
+        return Err(misuse("not a CREATE VIEW"));
+    };
+    if *exists {
+        return Ok(Vec::new());
+    }
+    let sql = ddl::canonical_sql("CREATE VIEW", source, *name_offset, source.len() as u32);
+    connection.with_state(|state| {
+        ddl::insert_schema_row(
+            &mut state.pager,
+            &SchemaRow {
+                kind: SchemaKind::View,
+                name: name.clone(),
+                table: name.clone(),
+                root: 0,
+                sql: Some(sql.clone()),
+            },
+        )
+    })??;
     connection.with_state(|state| ddl::bump_schema_cookie(&mut state.pager))??;
     connection.refresh_catalog()?;
     Ok(Vec::new())
@@ -279,12 +322,19 @@ fn drop_object(connection: &Connection, directive: &Directive) -> DbResult<Direc
     }
     let folded = name.to_ascii_lowercase();
     let table_drop = *kind == ObjectKind::Table;
+    let wanted: &[u8] = match kind {
+        ObjectKind::View => b"view",
+        ObjectKind::Trigger => b"trigger",
+        _ => b"index",
+    };
     connection.with_state(|state| {
         ddl::delete_schema_rows(&mut state.pager, |row| {
             if table_drop {
+                // A table takes its indexes and triggers with it, which is why
+                // the match is on the row's *table* rather than on its name.
                 row.table.to_ascii_lowercase() == folded
             } else {
-                row.name.to_ascii_lowercase() == folded && row.kind == b"index"
+                row.name.to_ascii_lowercase() == folded && row.kind == wanted
             }
         })
     })??;

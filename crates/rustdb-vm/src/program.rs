@@ -183,6 +183,13 @@ pub enum Opcode {
     EphSawNull,
     /// `p1`: store, `p4`: the sort key. Order the store's rows in place.
     EphSort,
+    /// `p1`: register, `p4`: the column's type and name. Fail on a bad type.
+    ///
+    /// A `STRICT` table refuses a value whose storage class its column does not
+    /// declare. The affinity has already been applied by the time this runs, so
+    /// `'123'` in an `INT` column is an integer and passes, and `'abc'` is
+    /// still text and does not - which is exactly the line SQLite draws.
+    TypeCheck,
     /// `p1`: store, `p4`: the window pass. Append each row's window values.
     ///
     /// The store must already be sorted by the partition keys and then by the
@@ -361,6 +368,7 @@ impl Opcode {
             Opcode::EphDedup => "EphDedup",
             Opcode::EphSawNull => "EphSawNull",
             Opcode::EphSort => "EphSort",
+            Opcode::TypeCheck => "TypeCheck",
             Opcode::Window => "Window",
             Opcode::If => "If",
             Opcode::IfNot => "IfNot",
@@ -449,6 +457,48 @@ pub struct AggregateCall {
     pub distinct: bool,
     /// The collation the aggregate compares with.
     pub collation: Collation,
+}
+
+/// The six types a `STRICT` table's column may declare.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StrictType {
+    /// `INT` or `INTEGER`.
+    Int,
+    /// `REAL`.
+    Real,
+    /// `TEXT`.
+    Text,
+    /// `BLOB`.
+    Blob,
+    /// `ANY`, which stores whatever it is given with no affinity applied.
+    Any,
+}
+
+impl StrictType {
+    /// Returns the type a declared name spells, when it is one of the six.
+    pub fn of(declared: &[u8]) -> Option<StrictType> {
+        let folded = declared.to_ascii_uppercase();
+        let kind = match folded.as_slice() {
+            b"INT" | b"INTEGER" => StrictType::Int,
+            b"REAL" => StrictType::Real,
+            b"TEXT" => StrictType::Text,
+            b"BLOB" => StrictType::Blob,
+            b"ANY" => StrictType::Any,
+            _ => return None,
+        };
+        Some(kind)
+    }
+
+    /// Returns the name the error message uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StrictType::Int => "INT",
+            StrictType::Real => "REAL",
+            StrictType::Text => "TEXT",
+            StrictType::Blob => "BLOB",
+            StrictType::Any => "ANY",
+        }
+    }
 }
 
 /// Which family a window call belongs to.
@@ -566,6 +616,8 @@ pub enum Operand {
     Change(RowChangeKind, Vec<u8>),
     /// A window pass.
     Window(Box<WindowPlan>),
+    /// A `STRICT` column's declared type and its qualified name.
+    Strict(StrictType, Vec<u8>),
     /// A sort that names the columns it orders by.
     ///
     /// The ordinary sort key compares column `i` of the key against column `i`
