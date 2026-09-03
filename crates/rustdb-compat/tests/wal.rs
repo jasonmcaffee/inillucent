@@ -587,3 +587,93 @@ fn checkpoint(connection: &rustdb::Connection, mode: &str) -> (i64, i64, i64) {
     let field = |index: usize| row.get(index).and_then(Value::as_integer).unwrap_or(-1);
     (field(0), field(1), field(2))
 }
+
+/// SQLite and rust-db share one log *at the same time*, through the same
+/// shared-memory index.
+///
+/// Every other interop test here hands the files over: one engine closes, the
+/// other opens. This one does not. A rust-db connection stays open, holding the
+/// database, the log and the wal-index, while the pinned SQLite build opens the
+/// same three files and writes through them - and then each engine reads what
+/// the other did.
+///
+/// It is the test the shared-memory index exists for, and it is the one that
+/// would fail if the index were merely a file this engine read and wrote rather
+/// than memory both engines map. It would also fail if the dead-man switch were
+/// taken on the wrong byte: SQLite holds a shared lock on byte 128 for as long
+/// as it has the file mapped, and an engine that thought it was alone would
+/// throw away the index SQLite was using.
+#[test]
+fn sqlite_and_rustdb_share_one_log_at_the_same_time() {
+    let Some(_) = pinned_shell() else {
+        eprintln!("skipping: the pinned SQLite shell is not present");
+        return;
+    };
+    let path = scratch("shared-log");
+    let connection = connect(&path);
+    connection
+        .execute_batch("PRAGMA journal_mode=wal")
+        .expect("the mode changes");
+    connection
+        .execute_batch("CREATE TABLE t(a INTEGER PRIMARY KEY, who TEXT)")
+        .expect("the table is made");
+    connection
+        .execute_batch("INSERT INTO t VALUES(1, 'rustdb')")
+        .expect("a row");
+
+    // The connection is still open, and deliberately still holding a read, so
+    // the log and the index are live rather than tidied away.
+    assert_eq!(integer(&connection, "SELECT count(*) FROM t"), 1);
+
+    // SQLite opens the same three files and appends to the same log.
+    let reported = shell(
+        &path,
+        &[
+            "PRAGMA journal_mode;",
+            "INSERT INTO t VALUES(2, 'sqlite');",
+            "SELECT group_concat(who) FROM t ORDER BY a;",
+        ],
+    )
+    .expect("the shell runs");
+    let lines: Vec<&str> = reported.lines().map(str::trim).collect();
+    assert_eq!(
+        lines.first().copied(),
+        Some("wal"),
+        "SQLite did not open the database in WAL mode: {reported:?}"
+    );
+    assert!(
+        lines.contains(&"rustdb,sqlite"),
+        "SQLite could not see the row rust-db committed: {reported:?}"
+    );
+
+    // And back: this connection, which never closed, sees SQLite's row.
+    assert_eq!(
+        integer(&connection, "SELECT count(*) FROM t"),
+        2,
+        "rust-db could not see the row SQLite committed through the shared log"
+    );
+    assert_eq!(text(&connection, "SELECT who FROM t WHERE a = 2"), "sqlite");
+
+    // A checkpoint from this side copies both engines' frames back, and SQLite
+    // reads the result.
+    connection
+        .execute_batch("INSERT INTO t VALUES(3, 'rustdb again')")
+        .expect("a row");
+    let rows = connection
+        .query("PRAGMA wal_checkpoint(TRUNCATE)")
+        .expect("the checkpoint runs");
+    let row = rows.first().expect("the checkpoint reports a row");
+    assert_eq!(
+        row.first().and_then(Value::as_integer),
+        Some(0),
+        "the checkpoint was busy with nobody else holding the log"
+    );
+    drop(connection);
+    let reported = shell(
+        &path,
+        &["SELECT count(*) FROM t;", "PRAGMA integrity_check;"],
+    )
+    .expect("the shell runs");
+    let lines: Vec<&str> = reported.lines().map(str::trim).collect();
+    assert_eq!(lines, ["3", "ok"], "SQLite read {reported:?}");
+}

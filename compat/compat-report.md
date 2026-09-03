@@ -202,8 +202,8 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `txn.multi-database-commit` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
 | `txn.master-journal` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
 | `wal.mode-switch` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
-| `wal.frame-format` | pass | pass | linux-x86_64, windows-x86_64 | 9 |
-| `wal.index` | pass | pass | linux-x86_64, windows-x86_64 | 10 |
+| `wal.frame-format` | pass | pass | linux-x86_64, windows-x86_64 | 10 |
+| `wal.index` | pass | pass | linux-x86_64, windows-x86_64 | 11 |
 | `wal.read-transactions` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
 | `wal.write-transactions` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
 | `wal.checkpoint.passive` | pass | pass | linux-x86_64, windows-x86_64 | 7 |

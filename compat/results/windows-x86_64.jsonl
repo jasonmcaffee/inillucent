@@ -331,6 +331,7 @@
 {"test_id": "rustdb-compat::slt::tests::the_special_value_forms_are_rendered", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::sqlite_and_rustdb_agree_on_every_row_of_every_fixture", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::sqlite_and_rustdb_both_refuse_the_malformed_corpus", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::sqlite_and_rustdb_share_one_log_at_the_same_time", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::sqlite_mutates_a_rustdb_file_and_rustdb_accepts_it", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::sqlite_reads_a_log_rustdb_wrote", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::sqlite_reads_what_rustdb_wrote", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
