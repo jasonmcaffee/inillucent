@@ -53,6 +53,13 @@
 {"test_id": "rustdb-catalog::load::tests::only_integer_primary_key_aliases_the_rowid", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-catalog::load::tests::unparseable_schema_sql_is_corruption", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-catalog::load::tests::without_rowid_primary_keys_are_not_null", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-catalog::rename::tests::a_column_is_added_inside_the_list", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-catalog::rename::tests::a_dropped_column_takes_its_comma", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-catalog::rename::tests::a_keyword_name_is_quoted", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-catalog::rename::tests::a_rename_replaces_tokens_rather_than_bytes", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-catalog::rename::tests::an_index_follows_its_table", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-catalog::rename::tests::an_unparseable_rewrite_is_refused", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-catalog::rename::tests::the_tables_a_statement_reads_are_listed", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-catalog::snapshot::tests::temp_shadows_main_unless_the_name_is_qualified", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-catalog::snapshot::tests::unknown_names_and_indexes_are_empty", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::a_backward_scan_is_a_forward_scan_reversed", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
@@ -100,6 +107,7 @@
 {"test_id": "rustdb-compat::adversarial_depth_is_refused_rather_than_crashing", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::affinity_on_store_matches_sqlite", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::aggregates_answer_over_the_whole_table", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::alter_table_rewrites_the_schema", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::an_allocation_failure_at_every_point_leaves_the_database_alone", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::an_automatic_index_gets_its_root_page", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::an_empty_scorecard_is_generated_without_any_results", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}

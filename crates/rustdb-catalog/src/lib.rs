@@ -40,6 +40,7 @@
 pub mod analyze;
 pub mod ddl;
 pub mod load;
+pub mod rename;
 pub mod snapshot;
 
 pub use ddl::{

@@ -1349,6 +1349,12 @@ impl Machine {
         let limits = self.limits.clone();
         let encoding = self.encoding;
         let index = instruction.p2.max(0) as usize;
+        // Resolved before the cursor is borrowed, because the borrow lasts as
+        // long as the cached row does.
+        let absent = match &instruction.p4 {
+            Operand::None => Value::Null,
+            other => self.operand_value(other)?,
+        };
         let value = {
             let Some(Some(slot)) = self.cursors.get_mut(instruction.p1.max(0) as usize) else {
                 return Err(error::misuse("cursor is not open"));
@@ -1367,9 +1373,12 @@ impl Machine {
             let payload: &[u8] = slot.payload.as_deref().unwrap_or(&[]);
             let record = RecordRef::parse_with_limits(payload, encoding, &limits)?;
             if index >= record.field_count() {
-                // A column past the end of the record is NULL. This happens for
-                // real: `ALTER TABLE ADD COLUMN` does not rewrite existing rows.
-                Value::Null
+                // A column past the end of the record reads as its DEFAULT, and
+                // as NULL when it has none. This happens for real: `ALTER TABLE
+                // ADD COLUMN` does not rewrite the rows that already existed, so
+                // their records stop before the new column - and SQLite reads
+                // the default back for exactly those rows.
+                absent
             } else {
                 let value = record.value(index)?.into_owned()?;
                 if instruction.p5 == 1 {

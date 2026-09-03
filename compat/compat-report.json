@@ -1,8 +1,8 @@
 {
   "reference": "sqlite-3.53.4",
   "counts": {
-    "missing": 51,
-    "pass": 209
+    "missing": 50,
+    "pass": 210
   },
   "capabilities": [
     {"id": "harness.manifest.schema", "claimed": "pass", "evidenced": "pass", "phase": "phase 0: contract, provenance, and harness foundation", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::toml_lite::tests::the_manifest_subset_parses", "rustdb-compat::toml_lite::tests::anything_outside_the_subset_is_refused", "rustdb-compat::manifest::tests::a_capability_row_parses"]},
@@ -154,7 +154,7 @@
     {"id": "sql.returning", "claimed": "pass", "evidenced": "pass", "phase": "phase 7: single-database rollback transactions and DML", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::returning_matches_sqlite", "rustdb-compat::returning_reports_the_written_row"]},
     {"id": "sql.create-view", "claimed": "pass", "evidenced": "pass", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::views_match_the_oracle", "rustdb-compat::a_view_round_trips_through_sqlite", "rustdb-compat::dropping_a_view_leaves_the_table"]},
     {"id": "sql.create-trigger", "claimed": "missing", "evidenced": "missing", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": [], "tests": []},
-    {"id": "sql.alter-table", "claimed": "missing", "evidenced": "missing", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": [], "tests": []},
+    {"id": "sql.alter-table", "claimed": "pass", "evidenced": "pass", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::alter_table_rewrites_the_schema", "rustdb-catalog::rename::tests::a_rename_replaces_tokens_rather_than_bytes", "rustdb-catalog::rename::tests::an_index_follows_its_table", "rustdb-catalog::rename::tests::a_column_is_added_inside_the_list", "rustdb-catalog::rename::tests::a_dropped_column_takes_its_comma", "rustdb-catalog::rename::tests::the_tables_a_statement_reads_are_listed", "rustdb-catalog::rename::tests::an_unparseable_rewrite_is_refused", "rustdb-compat::a_schema_change_recompiles_a_prepared_statement"]},
     {"id": "sql.generated-columns", "claimed": "pass", "evidenced": "pass", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::generated_columns_round_trip_through_sqlite"]},
     {"id": "sql.without-rowid", "claimed": "missing", "evidenced": "missing", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": [], "tests": []},
     {"id": "sql.strict-tables", "claimed": "pass", "evidenced": "pass", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::strict_tables_refuse_the_wrong_class", "rustdb-compat::strict_is_enforced_on_a_file_sqlite_wrote"]},

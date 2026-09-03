@@ -242,9 +242,11 @@ fn a_schema_change_recompiles_a_prepared_statement() {
     assert_eq!(statement.column_count(), 3);
     assert_eq!(statement.value_integer(0), Some(1));
     assert_eq!(statement.value_text(1), Some("one".to_string()));
-    // The existing row was not rewritten by the ALTER, so the new column reads
-    // as NULL from the record rather than as its default.
-    assert!(statement.value(2).is_null());
+    // The existing row was not rewritten by the ALTER, so its record stops
+    // before the new column - and SQLite reads the column's DEFAULT back for
+    // exactly those rows rather than NULL. Verified against the pinned build:
+    // `typeof(c), quote(c)` answers `text|'x'`.
+    assert_eq!(statement.value_text(2), Some("x".to_string()));
 }
 
 /// A statement whose table is dropped under it reports the failure rather than
