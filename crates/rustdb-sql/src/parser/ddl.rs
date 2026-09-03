@@ -301,12 +301,18 @@ impl Parser<'_> {
         if self.eat_keyword(Keyword::PRIMARY)? {
             self.expect_keyword(Keyword::KEY)?;
             let columns = self.parse_indexed_column_list()?;
-            let autoincrement = self.eat_keyword(Keyword::AUTOINCREMENT)?;
+            // SQLite's grammar has no `AUTOINCREMENT` on a table-level PRIMARY
+            // KEY at all: `PRIMARY KEY(x, y) AUTOINCREMENT` is a syntax error
+            // there, not a constraint it refuses later. Accepting it would let
+            // rust-db store a CREATE TABLE the reference cannot parse.
+            if self.at_keyword(Keyword::AUTOINCREMENT)? {
+                return Err(self.unexpected(&[")", ",", "ON"])?);
+            }
             let on_conflict = self.parse_on_conflict()?;
             return Ok(TableConstraint::PrimaryKey {
                 columns,
                 on_conflict,
-                autoincrement,
+                autoincrement: false,
             });
         }
         if self.eat_keyword(Keyword::UNIQUE)? {

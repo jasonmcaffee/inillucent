@@ -216,6 +216,13 @@ pub struct TableInfo {
     pub without_rowid: bool,
     /// Whether the table is `STRICT`.
     pub strict: bool,
+    /// Whether the rowid alias was declared `AUTOINCREMENT`.
+    ///
+    /// It changes where a new rowid comes from: an ordinary table reuses the
+    /// numbers its deleted rows had, and an `AUTOINCREMENT` one never does,
+    /// because it remembers the largest it has ever handed out in
+    /// `sqlite_sequence`.
+    pub autoincrement: bool,
     /// What kind of object this is.
     pub kind: TableKind,
     /// The `CREATE` text as stored in `sqlite_schema`.
@@ -284,6 +291,7 @@ impl TableInfo {
             rowid_alias: None,
             without_rowid: true,
             strict: false,
+            autoincrement: false,
             kind: TableKind::Subquery,
             create_sql: Vec::new(),
             view: None,
@@ -632,6 +640,7 @@ mod tests {
             rowid_alias: None,
             without_rowid: false,
             strict: false,
+            autoincrement: false,
             kind: TableKind::Table,
             create_sql: Vec::new(),
             indexes: Vec::new(),

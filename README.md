@@ -251,7 +251,7 @@ commit rather than retrofitted once the edges exist.
 ### The compatibility report
 
 `compat/sqlite-3.53.4.toml` carries one row per capability rust-db owes, including the ones nothing
-has been written for yet: 260 rows, of which 215 pass and 45 are missing. That is the denominator on
+has been written for yet: 262 rows, of which 217 pass and 45 are missing. That is the denominator on
 purpose. A capability with no row cannot be reported as owed.
 
 A row reaches `pass` only when a test run recorded a passing result for every test it cites, on both

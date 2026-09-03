@@ -908,3 +908,68 @@ fn vacuum_matches_sqlite() {
     );
     assert!(compared == 0 || compared == 34, "compared {compared} steps");
 }
+
+/// `AUTOINCREMENT`, and the `sqlite_sequence` table that makes it work.
+///
+/// The difference from an ordinary `INTEGER PRIMARY KEY` shows only after a
+/// delete: a plain table hands the freed number out again, and an
+/// `AUTOINCREMENT` one never does, because it remembers the largest it has
+/// issued in a table of its own.
+#[test]
+fn autoincrement_matches_sqlite() {
+    let compared = compare(
+        "autoincrement",
+        &[
+            Step::Exec("CREATE TABLE t(id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)"),
+            Step::Query("SELECT type, name FROM sqlite_schema ORDER BY name"),
+            Step::Exec("INSERT INTO t(v) VALUES('a'),('b'),('c')"),
+            Step::Query("SELECT id, v FROM t ORDER BY id"),
+            Step::Query("SELECT name, seq FROM sqlite_sequence"),
+            // The freed number is not handed out again.
+            Step::Exec("DELETE FROM t WHERE id = 3"),
+            Step::Exec("INSERT INTO t(v) VALUES('d')"),
+            Step::Query("SELECT id, v FROM t ORDER BY id"),
+            Step::Query("SELECT name, seq FROM sqlite_sequence"),
+            // Nor after the whole table is emptied.
+            Step::Exec("DELETE FROM t"),
+            Step::Query("SELECT name, seq FROM sqlite_sequence"),
+            Step::Exec("INSERT INTO t(v) VALUES('e')"),
+            Step::Query("SELECT id, v FROM t"),
+            // An explicit key past the counter raises it.
+            Step::Exec("INSERT INTO t VALUES(100, 'f')"),
+            Step::Query("SELECT name, seq FROM sqlite_sequence"),
+            Step::Exec("INSERT INTO t(v) VALUES('g')"),
+            Step::Query("SELECT id, v FROM t ORDER BY id"),
+            // An explicit key below it does not lower it.
+            Step::Exec("INSERT INTO t VALUES(4, 'h')"),
+            Step::Query("SELECT name, seq FROM sqlite_sequence"),
+            Step::Exec("INSERT INTO t(v) VALUES('i')"),
+            Step::Query("SELECT id, v FROM t ORDER BY id"),
+            Step::Query("SELECT last_insert_rowid()"),
+            // A NULL key means "give me one", as it does anywhere else.
+            Step::Exec("INSERT INTO t VALUES(NULL, 'j')"),
+            Step::Query("SELECT id, v FROM t ORDER BY id"),
+            // A second such table gets its own counter.
+            Step::Exec("CREATE TABLE u(id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)"),
+            Step::Exec("INSERT INTO u(v) VALUES('x')"),
+            Step::Query("SELECT name, seq FROM sqlite_sequence ORDER BY name"),
+            // A plain INTEGER PRIMARY KEY reuses what it freed, which is the
+            // whole point of the difference.
+            Step::Exec("CREATE TABLE p(id INTEGER PRIMARY KEY, v TEXT)"),
+            Step::Exec("INSERT INTO p(v) VALUES('a'),('b')"),
+            Step::Exec("DELETE FROM p WHERE id = 2"),
+            Step::Exec("INSERT INTO p(v) VALUES('c')"),
+            Step::Query("SELECT id, v FROM p ORDER BY id"),
+            // A dropped table takes its counter with it.
+            Step::Exec("DROP TABLE u"),
+            Step::Query("SELECT name, seq FROM sqlite_sequence ORDER BY name"),
+            // The declarations SQLite refuses.
+            Step::Exec("CREATE TABLE a(x TEXT PRIMARY KEY AUTOINCREMENT)"),
+            Step::Exec("CREATE TABLE b(x INT PRIMARY KEY AUTOINCREMENT)"),
+            Step::Exec("CREATE TABLE c(x, y, PRIMARY KEY(x, y) AUTOINCREMENT)"),
+            Step::Exec("CREATE TABLE d(x INTEGER PRIMARY KEY AUTOINCREMENT) WITHOUT ROWID"),
+            Step::Query("SELECT count(*) FROM sqlite_schema"),
+        ],
+    );
+    assert!(compared == 0 || compared == 39, "compared {compared} steps");
+}

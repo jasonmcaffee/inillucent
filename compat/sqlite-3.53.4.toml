@@ -1223,6 +1223,23 @@ status = "pass"
 tests = ["rustdb-compat::generated_columns_round_trip_through_sqlite"]
 
 [[capability]]
+id = "sql.autoincrement"
+source = "https://sqlite.org/autoinc.html"
+profile = "default"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "pass"
+tests = ["rustdb-compat::autoincrement_matches_sqlite"]
+
+[[capability]]
+id = "sql.negative.autoincrement-placement"
+source = "https://sqlite.org/autoinc.html"
+profile = "negative-parity"
+phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
+status = "pass"
+expected = "syntax-error"
+tests = ["rustdb-compat::autoincrement_matches_sqlite"]
+
+[[capability]]
 id = "sql.without-rowid"
 source = "https://sqlite.org/lang_createtable.html"
 profile = "default"

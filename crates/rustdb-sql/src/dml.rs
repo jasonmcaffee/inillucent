@@ -126,6 +126,13 @@ pub struct BoundInsert {
     pub checks: Vec<BoundCheck>,
     /// The `ON CONFLICT ... DO UPDATE` clause, when there is one.
     pub upsert: Option<BoundUpsert>,
+    /// `sqlite_sequence`'s root page, when the target is `AUTOINCREMENT`.
+    ///
+    /// Resolved here rather than in the compiler because it is a fact about the
+    /// catalog, and the catalog is what the binder holds. It is zero for every
+    /// other table, which is also what it reads as before the first
+    /// `AUTOINCREMENT` table in a database is created.
+    pub sequence_root: u32,
     /// The `RETURNING` columns.
     pub returning: Vec<BoundResultColumn>,
     /// The triggers this write fires, in schema order.
@@ -262,6 +269,13 @@ impl<'a> Binder<'a> {
         let upsert = self.bind_upsert(&table, insert)?;
         let returning = self.bind_returning(&insert.returning)?;
         let triggers = self.bind_triggers(&table, TriggerEventInfo::Insert, &[])?;
+        let sequence_root = if table.autoincrement {
+            self.catalog
+                .find_table(None, b"sqlite_sequence")
+                .map_or(0, |sequence| sequence.root)
+        } else {
+            0
+        };
         Ok(BoundInsert {
             table,
             target_source,
@@ -272,6 +286,7 @@ impl<'a> Binder<'a> {
             on_conflict: insert.on_conflict,
             checks,
             upsert,
+            sequence_root,
             returning,
             triggers,
         })

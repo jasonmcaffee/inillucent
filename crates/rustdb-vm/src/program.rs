@@ -270,6 +270,23 @@ pub enum Opcode {
     /// pushes. Trigger bodies are inlined here, so the save and the restore are
     /// emitted around the body instead.
     LastRowid,
+    /// `p1`: table cursor, `p2`: `sqlite_sequence`'s root, `p3`: destination
+    /// register, `p4`: the table's name.
+    ///
+    /// The rowid an `AUTOINCREMENT` table's next row gets: one more than the
+    /// largest it has ever handed out, which is the larger of the value
+    /// `sqlite_sequence` remembers and the largest rowid still in the table.
+    /// An ordinary table reuses the numbers its deleted rows had; this is the
+    /// whole difference, and it is why the number has to be remembered
+    /// somewhere the rows are not.
+    SeqRowid,
+    /// `p1`: register holding a rowid just written, `p2`: `sqlite_sequence`'s
+    /// root, `p4`: the table's name.
+    ///
+    /// Raises the remembered value when the row that was written went past it.
+    /// It runs for an explicit rowid too: `sqlite_sequence` holds the largest
+    /// ever used, not the largest this statement generated.
+    SeqUpdate,
 }
 
 impl Opcode {
@@ -418,6 +435,8 @@ impl Opcode {
             Opcode::ClearBtree => "ClearBtree",
             Opcode::CountChange => "CountChange",
             Opcode::LastRowid => "LastRowid",
+            Opcode::SeqRowid => "SeqRowid",
+            Opcode::SeqUpdate => "SeqUpdate",
             Opcode::SorterInsert => "SorterInsert",
             Opcode::SorterSort => "SorterSort",
             Opcode::SorterNext => "SorterNext",
