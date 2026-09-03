@@ -116,6 +116,17 @@ pub mod offsets {
 /// The most fragmented free bytes a legal page may report.
 pub const MAX_FRAGMENTS: u8 = 60;
 
+/// The fewest bytes a cell may occupy on a page.
+///
+/// A cell can decode to fewer - an index entry holding one NULL is three bytes
+/// - but the space it occupies is rounded up to four, because a freeblock has
+/// to hold a two-byte next pointer and a two-byte length and a shorter hole
+/// could not be represented. SQLite does the same rounding inside its own cell
+/// parser (`if( nSize<4 ) nSize = 4`), so a page laid out by either engine
+/// accounts for the same bytes and each one's integrity check accepts the
+/// other's pages.
+pub const MIN_CELL_SIZE: usize = 4;
+
 /// How much of a cell's payload is stored on the page itself.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PayloadSplit {
@@ -125,6 +136,90 @@ pub struct PayloadSplit {
     pub local: usize,
     /// Whether the cell has an overflow chain at all.
     pub overflows: bool,
+}
+
+/// The local-payload window for one kind of page at one usable size.
+///
+/// The three numbers behind a payload split depend only on the page, not on the
+/// cell, and computing them costs two integer divisions. Doing that per cell
+/// put two divisions in the innermost loop of page validation - which runs once
+/// for every cell on every page a descent passes through, and an interior table
+/// page holds hundreds. Computing them once per page and carrying them on the
+/// layout is the same arithmetic in a place it is not repeated.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PayloadWindow {
+    /// The most payload that may be stored on the page itself.
+    pub max_local: u64,
+    /// The least that may be, once any of it overflows.
+    pub min_local: u64,
+    /// The usable bytes per page.
+    pub usable: u64,
+}
+
+impl PayloadWindow {
+    /// Returns the window for a page kind at a usable size.
+    pub fn new(usable: u32, kind: PageKind) -> DbResult<PayloadWindow> {
+        let usable = u64::from(usable);
+        if usable < 480 {
+            return Err(corrupt(format!(
+                "a usable page size of {usable} is too small"
+            )));
+        }
+        let max_local = if kind == PageKind::LeafTable {
+            usable.saturating_sub(35)
+        } else {
+            (usable.saturating_sub(12))
+                .saturating_mul(64)
+                .checked_div(255)
+                .unwrap_or(0)
+                .saturating_sub(23)
+        };
+        let min_local = (usable.saturating_sub(12))
+            .saturating_mul(32)
+            .checked_div(255)
+            .unwrap_or(0)
+            .saturating_sub(23);
+        Ok(PayloadWindow {
+            max_local,
+            min_local,
+            usable,
+        })
+    }
+
+    /// Returns how a payload of `total` bytes splits inside this window.
+    pub fn split(&self, total: u64) -> DbResult<PayloadSplit> {
+        if total <= self.max_local {
+            let local = usize::try_from(total)
+                .map_err(|_| corrupt("a local payload longer than memory"))?;
+            return Ok(PayloadSplit {
+                total,
+                local,
+                overflows: false,
+            });
+        }
+        let surplus = self.min_local.saturating_add(
+            total
+                .saturating_sub(self.min_local)
+                .checked_rem(self.usable.saturating_sub(4))
+                .unwrap_or(0),
+        );
+        let local = if surplus <= self.max_local {
+            surplus
+        } else {
+            self.min_local
+        };
+        if local > total {
+            return Err(corrupt(
+                "a payload split produced more local bytes than payload",
+            ));
+        }
+        Ok(PayloadSplit {
+            total,
+            local: usize::try_from(local)
+                .map_err(|_| corrupt("a local payload longer than memory"))?,
+            overflows: true,
+        })
+    }
 }
 
 /// Returns how a payload of `total` bytes splits on a page of `usable` bytes.
@@ -137,56 +232,7 @@ pub struct PayloadSplit {
 /// `M` otherwise. The point of the `K` term is that it leaves the last
 /// overflow page as full as possible rather than nearly empty.
 pub fn payload_split(total: u64, usable: u32, kind: PageKind) -> DbResult<PayloadSplit> {
-    let usable = u64::from(usable);
-    if usable < 480 {
-        return Err(corrupt(format!(
-            "a usable page size of {usable} is too small"
-        )));
-    }
-    let max_local = if kind == PageKind::LeafTable {
-        usable.saturating_sub(35)
-    } else {
-        (usable.saturating_sub(12))
-            .saturating_mul(64)
-            .checked_div(255)
-            .unwrap_or(0)
-            .saturating_sub(23)
-    };
-    if total <= max_local {
-        let local =
-            usize::try_from(total).map_err(|_| corrupt("a local payload longer than memory"))?;
-        return Ok(PayloadSplit {
-            total,
-            local,
-            overflows: false,
-        });
-    }
-    let min_local = (usable.saturating_sub(12))
-        .saturating_mul(32)
-        .checked_div(255)
-        .unwrap_or(0)
-        .saturating_sub(23);
-    let surplus = min_local.saturating_add(
-        total
-            .saturating_sub(min_local)
-            .checked_rem(usable.saturating_sub(4))
-            .unwrap_or(0),
-    );
-    let local = if surplus <= max_local {
-        surplus
-    } else {
-        min_local
-    };
-    if local > total {
-        return Err(corrupt(
-            "a payload split produced more local bytes than payload",
-        ));
-    }
-    Ok(PayloadSplit {
-        total,
-        local: usize::try_from(local).map_err(|_| corrupt("a local payload longer than memory"))?,
-        overflows: true,
-    })
+    PayloadWindow::new(usable, kind)?.split(total)
 }
 
 /// One cell on a page, decoded but with its payload still on the page.
@@ -212,6 +258,12 @@ impl CellRef<'_> {
     /// Reports whether the whole payload is on this page.
     pub fn is_complete(&self) -> bool {
         !self.split.overflows
+    }
+
+    /// Returns how many bytes of the page this cell occupies, which is its
+    /// decoded length rounded up to [`MIN_CELL_SIZE`].
+    pub fn footprint(&self) -> usize {
+        self.len.max(MIN_CELL_SIZE)
     }
 }
 
@@ -245,6 +297,8 @@ pub struct PageLayout {
     pub right_child: Option<PageId>,
     /// Each cell's offset, in the page's own order.
     pub cell_pointers: Vec<usize>,
+    /// The local-payload window every cell on this page splits against.
+    pub window: PayloadWindow,
 }
 
 impl PageLayout {
@@ -345,6 +399,7 @@ impl PageLayout {
         }
 
         let layout = PageLayout {
+            window: PayloadWindow::new(usable as u32, kind)?,
             base,
             usable,
             kind,
@@ -627,11 +682,7 @@ impl<'a> BTreePage<'a> {
             None
         };
 
-        let split = payload_split(
-            payload_len.value,
-            self.layout.usable as u32,
-            self.layout.kind,
-        )?;
+        let split = self.layout.window.split(payload_len.value)?;
         let local = window
             .get(cursor..cursor.saturating_add(split.local))
             .ok_or_else(|| {
@@ -670,7 +721,7 @@ impl<'a> BTreePage<'a> {
             let cell = self.cell(index)?;
             let end = cell
                 .offset
-                .checked_add(cell.len)
+                .checked_add(cell.footprint())
                 .ok_or_else(|| corrupt("a cell whose length overflows"))?;
             if end > self.layout.usable {
                 return Err(corrupt(format!(
@@ -694,7 +745,7 @@ impl<'a> BTreePage<'a> {
             Vec::with_capacity(self.layout.cell_count.saturating_add(8));
         for index in 0..self.layout.cell_count {
             let cell = self.cell(index)?;
-            used.push((cell.offset, cell.offset.saturating_add(cell.len)));
+            used.push((cell.offset, cell.offset.saturating_add(cell.footprint())));
         }
         for block in self.free_blocks()? {
             used.push((block.offset, block.offset.saturating_add(block.len)));

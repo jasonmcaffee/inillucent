@@ -21,6 +21,7 @@ use rustdb_base::limits::{Limit, Limits};
 use rustdb_base::DbResult;
 
 use crate::pager::Pager;
+use crate::{alloc, ptrmap};
 
 /// How many bytes of an overflow page are payload.
 pub fn payload_per_page(usable: u32) -> DbResult<usize> {
@@ -187,6 +188,80 @@ pub fn chain_pages(
         ));
     }
     Ok(pages)
+}
+
+/// Writes the part of a payload that did not fit on its page into a fresh
+/// chain, and returns the first page.
+///
+/// The pages are allocated before any of them is written, because each one has
+/// to hold the number of the next and a chain built forwards would need a
+/// second pass anyway. Allocation is the step that can fail - the disk is full,
+/// the freelist is corrupt - and doing it first means a failure leaves pages on
+/// the freelist rather than a half-linked chain.
+///
+/// The head's pointer-map entry names no parent yet. Which B-tree page owns the
+/// cell is not known until the cell has been placed, and a balance can move it
+/// again; [`crate::ptrmap::refresh_btree_page`] writes the real parent once the
+/// page holding the cell is final.
+pub fn write_chain(pager: &mut Pager, tail: &[u8]) -> DbResult<Option<PageId>> {
+    if tail.is_empty() {
+        return Ok(None);
+    }
+    let per_page = payload_per_page(pager.usable_size()?)?;
+    let count = tail.len().div_ceil(per_page);
+    let mut pages = Vec::with_capacity(count);
+    for _ in 0..count {
+        pages.push(alloc::allocate_page(pager)?);
+    }
+    for (index, page) in pages.iter().copied().enumerate() {
+        let next = pages.get(index.saturating_add(1)).copied();
+        let start = index.saturating_mul(per_page);
+        let end = start.saturating_add(per_page).min(tail.len());
+        let chunk = tail
+            .get(start..end)
+            .ok_or_else(|| corrupt("an overflow chunk outside its payload"))?
+            .to_vec();
+        pager.edit_page(page, |raw| {
+            bytes::write_u32(raw, 0, next.map(PageId::get).unwrap_or(0))?;
+            let target = bytes::window_mut(raw, 4, chunk.len())?;
+            target.copy_from_slice(&chunk);
+            Ok(())
+        })?;
+        match index.checked_sub(1).and_then(|before| pages.get(before)) {
+            Some(previous) => {
+                ptrmap::put(pager, page, ptrmap::Entry::overflow_next(*previous))?;
+            }
+            None => {
+                ptrmap::put(
+                    pager,
+                    page,
+                    ptrmap::Entry {
+                        kind: ptrmap::OVERFLOW1,
+                        parent: 0,
+                    },
+                )?;
+            }
+        }
+    }
+    Ok(pages.first().copied())
+}
+
+/// Returns every page of a chain to the freelist.
+///
+/// The chain is walked and validated first, so a corrupt chain is refused
+/// before a single page has been freed. Freeing as it walked would put half a
+/// chain on the freelist and leave the other half owned by nothing.
+pub fn free_chain(
+    pager: &mut Pager,
+    total: u64,
+    local: usize,
+    head: Option<PageId>,
+) -> DbResult<()> {
+    let pages = chain_pages(pager, total, local, head)?;
+    for page in pages {
+        alloc::free_page(pager, page)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

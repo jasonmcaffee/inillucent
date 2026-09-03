@@ -16,6 +16,7 @@
 //! stepping functions branch on it in exactly one place each.
 
 use std::cmp::Ordering;
+use std::sync::Arc;
 
 use rustdb_base::error::corrupt;
 use rustdb_base::ids::PageId;
@@ -25,7 +26,7 @@ use rustdb_value::record::{self, KeyInfo, RecordRef};
 use rustdb_value::{TextEncoding, Value};
 
 use crate::btree::{BTreePage, PageKind, PageLayout};
-use crate::cache::{PagePin, PageVersion};
+use crate::cache::{PageKey, PagePin, PageVersion};
 use crate::overflow;
 use crate::pager::Pager;
 
@@ -70,8 +71,8 @@ pub enum SeekBias {
 struct Frame {
     /// The pin that keeps the page resident.
     pin: PagePin,
-    /// The page's validated structure.
-    layout: PageLayout,
+    /// The page's validated structure, shared with its cache frame.
+    layout: Arc<PageLayout>,
     /// The page's number.
     page: PageId,
     /// The frame's version when it was pushed, so a reload is detectable.
@@ -168,17 +169,26 @@ impl BTreeCursor {
         self.stack.last().map(|frame| frame.page)
     }
 
-    /// Reports whether every page on the path still holds the version it did
-    /// when the cursor descended through it.
+    /// Reports whether every page on the path is still the page the cursor
+    /// descended through.
     ///
-    /// A read-only pager never reloads a page under a cursor, so this always
-    /// answers true today. It is here because phase 4's writer will, and a
-    /// cursor that trusted a stale slot after a page was rewritten would read
-    /// a different cell than the one it was on.
-    pub fn path_is_current(&self) -> bool {
-        self.stack
-            .iter()
-            .all(|frame| frame.pin.version() == frame.version)
+    /// The comparison is against the frame the cache holds *now*, not against
+    /// the one the cursor pinned. That distinction is the whole test: a writer
+    /// publishes a new frame rather than mutating the old one, so the pinned
+    /// frame keeps its version for ever and a cursor that compared a pin
+    /// against itself would answer "current" no matter what had happened to the
+    /// tree. What has changed is which frame is resident.
+    pub fn path_is_current(&self, pager: &Pager) -> bool {
+        let database = pager.database_id();
+        self.stack.iter().all(|frame| {
+            pager
+                .cache()
+                .version_of(PageKey {
+                    database,
+                    page: frame.page,
+                })
+                .is_some_and(|version| version == frame.version)
+        })
     }
 
     /// Positions on the first entry, returning whether the tree has one.
@@ -455,7 +465,7 @@ impl BTreeCursor {
     fn load(&mut self, pager: &mut Pager, page: PageId) -> DbResult<Frame> {
         let pin = pager.get_page(page)?;
         let usable = pager.usable_size()?;
-        let layout = PageLayout::parse(pin.bytes(), page, usable)?;
+        let layout = pin.layout(usable)?;
         self.pages_visited = self.pages_visited.saturating_add(1);
         Ok(Frame {
             version: pin.version(),
@@ -656,5 +666,75 @@ impl BTreeCursor {
             }
             self.stack.pop();
         }
+    }
+}
+
+/// Where a cursor was, in terms that survive a write.
+///
+/// A cursor's stack is page numbers and slot indices, and a write invalidates
+/// both: a balance moves cells between pages, so slot four of page nine is a
+/// different entry afterwards, or no entry at all. What does survive is the
+/// *key* the cursor was on, so that is what a saved position holds.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SavedPosition {
+    /// The cursor was not on an entry.
+    Unpositioned,
+    /// The cursor was on this rowid, in a table B-tree.
+    Rowid(i64),
+    /// The cursor was on this key, in an index B-tree.
+    Key(Vec<u8>),
+}
+
+impl BTreeCursor {
+    /// Records where the cursor is, so it can be put back after a write.
+    pub fn save_position(&self, pager: &mut Pager, limits: &Limits) -> DbResult<SavedPosition> {
+        if self.state != CursorState::OnEntry {
+            return Ok(SavedPosition::Unpositioned);
+        }
+        match self.kind {
+            TreeKind::Table => Ok(SavedPosition::Rowid(self.rowid()?)),
+            TreeKind::Index => Ok(SavedPosition::Key(self.payload(pager, limits)?)),
+        }
+    }
+
+    /// Puts the cursor back where it was, reporting whether the entry is still
+    /// there.
+    ///
+    /// When the entry has been deleted the cursor lands on the next one, which
+    /// is what a scan that was interrupted by a delete needs: it carries on
+    /// from where the deleted row was rather than from the beginning.
+    pub fn restore(
+        &mut self,
+        pager: &mut Pager,
+        saved: &SavedPosition,
+        limits: &Limits,
+    ) -> DbResult<bool> {
+        match saved {
+            SavedPosition::Unpositioned => {
+                self.reset();
+                Ok(false)
+            }
+            SavedPosition::Rowid(rowid) => self.seek_rowid(pager, *rowid, SeekBias::AtOrAfter),
+            SavedPosition::Key(key) => {
+                let encoding = pager.text_encoding();
+                let record = RecordRef::parse_with_limits(key, encoding, limits)?;
+                let values: Vec<Value<'static>> = record
+                    .values()?
+                    .into_iter()
+                    .map(|value| value.into_owned())
+                    .collect::<DbResult<Vec<_>>>()?;
+                self.seek_index(pager, &values, SeekBias::AtOrAfter)
+            }
+        }
+    }
+
+    /// Reports whether the cursor has to be restored before it is read again.
+    ///
+    /// A cursor whose pages all still hold the version they did when it
+    /// descended through them is looking at the same bytes it validated. One
+    /// whose pages do not is looking at a page the writer has replaced, and its
+    /// slot numbers mean nothing.
+    pub fn needs_restore(&self, pager: &Pager) -> bool {
+        self.state == CursorState::OnEntry && !self.path_is_current(pager)
     }
 }

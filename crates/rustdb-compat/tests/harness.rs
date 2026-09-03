@@ -56,7 +56,7 @@ fn the_shipped_manifest_is_structurally_sound() {
 /// a phase nobody has reached yet does not. A row that quietly claims a phase
 /// it has not reached is the thing the report exists to prevent, and a phase
 /// added to this list without its rows moving is caught by the same assertion.
-const FINISHED_PHASES: [&str; 4] = ["phase 0:", "phase 1:", "phase 2:", "phase 3:"];
+const FINISHED_PHASES: [&str; 5] = ["phase 0:", "phase 1:", "phase 2:", "phase 3:", "phase 4:"];
 
 /// Every row in a finished phase must claim `pass`, and every later row must
 /// not.

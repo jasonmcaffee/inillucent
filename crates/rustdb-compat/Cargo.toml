@@ -39,3 +39,7 @@ path = "src/bin/fixtures.rs"
 [[bin]]
 name = "rustdb-readperf"
 path = "src/bin/readperf.rs"
+
+[[bin]]
+name = "rustdb-writeperf"
+path = "src/bin/writeperf.rs"

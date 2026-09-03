@@ -12,7 +12,7 @@
 
 schema_version = 1
 reference = "sqlite-3.53.4"
-generated_by = "task-1782"
+generated_by = "task-1782, extended by task-1784"
 
 [[capability]]
 id = "harness.manifest.schema"
@@ -739,48 +739,136 @@ id = "storage.btree.insert"
 source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-storage::mutate::tests::ascending_rows_read_back_in_order", "rustdb-storage::mutate::tests::rows_inserted_out_of_order_read_back_sorted", "rustdb-storage::mutate::tests::inserting_the_same_rowid_replaces_the_row", "rustdb-storage::mutate::tests::payloads_across_the_overflow_threshold_round_trip", "rustdb-compat::generated_table_sequences_match_the_model", "rustdb-compat::generated_index_sequences_match_the_model"]
 
 [[capability]]
 id = "storage.btree.delete"
 source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-storage::mutate::tests::deleting_every_row_returns_its_pages_to_the_freelist", "rustdb-storage::mutate::tests::deleting_out_of_order_keeps_the_tree_valid", "rustdb-storage::mutate::tests::index_entries_can_be_deleted_in_any_order", "rustdb-storage::mutate::tests::dropping_a_tree_frees_every_page_it_owned", "rustdb-compat::generated_table_sequences_match_the_model"]
 
 [[capability]]
 id = "storage.btree.balance"
 source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-storage::mutate::tests::partitioning_conserves_every_entry", "rustdb-storage::mutate::tests::index_entries_stay_in_key_order", "rustdb-compat::payloads_at_the_local_boundary_match_the_model", "rustdb-compat::generated_index_sequences_match_the_model"]
 
 [[capability]]
 id = "storage.freelist"
 source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-storage::mutate::tests::deleting_every_row_returns_its_pages_to_the_freelist", "rustdb-storage::mutate::tests::dropping_a_tree_frees_every_page_it_owned", "rustdb-compat::the_leak_detector_reports_a_page_that_belongs_to_nothing"]
 
 [[capability]]
 id = "storage.pointer-maps"
 source = "https://sqlite.org/pragma.html#pragma_auto_vacuum"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-storage::mutate::tests::an_auto_vacuum_database_keeps_its_pointer_maps_correct", "rustdb-storage::vacuum::tests::relocation_moves_every_reference_to_a_page", "rustdb-compat::generated_sequences_match_the_model_under_a_vacuum"]
 
 [[capability]]
 id = "storage.auto-vacuum"
 source = "https://sqlite.org/pragma.html#pragma_auto_vacuum"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-storage::vacuum::tests::an_incremental_vacuum_shrinks_the_file_and_keeps_every_row", "rustdb-storage::vacuum::tests::a_full_auto_vacuum_leaves_no_free_pages", "rustdb-compat::generated_sequences_match_the_model_under_a_vacuum"]
+
+[[capability]]
+id = "storage.pager.write-transaction"
+source = "https://sqlite.org/lockingv3.html"
+profile = "default"
+phase = "phase 4: B-tree mutation, allocation, and rollback pages"
+status = "pass"
+tests = ["rustdb-storage::mutate::tests::a_rollback_restores_every_byte", "rustdb-compat::a_failed_transaction_rolls_all_the_way_back", "rustdb-compat::a_write_that_fails_at_the_file_system_is_reported_and_sticks"]
+
+[[capability]]
+id = "storage.pager.statement-undo"
+source = "https://sqlite.org/atomiccommit.html"
+profile = "default"
+phase = "phase 4: B-tree mutation, allocation, and rollback pages"
+status = "pass"
+tests = ["rustdb-storage::mutate::tests::a_statement_rollback_restores_the_pre_statement_tree", "rustdb-compat::a_failed_insert_leaves_the_tree_untouched", "rustdb-compat::a_failed_delete_leaves_the_tree_untouched", "rustdb-compat::a_failed_replace_leaves_the_tree_untouched", "rustdb-compat::a_failed_clear_leaves_the_tree_untouched"]
+
+[[capability]]
+id = "storage.pager.savepoints"
+source = "https://sqlite.org/lang_savepoint.html"
+profile = "default"
+phase = "phase 4: B-tree mutation, allocation, and rollback pages"
+status = "pass"
+tests = ["rustdb-compat::generated_table_sequences_match_the_model", "rustdb-compat::generated_index_sequences_match_the_model", "rustdb-compat::model::tests::savepoints_snapshot_and_restore"]
+
+[[capability]]
+id = "storage.page.cell-edit"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 4: B-tree mutation, allocation, and rollback pages"
+status = "pass"
+tests = ["rustdb-storage::edit::tests::inserted_cells_come_back_in_order", "rustdb-storage::edit::tests::removing_every_cell_leaves_a_valid_empty_page", "rustdb-storage::edit::tests::a_freed_block_is_reused", "rustdb-storage::edit::tests::defragmenting_keeps_every_cell", "rustdb-storage::edit::tests::a_full_page_refuses_a_cell", "rustdb-storage::edit::tests::an_initialised_page_of_every_kind_parses"]
+
+[[capability]]
+id = "storage.overflow.write"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 4: B-tree mutation, allocation, and rollback pages"
+status = "pass"
+tests = ["rustdb-storage::mutate::tests::payloads_across_the_overflow_threshold_round_trip", "rustdb-storage::edit::tests::an_overflowing_cell_carries_its_pointer", "rustdb-compat::payloads_at_the_local_boundary_match_the_model"]
+
+[[capability]]
+id = "storage.cursor.restore"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 4: B-tree mutation, allocation, and rollback pages"
+status = "pass"
+tests = ["rustdb-storage::mutate::tests::a_cursor_is_restored_across_a_write_that_moves_its_page", "rustdb-storage::mutate::tests::a_cursor_whose_row_was_deleted_lands_on_the_next_one"]
+
+[[capability]]
+id = "storage.vacuum.incremental"
+source = "https://sqlite.org/pragma.html#pragma_auto_vacuum"
+profile = "default"
+phase = "phase 4: B-tree mutation, allocation, and rollback pages"
+status = "pass"
+tests = ["rustdb-storage::vacuum::tests::an_incremental_vacuum_shrinks_the_file_and_keeps_every_row", "rustdb-compat::a_failed_vacuum_leaves_the_tree_untouched"]
+
+[[capability]]
+id = "storage.vacuum.copy"
+source = "https://sqlite.org/lang_vacuum.html"
+profile = "default"
+phase = "phase 4: B-tree mutation, allocation, and rollback pages"
+status = "pass"
+tests = ["rustdb-storage::vacuum::tests::copying_a_database_reproduces_it"]
+
+[[capability]]
+id = "storage.interop.cross-mutation"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 4: B-tree mutation, allocation, and rollback pages"
+status = "pass"
+tests = ["rustdb-compat::rustdb_mutates_a_sqlite_file_and_sqlite_accepts_it", "rustdb-compat::sqlite_mutates_a_rustdb_file_and_rustdb_accepts_it", "rustdb-compat::the_two_engines_take_turns_writing_the_same_file"]
+
+[[capability]]
+id = "storage.failure.statement-atomicity"
+source = "https://sqlite.org/atomiccommit.html"
+profile = "default"
+phase = "phase 4: B-tree mutation, allocation, and rollback pages"
+status = "pass"
+tests = ["rustdb-compat::a_failed_insert_leaves_the_tree_untouched", "rustdb-compat::a_failed_insert_at_a_larger_page_size_leaves_the_tree_untouched", "rustdb-compat::a_failed_delete_leaves_the_tree_untouched", "rustdb-compat::a_failed_replace_leaves_the_tree_untouched", "rustdb-compat::a_failed_vacuum_leaves_the_tree_untouched", "rustdb-compat::a_failed_clear_leaves_the_tree_untouched", "rustdb-compat::every_site_kind_is_reached_by_some_operation"]
+
+[[capability]]
+id = "harness.model.btree"
+source = "https://sqlite.org/fileformat2.html"
+profile = "default"
+phase = "phase 4: B-tree mutation, allocation, and rollback pages"
+status = "pass"
+tests = ["rustdb-compat::model::tests::the_model_keeps_its_entries_sorted_and_unique", "rustdb-compat::model::tests::a_rollback_returns_to_the_last_commit", "rustdb-compat::model::tests::every_operation_round_trips_through_json", "rustdb-compat::model::tests::generation_is_deterministic", "rustdb-compat::every_retained_sequence_still_passes"]
 
 [[capability]]
 id = "storage.integrity-check"

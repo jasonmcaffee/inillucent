@@ -1,0 +1,1895 @@
+//! Mutating a B-tree: insert, replace, delete, and the balancing that follows.
+//!
+//! Invariant: after every operation the tree is one a reader would accept -
+//! every page valid, every key in order, every leaf at the same depth, and
+//! every page owned exactly once. Nothing here leaves a tree in a state that is
+//! only legal until the next call fixes it, because the failure injection
+//! campaign stops *between* any two calls and looks.
+//!
+//! # Why balancing is written on owned cells
+//!
+//! The hard part of a B-tree writer is not the insert, it is what happens when
+//! the page is full: cells move between pages, pages appear and disappear, and
+//! the parent's divider cells have to be rewritten to match. Doing that by
+//! editing pages in place means holding several pages at once and reasoning
+//! about offsets that move underneath you, and it is where B-tree
+//! implementations traditionally go wrong.
+//!
+//! So this one does not. A balance decodes the pages it is going to touch into
+//! an ordered list of owned [`Entry`] values, decides how to lay them out again,
+//! and writes each page from scratch. No offset into a page survives a
+//! reorganisation, because no offset is kept. The cost is a page rewrite where
+//! SQLite would shuffle bytes; the benefit is that the partitioning step is a
+//! function from a list to a list of lists, which can be reasoned about and
+//! tested on its own.
+//!
+//! # The one asymmetry between table and index trees
+//!
+//! When a page splits, something has to become the divider in the parent. In an
+//! *index* tree the divider is a real entry and it *moves* out of the child - an
+//! index B-tree stores entries on interior pages, so the entry is still in the
+//! tree, just one level up. In a *table* tree an interior cell carries only a
+//! child pointer and the largest rowid below it, so the divider is *derived*
+//! from the last entry of the page and the entry itself stays on the leaf.
+//! Getting that backwards duplicates or loses a row per split, which is why it
+//! is decided in one place, [`promotes_dividers`], and read from there.
+
+use std::sync::Arc;
+
+use rustdb_base::error::corrupt;
+use rustdb_base::ids::PageId;
+use rustdb_base::limits::Limits;
+use rustdb_base::{bytes, varint, DbResult};
+use rustdb_value::record::{self, KeyInfo, RecordRef};
+use rustdb_value::TextEncoding;
+
+use crate::btree::{payload_split, BTreePage, PageKind, PageLayout};
+use crate::cursor::TreeKind;
+use crate::edit;
+use crate::header::VacuumMode;
+use crate::overflow;
+use crate::pager::Pager;
+use crate::{alloc, ptrmap};
+
+/// How many sibling pages a balance considers at once.
+///
+/// Three is SQLite's number and it is a compromise rather than a law: two
+/// cannot merge a page into its neighbours without cascading, and four reads
+/// and writes more pages than the improvement in occupancy is worth.
+const BALANCE_WINDOW: usize = 3;
+
+/// A page is balanced when it is emptier than this fraction of its capacity.
+///
+/// The format imposes no minimum occupancy - a page holding one cell is a legal
+/// page - so this is a policy, and a cheap one: a delete that leaves a page
+/// nearly empty pays for a balance, and one that does not leaves the tree
+/// alone. Without it a tree that is filled and then half emptied keeps every
+/// page it ever allocated.
+const UNDERFULL_NUMERATOR: usize = 1;
+/// The denominator of the underfull fraction.
+const UNDERFULL_DENOMINATOR: usize = 3;
+
+/// The deepest path any legal B-tree can have, which bounds every descent.
+const MAX_DEPTH: usize = 64;
+
+/// Which tree is being mutated, and how its keys compare.
+#[derive(Clone, Debug)]
+pub struct Tree {
+    /// The tree's root page.
+    pub root: PageId,
+    /// Whether it is keyed by rowid or by record.
+    pub kind: TreeKind,
+    /// The key ordering, for an index.
+    pub key: KeyInfo,
+}
+
+impl Tree {
+    /// Names a table B-tree.
+    pub fn table(root: PageId) -> Tree {
+        Tree {
+            root,
+            kind: TreeKind::Table,
+            key: KeyInfo::default(),
+        }
+    }
+
+    /// Names an index B-tree with the ordering its declaration gives it.
+    pub fn index(root: PageId, key: KeyInfo) -> Tree {
+        Tree {
+            root,
+            kind: TreeKind::Index,
+            key,
+        }
+    }
+
+    /// Returns the kind of page an interior page of this tree is.
+    fn interior_kind(&self) -> PageKind {
+        match self.kind {
+            TreeKind::Table => PageKind::InteriorTable,
+            TreeKind::Index => PageKind::InteriorIndex,
+        }
+    }
+}
+
+/// Reports whether a split of pages of this kind moves an entry up into the
+/// parent, or derives the divider from an entry that stays put.
+///
+/// See the note at the top of the module: this is the one place the difference
+/// between a table B-tree and an index B-tree is decided.
+fn promotes_dividers(tree: &Tree, children_are_leaves: bool) -> bool {
+    !(tree.kind == TreeKind::Table && children_are_leaves)
+}
+
+/// One entry as it moves between pages during a balance.
+///
+/// `body` is the entry in its *leaf* form: for a table leaf that is the whole
+/// cell, for an index page it is everything after the child pointer, and for a
+/// table interior page there is no body at all because the cell holds nothing
+/// but a pointer and a key.
+#[derive(Clone, Debug)]
+struct Entry {
+    /// The entry's bytes in leaf form.
+    body: Vec<u8>,
+    /// The subtree hanging below this entry, on an interior page.
+    child: Option<PageId>,
+    /// The key, in a table tree.
+    rowid: Option<i64>,
+}
+
+/// What a page is about to hold.
+#[derive(Clone, Debug)]
+struct PageContent {
+    /// Which kind of page it is.
+    kind: PageKind,
+    /// Its entries, in key order.
+    entries: Vec<Entry>,
+    /// The right-most child, on an interior page.
+    right: Option<PageId>,
+}
+
+impl PageContent {
+    /// Returns how many bytes these entries need on a page of this kind.
+    fn size(&self) -> DbResult<usize> {
+        let mut total = 0usize;
+        for entry in &self.entries {
+            let cell = encode_entry(entry, self.kind)?;
+            total = total
+                .saturating_add(edit::cell_footprint(cell.len()))
+                .saturating_add(2);
+        }
+        Ok(total)
+    }
+
+    /// Encodes every entry as a cell of this page's kind.
+    fn cells(&self) -> DbResult<Vec<Vec<u8>>> {
+        self.entries
+            .iter()
+            .map(|entry| encode_entry(entry, self.kind))
+            .collect()
+    }
+}
+
+/// One page on the path from the root to the page being changed.
+#[derive(Clone, Copy, Debug)]
+struct Step {
+    /// The page.
+    page: PageId,
+    /// Which child of it the path descended through, or which cell the search
+    /// stopped on when the page is where the entry lives.
+    slot: usize,
+}
+
+/// Encodes one entry as a cell of the given page kind.
+fn encode_entry(entry: &Entry, kind: PageKind) -> DbResult<Vec<u8>> {
+    match kind {
+        PageKind::LeafTable | PageKind::LeafIndex => Ok(entry.body.clone()),
+        PageKind::InteriorIndex => {
+            let child = entry
+                .child
+                .ok_or_else(|| corrupt("an index interior entry with no child"))?;
+            let mut cell = Vec::with_capacity(entry.body.len().saturating_add(4));
+            cell.extend_from_slice(&child.get().to_be_bytes());
+            cell.extend_from_slice(&entry.body);
+            Ok(cell)
+        }
+        PageKind::InteriorTable => {
+            let child = entry
+                .child
+                .ok_or_else(|| corrupt("a table interior entry with no child"))?;
+            let rowid = entry
+                .rowid
+                .ok_or_else(|| corrupt("a table interior entry with no rowid"))?;
+            let mut cell = Vec::with_capacity(12);
+            cell.extend_from_slice(&child.get().to_be_bytes());
+            let mut scratch = [0u8; varint::MAX_LEN];
+            let len = varint::encode_i64(&mut scratch, rowid)?;
+            cell.extend_from_slice(
+                scratch
+                    .get(..len)
+                    .ok_or_else(|| corrupt("a rowid varint width"))?,
+            );
+            Ok(cell)
+        }
+    }
+}
+
+/// Reads a page's validated layout.
+fn read_layout(pager: &mut Pager, page: PageId) -> DbResult<Arc<PageLayout>> {
+    let usable = pager.usable_size()?;
+    let pin = pager.get_page(page)?;
+    pin.layout(usable)
+}
+
+/// Reads a page's whole payload, following its overflow chain when it has one.
+fn cell_payload(pager: &mut Pager, page: PageId, index: usize) -> DbResult<Vec<u8>> {
+    let layout = read_layout(pager, page)?;
+    let pin = pager.get_page(page)?;
+    let view = BTreePage::new(pin.bytes(), &layout);
+    let cell = view.cell(index)?;
+    let local = cell.local_payload.to_vec();
+    let total = cell.split.total;
+    let head = cell.overflow;
+    drop(pin);
+    let limits = Limits::default();
+    overflow::read_payload(pager, &local, total, head, &limits)
+}
+
+/// Decodes a page into the entries a balance moves around.
+fn gather_page(pager: &mut Pager, page: PageId) -> DbResult<PageContent> {
+    let layout = read_layout(pager, page)?;
+    let pin = pager.get_page(page)?;
+    let view = BTreePage::new(pin.bytes(), &layout);
+    let mut entries = Vec::with_capacity(layout.cell_count);
+    for index in 0..layout.cell_count {
+        let cell = view.cell(index)?;
+        let raw = bytes::window(pin.bytes(), cell.offset, cell.len)?;
+        let body = match layout.kind {
+            PageKind::LeafTable | PageKind::LeafIndex => raw.to_vec(),
+            PageKind::InteriorIndex => raw
+                .get(4..)
+                .ok_or_else(|| corrupt("an index interior cell with no body"))?
+                .to_vec(),
+            PageKind::InteriorTable => Vec::new(),
+        };
+        entries.push(Entry {
+            body,
+            child: cell.left_child,
+            rowid: cell.rowid,
+        });
+    }
+    Ok(PageContent {
+        kind: layout.kind,
+        entries,
+        right: layout.right_child,
+    })
+}
+
+/// Writes a page from its content, and refreshes what it points at.
+fn write_page(pager: &mut Pager, page: PageId, content: &PageContent) -> DbResult<()> {
+    let usable = pager.usable_size()?;
+    let base = if page.get() == 1 { 100 } else { 0 };
+    let cells = content.cells()?;
+    let kind = content.kind;
+    let right = content.right;
+    pager.edit_page(page, |raw| {
+        edit::rewrite_page(raw, base, kind, usable, &cells, right)
+    })?;
+    ptrmap::refresh_btree_page(pager, page)
+}
+
+/// Returns how many bytes a page of this kind has for cells and pointers.
+fn capacity_of(pager: &Pager, page: PageId, kind: PageKind) -> DbResult<usize> {
+    let usable = pager.usable_size()?;
+    let base = if page.get() == 1 { 100 } else { 0 };
+    Ok(edit::capacity(base, kind, usable))
+}
+
+/// Creates an empty table B-tree and returns its root page.
+pub fn create_table(pager: &mut Pager) -> DbResult<PageId> {
+    create_tree(pager, PageKind::LeafTable)
+}
+
+/// Creates an empty index B-tree and returns its root page.
+pub fn create_index(pager: &mut Pager) -> DbResult<PageId> {
+    create_tree(pager, PageKind::LeafIndex)
+}
+
+/// Allocates a root page and writes an empty leaf into it.
+fn create_tree(pager: &mut Pager, kind: PageKind) -> DbResult<PageId> {
+    let root = if pager.header().vacuum_mode == VacuumMode::None {
+        alloc::allocate_page(pager)?
+    } else {
+        allocate_low_root(pager)?
+    };
+    let usable = pager.usable_size()?;
+    pager.edit_page(root, |raw| {
+        edit::initialize_btree_page(raw, 0, kind, usable)
+    })?;
+    ptrmap::put(pager, root, ptrmap::Entry::root())?;
+    if pager.header().vacuum_mode != VacuumMode::None {
+        let mut header = *pager.header();
+        if root.get() > header.largest_root {
+            header.largest_root = root.get();
+            pager.set_header(header)?;
+        }
+    }
+    Ok(root)
+}
+
+/// Places a new root at the lowest page number that is not already a root.
+///
+/// Only an auto-vacuum database needs this, and it needs it badly: a root is
+/// the one page a vacuum cannot move, because its number is written in
+/// `sqlite_schema` and storage cannot rewrite a column. A root allocated at the
+/// end of the file would therefore sit in front of every page a vacuum wants to
+/// reclaim and stop the vacuum dead. Keeping roots packed at the bottom means
+/// the trailing pages are always movable ones. SQLite does exactly this in
+/// `sqlite3BtreeCreateTable`, and whatever is living at the wanted page gets
+/// moved out of the way - which is the same relocation a vacuum performs.
+fn allocate_low_root(pager: &mut Pager) -> DbResult<PageId> {
+    let lock_byte = alloc::lock_byte_page(pager.page_size());
+    let mut target = pager.header().largest_root.max(1).saturating_add(1);
+    loop {
+        let page = PageId::from_persisted(target)?;
+        if ptrmap::is_map_page(pager, page)? || target == lock_byte {
+            target = target.saturating_add(1);
+            continue;
+        }
+        break;
+    }
+    let root = PageId::from_persisted(target)?;
+    if target > pager.page_count() {
+        alloc::allocate_exact(pager, root)?;
+        return Ok(root);
+    }
+    match ptrmap::get(pager, root)? {
+        Some(entry) if entry.kind == ptrmap::FREE_PAGE => alloc::allocate_exact(pager, root)?,
+        _ => {
+            let elsewhere = alloc::allocate_page(pager)?;
+            crate::vacuum::relocate_page(pager, root, elsewhere)?;
+            // Nothing points at the page any more, and it was never on the
+            // freelist, so it is the caller's without going through either.
+            pager.record_allocated(root);
+            pager.count_allocation();
+            pager.edit_page(root, |raw| {
+                raw.fill(0);
+                Ok(())
+            })?;
+        }
+    }
+    Ok(root)
+}
+
+/// Frees every page a tree owns, including its root.
+pub fn drop_tree(pager: &mut Pager, root: PageId) -> DbResult<()> {
+    clear_tree(pager, root)?;
+    alloc::free_page(pager, root)
+}
+
+/// Frees everything below a tree's root, leaving an empty tree.
+pub fn clear_tree(pager: &mut Pager, root: PageId) -> DbResult<()> {
+    let kind = read_layout(pager, root)?.kind;
+    free_subtree(pager, root, true)?;
+    let usable = pager.usable_size()?;
+    let leaf = if kind.is_table() {
+        PageKind::LeafTable
+    } else {
+        PageKind::LeafIndex
+    };
+    let base = if root.get() == 1 { 100 } else { 0 };
+    pager.edit_page(root, |raw| {
+        edit::initialize_btree_page(raw, base, leaf, usable)
+    })?;
+    Ok(())
+}
+
+/// Frees a page's overflow chains and its children, and then the page itself
+/// unless it is the root the caller is keeping.
+fn free_subtree(pager: &mut Pager, page: PageId, is_root: bool) -> DbResult<()> {
+    let layout = read_layout(pager, page)?;
+    let pin = pager.get_page(page)?;
+    let view = BTreePage::new(pin.bytes(), &layout);
+    let mut children = Vec::new();
+    let mut chains = Vec::new();
+    for index in 0..layout.cell_count {
+        let cell = view.cell(index)?;
+        if let Some(child) = cell.left_child {
+            children.push(child);
+        }
+        if cell.split.overflows {
+            chains.push((cell.split.total, cell.split.local, cell.overflow));
+        }
+    }
+    if let Some(right) = layout.right_child {
+        children.push(right);
+    }
+    drop(pin);
+    for (total, local, head) in chains {
+        overflow::free_chain(pager, total, local, head)?;
+    }
+    for child in children {
+        free_subtree(pager, child, false)?;
+    }
+    if !is_root {
+        alloc::free_page(pager, page)?;
+    }
+    Ok(())
+}
+
+/// Inserts or replaces a row in a table B-tree.
+pub fn insert_row(pager: &mut Pager, root: PageId, rowid: i64, payload: &[u8]) -> DbResult<()> {
+    let tree = Tree::table(root);
+    let (path, found) = find_rowid(pager, &tree, rowid)?;
+    let leaf = path
+        .last()
+        .copied()
+        .ok_or_else(|| corrupt("a descent that reached no page"))?;
+    if found {
+        remove_cell_at(pager, leaf.page, leaf.slot)?;
+    }
+    let cell = build_cell(pager, PageKind::LeafTable, None, Some(rowid), payload)?;
+    place_cell(pager, &tree, path, cell)
+}
+
+/// Deletes a row from a table B-tree, reporting whether it was there.
+pub fn delete_row(pager: &mut Pager, root: PageId, rowid: i64) -> DbResult<bool> {
+    let tree = Tree::table(root);
+    let (path, found) = find_rowid(pager, &tree, rowid)?;
+    if !found {
+        return Ok(false);
+    }
+    delete_at(pager, &tree, path)?;
+    Ok(true)
+}
+
+/// Inserts an entry into an index B-tree, replacing an identical one.
+pub fn insert_entry(
+    pager: &mut Pager,
+    root: PageId,
+    key: &KeyInfo,
+    payload: &[u8],
+) -> DbResult<bool> {
+    let tree = Tree::index(root, key.clone());
+    let (path, found) = find_key(pager, &tree, payload)?;
+    if found {
+        // The entry is where the search stopped, which for an index may be an
+        // interior page; replacing it in place would need the same balancing as
+        // a delete followed by an insert, so that is what this is.
+        delete_at(pager, &tree, path)?;
+        let (path, _) = find_key(pager, &tree, payload)?;
+        let cell = build_cell(pager, PageKind::LeafIndex, None, None, payload)?;
+        place_cell(pager, &tree, path, cell)?;
+        return Ok(true);
+    }
+    let cell = build_cell(pager, PageKind::LeafIndex, None, None, payload)?;
+    place_cell(pager, &tree, path, cell)?;
+    Ok(false)
+}
+
+/// Deletes an entry from an index B-tree, reporting whether it was there.
+pub fn delete_entry(
+    pager: &mut Pager,
+    root: PageId,
+    key: &KeyInfo,
+    payload: &[u8],
+) -> DbResult<bool> {
+    let tree = Tree::index(root, key.clone());
+    let (path, found) = find_key(pager, &tree, payload)?;
+    if !found {
+        return Ok(false);
+    }
+    delete_at(pager, &tree, path)?;
+    Ok(true)
+}
+
+/// Adds a row after every row already in a table B-tree, without comparing
+/// keys.
+///
+/// The caller promises the rowid is larger than every one already there. That
+/// promise is what makes a bulk copy possible: nothing is compared, so nothing
+/// depends on knowing how the source's keys were declared to sort - which is
+/// the one thing storage does not know and cannot look up.
+pub fn append_row(pager: &mut Pager, root: PageId, rowid: i64, payload: &[u8]) -> DbResult<()> {
+    let tree = Tree::table(root);
+    let path = rightmost_path(pager, root)?;
+    let cell = build_cell(pager, PageKind::LeafTable, None, Some(rowid), payload)?;
+    place_cell(pager, &tree, path, cell)
+}
+
+/// Adds an entry after every entry already in an index B-tree, without
+/// comparing keys.
+pub fn append_entry(pager: &mut Pager, root: PageId, payload: &[u8]) -> DbResult<()> {
+    let tree = Tree::index(root, KeyInfo::default());
+    let path = rightmost_path(pager, root)?;
+    let cell = build_cell(pager, PageKind::LeafIndex, None, None, payload)?;
+    place_cell(pager, &tree, path, cell)
+}
+
+/// Returns the path to the position after the last entry in a tree.
+fn rightmost_path(pager: &mut Pager, root: PageId) -> DbResult<Vec<Step>> {
+    let mut path = Vec::new();
+    let mut page = root;
+    loop {
+        let layout = read_layout(pager, page)?;
+        if layout.kind.is_leaf() {
+            path.push(Step {
+                page,
+                slot: layout.cell_count,
+            });
+            return Ok(path);
+        }
+        let slot = layout.cell_count;
+        let pin = pager.get_page(page)?;
+        let child = BTreePage::new(pin.bytes(), &layout).child_at(slot)?;
+        drop(pin);
+        path.push(Step { page, slot });
+        page = child;
+        if path.len() > MAX_DEPTH {
+            return Err(corrupt("a B-tree path deeper than any legal tree"));
+        }
+    }
+}
+
+/// Returns the kind of tree a root page holds.
+pub fn tree_kind(pager: &mut Pager, root: PageId) -> DbResult<TreeKind> {
+    let layout = read_layout(pager, root)?;
+    Ok(if layout.kind.is_table() {
+        TreeKind::Table
+    } else {
+        TreeKind::Index
+    })
+}
+
+/// Builds a cell, writing any part of its payload that does not fit locally
+/// into a fresh overflow chain.
+fn build_cell(
+    pager: &mut Pager,
+    kind: PageKind,
+    child: Option<PageId>,
+    rowid: Option<i64>,
+    payload: &[u8],
+) -> DbResult<Vec<u8>> {
+    let usable = pager.usable_size()?;
+    let split = payload_split(payload.len() as u64, usable, kind)?;
+    let head = if split.overflows {
+        let tail = payload
+            .get(split.local..)
+            .ok_or_else(|| corrupt("a payload shorter than its own local part"))?;
+        overflow::write_chain(pager, tail)?
+    } else {
+        None
+    };
+    edit::encode_cell(kind, usable, child, rowid, payload, head)
+}
+
+/// Removes the cell at `index` from a page, freeing its overflow chain.
+fn remove_cell_at(pager: &mut Pager, page: PageId, index: usize) -> DbResult<()> {
+    let layout = read_layout(pager, page)?;
+    let pin = pager.get_page(page)?;
+    let view = BTreePage::new(pin.bytes(), &layout);
+    let cell = view.cell(index)?;
+    let chain = if cell.split.overflows {
+        Some((cell.split.total, cell.split.local, cell.overflow))
+    } else {
+        None
+    };
+    drop(pin);
+    if let Some((total, local, head)) = chain {
+        overflow::free_chain(pager, total, local, head)?;
+    }
+    let layout = read_layout(pager, page)?;
+    pager.edit_page(page, |raw| edit::remove_cell(raw, &layout, index))
+}
+
+/// Puts a cell on the leaf the path ends at, balancing when it does not fit.
+fn place_cell(pager: &mut Pager, tree: &Tree, path: Vec<Step>, cell: Vec<u8>) -> DbResult<()> {
+    let leaf = path
+        .last()
+        .copied()
+        .ok_or_else(|| corrupt("a descent that reached no page"))?;
+    if try_insert_in_place(pager, leaf.page, leaf.slot, &cell)? {
+        ptrmap::refresh_btree_page(pager, leaf.page)?;
+        return Ok(());
+    }
+    let mut content = gather_page(pager, leaf.page)?;
+    let entry = decode_entry(&cell, content.kind)?;
+    if leaf.slot > content.entries.len() {
+        return Err(corrupt("an insertion point past the end of a page"));
+    }
+    content.entries.insert(leaf.slot, entry);
+    let depth = path.len().saturating_sub(1);
+    balance(pager, tree, &path, depth, content)
+}
+
+/// Tries to put a cell on a page without moving anything between pages.
+fn try_insert_in_place(
+    pager: &mut Pager,
+    page: PageId,
+    index: usize,
+    cell: &[u8],
+) -> DbResult<bool> {
+    let layout = read_layout(pager, page)?;
+    let needed = edit::cell_footprint(cell.len()).saturating_add(2);
+    let pin = pager.get_page(page)?;
+    let free = edit::free_bytes(&BTreePage::new(pin.bytes(), &layout))?;
+    drop(pin);
+    if free < needed {
+        return Ok(false);
+    }
+    let owned = cell.to_vec();
+    let placed = pager.edit_page(page, |raw| edit::insert_cell(raw, &layout, index, &owned))?;
+    if placed {
+        return Ok(true);
+    }
+    // The room is there but no single hole holds it, which is what
+    // defragmenting is for. SQLite does exactly this before it gives up.
+    let usable = pager.usable_size()?;
+    let owned = cell.to_vec();
+    pager.edit_page(page, |raw| {
+        edit::defragment(raw, &layout)?;
+        let fresh = PageLayout::parse(raw, page, usable)?;
+        edit::insert_cell(raw, &fresh, index, &owned)
+    })
+}
+
+/// Decodes a freshly built cell back into an entry.
+fn decode_entry(cell: &[u8], kind: PageKind) -> DbResult<Entry> {
+    match kind {
+        PageKind::LeafIndex => Ok(Entry {
+            body: cell.to_vec(),
+            child: None,
+            rowid: None,
+        }),
+        PageKind::LeafTable => {
+            let payload =
+                varint::decode(cell).map_err(|_| corrupt("a truncated payload length"))?;
+            let rest = cell
+                .get(payload.len..)
+                .ok_or_else(|| corrupt("a cell that ends inside its payload length"))?;
+            let (rowid, _) =
+                varint::decode_i64(rest).map_err(|_| corrupt("a truncated rowid varint"))?;
+            Ok(Entry {
+                body: cell.to_vec(),
+                child: None,
+                rowid: Some(rowid),
+            })
+        }
+        _ => Err(corrupt("a leaf cell was expected")),
+    }
+}
+
+/// Removes the entry the path ends on, rebalancing what that leaves behind.
+///
+/// A leaf entry is simply taken out. An entry on an *interior* page cannot be:
+/// it is a divider, and removing it would leave two subtrees with nothing
+/// between them. So it is replaced by its predecessor - the largest entry in the
+/// subtree to its left, which is always on a leaf - and that leaf entry is
+/// removed instead. Only an index tree reaches this case, because a table
+/// tree's interior cells are not entries.
+///
+/// The predecessor is taken off its leaf *first*, and the divider is then found
+/// again by key. Doing it the other way round looks simpler and is wrong:
+/// settling the leaf can balance pages all the way to the root, and the divider
+/// may be on a different page by the time the write lands. Re-finding it costs
+/// one descent and cannot be stale.
+fn delete_at(pager: &mut Pager, tree: &Tree, path: Vec<Step>) -> DbResult<()> {
+    let target = path
+        .last()
+        .copied()
+        .ok_or_else(|| corrupt("a descent that reached no page"))?;
+    let layout = read_layout(pager, target.page)?;
+    if layout.kind.is_leaf() {
+        remove_cell_at(pager, target.page, target.slot)?;
+        let content = gather_page(pager, target.page)?;
+        let depth = path.len().saturating_sub(1);
+        return settle(pager, tree, &path, depth, content);
+    }
+
+    // The key of the entry being deleted, so it can be found again afterwards.
+    let divider_payload = cell_payload(pager, target.page, target.slot)?;
+
+    // Walk down the left subtree of the divider to its rightmost leaf entry.
+    let pin = pager.get_page(target.page)?;
+    let child = BTreePage::new(pin.bytes(), &layout).cell_child(target.slot)?;
+    drop(pin);
+    let mut donor_path = path.clone();
+    let mut current = child;
+    loop {
+        let layout = read_layout(pager, current)?;
+        if layout.kind.is_leaf() {
+            if layout.cell_count == 0 {
+                return Err(corrupt("an empty leaf under an interior divider"));
+            }
+            donor_path.push(Step {
+                page: current,
+                slot: layout.cell_count.saturating_sub(1),
+            });
+            break;
+        }
+        let slot = layout.cell_count;
+        let pin = pager.get_page(current)?;
+        let next = BTreePage::new(pin.bytes(), &layout).child_at(slot)?;
+        drop(pin);
+        donor_path.push(Step {
+            page: current,
+            slot,
+        });
+        current = next;
+        if donor_path.len() > MAX_DEPTH {
+            return Err(corrupt("a B-tree path deeper than any legal tree"));
+        }
+    }
+
+    let donor = donor_path
+        .last()
+        .copied()
+        .ok_or_else(|| corrupt("a donor path that reached no page"))?;
+    let mut donor_content = gather_page(pager, donor.page)?;
+    if donor.slot >= donor_content.entries.len() {
+        return Err(corrupt("a donor entry that is not on its page"));
+    }
+    // Removed through the entry list rather than through `remove_cell_at`,
+    // because the entry is not being deleted: its bytes, and any overflow chain
+    // they name, are about to become the divider.
+    let donor_entry = donor_content.entries.remove(donor.slot);
+    let donor_depth = donor_path.len().saturating_sub(1);
+    settle(pager, tree, &donor_path, donor_depth, donor_content)?;
+
+    let (again, found) = find_key(pager, tree, &divider_payload)?;
+    if !found {
+        return Err(corrupt(
+            "the divider being deleted could not be found again",
+        ));
+    }
+    let step = again
+        .last()
+        .copied()
+        .ok_or_else(|| corrupt("a descent that reached no page"))?;
+    let mut content = gather_page(pager, step.page)?;
+    let replaced = content
+        .entries
+        .get_mut(step.slot)
+        .ok_or_else(|| corrupt("a divider that is not on its page"))?;
+    let old_body = std::mem::replace(&mut replaced.body, donor_entry.body);
+    replaced.rowid = donor_entry.rowid;
+    let kind = content.kind;
+    free_body_chain(pager, &old_body, kind)?;
+    let depth = again.len().saturating_sub(1);
+    settle(pager, tree, &again, depth, content)
+}
+
+/// Frees the overflow chain of an entry body, if it has one.
+fn free_body_chain(pager: &mut Pager, body: &[u8], kind: PageKind) -> DbResult<()> {
+    if kind.is_table() && !kind.is_leaf() {
+        return Ok(());
+    }
+    let usable = pager.usable_size()?;
+    let leaf_kind = if kind.is_table() {
+        PageKind::LeafTable
+    } else {
+        PageKind::LeafIndex
+    };
+    let payload = varint::decode(body).map_err(|_| corrupt("a truncated payload length"))?;
+    let mut cursor = payload.len;
+    if leaf_kind == PageKind::LeafTable {
+        let rest = body
+            .get(cursor..)
+            .ok_or_else(|| corrupt("a table cell with no rowid"))?;
+        let (_, width) = varint::decode_i64(rest).map_err(|_| corrupt("a truncated rowid"))?;
+        cursor = cursor.saturating_add(width);
+    }
+    let split = payload_split(payload.value, usable, leaf_kind)?;
+    if !split.overflows {
+        return Ok(());
+    }
+    let at = cursor.saturating_add(split.local);
+    let head = PageId::from_persisted(bytes::read_u32(body, at)?)
+        .map_err(|_| corrupt("an overflow chain that starts at page zero"))?;
+    overflow::free_chain(pager, payload.value, split.local, Some(head))
+}
+
+/// Writes a page's content back, balancing when it does not fit or when the
+/// page has become too empty to be worth keeping on its own.
+fn settle(
+    pager: &mut Pager,
+    tree: &Tree,
+    path: &[Step],
+    depth: usize,
+    content: PageContent,
+) -> DbResult<()> {
+    let step = path
+        .get(depth)
+        .copied()
+        .ok_or_else(|| corrupt("a path with no page at that depth"))?;
+    let capacity = capacity_of(pager, step.page, content.kind)?;
+    let size = content.size()?;
+    let fits = size <= capacity;
+    let underfull = depth > 0
+        && size.saturating_mul(UNDERFULL_DENOMINATOR)
+            < capacity.saturating_mul(UNDERFULL_NUMERATOR);
+    if fits && !underfull {
+        write_page(pager, step.page, &content)?;
+        if depth == 0 {
+            return collapse_root(pager, tree);
+        }
+        return Ok(());
+    }
+    balance(pager, tree, path, depth, content)
+}
+
+/// Lays a page and its siblings out again so that the content fits.
+fn balance(
+    pager: &mut Pager,
+    tree: &Tree,
+    path: &[Step],
+    depth: usize,
+    content: PageContent,
+) -> DbResult<()> {
+    if depth == 0 {
+        return balance_root(pager, tree, content);
+    }
+    let step = path
+        .get(depth)
+        .copied()
+        .ok_or_else(|| corrupt("a path with no page at that depth"))?;
+    let parent_step = path
+        .get(depth.saturating_sub(1))
+        .copied()
+        .ok_or_else(|| corrupt("a path with no parent"))?;
+    let parent = gather_page(pager, parent_step.page)?;
+    let child_count = parent.entries.len().saturating_add(1);
+    let index = parent_step.slot.min(parent.entries.len());
+
+    // A window of up to three consecutive children containing the one that
+    // changed, reaching left first because a merge is likelier to find room in
+    // a page that already exists than in one that is about to.
+    let last = child_count.saturating_sub(1);
+    let start = index.saturating_sub(1);
+    let end = start
+        .saturating_add(BALANCE_WINDOW.saturating_sub(1))
+        .min(last);
+    let first = end
+        .saturating_sub(BALANCE_WINDOW.saturating_sub(1))
+        .min(index);
+
+    let mut window = Vec::new();
+    for slot in first..=end {
+        let page = child_at(&parent, slot)?;
+        window.push(page);
+    }
+
+    let children_are_leaves = content.kind.is_leaf();
+    let promote = promotes_dividers(tree, children_are_leaves);
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut trailing: Option<PageId> = None;
+    for (offset, page) in window.iter().copied().enumerate() {
+        let slot = first.saturating_add(offset);
+        let piece = if page == step.page {
+            content.clone()
+        } else {
+            gather_page(pager, page)?
+        };
+        if piece.kind != content.kind {
+            return Err(corrupt("a balance across pages of different kinds"));
+        }
+        entries.extend(piece.entries.iter().cloned());
+        if slot < end {
+            let divider = parent
+                .entries
+                .get(slot)
+                .ok_or_else(|| corrupt("a window without its divider"))?;
+            if promote {
+                entries.push(Entry {
+                    body: divider.body.clone(),
+                    child: piece.right,
+                    rowid: divider.rowid,
+                });
+            }
+        } else {
+            trailing = piece.right;
+        }
+    }
+
+    let capacity = capacity_of(
+        pager,
+        window.first().copied().unwrap_or(step.page),
+        content.kind,
+    )?;
+    let ranges = partition(&entries, content.kind, capacity, promote)?;
+    let wanted = ranges.len();
+
+    // Reuse the window's pages first, then allocate, then free the surplus.
+    let mut pages: Vec<PageId> = Vec::with_capacity(wanted);
+    for slot in 0..wanted {
+        match window.get(slot).copied() {
+            Some(page) => pages.push(page),
+            None => pages.push(alloc::allocate_page(pager)?),
+        }
+    }
+    let surplus: Vec<PageId> = window
+        .get(wanted..)
+        .map(<[PageId]>::to_vec)
+        .unwrap_or_default();
+
+    let mut dividers: Vec<Entry> = Vec::with_capacity(wanted.saturating_sub(1));
+    for (slot, range) in ranges.iter().enumerate() {
+        let page = pages
+            .get(slot)
+            .copied()
+            .ok_or_else(|| corrupt("a partition without a page"))?;
+        let mut piece = PageContent {
+            kind: content.kind,
+            entries: entries
+                .get(range.0..range.1)
+                .ok_or_else(|| corrupt("a partition outside its entries"))?
+                .to_vec(),
+            right: None,
+        };
+        let is_last = slot.saturating_add(1) == wanted;
+        if !children_are_leaves {
+            piece.right = if is_last {
+                trailing
+            } else if promote {
+                entries
+                    .get(range.1)
+                    .and_then(|entry| entry.child)
+                    .ok_or_else(|| corrupt("a divider with no child"))
+                    .map(Some)?
+            } else {
+                return Err(corrupt("a table interior page without a promoted divider"));
+            };
+        }
+        if !is_last {
+            let divider = if promote {
+                let entry = entries
+                    .get(range.1)
+                    .ok_or_else(|| corrupt("a partition with no divider entry"))?;
+                Entry {
+                    body: entry.body.clone(),
+                    child: Some(page),
+                    rowid: entry.rowid,
+                }
+            } else {
+                let entry = piece
+                    .entries
+                    .last()
+                    .ok_or_else(|| corrupt("an empty page cannot supply a divider"))?;
+                Entry {
+                    body: Vec::new(),
+                    child: Some(page),
+                    rowid: entry.rowid,
+                }
+            };
+            dividers.push(divider);
+        }
+        write_page(pager, page, &piece)?;
+    }
+
+    let last_page = pages
+        .last()
+        .copied()
+        .ok_or_else(|| corrupt("a balance that produced no pages"))?;
+
+    let mut rebuilt = PageContent {
+        kind: parent.kind,
+        entries: parent
+            .entries
+            .get(..first)
+            .ok_or_else(|| corrupt("a window outside its parent"))?
+            .to_vec(),
+        right: parent.right,
+    };
+    rebuilt.entries.extend(dividers);
+    let mut tail = parent
+        .entries
+        .get(end..)
+        .ok_or_else(|| corrupt("a window outside its parent"))?
+        .to_vec();
+    match tail.first_mut() {
+        Some(entry) => entry.child = Some(last_page),
+        None => rebuilt.right = Some(last_page),
+    }
+    rebuilt.entries.extend(tail);
+
+    for page in surplus {
+        alloc::free_page(pager, page)?;
+    }
+
+    settle(pager, tree, path, depth.saturating_sub(1), rebuilt)
+}
+
+/// Returns the child a parent's slot selects.
+fn child_at(parent: &PageContent, slot: usize) -> DbResult<PageId> {
+    if slot == parent.entries.len() {
+        return parent
+            .right
+            .ok_or_else(|| corrupt("a right-most child was asked for on a leaf page"));
+    }
+    parent
+        .entries
+        .get(slot)
+        .and_then(|entry| entry.child)
+        .ok_or_else(|| corrupt("an interior entry with no child"))
+}
+
+/// Splits a list of entries into the pages that will hold them.
+///
+/// Each range is half-open, and when dividers are promoted the entry *at* a
+/// range's end is the divider between that page and the next: it belongs to the
+/// parent and to no page. The split is even rather than greedy - a greedy fill
+/// leaves the last page nearly empty, and a page that empty is a page the next
+/// delete has to balance again.
+fn partition(
+    entries: &[Entry],
+    kind: PageKind,
+    capacity: usize,
+    promote: bool,
+) -> DbResult<Vec<(usize, usize)>> {
+    let mut sizes = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let cell = encode_entry(entry, kind)?;
+        let size = edit::cell_footprint(cell.len()).saturating_add(2);
+        if size > capacity {
+            return Err(corrupt(format!(
+                "a cell of {size} bytes cannot fit a page holding {capacity}"
+            )));
+        }
+        sizes.push(size);
+    }
+    let greedy = fill(&sizes, capacity, promote, usize::MAX)?;
+    if greedy.len() <= 1 {
+        return Ok(greedy);
+    }
+    let total: usize = sizes.iter().copied().sum();
+    let target = total
+        .saturating_add(greedy.len().saturating_sub(1))
+        .saturating_div(greedy.len())
+        .min(capacity);
+    match fill(&sizes, capacity, promote, target) {
+        Ok(even) if even.len() == greedy.len() => Ok(even),
+        _ => Ok(greedy),
+    }
+}
+
+/// Fills pages up to `target` bytes each, never past `capacity`.
+///
+/// When dividers are promoted the arithmetic has one trap in it, and it costs
+/// an entry every time it is missed: between any two pages exactly one entry
+/// moves up to the parent, so `k` pages consume `k - 1` entries beyond what
+/// they hold. Closing a page with exactly one entry left therefore promotes
+/// that entry and leaves nothing for the page after it - so the entry is in no
+/// page and no parent, and it is simply gone. The fix is to hand one entry back
+/// to the page just closed, and where even that is impossible to admit the
+/// empty page rather than lose the row.
+fn fill(
+    sizes: &[usize],
+    capacity: usize,
+    promote: bool,
+    target: usize,
+) -> DbResult<Vec<(usize, usize)>> {
+    let len = sizes.len();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut index = 0usize;
+    loop {
+        let start = index;
+        let mut used = 0usize;
+        while index < len {
+            let size = sizes.get(index).copied().unwrap_or(0);
+            if used.saturating_add(size) > capacity {
+                break;
+            }
+            if used >= target && index > start {
+                break;
+            }
+            used = used.saturating_add(size);
+            index = index.saturating_add(1);
+        }
+        if index == start && index < len {
+            return Err(corrupt("an entry that fits no page"));
+        }
+        if promote && len.saturating_sub(index) == 1 && index > start.saturating_add(1) {
+            // One entry left would be promoted with no page to follow it.
+            index = index.saturating_sub(1);
+        }
+        ranges.push((start, index));
+        if index >= len {
+            break;
+        }
+        if !promote {
+            continue;
+        }
+        // This entry becomes the divider in the parent and lives on no page.
+        index = index.saturating_add(1);
+        if index >= len {
+            ranges.push((index, index));
+            break;
+        }
+    }
+    if ranges.is_empty() {
+        ranges.push((0, 0));
+    }
+    Ok(ranges)
+}
+
+/// Balances the root, which is the only page that can change the tree's height.
+fn balance_root(pager: &mut Pager, tree: &Tree, content: PageContent) -> DbResult<()> {
+    let capacity = capacity_of(pager, tree.root, content.kind)?;
+    if content.size()? <= capacity {
+        write_page(pager, tree.root, &content)?;
+        return collapse_root(pager, tree);
+    }
+
+    // The root cannot be split, because its page number is the tree's name and
+    // is recorded in the schema. So the tree grows a level instead: the root's
+    // contents move to a new child and the root becomes an interior page with
+    // that child as its only pointer, which is then balanced normally.
+    // The child is allocated and pointed at, but not written: the content that
+    // did not fit the root does not fit the child either, and balancing it at
+    // its new depth is what splits it across as many pages as it needs. The
+    // page is never read before it is written, because the balance below is
+    // handed the content rather than reading it back.
+    let child = alloc::allocate_page(pager)?;
+    let root_content = PageContent {
+        kind: tree.interior_kind(),
+        entries: Vec::new(),
+        right: Some(child),
+    };
+    write_page(pager, tree.root, &root_content)?;
+    let path = [
+        Step {
+            page: tree.root,
+            slot: 0,
+        },
+        Step {
+            page: child,
+            slot: 0,
+        },
+    ];
+    balance(pager, tree, &path, 1, content)
+}
+
+/// Pulls a root's only child up into it when the child fits, which is how a
+/// tree loses a level.
+fn collapse_root(pager: &mut Pager, tree: &Tree) -> DbResult<()> {
+    loop {
+        let root = gather_page(pager, tree.root)?;
+        if root.kind.is_leaf() || !root.entries.is_empty() {
+            return Ok(());
+        }
+        let Some(child) = root.right else {
+            return Ok(());
+        };
+        let content = gather_page(pager, child)?;
+        let capacity = capacity_of(pager, tree.root, content.kind)?;
+        if content.size()? > capacity {
+            // Page 1 has a hundred fewer usable bytes than any other page, so a
+            // child that fits its own page may not fit the root. Leaving the
+            // level in place is legal and costs one page read per lookup.
+            return Ok(());
+        }
+        write_page(pager, tree.root, &content)?;
+        alloc::free_page(pager, child)?;
+    }
+}
+
+/// Descends to where a rowid is or would be, recording the path.
+fn find_rowid(pager: &mut Pager, tree: &Tree, rowid: i64) -> DbResult<(Vec<Step>, bool)> {
+    let mut path = Vec::new();
+    let mut page = tree.root;
+    loop {
+        let layout = read_layout(pager, page)?;
+        if !layout.kind.is_table() {
+            return Err(corrupt("a table write reached an index page"));
+        }
+        let pin = pager.get_page(page)?;
+        let view = BTreePage::new(pin.bytes(), &layout);
+        let mut low = 0usize;
+        let mut high = layout.cell_count;
+        while low < high {
+            let middle = low.saturating_add(high.saturating_sub(low) / 2);
+            if view.cell_rowid(middle)? < rowid {
+                low = middle.saturating_add(1);
+            } else {
+                high = middle;
+            }
+        }
+        if layout.kind == PageKind::LeafTable {
+            let found = low < layout.cell_count && view.cell_rowid(low)? == rowid;
+            drop(pin);
+            path.push(Step { page, slot: low });
+            return Ok((path, found));
+        }
+        let child = view.child_at(low)?;
+        drop(pin);
+        path.push(Step { page, slot: low });
+        page = child;
+        if path.len() > MAX_DEPTH {
+            return Err(corrupt("a B-tree path deeper than any legal tree"));
+        }
+    }
+}
+
+/// Descends to where an index entry is or would be, recording the path.
+///
+/// Unlike a table tree, the entry may be on an interior page, and the descent
+/// stops there when it is: an index B-tree keeps entries at every level, so the
+/// first equal key found on the way down *is* the entry.
+fn find_key(pager: &mut Pager, tree: &Tree, probe: &[u8]) -> DbResult<(Vec<Step>, bool)> {
+    let encoding = pager.text_encoding();
+    let limits = Limits::default();
+    let mut path = Vec::new();
+    let mut page = tree.root;
+    loop {
+        let layout = read_layout(pager, page)?;
+        if layout.kind.is_table() {
+            return Err(corrupt("an index write reached a table page"));
+        }
+        let mut low = 0usize;
+        let mut high = layout.cell_count;
+        while low < high {
+            let middle = low.saturating_add(high.saturating_sub(low) / 2);
+            let ordering = compare_cell(pager, page, middle, probe, &tree.key, encoding, &limits)?;
+            if ordering == std::cmp::Ordering::Less {
+                low = middle.saturating_add(1);
+            } else {
+                high = middle;
+            }
+        }
+        let equal = low < layout.cell_count
+            && compare_cell(pager, page, low, probe, &tree.key, encoding, &limits)?
+                == std::cmp::Ordering::Equal;
+        if equal {
+            path.push(Step { page, slot: low });
+            return Ok((path, true));
+        }
+        if layout.kind == PageKind::LeafIndex {
+            path.push(Step { page, slot: low });
+            return Ok((path, false));
+        }
+        let pin = pager.get_page(page)?;
+        let child = BTreePage::new(pin.bytes(), &layout).child_at(low)?;
+        drop(pin);
+        path.push(Step { page, slot: low });
+        page = child;
+        if path.len() > MAX_DEPTH {
+            return Err(corrupt("a B-tree path deeper than any legal tree"));
+        }
+    }
+}
+
+/// Compares one cell's key against a probe record.
+#[allow(clippy::too_many_arguments)]
+fn compare_cell(
+    pager: &mut Pager,
+    page: PageId,
+    index: usize,
+    probe: &[u8],
+    key: &KeyInfo,
+    encoding: TextEncoding,
+    limits: &Limits,
+) -> DbResult<std::cmp::Ordering> {
+    let payload = cell_payload(pager, page, index)?;
+    let left = RecordRef::parse_with_limits(&payload, encoding, limits)?;
+    let right = RecordRef::parse_with_limits(probe, encoding, limits)?;
+    record::compare_records(&left, &right, key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::check::{self, CheckOptions};
+    use crate::cursor::BTreeCursor;
+    use crate::header::VacuumMode;
+    use crate::pager::{NewDatabase, PagerOptions};
+    use rustdb_base::page::PageSize;
+    use rustdb_value::record::encode_record;
+    use rustdb_value::Value;
+    use rustdb_vfs::memory::MemoryVfs;
+    use rustdb_vfs::DbPath;
+
+    /// The page sizes every structural test runs at.
+    ///
+    /// They are the format's smallest, its default, SQLite's old default, and
+    /// its largest. The two ends are where the arithmetic breaks: 512 has the
+    /// tightest local-payload window and splits after a handful of rows, and
+    /// 65536 is the one size whose content-area start does not fit in the two
+    /// bytes the header gives it.
+    const PAGE_SIZES: [u32; 4] = [512, 1024, 4096, 65_536];
+
+    /// Creates an empty database in memory and opens it for writing.
+    fn create(vfs: &MemoryVfs, page_size: u32, vacuum: VacuumMode) -> Pager {
+        let path = DbPath::new(format!("p{page_size}.db"));
+        Pager::create(
+            vfs,
+            &path,
+            PagerOptions::default(),
+            NewDatabase {
+                page_size: PageSize::new(page_size).unwrap(),
+                reserved_bytes: 0,
+                text_encoding: TextEncoding::Utf8,
+                vacuum_mode: vacuum,
+            },
+        )
+        .unwrap()
+    }
+
+    /// Encodes a one-column record holding an integer.
+    fn row(value: i64) -> Vec<u8> {
+        encode_record(&[Value::Integer(value)], TextEncoding::Utf8, 4).unwrap()
+    }
+
+    /// Encodes a record whose blob is `len` bytes long, which is how a test
+    /// asks for a payload on either side of the overflow threshold.
+    fn blob_row(marker: u8, len: usize) -> Vec<u8> {
+        let blob = vec![marker; len];
+        encode_record(
+            &[Value::Blob(rustdb_value::BlobValue::borrowed(&blob))],
+            TextEncoding::Utf8,
+            4,
+        )
+        .unwrap()
+    }
+
+    /// Encodes a two-field index entry: a key and the rowid that makes it
+    /// unique, which is what SQLite puts in an index.
+    fn index_entry(key: i64, rowid: i64) -> Vec<u8> {
+        encode_record(
+            &[Value::Integer(key), Value::Integer(rowid)],
+            TextEncoding::Utf8,
+            4,
+        )
+        .unwrap()
+    }
+
+    /// Reads every row of a table B-tree in cursor order.
+    fn scan_table(pager: &mut Pager, root: PageId) -> Vec<(i64, Vec<u8>)> {
+        let limits = Limits::default();
+        let mut cursor = BTreeCursor::table(root);
+        let mut rows = Vec::new();
+        let mut more = cursor.first(pager).unwrap();
+        while more {
+            rows.push((
+                cursor.rowid().unwrap(),
+                cursor.payload(pager, &limits).unwrap(),
+            ));
+            more = cursor.next(pager).unwrap();
+        }
+        rows
+    }
+
+    /// Reads every entry of an index B-tree in cursor order.
+    fn scan_index(pager: &mut Pager, root: PageId, key: &KeyInfo) -> Vec<Vec<u8>> {
+        let limits = Limits::default();
+        let mut cursor = BTreeCursor::index(root, key.clone());
+        let mut entries = Vec::new();
+        let mut more = cursor.first(pager).unwrap();
+        while more {
+            entries.push(cursor.payload(pager, &limits).unwrap());
+            more = cursor.next(pager).unwrap();
+        }
+        entries
+    }
+
+    /// Runs the integrity check over the trees a test built, and fails with
+    /// what it found rather than with a bare assertion.
+    fn check_roots(pager: &mut Pager, roots: &[PageId]) {
+        let report =
+            check::check_database_with_options(pager, &CheckOptions::roots(roots.to_vec()))
+                .unwrap();
+        assert!(report.is_ok(), "{:#?}", report.as_pragma_output());
+    }
+
+    /// A freshly created database is one page holding an empty schema tree, and
+    /// it passes the integrity check at every page size.
+    #[test]
+    fn a_created_database_is_a_valid_empty_database() {
+        for size in PAGE_SIZES {
+            let vfs = MemoryVfs::new();
+            let mut pager = create(&vfs, size, VacuumMode::None);
+            assert_eq!(pager.page_count(), 1, "{size}");
+            assert_eq!(pager.header().page_size.bytes(), size);
+            pager.begin_read().unwrap();
+            let report = check::integrity_check(&mut pager).unwrap();
+            assert!(report.is_ok(), "{size}: {:#?}", report.as_pragma_output());
+        }
+    }
+
+    /// Rows inserted in ascending order read back in that order, at every page
+    /// size, and the tree they build passes the integrity check.
+    #[test]
+    fn ascending_rows_read_back_in_order() {
+        for size in PAGE_SIZES {
+            let vfs = MemoryVfs::new();
+            let mut pager = create(&vfs, size, VacuumMode::None);
+            pager.begin_write().unwrap();
+            let root = create_table(&mut pager).unwrap();
+            for rowid in 1..=400i64 {
+                insert_row(&mut pager, root, rowid, &row(rowid * 7)).unwrap();
+            }
+            pager.commit().unwrap();
+            check_roots(&mut pager, &[root]);
+            let rows = scan_table(&mut pager, root);
+            assert_eq!(rows.len(), 400, "{size}");
+            for (index, (rowid, payload)) in rows.iter().enumerate() {
+                assert_eq!(*rowid, index as i64 + 1, "{size}");
+                assert_eq!(payload, &row((index as i64 + 1) * 7), "{size}");
+            }
+        }
+    }
+
+    /// Rows inserted in an order that is not sorted still come back sorted,
+    /// which is the property a descent and a split have to preserve together.
+    #[test]
+    fn rows_inserted_out_of_order_read_back_sorted() {
+        for size in PAGE_SIZES {
+            let vfs = MemoryVfs::new();
+            let mut pager = create(&vfs, size, VacuumMode::None);
+            pager.begin_write().unwrap();
+            let root = create_table(&mut pager).unwrap();
+            // A stride coprime with the count visits every rowid exactly once in
+            // an order that is nothing like sorted.
+            let mut expected = Vec::new();
+            for step in 0..300i64 {
+                let rowid = (step * 97) % 300 + 1;
+                insert_row(&mut pager, root, rowid, &row(rowid)).unwrap();
+                expected.push(rowid);
+            }
+            pager.commit().unwrap();
+            check_roots(&mut pager, &[root]);
+            expected.sort_unstable();
+            let rows: Vec<i64> = scan_table(&mut pager, root)
+                .into_iter()
+                .map(|(rowid, _)| rowid)
+                .collect();
+            assert_eq!(rows, expected, "{size}");
+        }
+    }
+
+    /// Inserting the same rowid twice replaces the row rather than adding one.
+    #[test]
+    fn inserting_the_same_rowid_replaces_the_row() {
+        let vfs = MemoryVfs::new();
+        let mut pager = create(&vfs, 1024, VacuumMode::None);
+        pager.begin_write().unwrap();
+        let root = create_table(&mut pager).unwrap();
+        for rowid in 1..=50i64 {
+            insert_row(&mut pager, root, rowid, &row(rowid)).unwrap();
+        }
+        for rowid in 1..=50i64 {
+            insert_row(&mut pager, root, rowid, &row(rowid * 1000)).unwrap();
+        }
+        pager.commit().unwrap();
+        check_roots(&mut pager, &[root]);
+        let rows = scan_table(&mut pager, root);
+        assert_eq!(rows.len(), 50);
+        for (index, (rowid, payload)) in rows.iter().enumerate() {
+            assert_eq!(*rowid, index as i64 + 1);
+            assert_eq!(payload, &row((index as i64 + 1) * 1000));
+        }
+    }
+
+    /// Deleting every row leaves an empty tree, a valid database, and the pages
+    /// the tree held on the freelist rather than owned by nothing.
+    #[test]
+    fn deleting_every_row_returns_its_pages_to_the_freelist() {
+        for size in PAGE_SIZES {
+            let vfs = MemoryVfs::new();
+            let mut pager = create(&vfs, size, VacuumMode::None);
+            pager.begin_write().unwrap();
+            let root = create_table(&mut pager).unwrap();
+            for rowid in 1..=250i64 {
+                insert_row(&mut pager, root, rowid, &row(rowid)).unwrap();
+            }
+            pager.commit().unwrap();
+            let grown = pager.page_count();
+
+            pager.begin_write().unwrap();
+            for rowid in 1..=250i64 {
+                assert!(delete_row(&mut pager, root, rowid).unwrap(), "{size}");
+            }
+            pager.commit().unwrap();
+            check_roots(&mut pager, &[root]);
+            assert!(scan_table(&mut pager, root).is_empty(), "{size}");
+            assert_eq!(
+                pager.page_count(),
+                grown,
+                "{size}: the file should not shrink"
+            );
+            let free = alloc::free_count(&pager);
+            assert_eq!(
+                u64::from(free).saturating_add(2),
+                u64::from(grown),
+                "{size}: every page but page 1 and the root should be free"
+            );
+        }
+    }
+
+    /// Deleting in a scattered order exercises merging rather than the trailing
+    /// collapse an in-order delete produces.
+    #[test]
+    fn deleting_out_of_order_keeps_the_tree_valid() {
+        let vfs = MemoryVfs::new();
+        let mut pager = create(&vfs, 512, VacuumMode::None);
+        pager.begin_write().unwrap();
+        let root = create_table(&mut pager).unwrap();
+        for rowid in 1..=300i64 {
+            insert_row(&mut pager, root, rowid, &row(rowid)).unwrap();
+        }
+        pager.commit().unwrap();
+
+        pager.begin_write().unwrap();
+        let mut remaining: Vec<i64> = (1..=300).collect();
+        for step in 0..300i64 {
+            let rowid = (step * 73) % 300 + 1;
+            if step % 3 == 0 {
+                assert!(delete_row(&mut pager, root, rowid).unwrap());
+                remaining.retain(|value| *value != rowid);
+            }
+        }
+        pager.commit().unwrap();
+        check_roots(&mut pager, &[root]);
+        let rows: Vec<i64> = scan_table(&mut pager, root)
+            .into_iter()
+            .map(|(rowid, _)| rowid)
+            .collect();
+        assert_eq!(rows, remaining);
+    }
+
+    /// A payload on either side of the local threshold round-trips, and its
+    /// overflow pages are freed when the row is deleted.
+    #[test]
+    fn payloads_across_the_overflow_threshold_round_trip() {
+        for size in PAGE_SIZES {
+            let vfs = MemoryVfs::new();
+            let mut pager = create(&vfs, size, VacuumMode::None);
+            let usable = pager.usable_size().unwrap();
+            let max_local = usable.saturating_sub(35) as usize;
+            let lengths = [
+                1usize,
+                max_local.saturating_sub(12),
+                max_local,
+                max_local.saturating_add(1),
+                max_local.saturating_add(usable as usize),
+                max_local.saturating_mul(3),
+            ];
+            pager.begin_write().unwrap();
+            let root = create_table(&mut pager).unwrap();
+            for (index, len) in lengths.iter().copied().enumerate() {
+                insert_row(
+                    &mut pager,
+                    root,
+                    index as i64 + 1,
+                    &blob_row(index as u8, len),
+                )
+                .unwrap();
+            }
+            pager.commit().unwrap();
+            check_roots(&mut pager, &[root]);
+            let rows = scan_table(&mut pager, root);
+            assert_eq!(rows.len(), lengths.len(), "{size}");
+            for (index, len) in lengths.iter().copied().enumerate() {
+                assert_eq!(
+                    rows[index].1,
+                    blob_row(index as u8, len),
+                    "{size} len {len}"
+                );
+            }
+
+            pager.begin_write().unwrap();
+            for index in 0..lengths.len() {
+                assert!(
+                    delete_row(&mut pager, root, index as i64 + 1).unwrap(),
+                    "{size}"
+                );
+            }
+            pager.commit().unwrap();
+            check_roots(&mut pager, &[root]);
+            assert!(scan_table(&mut pager, root).is_empty(), "{size}");
+        }
+    }
+
+    /// An index tree keeps its entries in key order across splits, and a delete
+    /// of an entry that has been promoted to an interior page keeps the rest.
+    #[test]
+    fn index_entries_stay_in_key_order() {
+        for size in PAGE_SIZES {
+            let vfs = MemoryVfs::new();
+            let mut pager = create(&vfs, size, VacuumMode::None);
+            let key = KeyInfo::binary(2);
+            pager.begin_write().unwrap();
+            let root = create_index(&mut pager).unwrap();
+            let mut expected = Vec::new();
+            for step in 0..300i64 {
+                let value = (step * 137) % 300;
+                insert_entry(&mut pager, root, &key, &index_entry(value, value)).unwrap();
+                expected.push(value);
+            }
+            pager.commit().unwrap();
+            let report = check::check_database_with_options(
+                &mut pager,
+                &CheckOptions::roots(vec![root]).with_key(root, key.clone()),
+            )
+            .unwrap();
+            assert!(report.is_ok(), "{size}: {:#?}", report.as_pragma_output());
+            expected.sort_unstable();
+            let entries = scan_index(&mut pager, root, &key);
+            let found: Vec<Vec<u8>> = expected
+                .iter()
+                .map(|value| index_entry(*value, *value))
+                .collect();
+            assert_eq!(entries, found, "{size}");
+        }
+    }
+
+    /// Deleting index entries one at a time, in an order unlike the key order,
+    /// keeps every remaining entry and every structural invariant.
+    #[test]
+    fn index_entries_can_be_deleted_in_any_order() {
+        let vfs = MemoryVfs::new();
+        let mut pager = create(&vfs, 512, VacuumMode::None);
+        let key = KeyInfo::binary(2);
+        pager.begin_write().unwrap();
+        let root = create_index(&mut pager).unwrap();
+        for value in 0..250i64 {
+            insert_entry(&mut pager, root, &key, &index_entry(value, value)).unwrap();
+        }
+        pager.commit().unwrap();
+
+        let mut remaining: Vec<i64> = (0..250).collect();
+        pager.begin_write().unwrap();
+        for step in 0..250i64 {
+            let value = (step * 61) % 250;
+            if step % 2 == 0 {
+                assert!(
+                    delete_entry(&mut pager, root, &key, &index_entry(value, value)).unwrap(),
+                    "{value}"
+                );
+                remaining.retain(|entry| *entry != value);
+            }
+        }
+        pager.commit().unwrap();
+        let report = check::check_database_with_options(
+            &mut pager,
+            &CheckOptions::roots(vec![root]).with_key(root, key.clone()),
+        )
+        .unwrap();
+        assert!(report.is_ok(), "{:#?}", report.as_pragma_output());
+        let entries = scan_index(&mut pager, root, &key);
+        let expected: Vec<Vec<u8>> = remaining
+            .iter()
+            .map(|value| index_entry(*value, *value))
+            .collect();
+        assert_eq!(entries, expected);
+    }
+
+    /// A rolled-back transaction leaves the database exactly as it was, byte
+    /// for byte, including the pages a balance rewrote and the pages it grew.
+    #[test]
+    fn a_rollback_restores_every_byte() {
+        let vfs = MemoryVfs::new();
+        let path = DbPath::new("rollback.db");
+        let mut pager = Pager::create(
+            &vfs,
+            &path,
+            PagerOptions::default(),
+            NewDatabase {
+                page_size: PageSize::new(512).unwrap(),
+                reserved_bytes: 0,
+                text_encoding: TextEncoding::Utf8,
+                vacuum_mode: VacuumMode::None,
+            },
+        )
+        .unwrap();
+        pager.begin_write().unwrap();
+        let root = create_table(&mut pager).unwrap();
+        for rowid in 1..=120i64 {
+            insert_row(&mut pager, root, rowid, &row(rowid)).unwrap();
+        }
+        pager.commit().unwrap();
+        let before = vfs.snapshot(&path).unwrap();
+
+        pager.begin_write().unwrap();
+        for rowid in 121..=400i64 {
+            insert_row(&mut pager, root, rowid, &row(rowid)).unwrap();
+        }
+        for rowid in 1..=60i64 {
+            assert!(delete_row(&mut pager, root, rowid).unwrap());
+        }
+        pager.rollback().unwrap();
+
+        assert_eq!(vfs.snapshot(&path).unwrap(), before);
+        check_roots(&mut pager, &[root]);
+        let rows: Vec<i64> = scan_table(&mut pager, root)
+            .into_iter()
+            .map(|(rowid, _)| rowid)
+            .collect();
+        assert_eq!(rows, (1..=120).collect::<Vec<i64>>());
+    }
+
+    /// A statement rollback restores the tree the statement started with while
+    /// leaving everything the transaction did before it alone.
+    #[test]
+    fn a_statement_rollback_restores_the_pre_statement_tree() {
+        let vfs = MemoryVfs::new();
+        let mut pager = create(&vfs, 512, VacuumMode::None);
+        pager.begin_write().unwrap();
+        let root = create_table(&mut pager).unwrap();
+        for rowid in 1..=100i64 {
+            insert_row(&mut pager, root, rowid, &row(rowid)).unwrap();
+        }
+        let before: Vec<i64> = scan_table(&mut pager, root)
+            .into_iter()
+            .map(|(rowid, _)| rowid)
+            .collect();
+
+        pager.begin_statement().unwrap();
+        for rowid in 101..=300i64 {
+            insert_row(&mut pager, root, rowid, &row(rowid)).unwrap();
+        }
+        pager.rollback_statement().unwrap();
+
+        let after: Vec<i64> = scan_table(&mut pager, root)
+            .into_iter()
+            .map(|(rowid, _)| rowid)
+            .collect();
+        assert_eq!(after, before);
+        pager.commit().unwrap();
+        check_roots(&mut pager, &[root]);
+    }
+
+    /// An auto-vacuum database keeps a pointer-map entry for every page, and
+    /// the integrity check compares each one against the traversal.
+    #[test]
+    fn an_auto_vacuum_database_keeps_its_pointer_maps_correct() {
+        for mode in [VacuumMode::Auto, VacuumMode::Incremental] {
+            let vfs = MemoryVfs::new();
+            let mut pager = create(&vfs, 512, mode);
+            pager.begin_write().unwrap();
+            let root = create_table(&mut pager).unwrap();
+            for rowid in 1..=200i64 {
+                insert_row(&mut pager, root, rowid, &blob_row(7, 900)).unwrap();
+            }
+            pager.commit().unwrap();
+            check_roots(&mut pager, &[root]);
+
+            pager.begin_write().unwrap();
+            for rowid in (1..=200i64).step_by(2) {
+                assert!(delete_row(&mut pager, root, rowid).unwrap());
+            }
+            pager.commit().unwrap();
+            check_roots(&mut pager, &[root]);
+        }
+    }
+
+    /// Dropping a tree returns every page it owned, including the pages of
+    /// every overflow chain.
+    #[test]
+    fn dropping_a_tree_frees_every_page_it_owned() {
+        let vfs = MemoryVfs::new();
+        let mut pager = create(&vfs, 512, VacuumMode::None);
+        pager.begin_write().unwrap();
+        let root = create_table(&mut pager).unwrap();
+        for rowid in 1..=120i64 {
+            insert_row(&mut pager, root, rowid, &blob_row(3, 1500)).unwrap();
+        }
+        pager.commit().unwrap();
+        let grown = pager.page_count();
+
+        pager.begin_write().unwrap();
+        drop_tree(&mut pager, root).unwrap();
+        pager.commit().unwrap();
+
+        pager.begin_read().unwrap();
+        let report = check::integrity_check(&mut pager).unwrap();
+        assert!(report.is_ok(), "{:#?}", report.as_pragma_output());
+        assert_eq!(
+            u64::from(alloc::free_count(&pager)).saturating_add(1),
+            u64::from(grown),
+            "every page but page 1 should be on the freelist"
+        );
+    }
+
+    /// A cursor left on a row survives a write that splits the page under it:
+    /// its recorded versions go stale, it says so, and restoring puts it back
+    /// on the same row.
+    #[test]
+    fn a_cursor_is_restored_across_a_write_that_moves_its_page() {
+        let vfs = MemoryVfs::new();
+        let mut pager = create(&vfs, 512, VacuumMode::None);
+        let limits = Limits::default();
+        pager.begin_write().unwrap();
+        let root = create_table(&mut pager).unwrap();
+        for rowid in 1..=60i64 {
+            insert_row(&mut pager, root, rowid, &row(rowid)).unwrap();
+        }
+        pager.commit().unwrap();
+
+        let mut cursor = crate::cursor::BTreeCursor::table(root);
+        assert!(cursor
+            .seek_rowid(&mut pager, 30, crate::cursor::SeekBias::AtOrAfter)
+            .unwrap());
+        let saved = cursor.save_position(&mut pager, &limits).unwrap();
+        assert_eq!(saved, crate::cursor::SavedPosition::Rowid(30));
+
+        pager.begin_write().unwrap();
+        for rowid in 61..=400i64 {
+            insert_row(&mut pager, root, rowid, &row(rowid)).unwrap();
+        }
+        pager.commit().unwrap();
+
+        assert!(
+            cursor.needs_restore(&pager),
+            "the pages under the cursor were rewritten, so it must know it is stale"
+        );
+        assert!(cursor.restore(&mut pager, &saved, &limits).unwrap());
+        assert_eq!(cursor.rowid().unwrap(), 30);
+        assert!(cursor.next(&mut pager).unwrap());
+        assert_eq!(cursor.rowid().unwrap(), 31);
+    }
+
+    /// A cursor whose row is deleted lands on the next row rather than
+    /// nowhere, which is what an interrupted scan needs.
+    #[test]
+    fn a_cursor_whose_row_was_deleted_lands_on_the_next_one() {
+        let vfs = MemoryVfs::new();
+        let mut pager = create(&vfs, 512, VacuumMode::None);
+        let limits = Limits::default();
+        pager.begin_write().unwrap();
+        let root = create_table(&mut pager).unwrap();
+        for rowid in 1..=200i64 {
+            insert_row(&mut pager, root, rowid, &row(rowid)).unwrap();
+        }
+        pager.commit().unwrap();
+
+        let mut cursor = crate::cursor::BTreeCursor::table(root);
+        assert!(cursor
+            .seek_rowid(&mut pager, 100, crate::cursor::SeekBias::AtOrAfter)
+            .unwrap());
+        let saved = cursor.save_position(&mut pager, &limits).unwrap();
+
+        pager.begin_write().unwrap();
+        assert!(delete_row(&mut pager, root, 100).unwrap());
+        pager.commit().unwrap();
+
+        assert!(!cursor.restore(&mut pager, &saved, &limits).unwrap());
+        assert_eq!(cursor.rowid().unwrap(), 101);
+    }
+
+    /// The partitioner never produces a page that does not fit, and never loses
+    /// or duplicates an entry.
+    #[test]
+    fn partitioning_conserves_every_entry() {
+        for capacity in [64usize, 200, 1000] {
+            for count in [1usize, 2, 5, 17, 64] {
+                let entries: Vec<Entry> = (0..count)
+                    .map(|index| Entry {
+                        body: vec![index as u8; 4 + (index % 11)],
+                        child: None,
+                        rowid: Some(index as i64),
+                    })
+                    .collect();
+                for promote in [false, true] {
+                    let ranges = partition(&entries, PageKind::LeafTable, capacity, promote);
+                    let Ok(ranges) = ranges else { continue };
+                    let mut seen = Vec::new();
+                    for (index, (start, end)) in ranges.iter().enumerate() {
+                        assert!(start <= end);
+                        let mut used = 0usize;
+                        for entry in entries.get(*start..*end).unwrap() {
+                            let cell = encode_entry(entry, PageKind::LeafTable).unwrap();
+                            used += edit::cell_footprint(cell.len()) + 2;
+                            seen.push(entry.rowid);
+                        }
+                        assert!(used <= capacity, "page {index} of {ranges:?} overflows");
+                        if promote && index + 1 < ranges.len() {
+                            seen.push(entries.get(*end).unwrap().rowid);
+                        }
+                    }
+                    let expected: Vec<Option<i64>> =
+                        (0..count).map(|index| Some(index as i64)).collect();
+                    assert_eq!(seen, expected, "capacity {capacity} count {count}");
+                }
+            }
+        }
+    }
+}

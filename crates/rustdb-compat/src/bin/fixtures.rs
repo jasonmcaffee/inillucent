@@ -45,7 +45,17 @@ fn pinned_shell(root: &Path) -> Result<PathBuf, String> {
         }
     }
     let directory = root.join(".sqlite-ref/3.53.4/shell");
-    for name in ["sqlite3.exe", "sqlite3"] {
+    // The name to try first is the one this platform runs. Both are on disk
+    // when the workspace is shared between Windows and WSL, and a Linux process
+    // that picks the `.exe` gets a *Windows* SQLite through binfmt interop -
+    // which then cannot open a Linux path, and says "unable to open database"
+    // for a reason that has nothing to do with the database.
+    let names: [&str; 2] = if cfg!(windows) {
+        ["sqlite3.exe", "sqlite3"]
+    } else {
+        ["sqlite3", "sqlite3.exe"]
+    };
+    for name in names {
         let path = directory.join(name);
         if path.is_file() {
             return Ok(path);
