@@ -435,3 +435,57 @@ fn date_and_time_functions_match_the_oracle() {
         ],
     );
 }
+
+/// The core scalar built-ins, with `printf` the substantial one.
+///
+/// `random()`, `randomblob()` and `sqlite_source_id()` are deliberately absent:
+/// two engines cannot agree on a random number, and the source id names the
+/// build rather than the behaviour. Their shape is covered by unit tests.
+#[test]
+fn core_functions_match_the_oracle() {
+    grade(
+        "core",
+        &[
+            "SELECT printf('%d', 42), printf('%d', -42), printf('%i', 7), printf('%u', 3)",
+            "SELECT printf('%5d|', 42), printf('%-5d|', 42), printf('%05d', 42), printf('%05d', -42)",
+            "SELECT printf('%+d %+d % d', 42, -42, 42)",
+            "SELECT printf('%.3d', 7), printf('%8.3d|', 7)",
+            "SELECT printf('%x %X %o', 255, 255, 8)",
+            "SELECT printf('%#x %#X %#o', 255, 255, 8)",
+            "SELECT printf('%f', 3.5), printf('%.2f', 3.14159), printf('%.0f', 2.5)",
+            "SELECT printf('%10.2f|', 3.14159), printf('%-10.2f|', 3.14159)",
+            "SELECT printf('%e', 1234.5), printf('%E', 1234.5), printf('%.2e', 1234.5)",
+            "SELECT printf('%g', 1234.5), printf('%g', 0.00001234), printf('%G', 1e20)",
+            "SELECT printf('%s|%s', 'ab', 'cd'), printf('%10s|', 'ab'), printf('%-10s|', 'ab')",
+            "SELECT printf('%.2s', 'abcdef')",
+            "SELECT printf('%c%c', 65, 66)",
+            "SELECT printf('%q', 'it''s'), printf('%Q', 'it''s'), printf('%Q', NULL), printf('%q', NULL)",
+            "SELECT printf('%w', 'a\"b')",
+            "SELECT printf('%%'), printf('a%%b'), printf('100%%')",
+            "SELECT printf('%*d|', 5, 42), printf('%-*d|', 5, 42), printf('%.*f', 2, 3.14159)",
+            "SELECT printf('%d-%d', 1), printf('%s!')",
+            "SELECT printf('%s', 5), printf('%s', 5.5), printf('%d', '42'), printf('%d', 'abc')",
+            "SELECT printf(NULL, 1), printf('no conversions')",
+            "SELECT format('%d apples', 3)",
+            "SELECT octet_length('abc'), octet_length(x'00ff'), octet_length(123), octet_length(NULL)",
+            "SELECT length('abc'), length(x'00ff'), length(12345), length(NULL)",
+            "SELECT hex('abc'), hex(x'00ff'), quote('it''s'), quote(NULL), quote(1.5)",
+            "SELECT substr('abcdef', 2), substr('abcdef', 2, 3), substr('abcdef', -2), substr('abcdef', -2, 1)",
+            "SELECT instr('abcdef', 'cd'), instr('abcdef', 'z'), instr(NULL, 'a')",
+            "SELECT replace('abcabc', 'b', 'X'), replace('abc', '', 'X'), replace(NULL, 'a', 'b')",
+            "SELECT trim('  ab  '), ltrim('xxabxx', 'x'), rtrim('xxabxx', 'x')",
+            "SELECT upper('aBc'), lower('aBc'), unicode('A'), char(65, 66)",
+            "SELECT iif(1, 'y', 'n'), iif(0, 'y', 'n'), iif(NULL, 'y', 'n')",
+            "SELECT coalesce(NULL, NULL, 3), ifnull(NULL, 2), nullif(1, 1), nullif(1, 2)",
+            "SELECT typeof(1), typeof(1.5), typeof('x'), typeof(x'00'), typeof(NULL)",
+            "SELECT zeroblob(3), hex(zeroblob(3)), unhex('414243')",
+            "SELECT concat('a', 1, NULL, 'b'), concat_ws('-', 'a', NULL, 'b')",
+            "SELECT sign(-3), sign(0), sign(3.5), sign('x')",
+            "SELECT likelihood(1, 0.5), likely(1), unlikely(1)",
+            // `soundex` is not in the pinned build - it needs
+            // `SQLITE_SOUNDEX` - so parity means refusing it rather than
+            // implementing it.
+            "SELECT soundex('Robert')",
+        ],
+    );
+}

@@ -106,7 +106,11 @@ pub struct Machine {
     /// the same promise, and a clock read per call would make
     /// `SELECT date('now') = date('now')` occasionally false.
     now: f64,
+    /// The state the random built-ins draw from.
+    entropy: u64,
     changes: i64,
+    /// How many rows every statement on this connection has changed.
+    total_changes: i64,
     last_insert_rowid: i64,
     conflict: Option<i32>,
     record_changes: bool,
@@ -145,7 +149,9 @@ impl Machine {
             file_format: 4,
             steps: 0,
             now: crate::datetime::julian_now(),
+            entropy: crate::datetime::julian_now().to_bits(),
             changes: 0,
+            total_changes: 0,
             last_insert_rowid: 0,
             conflict: None,
             record_changes: false,
@@ -177,6 +183,17 @@ impl Machine {
     /// session falls back to aborting the statement.
     pub fn conflict_action(&self) -> Option<i32> {
         self.conflict
+    }
+
+    /// Tells the machine what the connection's counters hold.
+    ///
+    /// `changes()` and `total_changes()` report the *connection's* history
+    /// rather than this statement's, so the numbers come from outside and are
+    /// set before the statement runs.
+    pub fn set_counters(&mut self, changes: i64, total_changes: i64, last_insert_rowid: i64) {
+        self.changes = changes;
+        self.total_changes = total_changes;
+        self.last_insert_rowid = last_insert_rowid;
     }
 
     /// Returns how many rows the program has changed so far.
@@ -490,7 +507,16 @@ impl Machine {
                     return Err(error::misuse("Function without a function"));
                 };
                 let arguments = self.block(instruction.p1, instruction.p2);
-                let value = builtin::call(func, &arguments, collation, self.encoding);
+                // Each call draws a fresh seed, so `random()` twice in one
+                // statement gives two values rather than one repeated.
+                self.entropy = self.entropy.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                let context = builtin::Context {
+                    changes: self.changes,
+                    total_changes: self.total_changes,
+                    last_insert_rowid: self.last_insert_rowid,
+                    seed: self.entropy,
+                };
+                let value = builtin::call_with(func, &arguments, collation, self.encoding, context);
                 self.store(instruction.p3, value);
                 Ok(Flow::Next)
             }
