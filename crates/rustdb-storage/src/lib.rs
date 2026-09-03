@@ -24,6 +24,7 @@
 //! - [`overflow`] - reading a payload that did not fit on its page;
 //! - [`cursor`] - seeks and scans over a table or an index;
 //! - [`journal`] - the hook that makes a commit crash-atomic;
+//! - [`wal`] - the hook that makes a page readable from a log instead;
 //! - [`schema`] - reading `sqlite_schema` for root pages;
 //! - [`check`] - the raw quick and integrity checks.
 
@@ -59,6 +60,7 @@ pub mod pager;
 pub mod ptrmap;
 pub mod schema;
 pub mod vacuum;
+pub mod wal;
 
 pub use btree::{BTreePage, CellRef, PageKind, PageLayout};
 pub use cache::{CacheCounters, PageCache, PageKey, PagePin, PageVersion};
@@ -69,6 +71,7 @@ pub use header::{DatabaseHeader, VacuumMode};
 pub use journal::{Journal, JournalStats};
 pub use pager::{NewDatabase, Pager, PagerCounters, PagerOptions, PagerState};
 pub use schema::{SchemaKind, SchemaObject};
+pub use wal::{CheckpointMode, CheckpointOutcome, WalSnapshot, WalStats, WriteAheadLog};
 
 /// The implementation phase that filled this crate in, as named by the TDD.
 pub const IMPLEMENTATION_PHASE: &str = "phase 3: read-only header, pager, page cache, and B-tree";

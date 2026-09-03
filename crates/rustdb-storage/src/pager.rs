@@ -35,6 +35,7 @@ use crate::btree::PageKind;
 use crate::cache::{CacheCounters, PageCache, PageKey, PagePin, PageState};
 use crate::header::{DatabaseHeader, VacuumMode, HEADER_SIZE};
 use crate::journal::{Journal, JournalStats};
+use crate::wal::{CheckpointMode, CheckpointOutcome, WalSnapshot, WalStats, WriteAheadLog};
 
 /// What the pager is doing.
 ///
@@ -205,6 +206,14 @@ pub struct Pager {
     journalled: BTreeSet<u32>,
     wrote_database: bool,
     journal_totals: JournalStats,
+    wal: Option<Box<dyn WriteAheadLog>>,
+    /// The snapshot the open read transaction is pinned to, in WAL mode.
+    ///
+    /// It is kept after the read transaction ends so that the next one can ask
+    /// whether anything changed. A cache full of pages from a snapshot that
+    /// has moved on is the one way WAL mode can serve a stale page, and
+    /// comparing two snapshots is how that is caught.
+    wal_snapshot: Option<WalSnapshot>,
 }
 
 /// One level of undo: everything needed to put the database back the way it
@@ -289,6 +298,8 @@ impl Pager {
             journalled: BTreeSet::new(),
             wrote_database: false,
             journal_totals: JournalStats::default(),
+            wal: None,
+            wal_snapshot: None,
         })
     }
 
@@ -400,6 +411,9 @@ impl Pager {
                 self.state
             )));
         }
+        if self.wal.is_some() {
+            return self.begin_wal_read();
+        }
         if let Err(error) = self.file.lock(FileLock::Shared) {
             // A busy file is not a corrupt one, so the pager stays usable and
             // the caller may retry; only an I/O failure is sticky.
@@ -424,13 +438,17 @@ impl Pager {
     /// holds it is the file handle.
     pub fn end_read(&mut self) -> DbResult<()> {
         self.cache.release_unpinned();
+        let ended = match self.wal.as_mut() {
+            Some(wal) => wal.end_read(),
+            None => Ok(()),
+        };
         if self.file.lock_level() != FileLock::None {
             self.file.unlock(FileLock::None)?;
         }
         if self.state == PagerState::Reader {
             self.state = PagerState::Open;
         }
-        Ok(())
+        ended
     }
 
     /// Returns the lock level the pager currently holds.
@@ -462,6 +480,12 @@ impl Pager {
             return Ok(pin);
         }
         self.cache.record_miss();
+        if self.wal.is_some() {
+            return match self.read_page_through_wal(key, page) {
+                Ok(pin) => Ok(pin),
+                Err(error) => Err(self.fail(error)),
+            };
+        }
         let pin = match self.read_page(key, page) {
             Ok(pin) => pin,
             Err(error) => return Err(self.fail(error)),
@@ -538,12 +562,20 @@ impl Pager {
 
     /// Closes the pager, releasing its lock and its unpinned pages.
     pub fn close(&mut self) -> DbResult<()> {
+        let closed = match self.wal.take() {
+            Some(mut wal) => {
+                let outcome = wal.close(self.file.as_ref());
+                self.wal = Some(wal);
+                outcome
+            }
+            None => Ok(()),
+        };
         if self.file.lock_level() != FileLock::None {
             let _ = self.file.unlock(FileLock::None);
         }
         self.cache.release_unpinned();
         self.state = PagerState::Closed;
-        Ok(())
+        closed
     }
 }
 
@@ -737,12 +769,22 @@ impl Pager {
                 self.state
             )));
         }
-        if let Err(error) = self.file.lock(FileLock::Reserved) {
-            let error = error.into_db_error();
-            if error.code() == rustdb_base::PrimaryCode::Busy {
-                return Err(error);
+        match self.wal.as_mut() {
+            // A log has no RESERVED lock to take. What it has instead is one
+            // write slot and a check that the snapshot this connection read is
+            // still the newest, which is the same exclusion arriving as a
+            // different answer: BUSY when somebody else is writing, and
+            // BUSY_SNAPSHOT when somebody else already has.
+            Some(wal) => wal.begin_write()?,
+            None => {
+                if let Err(error) = self.file.lock(FileLock::Reserved) {
+                    let error = error.into_db_error();
+                    if error.code() == rustdb_base::PrimaryCode::Busy {
+                        return Err(error);
+                    }
+                    return Err(self.fail(error));
+                }
             }
-            return Err(self.fail(error));
         }
         self.dirty.clear();
         self.undo.clear();
@@ -987,6 +1029,9 @@ impl Pager {
     pub fn commit(&mut self) -> DbResult<()> {
         self.check_usable()?;
         self.require_writer()?;
+        if self.wal.is_some() {
+            return self.commit_to_wal();
+        }
         if self.dirty.is_empty() && self.journalled.is_empty() {
             if let Some(journal) = self.journal.as_mut() {
                 let outcome = journal.discard();
@@ -1084,6 +1129,9 @@ impl Pager {
     pub fn rollback(&mut self) -> DbResult<()> {
         if !self.is_writing() && self.undo.is_empty() {
             return Ok(());
+        }
+        if self.wal.is_some() {
+            return self.rollback_from_wal();
         }
         if self.wrote_database {
             return self.rollback_from_journal();
@@ -1442,6 +1490,325 @@ impl Pager {
         self.counters.pages_freed = self.counters.pages_freed.saturating_add(1);
     }
 
+    /// Attaches a write-ahead log, which changes how pages are read as well
+    /// as how they are written.
+    ///
+    /// A pager in WAL mode takes no RESERVED or EXCLUSIVE lock on the database
+    /// file and never writes a page into it outside a checkpoint. That is why
+    /// the mode exists: the file a reader is reading is not the file the
+    /// writer is writing, so neither has to wait for the other.
+    pub fn attach_wal(&mut self, wal: Box<dyn WriteAheadLog>) {
+        self.wal = Some(wal);
+    }
+
+    /// Detaches the log, which is how a mode change gets it back to close it.
+    pub fn detach_wal(&mut self) -> Option<Box<dyn WriteAheadLog>> {
+        self.wal_snapshot = None;
+        self.wal.take()
+    }
+
+    /// Closes and removes the log, leaving the database in rollback mode.
+    ///
+    /// The log is closed before it is dropped so that the frames in it reach
+    /// the database file. A log that was merely forgotten would leave a
+    /// database whose pages are correct only when read through a log nobody is
+    /// going to open.
+    pub fn close_wal(&mut self) -> DbResult<()> {
+        let Some(mut wal) = self.wal.take() else {
+            return Ok(());
+        };
+        self.wal_snapshot = None;
+        self.cache.discard_above(self.database, 0);
+        let outcome = wal.close(self.file.as_ref());
+        self.file_bytes = self.file.file_size()?;
+        outcome
+    }
+
+    /// Reports whether a log is attached.
+    pub fn has_wal(&self) -> bool {
+        self.wal.is_some()
+    }
+
+    /// Returns what the log has cost since the pager was opened.
+    pub fn wal_stats(&self) -> WalStats {
+        self.wal
+            .as_ref()
+            .map_or(WalStats::default(), |wal| wal.stats())
+    }
+
+    /// Returns the snapshot the connection is reading, when there is one.
+    pub fn wal_snapshot(&self) -> Option<WalSnapshot> {
+        self.wal_snapshot
+    }
+
+    /// Returns how many frames the log may reach before a commit checkpoints
+    /// it, or zero when it never does.
+    pub fn wal_auto_checkpoint(&self) -> u32 {
+        self.wal.as_ref().map_or(0, |wal| wal.auto_checkpoint())
+    }
+
+    /// Sets how many frames the log may reach before a commit checkpoints it.
+    pub fn set_wal_auto_checkpoint(&mut self, frames: u32) {
+        if let Some(wal) = self.wal.as_mut() {
+            wal.set_auto_checkpoint(frames);
+        }
+    }
+
+    /// Returns how many frames the log currently holds.
+    pub fn wal_frame_count(&self) -> u32 {
+        self.wal.as_ref().map_or(0, |wal| wal.frame_count())
+    }
+
+    /// Copies frames from the log into the database file.
+    ///
+    /// The log is taken out for the duration so that it and the database file
+    /// are visibly two different things; a checkpoint writes one from the
+    /// other, and holding both through one borrow would say they were the
+    /// same.
+    pub fn checkpoint(&mut self, mode: CheckpointMode) -> DbResult<CheckpointOutcome> {
+        let Some(mut wal) = self.wal.take() else {
+            return Err(misuse(
+                "a checkpoint was asked for on a database with no write-ahead log",
+            ));
+        };
+        let outcome = wal.checkpoint(mode, self.file.as_ref());
+        self.wal = Some(wal);
+        let outcome = outcome?;
+        self.file_bytes = self.file.file_size()?;
+        Ok(outcome)
+    }
+
+    /// Takes a snapshot of the log and enters the reader state.
+    ///
+    /// The cache is emptied when the snapshot moved, because a frame in it was
+    /// read against the old one. Keeping the pages and checking them one at a
+    /// time would be cheaper and is what a later phase can do; getting it
+    /// wrong serves a page from a database state that no longer exists, which
+    /// is the one failure a snapshot exists to prevent.
+    fn begin_wal_read(&mut self) -> DbResult<()> {
+        let Some(wal) = self.wal.as_mut() else {
+            return Err(misuse("a WAL read was begun with no log attached"));
+        };
+        let snapshot = match wal.begin_read() {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                if error.code() == rustdb_base::PrimaryCode::Busy {
+                    return Err(error);
+                }
+                return Err(self.fail(error));
+            }
+        };
+        if self.wal_snapshot != Some(snapshot) {
+            self.cache.discard_above(self.database, 0);
+        }
+        self.wal_snapshot = Some(snapshot);
+        self.state = PagerState::Reader;
+        self.file_bytes = self.file.file_size()?;
+        if snapshot.is_database_only() {
+            let reloaded = self.reload_header();
+            if let Err(error) = reloaded {
+                return Err(self.fail(error));
+            }
+        } else {
+            self.page_count = snapshot.page_count;
+            if let Err(error) = self.reload_header_from_snapshot() {
+                return Err(self.fail(error));
+            }
+        }
+        Ok(())
+    }
+
+    /// Re-reads the header from page one as the snapshot sees it.
+    ///
+    /// Page one is a page like any other and may be in the log, so the header
+    /// a reader works from has to come through the same lookup as everything
+    /// else. Reading it from the file's first hundred bytes would describe the
+    /// last checkpoint rather than the snapshot.
+    fn reload_header_from_snapshot(&mut self) -> DbResult<()> {
+        let page_one = PageId::from_persisted(1)?;
+        let pin = self.get_page(page_one)?;
+        let header = DatabaseHeader::decode(bytes::window(pin.bytes(), 0, HEADER_SIZE)?)?;
+        drop(pin);
+        self.header = header;
+        Ok(())
+    }
+
+    /// Reads a page from the log when the snapshot has a frame for it, and
+    /// from the database file when it does not.
+    fn read_page_through_wal(&mut self, key: PageKey, page: PageId) -> DbResult<PagePin> {
+        let Some(wal) = self.wal.as_mut() else {
+            return Err(misuse("a WAL read was attempted with no log attached"));
+        };
+        let frame = wal.frame_for(page.get())?;
+        let Some(frame) = frame else {
+            return self.read_page_beneath_wal(key, page);
+        };
+        let mut buffer = PageBuffer::zeroed(self.header.page_size)?;
+        let Some(wal) = self.wal.as_mut() else {
+            return Err(misuse("a WAL read was attempted with no log attached"));
+        };
+        wal.read_frame(frame, buffer.as_mut_slice())?;
+        self.counters.page_reads = self.counters.page_reads.saturating_add(1);
+        self.counters.bytes_read = self
+            .counters
+            .bytes_read
+            .saturating_add(u64::from(self.header.page_size.bytes()));
+        self.cache.insert(key, buffer)
+    }
+
+    /// Reads a page the log does not hold out of the database file.
+    ///
+    /// A page inside the snapshot that the file is too short for reads as
+    /// zeroes rather than as corruption. In WAL mode the log's last commit is
+    /// what says how many pages the database has, and a transaction that grew
+    /// it without writing every new page is an ordinary thing for the
+    /// allocator to do.
+    fn read_page_beneath_wal(&mut self, key: PageKey, page: PageId) -> DbResult<PagePin> {
+        let size = self.header.page_size;
+        let mut buffer = PageBuffer::zeroed(size)?;
+        let offset = page::page_offset(size, page)?;
+        let end = offset.saturating_add(u64::from(size.bytes()));
+        if end > self.file_bytes {
+            return self.cache.insert(key, buffer);
+        }
+        self.file.read_exact_at(offset, buffer.as_mut_slice())?;
+        self.counters.page_reads = self.counters.page_reads.saturating_add(1);
+        self.counters.bytes_read = self
+            .counters
+            .bytes_read
+            .saturating_add(u64::from(size.bytes()));
+        self.cache.insert(key, buffer)
+    }
+
+    /// Commits by appending the transaction's pages to the log.
+    ///
+    /// There is no lock ladder and no database write here. The frames are
+    /// appended, made durable if the durability level asks for it, and then
+    /// published in one write of the log index header - and that publication
+    /// is the commit point. A crash before it leaves frames that no reader can
+    /// reach and that the next writer overwrites; a crash after it leaves a
+    /// transaction every reader can see.
+    fn commit_to_wal(&mut self) -> DbResult<()> {
+        if self.dirty.is_empty() {
+            return self.finish_wal_transaction();
+        }
+        self.reach_failpoint(FailSite::Commit)?;
+        let mut header = self.header;
+        header.change_counter = header.change_counter.wrapping_add(1);
+        header.database_size = self.page_count;
+        header.version_valid_for = header.change_counter;
+        header.write_library_version = WRITE_LIBRARY_VERSION;
+        self.set_header(header)?;
+        let pages: Vec<u32> = self.dirty.iter().copied().collect();
+        let Some(last) = pages.last().copied() else {
+            return self.finish_wal_transaction();
+        };
+        let Some(mut wal) = self.wal.take() else {
+            return Err(misuse("a WAL commit was attempted with no log attached"));
+        };
+        let outcome = self.append_and_publish(wal.as_mut(), &pages, last);
+        self.wal = Some(wal);
+        if let Err(error) = outcome {
+            return Err(self.fail(error));
+        }
+        for page in pages {
+            if let Ok(page_id) = PageId::from_persisted(page) {
+                self.cache.mark_clean(PageKey {
+                    database: self.database,
+                    page: page_id,
+                });
+            }
+        }
+        self.counters.commits = self.counters.commits.saturating_add(1);
+        self.finish_wal_transaction()
+    }
+
+    /// Appends every page of the transaction and publishes the commit.
+    fn append_and_publish(
+        &mut self,
+        wal: &mut dyn WriteAheadLog,
+        pages: &[u32],
+        last: u32,
+    ) -> DbResult<()> {
+        for page in pages.iter().copied() {
+            let image = self.page_image(page)?;
+            let commit = if page == last { self.page_count } else { 0 };
+            wal.append(page, &image, commit)?;
+        }
+        wal.publish_commit(self.page_count)?;
+        Ok(())
+    }
+
+    /// Returns a copy of a page's current bytes, for the log to hold.
+    fn page_image(&self, page: u32) -> DbResult<Vec<u8>> {
+        let page_id = PageId::from_persisted(page)?;
+        let key = PageKey {
+            database: self.database,
+            page: page_id,
+        };
+        let Some(pin) = self.cache.get(key) else {
+            return Err(misuse(format!(
+                "page {page} is dirty but is not resident, so its change was lost"
+            )));
+        };
+        Ok(pin.bytes().to_vec())
+    }
+
+    /// Undoes a transaction that never reached the log's published header.
+    ///
+    /// Nothing on disk has to be repaired: the frames the transaction appended
+    /// were never published, so no reader could see them and the next writer
+    /// overwrites them. What has to be undone is the index, which is shared,
+    /// and the pages in this connection's own cache.
+    fn rollback_from_wal(&mut self) -> DbResult<()> {
+        while let Some(frame) = self.undo.pop() {
+            self.restore(frame)?;
+        }
+        self.dirty.clear();
+        if let Some(wal) = self.wal.as_mut() {
+            wal.undo()?;
+        }
+        self.counters.rollbacks = self.counters.rollbacks.saturating_add(1);
+        self.clear_recoverable_error();
+        self.finish_wal_transaction()
+    }
+
+    /// Releases the log's write slot and returns to the reader state.
+    ///
+    /// The automatic checkpoint runs after the write slot is released, not
+    /// before: a checkpoint is a long operation and holding the one thing
+    /// every other writer needs while it runs would turn WAL mode's single
+    /// writer into a queue behind the slowest connection.
+    fn finish_wal_transaction(&mut self) -> DbResult<()> {
+        self.dirty.clear();
+        self.undo.clear();
+        self.freed.clear();
+        self.journalled.clear();
+        self.wrote_database = false;
+        if self.is_writing() {
+            self.state = PagerState::Reader;
+        }
+        let released = match self.wal.as_mut() {
+            Some(wal) => wal.end_write(),
+            None => Ok(()),
+        };
+        released?;
+        self.run_automatic_checkpoint()
+    }
+
+    /// Checkpoints when the log has grown past the configured threshold.
+    fn run_automatic_checkpoint(&mut self) -> DbResult<()> {
+        let threshold = self.wal.as_ref().map_or(0, |wal| wal.auto_checkpoint());
+        let frames = self.wal.as_ref().map_or(0, |wal| wal.frame_count());
+        if threshold == 0 || frames < threshold {
+            return Ok(());
+        }
+        // A checkpoint that cannot run is not a failure: it means a reader is
+        // using the frames, and the next commit will try again.
+        let _ = self.checkpoint(CheckpointMode::Passive)?;
+        Ok(())
+    }
+
     /// Returns an error unless a write transaction is open.
     fn require_writer(&self) -> DbResult<()> {
         if self.read_only {
@@ -1465,6 +1832,9 @@ impl Drop for Pager {
     /// for the reason `end_read` records: a pager that has failed is still a
     /// pager that holds a lock.
     fn drop(&mut self) {
+        if let Some(mut wal) = self.wal.take() {
+            let _ = wal.close(self.file.as_ref());
+        }
         if self.file.lock_level() != FileLock::None {
             let _ = self.file.unlock(FileLock::None);
         }

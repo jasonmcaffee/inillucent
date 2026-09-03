@@ -58,6 +58,15 @@ pub enum JournalMode {
     /// Write no journal at all. A crash mid-commit leaves a database that
     /// cannot be repaired.
     Off,
+    /// Write changes to a log beside the database instead of undo images
+    /// inside it.
+    ///
+    /// It is a journal mode in name and in the PRAGMA, and almost nothing else:
+    /// there is no rollback journal, the commit point is a write to a shared
+    /// memory header rather than to a file, and readers do not exclude the
+    /// writer. It is listed here because that is where SQLite puts it and
+    /// because a connection has exactly one of these at a time.
+    Wal,
 }
 
 impl JournalMode {
@@ -69,6 +78,7 @@ impl JournalMode {
             "persist" => Some(JournalMode::Persist),
             "memory" => Some(JournalMode::Memory),
             "off" | "none" => Some(JournalMode::Off),
+            "wal" => Some(JournalMode::Wal),
             _ => None,
         }
     }
@@ -81,6 +91,7 @@ impl JournalMode {
             JournalMode::Persist => "persist",
             JournalMode::Memory => "memory",
             JournalMode::Off => "off",
+            JournalMode::Wal => "wal",
         }
     }
 
@@ -92,13 +103,18 @@ impl JournalMode {
     pub fn is_crash_safe(self) -> bool {
         matches!(
             self,
-            JournalMode::Delete | JournalMode::Truncate | JournalMode::Persist
+            JournalMode::Delete | JournalMode::Truncate | JournalMode::Persist | JournalMode::Wal
         )
     }
 
     /// Reports whether the mode keeps its records on disk.
     pub fn writes_a_file(self) -> bool {
         self.is_crash_safe()
+    }
+
+    /// Reports whether the mode is the write-ahead log rather than a journal.
+    pub fn is_wal(self) -> bool {
+        self == JournalMode::Wal
     }
 }
 
@@ -306,7 +322,7 @@ impl RollbackJournal {
         self.vfs.randomness(&mut seed)?;
         self.checksum_seed = u32::from_be_bytes(seed);
         match self.options.mode {
-            JournalMode::Off => {
+            JournalMode::Off | JournalMode::Wal => {
                 self.medium = Medium::None;
                 self.header_written = true;
                 return Ok(());
@@ -371,7 +387,7 @@ impl RollbackJournal {
         let mode = self.options.mode;
         let synchronous = self.options.synchronous;
         match mode {
-            JournalMode::Off | JournalMode::Memory => {}
+            JournalMode::Off | JournalMode::Memory | JournalMode::Wal => {}
             JournalMode::Truncate => {
                 if let Medium::File(file) = &self.medium {
                     file.truncate(0)?;
@@ -449,7 +465,7 @@ impl Journal for RollbackJournal {
 
     /// Appends a page's pre-transaction image, once.
     fn record(&mut self, page: u32, image: &[u8]) -> DbResult<()> {
-        if self.options.mode == JournalMode::Off {
+        if matches!(self.options.mode, JournalMode::Off | JournalMode::Wal) {
             return Ok(());
         }
         if self.records.contains(&page) {
@@ -1107,6 +1123,7 @@ mod tests {
             JournalMode::Persist,
             JournalMode::Memory,
             JournalMode::Off,
+            JournalMode::Wal,
         ] {
             assert_eq!(JournalMode::parse(mode.as_str()), Some(mode));
         }
@@ -1115,5 +1132,8 @@ mod tests {
         assert!(JournalMode::Persist.is_crash_safe());
         assert!(!JournalMode::Memory.is_crash_safe());
         assert!(!JournalMode::Off.is_crash_safe());
+        assert!(JournalMode::Wal.is_crash_safe());
+        assert!(JournalMode::Wal.is_wal());
+        assert!(!JournalMode::Delete.is_wal());
     }
 }

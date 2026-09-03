@@ -22,6 +22,7 @@ use rustdb_vfs::{AccessMode, DbPath, FileKind, FileLock, OpenOptions, Vfs};
 use crate::journal::{
     decode_journal, recover_hot_journal, JournalMode, JournalOptions, RollbackJournal, Synchronous,
 };
+use crate::wal::{Wal, WalOptions};
 
 /// How a database file is opened by the transaction layer.
 #[derive(Clone, Copy, Debug)]
@@ -87,12 +88,47 @@ pub fn open_database(
     } else {
         Pager::open_read_write(vfs.as_ref(), path, options.pager)?
     };
-    if options.writable {
+    // A file whose format versions say WAL is opened in WAL mode whatever the
+    // connection asked for. The alternative - honouring the request - would
+    // have this connection writing undo images into a database another
+    // connection is appending frames for, which is not a mode, it is a race.
+    let wal = options.journal.mode.is_wal() || pager.header().is_wal();
+    if wal {
+        attach_wal(&mut pager, &vfs, path, options)?;
+    } else if options.writable {
         let mut journal = RollbackJournal::new(Arc::clone(&vfs), path, options.journal);
         journal.set_sector_size(sector_size_of(vfs.as_ref(), path));
         pager.attach_journal(Box::new(journal));
     }
     Ok(pager)
+}
+
+/// Opens the write-ahead log beside a database and attaches it to the pager.
+///
+/// The log takes its own handle on the database file, for the shared memory
+/// rather than for the pages: the shared-memory file is keyed by the identity
+/// of the database it belongs to, so a second handle finds the same one, and
+/// the pager keeps its handle to itself.
+pub fn attach_wal(
+    pager: &mut Pager,
+    vfs: &Arc<dyn Vfs>,
+    path: &DbPath,
+    options: DatabaseOptions,
+) -> DbResult<()> {
+    let file = vfs.open(path, OpenOptions::of_kind(FileKind::MainDb))?;
+    let wal = Wal::open(
+        Arc::clone(vfs),
+        path,
+        file.as_ref(),
+        pager.page_size(),
+        WalOptions {
+            synchronous: options.journal.synchronous,
+            auto_checkpoint: WalOptions::default().auto_checkpoint,
+            writable: options.writable,
+        },
+    )?;
+    pager.attach_wal(Box::new(wal));
+    Ok(())
 }
 
 /// Creates a database file and opens it the same way.

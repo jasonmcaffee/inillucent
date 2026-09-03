@@ -26,6 +26,7 @@ use rustdb_base::{error, DbResult};
 use rustdb_catalog::load_database_catalog;
 use rustdb_catalog::snapshot::CatalogSnapshot;
 use rustdb_storage::pager::{Pager, PagerOptions};
+use rustdb_storage::wal::{CheckpointMode, CheckpointOutcome};
 use rustdb_transaction::journal::{JournalMode, JournalOptions, Synchronous};
 use rustdb_transaction::recovery::{open_database, DatabaseOptions};
 use rustdb_transaction::state::{
@@ -241,12 +242,20 @@ impl Connection {
             },
         )?;
         let catalog = load_catalog(&mut pager, &options.main_name, 0, options.busy_timeout)?;
+        let journal = JournalOptions {
+            mode: if pager.has_wal() {
+                JournalMode::Wal
+            } else {
+                options.journal.mode
+            },
+            synchronous: options.journal.synchronous,
+        };
         Ok(Connection {
             state: RefCell::new(ConnectionState {
                 pager,
                 active: 0,
                 transaction: Transaction::new(),
-                journal: options.journal,
+                journal,
             }),
             catalog: RefCell::new(Arc::new(catalog)),
             interrupt: Arc::new(AtomicBool::new(false)),
@@ -658,19 +667,88 @@ impl Connection {
                 "cannot change the journal mode inside a transaction",
             ));
         }
-        state.journal = JournalOptions {
+        let current = state.journal.mode;
+        if mode == current {
+            return Ok(mode);
+        }
+        let options = JournalOptions {
             mode,
             synchronous: state.journal.synchronous,
         };
-        let options = state.journal;
-        state
-            .pager
-            .attach_journal(Box::new(rustdb_transaction::journal::RollbackJournal::new(
-                Arc::clone(&self.vfs),
-                &self.path,
-                options,
-            )));
+        if current.is_wal() {
+            leave_wal_mode(&mut state, &self.vfs, &self.path, options)?;
+        } else if mode.is_wal() {
+            enter_wal_mode(&mut state, &self.vfs, &self.path, options)?;
+        } else {
+            state.pager.attach_journal(Box::new(
+                rustdb_transaction::journal::RollbackJournal::new(
+                    Arc::clone(&self.vfs),
+                    &self.path,
+                    options,
+                ),
+            ));
+        }
+        state.journal = options;
         Ok(mode)
+    }
+
+    /// Copies the log's frames into the database file.
+    ///
+    /// This is `PRAGMA wal_checkpoint`. It reports what it managed rather than
+    /// insisting: a checkpoint that ran into a reader has still done useful
+    /// work, and telling the caller how much is the difference between a
+    /// diagnostic and a coin toss.
+    pub fn checkpoint(&self, mode: CheckpointMode) -> DbResult<CheckpointOutcome> {
+        let mut state = self
+            .state
+            .try_borrow_mut()
+            .map_err(|_| error::misuse("the connection is running a statement"))?;
+        if !state.pager.has_wal() {
+            return Err(error::misuse(
+                "a checkpoint was asked for on a database that is not in WAL mode",
+            ));
+        }
+        if state.pager.is_writing() {
+            return Err(error::misuse("cannot checkpoint inside a transaction"));
+        }
+        if state.pager.state().can_read() {
+            state.pager.end_read()?;
+        }
+        state.pager.checkpoint(mode)
+    }
+
+    /// Reports whether the connection's database is in WAL mode.
+    pub fn is_wal(&self) -> bool {
+        self.state
+            .try_borrow()
+            .is_ok_and(|state| state.pager.has_wal())
+    }
+
+    /// Returns how many frames the log may reach before a commit
+    /// checkpoints it, or zero when it never does.
+    pub fn wal_auto_checkpoint(&self) -> u32 {
+        self.state
+            .try_borrow()
+            .map_or(0, |state| state.pager.wal_auto_checkpoint())
+    }
+
+    /// Sets how many frames the log may reach before a commit checkpoints it.
+    pub fn set_wal_auto_checkpoint(&self, frames: u32) -> DbResult<()> {
+        let mut state = self
+            .state
+            .try_borrow_mut()
+            .map_err(|_| error::misuse("the connection is running a statement"))?;
+        state.pager.set_wal_auto_checkpoint(frames);
+        Ok(())
+    }
+
+    /// Returns what the write-ahead log has cost since the connection opened.
+    pub fn wal_stats(&self) -> rustdb_storage::wal::WalStats {
+        self.state
+            .try_borrow()
+            .map_or(rustdb_storage::wal::WalStats::default(), |state| {
+                state.pager.wal_stats()
+            })
     }
 
     /// Changes the durability level, which takes effect at the next sync.
@@ -866,6 +944,81 @@ impl Connection {
             .get(database)
             .map_or(0, |database| database.schema_cookie))
     }
+}
+
+/// Turns WAL mode on, stamping the file format versions that say so.
+///
+/// The stamp is an ordinary rollback-mode transaction, and it has to be: the
+/// two bytes are what tell every other connection - including one that opens
+/// the file next week - to look for a log. Writing them through the log they
+/// are announcing would be a file that only says it is in WAL mode to somebody
+/// who already knew.
+fn enter_wal_mode(
+    state: &mut ConnectionState,
+    vfs: &Arc<dyn Vfs>,
+    path: &DbPath,
+    options: JournalOptions,
+) -> DbResult<()> {
+    stamp_format_versions(state, 2)?;
+    rustdb_transaction::recovery::attach_wal(
+        &mut state.pager,
+        vfs,
+        path,
+        DatabaseOptions {
+            pager: PagerOptions::default(),
+            journal: options,
+            writable: true,
+        },
+    )
+}
+
+/// Turns WAL mode off, moving every frame into the database file first.
+///
+/// The checkpoint has to finish. A database whose format versions say rollback
+/// while frames are still only in the log is one that reads as though those
+/// transactions never happened, so the mode change is refused rather than half
+/// made when another connection is still holding the log open.
+fn leave_wal_mode(
+    state: &mut ConnectionState,
+    vfs: &Arc<dyn Vfs>,
+    path: &DbPath,
+    options: JournalOptions,
+) -> DbResult<()> {
+    if state.pager.state().can_read() {
+        state.pager.end_read()?;
+    }
+    let outcome = state.pager.checkpoint(CheckpointMode::Truncate)?;
+    if !outcome.truncated {
+        return Err(error::DbError::primary(rustdb_base::PrimaryCode::Busy)
+            .with_message("database is locked")
+            .with_detail("the log cannot be emptied while another connection is reading it"));
+    }
+    state.pager.close_wal()?;
+    let journal = rustdb_transaction::journal::RollbackJournal::new(Arc::clone(vfs), path, options);
+    state.pager.attach_journal(Box::new(journal));
+    stamp_format_versions(state, 1)
+}
+
+/// Writes the read and write format versions and commits.
+fn stamp_format_versions(state: &mut ConnectionState, version: u8) -> DbResult<()> {
+    if !state.pager.state().can_read() {
+        state.pager.begin_read()?;
+    }
+    state.pager.begin_write()?;
+    let mut header = *state.pager.header();
+    header.write_version = version;
+    header.read_version = version;
+    let stamped = state.pager.set_header(header);
+    if stamped.is_err() {
+        let _ = state.pager.rollback();
+        return stamped;
+    }
+    let committed = state.pager.commit();
+    if committed.is_err() {
+        let _ = state.pager.rollback();
+    }
+    committed?;
+    state.pager.end_read()
 }
 
 /// Opens a pager undo level for every savepoint taken before the write began.
