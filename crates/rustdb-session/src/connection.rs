@@ -651,25 +651,9 @@ impl Connection {
             return Err(error::DbError::primary(rustdb_base::PrimaryCode::ReadOnly)
                 .with_message("attempt to write a readonly database"));
         }
-        let count = rustdb_storage::PagerSet::count(&*state);
-        for database in 0..count {
-            if !state.database_exists(database) {
-                continue;
-            }
-            let pager = rustdb_storage::PagerSet::pager(&mut *state, database)?;
-            if !pager.state().can_read() {
-                begin_read_with_timeout(pager, timeout)?;
-            }
-        }
+        let fresh = state.writing.is_empty();
+        take_statement_locks(&mut state, access, writes, timeout)?;
         if access.writes() {
-            let fresh = state.writing.is_empty();
-            for database in writes.iter().copied() {
-                let pager = rustdb_storage::PagerSet::pager(&mut *state, database)?;
-                begin_write_with_timeout(pager, timeout)?;
-                if !state.writing.contains(&database) {
-                    state.writing.push(database);
-                }
-            }
             state.transaction.promote_to_write()?;
             if fresh {
                 open_pending_savepoint_levels(&mut state)?;
@@ -1861,6 +1845,93 @@ fn open_pending_savepoint_levels(state: &mut ConnectionState) -> DbResult<()> {
         }
         Ok(())
     })
+}
+
+/// Takes the locks a statement runs under, retrying while another connection
+/// is in the way.
+///
+/// A refusal gives back the reads this call took before it waits, and that is
+/// the whole point of the function. Holding them would be a deadlock rather
+/// than a wait: the connection that has the reservation cannot finish its
+/// commit until every reader has left, so a waiter that keeps reading is
+/// waiting for something it is itself preventing. SQLite drops back to no lock
+/// on the same path and for the same reason.
+///
+/// A read this call did not open is left alone. That is an explicit
+/// transaction that has already read and is now trying to write, and releasing
+/// its snapshot to make room would end a transaction the caller still believes
+/// it is inside. That case really is `SQLITE_BUSY`, and SQLite reports it too.
+fn take_statement_locks(
+    state: &mut ConnectionState,
+    access: Access,
+    writes: &[usize],
+    timeout: std::time::Duration,
+) -> DbResult<()> {
+    let started = std::time::Instant::now();
+    loop {
+        let mut attempt = Acquired::default();
+        let Err(failure) = attempt_statement_locks(state, access, writes, &mut attempt) else {
+            return Ok(());
+        };
+        if attempt.reserved.is_empty() {
+            release_reads(state, &attempt.read);
+        }
+        if failure.code() != rustdb_base::PrimaryCode::Busy || started.elapsed() >= timeout {
+            return Err(failure);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+/// What one attempt at the statement's locks managed to take.
+#[derive(Default)]
+struct Acquired {
+    /// The databases this attempt opened a read on.
+    read: Vec<usize>,
+    /// The databases this attempt took a reservation on.
+    reserved: Vec<usize>,
+}
+
+/// Makes one attempt at the locks, recording what it took.
+fn attempt_statement_locks(
+    state: &mut ConnectionState,
+    access: Access,
+    writes: &[usize],
+    attempt: &mut Acquired,
+) -> DbResult<()> {
+    let count = rustdb_storage::PagerSet::count(&*state);
+    for database in 0..count {
+        if !state.database_exists(database) {
+            continue;
+        }
+        let pager = rustdb_storage::PagerSet::pager(&mut *state, database)?;
+        if !pager.state().can_read() {
+            pager.begin_read()?;
+            attempt.read.push(database);
+        }
+    }
+    if !access.writes() {
+        return Ok(());
+    }
+    for database in writes.iter().copied() {
+        let pager = rustdb_storage::PagerSet::pager(&mut *state, database)?;
+        let already = pager.is_writing();
+        pager.begin_write()?;
+        if !already {
+            attempt.reserved.push(database);
+        }
+        if !state.writing.contains(&database) {
+            state.writing.push(database);
+        }
+    }
+    Ok(())
+}
+
+/// Gives back the reads one failed attempt took.
+fn release_reads(state: &mut ConnectionState, opened: &[usize]) {
+    for database in opened.iter().copied() {
+        let _ = rustdb_storage::PagerSet::pager(state, database).and_then(|pager| pager.end_read());
+    }
 }
 
 /// Takes the read lock, retrying a busy file until the timeout runs out.
