@@ -222,3 +222,85 @@ fn a_dead_process_releases_its_locks() {
     drop(survivor);
     let _ = std::fs::remove_dir_all(root.as_path());
 }
+
+/// A wal-index left behind by a process that died must be thrown away, and one
+/// a live process is still using must not be.
+///
+/// The index is a cache of the log and nothing else, so a copy whose owner is
+/// gone cannot be vouched for: the frames it names may never have reached the
+/// disk. SQLite settles this with a dead-man switch - a byte every connection
+/// holds a shared lock on, which the first arrival can only take exclusively
+/// when nobody else has the file mapped - and this is that byte doing its job.
+/// Both directions matter. Discarding too eagerly would throw away the index a
+/// running connection is reading, which is why the second half of this test
+/// exists at all.
+#[test]
+fn an_abandoned_wal_index_is_discarded() {
+    let root = workspace("abandoned-index");
+    let path = DbPath::new(root.as_path().join("index.db"));
+    let vfs = OsVfs::new();
+    let owner = vfs
+        .open(&path, OpenOptions::main_db())
+        .expect("the database opens");
+    owner.write_all_at(0, b"x").expect("the write lands");
+    drop(owner);
+
+    // A second process maps the shared memory and leaves a marker in it.
+    let mut probe = Probe::start(&path);
+    assert_eq!(probe.send("shm-open"), "ok");
+    assert_eq!(probe.send("shm-map"), "ok");
+    assert_eq!(probe.send("shm-write 64 6d61726b6572"), "ok");
+
+    // While that process is alive the marker is what everyone else sees.
+    let live = vfs
+        .open(&path, OpenOptions::main_db())
+        .expect("the database opens");
+    let live_shm = live
+        .shared_memory()
+        .expect("shared memory is available")
+        .expect("this VFS has shared memory");
+    let live_region = live_shm
+        .map(0, 32_768, false)
+        .expect("the region maps")
+        .expect("the region the other process made exists");
+    let mut seen = [0u8; 6];
+    live_region.read(64, &mut seen).expect("the read succeeds");
+    assert_eq!(
+        &seen, b"marker",
+        "a second connection did not see the live index"
+    );
+
+    // The process dies, and this one lets go too, so nobody has it mapped.
+    probe.child.kill().expect("the probe can be stopped");
+    let _ = probe.child.wait();
+    drop(probe);
+    drop(live_region);
+    drop(live_shm);
+    drop(live);
+
+    // The next arrival is alone, so what it finds is a leftover and goes.
+    let survivor = vfs
+        .open(&path, OpenOptions::main_db())
+        .expect("the database opens");
+    let survivor_shm = survivor
+        .shared_memory()
+        .expect("shared memory is available")
+        .expect("this VFS has shared memory");
+    let mut after = [0u8; 6];
+    match survivor_shm
+        .map(0, 32_768, false)
+        .expect("the map succeeds")
+    {
+        None => {}
+        Some(region) => {
+            region.read(64, &mut after).expect("the read succeeds");
+            assert_eq!(
+                after, [0u8; 6],
+                "an abandoned wal-index was believed rather than rebuilt"
+            );
+        }
+    }
+    drop(survivor_shm);
+    drop(survivor);
+    let _ = std::fs::remove_dir_all(root.as_path());
+}

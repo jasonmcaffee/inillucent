@@ -105,11 +105,12 @@ impl<'connection> Statement<'connection> {
                 declared_type: column.declared_type.clone(),
             })
             .collect();
-        let machine = Machine::new(
+        let mut machine = Machine::new(
             compiled.program.clone(),
             connection.interrupt_flag(),
             connection.limits().clone(),
         );
+        machine.set_progress(connection.progress_handler());
         let access = if compiled.program.readonly {
             Access::Read
         } else {
@@ -394,6 +395,8 @@ impl<'connection> Statement<'connection> {
             self.connection.interrupt_flag(),
             self.connection.limits().clone(),
         );
+        self.machine
+            .set_progress(self.connection.progress_handler());
         self.access = if compiled.program.readonly {
             Access::Read
         } else {

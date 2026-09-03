@@ -34,6 +34,142 @@ use crate::path::DbPath;
 /// The name this VFS registers under.
 pub const VFS_NAME: &str = "unix";
 
+/// A window onto a file that other processes see the same bytes of.
+///
+/// This is what makes the wal-index shared memory rather than a file two
+/// processes happen to be reading: a store here is visible to every other
+/// mapping of the same pages without a system call, which is what the WAL
+/// protocol's barriers are ordering. SQLite maps this file for the same
+/// reason, and mapping it is also what lets a byte carry both a lock and a
+/// counter, which the wal-index format requires of the dead-man switch.
+#[derive(Debug)]
+pub struct SharedMapping {
+    /// The address the mapping begins at, which may precede the caller's
+    /// window because a mapping has to start on a page boundary.
+    view: *mut u8,
+    /// How many bytes are mapped, for unmapping and for bounds checks.
+    view_len: usize,
+    /// Where the caller's window starts within the mapping.
+    offset: usize,
+    /// How long the caller's window is.
+    len: usize,
+}
+
+// SAFETY: the pointer is a shared file mapping, valid for the life of this
+// value on any thread; the type hands out no references to it and every access
+// goes through the bounds-checked methods below.
+unsafe impl Send for SharedMapping {}
+// SAFETY: as above. Concurrent access is the point of shared memory, and the
+// callers order their stores with the barrier the shared-memory contract
+// provides rather than relying on Rust's aliasing rules, which do not describe
+// memory another process is writing.
+unsafe impl Sync for SharedMapping {}
+
+impl SharedMapping {
+    /// Copies bytes out of the window.
+    pub fn read(&self, offset: usize, output: &mut [u8]) -> VfsResult<()> {
+        let start = self.window(offset, output.len())?;
+        // SAFETY: `window` has proved the range lies inside the mapping, the
+        // pointer is aligned for bytes, and `output` cannot overlap it because
+        // it is a Rust-owned slice and this mapping hands out no references
+        // into itself.
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.view.add(start), output.as_mut_ptr(), output.len());
+        }
+        Ok(())
+    }
+
+    /// Copies bytes into the window.
+    pub fn write(&self, offset: usize, input: &[u8]) -> VfsResult<()> {
+        let start = self.window(offset, input.len())?;
+        // SAFETY: as in `read`, with the direction reversed.
+        unsafe {
+            std::ptr::copy_nonoverlapping(input.as_ptr(), self.view.add(start), input.len());
+        }
+        Ok(())
+    }
+
+    /// Returns where a window of `len` bytes at `offset` starts in the mapping.
+    fn window(&self, offset: usize, len: usize) -> VfsResult<usize> {
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(|| error::misuse("a shared-memory window overflowed"))?;
+        if end > self.len {
+            return Err(error::misuse(
+                "a shared-memory access ran past the end of its region",
+            ));
+        }
+        let start = self
+            .offset
+            .checked_add(offset)
+            .filter(|start| start.saturating_add(len) <= self.view_len)
+            .ok_or_else(|| error::misuse("a shared-memory window left its mapping"))?;
+        Ok(start)
+    }
+}
+
+impl Drop for SharedMapping {
+    /// Releases the mapping.
+    fn drop(&mut self) {
+        // SAFETY: the pointer and length came from the `mmap` below and have
+        // not been unmapped before, because only this value owns them and it is
+        // dropped once.
+        unsafe {
+            libc::munmap(self.view.cast(), self.view_len);
+        }
+    }
+}
+
+/// Maps `len` bytes of `file` starting at `offset` into this process.
+///
+/// The mapping is taken from the page boundary at or below `offset`, because
+/// `mmap` refuses any other starting point, and the window the caller asked for
+/// is recorded as an offset into it.
+pub fn map_shared(file: &File, offset: u64, len: usize) -> VfsResult<SharedMapping> {
+    let page = page_size();
+    let aligned = offset - (offset % page);
+    let delta = usize::try_from(offset - aligned)
+        .map_err(|_| error::misuse("a shared-memory offset did not fit in memory"))?;
+    let view_len = delta
+        .checked_add(len)
+        .ok_or_else(|| error::misuse("a shared-memory mapping overflowed"))?;
+    let raw_offset = libc::off_t::try_from(aligned)
+        .map_err(|_| error::misuse("a shared-memory offset did not fit an off_t"))?;
+    // SAFETY: a null address asks the kernel to choose one, the descriptor is
+    // valid for the life of `file`, and the caller has already grown the file
+    // to cover the region being mapped.
+    let view = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            view_len,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            file.as_raw_fd(),
+            raw_offset,
+        )
+    };
+    if view == libc::MAP_FAILED {
+        return Err(VfsError::from_io(
+            VfsOperation::ShmMap,
+            &io::Error::last_os_error(),
+        ));
+    }
+    Ok(SharedMapping {
+        view: view.cast(),
+        view_len,
+        offset: delta,
+        len,
+    })
+}
+
+/// Returns the boundary a mapping has to start on.
+fn page_size() -> u64 {
+    // SAFETY: `sysconf` takes an integer and returns one; it has no pointer
+    // arguments and no failure mode this call has to distinguish.
+    let reported = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    u64::try_from(reported).unwrap_or(4096).max(1)
+}
+
 /// Reads at an absolute offset.
 pub fn read_at(file: &File, offset: u64, output: &mut [u8]) -> io::Result<usize> {
     file.read_at(output, offset)

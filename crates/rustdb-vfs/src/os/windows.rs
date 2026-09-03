@@ -16,6 +16,7 @@ use std::os::windows::io::AsRawHandle;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Security::Cryptography::{
     BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
@@ -24,6 +25,11 @@ use windows_sys::Win32::Storage::FileSystem::{
     GetFileInformationByHandle, LockFileEx, UnlockFileEx, BY_HANDLE_FILE_INFORMATION,
     LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
 };
+use windows_sys::Win32::System::Memory::{
+    CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_READ, FILE_MAP_WRITE,
+    PAGE_READWRITE,
+};
+use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
 use windows_sys::Win32::System::IO::OVERLAPPED;
 
 use crate::contract::{DeviceCharacteristics, FileIdentity, FileLock, SharedMemory};
@@ -193,6 +199,175 @@ pub fn unlock_bytes(file: &File, start: u64, len: u64, operation: VfsOperation) 
 /// Opens the shared-memory file for a database.
 pub fn open_shm(path: &DbPath) -> VfsResult<Arc<dyn SharedMemory>> {
     FileShm::open(path)
+}
+
+/// A window onto a file that other processes see the same bytes of.
+///
+/// This is what makes the wal-index shared memory rather than a file two
+/// processes happen to be reading: a store here is visible to every other
+/// mapping of the same pages without a system call, which is what the WAL
+/// protocol's barriers are ordering. It also sidesteps a Windows rule that
+/// makes the file-I/O version impossible: a shared byte-range lock forbids
+/// *writes* to the locked range even from the handle that took it, and the
+/// wal-index deliberately stores a counter at the same byte the dead-man
+/// switch is locked on. A mapped store is not a write in that sense, which is
+/// exactly why SQLite maps this file too.
+#[derive(Debug)]
+pub struct SharedMapping {
+    /// The address the view begins at, which may precede the caller's window
+    /// because a view has to start on an allocation-granularity boundary.
+    view: *mut u8,
+    /// How many bytes the view covers, for unmapping and for bounds checks.
+    view_len: usize,
+    /// Where the caller's window starts within the view.
+    offset: usize,
+    /// How long the caller's window is.
+    len: usize,
+}
+
+// SAFETY: the pointer is a mapping of a shared file view, which is valid for
+// the life of this value on any thread; the type hands out no references to it
+// and every access goes through the bounds-checked methods below.
+unsafe impl Send for SharedMapping {}
+// SAFETY: as above. Concurrent access is the point of shared memory, and the
+// callers order their stores with the barrier the shared-memory contract
+// provides rather than relying on Rust's aliasing rules, which do not describe
+// memory another process is writing.
+unsafe impl Sync for SharedMapping {}
+
+impl SharedMapping {
+    /// Copies bytes out of the window.
+    pub fn read(&self, offset: usize, output: &mut [u8]) -> VfsResult<()> {
+        let start = self.window(offset, output.len())?;
+        // SAFETY: `window` has proved the range lies inside the mapped view,
+        // the pointer is aligned for bytes, and `output` cannot overlap it
+        // because it is a Rust-owned slice and this mapping hands out no
+        // references into itself.
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.view.add(start), output.as_mut_ptr(), output.len());
+        }
+        Ok(())
+    }
+
+    /// Copies bytes into the window.
+    pub fn write(&self, offset: usize, input: &[u8]) -> VfsResult<()> {
+        let start = self.window(offset, input.len())?;
+        // SAFETY: as in `read`, with the direction reversed.
+        unsafe {
+            std::ptr::copy_nonoverlapping(input.as_ptr(), self.view.add(start), input.len());
+        }
+        Ok(())
+    }
+
+    /// Returns where a window of `len` bytes at `offset` starts in the view.
+    fn window(&self, offset: usize, len: usize) -> VfsResult<usize> {
+        let end = offset
+            .checked_add(len)
+            .ok_or_else(|| error::misuse("a shared-memory window overflowed"))?;
+        if end > self.len {
+            return Err(error::misuse(
+                "a shared-memory access ran past the end of its region",
+            ));
+        }
+        let start = self
+            .offset
+            .checked_add(offset)
+            .filter(|start| start.saturating_add(len) <= self.view_len)
+            .ok_or_else(|| error::misuse("a shared-memory window left its view"))?;
+        Ok(start)
+    }
+}
+
+impl Drop for SharedMapping {
+    /// Releases the view.
+    fn drop(&mut self) {
+        // SAFETY: the pointer came from `MapViewOfFile` and has not been
+        // unmapped before, because only this value owns it and it is dropped
+        // once.
+        unsafe {
+            UnmapViewOfFile(
+                windows_sys::Win32::System::Memory::MEMORY_MAPPED_VIEW_ADDRESS {
+                    Value: self.view.cast(),
+                },
+            );
+        }
+    }
+}
+
+/// Maps `len` bytes of `file` starting at `offset` into this process.
+///
+/// The view is taken from the allocation-granularity boundary at or below
+/// `offset`, because Windows refuses any other starting point, and the window
+/// the caller asked for is recorded as an offset into it.
+pub fn map_shared(file: &File, offset: u64, len: usize) -> VfsResult<SharedMapping> {
+    let granularity = allocation_granularity();
+    let aligned = offset - (offset % granularity);
+    let delta = usize::try_from(offset - aligned)
+        .map_err(|_| error::misuse("a shared-memory offset did not fit in memory"))?;
+    let view_len = delta
+        .checked_add(len)
+        .ok_or_else(|| error::misuse("a shared-memory view overflowed"))?;
+    // SAFETY: the handle is valid for the life of `file`, a null security
+    // descriptor and a null name are documented as "default, unnamed", and a
+    // zero size means "as large as the file", which the caller has already
+    // grown to cover the region.
+    let mapping = unsafe {
+        CreateFileMappingW(
+            file.as_raw_handle() as HANDLE,
+            std::ptr::null(),
+            PAGE_READWRITE,
+            0,
+            0,
+            std::ptr::null(),
+        )
+    };
+    if mapping.is_null() {
+        return Err(VfsError::from_io(
+            VfsOperation::ShmMap,
+            &io::Error::last_os_error(),
+        ));
+    }
+    // SAFETY: `mapping` is a valid mapping handle, the offset is aligned to the
+    // allocation granularity as the call requires, and the length lies within
+    // the file the mapping was made from.
+    let view = unsafe {
+        MapViewOfFile(
+            mapping,
+            FILE_MAP_READ | FILE_MAP_WRITE,
+            (aligned >> 32) as u32,
+            (aligned & 0xffff_ffff) as u32,
+            view_len,
+        )
+    };
+    // The mapping handle is not needed once a view exists: the view keeps the
+    // mapping alive, and leaving the handle open would leak one per region.
+    // SAFETY: `mapping` is a handle this function created and has not closed.
+    unsafe {
+        CloseHandle(mapping);
+    }
+    if view.Value.is_null() {
+        return Err(VfsError::from_io(
+            VfsOperation::ShmMap,
+            &io::Error::last_os_error(),
+        ));
+    }
+    Ok(SharedMapping {
+        view: view.Value.cast(),
+        view_len,
+        offset: delta,
+        len,
+    })
+}
+
+/// Returns the boundary a mapped view has to start on.
+fn allocation_granularity() -> u64 {
+    // SAFETY: SYSTEM_INFO is plain data with no invalid bit patterns, and the
+    // call fills every field this function reads.
+    let mut info: SYSTEM_INFO = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` is a properly aligned owned structure of the exact type
+    // the call expects.
+    unsafe { GetSystemInfo(&mut info) };
+    u64::from(info.dwAllocationGranularity.max(1))
 }
 
 /// The lock level one handle holds, and the transitions between levels.
