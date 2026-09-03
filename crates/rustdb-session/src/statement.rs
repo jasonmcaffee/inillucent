@@ -25,7 +25,7 @@ use rustdb_sql::parser::parse_next_statement;
 use rustdb_value::Value;
 use rustdb_vm::compile_dml::{CONFLICT_FAIL, CONFLICT_ROLLBACK};
 use rustdb_vm::machine::{Machine, MachineState, StepOutcome};
-use rustdb_vm::program::{Program, ProgramDependencies};
+use rustdb_vm::program::{Operand, Program, ProgramDependencies};
 use rustdb_vm::{compile, compile_dml, verify, verify_operands};
 
 use crate::connection::{Access, Connection, Outcome};
@@ -397,6 +397,114 @@ fn ending_for(failure: &rustdb_base::DbError, conflict: Option<i32>) -> Outcome 
     }
 }
 
+/// Compiles an `EXPLAIN` or `EXPLAIN QUERY PLAN`.
+///
+/// The inner statement is bound and compiled exactly as it would have been -
+/// so an `EXPLAIN` of a statement that does not compile fails with that
+/// statement's error - and then its program or its plan is rendered as rows.
+/// Nothing about the inner statement runs.
+fn explain(
+    connection: &Connection,
+    binder: &mut Binder<'_>,
+    query_plan: bool,
+    inner: &rustdb_sql::ast::Statement,
+    sql: &[u8],
+    parsed: &rustdb_sql::parser::ParsedStatement,
+    authorizer: &dyn Authorizer,
+) -> DbResult<Compiled> {
+    let _ = (connection, authorizer);
+    let bound = binder.bind_statement(inner)?;
+    let dependencies = ProgramDependencies {
+        schemas: binder.dependencies().schemas.clone(),
+        generation: binder.dependencies().generation,
+    };
+    let parameters = parsed.parameters.count;
+    let statement_sql = parsed.span.slice(sql).to_vec();
+    let consumed = parsed.span.end as usize;
+
+    let (program, plan) = match bound {
+        BoundStatement::Select(select) => {
+            let (program, plan) =
+                compile::compile_select(*select, dependencies.clone(), parameters)?;
+            (program, Some(plan))
+        }
+        BoundStatement::Insert(insert) => (
+            compile_dml::compile_insert(&insert, dependencies.clone(), parameters)?,
+            None,
+        ),
+        BoundStatement::Update(update) => (
+            compile_dml::compile_update(&update, dependencies.clone(), parameters)?,
+            None,
+        ),
+        BoundStatement::Delete(delete) => (
+            compile_dml::compile_delete(&delete, dependencies.clone(), parameters)?,
+            None,
+        ),
+        BoundStatement::Directive(directive) => {
+            (directive_program(dependencies.clone(), &directive), None)
+        }
+        BoundStatement::Empty => (empty_program(dependencies.clone()), None),
+    };
+
+    let program = if query_plan {
+        let lines = plan.map(|plan| plan.describe()).unwrap_or_default();
+        let rows: Vec<Vec<Operand>> = lines
+            .iter()
+            .enumerate()
+            .map(|(index, detail)| {
+                vec![
+                    Operand::Integer(index.saturating_add(1) as i64),
+                    Operand::Integer(0),
+                    Operand::Integer(0),
+                    Operand::Text(detail.as_bytes().to_vec()),
+                ]
+            })
+            .collect();
+        compile::compile_rows(&["id", "parent", "notused", "detail"], &rows, dependencies)?
+    } else {
+        let rows: Vec<Vec<Operand>> = program
+            .instructions
+            .iter()
+            .enumerate()
+            .map(|(address, instruction)| {
+                vec![
+                    Operand::Integer(address as i64),
+                    Operand::Text(instruction.opcode.name().as_bytes().to_vec()),
+                    Operand::Integer(i64::from(instruction.p1)),
+                    Operand::Integer(i64::from(instruction.p2)),
+                    Operand::Integer(i64::from(instruction.p3)),
+                    Operand::Text(render_operand(&instruction.p4)),
+                    Operand::Integer(i64::from(instruction.p5)),
+                    Operand::Text(Vec::new()),
+                ]
+            })
+            .collect();
+        compile::compile_rows(
+            &["addr", "opcode", "p1", "p2", "p3", "p4", "p5", "comment"],
+            &rows,
+            dependencies,
+        )?
+    };
+    Ok(Compiled {
+        program: Arc::new(program),
+        body: Body::Program,
+        sql: statement_sql,
+        consumed,
+    })
+}
+
+/// Renders an instruction's typed operand for the `p4` column.
+fn render_operand(operand: &Operand) -> Vec<u8> {
+    match operand {
+        Operand::None => Vec::new(),
+        Operand::Text(text) => text.clone(),
+        Operand::Integer(value) => value.to_string().into_bytes(),
+        Operand::Real(value) => value.to_string().into_bytes(),
+        Operand::Count(value) => value.to_string().into_bytes(),
+        other => format!("{other:?}").into_bytes(),
+    }
+}
+
 /// One compiled statement.
 #[derive(Clone)]
 struct Compiled {
@@ -426,6 +534,17 @@ fn compile_sql(
     let parsed = parse_next_statement(sql, 0, &limits)?;
     let catalog = connection.catalog()?;
     let mut binder = Binder::new(catalog.as_ref(), &parsed.ast, authorizer);
+    if let rustdb_sql::ast::Statement::Explain { query_plan, inner } = &parsed.statement {
+        return explain(
+            connection,
+            &mut binder,
+            *query_plan,
+            inner,
+            sql,
+            &parsed,
+            authorizer,
+        );
+    }
     let bound = binder.bind_statement(&parsed.statement)?;
     let dependencies = ProgramDependencies {
         schemas: binder.dependencies().schemas.clone(),

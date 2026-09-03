@@ -20,7 +20,7 @@ use rustdb_sql::bind::{
 };
 use rustdb_sql::catalog_view::TableInfo;
 use rustdb_sql::plan::{
-    plan_select, AccessPath, AggregationMode, BoundKind, PhysicalPlan, RangeBound,
+    is_outer, plan_select, AccessPath, AggregationMode, BoundKind, PhysicalPlan, RangeBound,
 };
 use rustdb_value::{Affinity, Collation};
 
@@ -66,12 +66,24 @@ pub struct Compiler {
     /// term that is also a result column, for instance - and the store must be
     /// opened exactly once however many times the expression is emitted.
     subquery_plans: std::collections::BTreeMap<usize, ValueSubquery>,
-    /// The level whose residual predicate the loop must not test.
+    /// The outer joins whose unmatched right rows still owe a pass.
     ///
-    /// An outer join's `WHERE` runs after the join, not inside it: testing it
-    /// in the loop would skip the row, leave the match flag clear, and emit a
-    /// null-extended row for a row that did match.
-    bare_level: Option<usize>,
+    /// A `RIGHT` or `FULL` join keeps the rows of its right side that matched
+    /// nothing, and those can only be known once the whole loop nest has run -
+    /// so the pass is recorded here and emitted after it.
+    antijoins: Vec<AntiJoin>,
+    /// For each level, the outer join whose continuation tests its residual.
+    ///
+    /// A `WHERE` over a term that an outer join can null-extend runs *after*
+    /// the join rather than inside its loop. For the join's own term that is
+    /// because testing it in the loop would leave the match flag clear and emit
+    /// a null-extended row for a row that did match. For a `RIGHT` join it goes
+    /// further: every term to its left is null-extendable, so their `WHERE`
+    /// terms move too - and until they did,
+    /// `a RIGHT JOIN b ON ... WHERE a.name IS NULL` filtered every row of `a`
+    /// out of the loop, so nothing was ever recorded as matched and the second
+    /// pass then emitted every row of `b`.
+    deferred: Vec<Option<usize>>,
     aggregate_registers: Vec<u32>,
     pub(crate) end_jumps: Vec<Label>,
 }
@@ -99,7 +111,8 @@ impl Compiler {
             substitutions: Vec::new(),
             source_cursors: Vec::new(),
             stop_at: None,
-            bare_level: None,
+            deferred: Vec::new(),
+            antijoins: Vec::new(),
             subquery_plans: std::collections::BTreeMap::new(),
             aggregate_registers: Vec::new(),
             end_jumps: Vec::new(),
@@ -280,6 +293,14 @@ pub(crate) struct SourceCursors {
     /// enclosing loop, so the flag was cleared on every outer row and the store
     /// accumulated one copy of the subquery per row of the query above it.
     built: Option<u32>,
+    /// The store recording which of this term's rows a `RIGHT` or `FULL` join
+    /// matched.
+    ///
+    /// Opened before the loops for the same reason: a term on the right of an
+    /// outer join is scanned once per row of everything above it, and opening
+    /// its matched-set inside that loop emptied the set on every outer row -
+    /// so the second pass then treated every row as unmatched.
+    matched: Option<u32>,
 }
 
 impl SourceCursors {
@@ -295,8 +316,23 @@ impl SourceCursors {
             index: None,
             ephemeral: false,
             built: None,
+            matched: None,
         }
     }
+}
+
+/// One `RIGHT` or `FULL` join's second pass.
+#[derive(Clone, Copy, Debug)]
+struct AntiJoin {
+    /// The level whose unmatched rows the pass emits.
+    level: usize,
+    /// The store holding the keys of the rows that did match.
+    matched: u32,
+    /// The register holding the continuation's return address.
+    ret: u32,
+    /// The continuation the pass enters, which is the same one the matched
+    /// rows enter: everything below this level, and this level's residual.
+    continuation: i32,
 }
 
 /// A nested query used as a value, prepared before the block that reads it.
@@ -356,6 +392,7 @@ impl Compiler {
                             index: None,
                             ephemeral: true,
                             built,
+                            matched: None,
                         },
                     );
                     self.emit(Instruction::new(
@@ -379,6 +416,7 @@ impl Compiler {
                             index: None,
                             ephemeral: true,
                             built: None,
+                            matched: None,
                         },
                     );
                     // The store keeps an index: a `UNION` step has to be able
@@ -440,6 +478,19 @@ impl Compiler {
                         }
                         _ => None,
                     };
+                    // A `RIGHT` or `FULL` join owes a pass over the rows of
+                    // this term that matched nothing, so the set of the ones
+                    // that did is opened here, before any loop.
+                    let matched =
+                        matches!(source.join, JoinKind::Right | JoinKind::Full).then(|| {
+                            let store = self.ephemeral();
+                            self.emit(
+                                Instruction::new(Opcode::EphOpen, store as i32, 1, 0)
+                                    .with_p4(Operand::SortKey(store_key(1)))
+                                    .with_p5(1),
+                            );
+                            store
+                        });
                     self.register_source(
                         source.id,
                         SourceCursors {
@@ -447,6 +498,7 @@ impl Compiler {
                             index,
                             ephemeral: false,
                             built: None,
+                            matched,
                         },
                     );
                 }
@@ -561,7 +613,10 @@ impl Compiler {
             offset_register,
             sink,
         };
-        self.compile_statement(&body)
+        self.deferred = deferral_map(plan);
+        let outcome = self.compile_statement(&body);
+        self.deferred = Vec::new();
+        outcome
     }
 
     /// Compiles a block that computes window functions.
@@ -969,6 +1024,7 @@ impl Compiler {
             tail_return,
         };
         self.compile_level(body, 0, &emit)?;
+        self.compile_antijoins(body)?;
         self.drain_sorter(body, width)?;
         Ok(())
     }
@@ -980,6 +1036,7 @@ impl Compiler {
         let skip_scan = self.guard_constant_filter_jump(body)?;
         let step = InnerBody::AggregateStep;
         self.compile_level(body, 0, &step)?;
+        self.compile_antijoins(body)?;
         if let Some(label) = skip_scan {
             self.patch_here(label);
         }
@@ -1041,6 +1098,7 @@ impl Compiler {
         };
         self.guard_constant_filter(body)?;
         self.compile_level(body, 0, &step)?;
+        self.compile_antijoins(body)?;
 
         // Drain the sorter, one group at a time.
         let width = body.plan.select.columns.len();
@@ -1523,19 +1581,32 @@ impl Compiler {
         if self.stop_at == Some(level) {
             return self.compile_inner(body, inner);
         }
-        if source.join == JoinKind::Left {
-            return self.compile_left_join(body, level, inner);
+        if is_outer(source.join) {
+            return self.compile_outer_join(body, level, inner);
         }
         self.compile_loop(body, level, inner)
     }
 
-    /// Compiles a `LEFT JOIN` level: the loop, then the row it owes.
-    fn compile_left_join(
+    /// Compiles an outer join level: the loop, then the rows it owes.
+    ///
+    /// `LEFT` owes a null-extended row for every left row that matched nothing,
+    /// which is known as soon as its loop ends. `RIGHT` owes one for every
+    /// *right* row that matched nothing, which is not known until the whole
+    /// nest has run - so the matching rows are recorded as they go and the pass
+    /// over the rest is emitted afterwards. `FULL` owes both.
+    fn compile_outer_join(
         &mut self,
         body: &Body<'_>,
         level: usize,
         inner: &InnerBody,
     ) -> DbResult<()> {
+        let join = body
+            .plan
+            .sources
+            .get(level)
+            .map_or(JoinKind::Left, |source| source.join);
+        let keeps_left = matches!(join, JoinKind::Left | JoinKind::Full);
+        let keeps_right = matches!(join, JoinKind::Right | JoinKind::Full);
         let matched = self.register();
         let ret = self.register();
         let on = body
@@ -1543,13 +1614,34 @@ impl Compiler {
             .sources
             .get(level)
             .and_then(|source| source.on.clone());
+        // The right side's matched rows are recorded by their rowid, which is
+        // the only identity a row has that survives the cursor moving away and
+        // coming back on a second pass. The store was opened with the cursors,
+        // before any loop.
+        let matched_set = if keeps_right {
+            self.cursors_of(source_id(body, level)?)?.matched
+        } else {
+            None
+        };
         // The continuation is emitted with the join's own limits cleared, so
         // that a nested outer join inside it is compiled as a whole rather than
         // stopping where this one stops.
-        let saved = (self.stop_at.take(), self.bare_level.take());
+        // The continuation tests every residual this join deferred - its own
+        // term's, and for a `RIGHT` join every term to its left as well.
+        let owed: Vec<usize> = self
+            .deferred
+            .iter()
+            .enumerate()
+            .filter_map(|(candidate, owner)| (*owner == Some(level)).then_some(candidate))
+            .collect();
+        let saved_deferred = core::mem::take(&mut self.deferred);
+        let saved_stop = self.stop_at.take();
         let skip = self.emit_jump(Instruction::new(Opcode::Goto, 0, -1, 0));
         let continuation = self.here();
-        let residual = self.compile_residual(body, level)?;
+        let mut residual = Vec::new();
+        for candidate in &owed {
+            residual.extend(self.compile_residual(body, *candidate)?);
+        }
         self.compile_level(body, level.saturating_add(1), inner)?;
         for label in residual {
             self.patch_here(label);
@@ -1564,25 +1656,89 @@ impl Compiler {
             ret,
             continuation,
             on,
+            matched_set,
+            source: source_id(body, level)?,
         };
+        self.deferred = saved_deferred;
         self.stop_at = Some(level.saturating_add(1));
-        self.bare_level = Some(level);
         let outcome = self.compile_loop(body, level, &entered);
-        self.stop_at = saved.0;
-        self.bare_level = saved.1;
+        self.stop_at = saved_stop;
         outcome?;
-        let done = self.emit_jump(Instruction::new(Opcode::If, matched as i32, -1, 0));
-        let cursors = self.cursors_of(source_id(body, level)?)?;
-        if !cursors.ephemeral {
-            self.emit(Instruction::new(
-                Opcode::NullRow,
+        if keeps_left {
+            let done = self.emit_jump(Instruction::new(Opcode::If, matched as i32, -1, 0));
+            let cursors = self.cursors_of(source_id(body, level)?)?;
+            if !cursors.ephemeral {
+                self.emit(Instruction::new(
+                    Opcode::NullRow,
+                    cursors.table as i32,
+                    0,
+                    0,
+                ));
+            }
+            self.emit(Instruction::new(Opcode::Gosub, ret as i32, continuation, 0));
+            self.patch_here(done);
+        }
+        if let Some(store) = matched_set {
+            self.antijoins.push(AntiJoin {
+                level,
+                matched: store,
+                ret,
+                continuation,
+            });
+        }
+        Ok(())
+    }
+
+    /// Emits the second pass every `RIGHT` or `FULL` join in a block owes.
+    ///
+    /// It scans the join's own term, skips the rows the nest already matched,
+    /// and null-rows every term *before* it - an unmatched right row pairs with
+    /// nothing on the left. The terms after it are joined normally, which is
+    /// why the pass enters the same continuation the matched rows did rather
+    /// than emitting the body a second time.
+    fn compile_antijoins(&mut self, body: &Body<'_>) -> DbResult<()> {
+        let pending = core::mem::take(&mut self.antijoins);
+        for pass in pending.iter().rev() {
+            let cursors = self.cursors_of(source_id(body, pass.level)?)?;
+            if cursors.ephemeral {
+                return Err(error::misuse(
+                    "a right join over a materialised term is not supported",
+                ));
+            }
+            let key = self.register();
+            let empty = self.emit_jump(Instruction::new(
+                Opcode::Rewind,
                 cursors.table as i32,
-                0,
+                -1,
                 0,
             ));
+            let start = self.here();
+            self.emit(Instruction::new(
+                Opcode::Rowid,
+                cursors.table as i32,
+                key as i32,
+                0,
+            ));
+            let seen = self.emit_jump(
+                Instruction::new(Opcode::EphFound, pass.matched as i32, -1, key as i32).with_p5(1),
+            );
+            for earlier in 0..pass.level {
+                let before = self.cursors_of(source_id(body, earlier)?)?;
+                if !before.ephemeral {
+                    self.emit(Instruction::new(Opcode::NullRow, before.table as i32, 0, 0));
+                }
+            }
+            self.emit(Instruction::new(
+                Opcode::Gosub,
+                pass.ret as i32,
+                pass.continuation,
+                0,
+            ));
+            self.patch_here(seen);
+            let more = self.emit_jump(Instruction::new(Opcode::Next, cursors.table as i32, -1, 0));
+            self.patch(more, start);
+            self.patch_here(empty);
         }
-        self.emit(Instruction::new(Opcode::Gosub, ret as i32, continuation, 0));
-        self.patch_here(done);
         Ok(())
     }
 
@@ -1927,7 +2083,7 @@ impl Compiler {
 
     /// Emits the residual predicate for one loop level.
     fn compile_residual(&mut self, body: &Body<'_>, level: usize) -> DbResult<Vec<Label>> {
-        if self.bare_level == Some(level) {
+        if self.deferred.get(level).copied().flatten().is_some() {
             return Ok(Vec::new());
         }
         let Some(Some(residual)) = body.plan.residuals.get(level) else {
@@ -2040,6 +2196,8 @@ impl Compiler {
                 ret,
                 continuation,
                 on,
+                matched_set,
+                source,
             } => {
                 // The `ON` condition is tested here rather than as a residual:
                 // a row that fails it is not a match, and the loop has to carry
@@ -2055,6 +2213,21 @@ impl Compiler {
                     Instruction::new(Opcode::Load, 0, *matched as i32, 0)
                         .with_p4(Operand::Integer(1)),
                 );
+                if let Some(store) = matched_set {
+                    let cursors = self.cursors_of(*source)?;
+                    let key = self.register();
+                    self.emit(Instruction::new(
+                        Opcode::Rowid,
+                        cursors.table as i32,
+                        key as i32,
+                        0,
+                    ));
+                    let duplicate = self.emit_jump(
+                        Instruction::new(Opcode::EphInsertUnique, *store as i32, -1, key as i32)
+                            .with_p5(1),
+                    );
+                    self.patch_here(duplicate);
+                }
                 self.emit(Instruction::new(
                     Opcode::Gosub,
                     *ret as i32,
@@ -2182,6 +2355,11 @@ enum InnerBody {
         continuation: i32,
         /// The join's `ON` condition, which decides what counts as a match.
         on: Option<BoundExpr>,
+        /// The store recording which rows of this term matched, for a `RIGHT`
+        /// or `FULL` join's second pass.
+        matched_set: Option<u32>,
+        /// This term's statement-wide number.
+        source: usize,
     },
     /// Build a result row and run the tail.
     Row {
@@ -2634,6 +2812,34 @@ fn children_of(expr: &BoundExpr) -> Vec<BoundExpr> {
         _ => {}
     }
     out
+}
+
+/// Returns, for each level, the outer join whose continuation owes its residual.
+///
+/// A `LEFT` join defers its own term's `WHERE`; a `RIGHT` join defers its own
+/// and every term to its left, because all of them can be null-extended by it.
+/// Later joins win, because a term inside two outer joins is filtered after
+/// both of them.
+fn deferral_map(plan: &PhysicalPlan) -> Vec<Option<usize>> {
+    let mut deferred = vec![None; plan.sources.len()];
+    for (level, source) in plan.sources.iter().enumerate() {
+        if !is_outer(source.join) {
+            continue;
+        }
+        if matches!(source.join, JoinKind::Left | JoinKind::Full) {
+            if let Some(slot) = deferred.get_mut(level) {
+                *slot = Some(level);
+            }
+        }
+        if matches!(source.join, JoinKind::Right | JoinKind::Full) {
+            for earlier in 0..=level {
+                if let Some(slot) = deferred.get_mut(earlier) {
+                    *slot = Some(level);
+                }
+            }
+        }
+    }
+    deferred
 }
 
 /// Returns the sink one compound operator writes an arm's rows through.
@@ -3360,6 +3566,66 @@ pub fn compile_select(
     let plan = rustdb_sql::plan::plan_select(select);
     let program = compile(&plan, dependencies, parameters)?;
     Ok((program, plan))
+}
+
+/// Builds a program that emits a fixed set of rows.
+///
+/// `EXPLAIN` answers with rows about a statement rather than by running it, and
+/// so does anything else that reports rather than computes. Rendering the rows
+/// here and emitting them as constants keeps the statement an ordinary prepared
+/// statement - it steps, it has result-column metadata, it resets - instead of
+/// a second path through the session that would have to reimplement all of it.
+pub fn compile_rows(
+    columns: &[&str],
+    rows: &[Vec<Operand>],
+    dependencies: ProgramDependencies,
+) -> DbResult<Program> {
+    let mut compiler = Compiler::new();
+    let entry = compiler.emit_jump(Instruction::new(Opcode::Init, 0, -1, 0));
+    compiler.patch_here(entry);
+    let width = columns.len();
+    let block = compiler.register_block(width.max(1));
+    for row in rows {
+        for index in 0..width {
+            let value = row.get(index).cloned().unwrap_or(Operand::Null);
+            compiler.emit(
+                Instruction::new(
+                    Opcode::Load,
+                    0,
+                    block.saturating_add(index as u32) as i32,
+                    0,
+                )
+                .with_p4(value),
+            );
+        }
+        compiler.emit(Instruction::new(
+            Opcode::ResultRow,
+            block as i32,
+            width as i32,
+            0,
+        ));
+    }
+    compiler.emit(Instruction::new(Opcode::Halt, 0, 0, 0));
+    Ok(Program {
+        instructions: compiler.instructions,
+        register_count: compiler.registers,
+        cursor_count: 0,
+        sorter_count: 0,
+        distinct_count: 0,
+        ephemeral_count: 0,
+        aggregate_count: 0,
+        result_columns: columns
+            .iter()
+            .map(|name| ResultColumn {
+                name: name.as_bytes().to_vec(),
+                origin: None,
+                declared_type: Vec::new(),
+            })
+            .collect(),
+        dependencies,
+        readonly: true,
+        parameter_count: 0,
+    })
 }
 
 /// Returns the table a planned source names, for diagnostics.

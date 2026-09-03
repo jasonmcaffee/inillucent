@@ -925,7 +925,10 @@ impl<'a> Binder<'a> {
                 let bound = self.bind_delete(delete)?;
                 Ok(BoundStatement::Delete(Box::new(bound)))
             }
-            ast::Statement::Explain { .. } => Err(unsupported("EXPLAIN", Span::default())),
+            // `EXPLAIN` is handled a level up, where the inner statement's
+            // program is available to render. Reaching it here means a nested
+            // one, which SQLite refuses too.
+            ast::Statement::Explain { .. } => Err(unsupported("nested EXPLAIN", Span::default())),
             other => {
                 let directive = self.bind_directive(other)?;
                 Ok(BoundStatement::Directive(Box::new(directive)))

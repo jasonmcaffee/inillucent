@@ -230,6 +230,15 @@ fn joins_match_the_oracle() {
         "SELECT * FROM a NATURAL JOIN b ORDER BY a.id",
         "SELECT a.name, b.region, c.v FROM a LEFT JOIN b ON a.team = b.team LEFT JOIN c ON c.k = b.rank ORDER BY a.id, c.v",
         "SELECT a.name FROM a LEFT JOIN b ON a.team = b.team WHERE b.rank IS NULL ORDER BY a.id",
+        "SELECT a.name, b.region FROM a RIGHT JOIN b ON a.team = b.team ORDER BY b.id, a.id",
+        "SELECT a.name, b.region FROM a RIGHT OUTER JOIN b ON a.team = b.team ORDER BY b.id, a.id",
+        "SELECT count(*) FROM a RIGHT JOIN b ON a.team = b.team",
+        "SELECT a.name, b.region FROM a FULL JOIN b ON a.team = b.team ORDER BY a.id, b.id",
+        "SELECT a.name, b.region FROM a FULL OUTER JOIN b ON a.team = b.team ORDER BY a.id, b.id",
+        "SELECT count(*) FROM a FULL JOIN b ON a.team = b.team",
+        "SELECT a.name, b.region FROM a RIGHT JOIN b ON a.team = b.team WHERE a.name IS NULL ORDER BY b.id",
+        "SELECT a.name, b.region FROM a FULL JOIN b ON a.team = b.team AND b.rank > 1 ORDER BY a.id, b.id",
+        "SELECT a.name, b.region, c.v FROM a RIGHT JOIN b ON a.team = b.team JOIN c ON c.k = b.rank ORDER BY b.id, c.v",
     ]);
 }
 
