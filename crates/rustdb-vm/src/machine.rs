@@ -115,8 +115,10 @@ pub struct Machine {
     /// the two are counted separately and folded together only where
     /// `total_changes()` is worked out.
     trigger_changes: i64,
-    /// How many rows every statement on this connection has changed.
-    total_changes: i64,
+    /// What `changes()` answers: the connection's, not this statement's.
+    reported_changes: i64,
+    /// What `total_changes()` answers, for the same reason.
+    reported_total_changes: i64,
     last_insert_rowid: i64,
     conflict: Option<i32>,
     record_changes: bool,
@@ -158,7 +160,8 @@ impl Machine {
             entropy: crate::datetime::julian_now().to_bits(),
             changes: 0,
             trigger_changes: 0,
-            total_changes: 0,
+            reported_changes: 0,
+            reported_total_changes: 0,
             last_insert_rowid: 0,
             conflict: None,
             record_changes: false,
@@ -196,10 +199,18 @@ impl Machine {
     ///
     /// `changes()` and `total_changes()` report the *connection's* history
     /// rather than this statement's, so the numbers come from outside and are
-    /// set before the statement runs.
+    /// set before the statement runs. They are kept apart from the statement's
+    /// own tallies, which start at zero and are published when it finishes -
+    /// seeding those instead would have every statement report the connection's
+    /// history as its own row count.
+    ///
+    /// `last_insert_rowid` is the exception and is seeded into the live value:
+    /// SQLite updates it as rows are written rather than at the end, so a
+    /// statement that reads it sees its own inserts, and one that writes none
+    /// has to see the previous statement's.
     pub fn set_counters(&mut self, changes: i64, total_changes: i64, last_insert_rowid: i64) {
-        self.changes = changes;
-        self.total_changes = total_changes;
+        self.reported_changes = changes;
+        self.reported_total_changes = total_changes;
         self.last_insert_rowid = last_insert_rowid;
     }
 
@@ -523,8 +534,8 @@ impl Machine {
                 // statement gives two values rather than one repeated.
                 self.entropy = self.entropy.wrapping_add(0x9E37_79B9_7F4A_7C15);
                 let context = builtin::Context {
-                    changes: self.changes,
-                    total_changes: self.total_changes,
+                    changes: self.reported_changes,
+                    total_changes: self.reported_total_changes,
                     last_insert_rowid: self.last_insert_rowid,
                     seed: self.entropy,
                 };
@@ -832,6 +843,8 @@ impl Machine {
             Opcode::CreateBtree => self.create_btree(instruction, pager),
             Opcode::DestroyBtree => self.destroy_btree(instruction, pager),
             Opcode::ClearBtree => self.clear_btree(instruction, pager),
+            Opcode::SeqRowid => self.sequence_rowid(instruction, pager),
+            Opcode::SeqUpdate => self.sequence_update(instruction, pager),
             Opcode::LastRowid => {
                 if instruction.p2 == 1 {
                     self.last_insert_rowid = cast::integer_value(&self.register(instruction.p1));
@@ -869,6 +882,136 @@ impl Machine {
                 Ok(Flow::Next)
             }
         }
+    }
+
+    /// Reads the next rowid an `AUTOINCREMENT` table owes.
+    ///
+    /// The larger of what `sqlite_sequence` remembers and the largest rowid the
+    /// table still holds, plus one. Both halves are needed: the remembered
+    /// value is what stops a deleted row's number being reused, and the table's
+    /// own maximum is what keeps a row inserted with an explicit rowid from
+    /// being collided with before the sequence has caught up.
+    fn sequence_rowid(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
+        let name = match &instruction.p4 {
+            Operand::Text(text) => text.clone(),
+            _ => return Err(error::misuse("SeqRowid without a table name")),
+        };
+        let remembered = self
+            .read_sequence(instruction.p2, &name, pager)?
+            .unwrap_or(0);
+        let largest = self.with_cursor_and_pager(instruction.p1, pager, |slot, pager| {
+            if !slot.cursor.last(pager)? {
+                return Ok(0);
+            }
+            slot.moved();
+            slot.cursor.rowid()
+        })?;
+        let highest = remembered.max(largest);
+        let Some(next) = highest.checked_add(1) else {
+            // SQLite reports SQLITE_FULL for this: the table is not out of
+            // space, it is out of *keys*, and there is no larger integer.
+            return Err(
+                rustdb_base::DbError::primary(rustdb_base::PrimaryCode::Full).with_message(
+                    format!(
+                        "database or disk is full: {} has no more rowids",
+                        String::from_utf8_lossy(&name)
+                    ),
+                ),
+            );
+        };
+        self.store(instruction.p3, Value::Integer(next));
+        Ok(Flow::Next)
+    }
+
+    /// Raises what `sqlite_sequence` remembers, if this row went past it.
+    fn sequence_update(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
+        let name = match &instruction.p4 {
+            Operand::Text(text) => text.clone(),
+            _ => return Err(error::misuse("SeqUpdate without a table name")),
+        };
+        let written = cast::integer_value(&self.register(instruction.p1));
+        let Some(root) = PageId::new(instruction.p2.max(0) as u32) else {
+            return Ok(Flow::Next);
+        };
+        let existing = self.read_sequence(instruction.p2, &name, pager)?;
+        if existing.is_some_and(|seq| seq >= written) {
+            return Ok(Flow::Next);
+        }
+        let encoding = pager.text_encoding();
+        let format = pager.header().schema_format.max(1);
+        let values = [Value::owned_text(&name)?, Value::Integer(written)];
+        let payload = rustdb_value::record::encode_record(&values, encoding, format)?;
+        let rowid = match self.find_sequence_rowid(root, &name, pager)? {
+            Some(rowid) => rowid,
+            None => self.next_sequence_rowid(root, pager)?,
+        };
+        mutate::insert_row(pager, root, rowid, &payload)?;
+        Ok(Flow::Next)
+    }
+
+    /// Returns what `sqlite_sequence` remembers for one table, if anything.
+    fn read_sequence(
+        &mut self,
+        root: i32,
+        name: &[u8],
+        pager: &mut Pager,
+    ) -> DbResult<Option<i64>> {
+        let Some(root) = PageId::new(root.max(0) as u32) else {
+            return Ok(None);
+        };
+        let limits = self.limits.clone();
+        let encoding = pager.text_encoding();
+        let mut cursor = rustdb_storage::cursor::BTreeCursor::table(root);
+        let mut more = cursor.first(pager)?;
+        while more {
+            let payload = cursor.payload(pager, &limits)?;
+            let record = rustdb_value::record::RecordRef::parse(&payload, encoding)?;
+            if let Ok(Value::Text(text)) = record.value(0) {
+                if text.utf8_bytes().as_ref() == name {
+                    let seq = record
+                        .value(1)
+                        .map(|value| cast::integer_value(&value))
+                        .unwrap_or(0);
+                    return Ok(Some(seq));
+                }
+            }
+            more = cursor.next(pager)?;
+        }
+        Ok(None)
+    }
+
+    /// Returns the rowid `sqlite_sequence` holds one table's row under.
+    fn find_sequence_rowid(
+        &mut self,
+        root: PageId,
+        name: &[u8],
+        pager: &mut Pager,
+    ) -> DbResult<Option<i64>> {
+        let limits = self.limits.clone();
+        let encoding = pager.text_encoding();
+        let mut cursor = rustdb_storage::cursor::BTreeCursor::table(root);
+        let mut more = cursor.first(pager)?;
+        while more {
+            let rowid = cursor.rowid()?;
+            let payload = cursor.payload(pager, &limits)?;
+            let record = rustdb_value::record::RecordRef::parse(&payload, encoding)?;
+            if let Ok(Value::Text(text)) = record.value(0) {
+                if text.utf8_bytes().as_ref() == name {
+                    return Ok(Some(rowid));
+                }
+            }
+            more = cursor.next(pager)?;
+        }
+        Ok(None)
+    }
+
+    /// Returns a rowid no row of `sqlite_sequence` is using.
+    fn next_sequence_rowid(&mut self, root: PageId, pager: &mut Pager) -> DbResult<i64> {
+        let mut cursor = rustdb_storage::cursor::BTreeCursor::table(root);
+        if !cursor.last(pager)? {
+            return Ok(1);
+        }
+        Ok(cursor.rowid()?.saturating_add(1))
     }
 
     /// Allocates a rowid no row in the table is using.

@@ -1875,6 +1875,57 @@ impl Compiler {
         RowImage { values, rowid }
     }
 
+    /// Emits the rowid an `AUTOINCREMENT` table's row gets, when it needs one.
+    ///
+    /// `None` when the statement supplied the key itself, because then there is
+    /// nothing to allocate - the value is used as written, and the sequence is
+    /// raised to it afterwards like any other.
+    fn emit_autoincrement_rowid(
+        &mut self,
+        writer: &Writer,
+        insert: &BoundInsert,
+        values: &[u32],
+    ) -> DbResult<Option<u32>> {
+        let table = &insert.table;
+        let Some(alias) = table.rowid_alias else {
+            return Ok(None);
+        };
+        let supplied = values.get(usize::from(alias)).copied();
+        let register = self.register();
+        self.emit(
+            Instruction::new(
+                Opcode::SeqRowid,
+                writer.table as i32,
+                insert.sequence_root as i32,
+                register as i32,
+            )
+            .with_p4(Operand::Text(table.name.clone())),
+        );
+        let Some(supplied) = supplied else {
+            return Ok(Some(register));
+        };
+        // A NULL in the key column means "give me one"; anything else is the
+        // key, and the sequence only records it.
+        let chosen = self.register();
+        self.emit(Instruction::new(
+            Opcode::Copy,
+            supplied as i32,
+            chosen as i32,
+            0,
+        ));
+        let generated = self.emit_jump(Instruction::new(Opcode::IfNull, supplied as i32, -1, 0));
+        let done = self.emit_jump(Instruction::new(Opcode::Goto, 0, -1, 0));
+        self.patch_here(generated);
+        self.emit(Instruction::new(
+            Opcode::Copy,
+            register as i32,
+            chosen as i32,
+            0,
+        ));
+        self.patch_here(done);
+        Ok(Some(chosen))
+    }
+
     /// Emits the uniqueness check a `WITHOUT ROWID` table's primary key owes.
     ///
     /// The key is the table's own b-tree, so the check is a seek on the cursor
@@ -2021,6 +2072,20 @@ impl Compiler {
         }
         let rowid = self.emit_insert_rowid(writer, insert, &values)?;
         self.emit_generated_values(table, &generated, &mut values, rowid)?;
+        if table.autoincrement && insert.sequence_root != 0 {
+            // Before the row is written, and for an explicit rowid as well as a
+            // generated one: `sqlite_sequence` holds the largest rowid the table
+            // has ever used, not the largest this statement invented.
+            self.emit(
+                Instruction::new(
+                    Opcode::SeqUpdate,
+                    rowid as i32,
+                    insert.sequence_root as i32,
+                    0,
+                )
+                .with_p4(Operand::Text(table.name.clone())),
+            );
+        }
         let mut skip = Vec::new();
         // A BEFORE trigger runs on the row as proposed - after the defaults, the
         // rowid and the generated columns have been worked out, because it can
@@ -2107,6 +2172,11 @@ impl Compiler {
         insert: &BoundInsert,
         values: &[u32],
     ) -> DbResult<u32> {
+        if insert.table.autoincrement && insert.sequence_root != 0 {
+            if let Some(register) = self.emit_autoincrement_rowid(writer, insert, values)? {
+                return Ok(register);
+            }
+        }
         if insert.table.without_rowid {
             // There is no rowid to allocate. The register exists because the
             // callers pass one through to the row image and the index-entry

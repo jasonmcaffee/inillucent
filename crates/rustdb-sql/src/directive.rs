@@ -497,6 +497,7 @@ impl<'a> Binder<'a> {
         if *without_rowid && !self.declares_primary_key(columns, constraints) {
             return Err(refused("PRIMARY KEY missing on table", Span::default()));
         }
+        self.check_autoincrement(columns, *without_rowid)?;
         if *strict {
             self.check_strict(columns)?;
         }
@@ -1183,6 +1184,44 @@ impl<'a> Binder<'a> {
             name_offset: self.name_offset(name),
             exists,
         })
+    }
+
+    /// Refuses the two places `AUTOINCREMENT` may not be written.
+    ///
+    /// It counts the rowid the table has handed out, so it needs a rowid to
+    /// count: only an `INTEGER PRIMARY KEY` column, and never on a table that
+    /// has no rowid at all. Both messages are the reference's own, because an
+    /// application that reads them is reading SQLite's.
+    fn check_autoincrement(
+        &mut self,
+        columns: &[ast::ColumnDef],
+        without_rowid: bool,
+    ) -> Result<(), ParseError> {
+        for column in columns {
+            let declared = column.declared_type.clone().unwrap_or_default();
+            for (_, constraint) in &column.constraints {
+                let ast::ColumnConstraint::PrimaryKey {
+                    autoincrement: true,
+                    ..
+                } = constraint
+                else {
+                    continue;
+                };
+                if without_rowid {
+                    return Err(refused(
+                        "AUTOINCREMENT not allowed on WITHOUT ROWID tables",
+                        Span::default(),
+                    ));
+                }
+                if !declared.eq_ignore_ascii_case(b"integer") {
+                    return Err(refused(
+                        "AUTOINCREMENT is only allowed on an INTEGER PRIMARY KEY",
+                        Span::default(),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Binds a `CREATE TRIGGER`.

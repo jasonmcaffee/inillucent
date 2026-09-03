@@ -13,6 +13,9 @@ archive = "sqlite-doc-3530400.zip"
 url = "https://sqlite.org/atomiccommit.html"
 
 [[source]]
+url = "https://sqlite.org/autoinc.html"
+
+[[source]]
 url = "https://sqlite.org/backup.html"
 
 [[source]]

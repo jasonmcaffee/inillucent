@@ -195,9 +195,54 @@ fn create_table(
             )
         })??;
     }
+    if table.autoincrement {
+        // The sequence table is created with the first AUTOINCREMENT table, as
+        // SQLite creates it, so that every later INSERT can be compiled against
+        // a root that already exists.
+        sequence_root(connection)?;
+    }
     connection.with_state(|state| ddl::bump_schema_cookie(&mut state.pager))??;
     connection.refresh_catalog()?;
     Ok(Vec::new())
+}
+
+/// The name of the table an `AUTOINCREMENT` key remembers its counter in.
+const SEQUENCE: &[u8] = b"sqlite_sequence";
+
+/// The text SQLite stores for `sqlite_sequence`, byte for byte.
+const SEQUENCE_SQL: &str = "CREATE TABLE sqlite_sequence(name,seq)";
+
+/// Returns `sqlite_sequence`'s root, creating the table when it is first owed.
+///
+/// The same shape `sqlite_stat1` gets: SQLite creates neither until something
+/// needs it, and both are ordinary tables with a `sqlite_` name, so they are
+/// written here rather than through the binder - which refuses that prefix, and
+/// should.
+fn sequence_root(connection: &Connection) -> DbResult<u32> {
+    let catalog = connection.catalog()?;
+    let existing = {
+        use rustdb_sql::catalog_view::CatalogView;
+        catalog.find_table(None, SEQUENCE).map(|table| table.root)
+    };
+    if let Some(root) = existing {
+        if root != 0 {
+            return Ok(root);
+        }
+    }
+    let root = connection.with_state(|state| ddl::allocate_table_root(&mut state.pager))??;
+    connection.with_state(|state| {
+        ddl::insert_schema_row(
+            &mut state.pager,
+            &SchemaRow {
+                kind: SchemaKind::Table,
+                name: SEQUENCE.to_vec(),
+                table: SEQUENCE.to_vec(),
+                root,
+                sql: Some(SEQUENCE_SQL.as_bytes().to_vec()),
+            },
+        )
+    })??;
+    Ok(root)
 }
 
 /// Runs `ALTER TABLE`.
@@ -970,9 +1015,54 @@ fn drop_object(connection: &Connection, directive: &Directive) -> DbResult<Direc
     for root in index_roots.iter().chain(core::iter::once(root)) {
         connection.with_state(|state| ddl::free_root(&mut state.pager, *root))??;
     }
+    if table_drop {
+        // A dropped table's `AUTOINCREMENT` counter goes with it. Leaving the
+        // row behind would have a table of the same name created later carry on
+        // from the dead one's numbers.
+        forget_sequence(connection, &folded)?;
+    }
     connection.with_state(|state| ddl::bump_schema_cookie(&mut state.pager))??;
     connection.refresh_catalog()?;
     Ok(Vec::new())
+}
+
+/// Removes a table's row from `sqlite_sequence`, if it has one.
+fn forget_sequence(connection: &Connection, folded: &[u8]) -> DbResult<()> {
+    let catalog = connection.catalog()?;
+    let root = {
+        use rustdb_sql::catalog_view::CatalogView;
+        catalog
+            .find_table(None, SEQUENCE)
+            .map_or(0, |table| table.root)
+    };
+    let Some(root) = rustdb_base::ids::PageId::new(root) else {
+        return Ok(());
+    };
+    let doomed = connection.with_state(|state| -> DbResult<Vec<i64>> {
+        let limits = rustdb_base::limits::Limits::default();
+        let encoding = state.pager.text_encoding();
+        let mut cursor = rustdb_storage::cursor::BTreeCursor::table(root);
+        let mut out = Vec::new();
+        let mut more = cursor.first(&mut state.pager)?;
+        while more {
+            let rowid = cursor.rowid()?;
+            let payload = cursor.payload(&mut state.pager, &limits)?;
+            let record = rustdb_value::record::RecordRef::parse(&payload, encoding)?;
+            if let Ok(Value::Text(text)) = record.value(0) {
+                if text.utf8_bytes().to_ascii_lowercase() == folded {
+                    out.push(rowid);
+                }
+            }
+            more = cursor.next(&mut state.pager)?;
+        }
+        Ok(out)
+    })??;
+    for rowid in doomed {
+        connection.with_state(|state| {
+            rustdb_storage::mutate::delete_row(&mut state.pager, root, rowid)
+        })??;
+    }
+    Ok(())
 }
 
 /// Answers or applies a `PRAGMA`.

@@ -167,6 +167,7 @@ mod tests {
             rowid_alias: None,
             without_rowid: false,
             strict: false,
+            autoincrement: false,
             kind: TableKind::Table,
             create_sql: Vec::new(),
             indexes: Vec::new(),

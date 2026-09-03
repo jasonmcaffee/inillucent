@@ -186,6 +186,16 @@ impl<'connection> Statement<'connection> {
             self.connection.begin_statement(self.access)?;
             self.machine
                 .record_row_changes(self.connection.wants_row_changes());
+            // What `changes()`, `total_changes()` and `last_insert_rowid()`
+            // answer is the connection's history, and the machine has no way to
+            // ask for it. Nothing was telling it, so all three read zero from
+            // inside a statement however many rows the connection had written.
+            let counters = self.connection.counters();
+            self.machine.set_counters(
+                counters.changes,
+                counters.total_changes,
+                counters.last_insert_rowid,
+            );
             self.open = true;
         }
         let outcome = self

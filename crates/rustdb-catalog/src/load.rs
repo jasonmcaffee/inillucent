@@ -198,6 +198,7 @@ fn table_from_row(row: &SchemaObject, database: usize) -> DbResult<TableInfo> {
             rowid_alias: None,
             without_rowid: false,
             strict: false,
+            autoincrement: false,
             kind: TableKind::View,
             create_sql,
             view: Some(Box::new(view)),
@@ -219,6 +220,7 @@ fn table_from_row(row: &SchemaObject, database: usize) -> DbResult<TableInfo> {
             rowid_alias: None,
             without_rowid: false,
             strict: false,
+            autoincrement: false,
             kind: TableKind::Virtual,
             create_sql: Vec::new(),
             view: None,
@@ -345,6 +347,7 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
                 rowid_alias: None,
                 without_rowid: false,
                 strict: false,
+                autoincrement: false,
                 kind: TableKind::Virtual,
                 create_sql: sql.to_vec(),
                 view: None,
@@ -375,6 +378,7 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
         rowid_alias: None,
         without_rowid: *without_rowid,
         strict: *strict,
+        autoincrement: false,
         kind: TableKind::Table,
         create_sql: sql.to_vec(),
         view: None,
@@ -402,6 +406,7 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
         }
     }
     info.rowid_alias = rowid_alias(&info, &parsed.ast, columns, constraints);
+    info.autoincrement = info.rowid_alias.is_some() && declares_autoincrement(columns, constraints);
     info.indexes = automatic_indexes(&info, &parsed.ast, columns, constraints);
     if info.without_rowid {
         // A WITHOUT ROWID table *is* its primary-key index: SQLite writes no
@@ -548,6 +553,38 @@ fn apply_table_constraints(
             }
         }
     }
+}
+
+/// Returns whether the primary key was declared `AUTOINCREMENT`.
+///
+/// Only meaningful next to a rowid alias: SQLite refuses `AUTOINCREMENT` on
+/// anything else, so a table that has it and no alias is one this reader is
+/// looking at wrongly rather than one to guess about.
+fn declares_autoincrement(
+    columns: &[rustdb_sql::ast::ColumnDef],
+    constraints: &[(Option<rustdb_sql::ast::NameId>, TableConstraint)],
+) -> bool {
+    let on_column = columns.iter().any(|column| {
+        column.constraints.iter().any(|(_, constraint)| {
+            matches!(
+                constraint,
+                ColumnConstraint::PrimaryKey {
+                    autoincrement: true,
+                    ..
+                }
+            )
+        })
+    });
+    let on_table = constraints.iter().any(|(_, constraint)| {
+        matches!(
+            constraint,
+            TableConstraint::PrimaryKey {
+                autoincrement: true,
+                ..
+            }
+        )
+    });
+    on_column || on_table
 }
 
 /// Returns the folded name of an indexed column when it is a bare column.
