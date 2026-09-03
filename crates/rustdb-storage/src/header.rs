@@ -147,6 +147,38 @@ pub struct DatabaseHeader {
 }
 
 impl DatabaseHeader {
+    /// Returns a header that describes nothing but a page size.
+    ///
+    /// It exists for the one moment where a page size is known and a header is
+    /// not: a database whose page one is only readable through a write-ahead
+    /// log, where the log's own header says how big a page is and the real
+    /// header arrives with the first snapshot. Nothing should read any other
+    /// field of it, and a zero page count is what makes that true - every page
+    /// is out of range until the snapshot says otherwise.
+    pub fn provisional(page_size: PageSize) -> DatabaseHeader {
+        DatabaseHeader {
+            page_size,
+            write_version: 2,
+            read_version: 2,
+            reserved_bytes: 0,
+            change_counter: 0,
+            database_size: 0,
+            freelist_head: 0,
+            freelist_count: 0,
+            schema_cookie: 0,
+            schema_format: 4,
+            cache_size: 0,
+            largest_root: 0,
+            text_encoding: TextEncoding::Utf8,
+            user_version: 0,
+            vacuum_mode: VacuumMode::None,
+            application_id: 0,
+            reserved_expansion_is_zero: true,
+            version_valid_for: 0,
+            write_library_version: 0,
+        }
+    }
+
     /// Decodes and validates a header.
     pub fn decode(raw: &[u8]) -> DbResult<DatabaseHeader> {
         let magic = bytes::window(raw, offsets::MAGIC, MAGIC.len())?;

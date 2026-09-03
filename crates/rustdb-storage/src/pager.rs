@@ -700,6 +700,58 @@ impl Pager {
         Pager::open_read_write(vfs, path, options)
     }
 
+    /// Opens a database whose header can only be read through a log.
+    ///
+    /// An interrupted checkpoint leaves the database file holding pages that
+    /// were half copied out of the log, and page one is usually the first of
+    /// them - so the hundred bytes at the front of the file are not a header
+    /// any more. That is not corruption: every one of those pages is still in
+    /// the log, and the next checkpoint copies them again. But the header has
+    /// to come from somewhere before the log can be consulted, so this opens
+    /// the pager with a provisional one carrying only the page size the log
+    /// declares. `begin_read` replaces it with the real header as soon as a
+    /// snapshot exists, which is what SQLite does too: it reads page one after
+    /// it has opened the log, never before.
+    pub fn open_with_header_from_log(
+        vfs: &dyn Vfs,
+        path: &DbPath,
+        options: PagerOptions,
+        page_size: PageSize,
+        writable: bool,
+    ) -> DbResult<Pager> {
+        let mut open = OpenOptions::of_kind(rustdb_vfs::FileKind::MainDb);
+        if !writable {
+            open = open.read_only();
+        }
+        let file = vfs.open(path, open)?;
+        let file_bytes = file.file_size()?;
+        Ok(Pager {
+            file,
+            path: path.clone(),
+            header: DatabaseHeader::provisional(page_size),
+            file_bytes,
+            page_count: 0,
+            cache: Arc::new(PageCache::new(options.cache_bytes)),
+            database: options.database,
+            state: PagerState::Open,
+            sticky: None,
+            counters: PagerCounters::default(),
+            read_only: !writable,
+            dirty: BTreeSet::new(),
+            undo: Vec::new(),
+            freed: BTreeSet::new(),
+            sites_reached: 0,
+            fail_at: None,
+            journal: None,
+            journalled: BTreeSet::new(),
+            wrote_database: false,
+            journal_totals: JournalStats::default(),
+            committing: Vec::new(),
+            wal: None,
+            wal_snapshot: None,
+        })
+    }
+
     /// Attaches the journal that makes this pager's commits crash-atomic.
     ///
     /// A pager with no journal attached still commits, and still orders its
