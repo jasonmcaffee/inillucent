@@ -250,6 +250,11 @@ pub struct CellRef<'a> {
     pub split: PayloadSplit,
     /// The payload bytes stored on this page.
     pub local_payload: &'a [u8],
+    /// Where those bytes start within the page.
+    ///
+    /// The slice knows its length and not its address, and a caller that wants
+    /// to *write* one of those bytes needs the offset to hand to `edit_page`.
+    pub local_offset: usize,
     /// The first page of the overflow chain, when there is one.
     pub overflow: Option<PageId>,
 }
@@ -659,6 +664,7 @@ impl<'a> BTreePage<'a> {
                     overflows: false,
                 },
                 local_payload: &[],
+                local_offset: offset,
                 overflow: None,
             });
         }
@@ -683,6 +689,7 @@ impl<'a> BTreePage<'a> {
         };
 
         let split = self.layout.window.split(payload_len.value)?;
+        let local_offset = offset.saturating_add(cursor);
         let local = window
             .get(cursor..cursor.saturating_add(split.local))
             .ok_or_else(|| {
@@ -711,6 +718,7 @@ impl<'a> BTreePage<'a> {
             rowid,
             split,
             local_payload: local,
+            local_offset,
             overflow,
         })
     }

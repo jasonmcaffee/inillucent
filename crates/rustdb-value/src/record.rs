@@ -311,6 +311,60 @@ impl<'a> RecordRef<'a> {
     }
 }
 
+/// Returns how many bytes a record's header occupies.
+///
+/// Only the first varint is read, so a prefix of the record is enough - which
+/// is the point: a caller that has not read the record yet uses this to find
+/// out how much of it to read.
+pub fn header_length(prefix: &[u8]) -> DbResult<u64> {
+    let header = varint::decode(prefix)
+        .map_err(|_| corrupt("a record's header size varint is truncated"))?;
+    if header.value < header.len as u64 {
+        return Err(corrupt(
+            "a record whose header is shorter than the size that declares it",
+        ));
+    }
+    Ok(header.value)
+}
+
+/// Returns where one field of a record starts and how long it is.
+///
+/// `header` must hold at least the record's header. Nothing else is read: the
+/// header says how long every field is, so finding where the fifth value
+/// begins is a walk of four varints rather than a read of the four values. It
+/// is what lets a blob handle open a hundred-megabyte value without reading
+/// any of it.
+pub fn field_extent(header: &[u8], index: usize) -> DbResult<(u64, u64)> {
+    let header_len = header_length(header)?;
+    let header_len_usize =
+        usize::try_from(header_len).map_err(|_| corrupt("a record header longer than memory"))?;
+    if header_len_usize > header.len() {
+        return Err(corrupt("a record header shorter than the size it declares"));
+    }
+    let leading = varint::decode(header)
+        .map_err(|_| corrupt("a record's header size varint is truncated"))?;
+    let mut cursor = leading.len;
+    let mut start = header_len;
+    let mut field = 0usize;
+    while cursor < header_len_usize {
+        let window = header
+            .get(cursor..header_len_usize)
+            .ok_or_else(|| corrupt("a record's header runs past its own end"))?;
+        let decoded = varint::decode(window)
+            .map_err(|_| corrupt("a record's serial type varint is truncated"))?;
+        let len = SerialType(decoded.value).payload_len()?;
+        if field == index {
+            return Ok((start, len));
+        }
+        start = start.saturating_add(len);
+        cursor = cursor.saturating_add(decoded.len);
+        field = field.saturating_add(1);
+    }
+    Err(corrupt(format!(
+        "a record of {field} fields has no field {index}"
+    )))
+}
+
 /// Decodes one field's payload under its serial type.
 pub fn decode_field(
     serial: SerialType,

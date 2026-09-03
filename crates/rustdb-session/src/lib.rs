@@ -15,7 +15,10 @@
 //! Module map:
 //!
 //! - [`connection`] - the connection, its catalog, and the read transaction;
-//! - [`statement`] - prepare, bind, step, reset, and finalise.
+//! - [`statement`] - prepare, bind, step, reset, and finalise;
+//! - [`backup`] - copying one database into another a few pages at a time;
+//! - [`blob`] - a handle on one value, read and written a range at a time;
+//! - [`serialize`] - a database as a byte string, and back.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -35,14 +38,20 @@
     )
 )]
 
+pub mod backup;
+pub mod blob;
 pub mod connection;
 pub mod execute;
+pub mod serialize;
 pub mod statement;
 
+pub use backup::{Backup, BackupProgress};
+pub use blob::Blob;
 pub use connection::{
     Access, CommitHook, Connection, Hooks, OpenOptions, Outcome, RollbackHook, SessionDatabase,
     UpdateHook,
 };
+pub use serialize::{serialize, Deserialized};
 pub use statement::{ColumnMetadata, Statement};
 
 /// The implementation phase that filled this crate in, as named by the TDD.
