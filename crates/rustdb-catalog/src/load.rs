@@ -105,6 +105,13 @@ fn table_from_row(row: &SchemaObject, database: usize) -> DbResult<TableInfo> {
     let root = row.root_page.map_or(0, |page| page.get());
     let sql = row.sql.clone().unwrap_or_default();
     if row.kind == SchemaKind::View {
+        let create_sql = sql.into_bytes();
+        // The body is parsed here, once, and kept. A view referenced twice in
+        // one statement is then two binds of one arena rather than two parses,
+        // and - the reason it has to be here rather than in the binder - the
+        // arena outlives every statement bound against this snapshot.
+        let view = view_from_create_sql(&create_sql)
+            .map_err(|error| error.with_detail(format!("in view {}", row.name)))?;
         return Ok(TableInfo {
             name: row.name.clone().into_bytes(),
             folded: row.name.to_ascii_lowercase().into_bytes(),
@@ -115,7 +122,8 @@ fn table_from_row(row: &SchemaObject, database: usize) -> DbResult<TableInfo> {
             without_rowid: false,
             strict: false,
             kind: TableKind::View,
-            create_sql: sql.into_bytes(),
+            create_sql,
+            view: Some(Box::new(view)),
             indexes: Vec::new(),
             checks: Vec::new(),
         });
@@ -134,6 +142,7 @@ fn table_from_row(row: &SchemaObject, database: usize) -> DbResult<TableInfo> {
             strict: false,
             kind: TableKind::Virtual,
             create_sql: Vec::new(),
+            view: None,
             indexes: Vec::new(),
             checks: Vec::new(),
         });
@@ -143,6 +152,32 @@ fn table_from_row(row: &SchemaObject, database: usize) -> DbResult<TableInfo> {
     table.name = row.name.clone().into_bytes();
     table.folded = row.name.to_ascii_lowercase().into_bytes();
     Ok(table)
+}
+
+/// Parses a `CREATE VIEW` statement into the body a reference binds.
+///
+/// The arena is kept whole rather than the `SELECT` being lifted out of it,
+/// because every node the select refers to - names, expressions, nested
+/// selects - lives in the arena and is addressed by an index into it.
+pub fn view_from_create_sql(sql: &[u8]) -> DbResult<rustdb_sql::catalog_view::ViewBody> {
+    let limits = Limits::default();
+    let parsed = parse_next_statement(sql, 0, &limits)
+        .map_err(|error| error::corrupt(format!("malformed view SQL: {}", error.message())))?;
+    let Statement::CreateView {
+        columns, select, ..
+    } = &parsed.statement
+    else {
+        return Err(error::corrupt("schema SQL is not a CREATE VIEW"));
+    };
+    let names = columns
+        .iter()
+        .map(|name| parsed.ast.text(*name).to_vec())
+        .collect();
+    Ok(rustdb_sql::catalog_view::ViewBody {
+        select: *select,
+        columns: names,
+        ast: parsed.ast,
+    })
 }
 
 /// Parses a `CREATE TABLE` statement into a table entry.
@@ -167,6 +202,7 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
                 strict: false,
                 kind: TableKind::Virtual,
                 create_sql: sql.to_vec(),
+                view: None,
                 indexes: Vec::new(),
                 checks: Vec::new(),
             });
@@ -194,6 +230,7 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
         strict: *strict,
         kind: TableKind::Table,
         create_sql: sql.to_vec(),
+        view: None,
         indexes: Vec::new(),
         checks: Vec::new(),
     };

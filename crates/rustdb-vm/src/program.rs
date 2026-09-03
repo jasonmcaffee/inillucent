@@ -144,6 +144,43 @@ pub enum Opcode {
     SorterNext,
     /// `p1`: sorter, `p2`: column, `p3`: destination register.
     SorterColumn,
+    /// `p1`: cursor. Make every column of the cursor read as NULL.
+    ///
+    /// This is how an outer join emits its unmatched row: rather than a second
+    /// copy of the body that knows to substitute NULLs, the cursor is put into
+    /// a state where every `Column` off it answers NULL and the same body runs.
+    NullRow,
+    /// `p1`: store, `p2`: column count, `p4`: the key when `p5` is 1.
+    ///
+    /// Opens an ephemeral row store. With `p5` of 1 it keeps an ordered index
+    /// and can be probed and de-duplicated; without, it is append-and-scan.
+    EphOpen,
+    /// `p1`: store, `p2`: first register, `p3`: count. Append a row.
+    EphInsert,
+    /// `p1`: store, `p2`: jump when an equal row is already present,
+    /// `p3`: first register, `p5`: count.
+    EphInsertUnique,
+    /// `p1`: store, `p2`: jump when the store is empty.
+    EphRewind,
+    /// `p1`: store, `p2`: jump when another row exists.
+    EphNext,
+    /// `p1`: store, `p2`: column, `p3`: destination register.
+    EphColumn,
+    /// `p1`: store, `p2`: jump when an equal row is present, `p3`: first
+    /// register, `p5`: count.
+    EphFound,
+    /// `p1`: store, `p2`: jump when no equal row is present, `p3`: first
+    /// register, `p5`: count.
+    EphNotFound,
+    /// `p1`: store, `p2`: jump when an equal row was present and removed,
+    /// `p3`: first register, `p5`: count.
+    EphRemove,
+    /// `p1`: store. Forget every row, keeping the store open.
+    EphClear,
+    /// `p1`: store. Keep the first of every group of equal rows.
+    EphDedup,
+    /// `p1`: store, `p2`: destination register. Whether the store holds a NULL.
+    EphSawNull,
     /// `p1`: set. Open a distinct set.
     DistinctOpen,
     /// `p1`: set, `p2`: jump when the row has been seen, `p3`: first register,
@@ -254,6 +291,12 @@ impl Opcode {
                 | Opcode::DistinctCheck
                 | Opcode::NotExists
                 | Opcode::NoConflict
+                | Opcode::EphInsertUnique
+                | Opcode::EphRewind
+                | Opcode::EphNext
+                | Opcode::EphFound
+                | Opcode::EphNotFound
+                | Opcode::EphRemove
         )
     }
 
@@ -295,6 +338,19 @@ impl Opcode {
             Opcode::Not => "Not",
             Opcode::IsNull => "IsNull",
             Opcode::InList => "InList",
+            Opcode::NullRow => "NullRow",
+            Opcode::EphOpen => "OpenEphemeral",
+            Opcode::EphInsert => "EphInsert",
+            Opcode::EphInsertUnique => "EphInsertUnique",
+            Opcode::EphRewind => "EphRewind",
+            Opcode::EphNext => "EphNext",
+            Opcode::EphColumn => "EphColumn",
+            Opcode::EphFound => "EphFound",
+            Opcode::EphNotFound => "EphNotFound",
+            Opcode::EphRemove => "EphRemove",
+            Opcode::EphClear => "EphClear",
+            Opcode::EphDedup => "EphDedup",
+            Opcode::EphSawNull => "EphSawNull",
             Opcode::If => "If",
             Opcode::IfNot => "IfNot",
             Opcode::IfNull => "IfNull",
@@ -552,6 +608,8 @@ pub struct Program {
     pub sorter_count: u32,
     /// How many distinct sets the machine must allocate.
     pub distinct_count: u32,
+    /// How many ephemeral row stores the machine must allocate.
+    pub ephemeral_count: u32,
     /// How many aggregate accumulators the machine must allocate.
     pub aggregate_count: u32,
     /// The result columns, in order.

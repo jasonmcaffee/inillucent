@@ -162,6 +162,7 @@ mod tests {
             kind: TableKind::Table,
             create_sql: Vec::new(),
             indexes: Vec::new(),
+            view: None,
             checks: Vec::new(),
         }
     }

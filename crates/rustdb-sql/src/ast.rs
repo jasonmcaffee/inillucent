@@ -1119,7 +1119,7 @@ pub enum TransactionBehaviour {
 }
 
 /// The arena every node of one parse lives in.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Ast {
     names: Vec<Name>,
     exprs: Vec<Expr>,

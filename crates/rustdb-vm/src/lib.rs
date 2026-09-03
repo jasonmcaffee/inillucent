@@ -18,6 +18,7 @@
 //! - [`pattern`] - `LIKE` and `GLOB`;
 //! - [`aggregate`] - the accumulators;
 //! - [`sorter`] - the sorter and the distinct set;
+//! - [`ephemeral`] - the temporary row stores nested queries are built on;
 //! - [`machine`] - registers, cursors, and the step loop.
 
 #![forbid(unsafe_code)]
@@ -60,6 +61,7 @@ pub mod aggregate;
 pub mod builtin;
 pub mod compile;
 pub mod compile_dml;
+pub mod ephemeral;
 pub mod eval;
 pub mod machine;
 pub mod pattern;
