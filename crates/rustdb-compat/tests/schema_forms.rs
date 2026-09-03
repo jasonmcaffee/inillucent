@@ -345,3 +345,72 @@ fn strict_is_enforced_on_a_file_sqlite_wrote() {
         Ok(vec!["int:1".to_string(), "int:2".to_string()])
     );
 }
+
+/// `EXPLAIN` and `EXPLAIN QUERY PLAN` answer with rows about a statement
+/// rather than running it.
+#[test]
+fn explain_reports_without_running() {
+    let path = scratch("explain");
+    let database = Database::open(&path).expect("the database opens");
+    let connection = database.connect().expect("the connection opens");
+    run_all(
+        &connection,
+        &[
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, team TEXT)",
+            "CREATE INDEX t_team ON t (team)",
+            "INSERT INTO t VALUES (1, 'ada', 'blue')",
+            "INSERT INTO t VALUES (2, 'bob', 'red')",
+        ],
+    );
+
+    // The plan names the access path, which is the question a person asks it.
+    let scan = run(&connection, "EXPLAIN QUERY PLAN SELECT * FROM t").expect("the plan explains");
+    assert_eq!(scan.len(), 1);
+    assert!(
+        scan.first().is_some_and(|line| line.contains("SCAN t")),
+        "{scan:?}"
+    );
+    let search = run(
+        &connection,
+        "EXPLAIN QUERY PLAN SELECT * FROM t WHERE team = 'blue'",
+    )
+    .expect("the plan explains");
+    assert!(
+        search
+            .first()
+            .is_some_and(|line| line.contains("SEARCH t USING INDEX t_team")),
+        "{search:?}"
+    );
+    let sorted = run(
+        &connection,
+        "EXPLAIN QUERY PLAN SELECT * FROM t ORDER BY name",
+    )
+    .expect("the plan explains");
+    assert!(
+        sorted
+            .iter()
+            .any(|line| line.contains("USE TEMP B-TREE FOR ORDER BY")),
+        "{sorted:?}"
+    );
+
+    // The bytecode listing has SQLite's eight columns and begins at Init.
+    let bytecode = run(&connection, "EXPLAIN SELECT * FROM t").expect("the bytecode explains");
+    assert!(!bytecode.is_empty());
+    assert!(
+        bytecode.first().is_some_and(|line| line.contains("Init")),
+        "{bytecode:?}"
+    );
+
+    // Explaining does not run: the table is untouched, and a statement that
+    // would fail to compile still fails.
+    assert_eq!(
+        run(&connection, "SELECT count(*) FROM t"),
+        Ok(vec!["int:2".to_string()])
+    );
+    run_all(&connection, &["EXPLAIN DELETE FROM t"]);
+    assert_eq!(
+        run(&connection, "SELECT count(*) FROM t"),
+        Ok(vec!["int:2".to_string()])
+    );
+    assert!(run(&connection, "EXPLAIN SELECT * FROM nosuchtable").is_err());
+}
