@@ -36,6 +36,13 @@ pub enum ColumnSource {
     Row(usize),
     /// An expression evaluated once per row, which is what a `DEFAULT` is.
     Expr(BoundExpr),
+    /// A generated column, computed from the rest of the row rather than from
+    /// anything the statement supplied.
+    ///
+    /// It is its own variant because it is evaluated at a different *time*: a
+    /// `DEFAULT` is a value like any other, while a generated column reads the
+    /// row it is part of and so cannot be computed until the rest of it is.
+    Generated(BoundExpr),
 }
 
 /// What an INSERT inserts.
@@ -347,6 +354,32 @@ impl<'a> Binder<'a> {
         self.scopes.push(vec![id]);
     }
 
+    /// Refuses an attempt to write a generated column.
+    ///
+    /// SQLite's message names the column, because the usual cause is a script
+    /// that inserts every column of a table one of whose columns has since been
+    /// made generated.
+    fn refuse_generated(
+        &self,
+        table: &TableInfo,
+        position: u16,
+        span: Span,
+    ) -> Result<(), ParseError> {
+        let Some(column) = table.column(position) else {
+            return Ok(());
+        };
+        if !column.generated {
+            return Ok(());
+        }
+        Err(refused(
+            format!(
+                "cannot INSERT into generated column \"{}\"",
+                String::from_utf8_lossy(&column.name)
+            ),
+            span,
+        ))
+    }
+
     /// Returns the target column positions an INSERT writes, in source order.
     ///
     /// With no column list the targets are every column in declaration order,
@@ -359,7 +392,17 @@ impl<'a> Binder<'a> {
         columns: &[ast::NameId],
     ) -> Result<Vec<u16>, ParseError> {
         if columns.is_empty() {
-            return Ok((0..table.columns.len() as u16).collect());
+            // A bare `INSERT INTO t VALUES (...)` supplies the columns a person
+            // can write, which is every column that is not generated - so a
+            // table with a generated column takes fewer values than it has
+            // columns, exactly as SQLite counts them.
+            return Ok((0..table.columns.len() as u16)
+                .filter(|position| {
+                    table
+                        .column(*position)
+                        .is_some_and(|column| !column.generated)
+                })
+                .collect());
         }
         let mut targets = Vec::with_capacity(columns.len());
         for name in columns {
@@ -376,6 +419,7 @@ impl<'a> Binder<'a> {
                     Span::default(),
                 ));
             }
+            self.refuse_generated(table, position, Span::default())?;
             targets.push(position);
         }
         Ok(targets)
@@ -445,6 +489,10 @@ impl<'a> Binder<'a> {
     ) -> Result<(Vec<ColumnSource>, Option<ColumnSource>), ParseError> {
         let mut columns = Vec::with_capacity(table.columns.len());
         for position in 0..table.columns.len() as u16 {
+            if let Some(expr) = self.generated_expr(table, position)? {
+                columns.push(ColumnSource::Generated(expr));
+                continue;
+            }
             let source = match targets.iter().position(|target| *target == position) {
                 Some(index) => ColumnSource::Row(index),
                 None => ColumnSource::Expr(self.default_expr(table, position)?),
@@ -456,6 +504,24 @@ impl<'a> Binder<'a> {
             None => None,
         };
         Ok((columns, rowid))
+    }
+
+    /// Binds a generated column's expression, when the column is one.
+    fn generated_expr(
+        &mut self,
+        table: &TableInfo,
+        position: u16,
+    ) -> Result<Option<BoundExpr>, ParseError> {
+        let Some(column) = table.column(position) else {
+            return Ok(None);
+        };
+        if !column.generated {
+            return Ok(None);
+        }
+        let Some(sql) = column.generated_sql.clone() else {
+            return Ok(Some(BoundExpr::Null));
+        };
+        Ok(Some(self.bind_schema_expr(&sql)?))
     }
 
     /// Binds a column's `DEFAULT`, or NULL when it has none.

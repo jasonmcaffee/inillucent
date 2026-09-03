@@ -334,6 +334,8 @@ fn column_info(source: &[u8], ast: &Ast, column: &rustdb_sql::ast::ColumnDef) ->
         primary_key_position: None,
         hidden: false,
         generated: false,
+        stored: false,
+        generated_sql: None,
     };
     for (_, constraint) in &column.constraints {
         match constraint {
@@ -350,11 +352,12 @@ fn column_info(source: &[u8], ast: &Ast, column: &rustdb_sql::ast::ColumnDef) ->
             ColumnConstraint::PrimaryKey { .. } => {
                 info.primary_key_position = Some(1);
             }
-            ColumnConstraint::Generated { stored, .. } => {
+            ColumnConstraint::Generated { expr, stored } => {
                 info.generated = true;
                 // A VIRTUAL generated column is not stored in the record, and a
                 // STORED one is. Neither is hidden from `SELECT *`.
-                let _ = stored;
+                info.stored = *stored;
+                info.generated_sql = Some(source_of(source, ast, *expr));
             }
             _ => {}
         }

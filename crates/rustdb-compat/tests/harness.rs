@@ -71,7 +71,7 @@ const FINISHED_PHASES: [&str; 8] = [
 const IN_PROGRESS_PHASE: &str = "phase 8:";
 
 /// The rows of [`IN_PROGRESS_PHASE`] that have evidence behind them.
-const IN_PROGRESS_ROWS: [&str; 24] = [
+const IN_PROGRESS_ROWS: [&str; 25] = [
     "sql.expr.in-subquery",
     "sql.select.joins",
     "sql.select.compound",
@@ -85,6 +85,7 @@ const IN_PROGRESS_ROWS: [&str; 24] = [
     "sql.explain",
     "sql.analyze",
     "sql.reindex",
+    "sql.generated-columns",
     "planner.access-paths",
     "planner.join-order",
     "planner.statistics",

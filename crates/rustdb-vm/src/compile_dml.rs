@@ -789,6 +789,81 @@ impl Compiler {
         Ok(values)
     }
 
+    /// Computes every generated column of a row image, in dependency order.
+    ///
+    /// A generated column's expression reads other columns of the same row, so
+    /// it is compiled against the row's *registers* rather than against a
+    /// cursor - the row is not in the table yet. One generated column may read
+    /// another, so the pass repeats until nothing new can be computed; anything
+    /// still outstanding is part of a cycle, which the table's creation
+    /// refuses, and it keeps the NULL it was given rather than looping.
+    fn emit_generated_values(
+        &mut self,
+        table: &TableInfo,
+        generated: &[(usize, BoundExpr)],
+        values: &mut [u32],
+        rowid: u32,
+    ) -> DbResult<()> {
+        if generated.is_empty() {
+            return Ok(());
+        }
+        let mut ready: Vec<usize> = (0..table.columns.len())
+            .filter(|position| {
+                table
+                    .column(*position as u16)
+                    .is_some_and(|column| !column.generated)
+            })
+            .collect();
+        let mut pending: Vec<(usize, BoundExpr)> = generated.to_vec();
+        let mut rounds = 0usize;
+        while !pending.is_empty() && rounds <= generated.len() {
+            rounds = rounds.saturating_add(1);
+            let mut progressed = false;
+            let mut still = Vec::new();
+            for (position, expr) in pending {
+                let mut reads = Vec::new();
+                expr.columns_used(&mut reads);
+                let satisfied = reads.iter().all(|column| {
+                    ready.contains(&usize::from(*column)) || table.rowid_alias == Some(*column)
+                });
+                if !satisfied {
+                    still.push((position, expr));
+                    continue;
+                }
+                let previous = core::mem::replace(
+                    &mut self.substitutions,
+                    row_substitutions_for(table, values, rowid, &ready),
+                );
+                let compiled = self.compile_expr(&expr);
+                self.substitutions = previous;
+                let register = compiled?;
+                let target = self.register();
+                self.emit(Instruction::new(
+                    Opcode::Copy,
+                    register as i32,
+                    target as i32,
+                    0,
+                ));
+                if let Some(column) = table.column(position as u16) {
+                    self.emit(
+                        Instruction::new(Opcode::ApplyAffinity, target as i32, 1, 0)
+                            .with_p4(Operand::Affinity(column.affinity)),
+                    );
+                }
+                if let Some(slot) = values.get_mut(position) {
+                    *slot = target;
+                }
+                ready.push(position);
+                progressed = true;
+            }
+            pending = still;
+            if !progressed {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     /// Emits the record for a table row and writes it, indexes included.
     fn emit_write_row(
         &mut self,
@@ -797,10 +872,21 @@ impl Compiler {
         values: &[u32],
         rowid: u32,
     ) -> DbResult<()> {
-        let width = table.columns.len().max(1);
+        // The record holds one slot per *stored* column: a VIRTUAL generated
+        // column is computed on read and takes none, so packing by declared
+        // position would leave a hole and shift every column after it.
+        let width = table.record_width().max(1);
         let block = self.register_block(width);
+        let mut target_slot = 0usize;
         for position in 0..table.columns.len() {
-            let target = block.saturating_add(position as u32);
+            let virtual_column = table
+                .column(position as u16)
+                .is_some_and(|column| column.generated && !column.stored);
+            if virtual_column {
+                continue;
+            }
+            let target = block.saturating_add(target_slot as u32);
+            target_slot = target_slot.saturating_add(1);
             if table.rowid_alias == Some(position as u16) {
                 // The rowid is the row's key, not one of its fields; SQLite
                 // stores a NULL in the record and reads the key back instead.
@@ -822,6 +908,7 @@ impl Compiler {
             .columns
             .iter()
             .enumerate()
+            .filter(|(_, column)| !(column.generated && !column.stored))
             .map(|(position, column)| {
                 if table.rowid_alias == Some(position as u16) {
                     Affinity::Blob
@@ -835,7 +922,7 @@ impl Compiler {
             Instruction::new(
                 Opcode::MakeRecord,
                 block as i32,
-                table.columns.len() as i32,
+                table.record_width() as i32,
                 record as i32,
             )
             .with_p4(Operand::Affinities(affinities)),
@@ -956,6 +1043,7 @@ fn excluded_substitutions(table: &TableInfo, values: &[u32], rowid: u32) -> Vec<
             BoundExpr::Column {
                 source: EXCLUDED_SOURCE,
                 column: position as u16,
+                slot: table.record_slot(position as u16).unwrap_or(position) as u16,
                 affinity: column.affinity,
                 collation,
             },
@@ -997,6 +1085,26 @@ fn index_key(index: &IndexInfo) -> IndexKey {
     }
 }
 
+/// Returns the substitutions for the columns of a row that have values yet.
+///
+/// A generated column that has not been computed is deliberately absent: with
+/// it present, an expression that read it would compile to the placeholder NULL
+/// and quietly produce the wrong answer instead of failing to be ordered.
+fn row_substitutions_for(
+    table: &TableInfo,
+    values: &[u32],
+    rowid: u32,
+    ready: &[usize],
+) -> Vec<(BoundExpr, u32)> {
+    row_substitutions(table, values, rowid)
+        .into_iter()
+        .filter(|(expr, _)| match expr {
+            BoundExpr::Column { column, .. } => ready.contains(&usize::from(*column)),
+            _ => true,
+        })
+        .collect()
+}
+
 /// Returns the substitutions a row image is compiled against.
 ///
 /// A CHECK, a RETURNING and a DO UPDATE all read "the row being written",
@@ -1019,6 +1127,7 @@ fn row_substitutions(table: &TableInfo, values: &[u32], rowid: u32) -> Vec<(Boun
             BoundExpr::Column {
                 source: 0,
                 column: position as u16,
+                slot: table.record_slot(position as u16).unwrap_or(position) as u16,
                 affinity: column.affinity,
                 collation,
             },
@@ -1110,10 +1219,20 @@ impl Compiler {
     ) -> DbResult<()> {
         let table = &insert.table;
         let mut values = Vec::with_capacity(table.columns.len());
-        for column in &insert.columns {
+        let mut generated: Vec<(usize, BoundExpr)> = Vec::new();
+        for (position, column) in insert.columns.iter().enumerate() {
             let register = match column {
                 ColumnSource::Row(index) => sources.get(*index).copied().unwrap_or(0),
                 ColumnSource::Expr(expr) => self.compile_expr(expr)?,
+                ColumnSource::Generated(expr) => {
+                    // Its value is not known yet: it reads the rest of the row,
+                    // and the rest of the row is still being assembled. A NULL
+                    // holds the slot until the second pass fills it.
+                    generated.push((position, expr.clone()));
+                    let placeholder = self.register();
+                    self.emit(Instruction::new(Opcode::Null, 0, placeholder as i32, 0));
+                    placeholder
+                }
             };
             values.push(register);
         }
@@ -1121,7 +1240,7 @@ impl Compiler {
             let Some(column) = table.column(position as u16) else {
                 continue;
             };
-            if table.rowid_alias == Some(position as u16) {
+            if table.rowid_alias == Some(position as u16) || column.generated {
                 continue;
             }
             self.emit(
@@ -1130,6 +1249,7 @@ impl Compiler {
             );
         }
         let rowid = self.emit_insert_rowid(writer, insert, &values)?;
+        self.emit_generated_values(table, &generated, &mut values, rowid)?;
         let mut skip = Vec::new();
         let previous = core::mem::replace(
             &mut self.substitutions,

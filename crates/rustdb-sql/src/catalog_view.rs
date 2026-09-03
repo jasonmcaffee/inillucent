@@ -55,6 +55,15 @@ pub struct ColumnInfo {
     pub hidden: bool,
     /// Whether the column is generated.
     pub generated: bool,
+    /// Whether a generated column's value is stored in the record.
+    ///
+    /// A `VIRTUAL` column occupies no slot and is computed on every read; a
+    /// `STORED` one occupies a slot like any other column. The distinction is
+    /// not cosmetic: it changes which *record position* every column after it
+    /// lives at, so a reader that ignored it would read the wrong column.
+    pub stored: bool,
+    /// The generating expression, as the source text it was written as.
+    pub generated_sql: Option<Vec<u8>>,
 }
 
 /// One key column of an index.
@@ -226,6 +235,42 @@ impl TableInfo {
             indexes: Vec::new(),
             checks: Vec::new(),
         }
+    }
+
+    /// Returns the record slot a column's value lives in, when it has one.
+    ///
+    /// `VIRTUAL` generated columns take no slot, so the slots of the columns
+    /// after them shift down. Every read of a stored column has to go through
+    /// this rather than through the column's declared position, and a `VIRTUAL`
+    /// column has no slot at all - it is computed.
+    pub fn record_slot(&self, column: u16) -> Option<usize> {
+        let mut slot = 0usize;
+        for (position, info) in self.columns.iter().enumerate() {
+            if info.generated && !info.stored {
+                if position == usize::from(column) {
+                    return None;
+                }
+                continue;
+            }
+            if position == usize::from(column) {
+                return Some(slot);
+            }
+            slot = slot.saturating_add(1);
+        }
+        None
+    }
+
+    /// Returns how many columns the record holds.
+    pub fn record_width(&self) -> usize {
+        self.columns
+            .iter()
+            .filter(|column| !(column.generated && !column.stored))
+            .count()
+    }
+
+    /// Returns whether the table has any generated column at all.
+    pub fn has_generated(&self) -> bool {
+        self.columns.iter().any(|column| column.generated)
     }
 
     /// Returns whether a name is one of the rowid's three spellings and is not
@@ -434,6 +479,8 @@ mod tests {
                 primary_key_position: None,
                 hidden: false,
                 generated: false,
+                stored: false,
+                generated_sql: None,
             }],
             rowid_alias: None,
             without_rowid: false,

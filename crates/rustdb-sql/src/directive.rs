@@ -21,6 +21,79 @@ use crate::diagnostic::ParseError;
 use crate::lexer::Span;
 use rustdb_value::Collation;
 
+/// Returns the direct children of an expression node.
+///
+/// The arena has no walker of its own, and the only caller that needs one is
+/// the generated-column check, so it lives beside it rather than becoming a
+/// method every other reader would have to ignore.
+fn expression_children(ast: &crate::ast::Ast, expr: ast::ExprId) -> Vec<ast::ExprId> {
+    let mut out = Vec::new();
+    let Some(node) = ast.expr(expr) else {
+        return out;
+    };
+    match node {
+        ast::Expr::Unary { operand, .. } => out.push(*operand),
+        ast::Expr::Binary { left, right, .. } => {
+            out.push(*left);
+            out.push(*right);
+        }
+        ast::Expr::Collate { operand, .. } | ast::Expr::Cast { operand, .. } => out.push(*operand),
+        ast::Expr::IsNull { operand, .. } => out.push(*operand),
+        ast::Expr::Is { left, right, .. } => {
+            out.push(*left);
+            out.push(*right);
+        }
+        ast::Expr::Between {
+            operand, low, high, ..
+        } => {
+            out.push(*operand);
+            out.push(*low);
+            out.push(*high);
+        }
+        ast::Expr::In { operand, rhs, .. } => {
+            out.push(*operand);
+            if let ast::InRhs::List(items) = rhs {
+                out.extend(items.iter().copied());
+            }
+        }
+        ast::Expr::Case {
+            operand,
+            branches,
+            otherwise,
+        } => {
+            if let Some(operand) = operand {
+                out.push(*operand);
+            }
+            for (when, then) in branches {
+                out.push(*when);
+                out.push(*then);
+            }
+            if let Some(otherwise) = otherwise {
+                out.push(*otherwise);
+            }
+        }
+        ast::Expr::Pattern {
+            operand,
+            pattern,
+            escape,
+            ..
+        } => {
+            out.push(*operand);
+            out.push(*pattern);
+            if let Some(escape) = escape {
+                out.push(*escape);
+            }
+        }
+        ast::Expr::Function { arguments, .. } => {
+            if let Some(arguments) = arguments {
+                out.extend(arguments.iter().copied());
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
 /// Returns the failure `REINDEX` gives for a name that is nothing it knows.
 fn no_such_collation_sequence(name: &[u8], span: Span) -> ParseError {
     ParseError::new(
@@ -291,6 +364,7 @@ impl<'a> Binder<'a> {
         if *strict {
             self.check_strict(columns)?;
         }
+        self.check_generated(columns)?;
         if columns.is_empty() {
             return Err(refused(
                 "a table must have at least one column",
@@ -345,6 +419,109 @@ impl<'a> Binder<'a> {
             || constraints.iter().any(|(_, constraint)| {
                 matches!(constraint, ast::TableConstraint::PrimaryKey { .. })
             })
+    }
+
+    /// Checks the rules a generated column has to obey.
+    ///
+    /// A generated column may not carry a `DEFAULT` - it has no value of its
+    /// own to fall back to - may not be part of a rowid table's `PRIMARY KEY`,
+    /// and may not refer to a column that does not exist or to itself. The
+    /// cycle check is the one that matters: without it a `CREATE TABLE` that
+    /// describes one is accepted and every later insert recurses.
+    fn check_generated(&self, columns: &[ast::ColumnDef]) -> Result<(), ParseError> {
+        let names: Vec<Vec<u8>> = columns
+            .iter()
+            .map(|column| self.ast.folded(column.name).to_vec())
+            .collect();
+        let mut generated: Vec<(usize, Vec<usize>)> = Vec::new();
+        for (position, column) in columns.iter().enumerate() {
+            let mut expr = None;
+            let mut has_default = false;
+            let mut in_primary_key = false;
+            for (_, constraint) in &column.constraints {
+                match constraint {
+                    ast::ColumnConstraint::Generated { expr: body, .. } => expr = Some(*body),
+                    ast::ColumnConstraint::Default(_) => has_default = true,
+                    ast::ColumnConstraint::PrimaryKey { .. } => in_primary_key = true,
+                    _ => {}
+                }
+            }
+            let Some(expr) = expr else {
+                continue;
+            };
+            let written = String::from_utf8_lossy(self.ast.text(column.name)).into_owned();
+            if has_default {
+                return Err(refused(
+                    format!("cannot use DEFAULT on a generated column: {written}"),
+                    Span::default(),
+                ));
+            }
+            if in_primary_key {
+                return Err(refused(
+                    format!("generated columns cannot be part of the PRIMARY KEY: {written}"),
+                    Span::default(),
+                ));
+            }
+            let mut reads = Vec::new();
+            self.expression_names(expr, &mut reads);
+            let mut resolved = Vec::new();
+            for name in &reads {
+                let Some(found) = names.iter().position(|candidate| candidate == name) else {
+                    return Err(crate::bind::no_such_column(name, Span::default()));
+                };
+                resolved.push(found);
+            }
+            generated.push((position, resolved));
+        }
+        // A cycle is anything that never becomes computable: repeat the "every
+        // dependency is settled" pass until it stops making progress, and if
+        // anything is left it depends on itself, directly or through others.
+        let mut settled: Vec<usize> = (0..columns.len())
+            .filter(|position| !generated.iter().any(|(owner, _)| owner == position))
+            .collect();
+        let mut pending = generated;
+        loop {
+            let before = pending.len();
+            let mut still = Vec::new();
+            for (position, reads) in pending {
+                if reads.iter().all(|read| settled.contains(read)) {
+                    settled.push(position);
+                } else {
+                    still.push((position, reads));
+                }
+            }
+            pending = still;
+            if pending.is_empty() || pending.len() == before {
+                break;
+            }
+        }
+        if let Some((position, _)) = pending.first() {
+            let written = columns
+                .get(*position)
+                .map(|column| String::from_utf8_lossy(self.ast.text(column.name)).into_owned())
+                .unwrap_or_default();
+            return Err(refused(
+                format!("generated column loop on {written}"),
+                Span::default(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Collects the folded column names an expression mentions.
+    fn expression_names(&self, expr: ast::ExprId, into: &mut Vec<Vec<u8>>) {
+        let Some(node) = self.ast.expr(expr) else {
+            return;
+        };
+        if let ast::Expr::Column { column, .. } = node {
+            let name = self.ast.folded(*column).to_vec();
+            if !into.contains(&name) {
+                into.push(name);
+            }
+        }
+        for child in expression_children(self.ast, expr) {
+            self.expression_names(child, into);
+        }
     }
 
     /// Checks the rules a `STRICT` table adds to its column list.

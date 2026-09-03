@@ -1073,6 +1073,7 @@ mod tests {
         let outer = BoundExpr::Column {
             source: 0,
             column: 0,
+            slot: 0,
             affinity: rustdb_value::Affinity::Integer,
             collation: Collation::Binary,
         };

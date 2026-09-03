@@ -1,8 +1,8 @@
 {
   "reference": "sqlite-3.53.4",
   "counts": {
-    "missing": 52,
-    "pass": 208
+    "missing": 51,
+    "pass": 209
   },
   "capabilities": [
     {"id": "harness.manifest.schema", "claimed": "pass", "evidenced": "pass", "phase": "phase 0: contract, provenance, and harness foundation", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::toml_lite::tests::the_manifest_subset_parses", "rustdb-compat::toml_lite::tests::anything_outside_the_subset_is_refused", "rustdb-compat::manifest::tests::a_capability_row_parses"]},
@@ -155,7 +155,7 @@
     {"id": "sql.create-view", "claimed": "pass", "evidenced": "pass", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::views_match_the_oracle", "rustdb-compat::a_view_round_trips_through_sqlite", "rustdb-compat::dropping_a_view_leaves_the_table"]},
     {"id": "sql.create-trigger", "claimed": "missing", "evidenced": "missing", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": [], "tests": []},
     {"id": "sql.alter-table", "claimed": "missing", "evidenced": "missing", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": [], "tests": []},
-    {"id": "sql.generated-columns", "claimed": "missing", "evidenced": "missing", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": [], "tests": []},
+    {"id": "sql.generated-columns", "claimed": "pass", "evidenced": "pass", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::generated_columns_round_trip_through_sqlite"]},
     {"id": "sql.without-rowid", "claimed": "missing", "evidenced": "missing", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": [], "tests": []},
     {"id": "sql.strict-tables", "claimed": "pass", "evidenced": "pass", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::strict_tables_refuse_the_wrong_class", "rustdb-compat::strict_is_enforced_on_a_file_sqlite_wrote"]},
     {"id": "sql.explain", "claimed": "pass", "evidenced": "pass", "phase": "phase 8: complete SELECT, planner, schema, and SQL semantics", "profile": "default", "platforms": ["linux-x86_64", "windows-x86_64"], "tests": ["rustdb-compat::explain_reports_without_running"]},
