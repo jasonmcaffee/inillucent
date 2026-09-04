@@ -35,6 +35,29 @@ pub const FETCH_PENALTY: f64 = 3.0;
 /// What sorting a row costs relative to visiting one.
 pub const SORT_FACTOR: f64 = 3.0;
 
+/// Returns how much of a row's width one index entry is.
+///
+/// An entry holds the indexed columns and the row's key; a row holds every
+/// column. Cost here is bytes touched, so the ratio of the two is what a
+/// covering path saves over reading the rows - and it is what makes a covering
+/// scan of a narrow index beat a scan of a wide table when neither has a
+/// predicate to narrow it.
+///
+/// The floor stops a one-column index over a fifty-column table from looking
+/// fifty times cheaper than it is: pages, not just bytes, are what a scan
+/// touches, and a b-tree of any width has a per-entry cost that does not shrink
+/// with the entry.
+/// @param index_columns - how many columns the index is over
+/// @param table_columns - how many the table has
+pub fn entry_share(index_columns: usize, table_columns: usize) -> f64 {
+    let entry = index_columns.saturating_add(1) as f64;
+    let row = table_columns.max(1) as f64;
+    (entry / row).clamp(ENTRY_SHARE_FLOOR, 1.0)
+}
+
+/// The least a covering entry is allowed to be worth relative to a row.
+pub const ENTRY_SHARE_FLOOR: f64 = 0.25;
+
 /// Returns the estimated cost of visiting a number of rows through a scan.
 ///
 /// One visit per row, and no descent per row: a scan walks the leaves in order

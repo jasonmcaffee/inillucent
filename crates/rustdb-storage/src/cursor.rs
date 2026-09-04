@@ -254,6 +254,32 @@ impl BTreeCursor {
         )
     }
 
+    /// Reads the entry's payload into a buffer the caller keeps.
+    ///
+    /// The same bytes as `payload`, without the allocation: a scan reads one
+    /// row per step, and a fresh `Vec` per row was a measurable share of what a
+    /// step cost.
+    /// @param pager - the pager holding the pages
+    /// @param limits - the run-time limits
+    /// @param into - the buffer to fill
+    pub fn payload_into(
+        &self,
+        pager: &mut Pager,
+        limits: &Limits,
+        into: &mut Vec<u8>,
+    ) -> DbResult<()> {
+        let frame = self.positioned_frame()?;
+        let cell = frame.page().cell(frame.slot)?;
+        overflow::read_payload_into(
+            pager,
+            cell.local_payload,
+            cell.split.total,
+            cell.overflow,
+            limits,
+            into,
+        )
+    }
+
     /// Returns where the entry's payload lives, without reading it.
     ///
     /// A blob handle wants a range of one value and not the row it is in, so

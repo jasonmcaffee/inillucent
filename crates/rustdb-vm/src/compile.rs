@@ -75,6 +75,12 @@ pub struct Compiler {
     /// one, and `SELECT b.label FROM a, b WHERE a.k = 'x'` addressed `a`'s
     /// index cursor as if it were `b`'s table.
     pub(crate) source_cursors: Vec<Option<SourceCursors>>,
+    /// Where a covering path keeps each column it was chosen to carry.
+    ///
+    /// Keyed by the FROM term's statement-wide number, holding
+    /// `(record slot in the table, slot in the index entry)`. A term that is
+    /// not in this map is read from its table the ordinary way.
+    covering_slots: std::collections::BTreeMap<usize, Vec<(u16, usize)>>,
     /// The level an outer join's loop must stop descending at.
     ///
     /// The levels below an outer join are emitted once, as a continuation the
@@ -177,6 +183,7 @@ impl Compiler {
             ignore_jumps: Vec::new(),
             firing_depth: 0,
             source_cursors: Vec::new(),
+            covering_slots: std::collections::BTreeMap::new(),
             virtual_planner: None,
             stop_at: None,
             source_defaults: Vec::new(),
@@ -368,6 +375,30 @@ impl Compiler {
             .is_some_and(|cursors| cursors.index_table)
     }
 
+    /// Returns the index cursor a covering path reads a column through, and
+    /// where in the entry that column sits.
+    fn covering_read(&self, source: usize, slot: u16) -> Option<(u32, usize)> {
+        let index = self.covering_index(source)?;
+        let entry = self
+            .covering_slots
+            .get(&source)?
+            .iter()
+            .find(|(column, _)| *column == slot)
+            .map(|(_, at)| *at)?;
+        Some((index, entry))
+    }
+
+    /// Returns the index cursor of a covering path, when the term has one.
+    fn covering_index(&self, source: usize) -> Option<u32> {
+        if !self.covering_slots.contains_key(&source) {
+            return None;
+        }
+        self.source_cursors
+            .get(source)
+            .and_then(Option::as_ref)
+            .and_then(|cursors| cursors.index)
+    }
+
     /// Returns whether a FROM term's rows come from an ephemeral store.
     fn is_virtual_source(&self, id: usize) -> bool {
         self.source_cursors
@@ -484,6 +515,11 @@ pub(crate) enum Sink {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SourceCursors {
     /// The table cursor, or the ephemeral store when the term is a subquery.
+    ///
+    /// A covering path never opens it. That is deliberate rather than tidy: if
+    /// the planner decided an index carried every column the query reads and it
+    /// was wrong, the mistake shows up as a statement that will not run rather
+    /// than as one that quietly reads the wrong bytes.
     table: u32,
     /// The index cursor an index path reads through.
     index: Option<u32>,
@@ -771,7 +807,13 @@ impl Compiler {
                             )
                             .with_p4(Operand::IndexKey(primary_key_of(&source.table))),
                         );
-                    } else {
+                    } else if !matches!(
+                        path,
+                        AccessPath::IndexSeek {
+                            covering: Some(_),
+                            ..
+                        }
+                    ) {
                         self.emit(
                             Instruction::new(
                                 Opcode::OpenRead,
@@ -849,6 +891,13 @@ impl Compiler {
                             matched,
                         },
                     );
+                    if let AccessPath::IndexSeek {
+                        covering: Some(slots),
+                        ..
+                    } = path
+                    {
+                        self.covering_slots.insert(source.id, slots.clone());
+                    }
                     self.register_defaults(source.id, &source.table);
                 }
             }
@@ -2197,6 +2246,7 @@ impl Compiler {
                 columns,
                 without_rowid,
                 key_entry_slots,
+                covering,
                 ..
             } => {
                 self.compile_index_seek(
@@ -2209,6 +2259,7 @@ impl Compiler {
                     &columns,
                     without_rowid,
                     &key_entry_slots,
+                    covering.is_some(),
                     inner,
                 )?;
             }
@@ -2314,6 +2365,7 @@ impl Compiler {
         columns: &[u16],
         without_rowid: bool,
         key_slots: &[usize],
+        covering: bool,
         inner: &InnerBody,
     ) -> DbResult<()> {
         let Some(index_cursor) = cursors.index else {
@@ -2363,9 +2415,17 @@ impl Compiler {
                 0,
             )));
         }
-        let empty = self.emit_jump(
-            Instruction::new(opcode, index_cursor as i32, -1, key as i32).with_p5(seek_len as u16),
-        );
+        // With nothing to seek to, the path is a scan of the whole index -
+        // which is worth choosing when the index carries every column the query
+        // reads, because an entry is narrower than a row.
+        let empty = if seek_len == 0 {
+            self.emit_jump(Instruction::new(Opcode::Rewind, index_cursor as i32, -1, 0))
+        } else {
+            self.emit_jump(
+                Instruction::new(opcode, index_cursor as i32, -1, key as i32)
+                    .with_p5(seek_len as u16),
+            )
+        };
         let start = self.here();
         let mut done: Vec<Label> = Vec::new();
         // The equality prefix has to be re-checked on every entry, because a
@@ -2411,7 +2471,11 @@ impl Compiler {
             );
         }
         let mut skip: Vec<Label> = Vec::new();
-        if !without_rowid {
+        if covering {
+            // The entry holds everything the query reads, so there is no row
+            // to fetch - which is the whole of what makes a covering path
+            // worth choosing. The table cursor was not even opened.
+        } else if !without_rowid {
             let rowid = self.register();
             self.emit(Instruction::new(
                 Opcode::IdxRowid,
@@ -3691,6 +3755,34 @@ impl Compiler {
                 // the note on the opcode.
                 let widen = u16::from(*affinity == Affinity::Real);
                 let cursor = self.cursor_for_source(*source);
+                // A covering path never opened the table, so the column is read
+                // out of the index entry the cursor is standing on. The slot is
+                // the entry's, not the row's: an index holds the columns it was
+                // declared over, in that order, and nothing else.
+                if let Some((index_cursor, slot)) = self.covering_read(*source, *column) {
+                    let register = self.register();
+                    if slot == rustdb_sql::plan::ROWID_ENTRY_SLOT {
+                        // The column *is* the rowid, which an entry keeps as
+                        // its key rather than as a field.
+                        self.emit(Instruction::new(
+                            Opcode::IdxRowid,
+                            index_cursor as i32,
+                            register as i32,
+                            0,
+                        ));
+                        return Ok(register);
+                    }
+                    self.emit(
+                        Instruction::new(
+                            Opcode::IdxColumn,
+                            index_cursor as i32,
+                            slot as i32,
+                            register as i32,
+                        )
+                        .with_p5(widen),
+                    );
+                    return Ok(register);
+                }
                 // A subquery's rows live in an ephemeral store rather than
                 // under a B-tree cursor, and the value is already a value: no
                 // record to parse, and no affinity to re-apply on the way out.
@@ -3799,6 +3891,18 @@ impl Compiler {
                 }
                 if self.is_virtual_source(*source) {
                     self.emit(Instruction::new(Opcode::VRowid, cursor, register as i32, 0));
+                    return Ok(register);
+                }
+                if let Some(index_cursor) = self.covering_index(*source) {
+                    // An index entry over a rowid table ends with the rowid,
+                    // which is how the row would have been found had the query
+                    // needed anything else from it.
+                    self.emit(Instruction::new(
+                        Opcode::IdxRowid,
+                        index_cursor as i32,
+                        register as i32,
+                        0,
+                    ));
                     return Ok(register);
                 }
                 self.emit(Instruction::new(Opcode::Rowid, cursor, register as i32, 0));

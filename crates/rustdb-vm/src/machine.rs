@@ -68,6 +68,21 @@ struct CursorSlot {
     database: usize,
     cursor: BTreeCursor,
     payload: Option<Vec<u8>>,
+    /// Where each field of the cached row lives, and where its payload begins.
+    ///
+    /// Parsing a record is a walk of its whole header, and reading a column
+    /// used to do that walk - and a heap allocation - once per column. A
+    /// two-column projection therefore parsed every row twice. The buffer is
+    /// reused across rows, so a scan of a million rows parses a million headers
+    /// and allocates once.
+    record: Option<(Vec<rustdb_value::record::FieldSpan>, usize)>,
+    /// Whether `payload` holds the row the cursor is standing on.
+    ///
+    /// Separate from `payload` being `Some`, because the buffer is kept across
+    /// rows: an empty buffer that is about to be refilled and an empty buffer
+    /// holding a zero-length row are the same `Some(vec![])`, and only this
+    /// says which.
+    row_is_loaded: bool,
     is_index: bool,
     key: KeyInfo,
     /// Whether the cursor is standing on the null row an outer join emits.
@@ -85,7 +100,13 @@ impl CursorSlot {
     /// and a flag left set would turn the whole of the rest of the scan into
     /// NULLs.
     fn moved(&mut self) {
-        self.payload = None;
+        self.row_is_loaded = false;
+        // The spans describe the row that was there; the buffer they live in is
+        // kept so the next row refills it rather than allocating a new one.
+        if let Some((fields, _)) = self.record.as_mut() {
+            fields.clear();
+        }
+        self.record = None;
         self.null_row = false;
     }
 }
@@ -877,7 +898,8 @@ impl Machine {
             }
             Opcode::NullRow => {
                 if let Some(Some(slot)) = self.cursors.get_mut(instruction.p1.max(0) as usize) {
-                    slot.payload = None;
+                    slot.row_is_loaded = false;
+                    slot.record = None;
                     slot.null_row = true;
                 }
                 Ok(Flow::Next)
@@ -1606,7 +1628,8 @@ impl Machine {
     fn invalidate_cursors_on(&mut self, database: usize, root: PageId) {
         for slot in self.cursors.iter_mut().flatten() {
             if slot.database == database && slot.cursor.root() == root {
-                slot.payload = None;
+                slot.row_is_loaded = false;
+                slot.record = None;
             }
         }
     }
@@ -1700,7 +1723,8 @@ impl Machine {
             let Some(Some(slot)) = self.cursors.get_mut(position) else {
                 continue;
             };
-            slot.payload = None;
+            slot.row_is_loaded = false;
+            slot.record = None;
             slot.cursor.restore(pager, &where_it_was, &limits)?;
         }
         Ok(())
@@ -1764,6 +1788,8 @@ impl Machine {
                 null_row: false,
                 cursor,
                 payload: None,
+                record: None,
+                row_is_loaded: false,
                 is_index,
                 key,
             });
@@ -1967,15 +1993,35 @@ impl Machine {
                 self.store(instruction.p3, Value::Null);
                 return Ok(Flow::Next);
             }
-            if slot.payload.is_none() {
-                slot.payload = Some(slot.cursor.payload(pager, &limits)?);
+            if !slot.row_is_loaded {
+                let mut buffer = slot.payload.take().unwrap_or_default();
+                slot.cursor.payload_into(pager, &limits, &mut buffer)?;
+                slot.payload = Some(buffer);
+                slot.row_is_loaded = true;
             }
             // Borrow the cached row rather than copying it. Cloning here cost a
             // whole-row copy *per column read*, which is three copies of every
             // row of a three-column projection and was the largest single
             // allocation source the baselines found.
+            //
+            // The record's *shape* is cached beside it for the same reason:
+            // finding where a field lives is a walk of the whole header, and
+            // doing that once per column read made a two-column projection
+            // parse every row twice.
+            if slot.record.is_none() {
+                let mut fields = Vec::new();
+                let header = {
+                    let payload: &[u8] = slot.payload.as_deref().unwrap_or(&[]);
+                    RecordRef::parse_into(payload, &limits, &mut fields)?
+                };
+                slot.record = Some((fields, header));
+            }
             let payload: &[u8] = slot.payload.as_deref().unwrap_or(&[]);
-            let record = RecordRef::parse_with_limits(payload, encoding, &limits)?;
+            let (fields, header_len) = match slot.record.as_ref() {
+                Some((fields, header)) => (fields.as_slice(), *header),
+                None => (&[][..], 0),
+            };
+            let record = RecordRef::with_fields(payload, fields, header_len, encoding);
             if index >= record.field_count() {
                 // A column past the end of the record reads as its DEFAULT, and
                 // as NULL when it has none. This happens for real: `ALTER TABLE
