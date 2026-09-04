@@ -5,8 +5,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | status | capabilities |
 |---|---|
 | missing | 5 |
-| partial | 22 |
-| pass | 236 |
+| pass | 258 |
 | **total** | **263** |
 
 ## By phase
@@ -15,8 +14,8 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 |---|---|---|---|---|
 | phase 0: contract, provenance, and harness foundation | 24 | 0 | 0 | 0 |
 | phase 10: WAL and concurrent connection semantics | 12 | 0 | 0 | 0 |
-| phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree | 0 | 10 | 0 | 0 |
-| phase 12: C ABI and CLI completion | 0 | 12 | 0 | 0 |
+| phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree | 10 | 0 | 0 | 0 |
+| phase 12: C ABI and CLI completion | 12 | 0 | 0 | 0 |
 | phase 13: transactional rust-db search and legacy migration | 0 | 0 | 3 | 0 |
 | phase 14: performance qualification and release | 0 | 0 | 2 | 0 |
 | phase 1: VFS, binary primitives, and simulator | 46 | 0 | 0 | 0 |
@@ -28,33 +27,6 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | phase 7: single-database rollback transactions and DML | 29 | 0 | 0 | 0 |
 | phase 8: complete SELECT, planner, schema, and SQL semantics | 33 | 0 | 0 | 0 |
 | phase 9: foreign keys, ATTACH, and multi-database commit | 7 | 0 | 0 | 0 |
-
-## Problems
-
-| kind | capability | detail |
-|---|---|---|
-| unsupported-release-claim | `capi.backup` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `capi.bind` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `capi.blob-io` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `capi.column-metadata` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `capi.custom-functions` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `capi.hooks` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `capi.open-close` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `capi.prepare-step-finalize` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `capi.serialize-deserialize` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `capi.vfs-registration` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `cli.dot-commands` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `cli.output-modes` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `ext.fts5.queries` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `ext.fts5.ranking` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `ext.rtree` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `functions.json` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `pragma.integrity` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `pragma.pager` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `pragma.query-only` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `pragma.schema` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `vtab.contract` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `vtab.eponymous` | no passing result recorded on linux-x86_64 |
 
 ## Capabilities
 
@@ -245,29 +217,29 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `functions.aggregate` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `functions.date-time` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `functions.math` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
-| `functions.json` | pass | partial | windows-x86_64 | 8 |
+| `functions.json` | pass | pass | linux-x86_64, windows-x86_64 | 8 |
 | `functions.window` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
-| `pragma.schema` | pass | partial | windows-x86_64 | 4 |
-| `pragma.pager` | pass | partial | windows-x86_64 | 2 |
-| `pragma.integrity` | pass | partial | windows-x86_64 | 1 |
-| `pragma.query-only` | pass | partial | windows-x86_64 | 1 |
-| `vtab.contract` | pass | partial | windows-x86_64 | 7 |
-| `vtab.eponymous` | pass | partial | windows-x86_64 | 4 |
-| `ext.fts5.queries` | pass | partial | windows-x86_64 | 16 |
-| `ext.fts5.ranking` | pass | partial | windows-x86_64 | 5 |
-| `ext.rtree` | pass | partial | windows-x86_64 | 5 |
-| `capi.open-close` | pass | partial | windows-x86_64 | 3 |
-| `capi.prepare-step-finalize` | pass | partial | windows-x86_64 | 3 |
-| `capi.bind` | pass | partial | windows-x86_64 | 3 |
-| `capi.column-metadata` | pass | partial | windows-x86_64 | 3 |
-| `capi.hooks` | pass | partial | windows-x86_64 | 3 |
-| `capi.backup` | pass | partial | windows-x86_64 | 3 |
-| `capi.blob-io` | pass | partial | windows-x86_64 | 3 |
-| `capi.serialize-deserialize` | pass | partial | windows-x86_64 | 3 |
-| `capi.custom-functions` | pass | partial | windows-x86_64 | 8 |
-| `capi.vfs-registration` | pass | partial | windows-x86_64 | 3 |
-| `cli.dot-commands` | pass | partial | windows-x86_64 | 10 |
-| `cli.output-modes` | pass | partial | windows-x86_64 | 9 |
+| `pragma.schema` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `pragma.pager` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `pragma.integrity` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `pragma.query-only` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `vtab.contract` | pass | pass | linux-x86_64, windows-x86_64 | 7 |
+| `vtab.eponymous` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `ext.fts5.queries` | pass | pass | linux-x86_64, windows-x86_64 | 16 |
+| `ext.fts5.ranking` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
+| `ext.rtree` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
+| `capi.open-close` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `capi.prepare-step-finalize` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `capi.bind` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `capi.column-metadata` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `capi.hooks` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `capi.backup` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `capi.blob-io` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `capi.serialize-deserialize` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `capi.custom-functions` | pass | pass | linux-x86_64, windows-x86_64 | 8 |
+| `capi.vfs-registration` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `cli.dot-commands` | pass | pass | linux-x86_64, windows-x86_64 | 10 |
+| `cli.output-modes` | pass | pass | linux-x86_64, windows-x86_64 | 9 |
 | `search.virtual-table` | missing | missing | - | 0 |
 | `search.transactional-visibility` | missing | missing | - | 0 |
 | `search.legacy-migration` | missing | missing | - | 0 |
