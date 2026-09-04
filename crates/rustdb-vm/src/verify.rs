@@ -401,6 +401,12 @@ impl RegisterSet {
             .is_some_and(|word| word & (1u64 << (register % 64)) != 0)
     }
 
+    /// Replaces this set's members with another's, without allocating.
+    fn copy_from(&mut self, other: &RegisterSet) {
+        self.words.clear();
+        self.words.extend_from_slice(&other.words);
+    }
+
     /// Keeps only the members both sets have, reporting whether it changed.
     fn intersect_with(&mut self, other: &RegisterSet) -> bool {
         let mut changed = false;
@@ -428,30 +434,40 @@ fn check_registers(program: &Program, problems: &mut Vec<VerifyError>) {
     // in at most one pass per instruction.
     let mut changed = true;
     let mut rounds = 0usize;
+    // Scratch reused across the whole analysis. Every statement an application
+    // prepares runs this, and allocating a bitmap and a vector per instruction
+    // per round made verifying a four-instruction `SELECT 1` cost more than
+    // parsing, binding and compiling it put together.
+    let mut outgoing = RegisterSet::empty(registers);
     while changed && rounds <= length.saturating_add(2) {
         changed = false;
         rounds = rounds.saturating_add(1);
         for address in 0..length {
-            let Some(Some(incoming)) = written.get(address).cloned() else {
+            let Some(Some(incoming)) = written.get(address) else {
                 continue;
             };
             let Some(instruction) = program.instructions.get(address) else {
                 continue;
             };
-            let mut outgoing = incoming.clone();
-            for register in writes_of(program, address) {
+            outgoing.copy_from(incoming);
+            if let Some(register) = writes_of(program, address) {
                 outgoing.insert(register);
             }
-            let mut targets = Vec::new();
+            let mut targets: [usize; 2] = [0, 0];
+            let mut target_count = 0usize;
             if instruction.opcode != Opcode::Goto
                 && instruction.opcode != Opcode::Init
                 && instruction.opcode != Opcode::Halt
                 && instruction.opcode != Opcode::Return
             {
-                targets.push(address.saturating_add(1));
+                targets[0] = address.saturating_add(1);
+                target_count = 1;
             }
             if instruction.opcode.jumps() {
-                targets.push(instruction.p2.max(0) as usize);
+                if let Some(slot) = targets.get_mut(target_count) {
+                    *slot = instruction.p2.max(0) as usize;
+                }
+                target_count = target_count.saturating_add(1);
             }
             if instruction.opcode == Opcode::Return {
                 // A return goes wherever its caller was, which the verifier
@@ -460,7 +476,7 @@ fn check_registers(program: &Program, problems: &mut Vec<VerifyError>) {
                 // Gosub already propagated into the subroutine.
                 continue;
             }
-            for target in targets {
+            for target in targets.iter().copied().take(target_count) {
                 if target > length {
                     continue;
                 }
@@ -498,12 +514,16 @@ fn check_registers(program: &Program, problems: &mut Vec<VerifyError>) {
     }
 }
 
-/// Returns the registers an instruction writes.
-fn writes_of(program: &Program, address: usize) -> Vec<u32> {
+/// Returns the register an instruction writes, when it writes one.
+///
+/// No opcode writes more than one, which is what lets this be an `Option`
+/// rather than a vector - and a vector here was an allocation per instruction
+/// per round of the dataflow pass.
+fn writes_of(program: &Program, address: usize) -> Option<u32> {
     let Some(instruction) = program.instructions.get(address) else {
-        return Vec::new();
+        return None;
     };
-    let single = |value: i32| vec![value.max(0) as u32];
+    let single = |value: i32| Some(value.max(0) as u32);
     match instruction.opcode {
         // The save direction fills its register; the restore direction reads it.
         Opcode::LastRowid if instruction.p2 == 0 => single(instruction.p1),
@@ -538,13 +558,13 @@ fn writes_of(program: &Program, address: usize) -> Vec<u32> {
             if instruction.p3 >= 0 {
                 single(instruction.p3)
             } else {
-                Vec::new()
+                None
             }
         }
         Opcode::Gosub => single(instruction.p1),
         Opcode::NewRowid | Opcode::RowData | Opcode::CreateBtree => single(instruction.p2),
         Opcode::MakeRecord => single(instruction.p3),
-        _ => Vec::new(),
+        _ => None,
     }
 }
 
