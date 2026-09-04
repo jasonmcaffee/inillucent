@@ -559,6 +559,106 @@ fn load_generation(dir: &Path) -> Result<Index> {
     Index::from_parts(saved.to_config()?, store, vectors, graph, Some(lexical))
 }
 
+/// The tag that opens an index written as one byte stream.
+const KIND_STREAM: u8 = 6;
+
+/// Writes a whole index as one self-describing byte stream.
+///
+/// `save` writes five files into a directory because that is what a reader
+/// mapping them wants. A caller that has nowhere to put a directory - a search
+/// index whose generations live inside a database file, which is what makes them
+/// commit and roll back with the rows they describe - wants the same five
+/// sections one after another with their lengths in front, and that is what this
+/// is. The sections and their encodings are the same ones `save` writes, so the
+/// two forms describe the same index and neither is a second format.
+/// @param index - the committed index to write
+/// @param w - where the bytes go
+pub fn write_index(index: &Index, w: &mut impl Write) -> Result<()> {
+    header(w, KIND_STREAM)?;
+    let config = serde_json::to_vec(&SavedConfig::from(index.config()))?;
+    section(w, &config)?;
+    let mut store = Vec::new();
+    index
+        .store()
+        .write_to(&mut store)
+        .context("writing the store")?;
+    section(w, &store)?;
+    let mut vectors = Vec::new();
+    {
+        let set = index.vectors();
+        vectors.extend_from_slice(&(set.dims() as u32).to_le_bytes());
+        vectors.extend_from_slice(&(set.len() as u32).to_le_bytes());
+        vectors.extend_from_slice(bytemuck::cast_slice(set.raw()));
+    }
+    section(w, &vectors)?;
+    let mut graph = Vec::new();
+    index.write_graph(&mut graph)?;
+    section(w, &graph)?;
+    let mut lexical = Vec::new();
+    index.write_lexical(&mut lexical)?;
+    section(w, &lexical)?;
+    Ok(())
+}
+
+/// Reads back an index that `write_index` wrote.
+///
+/// A truncated or reordered stream is an error rather than a partial index: the
+/// caller holding these bytes is a database that can tell the difference between
+/// "corrupt" and "empty", and an index that answers from half a corpus is the
+/// failure nobody notices.
+/// @param r - the bytes `write_index` produced
+pub fn read_index(r: &mut impl Read) -> Result<Index> {
+    check_header(r, KIND_STREAM)?;
+    let saved: SavedConfig =
+        serde_json::from_slice(&read_section(r)?).context("reading the config")?;
+    let store = Store::read_from(&mut read_section(r)?.as_slice()).context("reading the store")?;
+    let vectors = {
+        let bytes = read_section(r)?;
+        let mut cursor = bytes.as_slice();
+        let mut buf4 = [0u8; 4];
+        cursor.read_exact(&mut buf4)?;
+        let dims = u32::from_le_bytes(buf4) as usize;
+        cursor.read_exact(&mut buf4)?;
+        let count = u32::from_le_bytes(buf4) as usize;
+        VectorSet::from_raw(
+            dims,
+            crate::binio::read_pod_vec::<f32>(&mut cursor, dims * count)?,
+        )
+    };
+    let params = saved.hnsw_params();
+    let graph = Hnsw::read_graph(&mut read_section(r)?.as_slice(), params)?;
+    let lexical = Bm25Index::read_from(&mut read_section(r)?.as_slice())
+        .context("reading the lexical index")?;
+    Index::from_parts(saved.to_config()?, store, vectors, graph, Some(lexical))
+}
+
+/// Writes one length-prefixed section.
+fn section(w: &mut impl Write, bytes: &[u8]) -> Result<()> {
+    w.write_all(&(bytes.len() as u64).to_le_bytes())?;
+    w.write_all(bytes)?;
+    Ok(())
+}
+
+/// Reads one length-prefixed section.
+///
+/// The length is checked against a ceiling before it is used to allocate,
+/// because these bytes may have come out of a database file somebody else could
+/// write to, and a corrupt length is the cheapest way to turn a read into an
+/// out-of-memory abort.
+fn read_section(r: &mut impl Read) -> Result<Vec<u8>> {
+    let mut length = [0u8; 8];
+    r.read_exact(&mut length)
+        .context("reading a section length")?;
+    let length = u64::from_le_bytes(length);
+    const CEILING: u64 = 1 << 40;
+    if length > CEILING {
+        anyhow::bail!("index section claims {length} bytes, which is not a length this build reads");
+    }
+    let mut bytes = vec![0u8; length as usize];
+    r.read_exact(&mut bytes).context("reading a section")?;
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

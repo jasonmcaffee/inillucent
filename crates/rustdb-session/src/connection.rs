@@ -558,6 +558,7 @@ impl Connection {
             registry: std::sync::Arc::new({
                 let mut registry = rustdb_ext::registry::Registry::with_builtins();
                 crate::pragma_vtab::register_all(&mut registry);
+                rustdb_search::register(&mut registry);
                 registry
             }),
             virtual_tables: std::rc::Rc::new(core::cell::RefCell::new(
@@ -967,6 +968,9 @@ impl Connection {
             for database in writing {
                 rustdb_storage::PagerSet::pager(&mut *state, database)?.begin_statement()?;
             }
+            if fresh {
+                tell_virtual_tables(&mut state, crate::vtab::Moment::Begin)?;
+            }
         } else {
             state.transaction.promote_to_read();
         }
@@ -1045,18 +1049,31 @@ impl Connection {
                 return Ok(());
             }
             if !state.writing.is_empty() {
-                if matches!(outcome, Outcome::Done | Outcome::Fail) && !self.commit_is_vetoed() {
+                let flushed = if matches!(outcome, Outcome::Done | Outcome::Fail) {
+                    tell_virtual_tables(&mut state, crate::vtab::Moment::Sync)
+                } else {
+                    Ok(())
+                };
+                if matches!(outcome, Outcome::Done | Outcome::Fail)
+                    && flushed.is_ok()
+                    && !self.commit_is_vetoed()
+                {
                     let committed = commit_writers(&mut state, &self.vfs, &self.path);
                     if committed.is_err() {
                         let _ = rollback_writers(&mut state);
+                        let _ = tell_virtual_tables(&mut state, crate::vtab::Moment::Rollback);
                         self.fire_rollback_hook();
+                    } else {
+                        let _ = tell_virtual_tables(&mut state, crate::vtab::Moment::Commit);
                     }
                     state.transaction.finish(committed.is_ok());
                     committed?;
                 } else {
                     rollback_writers(&mut state)?;
+                    let _ = tell_virtual_tables(&mut state, crate::vtab::Moment::Rollback);
                     state.transaction.finish(false);
                     self.fire_rollback_hook();
+                    flushed?;
                 }
             } else {
                 state.transaction.end_read();
@@ -1767,19 +1784,28 @@ impl Connection {
         // behaviour and the reason the hook is worth having at all.
         if self.commit_is_vetoed() {
             let rolled = rollback_writers(&mut state);
+            let _ = tell_virtual_tables(&mut state, crate::vtab::Moment::Rollback);
             state.transaction.finish(false);
             let released = end_reads(&mut state);
             self.fire_rollback_hook();
             rolled?;
             return released;
         }
+        // The modules write first, inside the same transaction, so anything a
+        // virtual table has to publish at commit lands on pages this commit is
+        // about to make durable. A module that cannot finish turns the COMMIT
+        // into a ROLLBACK rather than committing half of what it meant to.
         let committed = if state.writing.is_empty() {
             Ok(())
         } else {
-            commit_writers(&mut state, &self.vfs, &self.path)
+            tell_virtual_tables(&mut state, crate::vtab::Moment::Sync)
+                .and_then(|()| commit_writers(&mut state, &self.vfs, &self.path))
         };
         if committed.is_err() {
             let _ = rollback_writers(&mut state);
+            let _ = tell_virtual_tables(&mut state, crate::vtab::Moment::Rollback);
+        } else {
+            let _ = tell_virtual_tables(&mut state, crate::vtab::Moment::Commit);
         }
         state.transaction.finish(committed.is_ok());
         state.defer_foreign_keys = false;
@@ -1801,6 +1827,7 @@ impl Connection {
             return Err(error::misuse("cannot rollback - no transaction is active"));
         }
         let rolled = rollback_writers(&mut state);
+        let _ = tell_virtual_tables(&mut state, crate::vtab::Moment::Rollback);
         state.transaction.finish(false);
         state.defer_foreign_keys = false;
         let released = end_reads(&mut state);
@@ -1835,12 +1862,14 @@ impl Connection {
             }
         }
         state.transaction.open_savepoint(&text)?;
+        let depth = state.transaction.depth() as i32;
         for_each_writer(&mut state, |pager| {
             if pager.is_writing() {
                 pager.begin_savepoint(&text)?;
             }
             Ok(())
-        })
+        })?;
+        tell_virtual_tables(&mut state, crate::vtab::Moment::Savepoint(depth))
     }
 
     /// Releases a savepoint, keeping its changes.
@@ -1850,6 +1879,7 @@ impl Connection {
             .try_borrow_mut()
             .map_err(|_| error::misuse("the connection is running a statement"))?;
         let text = String::from_utf8_lossy(name).into_owned();
+        let depth = state.transaction.depth() as i32;
         let outermost = state.transaction.release_savepoint(&text)?;
         let _ = for_each_writer(&mut state, |pager| {
             if pager.is_writing() {
@@ -1857,6 +1887,7 @@ impl Connection {
             }
             Ok(())
         });
+        let _ = tell_virtual_tables(&mut state, crate::vtab::Moment::Release(depth));
         if !outermost {
             return Ok(());
         }
@@ -1864,6 +1895,7 @@ impl Connection {
         // it, which is the one place a RELEASE is a commit.
         if self.commit_is_vetoed() {
             let rolled = rollback_writers(&mut state);
+            let _ = tell_virtual_tables(&mut state, crate::vtab::Moment::Rollback);
             state.transaction.finish(false);
             let released = end_reads(&mut state);
             self.fire_rollback_hook();
@@ -1873,10 +1905,14 @@ impl Connection {
         let committed = if state.writing.is_empty() {
             Ok(())
         } else {
-            commit_writers(&mut state, &self.vfs, &self.path)
+            tell_virtual_tables(&mut state, crate::vtab::Moment::Sync)
+                .and_then(|()| commit_writers(&mut state, &self.vfs, &self.path))
         };
         if committed.is_err() {
             let _ = rollback_writers(&mut state);
+            let _ = tell_virtual_tables(&mut state, crate::vtab::Moment::Rollback);
+        } else {
+            let _ = tell_virtual_tables(&mut state, crate::vtab::Moment::Commit);
         }
         state.transaction.finish(committed.is_ok());
         let released = end_reads(&mut state);
@@ -1892,12 +1928,14 @@ impl Connection {
             .map_err(|_| error::misuse("the connection is running a statement"))?;
         let text = String::from_utf8_lossy(name).into_owned();
         state.transaction.rollback_to_savepoint(&text)?;
+        let depth = state.transaction.depth() as i32;
         let _ = for_each_writer(&mut state, |pager| {
             if pager.is_writing() {
                 let _ = pager.rollback_to_savepoint(&text);
             }
             Ok(())
         });
+        let _ = tell_virtual_tables(&mut state, crate::vtab::Moment::RollbackTo(depth));
         Ok(())
     }
 
@@ -1914,6 +1952,20 @@ impl Connection {
             .get(database)
             .map_or(0, |database| database.schema_cookie))
     }
+}
+
+/// Tells the connected virtual tables that the transaction reached a moment.
+///
+/// A thin wrapper so the call sites read as one line each. The limits and the
+/// connected tables both live on the state, and a module is handed the state
+/// itself as its host - which is the same reach it has inside an ordinary
+/// statement and no more.
+/// @param state - the connection
+/// @param moment - what happened
+fn tell_virtual_tables(state: &mut ConnectionState, moment: crate::vtab::Moment) -> DbResult<()> {
+    let tables = std::rc::Rc::clone(&state.virtual_tables);
+    let limits = state.limits.clone();
+    crate::vtab::notify(&tables, state, &limits, moment)
 }
 
 /// Turns WAL mode on, stamping the file format versions that say so.

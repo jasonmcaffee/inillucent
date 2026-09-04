@@ -15,3 +15,4 @@ rustdb-vm = { workspace = true }
 rustdb-storage = { workspace = true }
 rustdb-transaction = { workspace = true }
 rustdb-ext = { workspace = true }
+rustdb-search = { workspace = true }
