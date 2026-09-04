@@ -80,6 +80,8 @@ pub struct Compiler {
     /// The levels below an outer join are emitted once, as a continuation the
     /// matched row and the null-extended row both enter, so the loop itself
     /// must not descend into them a second time.
+    /// Who answers `best_index` for this compilation, when anybody does.
+    virtual_planner: Option<Box<dyn VirtualPlanner>>,
     stop_at: Option<usize>,
     /// What each FROM term's columns read as when the record is too short.
     ///
@@ -125,6 +127,38 @@ impl Default for Compiler {
     }
 }
 
+/// Who answers `best_index` while a statement is being compiled.
+///
+/// The planner cannot ask - a bound plan has to stay a pure function of the SQL
+/// and one catalog generation - so the question is put here, once, while the
+/// program is being written. The answer is baked into the program, which is
+/// also what makes a prepared statement's plan stable until the schema changes.
+pub trait VirtualPlanner {
+    /// Puts one offer to a module and reads its answer back.
+    fn best_index(
+        &mut self,
+        reference: &crate::program::VirtualRef,
+        query: &mut rustdb_sql::vtab::IndexQuery,
+    ) -> DbResult<()>;
+}
+
+/// A planner that refuses, for a compilation with no connection behind it.
+pub struct NoVirtualPlanner;
+
+impl VirtualPlanner for NoVirtualPlanner {
+    /// Refuses: there is no registry to ask.
+    fn best_index(
+        &mut self,
+        reference: &crate::program::VirtualRef,
+        _query: &mut rustdb_sql::vtab::IndexQuery,
+    ) -> DbResult<()> {
+        Err(error::misuse(format!(
+            "no such module: {}",
+            String::from_utf8_lossy(&reference.module.name)
+        )))
+    }
+}
+
 impl Compiler {
     /// Returns an empty compiler.
     pub fn new() -> Compiler {
@@ -143,6 +177,7 @@ impl Compiler {
             ignore_jumps: Vec::new(),
             firing_depth: 0,
             source_cursors: Vec::new(),
+            virtual_planner: None,
             stop_at: None,
             source_defaults: Vec::new(),
             deferred: Vec::new(),
@@ -151,6 +186,28 @@ impl Compiler {
             aggregate_registers: Vec::new(),
             end_jumps: Vec::new(),
         }
+    }
+
+    /// Points the compiler at who can answer `best_index`.
+    pub fn with_virtual_planner(mut self, planner: Box<dyn VirtualPlanner>) -> Compiler {
+        self.virtual_planner = Some(planner);
+        self
+    }
+
+    /// Puts every virtual scan in a plan to its module, and records the answer.
+    ///
+    /// A plan with no virtual scan in it never reaches the planner at all, so a
+    /// compilation with nobody to ask still succeeds for every statement that
+    /// does not name a module - which is every statement the DML compilers'
+    /// own tests run.
+    pub(crate) fn resolve_plan(&mut self, plan: &mut PhysicalPlan) -> DbResult<()> {
+        let mut planner = match self.virtual_planner.take() {
+            Some(planner) => planner,
+            None => Box::new(NoVirtualPlanner) as Box<dyn VirtualPlanner>,
+        };
+        let outcome = resolve_virtual_plans(plan, planner.as_mut());
+        self.virtual_planner = Some(planner);
+        outcome
     }
 
     /// Allocates one register.
@@ -270,6 +327,14 @@ impl Compiler {
     }
 
     /// Returns whether a FROM term's rows come from an ephemeral store.
+    fn is_virtual_source(&self, id: usize) -> bool {
+        self.source_cursors
+            .get(id)
+            .and_then(Option::as_ref)
+            .is_some_and(|cursors| cursors.virtual_table)
+    }
+
+    /// Returns whether a FROM term's rows come from an ephemeral store.
     fn is_ephemeral_source(&self, id: usize) -> bool {
         self.source_cursors
             .get(id)
@@ -299,7 +364,21 @@ pub fn compile(
     dependencies: ProgramDependencies,
     parameters: u32,
 ) -> DbResult<Program> {
-    let mut compiler = Compiler::new();
+    compile_into(Compiler::new(), plan, dependencies, parameters)
+}
+
+/// Compiles a physical plan with a compiler the caller has already set up.
+///
+/// The only thing a caller sets up is who answers `best_index`, and the only
+/// caller that does is the session. Splitting it here rather than adding a
+/// parameter to `compile` keeps every existing call site - and every test that
+/// compiles a plan with nothing behind it - reading the same way.
+pub fn compile_into(
+    mut compiler: Compiler,
+    plan: &PhysicalPlan,
+    dependencies: ProgramDependencies,
+    parameters: u32,
+) -> DbResult<Program> {
     let entry = compiler.emit_jump(Instruction::new(Opcode::Init, 0, -1, 0));
     compiler.patch_here(entry);
     compiler.emit(Instruction::new(Opcode::Transaction, 0, 0, 0));
@@ -377,6 +456,8 @@ pub(crate) struct SourceCursors {
     /// enclosing loop, so the flag was cleared on every outer row and the store
     /// accumulated one copy of the subquery per row of the query above it.
     built: Option<u32>,
+    /// Whether the term's rows come from a module rather than from a b-tree.
+    virtual_table: bool,
     /// The store recording which of this term's rows a `RIGHT` or `FULL` join
     /// matched.
     ///
@@ -400,6 +481,7 @@ impl SourceCursors {
             index: None,
             ephemeral: false,
             index_table: false,
+            virtual_table: false,
             built: None,
             matched: None,
         }
@@ -412,6 +494,7 @@ impl SourceCursors {
             index: Some(table),
             ephemeral: false,
             index_table: true,
+            virtual_table: false,
             built: None,
             matched: None,
         }
@@ -457,6 +540,76 @@ struct Body<'a> {
     sink: Sink,
 }
 
+/// Puts every virtual scan's offer to its module, and records the answer.
+///
+/// It runs over the whole plan - nested blocks and compound arms included -
+/// before a single instruction is written, so that the compiler never has to
+/// reach outside itself. A scan whose module says it will produce the
+/// statement's ordering also clears the sorter, which is the one place the
+/// answer changes the shape of the program rather than only its operands.
+pub fn resolve_virtual_plans(
+    plan: &mut PhysicalPlan,
+    planner: &mut dyn VirtualPlanner,
+) -> DbResult<()> {
+    let mut satisfied_order = false;
+    for (level, source) in plan.sources.iter_mut().enumerate() {
+        match &mut source.path {
+            AccessPath::Subquery { plan: nested, .. } => {
+                resolve_virtual_plans(nested, planner)?;
+            }
+            AccessPath::Recursive { seeds, steps, .. } => {
+                for (_, arm) in seeds.iter_mut().chain(steps.iter_mut()) {
+                    resolve_virtual_plans(arm, planner)?;
+                }
+            }
+            AccessPath::VirtualScan {
+                module,
+                offer,
+                order_by,
+                chosen,
+            } => {
+                let reference = crate::program::VirtualRef {
+                    database: source.table.database,
+                    table: source.table.name.clone(),
+                    module: module.clone(),
+                };
+                let mut query = rustdb_sql::vtab::IndexQuery::new(
+                    offer.iter().map(|item| item.spec).collect(),
+                    order_by.clone(),
+                );
+                planner.best_index(&reference, &mut query)?;
+                let arguments = query.argument_order();
+                let recheck = (0..offer.len())
+                    .filter(|index| {
+                        query
+                            .usage
+                            .get(*index)
+                            .is_none_or(|usage| usage.argument == 0 || !usage.omit)
+                    })
+                    .collect();
+                if query.ordered && level == 0 && !order_by.is_empty() {
+                    satisfied_order = true;
+                }
+                *chosen = Some(rustdb_sql::plan::VirtualChoice {
+                    index_number: query.index_number,
+                    index_string: query.index_string,
+                    arguments,
+                    recheck,
+                    ordered: query.ordered,
+                });
+            }
+            _ => {}
+        }
+    }
+    if satisfied_order {
+        plan.needs_sort = false;
+    }
+    for (_, arm) in plan.compounds.iter_mut() {
+        resolve_virtual_plans(arm, planner)?;
+    }
+    Ok(())
+}
+
 impl Compiler {
     /// Opens every cursor the plan and everything nested inside it will use.
     pub(crate) fn open_all_cursors(&mut self, plan: &PhysicalPlan) -> DbResult<()> {
@@ -467,6 +620,31 @@ impl Compiler {
                     // loop is on, so it opens nothing of its own.
                     let cursors = self.cursors_of(*cte)?;
                     self.register_source(source.id, cursors);
+                }
+                AccessPath::VirtualScan { module, .. } => {
+                    let cursor = self.cursors;
+                    self.cursors = self.cursors.saturating_add(1);
+                    self.register_source(
+                        source.id,
+                        SourceCursors {
+                            table: cursor,
+                            index: None,
+                            ephemeral: false,
+                            index_table: false,
+                            virtual_table: true,
+                            built: None,
+                            matched: None,
+                        },
+                    );
+                    self.emit(
+                        Instruction::new(Opcode::VOpen, cursor as i32, 0, 0).with_p4(
+                            Operand::Virtual(Box::new(crate::program::VirtualRef {
+                                database: source.table.database,
+                                table: source.table.name.clone(),
+                                module: module.clone(),
+                            })),
+                        ),
+                    );
                 }
                 AccessPath::Subquery {
                     plan: nested,
@@ -489,6 +667,7 @@ impl Compiler {
                             index: None,
                             ephemeral: true,
                             index_table: false,
+                            virtual_table: false,
                             built,
                             matched: None,
                         },
@@ -514,6 +693,7 @@ impl Compiler {
                             index: None,
                             ephemeral: true,
                             index_table: false,
+                            virtual_table: false,
                             built: None,
                             matched: None,
                         },
@@ -622,6 +802,7 @@ impl Compiler {
                             index,
                             ephemeral: false,
                             index_table: source.table.without_rowid,
+                            virtual_table: false,
                             built: None,
                             matched,
                         },
@@ -680,7 +861,11 @@ impl Compiler {
             if self.subquery_plans.contains_key(&id) {
                 continue;
             }
-            let nested = plan_select((*block).clone());
+            let mut nested = plan_select((*block).clone());
+            // A block used as a value is planned here rather than by the
+            // planner that built the enclosing one, so it has not been shown
+            // to any module yet.
+            self.resolve_plan(&mut nested)?;
             let correlated = !block.correlations.is_empty() || !self.substitutions.is_empty();
             let store = self.ephemeral();
             let width = block.columns.len().max(1);
@@ -1982,6 +2167,9 @@ impl Compiler {
                     inner,
                 )?;
             }
+            AccessPath::VirtualScan { offer, chosen, .. } => {
+                self.compile_virtual_scan(body, level, cursors, &offer, chosen.as_ref(), inner)?;
+            }
             AccessPath::Subquery { .. }
             | AccessPath::Recursive { .. }
             | AccessPath::RecursiveSelf { .. } => {
@@ -2278,6 +2466,76 @@ impl Compiler {
         Ok(vec![self.emit_jump(
             Instruction::new(Opcode::IfNot, register as i32, -1, 0).with_p5(1),
         )])
+    }
+
+    /// Compiles the loop that runs one virtual table's chosen plan.
+    ///
+    /// `VFilter` is a jump like `Rewind`: a module that produces nothing skips
+    /// the body rather than running it once on an unpositioned cursor. What
+    /// follows it is the body, then the predicates the module did not promise
+    /// to apply, then `VNext` back to the top.
+    fn compile_virtual_scan(
+        &mut self,
+        body: &Body<'_>,
+        level: usize,
+        cursors: SourceCursors,
+        offer: &[rustdb_sql::plan::VirtualConstraint],
+        chosen: Option<&rustdb_sql::plan::VirtualChoice>,
+        inner: &InnerBody,
+    ) -> DbResult<()> {
+        let Some(chosen) = chosen else {
+            return Err(error::misuse(
+                "a virtual scan reached the compiler with no plan",
+            ));
+        };
+        // The arguments are evaluated once, before the scan starts, into one
+        // contiguous block: `filter` reads them positionally and a value
+        // computed inside the loop would be a value that changed under it.
+        let block = self.register_block(chosen.arguments.len().max(1));
+        for (position, index) in chosen.arguments.iter().enumerate() {
+            let Some(constraint) = offer.get(*index) else {
+                continue;
+            };
+            let register = self.compile_expr(&constraint.value)?;
+            self.emit(Instruction::new(
+                Opcode::Copy,
+                register as i32,
+                block.saturating_add(position as u32) as i32,
+                0,
+            ));
+        }
+        let empty = self.emit_jump(
+            Instruction::new(Opcode::VFilter, cursors.table as i32, -1, block as i32)
+                .with_p5(chosen.arguments.len().min(usize::from(u16::MAX)) as u16)
+                .with_p4(Operand::VirtualPlan(Box::new(
+                    crate::program::VirtualPlan {
+                        index_number: chosen.index_number,
+                        index_string: chosen.index_string.clone(),
+                    },
+                ))),
+        );
+        let start = self.here();
+        // Everything the module did not promise to apply is tested here, in
+        // the order it was offered, before the residual the planner left.
+        let mut skip = Vec::new();
+        for index in &chosen.recheck {
+            let Some(constraint) = offer.get(*index) else {
+                continue;
+            };
+            let register = self.compile_expr(&constraint.predicate)?;
+            skip.push(
+                self.emit_jump(Instruction::new(Opcode::IfNot, register as i32, -1, 0).with_p5(1)),
+            );
+        }
+        skip.extend(self.compile_residual(body, level)?);
+        self.compile_level(body, level.saturating_add(1), inner)?;
+        for label in skip {
+            self.patch_here(label);
+        }
+        let more = self.emit_jump(Instruction::new(Opcode::VNext, cursors.table as i32, -1, 0));
+        self.patch(more, start);
+        self.patch_here(empty);
+        Ok(())
     }
 
     /// Materialises a nested block into its store, then scans the store.
@@ -3376,6 +3634,7 @@ impl Compiler {
             BoundExpr::Parameter(index) => Ok(self.emit_load(Operand::Parameter(*index))),
             BoundExpr::Column {
                 source,
+                column: declared,
                 slot,
                 affinity,
                 ..
@@ -3389,7 +3648,14 @@ impl Compiler {
                 // A subquery's rows live in an ephemeral store rather than
                 // under a B-tree cursor, and the value is already a value: no
                 // record to parse, and no affinity to re-apply on the way out.
-                let opcode = if self.is_ephemeral_source(*source) {
+                let opcode = if self.is_virtual_source(*source) {
+                    // A module answers a column by number and returns a value,
+                    // not a record slot: there is nothing to decode and no
+                    // affinity to re-apply, and the number it is asked for is
+                    // the *declared* position rather than a record slot -
+                    // hidden columns take a position like any other.
+                    Opcode::VColumn
+                } else if self.is_ephemeral_source(*source) {
                     Opcode::EphColumn
                 } else if self.is_index_source(*source) {
                     // A WITHOUT ROWID table is read through an index cursor, so
@@ -3401,12 +3667,20 @@ impl Compiler {
                 } else {
                     Opcode::Column
                 };
+                let column = if opcode == Opcode::VColumn {
+                    // The declared position, not the record slot.
+                    &declared
+                } else {
+                    column
+                };
                 let mut read = Instruction::new(opcode, cursor, *column as i32, register as i32)
-                    .with_p5(if opcode == Opcode::EphColumn {
-                        0
-                    } else {
-                        widen
-                    });
+                    .with_p5(
+                        if opcode == Opcode::EphColumn || opcode == Opcode::VColumn {
+                            0
+                        } else {
+                            widen
+                        },
+                    );
                 if opcode == Opcode::Column {
                     if let Some(default) = self.default_of(*source, *slot) {
                         read = read.with_p4(default);
@@ -3422,6 +3696,10 @@ impl Compiler {
                     // A materialised block has no rowid; nothing can have named
                     // one, because the binder refuses `rowid` on a subquery.
                     self.emit(Instruction::new(Opcode::Null, 0, register as i32, 0));
+                    return Ok(register);
+                }
+                if self.is_virtual_source(*source) {
+                    self.emit(Instruction::new(Opcode::VRowid, cursor, register as i32, 0));
                     return Ok(register);
                 }
                 self.emit(Instruction::new(Opcode::Rowid, cursor, register as i32, 0));
@@ -3903,8 +4181,23 @@ pub fn compile_select(
     dependencies: ProgramDependencies,
     parameters: u32,
 ) -> DbResult<(Program, PhysicalPlan)> {
-    let plan = rustdb_sql::plan::plan_select(select);
-    let program = compile(&plan, dependencies, parameters)?;
+    compile_select_with(select, dependencies, parameters, None)
+}
+
+/// Compiles a bound `SELECT`, with somebody to ask about virtual tables.
+pub fn compile_select_with(
+    select: BoundSelect,
+    dependencies: ProgramDependencies,
+    parameters: u32,
+    planner: Option<Box<dyn VirtualPlanner>>,
+) -> DbResult<(Program, PhysicalPlan)> {
+    let mut plan = rustdb_sql::plan::plan_select(select);
+    let mut compiler = Compiler::new();
+    if let Some(planner) = planner {
+        compiler = compiler.with_virtual_planner(planner);
+    }
+    compiler.resolve_plan(&mut plan)?;
+    let program = compile_into(compiler, &plan, dependencies, parameters)?;
     Ok((program, plan))
 }
 

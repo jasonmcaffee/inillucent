@@ -1015,6 +1015,13 @@ pub struct Binder<'a> {
     /// budget, and running out is reported rather than silently leaving the
     /// rows the cascade did not reach.
     pub(crate) foreign_key_budget: usize,
+    /// Equalities a table-valued function's arguments implied, waiting to be
+    /// ANDed into the block's `WHERE`.
+    ///
+    /// They cannot be added when the term is bound, because the filter has not
+    /// been bound yet and the arguments have to be inside it rather than beside
+    /// it: `json_each(x) WHERE key > 1` is one conjunction, not two filters.
+    pub(crate) pending_constraints: Vec<BoundExpr>,
     /// The folded names of the triggers whose bodies are being bound, outermost
     /// first.
     ///
@@ -1148,6 +1155,7 @@ impl<'a> Binder<'a> {
             row_aliases: None,
             view_target: None,
             firing: Vec::new(),
+            pending_constraints: Vec::new(),
             foreign_keys: false,
             defer_foreign_keys: false,
             firing_foreign_keys: Vec::new(),
@@ -1547,10 +1555,17 @@ impl<'a> Binder<'a> {
             self.bind_from_term(*term)?;
         }
         self.desugar_join_constraints(from)?;
-        let bound_filter = match filter {
+        let pending = core::mem::take(&mut self.pending_constraints);
+        let mut bound_filter = match filter {
             Some(expr) => Some(self.bind_expr(*expr)?),
             None => None,
         };
+        for constraint in pending {
+            bound_filter = Some(match bound_filter.take() {
+                Some(existing) => BoundExpr::And(Box::new(existing), Box::new(constraint)),
+                None => constraint,
+            });
+        }
         self.allow_aggregates = true;
         let bound_columns = self.bind_result_columns(columns)?;
         for column in &bound_columns {
@@ -1612,10 +1627,12 @@ impl<'a> Binder<'a> {
                 arguments,
                 ..
             } => {
-                if arguments.is_some() {
-                    return Err(unsupported("table-valued functions", span));
+                let arguments = arguments.clone();
+                self.bind_table_term(*database, *name, term.alias, join, span)?;
+                if let Some(arguments) = arguments {
+                    self.bind_table_arguments(&arguments, span)?;
                 }
-                self.bind_table_term(*database, *name, term.alias, join, span)
+                Ok(())
             }
             FromSource::Subquery(select) => {
                 let alias = term.alias.map(|alias| self.ast.text(alias).to_vec());
@@ -1687,8 +1704,11 @@ impl<'a> Binder<'a> {
         let Some(table) = self.catalog.find_table(database_name.as_deref(), &folded) else {
             return Err(no_such_table(&written, span));
         };
-        if table.kind == TableKind::Virtual {
-            return Err(unsupported("virtual tables", span));
+        if table.kind == TableKind::Virtual && table.columns.is_empty() {
+            // A virtual table with no declared columns is one whose module this
+            // build does not have. The schema still loaded - every other table
+            // in the file works - and naming this one is what fails.
+            return Err(unsupported("that virtual table's module", span));
         }
         if table.kind == TableKind::View {
             let view_alias = match alias {
@@ -2429,6 +2449,67 @@ impl<'a> Binder<'a> {
             ));
         }
         Ok(bound)
+    }
+
+    /// Turns a table-valued function's arguments into hidden-column equalities.
+    ///
+    /// The nth argument constrains the nth *hidden* column, which is the rule
+    /// that makes `generate_series(1,5)` mean `start = 1 AND stop = 5`. More
+    /// arguments than hidden columns is an error at bind time, because there is
+    /// nothing for the extra one to constrain.
+    fn bind_table_arguments(&mut self, arguments: &[ExprId], span: Span) -> Result<(), ParseError> {
+        let Some(id) = self.scope().last().copied() else {
+            return Err(unsupported("a table-valued function with no term", span));
+        };
+        let Some(source) = self.sources.get(id) else {
+            return Err(unsupported("a table-valued function with no term", span));
+        };
+        if source.table.kind != TableKind::Virtual {
+            return Err(unsupported(
+                "arguments on a table that is not virtual",
+                span,
+            ));
+        }
+        let hidden: Vec<(u16, Affinity, Collation)> = source
+            .table
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, column)| column.hidden)
+            .map(|(index, column)| {
+                (
+                    index as u16,
+                    column.affinity,
+                    Collation::from_name(
+                        core::str::from_utf8(&column.collation).unwrap_or("BINARY"),
+                    )
+                    .unwrap_or(Collation::Binary),
+                )
+            })
+            .collect();
+        if arguments.len() > hidden.len() {
+            return Err(wrong_arguments(&source.table.name.clone(), span));
+        }
+        for (position, argument) in arguments.iter().enumerate() {
+            let Some((column, affinity, collation)) = hidden.get(position).copied() else {
+                break;
+            };
+            let value = self.bind_expr(*argument)?;
+            self.pending_constraints.push(BoundExpr::Compare {
+                op: BinaryOp::Equal,
+                left: Box::new(BoundExpr::Column {
+                    source: id,
+                    column,
+                    slot: column,
+                    affinity,
+                    collation,
+                }),
+                right: Box::new(value),
+                affinity: None,
+                collation,
+            });
+        }
+        Ok(())
     }
 
     /// Expands `*` or `table.*` into one bound column per visible column.

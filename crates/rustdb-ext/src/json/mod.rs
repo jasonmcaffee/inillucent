@@ -297,6 +297,11 @@ fn error_position(arguments: &[Argument<'_>]) -> DbResult<Answer> {
 }
 
 /// Turns one element into the SQL value `json_extract` hands back.
+pub fn value_of(node: &Node) -> DbResult<Answer> {
+    as_sql(node)
+}
+
+/// Turns one element into the SQL value `json_extract` hands back.
 fn as_sql(node: &Node) -> DbResult<Answer> {
     Ok(match node {
         Node::Null => Answer::plain(Value::Null),

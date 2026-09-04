@@ -154,6 +154,7 @@ may_depend_on = [
   "rustdb-catalog",
   "rustdb-transaction",
   "rustdb-sql",
+  "rustdb-ext",
   "rustdb-vm",
 ]
 

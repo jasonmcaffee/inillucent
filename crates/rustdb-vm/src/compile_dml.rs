@@ -1491,7 +1491,8 @@ impl Compiler {
     /// reason to write a SELECT in a trigger body is the `RAISE()` in it, and a
     /// query that was optimised away would never reach it.
     fn emit_discarded_select(&mut self, select: &BoundSelect) -> DbResult<()> {
-        let plan = rustdb_sql::plan::plan_select(select.clone());
+        let mut plan = rustdb_sql::plan::plan_select(select.clone());
+        self.resolve_plan(&mut plan)?;
         let width = plan.select.columns.len().max(1);
         let store = self.ephemeral();
         self.emit(Instruction::new(
@@ -1540,7 +1541,20 @@ pub fn compile_insert(
     dependencies: ProgramDependencies,
     parameters: u32,
 ) -> DbResult<Program> {
+    compile_insert_with(insert, dependencies, parameters, None)
+}
+
+/// As [`compile_insert`], with somebody to ask about virtual tables.
+pub fn compile_insert_with(
+    insert: &BoundInsert,
+    dependencies: ProgramDependencies,
+    parameters: u32,
+    planner: Option<Box<dyn crate::compile::VirtualPlanner>>,
+) -> DbResult<Program> {
     let mut compiler = Compiler::new();
+    if let Some(planner) = planner {
+        compiler = compiler.with_virtual_planner(planner);
+    }
     let entry = compiler.emit_jump(Instruction::new(Opcode::Init, 0, -1, 0));
     compiler.patch_here(entry);
     compiler.emit(Instruction::new(Opcode::Transaction, 0, 0, 0));
@@ -1625,7 +1639,8 @@ impl Compiler {
         insert: &BoundInsert,
         select: &BoundSelect,
     ) -> DbResult<()> {
-        let plan = rustdb_sql::plan::plan_select(select.clone());
+        let mut plan = rustdb_sql::plan::plan_select(select.clone());
+        self.resolve_plan(&mut plan)?;
         let width = insert.arity.max(1);
         let store = self.ephemeral();
         self.emit(Instruction::new(
@@ -1845,7 +1860,8 @@ impl Compiler {
         triggers: &[BoundTrigger],
         assignments: Option<&[BoundAssignment]>,
     ) -> DbResult<()> {
-        let plan = rustdb_sql::plan::plan_select(rows.clone());
+        let mut plan = rustdb_sql::plan::plan_select(rows.clone());
+        self.resolve_plan(&mut plan)?;
         let width = plan.select.columns.len().max(1);
         let store = self.ephemeral();
         self.emit(Instruction::new(
@@ -2362,7 +2378,20 @@ pub fn compile_delete(
     dependencies: ProgramDependencies,
     parameters: u32,
 ) -> DbResult<Program> {
+    compile_delete_with(delete, dependencies, parameters, None)
+}
+
+/// As [`compile_delete`], with somebody to ask about virtual tables.
+pub fn compile_delete_with(
+    delete: &BoundDelete,
+    dependencies: ProgramDependencies,
+    parameters: u32,
+    planner: Option<Box<dyn crate::compile::VirtualPlanner>>,
+) -> DbResult<Program> {
     let mut compiler = Compiler::new();
+    if let Some(planner) = planner {
+        compiler = compiler.with_virtual_planner(planner);
+    }
     let entry = compiler.emit_jump(Instruction::new(Opcode::Init, 0, -1, 0));
     compiler.patch_here(entry);
     compiler.emit(Instruction::new(Opcode::Transaction, 0, 0, 0));
@@ -2728,7 +2757,20 @@ pub fn compile_update(
     dependencies: ProgramDependencies,
     parameters: u32,
 ) -> DbResult<Program> {
+    compile_update_with(update, dependencies, parameters, None)
+}
+
+/// As [`compile_update`], with somebody to ask about virtual tables.
+pub fn compile_update_with(
+    update: &BoundUpdate,
+    dependencies: ProgramDependencies,
+    parameters: u32,
+    planner: Option<Box<dyn crate::compile::VirtualPlanner>>,
+) -> DbResult<Program> {
     let mut compiler = Compiler::new();
+    if let Some(planner) = planner {
+        compiler = compiler.with_virtual_planner(planner);
+    }
     let entry = compiler.emit_jump(Instruction::new(Opcode::Init, 0, -1, 0));
     compiler.patch_here(entry);
     compiler.emit(Instruction::new(Opcode::Transaction, 0, 0, 0));

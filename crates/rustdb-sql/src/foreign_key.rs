@@ -761,6 +761,7 @@ mod tests {
             checks: Vec::new(),
             foreign_keys: Vec::new(),
             foreign_key_triggers: Vec::new(),
+            module: None,
         }
     }
 

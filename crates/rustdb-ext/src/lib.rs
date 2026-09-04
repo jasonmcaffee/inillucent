@@ -30,6 +30,8 @@
 )]
 
 pub mod json;
+pub mod registry;
+pub mod vtab;
 
 /// The implementation phase that filled this crate in, as named by the TDD.
 pub const IMPLEMENTATION_PHASE: &str =

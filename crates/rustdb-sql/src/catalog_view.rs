@@ -260,6 +260,13 @@ pub struct TableInfo {
     /// way through would be a second source of truth beside the `CREATE`
     /// statement the file actually stores.
     pub checks: Vec<CheckInfo>,
+    /// The module a virtual table is implemented by, and its arguments.
+    ///
+    /// The catalog records the question and the session fills in the answer:
+    /// what columns the table has is the module's to say, not the file's, so a
+    /// virtual table arrives here with a module and no columns and leaves the
+    /// connection's schema load with both.
+    pub module: Option<crate::vtab::ModuleRef>,
 }
 
 /// One trigger a foreign key implies, or the reason there is not one.
@@ -386,6 +393,7 @@ impl TableInfo {
             create_sql: Vec::new(),
             foreign_keys: Vec::new(),
             foreign_key_triggers: Vec::new(),
+            module: None,
             view: None,
             triggers: Vec::new(),
             analysed_rows: None,
@@ -742,6 +750,7 @@ mod tests {
             checks: Vec::new(),
             foreign_keys: Vec::new(),
             foreign_key_triggers: Vec::new(),
+            module: None,
         }
     }
 

@@ -65,6 +65,7 @@ pub mod compile_dml;
 pub mod datetime;
 pub mod ephemeral;
 pub mod eval;
+pub mod host;
 pub mod machine;
 pub mod mathfn;
 pub mod pattern;

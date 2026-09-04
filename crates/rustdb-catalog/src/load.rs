@@ -243,6 +243,7 @@ fn table_from_row(row: &SchemaObject, database: usize) -> DbResult<TableInfo> {
             checks: Vec::new(),
             foreign_keys: Vec::new(),
             foreign_key_triggers: Vec::new(),
+            module: None,
         });
     }
     if sql.is_empty() {
@@ -267,6 +268,7 @@ fn table_from_row(row: &SchemaObject, database: usize) -> DbResult<TableInfo> {
             checks: Vec::new(),
             foreign_keys: Vec::new(),
             foreign_key_triggers: Vec::new(),
+            module: None,
         });
     }
     let mut table = table_from_create_sql(sql.as_bytes(), database, root)
@@ -384,8 +386,15 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
     let parsed = parse_next_statement(sql, 0, &limits)
         .map_err(|error| error::corrupt(format!("malformed schema SQL: {}", error.message())))?;
     let Statement::CreateTable { name, body, .. } = &parsed.statement else {
-        if let Statement::CreateVirtualTable { name, .. } = &parsed.statement {
+        if let Statement::CreateVirtualTable {
+            name,
+            module,
+            arguments,
+            ..
+        } = &parsed.statement
+        {
             let text = parsed.ast.text(*name).to_vec();
+            let module_name = parsed.ast.text(*module).to_vec();
             return Ok(TableInfo {
                 folded: text.to_ascii_lowercase(),
                 name: text,
@@ -405,6 +414,15 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
                 checks: Vec::new(),
                 foreign_keys: Vec::new(),
                 foreign_key_triggers: Vec::new(),
+                // The columns stay empty here on purpose: only the module can
+                // say what they are, and the catalog is below the module
+                // registry. The connection fills them in when it loads the
+                // schema, which is the same moment SQLite calls `xConnect`.
+                module: Some(rustdb_sql::vtab::ModuleRef {
+                    folded: module_name.to_ascii_lowercase(),
+                    name: module_name,
+                    arguments: arguments.clone(),
+                }),
             });
         }
         return Err(error::corrupt("schema SQL is not a CREATE TABLE"));
@@ -438,6 +456,7 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
         checks: Vec::new(),
         foreign_keys: Vec::new(),
         foreign_key_triggers: Vec::new(),
+        module: None,
     };
     for column in columns {
         info.columns.push(column_info(sql, &parsed.ast, column));

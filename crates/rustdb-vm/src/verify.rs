@@ -188,6 +188,15 @@ fn check_operand_ranges(program: &Program, address: usize, problems: &mut Vec<Ve
             blocks.push((instruction.p3, i32::from(instruction.p5)))
         }
         Opcode::ResultRow | Opcode::ApplyAffinity => blocks.push((instruction.p1, instruction.p2)),
+        Opcode::VFilter => blocks.push((instruction.p3, i32::from(instruction.p5))),
+        Opcode::VColumn => registers.push((instruction.p3, "destination")),
+        Opcode::VRowid => registers.push((instruction.p2, "destination")),
+        Opcode::VUpdate => {
+            blocks.push((instruction.p1, instruction.p2));
+            if instruction.p3 >= 0 {
+                registers.push((instruction.p3, "destination"));
+            }
+        }
         Opcode::Function
         | Opcode::Pattern
         | Opcode::MathCall
@@ -507,7 +516,15 @@ fn writes_of(program: &Program, address: usize) -> Vec<u32> {
         | Opcode::MathCall
         | Opcode::TimeCall
         | Opcode::JsonCall => single(instruction.p3),
-        Opcode::AggFinal => single(instruction.p2),
+        Opcode::AggFinal | Opcode::VRowid => single(instruction.p2),
+        Opcode::VColumn => single(instruction.p3),
+        Opcode::VUpdate => {
+            if instruction.p3 >= 0 {
+                single(instruction.p3)
+            } else {
+                Vec::new()
+            }
+        }
         Opcode::Gosub => single(instruction.p1),
         Opcode::NewRowid | Opcode::RowData | Opcode::CreateBtree => single(instruction.p2),
         Opcode::MakeRecord => single(instruction.p3),
@@ -559,6 +576,8 @@ fn reads_of(program: &Program, address: usize) -> Vec<u32> {
         | Opcode::TimeCall
         | Opcode::JsonCall
         | Opcode::AggStep => block(instruction.p1, instruction.p2),
+        Opcode::VFilter => block(instruction.p3, i32::from(instruction.p5)),
+        Opcode::VUpdate => block(instruction.p1, instruction.p2),
         Opcode::InList => {
             let mut reads = vec![instruction.p1.max(0) as u32];
             reads.extend(block(instruction.p2, instruction.p5 as i32));
@@ -601,6 +620,14 @@ pub fn operand_matches(opcode: Opcode, operand: &Operand) -> bool {
         Opcode::Cast | Opcode::ApplyAffinity => matches!(operand, Operand::Affinity(_)),
         Opcode::Function => matches!(operand, Operand::Scalar(_, _)),
         Opcode::JsonCall => matches!(operand, Operand::Json(_)),
+        Opcode::VOpen
+        | Opcode::VUpdate
+        | Opcode::VBegin
+        | Opcode::VSync
+        | Opcode::VCommit
+        | Opcode::VRollback
+        | Opcode::VSavepoint => matches!(operand, Operand::Virtual(_)),
+        Opcode::VFilter => matches!(operand, Operand::VirtualPlan(_)),
         Opcode::Pattern => matches!(operand, Operand::Pattern(_)),
         Opcode::AggStep | Opcode::AggFinal | Opcode::AggReset => {
             matches!(operand, Operand::Aggregate(_))

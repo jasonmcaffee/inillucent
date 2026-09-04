@@ -44,6 +44,7 @@ pub mod connection;
 pub mod execute;
 pub mod serialize;
 pub mod statement;
+pub mod vtab;
 
 pub use backup::{Backup, BackupProgress};
 pub use blob::Blob;
