@@ -18,8 +18,54 @@
 
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::encoding::{self, TextEncoding};
+
+/// What an application-defined collation does.
+pub type Comparator = Arc<dyn Fn(&[u8], &[u8]) -> Ordering + Send + Sync>;
+
+/// One application-defined collation.
+struct CustomCollation {
+    /// The name it was registered under, for `PRAGMA collation_list`.
+    name: String,
+    /// What it does.
+    body: Comparator,
+}
+
+/// Every application-defined collation, indexed by the id inside `Collation`.
+///
+/// It only grows. See the module comment: an id that appears in a prepared
+/// statement or an index key must still resolve years later, and a table that
+/// reused ids could give it the wrong comparator.
+fn custom_table() -> &'static RwLock<Vec<CustomCollation>> {
+    static TABLE: OnceLock<RwLock<Vec<CustomCollation>>> = OnceLock::new();
+    TABLE.get_or_init(|| RwLock::new(Vec::new()))
+}
+
+/// Registers a comparator and returns the collation that names it.
+pub fn register_custom(name: &str, body: Comparator) -> Collation {
+    let Ok(mut table) = custom_table().write() else {
+        return Collation::Binary;
+    };
+    table.push(CustomCollation {
+        name: name.to_string(),
+        body,
+    });
+    Collation::Custom(table.len().saturating_sub(1) as u32)
+}
+
+/// Returns the name an application-defined collation was registered under.
+pub fn custom_name(id: u32) -> Option<String> {
+    let table = custom_table().read().ok()?;
+    table.get(id as usize).map(|entry| entry.name.clone())
+}
+
+/// Returns an application-defined collation's comparator.
+fn custom_body(id: u32) -> Option<Comparator> {
+    let table = custom_table().read().ok()?;
+    table.get(id as usize).map(|entry| Arc::clone(&entry.body))
+}
 
 /// A built-in collating sequence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -30,6 +76,12 @@ pub enum Collation {
     NoCase,
     /// Compare the bytes, ignoring trailing spaces on either side.
     RTrim,
+    /// An application-defined comparison, by its id in the process-wide table.
+    ///
+    /// The id rather than the function is what makes `Collation` stay `Copy`,
+    /// which is what lets it travel through the record codec and the b-tree
+    /// without either of them knowing this variant exists.
+    Custom(u32),
 }
 
 impl Collation {
@@ -39,6 +91,18 @@ impl Collation {
             Collation::Binary => "BINARY",
             Collation::NoCase => "NOCASE",
             Collation::RTrim => "RTRIM",
+            // A custom collation's name is not static - it was chosen at run
+            // time - so `custom_name` is what answers for one, and this is the
+            // honest placeholder for a caller that wanted a `&'static str`.
+            Collation::Custom(_) => "CUSTOM",
+        }
+    }
+
+    /// Returns the name this collation is known by, custom ones included.
+    pub fn display_name(self) -> String {
+        match self {
+            Collation::Custom(id) => custom_name(id).unwrap_or_else(|| "CUSTOM".to_string()),
+            other => other.name().to_string(),
         }
     }
 
@@ -62,6 +126,13 @@ impl Collation {
             Collation::Binary => compare_binary(left, right),
             Collation::NoCase => compare_nocase(left, right),
             Collation::RTrim => compare_rtrim(left, right),
+            // A comparator that has gone missing cannot happen - the table only
+            // grows - but falling back to BINARY is better than a panic on the
+            // comparison path, which is the hottest path in the engine.
+            Collation::Custom(id) => match custom_body(id) {
+                Some(body) => body(left, right),
+                None => compare_binary(left, right),
+            },
         }
     }
 

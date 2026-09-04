@@ -207,7 +207,8 @@ fn check_operand_ranges(program: &Program, address: usize, problems: &mut Vec<Ve
         | Opcode::Pattern
         | Opcode::MathCall
         | Opcode::TimeCall
-        | Opcode::JsonCall => {
+        | Opcode::JsonCall
+        | Opcode::ExtCall => {
             blocks.push((instruction.p1, instruction.p2));
             registers.push((instruction.p3, "destination"));
         }
@@ -521,7 +522,8 @@ fn writes_of(program: &Program, address: usize) -> Vec<u32> {
         | Opcode::Pattern
         | Opcode::MathCall
         | Opcode::TimeCall
-        | Opcode::JsonCall => single(instruction.p3),
+        | Opcode::JsonCall
+        | Opcode::ExtCall => single(instruction.p3),
         Opcode::AggFinal | Opcode::VRowid => single(instruction.p2),
         Opcode::VColumn => single(instruction.p3),
         Opcode::VAux => single(instruction.p3),
@@ -582,6 +584,7 @@ fn reads_of(program: &Program, address: usize) -> Vec<u32> {
         | Opcode::MathCall
         | Opcode::TimeCall
         | Opcode::JsonCall
+        | Opcode::ExtCall
         | Opcode::AggStep => block(instruction.p1, instruction.p2),
         Opcode::VFilter => block(instruction.p3, i32::from(instruction.p5)),
         Opcode::VUpdate => block(instruction.p1, instruction.p2),

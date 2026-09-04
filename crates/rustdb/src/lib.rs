@@ -34,8 +34,17 @@
 use std::path::Path;
 
 pub use rustdb_base::{DbError, DbResult, ExtendedCode, PrimaryCode};
-pub use rustdb_session::{Backup, BackupProgress, Blob, ColumnMetadata};
-pub use rustdb_value::{Affinity, Collation, StorageClass, TextEncoding, Value};
+/// The collation registry, for an application that defines one.
+pub use rustdb_session::collation;
+/// What an application registers a function as.
+pub use rustdb_session::extensions;
+/// The file-system contract, for an application that supplies its own.
+pub use rustdb_session::vfs;
+pub use rustdb_session::{
+    Backup, BackupProgress, Blob, ColumnMetadata, CommitHook, RollbackHook, RowChangeKind,
+    UpdateHook,
+};
+pub use rustdb_value::{cast, Affinity, Collation, StorageClass, TextEncoding, Value};
 
 use rustdb_session::{
     Connection as SessionConnection, OpenOptions, SessionDatabase, Statement as SessionStatement,
@@ -71,6 +80,20 @@ impl Database {
     pub fn open_with(path: impl AsRef<Path>, options: OpenOptions) -> DbResult<Database> {
         Ok(Database {
             inner: SessionDatabase::open_with_options(path, options)?,
+        })
+    }
+
+    /// Opens a database file through a file system the caller supplies.
+    ///
+    /// This is what a registered VFS is *for*: everything else about a database
+    /// stays the same, and the bytes go somewhere the application chose.
+    pub fn open_with_vfs(
+        path: impl AsRef<Path>,
+        options: OpenOptions,
+        file_system: std::sync::Arc<dyn vfs::Vfs>,
+    ) -> DbResult<Database> {
+        Ok(Database {
+            inner: SessionDatabase::open_with(path, file_system, options)?,
         })
     }
 
@@ -149,6 +172,26 @@ impl Connection {
         backup.finish()
     }
 
+    /// Begins a page-at-a-time copy into another connection's database.
+    ///
+    /// `backup_into` is the whole-thing convenience; this is the form an
+    /// application needs when the copy has to be interleaved with other work,
+    /// abandoned, or reported on. The databases are named by position - zero is
+    /// `main` - which is what the catalog numbers them by.
+    pub fn backup_begin<'a>(
+        &'a self,
+        source_database: usize,
+        destination: &'a Connection,
+        destination_database: usize,
+    ) -> DbResult<rustdb_session::Backup<'a>> {
+        rustdb_session::Backup::begin(
+            &self.inner,
+            source_database,
+            &destination.inner,
+            destination_database,
+        )
+    }
+
     /// Returns the main database's bytes, exactly as the file holds them.
     pub fn serialize(&self) -> DbResult<Vec<u8>> {
         rustdb_session::serialize(&self.inner, 0)
@@ -211,6 +254,51 @@ impl Connection {
     /// Clears a pending interrupt.
     pub fn clear_interrupt(&self) {
         self.inner.clear_interrupt();
+    }
+
+    /// Registers a scalar function, replacing one of the same name and arity.
+    ///
+    /// It is `direct-only` unless the flags say otherwise: a schema is data,
+    /// and data does not get to choose what code runs.
+    pub fn create_scalar_function(
+        &self,
+        name: &str,
+        arity: i32,
+        flags: extensions::FunctionFlags,
+        body: extensions::ScalarBody,
+    ) -> DbResult<()> {
+        self.inner.create_scalar_function(name, arity, flags, body)
+    }
+
+    /// Registers an aggregate, replacing one of the same name and arity.
+    ///
+    /// It is handed the whole group at once rather than a row at a time, which
+    /// is what lets an implementation keep its accumulator somewhere this
+    /// engine cannot see - a C `xStep`/`xFinal` pair, for instance.
+    pub fn create_aggregate_function(
+        &self,
+        name: &str,
+        arity: i32,
+        flags: extensions::FunctionFlags,
+        body: extensions::AggregateBody,
+    ) -> DbResult<()> {
+        self.inner
+            .create_aggregate_function(name, arity, flags, body)
+    }
+
+    /// Removes a function by name and arity, reporting whether one went.
+    pub fn remove_function(&self, name: &str, arity: i32) -> DbResult<bool> {
+        self.inner.remove_function(name, arity)
+    }
+
+    /// Defines a collating sequence, replacing one of the same name.
+    pub fn create_collation(&self, name: &str, comparator: collation::Comparator) -> DbResult<()> {
+        self.inner.create_collation(name, comparator)
+    }
+
+    /// Returns whether the connection may write.
+    pub fn is_writable(&self) -> bool {
+        self.inner.is_writable()
     }
 
     /// Returns whether the connection is in autocommit mode.
@@ -374,6 +462,27 @@ impl Statement<'_> {
     /// Returns the statement's result columns.
     pub fn columns(&self) -> &[ColumnMetadata] {
         self.inner.columns()
+    }
+
+    /// Returns the statement's own SQL text, without any tail.
+    pub fn sql(&self) -> &[u8] {
+        self.inner.sql()
+    }
+
+    /// Returns how many bytes of the prepared text this statement occupied,
+    /// its semicolon included.
+    pub fn sql_used(&self) -> usize {
+        self.inner.sql_used()
+    }
+
+    /// Returns the highest parameter index the statement uses.
+    pub fn parameter_count(&self) -> u32 {
+        self.inner.parameter_count()
+    }
+
+    /// Returns each named parameter and the index it was assigned.
+    pub fn parameter_names(&self) -> &[(Vec<u8>, u32)] {
+        self.inner.parameter_names()
     }
 
     /// Returns how many columns the statement returns.

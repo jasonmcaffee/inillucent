@@ -310,6 +310,13 @@ pub enum Opcode {
     VColumn,
     /// `p1`: cursor, `p2`: destination register.
     VRowid,
+    /// `p1`: first argument register, `p2`: how many, `p3`: destination
+    /// register, `p4`: the function's folded name.
+    ///
+    /// A call to a function an application registered. The machine looks the
+    /// name up in the table the connection handed it, which is why nothing
+    /// about what the function does reaches the program.
+    ExtCall,
     /// `p1`: cursor, `p2`: first argument register, `p3`: destination
     /// register, `p4`: the function's folded name, `p5`: argument count.
     ///
@@ -513,6 +520,7 @@ impl Opcode {
             Opcode::VFilter => "VFilter",
             Opcode::VNext => "VNext",
             Opcode::VColumn => "VColumn",
+            Opcode::ExtCall => "ExtCall",
             Opcode::VRowid => "VRowid",
             Opcode::VAux => "VAux",
             Opcode::VUpdate => "VUpdate",
@@ -596,10 +604,16 @@ pub struct IndexKey {
 }
 
 /// An aggregate call, with everything it needs decided at compile time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AggregateCall {
     /// Which aggregate.
     pub func: AggregateFunc,
+    /// The name, when the aggregate is one an application registered.
+    ///
+    /// This is what stops the struct being `Copy`, and it is worth it: an
+    /// application's aggregate is named at run time, and an id would have to be
+    /// allocated somewhere that outlives the program.
+    pub external: Option<Vec<u8>>,
     /// Whether `DISTINCT` was written.
     pub distinct: bool,
     /// The collation the aggregate compares with.

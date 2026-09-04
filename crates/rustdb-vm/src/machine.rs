@@ -163,6 +163,28 @@ pub struct Machine {
     row_changes: Vec<RowChange>,
     /// The callback that may stop a long statement, and how often to ask it.
     progress: Option<Progress>,
+    /// The functions an application registered on the connection.
+    ///
+    /// A table rather than a host: a scalar call and an aggregate's finish both
+    /// happen deep in the ordinary instruction path, and threading a host down
+    /// there to reach two call sites would be a far larger change than a
+    /// pointer the machine already holds.
+    functions: Option<Arc<dyn ExternalFunctions>>,
+}
+
+/// What the machine calls for a function this engine did not write.
+///
+/// The two halves are deliberately different shapes. A scalar sees one row's
+/// arguments; an aggregate sees the whole group at once, because an
+/// implementation on the other side of a C boundary keeps its accumulator in
+/// memory this engine must not look inside, and driving its `xStep` and
+/// `xFinal` at the end of the group is what keeps that state over there.
+pub trait ExternalFunctions: Send + Sync {
+    /// Calls a scalar function on one row's arguments.
+    fn call(&self, name: &[u8], arguments: &[Value<'static>]) -> DbResult<Value<'static>>;
+
+    /// Reduces a group to one value.
+    fn reduce(&self, name: &[u8], rows: &[Vec<Value<'static>>]) -> DbResult<Value<'static>>;
 }
 
 /// A callback the machine asks, now and then, whether to give up.
@@ -239,6 +261,7 @@ impl Machine {
             last_insert_rowid: 0,
             conflict: None,
             progress: None,
+            functions: None,
             record_changes: false,
             row_changes: Vec::new(),
         }
@@ -367,6 +390,11 @@ impl Machine {
         self.state = MachineState::Prepared;
         self.result.clear();
         self.steps = 0;
+    }
+
+    /// Names the functions an application registered on the connection.
+    pub fn set_functions(&mut self, functions: Option<Arc<dyn ExternalFunctions>>) {
+        self.functions = functions;
     }
 
     /// Installs, or clears, the callback that may stop a long statement.
@@ -733,6 +761,23 @@ impl Machine {
             Opcode::AggStep => self.aggregate_step(instruction),
             Opcode::AggFinal => {
                 let slot = instruction.p1.max(0) as usize;
+                // An application's aggregate is finished here rather than in
+                // the accumulator: only the machine holds the table its name
+                // resolves in, and only it can carry the failure back.
+                let external = self
+                    .accumulators
+                    .get(slot)
+                    .and_then(|accumulator| accumulator.as_ref())
+                    .and_then(|accumulator| {
+                        accumulator
+                            .external_name()
+                            .map(|name| (name.to_vec(), accumulator.group_rows().to_vec()))
+                    });
+                if let Some((name, rows)) = external {
+                    let value = self.reduce_external(&name, &rows)?;
+                    self.store(instruction.p2, value);
+                    return Ok(Flow::Next);
+                }
                 let answer = match self
                     .accumulators
                     .get(slot)
@@ -748,14 +793,21 @@ impl Machine {
                 Ok(Flow::Next)
             }
             Opcode::AggReset => {
-                let Operand::Aggregate(call) = instruction.p4 else {
+                let Operand::Aggregate(call) = &instruction.p4 else {
                     return Err(error::misuse("AggReset without an aggregate"));
                 };
+                let call = call.clone();
                 if let Some(slot) = self.accumulators.get_mut(instruction.p1.max(0) as usize) {
-                    *slot = Some(Accumulator::new(call.func, call.distinct, call.collation));
+                    *slot = Some(Accumulator::named(
+                        call.func,
+                        call.external.clone(),
+                        call.distinct,
+                        call.collation,
+                    ));
                 }
                 Ok(Flow::Next)
             }
+            Opcode::ExtCall => self.external_call(instruction),
             Opcode::SorterOpen => {
                 let Operand::SortKey(key) = instruction.p4.clone() else {
                     return Err(error::misuse("SorterOpen without a key"));
@@ -2050,9 +2102,10 @@ impl Machine {
 
     /// Feeds one row into an accumulator.
     fn aggregate_step(&mut self, instruction: &Instruction) -> DbResult<Flow> {
-        let Operand::Aggregate(call) = instruction.p4 else {
+        let Operand::Aggregate(call) = &instruction.p4 else {
             return Err(error::misuse("AggStep without an aggregate"));
         };
+        let call = call.clone();
         let arguments = self.block(instruction.p1, instruction.p2);
         let marks = self.mark_block(instruction.p1, instruction.p2);
         let encoding = self.encoding;
@@ -2063,6 +2116,39 @@ impl Machine {
             slot.get_or_insert_with(|| Accumulator::new(call.func, call.distinct, call.collation));
         accumulator.step(&arguments, &marks, encoding)?;
         Ok(Flow::Next)
+    }
+
+    /// Calls a function an application registered.
+    fn external_call(&mut self, instruction: &Instruction) -> DbResult<Flow> {
+        let Operand::Text(name) = &instruction.p4 else {
+            return Err(error::misuse("ExtCall without a function name"));
+        };
+        let name = name.clone();
+        let arguments = self.block(instruction.p1, instruction.p2);
+        let Some(functions) = self.functions.as_ref() else {
+            return Err(error::misuse(format!(
+                "no such function: {}",
+                String::from_utf8_lossy(&name)
+            )));
+        };
+        let value = functions.call(&name, &arguments)?;
+        self.store(instruction.p3, value);
+        Ok(Flow::Next)
+    }
+
+    /// Finishes a group an application's aggregate collected.
+    fn reduce_external(
+        &mut self,
+        name: &[u8],
+        rows: &[Vec<Value<'static>>],
+    ) -> DbResult<Value<'static>> {
+        let Some(functions) = self.functions.as_ref() else {
+            return Err(error::misuse(format!(
+                "no such function: {}",
+                String::from_utf8_lossy(name)
+            )));
+        };
+        functions.reduce(name, rows)
     }
 
     /// Calls a JSON built-in.

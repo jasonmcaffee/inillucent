@@ -32,6 +32,7 @@ use rustdb_transaction::recovery::{open_database, DatabaseOptions};
 use rustdb_transaction::state::{
     BeginMode, ChangeCounters, Transaction, TransactionState, TransactionStats,
 };
+use rustdb_vfs::memory::MemoryVfs;
 use rustdb_vfs::os::OsVfs;
 use rustdb_vfs::path::DbPath;
 use rustdb_vfs::Vfs;
@@ -86,17 +87,25 @@ pub struct SessionDatabase {
 impl SessionDatabase {
     /// Opens a database file.
     pub fn open(path: impl AsRef<std::path::Path>) -> DbResult<SessionDatabase> {
-        SessionDatabase::open_with(path, Arc::new(OsVfs::new()), OpenOptions::default())
+        SessionDatabase::open_with_options(path, OpenOptions::default())
     }
 
-    /// Opens a database file on the operating-system VFS with explicit options.
+    /// Opens a database file with explicit options, choosing the VFS by name.
     ///
     /// The facade above cannot name a VFS - it does not depend on that crate,
-    /// and should not - so the default one is chosen here.
+    /// and should not - so the choice is made here. `:memory:` is the one name
+    /// that is not a file: SQLite gives it a private database that lives only
+    /// as long as the handle, and an operating-system VFS handed that name
+    /// would try to create a file called `:memory:`, which is not even a legal
+    /// name on Windows.
     pub fn open_with_options(
         path: impl AsRef<std::path::Path>,
         options: OpenOptions,
     ) -> DbResult<SessionDatabase> {
+        let path = path.as_ref();
+        if DbPath::new(path.to_path_buf()).is_memory() {
+            return SessionDatabase::open_with(path, Arc::new(MemoryVfs::new()), options);
+        }
         SessionDatabase::open_with(path, Arc::new(OsVfs::new()), options)
     }
 
@@ -190,6 +199,12 @@ pub struct ConnectionState {
     pub defer_foreign_keys: bool,
     /// The modules, collations and policy flags this connection can reach.
     pub registry: std::sync::Arc<rustdb_ext::registry::Registry>,
+    /// The collations an application defined on this connection, by name.
+    ///
+    /// The comparator itself lives in the process-wide table; this maps the
+    /// name a statement writes to the id that reaches it, which is what keeps
+    /// two connections' `MYCOLL` apart.
+    pub collations: Vec<(String, rustdb_value::Collation)>,
     /// The virtual tables this connection has connected, by database and name.
     ///
     /// Shared with whatever is compiling a statement, because a module is
@@ -539,6 +554,7 @@ impl Connection {
             journal,
             foreign_keys: false,
             defer_foreign_keys: false,
+            collations: Vec::new(),
             registry: std::sync::Arc::new({
                 let mut registry = rustdb_ext::registry::Registry::with_builtins();
                 crate::pragma_vtab::register_all(&mut registry);
@@ -675,6 +691,122 @@ impl Connection {
             .and_then(|hooks| hooks.progress.clone())
     }
 
+    /// Registers a scalar function, replacing one of the same name and arity.
+    ///
+    /// It is `direct-only` by default, like every other function this engine
+    /// knows: a schema is data, and data does not get to choose what code runs.
+    /// An application that wants its function callable from a `DEFAULT` or a
+    /// view says so with the flags.
+    pub fn create_scalar_function(
+        &self,
+        name: &str,
+        arity: i32,
+        flags: rustdb_ext::registry::FunctionFlags,
+        body: rustdb_ext::registry::ScalarBody,
+    ) -> DbResult<()> {
+        self.register(rustdb_ext::registry::UserFunction {
+            name: name.to_string(),
+            arity,
+            flags,
+            body: rustdb_ext::registry::UserBody::Scalar(body),
+        })
+    }
+
+    /// Registers an aggregate, replacing one of the same name and arity.
+    pub fn create_aggregate_function(
+        &self,
+        name: &str,
+        arity: i32,
+        flags: rustdb_ext::registry::FunctionFlags,
+        body: rustdb_ext::registry::AggregateBody,
+    ) -> DbResult<()> {
+        self.register(rustdb_ext::registry::UserFunction {
+            name: name.to_string(),
+            arity,
+            flags,
+            body: rustdb_ext::registry::UserBody::Aggregate(body),
+        })
+    }
+
+    /// Puts one function into the connection's registry.
+    fn register(&self, function: rustdb_ext::registry::UserFunction) -> DbResult<()> {
+        let mut state = self
+            .state
+            .try_borrow_mut()
+            .map_err(|_| error::misuse("the connection is in use"))?;
+        // The registry is shared with whatever is currently reading it, so a
+        // change makes a private copy rather than mutating under a reader. A
+        // registration is rare and the registry is small, which is what makes
+        // copy-on-write the right shape here.
+        std::sync::Arc::make_mut(&mut state.registry).register_function(function);
+        Ok(())
+    }
+
+    /// Removes a function by name and arity, reporting whether one went.
+    pub fn remove_function(&self, name: &str, arity: i32) -> DbResult<bool> {
+        let mut state = self
+            .state
+            .try_borrow_mut()
+            .map_err(|_| error::misuse("the connection is in use"))?;
+        Ok(std::sync::Arc::make_mut(&mut state.registry).unregister_function(name, arity))
+    }
+
+    /// Returns every function an application registered, for the binder.
+    pub fn external_functions(&self) -> Vec<rustdb_sql::function::ExternalFunction> {
+        let Ok(state) = self.state.try_borrow() else {
+            return Vec::new();
+        };
+        state
+            .registry
+            .functions()
+            .iter()
+            .map(|function| rustdb_sql::function::ExternalFunction {
+                name: function.name.to_ascii_lowercase().into_bytes(),
+                arity: function.arity,
+                aggregate: function.is_aggregate(),
+            })
+            .collect()
+    }
+
+    /// Defines a collating sequence, replacing one of the same name.
+    ///
+    /// The comparator goes into the process-wide table; the connection keeps
+    /// the name and the id it was given, so a statement that writes
+    /// `COLLATE MYCOLL` on this connection reaches this comparator and one on
+    /// another connection reaches its own.
+    pub fn create_collation(
+        &self,
+        name: &str,
+        comparator: rustdb_value::collation::Comparator,
+    ) -> DbResult<()> {
+        let collation = rustdb_value::collation::register_custom(name, comparator);
+        let mut state = self
+            .state
+            .try_borrow_mut()
+            .map_err(|_| error::misuse("the connection is in use"))?;
+        let folded = name.to_ascii_uppercase();
+        state.collations.retain(|(existing, _)| *existing != folded);
+        state.collations.push((folded, collation));
+        Ok(())
+    }
+
+    /// Returns the bodies of the registered functions, for the machine.
+    pub fn function_table(&self) -> std::sync::Arc<dyn rustdb_vm::machine::ExternalFunctions> {
+        let registry = match self.state.try_borrow() {
+            Ok(state) => std::sync::Arc::clone(&state.registry),
+            Err(_) => std::sync::Arc::new(rustdb_ext::registry::Registry::default()),
+        };
+        std::sync::Arc::new(RegisteredFunctions { registry })
+    }
+
+    /// Returns the collations an application defined on this connection.
+    pub fn collations(&self) -> Vec<(String, rustdb_value::Collation)> {
+        match self.state.try_borrow() {
+            Ok(state) => state.collations.clone(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Returns the flag a caller sets to interrupt a running statement.
     pub fn interrupt_flag(&self) -> Arc<AtomicBool> {
         self.interrupt.clone()
@@ -722,6 +854,14 @@ impl Connection {
             .map_or(TransactionStats::default(), |state| {
                 state.transaction.stats()
             })
+    }
+
+    /// Returns whether the connection may write.
+    ///
+    /// A read-only connection refuses a writing statement rather than failing
+    /// part-way through one, so this is worth asking before starting it.
+    pub fn is_writable(&self) -> bool {
+        self.options.writable
     }
 
     /// Returns the journal mode and durability level in force.
@@ -2334,5 +2474,60 @@ fn empty_temp_catalog() -> rustdb_catalog::snapshot::DatabaseCatalog {
         name: b"temp".to_vec(),
         schema_cookie: 0,
         tables: rustdb_catalog::load::schema_table_aliases(rustdb_storage::TEMP_DATABASE),
+    }
+}
+
+/// The registry, seen the way the machine wants to see it.
+///
+/// The machine knows a name and some values; the registry knows what the name
+/// resolves to. This is the whole of the join, and it is here rather than in
+/// the machine because the registry is connection state and the machine is not
+/// allowed to reach for connection state.
+struct RegisteredFunctions {
+    registry: Arc<rustdb_ext::registry::Registry>,
+}
+
+impl rustdb_vm::machine::ExternalFunctions for RegisteredFunctions {
+    /// Calls a scalar function on one row's arguments.
+    fn call(
+        &self,
+        name: &[u8],
+        arguments: &[rustdb_value::Value<'static>],
+    ) -> DbResult<rustdb_value::Value<'static>> {
+        let Some(found) = self.registry.function(name, arguments.len()) else {
+            return Err(error::misuse(format!(
+                "no such function: {}",
+                String::from_utf8_lossy(name)
+            )));
+        };
+        match &found.body {
+            rustdb_ext::registry::UserBody::Scalar(body) => body(arguments),
+            rustdb_ext::registry::UserBody::Aggregate(_) => Err(error::misuse(format!(
+                "misuse of aggregate function {}",
+                String::from_utf8_lossy(name)
+            ))),
+        }
+    }
+
+    /// Reduces a group to one value.
+    fn reduce(
+        &self,
+        name: &[u8],
+        rows: &[Vec<rustdb_value::Value<'static>>],
+    ) -> DbResult<rustdb_value::Value<'static>> {
+        let argc = rows.first().map_or(0, Vec::len);
+        let Some(found) = self.registry.function(name, argc) else {
+            return Err(error::misuse(format!(
+                "no such function: {}",
+                String::from_utf8_lossy(name)
+            )));
+        };
+        match &found.body {
+            rustdb_ext::registry::UserBody::Aggregate(body) => body(rows),
+            rustdb_ext::registry::UserBody::Scalar(_) => Err(error::misuse(format!(
+                "{} is not an aggregate",
+                String::from_utf8_lossy(name)
+            ))),
+        }
     }
 }

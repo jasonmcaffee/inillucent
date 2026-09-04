@@ -1644,6 +1644,7 @@ impl Compiler {
                 Instruction::new(Opcode::AggStep, block as i32, count as i32, slot as i32).with_p4(
                     Operand::Aggregate(AggregateCall {
                         func: aggregate.func,
+                        external: aggregate.external.clone(),
                         distinct: aggregate.distinct,
                         collation: aggregate.collation,
                     }),
@@ -1662,6 +1663,7 @@ impl Compiler {
                 Instruction::new(Opcode::AggReset, slot as i32, 0, 0).with_p4(Operand::Aggregate(
                     AggregateCall {
                         func: aggregate.func,
+                        external: aggregate.external.clone(),
                         distinct: aggregate.distinct,
                         collation: aggregate.collation,
                     },
@@ -1679,6 +1681,7 @@ impl Compiler {
                 Instruction::new(Opcode::AggFinal, slot as i32, register as i32, 0).with_p4(
                     Operand::Aggregate(AggregateCall {
                         func: aggregate.func,
+                        external: aggregate.external.clone(),
                         distinct: aggregate.distinct,
                         collation: aggregate.collation,
                     }),
@@ -2756,6 +2759,7 @@ impl Compiler {
                         Instruction::new(Opcode::AggStep, block as i32, count as i32, slot as i32)
                             .with_p4(Operand::Aggregate(AggregateCall {
                                 func: aggregate.func,
+                                external: aggregate.external.clone(),
                                 distinct: aggregate.distinct,
                                 collation: aggregate.collation,
                             })),
@@ -3729,6 +3733,31 @@ impl Compiler {
                     }
                 }
                 self.emit(read);
+                Ok(register)
+            }
+            BoundExpr::External { name, arguments } => {
+                // The arguments go in a contiguous block, which is the shape
+                // every call in this engine hands its implementation.
+                let first = self.register_block(arguments.len().max(1));
+                for (offset, argument) in arguments.iter().enumerate() {
+                    let value = self.compile_expr(argument)?;
+                    self.emit(Instruction::new(
+                        Opcode::Copy,
+                        value as i32,
+                        first as i32 + offset as i32,
+                        0,
+                    ));
+                }
+                let register = self.register();
+                self.emit(
+                    Instruction::new(
+                        Opcode::ExtCall,
+                        first as i32,
+                        arguments.len() as i32,
+                        register as i32,
+                    )
+                    .with_p4(Operand::Text(name.clone())),
+                );
                 Ok(register)
             }
             BoundExpr::VirtualFunction {

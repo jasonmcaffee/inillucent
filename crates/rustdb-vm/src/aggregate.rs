@@ -24,6 +24,8 @@ use rustdb_value::{cast, compare, Collation, TextEncoding, Value};
 use crate::eval;
 
 /// One accumulator, mid-group.
+///
+/// An application's aggregate is the one that keeps its rows: see `rows`.
 #[derive(Clone, Debug)]
 pub struct Accumulator {
     func: AggregateFunc,
@@ -40,6 +42,14 @@ pub struct Accumulator {
     joined: Vec<u8>,
     separator: Option<Vec<u8>>,
     seen: Vec<Value<'static>>,
+    /// The name, when this is an aggregate an application registered.
+    external: Option<Vec<u8>>,
+    /// Every row of the group, kept for an application's aggregate.
+    ///
+    /// Only an external aggregate fills this: a built-in reduces as it goes,
+    /// and an implementation on the other side of the C boundary keeps its own
+    /// accumulator, so the rows are what has to be kept until the end.
+    rows: Vec<Vec<Value<'static>>>,
     /// The elements a `json_group_array` has collected.
     json_items: Vec<Node>,
     /// The members a `json_group_object` has collected.
@@ -49,8 +59,20 @@ pub struct Accumulator {
 impl Accumulator {
     /// Returns a fresh accumulator for one aggregate.
     pub fn new(func: AggregateFunc, distinct: bool, collation: Collation) -> Accumulator {
+        Accumulator::named(func, None, distinct, collation)
+    }
+
+    /// Returns a fresh accumulator, naming an application's aggregate.
+    pub fn named(
+        func: AggregateFunc,
+        external: Option<Vec<u8>>,
+        distinct: bool,
+        collation: Collation,
+    ) -> Accumulator {
         Accumulator {
             func,
+            external,
+            rows: Vec::new(),
             distinct,
             collation,
             count: 0,
@@ -105,6 +127,10 @@ impl Accumulator {
             self.seen.push(value.clone());
         }
         match self.func {
+            AggregateFunc::External => {
+                self.count = self.count.saturating_add(1);
+                self.rows.push(arguments.to_vec());
+            }
             AggregateFunc::Count => {
                 if arguments.is_empty() || !value.is_null() {
                     self.count = self.count.saturating_add(1);
@@ -233,9 +259,22 @@ impl Accumulator {
         })
     }
 
+    /// Returns the name of the application aggregate this accumulates for.
+    pub fn external_name(&self) -> Option<&[u8]> {
+        self.external.as_deref()
+    }
+
+    /// Returns every row the group collected, for an application's aggregate.
+    pub fn group_rows(&self) -> &[Vec<Value<'static>>] {
+        &self.rows
+    }
+
     /// Produces the aggregate's value, without the mark.
     fn finish_value(&self) -> DbResult<Value<'static>> {
         Ok(match self.func {
+            // The machine finishes an external aggregate itself, because only
+            // it holds the table the name resolves in.
+            AggregateFunc::External => Value::Null,
             AggregateFunc::Count => Value::Integer(self.count),
             AggregateFunc::Sum => {
                 if !self.saw_value {

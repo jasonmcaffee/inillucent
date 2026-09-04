@@ -6,7 +6,9 @@ license.workspace = true
 description = "Versioned SQLite C API compatibility surface and ABI probes."
 
 [lib]
-crate-type = ["lib"]
+# A C caller links the dynamic or the static library; the `lib` form is what
+# the crate's own tests and the probe harness use.
+crate-type = ["lib", "cdylib", "staticlib"]
 
 [dependencies]
 rustdb = { workspace = true }
