@@ -246,7 +246,7 @@ pub fn connect(
 pub fn with_table<T>(
     tables: &mut VirtualTables,
     key: &VirtualKey,
-    pagers: &mut dyn rustdb_storage::PagerSet,
+    host: &mut dyn rustdb_ext::vtab::Host,
     limits: &rustdb_base::limits::Limits,
     database: usize,
     body: impl FnOnce(&mut dyn VirtualTable, &mut Context<'_>) -> DbResult<T>,
@@ -256,9 +256,10 @@ pub fn with_table<T>(
     };
     let outcome = {
         let mut context = Context {
-            pagers,
+            host,
             database,
             limits,
+            catalog: None,
         };
         body(taken.as_mut(), &mut context)
     };

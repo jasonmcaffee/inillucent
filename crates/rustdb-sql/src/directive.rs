@@ -360,6 +360,12 @@ pub enum Directive {
     },
     /// `PRAGMA`.
     Pragma {
+        /// The schema the pragma was qualified with, when one was written.
+        ///
+        /// `PRAGMA aux.table_info(t)` asks about the attached database rather
+        /// than about `main`, and a pragma that dropped the qualifier would
+        /// answer confidently about the wrong file.
+        database: Option<usize>,
         /// The pragma name, folded.
         name: Vec<u8>,
         /// The argument, when one was written.
@@ -1516,11 +1522,22 @@ impl<'a> Binder<'a> {
         }
         let mut keys = Vec::with_capacity(columns.len());
         for column in columns {
+            // `CREATE INDEX x ON t(b COLLATE NOCASE DESC)` parses the collation
+            // into the *expression*, because that is where the grammar puts a
+            // `COLLATE` that follows a value. It is still an index on a bare
+            // column, and treating it as one is the difference between
+            // supporting the everyday form and refusing it as an expression.
+            let (expr, written_collation) = match self.ast.expr(column.expr) {
+                Some(ast::Expr::Collate { operand, collation }) => {
+                    (self.ast.expr(*operand), Some(*collation))
+                }
+                other => (other, column.collation),
+            };
             let Some(ast::Expr::Column {
                 table: None,
                 column: name,
                 ..
-            }) = self.ast.expr(column.expr)
+            }) = expr
             else {
                 return Err(unsupported("indexes on expressions", Span::default()));
             };
@@ -1531,7 +1548,7 @@ impl<'a> Binder<'a> {
                     Span::default(),
                 ));
             };
-            let collation = match column.collation {
+            let collation = match written_collation {
                 Some(collation) => self.ast.folded(collation).to_vec(),
                 None => target
                     .column(position)
@@ -1701,7 +1718,7 @@ impl<'a> Binder<'a> {
     /// Binds a `PRAGMA`.
     fn bind_pragma(
         &mut self,
-        _database: Option<ast::NameId>,
+        database: Option<ast::NameId>,
         name: ast::NameId,
         value: &ast::PragmaValue,
     ) -> Result<Directive, ParseError> {
@@ -1712,7 +1729,12 @@ impl<'a> Binder<'a> {
             }
             ast::PragmaValue::Value(expr) => Some(PragmaArgument::Value(self.bind_expr(*expr)?)),
         };
+        let database = match database {
+            Some(id) => Some(self.resolve_database(Some(id))?),
+            None => None,
+        };
         Ok(Directive::Pragma {
+            database,
             name: self.ast.folded(name).to_vec(),
             argument,
         })

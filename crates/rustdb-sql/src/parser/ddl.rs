@@ -272,7 +272,23 @@ impl Parser<'_> {
             self.expect(Punctuator::RightParen)?;
             return Ok(expr);
         }
-        self.parse_expr()
+        // Unparenthesised, SQLite's grammar takes a *literal* and nothing else:
+        // a signed number, a string, a blob, NULL, TRUE, FALSE, or one of the
+        // CURRENT_ keywords. Reading a whole expression here swallowed the
+        // column's own `COLLATE` clause - `DEFAULT 'x' COLLATE NOCASE` became
+        // one default and no collation - which changed both what
+        // `PRAGMA table_info` reports and how the column compares.
+        self.parse_literal_default()
+    }
+
+    /// Parses the literal an unparenthesised `DEFAULT` takes.
+    ///
+    /// One prefix form and no more: a number, a string, a blob, `NULL`, one of
+    /// the `CURRENT_` keywords, or a signed number. It stops before any infix
+    /// operator, which is the whole point - the next word after the default is
+    /// the column's next constraint, not more of the default.
+    fn parse_literal_default(&mut self) -> Result<crate::ast::ExprId, ParseError> {
+        self.parse_prefix()
     }
 
     /// Parses an optional `ASC` or `DESC`.

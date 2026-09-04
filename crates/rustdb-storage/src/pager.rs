@@ -216,6 +216,12 @@ pub struct Pager {
     journal: Option<Box<dyn Journal>>,
     /// How long a commit waits for readers before reporting BUSY.
     busy_timeout: std::time::Duration,
+    /// The largest the file may grow to, in pages.
+    ///
+    /// `PRAGMA max_page_count` is a limit an application sets to bound what a
+    /// runaway statement can do to the disk, so it is enforced where pages are
+    /// allocated rather than checked by whoever set it.
+    max_page_count: u32,
     journalled: BTreeSet<u32>,
     wrote_database: bool,
     journal_totals: JournalStats,
@@ -311,6 +317,7 @@ impl Pager {
             fail_at: None,
             journal: None,
             busy_timeout: options.busy_timeout,
+            max_page_count: u32::MAX - 1,
             journalled: BTreeSet::new(),
             wrote_database: false,
             journal_totals: JournalStats::default(),
@@ -348,6 +355,30 @@ impl Pager {
     /// Returns how many pages the database has.
     pub fn page_count(&self) -> u32 {
         self.page_count
+    }
+
+    /// Returns how long a commit waits for readers before reporting BUSY.
+    pub fn busy_timeout(&self) -> std::time::Duration {
+        self.busy_timeout
+    }
+
+    /// Changes how long a commit waits for readers before reporting BUSY.
+    pub fn set_busy_timeout(&mut self, timeout: std::time::Duration) {
+        self.busy_timeout = timeout;
+    }
+
+    /// Returns the largest the file may grow to, in pages.
+    pub fn max_page_count(&self) -> u32 {
+        self.max_page_count
+    }
+
+    /// Changes the largest the file may grow to.
+    ///
+    /// A limit below the current size is not an error and does not shrink the
+    /// file: it stops it growing, which is what SQLite does and the only thing
+    /// it *can* do without deleting somebody's rows.
+    pub fn set_max_page_count(&mut self, pages: u32) {
+        self.max_page_count = pages.max(1);
     }
 
     /// Returns how many whole pages the file actually holds.
@@ -796,6 +827,7 @@ impl Pager {
             fail_at: None,
             journal: None,
             busy_timeout: options.busy_timeout,
+            max_page_count: u32::MAX - 1,
             journalled: BTreeSet::new(),
             wrote_database: false,
             journal_totals: JournalStats::default(),

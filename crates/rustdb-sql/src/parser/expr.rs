@@ -43,7 +43,7 @@ impl Parser<'_> {
 
     /// Parses one prefix form: a literal, a name, a call, a parenthesis, or a
     /// unary operator.
-    fn parse_prefix(&mut self) -> Result<ExprId, ParseError> {
+    pub(crate) fn parse_prefix(&mut self) -> Result<ExprId, ParseError> {
         let token = self.peek()?;
         match token.kind {
             TokenKind::EndOfInput => Err(self.unexpected(&["an expression"])?),
@@ -490,7 +490,12 @@ impl Parser<'_> {
         }
         let mut end = first.span;
         self.bump()?;
-        while self.at_name()? {
+        // A type name is one or more words, and it stops at the first word that
+        // begins a column constraint. Without that stop, `d BLOB GENERATED
+        // ALWAYS AS (...)` had the declared type `BLOB GENERATED ALWAYS` -
+        // which `PRAGMA table_xinfo` then reported and which decides the
+        // column's affinity.
+        while self.at_name()? && !self.at_constraint_keyword()? {
             end = self.bump()?.span;
         }
         if self.at(Punctuator::LeftParen)? {
@@ -517,6 +522,27 @@ impl Parser<'_> {
         let span = first.span.to(end);
         let text = span.slice(self.source()).to_vec();
         Ok(self.ast.intern(text, crate::lexer::QuoteForm::Bare, span))
+    }
+
+    /// Returns whether the next word begins a column constraint.
+    fn at_constraint_keyword(&mut self) -> Result<bool, ParseError> {
+        let Some(keyword) = self.peek()?.keyword() else {
+            return Ok(false);
+        };
+        Ok(matches!(
+            keyword,
+            crate::keyword::Keyword::CONSTRAINT
+                | crate::keyword::Keyword::PRIMARY
+                | crate::keyword::Keyword::NOT
+                | crate::keyword::Keyword::NULL
+                | crate::keyword::Keyword::UNIQUE
+                | crate::keyword::Keyword::CHECK
+                | crate::keyword::Keyword::DEFAULT
+                | crate::keyword::Keyword::COLLATE
+                | crate::keyword::Keyword::REFERENCES
+                | crate::keyword::Keyword::GENERATED
+                | crate::keyword::Keyword::AS
+        ))
     }
 
     /// Parses one infix or postfix form, if the next token binds tightly

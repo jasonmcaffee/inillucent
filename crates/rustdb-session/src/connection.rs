@@ -198,11 +198,32 @@ pub struct ConnectionState {
     pub virtual_tables: std::rc::Rc<core::cell::RefCell<crate::vtab::VirtualTables>>,
     /// The run-time limits, so a module can be told what they are.
     pub limits: rustdb_base::limits::Limits,
+    /// The settings the pragmas read and write.
+    pub settings: crate::settings::Settings,
+    /// The file the connection was opened on, for `PRAGMA database_list`.
+    pub main_file: String,
+    /// The schema the connection last published.
+    ///
+    /// The same `Arc` the connection hands to a statement, held here as well so
+    /// that a module can be given it while a statement is running - the point
+    /// at which the connection itself is borrowed and cannot be asked. One
+    /// snapshot, two holders; the publisher updates both together.
+    pub catalog: Arc<CatalogSnapshot>,
 }
 
 impl rustdb_vm::host::Host for ConnectionState {
     /// The databases the connection has open.
     fn pagers(&mut self) -> &mut dyn rustdb_storage::PagerSet {
+        self
+    }
+
+    /// The schema the statement was compiled against.
+    fn schema(&self) -> Option<Arc<CatalogSnapshot>> {
+        Some(Arc::clone(&self.catalog))
+    }
+
+    /// The connection as a module is allowed to see it.
+    fn services(&mut self) -> &mut dyn rustdb_ext::vtab::Host {
         self
     }
 
@@ -245,9 +266,10 @@ impl rustdb_vm::host::Host for ConnectionState {
         };
         let outcome = {
             let mut context = rustdb_ext::vtab::Context {
-                pagers: self,
+                host: self,
                 database,
                 limits: &limits,
+                catalog: None,
             };
             body(taken.as_mut(), &mut context)
         };
@@ -255,6 +277,32 @@ impl rustdb_vm::host::Host for ConnectionState {
             tables.insert(key, taken);
         }
         outcome
+    }
+}
+
+impl rustdb_ext::vtab::Host for ConnectionState {
+    /// Answers a pragma that only reads.
+    ///
+    /// The same register the `PRAGMA` directive reads through, called from the
+    /// other side: `SELECT * FROM pragma_table_info('t')` and
+    /// `PRAGMA table_info(t)` are the same question and must not be able to
+    /// give two answers.
+    fn pragma(
+        &mut self,
+        database: Option<usize>,
+        name: &[u8],
+        argument: Option<&rustdb_value::Value<'static>>,
+    ) -> DbResult<Option<Vec<Vec<rustdb_value::Value<'static>>>>> {
+        let argument = argument.map(|value| {
+            rustdb_sql::directive::PragmaArgument::Name(match value {
+                rustdb_value::Value::Text(text) => text.utf8_bytes().into_owned(),
+                rustdb_value::Value::Integer(number) => number.to_string().into_bytes(),
+                rustdb_value::Value::Real(number) => rustdb_value::numeric::real_to_text(*number),
+                rustdb_value::Value::Blob(blob) => blob.raw().to_vec(),
+                rustdb_value::Value::Null => Vec::new(),
+            })
+        });
+        crate::pragma::read(self, database, name, argument.as_ref())
     }
 }
 
@@ -491,16 +539,25 @@ impl Connection {
             journal,
             foreign_keys: false,
             defer_foreign_keys: false,
-            registry: std::sync::Arc::new(rustdb_ext::registry::Registry::with_builtins()),
+            registry: std::sync::Arc::new({
+                let mut registry = rustdb_ext::registry::Registry::with_builtins();
+                crate::pragma_vtab::register_all(&mut registry);
+                registry
+            }),
             virtual_tables: std::rc::Rc::new(core::cell::RefCell::new(
                 crate::vtab::VirtualTables::default(),
             )),
             limits: options.limits.clone(),
+            settings: crate::settings::Settings::default(),
+            catalog: Arc::new(CatalogSnapshot::default()),
+            main_file: path.display().to_string(),
         };
         declare_virtual_tables(&mut state, &mut catalog)?;
+        let published = Arc::new(catalog);
+        state.catalog = Arc::clone(&published);
         Ok(Connection {
             state: RefCell::new(state),
-            catalog: RefCell::new(Arc::new(catalog)),
+            catalog: RefCell::new(published),
             interrupt: Arc::new(AtomicBool::new(false)),
             limits: options.limits.clone(),
             path: path.clone(),
@@ -1025,11 +1082,16 @@ impl Connection {
                 .map_err(|_| error::misuse("the connection is running a statement"))?;
             read_every_catalog(&mut state, &name, generation)?
         };
+        let published = Arc::new(loaded);
+        self.state
+            .try_borrow_mut()
+            .map_err(|_| error::misuse("the connection is running a statement"))?
+            .catalog = Arc::clone(&published);
         let mut catalog = self
             .catalog
             .try_borrow_mut()
             .map_err(|_| error::misuse("the catalog is in use"))?;
-        *catalog = Arc::new(loaded);
+        *catalog = published;
         Ok(())
     }
 
@@ -1078,12 +1140,86 @@ impl Connection {
             released?;
             loaded
         };
+        let published = Arc::new(loaded);
+        self.state
+            .try_borrow_mut()
+            .map_err(|_| error::misuse("the connection is running a statement"))?
+            .catalog = Arc::clone(&published);
         let mut catalog = self
             .catalog
             .try_borrow_mut()
             .map_err(|_| error::misuse("the catalog is in use"))?;
-        *catalog = Arc::new(loaded);
+        *catalog = published;
         Ok(())
+    }
+
+    /// Returns what one setting holds.
+    pub fn setting(&self, setting: crate::settings::Setting) -> DbResult<i64> {
+        self.with_state(|state| state.settings.get(setting))
+    }
+
+    /// Changes what one setting holds, and applies the ones this engine acts on.
+    ///
+    /// The applied ones are the point: a `busy_timeout` that were only recorded
+    /// would be an application waiting for a lock it had asked to wait for and
+    /// not getting the wait. What is recorded and not applied is recorded as
+    /// such in `settings.rs`, one row at a time.
+    pub fn set_setting(&self, setting: crate::settings::Setting, value: i64) -> DbResult<i64> {
+        let previous = self.with_state(|state| state.settings.set(setting, value))??;
+        match setting {
+            crate::settings::Setting::MaxPageCount => {
+                let pages = value.clamp(1, i64::from(u32::MAX)) as u32;
+                self.with_state(|state| state.pager.set_max_page_count(pages))?;
+            }
+            crate::settings::Setting::BusyTimeout => {
+                let timeout = std::time::Duration::from_millis(value.max(0) as u64);
+                self.with_state(|state| state.pager.set_busy_timeout(timeout))?;
+            }
+            // Every other setting is recorded and reported and changes nothing
+            // here; `settings.rs` says which and why, one row at a time.
+            _ => {}
+        }
+        Ok(previous)
+    }
+
+    /// Returns the file one attached database was opened from.
+    pub fn database_file(&self, index: usize) -> String {
+        if index == rustdb_storage::MAIN_DATABASE {
+            return self.path.display().to_string();
+        }
+        if index == rustdb_storage::TEMP_DATABASE {
+            return String::new();
+        }
+        self.with_state(|state| {
+            state
+                .attached
+                .get(index.saturating_sub(2))
+                .map(|attached| attached.path.display().to_string())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default()
+    }
+
+    /// Returns each index's declared key ordering, by root page.
+    ///
+    /// The integrity check verifies that an index's entries are in the order
+    /// the index declares, and only the catalog knows what that order is: the
+    /// storage layer sees a b-tree of records and no collation anywhere.
+    pub fn index_key_map(
+        &self,
+    ) -> DbResult<std::collections::BTreeMap<u32, rustdb_value::record::KeyInfo>> {
+        use rustdb_sql::catalog_view::CatalogView;
+        let catalog = self.catalog()?;
+        let mut keys = std::collections::BTreeMap::new();
+        for table in catalog.every_table() {
+            for index in &table.indexes {
+                if index.root == 0 {
+                    continue;
+                }
+                keys.insert(index.root, crate::execute::index_key_info(index));
+            }
+        }
+        Ok(keys)
     }
 
     /// Reloads the catalog from the file, which invalidates every prepared
@@ -1131,12 +1267,14 @@ impl Connection {
         state.pager = pager;
         let mut loaded = loaded;
         declare_virtual_tables(&mut state, &mut loaded)?;
+        let published = Arc::new(loaded);
+        state.catalog = Arc::clone(&published);
         drop(state);
         let mut catalog = self
             .catalog
             .try_borrow_mut()
             .map_err(|_| error::misuse("the catalog is in use"))?;
-        *catalog = Arc::new(loaded);
+        *catalog = published;
         Ok(())
     }
 

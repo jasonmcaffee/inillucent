@@ -30,6 +30,19 @@ pub trait Host {
     /// Returns the databases the connection has open.
     fn pagers(&mut self) -> &mut dyn PagerSet;
 
+    /// Returns the connection as a module is allowed to see it.
+    fn services(&mut self) -> &mut dyn rustdb_ext::vtab::Host;
+
+    /// Returns the schema the statement was compiled against.
+    ///
+    /// A module that introspects needs it - `pragma_table_info` is a
+    /// table-valued function over exactly this - and every other module ignores
+    /// it. A host with no schema of its own answers `None`, which those modules
+    /// read as an empty schema rather than as an error.
+    fn schema(&self) -> Option<std::sync::Arc<rustdb_catalog::snapshot::CatalogSnapshot>> {
+        None
+    }
+
     /// Opens a cursor on one virtual table.
     fn open_virtual(&mut self, reference: &VirtualRef) -> DbResult<Box<dyn VirtualCursor>>;
 
@@ -54,6 +67,11 @@ pub trait Host {
 impl Host for Pager {
     /// The single database.
     fn pagers(&mut self) -> &mut dyn PagerSet {
+        self
+    }
+
+    /// A pager answers no pragmas, which the default already says.
+    fn services(&mut self) -> &mut dyn rustdb_ext::vtab::Host {
         self
     }
 

@@ -976,7 +976,18 @@ fn index_from_create_sql(sql: &[u8], table: &TableInfo, root: u32) -> DbResult<I
     let text = parsed.ast.text(*name).to_vec();
     let mut key_columns = Vec::with_capacity(columns.len());
     for key in columns {
-        let column = match parsed.ast.expr(key.expr) {
+        // `ON t(b COLLATE NOCASE)` parses the collation into the expression,
+        // because that is where the grammar puts a `COLLATE` that follows a
+        // value. It is still an index on a bare column; reading it as an
+        // expression would make every write to the table refuse, because a
+        // key the engine cannot compute is a key it cannot maintain.
+        let (expr, written_collation) = match parsed.ast.expr(key.expr) {
+            Some(Expr::Collate { operand, collation }) => {
+                (parsed.ast.expr(*operand), Some(*collation))
+            }
+            other => (other, key.collation),
+        };
+        let column = match expr {
             Some(Expr::Column { column, .. }) => table.column_position(parsed.ast.folded(*column)),
             _ => None,
         };
@@ -985,7 +996,7 @@ fn index_from_create_sql(sql: &[u8], table: &TableInfo, root: u32) -> DbResult<I
         } else {
             None
         };
-        let collation = match key.collation {
+        let collation = match written_collation {
             Some(name) => parsed.ast.folded(name).to_vec(),
             None => column
                 .and_then(|index| table.column(index))

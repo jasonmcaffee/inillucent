@@ -42,7 +42,10 @@ pub mod backup;
 pub mod blob;
 pub mod connection;
 pub mod execute;
+pub mod pragma;
+pub mod pragma_vtab;
 pub mod serialize;
+pub mod settings;
 pub mod statement;
 pub mod vtab;
 
