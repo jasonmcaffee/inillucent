@@ -23,6 +23,14 @@ name = "rustdb-sqlperf"
 path = "src/bin/sqlperf.rs"
 
 [[bin]]
+name = "rustdb-sizecheck"
+path = "src/bin/sizecheck.rs"
+
+[[bin]]
+name = "rustdb-hotprofile"
+path = "src/bin/hotprofile.rs"
+
+[[bin]]
 name = "rustdb-planperf"
 path = "src/bin/planperf.rs"
 
@@ -97,3 +105,8 @@ path = "src/bin/release.rs"
 [[bin]]
 name = "rustdb-checkpointperf"
 path = "src/bin/checkpointperf.rs"
+
+[features]
+# Passed through to the virtual machine so `rustdb-hotprofile` can attribute
+# time and allocations to individual opcodes.
+opcode-probe = ["rustdb-vm/opcode-probe"]

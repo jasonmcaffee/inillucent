@@ -68,14 +68,25 @@ struct CursorSlot {
     database: usize,
     cursor: BTreeCursor,
     payload: Option<Vec<u8>>,
-    /// Where each field of the cached row lives, and where its payload begins.
+    /// Where each field of the cached row lives.
     ///
     /// Parsing a record is a walk of its whole header, and reading a column
     /// used to do that walk - and a heap allocation - once per column. A
-    /// two-column projection therefore parsed every row twice. The buffer is
-    /// reused across rows, so a scan of a million rows parses a million headers
-    /// and allocates once.
-    record: Option<(Vec<rustdb_value::record::FieldSpan>, usize)>,
+    /// two-column projection therefore parsed every row twice.
+    ///
+    /// The buffer is owned rather than held in an `Option`, and a move clears
+    /// `record_parsed` rather than dropping it. Holding it in an `Option` and
+    /// setting that `Option` to `None` on every move is what the previous shape
+    /// did, and it gave the buffer back to the allocator once per row: a scan
+    /// of five thousand rows that read one integer column was measured making
+    /// three heap allocations per row, of which two were this vector being
+    /// freed and grown again. It now allocates once per cursor and is refilled
+    /// in place, which is what the comment here always claimed.
+    fields: Vec<rustdb_value::record::FieldSpan>,
+    /// How long the cached row's record header is.
+    header_len: usize,
+    /// Whether `fields` describes the row the cursor is standing on.
+    record_parsed: bool,
     /// Whether `payload` holds the row the cursor is standing on.
     ///
     /// Separate from `payload` being `Some`, because the buffer is kept across
@@ -101,12 +112,10 @@ impl CursorSlot {
     /// NULLs.
     fn moved(&mut self) {
         self.row_is_loaded = false;
-        // The spans describe the row that was there; the buffer they live in is
-        // kept so the next row refills it rather than allocating a new one.
-        if let Some((fields, _)) = self.record.as_mut() {
-            fields.clear();
-        }
-        self.record = None;
+        // The spans describe the row that was there, so they stop being valid;
+        // the buffer holding them is kept, so the next row refills it rather
+        // than allocating a new one.
+        self.record_parsed = false;
         self.null_row = false;
     }
 }
@@ -150,6 +159,21 @@ pub struct Machine {
     ephemerals: Vec<Option<Ephemeral>>,
     accumulators: Vec<Option<Accumulator>>,
     bindings: Vec<Value<'static>>,
+    /// A buffer for the register blocks opcodes pass around, reused.
+    ///
+    /// An opcode that takes several registers - an aggregate step, a record to
+    /// encode, an index key, a function call - used to collect them into a
+    /// fresh `Vec` every time it ran. On a scan that is one heap allocation per
+    /// row per such opcode: `SELECT count(*), sum(key), max(category)` was
+    /// measured making eight hundred thousand allocations over two hundred
+    /// thousand rows, and every one of them was this vector and its marks.
+    ///
+    /// It is taken out with `mem::take` while it is filled, because the machine
+    /// is borrowed mutably to read the registers, and put back after - so the
+    /// capacity survives even though the borrow does not.
+    scratch_values: Vec<Value<'static>>,
+    /// The JSON marks that go with `scratch_values`, reused the same way.
+    scratch_marks: Vec<bool>,
     counter: usize,
     state: MachineState,
     result: Vec<Value<'static>>,
@@ -257,6 +281,8 @@ impl Machine {
         Machine {
             program,
             registers,
+            scratch_values: Vec::new(),
+            scratch_marks: Vec::new(),
             register_marks,
             cursors,
             virtual_cursors,
@@ -462,6 +488,15 @@ impl Machine {
             self.file_format = main.header().schema_format.max(1);
         }
         self.state = MachineState::Running;
+        // The program is held behind an `Arc` so the step loop can borrow its
+        // instructions while the rest of the machine is borrowed mutably. It
+        // used to clone the instruction instead, once per dispatch - and an
+        // `Operand` that carries a `Vec` (a text or blob literal, a sort key,
+        // an index key, an aggregate call) made that clone a heap allocation
+        // and a free on the hottest path there is. Nothing reassigns
+        // `self.program` while a statement is running, so this handle is the
+        // same program for the whole loop.
+        let program = Arc::clone(&self.program);
         loop {
             // The interrupt is checked at instruction boundaries, which are the
             // machine's declared safe points: no page is pinned and no cursor
@@ -470,16 +505,39 @@ impl Machine {
                 self.state = MachineState::Failed;
                 return Err(rustdb_base::DbError::primary(PrimaryCode::Interrupt));
             }
-            let Some(instruction) = self.program.instruction(self.counter).cloned() else {
+            let Some(instruction) = program.instruction(self.counter) else {
                 self.state = MachineState::Done;
                 return Ok(StepOutcome::Done);
             };
             self.steps = self.steps.saturating_add(1);
+            #[cfg(feature = "opcode-probe")]
+            let probe_started = std::time::Instant::now();
+            #[cfg(feature = "opcode-probe")]
+            let probe_allocations =
+                rustdb_base::probe::ALLOCATIONS.load(core::sync::atomic::Ordering::Relaxed);
             let outcome = if instruction.opcode.is_virtual() {
-                self.execute_virtual(&instruction, host)
+                self.execute_virtual(instruction, host)
             } else {
-                self.execute(&instruction, host.pagers())
+                self.execute(instruction, host.pagers())
             };
+            #[cfg(feature = "opcode-probe")]
+            {
+                use core::sync::atomic::Ordering as ProbeOrdering;
+                let spent = probe_started.elapsed().as_nanos() as u64;
+                let made = rustdb_base::probe::ALLOCATIONS
+                    .load(ProbeOrdering::Relaxed)
+                    .saturating_sub(probe_allocations);
+                let slot = instruction.opcode as usize;
+                if let (Some(runs), Some(nanos), Some(allocations)) = (
+                    rustdb_base::probe::OPCODE_RUNS.get(slot),
+                    rustdb_base::probe::OPCODE_NANOS.get(slot),
+                    rustdb_base::probe::OPCODE_ALLOCATIONS.get(slot),
+                ) {
+                    runs.fetch_add(1, ProbeOrdering::Relaxed);
+                    nanos.fetch_add(spent, ProbeOrdering::Relaxed);
+                    allocations.fetch_add(made, ProbeOrdering::Relaxed);
+                }
+            }
             match outcome {
                 Ok(Flow::Next) => self.counter = self.counter.saturating_add(1),
                 Ok(Flow::Jump(target)) => self.counter = target,
@@ -558,6 +616,28 @@ impl Machine {
         (0..count.max(0))
             .map(|offset| self.marked(first.saturating_add(offset)))
             .collect()
+    }
+
+    /// Fills a caller-owned buffer with a contiguous block of registers.
+    ///
+    /// The allocating form below is still right for the handful of opcodes that
+    /// keep what they collect; this one is for the ones that read it and drop
+    /// it, which are the ones that run per row.
+    fn block_into(&self, first: i32, count: i32, into: &mut Vec<Value<'static>>) {
+        into.clear();
+        into.reserve(count.max(0) as usize);
+        for offset in 0..count.max(0) {
+            into.push(self.register(first.saturating_add(offset)));
+        }
+    }
+
+    /// Fills a caller-owned buffer with the JSON marks of a block of registers.
+    fn mark_block_into(&self, first: i32, count: i32, into: &mut Vec<bool>) {
+        into.clear();
+        into.reserve(count.max(0) as usize);
+        for offset in 0..count.max(0) {
+            into.push(self.marked(first.saturating_add(offset)));
+        }
     }
 
     /// Returns a contiguous block of registers.
@@ -919,7 +999,7 @@ impl Machine {
             Opcode::NullRow => {
                 if let Some(Some(slot)) = self.cursors.get_mut(instruction.p1.max(0) as usize) {
                     slot.row_is_loaded = false;
-                    slot.record = None;
+                    slot.record_parsed = false;
                     slot.null_row = true;
                 }
                 Ok(Flow::Next)
@@ -1109,7 +1189,11 @@ impl Machine {
                 Ok(Flow::Next)
             }
             Opcode::ResultRow => {
-                self.result = self.block(instruction.p1, instruction.p2);
+                // Refilled in place rather than replaced, so the row buffer is
+                // allocated once per statement instead of once per row.
+                let mut row = core::mem::take(&mut self.result);
+                self.block_into(instruction.p1, instruction.p2, &mut row);
+                self.result = row;
                 Ok(Flow::Row)
             }
             Opcode::OpenWrite => self.open_cursor(instruction, false),
@@ -1649,7 +1733,7 @@ impl Machine {
         for slot in self.cursors.iter_mut().flatten() {
             if slot.database == database && slot.cursor.root() == root {
                 slot.row_is_loaded = false;
-                slot.record = None;
+                slot.record_parsed = false;
             }
         }
     }
@@ -1744,7 +1828,7 @@ impl Machine {
                 continue;
             };
             slot.row_is_loaded = false;
-            slot.record = None;
+            slot.record_parsed = false;
             slot.cursor.restore(pager, &where_it_was, &limits)?;
         }
         Ok(())
@@ -1808,7 +1892,9 @@ impl Machine {
                 null_row: false,
                 cursor,
                 payload: None,
-                record: None,
+                fields: Vec::new(),
+                header_len: 0,
+                record_parsed: false,
                 row_is_loaded: false,
                 is_index,
                 key,
@@ -2045,20 +2131,17 @@ impl Machine {
             // finding where a field lives is a walk of the whole header, and
             // doing that once per column read made a two-column projection
             // parse every row twice.
-            if slot.record.is_none() {
-                let mut fields = Vec::new();
+            if !slot.record_parsed {
+                slot.fields.clear();
                 let header = {
                     let payload: &[u8] = slot.payload.as_deref().unwrap_or(&[]);
-                    RecordRef::parse_into(payload, &limits, &mut fields)?
+                    RecordRef::parse_into(payload, &limits, &mut slot.fields)?
                 };
-                slot.record = Some((fields, header));
+                slot.header_len = header;
+                slot.record_parsed = true;
             }
             let payload: &[u8] = slot.payload.as_deref().unwrap_or(&[]);
-            let (fields, header_len) = match slot.record.as_ref() {
-                Some((fields, header)) => (fields.as_slice(), *header),
-                None => (&[][..], 0),
-            };
-            let record = RecordRef::with_fields(payload, fields, header_len, encoding);
+            let record = RecordRef::with_fields(payload, &slot.fields, slot.header_len, encoding);
             if index >= record.field_count() {
                 // A column past the end of the record reads as its DEFAULT, and
                 // as NULL when it has none. This happens for real: `ALTER TABLE
@@ -2191,15 +2274,25 @@ impl Machine {
             return Err(error::misuse("AggStep without an aggregate"));
         };
         let call = call.clone();
-        let arguments = self.block(instruction.p1, instruction.p2);
-        let marks = self.mark_block(instruction.p1, instruction.p2);
+        let mut arguments = core::mem::take(&mut self.scratch_values);
+        let mut marks = core::mem::take(&mut self.scratch_marks);
+        self.block_into(instruction.p1, instruction.p2, &mut arguments);
+        self.mark_block_into(instruction.p1, instruction.p2, &mut marks);
         let encoding = self.encoding;
-        let Some(slot) = self.accumulators.get_mut(instruction.p3.max(0) as usize) else {
-            return Err(error::misuse("an aggregate slot that does not exist"));
+        let outcome = match self.accumulators.get_mut(instruction.p3.max(0) as usize) {
+            Some(slot) => {
+                let accumulator = slot.get_or_insert_with(|| {
+                    Accumulator::new(call.func, call.distinct, call.collation)
+                });
+                accumulator.step(&arguments, &marks, encoding)
+            }
+            None => Err(error::misuse("an aggregate slot that does not exist")),
         };
-        let accumulator =
-            slot.get_or_insert_with(|| Accumulator::new(call.func, call.distinct, call.collation));
-        accumulator.step(&arguments, &marks, encoding)?;
+        // Put the buffers back whatever happened, so a statement that fails part
+        // way through does not leave the machine allocating again per row.
+        self.scratch_values = arguments;
+        self.scratch_marks = marks;
+        outcome?;
         Ok(Flow::Next)
     }
 

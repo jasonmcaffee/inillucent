@@ -55,11 +55,14 @@ const UNSAFE_CRATES: [&str; 1] = ["rustdb-capi"];
 /// about what the engine is made of, and a baseline tool that never ships is
 /// not part of it - but a file with `unsafe` in it should still have to say
 /// why, in writing, in a list somebody reads.
-const UNSAFE_ALLOWED: [&str; 4] = [
+const UNSAFE_ALLOWED: [&str; 5] = [
     "crates/rustdb-vfs/src/os/windows.rs",
     "crates/rustdb-vfs/src/os/unix.rs",
     "crates/rustdb-compat/src/bin/sqlperf.rs",
     "crates/rustdb-compat/src/bin/planperf.rs",
+    // The same counting global allocator as the two profiling binaries above:
+    // every method forwards to the system allocator and only adds a counter.
+    "crates/rustdb-compat/src/bin/hotprofile.rs",
 ];
 
 /// Returns every `.rs` file under a directory.

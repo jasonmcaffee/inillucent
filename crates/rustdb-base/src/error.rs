@@ -158,25 +158,65 @@ impl fmt::Display for DatabaseName {
     }
 }
 
-/// A rust-db error: a stable code plus the context a caller may safely see.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DbError {
-    extended: ExtendedCode,
-    message: String,
+/// Everything an error carries beyond its code.
+///
+/// Held behind a pointer because almost every error has none of it: the code's
+/// own manifest message is the message, and there is no offset, database or
+/// detail. Keeping the four fields inline made `DbError` 88 bytes, and a
+/// `DbResult` is returned once per bytecode instruction - so every instruction
+/// in the machine, and every `?` on every path in the engine, was moving 88
+/// bytes to describe a failure that had not happened. Boxing it makes the error
+/// half of a `Result` one pointer, and costs an allocation only on the paths
+/// that are already failing or already building a message.
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
+struct ErrorContext {
+    /// A message that replaces the code's own, when one was attached.
+    message: Option<String>,
+    /// The byte offset in the SQL text, when the error has one.
     sql_offset: Option<u32>,
+    /// The schema the error was attributed to, when it was attributed.
     database: Option<DatabaseName>,
+    /// Diagnostic text that never leaves the process.
     detail: Option<String>,
 }
 
+/// A rust-db error: a stable code plus the context a caller may safely see.
+///
+/// Equality is over what the error *says*, not over how it is stored: an error
+/// carrying no context and one carrying a message equal to its code's own
+/// message are the same error, and were the same error before the context was
+/// boxed. `PartialEq` is written out below for that reason rather than derived.
+#[derive(Clone, Debug)]
+pub struct DbError {
+    extended: ExtendedCode,
+    context: Option<Box<ErrorContext>>,
+}
+
+impl PartialEq for DbError {
+    /// Compares the code and every effective field, so the boxing is invisible.
+    fn eq(&self, other: &DbError) -> bool {
+        self.extended == other.extended
+            && self.message() == other.message()
+            && self.sql_offset() == other.sql_offset()
+            && self.database() == other.database()
+            && self.detail() == other.detail()
+    }
+}
+
+impl Eq for DbError {}
+
 impl DbError {
+    /// Returns the context, creating an empty one to write into.
+    fn context_mut(&mut self) -> &mut ErrorContext {
+        self.context
+            .get_or_insert_with(Box::<ErrorContext>::default)
+    }
+
     /// Builds an error from an extended code, taking the manifest's message.
     pub fn new(extended: ExtendedCode) -> DbError {
         DbError {
             extended,
-            message: extended.message().to_string(),
-            sql_offset: None,
-            database: None,
-            detail: None,
+            context: None,
         }
     }
 
@@ -190,25 +230,25 @@ impl DbError {
     /// The replacement must stay free of paths, bound values, and page bytes;
     /// anything sensitive belongs in `with_detail` instead.
     pub fn with_message(mut self, message: impl Into<String>) -> DbError {
-        self.message = message.into();
+        self.context_mut().message = Some(message.into());
         self
     }
 
     /// Attaches diagnostic text that stays inside the process.
     pub fn with_detail(mut self, detail: impl Into<String>) -> DbError {
-        self.detail = Some(detail.into());
+        self.context_mut().detail = Some(detail.into());
         self
     }
 
     /// Attaches the byte offset in the SQL text that produced the error.
     pub fn with_sql_offset(mut self, offset: u32) -> DbError {
-        self.sql_offset = Some(offset);
+        self.context_mut().sql_offset = Some(offset);
         self
     }
 
     /// Attaches the schema name of the database the error came from.
     pub fn with_database(mut self, database: DatabaseName) -> DbError {
-        self.database = Some(database);
+        self.context_mut().database = Some(database);
         self
     }
 
@@ -223,23 +263,37 @@ impl DbError {
     }
 
     /// Returns the caller-visible message.
+    ///
+    /// An error that was never given one answers with its code's own message,
+    /// which is what it was constructed with before the context was boxed.
     pub fn message(&self) -> &str {
-        &self.message
+        match self
+            .context
+            .as_ref()
+            .and_then(|context| context.message.as_deref())
+        {
+            Some(message) => message,
+            None => self.extended.message(),
+        }
     }
 
     /// Returns the internal diagnostic text, if any was attached.
     pub fn detail(&self) -> Option<&str> {
-        self.detail.as_deref()
+        self.context
+            .as_ref()
+            .and_then(|context| context.detail.as_deref())
     }
 
     /// Returns the SQL byte offset, if the error has one.
     pub fn sql_offset(&self) -> Option<u32> {
-        self.sql_offset
+        self.context.as_ref().and_then(|context| context.sql_offset)
     }
 
     /// Returns the schema name, if the error was attributed to one.
     pub fn database(&self) -> Option<&DatabaseName> {
-        self.database.as_ref()
+        self.context
+            .as_ref()
+            .and_then(|context| context.database.as_ref())
     }
 
     /// Reports whether the connection may still be used after this error.
@@ -272,9 +326,9 @@ impl fmt::Display for DbError {
     /// internal detail is deliberately absent so that logging an error cannot
     /// leak a path or a bound value.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.sql_offset {
-            Some(offset) => write!(formatter, "{} (at SQL byte {offset})", self.message),
-            None => formatter.write_str(&self.message),
+        match self.sql_offset() {
+            Some(offset) => write!(formatter, "{} (at SQL byte {offset})", self.message()),
+            None => formatter.write_str(self.message()),
         }
     }
 }

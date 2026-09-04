@@ -475,6 +475,146 @@ impl Opcode {
     }
 
     /// Returns the stable name used in `EXPLAIN` output.
+    /// Every opcode, in declaration order.
+    ///
+    /// A profile records an opcode's discriminant, because that is what indexes
+    /// an array cheaply on the hot path; turning one back into a name needs a
+    /// list, and a derived one would be another dependency for a table that
+    /// changes when somebody adds an instruction and the compiler will not
+    /// notice. The exhaustive match in `name()` is what keeps this honest: a
+    /// new variant fails to compile there first.
+    pub const ALL: [Opcode; 112] = [
+        Opcode::Init,
+        Opcode::Goto,
+        Opcode::Gosub,
+        Opcode::Return,
+        Opcode::Halt,
+        Opcode::Transaction,
+        Opcode::OpenRead,
+        Opcode::OpenIndex,
+        Opcode::Close,
+        Opcode::Rewind,
+        Opcode::Last,
+        Opcode::Next,
+        Opcode::Prev,
+        Opcode::SeekRowid,
+        Opcode::SeekGe,
+        Opcode::SeekGt,
+        Opcode::SeekLe,
+        Opcode::SeekLt,
+        Opcode::IdxGe,
+        Opcode::IdxGt,
+        Opcode::IdxLe,
+        Opcode::IdxLt,
+        Opcode::IdxRowid,
+        Opcode::Column,
+        Opcode::IdxColumn,
+        Opcode::Rowid,
+        Opcode::Null,
+        Opcode::Load,
+        Opcode::Copy,
+        Opcode::Arithmetic,
+        Opcode::Negate,
+        Opcode::BitNot,
+        Opcode::Compare,
+        Opcode::Is,
+        Opcode::And,
+        Opcode::Or,
+        Opcode::Not,
+        Opcode::IsNull,
+        Opcode::InList,
+        Opcode::If,
+        Opcode::IfNot,
+        Opcode::IfNull,
+        Opcode::IfNotNull,
+        Opcode::IfPos,
+        Opcode::DecrJumpZero,
+        Opcode::Cast,
+        Opcode::ApplyAffinity,
+        Opcode::Function,
+        Opcode::Pattern,
+        Opcode::MathCall,
+        Opcode::TimeCall,
+        Opcode::JsonCall,
+        Opcode::AggStep,
+        Opcode::AggFinal,
+        Opcode::AggReset,
+        Opcode::SorterOpen,
+        Opcode::SorterInsert,
+        Opcode::SorterSort,
+        Opcode::SorterNext,
+        Opcode::SorterColumn,
+        Opcode::NullRow,
+        Opcode::EphOpen,
+        Opcode::EphInsert,
+        Opcode::EphInsertUnique,
+        Opcode::EphRewind,
+        Opcode::EphNext,
+        Opcode::EphColumn,
+        Opcode::EphFound,
+        Opcode::EphNotFound,
+        Opcode::EphRemove,
+        Opcode::EphClear,
+        Opcode::EphDedup,
+        Opcode::EphSawNull,
+        Opcode::EphSort,
+        Opcode::TypeCheck,
+        Opcode::Window,
+        Opcode::DistinctOpen,
+        Opcode::DistinctCheck,
+        Opcode::ResultRow,
+        Opcode::OpenWrite,
+        Opcode::OpenWriteIndex,
+        Opcode::NewRowid,
+        Opcode::MakeRecord,
+        Opcode::InsertRow,
+        Opcode::DeleteRow,
+        Opcode::IdxInsert,
+        Opcode::IdxDelete,
+        Opcode::NotExists,
+        Opcode::NoConflict,
+        Opcode::RowData,
+        Opcode::HaltError,
+        Opcode::SetCookie,
+        Opcode::CreateBtree,
+        Opcode::DestroyBtree,
+        Opcode::ClearBtree,
+        Opcode::CountChange,
+        Opcode::LastRowid,
+        Opcode::SeqRowid,
+        Opcode::SeqUpdate,
+        Opcode::VOpen,
+        Opcode::VFilter,
+        Opcode::VNext,
+        Opcode::VColumn,
+        Opcode::VRowid,
+        Opcode::ExtCall,
+        Opcode::VAux,
+        Opcode::VUpdate,
+        Opcode::VBegin,
+        Opcode::VSync,
+        Opcode::VCommit,
+        Opcode::VRollback,
+        Opcode::VSavepoint,
+    ];
+
+    /// Returns the opcode with a given discriminant, for a profile that
+    /// recorded the number rather than the name.
+    ///
+    /// The table is walked rather than transmuted: this crate forbids unsafe
+    /// code, and a lookup that runs once per row of a *report* does not need to
+    /// be fast.
+    pub fn from_index(index: usize) -> Option<Opcode> {
+        Opcode::ALL
+            .iter()
+            .copied()
+            .find(|opcode| *opcode as usize == index)
+    }
+
+    /// Returns the opcode's name, as `EXPLAIN` and a profile print it.
+    ///
+    /// The match is exhaustive on purpose: it is what makes `ALL` above stay
+    /// complete, because a new variant fails to compile here first.
     pub fn name(self) -> &'static str {
         match self {
             Opcode::Init => "Init",
