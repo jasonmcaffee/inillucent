@@ -858,6 +858,7 @@
 {"test_id": "rustdb-storage::mutate::tests::a_cursor_whose_row_was_deleted_lands_on_the_next_one", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-storage::mutate::tests::a_rollback_restores_every_byte", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-storage::mutate::tests::a_statement_rollback_restores_the_pre_statement_tree", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-storage::mutate::tests::an_ascending_build_fills_its_pages", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-storage::mutate::tests::an_auto_vacuum_database_keeps_its_pointer_maps_correct", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-storage::mutate::tests::ascending_rows_read_back_in_order", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-storage::mutate::tests::deleting_every_row_returns_its_pages_to_the_freelist", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}

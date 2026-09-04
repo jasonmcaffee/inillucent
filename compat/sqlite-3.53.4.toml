@@ -1073,6 +1073,7 @@ tests = [
   "rustdb-compat::sqlite_reads_what_rustdb_wrote",
   "rustdb-storage::mutate::tests::a_batched_append_places_every_entry_in_order",
   "rustdb-storage::mutate::tests::a_batched_append_builds_the_same_tree_as_one_at_a_time",
+  "rustdb-storage::mutate::tests::an_ascending_build_fills_its_pages",
 ]
 
 [[capability]]
