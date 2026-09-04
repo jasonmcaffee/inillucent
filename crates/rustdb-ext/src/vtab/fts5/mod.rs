@@ -355,6 +355,17 @@ impl VirtualTable for Fts5Table {
                 Ok(None)
             }
             Change::Insert { rowid, values } => {
+                // A value in the table's own hidden column makes the statement
+                // a command rather than a row.
+                if let Some(command) = values
+                    .get(self.match_column() as usize)
+                    .filter(|value| !matches!(value, Value::Null))
+                    .and_then(text_of)
+                {
+                    let argument = values.get(self.rank_column() as usize).cloned();
+                    self.command(context, &command, argument)?;
+                    return Ok(None);
+                }
                 let key = match rowid.as_integer() {
                     Some(key) => key,
                     None => self
@@ -652,7 +663,124 @@ fn term_row(
     Ok(Some(next))
 }
 
+/// Returns the error a command FTS5 does not know reports.
+///
+/// SQLite says nothing more than `SQL logic error` here - there is no message
+/// naming the command - so neither does this.
+fn unrecognized() -> rustdb_base::DbError {
+    rustdb_base::DbError::primary(rustdb_base::PrimaryCode::Error)
+}
+
 impl Fts5Table {
+    /// Runs one of the module's special commands.
+    ///
+    /// `integrity-check` and `rebuild` do what they say. The merge family -
+    /// `optimize`, `merge`, `automerge`, `crisismerge`, `usermerge`, `pgsz` -
+    /// is accepted and does nothing, because this index keeps one doclist per
+    /// term rather than a stack of segments to merge: there is no work for them
+    /// to ask for. They are accepted rather than refused so that an application
+    /// written against SQLite runs unchanged, and they are listed here rather
+    /// than ignored silently so the next reader knows the difference is
+    /// deliberate.
+    fn command(
+        &mut self,
+        context: &mut Context<'_>,
+        command: &[u8],
+        argument: Option<Value<'static>>,
+    ) -> DbResult<()> {
+        let name = String::from_utf8_lossy(command).into_owned();
+        let argument = argument.filter(|value| !matches!(value, Value::Null));
+        match name.as_str() {
+            "integrity-check" => match self.integrity(context)? {
+                Some(problem) => Err(failure(problem)),
+                None => Ok(()),
+            },
+            "rebuild" => self.rebuild(context),
+            // There is nothing to merge or flush: one doclist per term is the
+            // whole index, so the segment machinery these ask about does not
+            // exist here. They are accepted rather than refused so that an
+            // application written against SQLite runs unchanged.
+            "optimize" | "flush" => Ok(()),
+            "merge" => match argument {
+                Some(_) => Ok(()),
+                None => Err(unrecognized()),
+            },
+            // The settings *are* kept, because `%_config` is a table an
+            // application reads. Nothing here acts on them - see above - but a
+            // value that was written and cannot be read back would be a
+            // difference a reader can see.
+            "automerge" | "crisismerge" | "deletemerge" | "pgsz" | "rank" | "secure-delete"
+            | "usermerge" => {
+                let Some(value) = argument else {
+                    return Err(unrecognized());
+                };
+                self.shadows.write_keyed(
+                    context,
+                    b"config",
+                    1,
+                    &[Value::owned_text(name.as_bytes())?, value],
+                )
+            }
+            "delete-all" => Err(failure(
+                "'delete-all' may only be used with a contentless or external content fts5 table",
+            )),
+            _ => Err(unrecognized()),
+        }
+    }
+
+    /// Throws the index away and builds it again from the content.
+    ///
+    /// The content table is the truth: it holds the rows exactly as they were
+    /// inserted, and everything else - the doclists, the term dictionary, the
+    /// sizes, the totals - is derived from it. That is what makes a rebuild
+    /// possible at all, and what makes it the repair for an index that has
+    /// drifted.
+    fn rebuild(&mut self, context: &mut Context<'_>) -> DbResult<()> {
+        let width = self.options.columns.len();
+        let mut rows: Vec<(i64, Vec<Value<'static>>)> = Vec::new();
+        self.shadows.scan(context, b"content", |rowid, values| {
+            rows.push((rowid, values.iter().skip(1).take(width).cloned().collect()));
+            Ok(true)
+        })?;
+        let mut doclists = Vec::new();
+        self.shadows.scan(context, b"data", |rowid, _| {
+            if rowid != TOTALS {
+                doclists.push(rowid);
+            }
+            Ok(true)
+        })?;
+        for rowid in doclists {
+            self.shadows.delete_row(context, b"data", rowid)?;
+        }
+        let mut terms = Vec::new();
+        self.shadows.scan_keyed(context, b"idx", 2, |values| {
+            if let Some(term) = values.get(1).and_then(Value::as_blob) {
+                terms.push(term.raw().to_vec());
+            }
+            Ok(true)
+        })?;
+        for term in terms {
+            self.shadows.delete_keyed(
+                context,
+                b"idx",
+                &[Value::Integer(SEGMENT), Value::owned_blob(&term)?],
+            )?;
+        }
+        let mut sizes = Vec::new();
+        self.shadows.scan(context, b"docsize", |rowid, _| {
+            sizes.push(rowid);
+            Ok(true)
+        })?;
+        for rowid in sizes {
+            self.shadows.delete_row(context, b"docsize", rowid)?;
+        }
+        put_totals(context, &self.shadows, &Totals::empty(width))?;
+        for (rowid, values) in rows {
+            self.add(context, rowid, &values)?;
+        }
+        Ok(())
+    }
+
     /// Adds one row to the content and to the index.
     fn add(
         &mut self,
