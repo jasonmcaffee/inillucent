@@ -7,5 +7,6 @@ description = "SQL virtual table and index-method bridge to the existing BM25, v
 
 [dependencies]
 rustdb-base = { workspace = true }
+rustdb-value = { workspace = true }
 rustdb-ext = { workspace = true }
 rustdb-core = { workspace = true }

@@ -143,6 +143,14 @@ may_depend_on = [
   "rustdb-ext",
 ]
 
+# The edge from `rustdb-session` down to `rustdb-search` is where the retrieval
+# engine becomes a first-party module, and task-1790 put it here rather than one
+# layer up for a concrete reason. `Registry::with_builtins` lives in
+# `rustdb-ext`, two layers below the retrieval engine, so the module cannot be
+# registered there without dragging a vector index into every database that only
+# wanted SQL. The connection is the first place that both builds a registry and
+# is allowed to know the engine exists, which is exactly what the TDD's crate
+# table says `rustdb-search` is for.
 [[crate]]
 name = "rustdb-session"
 kind = "production"
@@ -156,6 +164,7 @@ may_depend_on = [
   "rustdb-transaction",
   "rustdb-sql",
   "rustdb-ext",
+  "rustdb-search",
   "rustdb-vm",
 ]
 
@@ -195,11 +204,15 @@ kind = "production"
 layer = 0
 may_depend_on = []
 
+# `rustdb-search` reaching `rustdb-value` is the same refinement `rustdb-ext`
+# made in task-1789 and for the same reason: a virtual-table module is handed
+# `Value`s and hands them back, so it cannot be written without naming the type.
+# The edge is downward to a leaf and adds no cycle.
 [[crate]]
 name = "rustdb-search"
 kind = "production"
 layer = 7
-may_depend_on = ["rustdb-base", "rustdb-ext", "rustdb-core"]
+may_depend_on = ["rustdb-base", "rustdb-value", "rustdb-ext", "rustdb-core"]
 
 [[crate]]
 name = "rustdb-sim"

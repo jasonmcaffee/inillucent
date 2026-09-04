@@ -1269,6 +1269,7 @@ dependencies = [
  "rustdb-base",
  "rustdb-core",
  "rustdb-ext",
+ "rustdb-value",
 ]
 
 [[package]]
@@ -1278,6 +1279,7 @@ dependencies = [
  "rustdb-base",
  "rustdb-catalog",
  "rustdb-ext",
+ "rustdb-search",
  "rustdb-sql",
  "rustdb-storage",
  "rustdb-transaction",

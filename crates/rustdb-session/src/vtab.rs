@@ -267,6 +267,101 @@ pub fn with_table<T>(
     outcome
 }
 
+/// A moment in a transaction that a module is entitled to be told about.
+///
+/// The contract has always declared these methods; before task-1790 only
+/// `CREATE VIRTUAL TABLE` ever called them, which was enough for FTS5 and the
+/// R-Tree because both write their whole state through `update` and inherit the
+/// pager's atomicity. A module that has to *decide* something at a transaction
+/// boundary - which commit sequence its changes were published under, or
+/// whether its delta log is now long enough to fold in - cannot be written
+/// against a contract nothing invokes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Moment {
+    /// A write transaction has started.
+    Begin,
+    /// Everything is about to be committed. The last chance to write.
+    Sync,
+    /// The commit succeeded.
+    Commit,
+    /// The transaction was undone.
+    Rollback,
+    /// A savepoint opened, at this depth.
+    Savepoint(i32),
+    /// A savepoint was released, keeping its changes.
+    Release(i32),
+    /// The transaction was rolled back to this depth.
+    RollbackTo(i32),
+}
+
+impl Moment {
+    /// Returns whether a failure at this moment can still stop the transaction.
+    ///
+    /// `Sync` can: it runs before the commit marker, so a module that cannot
+    /// finish has a say. `Commit` and `Rollback` cannot - the decision is made
+    /// and the pages are written or discarded - so an error there is recorded
+    /// by the module and ignored here, because the alternative is a commit that
+    /// reports a failure it has already survived.
+    fn is_fallible(self) -> bool {
+        matches!(self, Moment::Begin | Moment::Sync | Moment::Savepoint(_))
+    }
+}
+
+/// Tells every connected virtual table that the transaction reached a moment.
+///
+/// Tables are visited in key order, which is stable, so a module that writes at
+/// `Sync` writes in the same order every time and a crash-recovery test sees a
+/// deterministic prefix.
+/// @param tables - the connection's connected tables
+/// @param host - the connection, as a module may see it
+/// @param limits - the run-time limits
+/// @param moment - what happened
+pub fn notify(
+    tables: &std::rc::Rc<core::cell::RefCell<VirtualTables>>,
+    host: &mut dyn rustdb_ext::vtab::Host,
+    limits: &rustdb_base::limits::Limits,
+    moment: Moment,
+) -> DbResult<()> {
+    let keys = match tables.try_borrow() {
+        Ok(borrowed) => borrowed.keys(),
+        Err(_) => return Ok(()),
+    };
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let mut failure: Option<rustdb_base::DbError> = None;
+    for key in keys {
+        let Ok(mut borrowed) = tables.try_borrow_mut() else {
+            continue;
+        };
+        let outcome = with_table(
+            &mut borrowed,
+            &key,
+            host,
+            limits,
+            key.0,
+            |table, context| match moment {
+                Moment::Begin => table.begin(context),
+                Moment::Sync => table.sync(context),
+                Moment::Commit => table.commit(context),
+                Moment::Rollback => table.rollback(context),
+                Moment::Savepoint(level) => table.savepoint(context, level),
+                Moment::Release(level) => table.release(context, level),
+                Moment::RollbackTo(level) => table.rollback_to(context, level),
+            },
+        );
+        if let Err(error) = outcome {
+            if moment.is_fallible() && failure.is_none() {
+                failure = Some(error);
+            }
+        }
+    }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 /// Opens a cursor on a connected table.
 pub fn open_cursor(tables: &VirtualTables, key: &VirtualKey) -> DbResult<Box<dyn VirtualCursor>> {
     let Some(table) = tables.get(key) else {

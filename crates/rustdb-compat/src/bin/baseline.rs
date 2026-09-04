@@ -12,11 +12,24 @@
 //! code which produced it has not moved. The command line to reproduce it is
 //! recorded in the capture so a later story does not have to guess.
 //!
+//! ## Amendments
+//!
+//! A later phase is eventually *supposed* to touch the retrieval engine -
+//! phase 13 gives it a transactional home, and phase 14 optimises it - and the
+//! answer to that cannot be "recapture the baseline", because a recapture
+//! silently blesses whatever else happened to be in the tree at the time. So a
+//! change is declared instead, in `compat/baseline/rustdb-core-amendments.toml`:
+//! one entry per changed file, naming the ticket, the reason, and the digest
+//! the file is allowed to have. `verify` accepts exactly those files at exactly
+//! those digests and still fails on anything else, so the guard keeps its edge
+//! while the engine is allowed to move deliberately.
+//!
 //! Usage:
 //!
 //! ```text
 //! rustdb-baseline capture [--out <dir>]
 //! rustdb-baseline verify  [--out <dir>]
+//! rustdb-baseline amend <path> --ticket <task-N> --reason <text> [--out <dir>]
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -53,6 +66,7 @@ fn main() -> ExitCode {
     let outcome = match command {
         "capture" => capture(&root, &out),
         "verify" => verify(&root, &out),
+        "amend" => amend(&root, &out, &arguments),
         other => Err(format!("unknown command `{other}`")),
     };
     match outcome {
@@ -253,23 +267,86 @@ fn capture(root: &Path, out: &Path) -> Result<String, String> {
     ))
 }
 
+/// The file that records deliberate, reviewed changes to the retrieval engine.
+const AMENDMENTS: &str = "rustdb-core-amendments.toml";
+
+/// One declared change to a tracked file.
+#[derive(Clone, Debug)]
+struct Amendment {
+    path: String,
+    ticket: String,
+    reason: String,
+    sha256: String,
+}
+
+/// Reads the declared amendments, or an empty list when there are none.
+fn amendments(out: &Path) -> Result<Vec<Amendment>, String> {
+    let path = out.join(AMENDMENTS);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(Vec::new());
+    };
+    let document = rustdb_compat::toml_lite::parse(&text)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut found = Vec::new();
+    for table in document.array("amendment") {
+        let field = |name: &str| {
+            table
+                .get(name)
+                .and_then(rustdb_compat::toml_lite::Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| format!("an amendment is missing `{name}`"))
+        };
+        found.push(Amendment {
+            path: field("path")?,
+            ticket: field("ticket")?,
+            reason: field("reason")?,
+            sha256: field("sha256")?,
+        });
+    }
+    Ok(found)
+}
+
 /// Re-checks a capture against the working tree.
+///
+/// A file may differ from the capture only when an amendment names it *and*
+/// pins the digest it now has. That is deliberately strict: a declared file
+/// whose contents have moved again since the declaration is an undeclared
+/// change, and is reported as one.
 fn verify(root: &Path, out: &Path) -> Result<String, String> {
     let path = out.join("rustdb-core-baseline.json");
     let recorded = std::fs::read_to_string(&path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let declared = amendments(out)?;
     let current = digests(root)?;
     let mut changed = Vec::new();
+    let mut amended = 0usize;
     for file in &current {
         let needle = format!("\"sha256\": \"{}\"", file.sha256);
-        if !recorded.contains(&needle) {
-            changed.push(file.path.clone());
+        if recorded.contains(&needle) {
+            continue;
+        }
+        match declared
+            .iter()
+            .find(|amendment| amendment.path == file.path)
+        {
+            Some(amendment) if amendment.sha256 == file.sha256 => {
+                amended = amended.saturating_add(1);
+            }
+            Some(amendment) => changed.push(format!(
+                "{} has moved again since {} declared it",
+                file.path, amendment.ticket
+            )),
+            None => changed.push(file.path.clone()),
         }
     }
     let recorded_count = recorded.matches("\"sha256\":").count();
-    if recorded_count != current.len() {
+    let added = declared
+        .iter()
+        .filter(|amendment| !recorded.contains(&format!("\"path\": \"{}\"", amendment.path)))
+        .count();
+    if recorded_count.saturating_add(added) != current.len() {
         changed.push(format!(
-            "the file set changed: {recorded_count} recorded, {} now",
+            "the file set changed: {recorded_count} recorded plus {added} added, {} now",
             current.len()
         ));
     }
@@ -280,7 +357,69 @@ fn verify(root: &Path, out: &Path) -> Result<String, String> {
         ));
     }
     Ok(format!(
-        "{} files unchanged since the baseline",
-        current.len()
+        "{} files unchanged since the baseline, {amended} changed by declared amendment",
+        current.len().saturating_sub(amended)
     ))
+}
+
+/// Declares one changed file, recording the digest it is allowed to have.
+///
+/// The reason is required and is not decoration: the whole value of the guard
+/// is that somebody reading the file later can tell a deliberate change from a
+/// drift, and a list of paths with no reasons is a list nobody can audit.
+fn amend(root: &Path, out: &Path, arguments: &[String]) -> Result<String, String> {
+    let target = arguments.get(1).ok_or_else(|| {
+        "usage: rustdb-baseline amend <path> --ticket <task-N> --reason <text>".to_string()
+    })?;
+    let ticket = text_flag(arguments, "--ticket")
+        .ok_or_else(|| "an amendment needs --ticket".to_string())?;
+    let reason = text_flag(arguments, "--reason")
+        .ok_or_else(|| "an amendment needs --reason".to_string())?;
+    let relative = target.replace('\\', "/");
+    let current = digests(root)?;
+    let file = current
+        .iter()
+        .find(|file| file.path == relative)
+        .ok_or_else(|| format!("{relative} is not a tracked file"))?;
+    let mut declared = amendments(out)?;
+    declared.retain(|amendment| amendment.path != relative);
+    declared.push(Amendment {
+        path: relative.clone(),
+        ticket: ticket.clone(),
+        reason: reason.clone(),
+        sha256: file.sha256.clone(),
+    });
+    declared.sort_by(|left, right| left.path.cmp(&right.path));
+    let mut text = String::new();
+    text.push_str("# Deliberate, reviewed changes to the retrieval engine.\n#\n");
+    text.push_str("# `rustdb-baseline verify` accepts a tracked file that differs from the\n");
+    text.push_str("# capture only when it is named here at exactly the digest it now has, so a\n");
+    text.push_str("# second, undeclared change to the same file still fails the guard.\n#\n");
+    text.push_str(
+        "# Written by `rustdb-baseline amend`; edit through that rather than by hand.\n\n",
+    );
+    for amendment in &declared {
+        text.push_str("[[amendment]]\n");
+        text.push_str(&format!("path = \"{}\"\n", amendment.path));
+        text.push_str(&format!("ticket = \"{}\"\n", amendment.ticket));
+        text.push_str(&format!(
+            "reason = \"{}\"\n",
+            amendment.reason.replace('"', "'")
+        ));
+        text.push_str(&format!("sha256 = \"{}\"\n\n", amendment.sha256));
+    }
+    std::fs::create_dir_all(out)
+        .map_err(|error| format!("cannot create {}: {error}", out.display()))?;
+    std::fs::write(out.join(AMENDMENTS), text)
+        .map_err(|error| format!("cannot write the amendments: {error}"))?;
+    Ok(format!(
+        "{relative} is declared changed by {ticket}; {} amendment(s) recorded",
+        declared.len()
+    ))
+}
+
+/// Returns the value of a `--flag value` argument as text.
+fn text_flag(arguments: &[String], name: &str) -> Option<String> {
+    let position = arguments.iter().position(|argument| argument == name)?;
+    arguments.get(position.saturating_add(1)).cloned()
 }
