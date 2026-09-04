@@ -173,8 +173,8 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `txn.synchronous-modes` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `sql.select.joins` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `sql.select.compound` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
-| `sql.select.group-by-having` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
-| `sql.select.distinct` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `sql.select.group-by-having` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `sql.select.distinct` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
 | `sql.with.cte` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `sql.with.recursive` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `sql.select.window` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
@@ -245,7 +245,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `search.transactional-visibility` | pass | pass | linux-x86_64, windows-x86_64 | 13 |
 | `search.legacy-migration` | pass | pass | linux-x86_64, windows-x86_64 | 11 |
 | `perf.qualified-measurement` | pass | pass | linux-x86_64, windows-x86_64 | 11 |
-| `perf.optimization-arms` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
+| `perf.optimization-arms` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
 | `perf.regression-tracking` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
 | `optional.session-extension` | missing | missing | - | 0 |
 | `optional.preupdate-hook` | missing | missing | - | 0 |
