@@ -1,8 +1,8 @@
-//! `ORDER BY` answered by the walk instead of by a sorter, graded against the
-//! pinned oracle.
+//! `ORDER BY`, `GROUP BY` and `DISTINCT` answered by the walk instead of by a
+//! sorter or a set, graded against the pinned oracle.
 //!
-//! Invariant: skipping the sort is only ever a speed decision, never an answer
-//! one. Every statement here is one where the planner may decide the access
+//! Invariant: skipping the sorter is only ever a speed decision, never an
+//! answer one. Every statement here is one where the planner may decide the access
 //! path already produces the requested order - and every one of them is graded
 //! on the rows *in order* against SQLite 3.53.4's own answer, because an
 //! ordering optimisation that gets it wrong returns rows in the wrong order and
@@ -101,6 +101,30 @@ const STATEMENTS: &[&str] = &[
     "SELECT grp, k, id FROM t WHERE grp = 2 ORDER BY k DESC",
     "SELECT grp, k, id FROM t WHERE grp = 2 ORDER BY grp, k DESC",
     "SELECT grp, k, id FROM t WHERE grp = 2 ORDER BY k DESC LIMIT 1",
+    // Grouping and de-duplicating that the walk can deliver, where the NULLs,
+    // the ties and the empty groups decide the answer.
+    "SELECT k, count(*) FROM t GROUP BY k ORDER BY k",
+    "SELECT k, count(*), sum(id), max(name) FROM t GROUP BY k ORDER BY k",
+    "SELECT k, count(*) FROM t GROUP BY k ORDER BY k DESC",
+    "SELECT k, count(*) FROM t WHERE k IS NOT NULL GROUP BY k ORDER BY k",
+    "SELECT k, count(*) FROM t WHERE k > 100 GROUP BY k ORDER BY k",
+    "SELECT k, count(*) FROM t GROUP BY k HAVING count(*) > 1 ORDER BY k",
+    "SELECT grp, k, count(*) FROM t GROUP BY grp, k ORDER BY grp, k",
+    "SELECT k, grp, count(*) FROM t GROUP BY k, grp ORDER BY grp, k",
+    "SELECT grp, count(*) FROM t GROUP BY grp ORDER BY grp",
+    "SELECT k FROM t WHERE k = 10 GROUP BY k",
+    "SELECT k, count(*) FROM t WHERE k = 999 GROUP BY k",
+    "SELECT DISTINCT k FROM t ORDER BY k",
+    "SELECT DISTINCT k FROM t ORDER BY k DESC",
+    "SELECT DISTINCT grp, k FROM t ORDER BY grp, k",
+    "SELECT DISTINCT k FROM t WHERE k IS NOT NULL ORDER BY k",
+    "SELECT DISTINCT name FROM t ORDER BY name COLLATE NOCASE",
+    "SELECT DISTINCT id FROM t ORDER BY id DESC",
+    // The collation trap: a NOCASE index puts `Ada` and `ADA` together, and a
+    // BINARY grouping over it would then treat them as one row.
+    "SELECT DISTINCT name FROM t ORDER BY name",
+    "SELECT name, count(*) FROM t GROUP BY name ORDER BY name",
+    "SELECT name COLLATE NOCASE, count(*) FROM t GROUP BY name COLLATE NOCASE",
     // Shapes where the order is not the walk's, and the sort has to stay.
     "SELECT k, id FROM t ORDER BY note",
     "SELECT k, id FROM t ORDER BY k + 1",
@@ -282,6 +306,30 @@ fn the_sort_is_skipped_exactly_where_the_walk_answers_the_order() {
         "SELECT grp, k, id FROM t WHERE grp = 2 ORDER BY k DESC",
         "SELECT name, id FROM t ORDER BY name COLLATE NOCASE",
     ];
+    // Grouping and de-duplicating the walk delivers, so no temp b-tree is
+    // built for either.
+    let streamed = [
+        "SELECT k, count(*) FROM t GROUP BY k",
+        "SELECT k, count(*) FROM t GROUP BY k ORDER BY k",
+        "SELECT grp, k, count(*) FROM t GROUP BY grp, k",
+        // The group *set*, not the group order: a walk ordered by `(grp, k)`
+        // makes every `(grp, k)` pair adjacent, so it groups them written
+        // either way round.
+        "SELECT k, grp, count(*) FROM t GROUP BY k, grp",
+        "SELECT DISTINCT k FROM t",
+        "SELECT DISTINCT grp, k FROM t ORDER BY grp, k",
+    ];
+    // Grouping and de-duplicating it cannot, so one is.
+    let collected = [
+        // No index holds `note`.
+        "SELECT note, count(*) FROM t GROUP BY note",
+        "SELECT DISTINCT note FROM t",
+        // A BINARY grouping over a NOCASE index would merge `Ada` and `ADA`.
+        "SELECT name, count(*) FROM t GROUP BY name",
+        "SELECT DISTINCT name FROM t",
+        // Distinct over an aggregate is distinct over values no walk produced.
+        "SELECT DISTINCT count(*) FROM t GROUP BY k",
+    ];
     let sorted = [
         // The order is over an expression, not a column.
         "SELECT k, id FROM t ORDER BY k + 1",
@@ -308,5 +356,30 @@ fn the_sort_is_skipped_exactly_where_the_walk_answers_the_order() {
     }
     for sql in sorted {
         assert!(sorts(sql), "this should still sort: {sql}");
+    }
+
+    let builds = |sql: &str, what: &str| -> bool {
+        let plan = rustdb_rows(&connection, &format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("the plan renders");
+        plan.iter().any(|row| row.contains(what))
+    };
+    for sql in streamed {
+        let what = if sql.contains("DISTINCT") {
+            "DISTINCT"
+        } else {
+            "GROUP BY"
+        };
+        assert!(
+            !builds(sql, what),
+            "this should be answered as the rows arrive: {sql}"
+        );
+    }
+    for sql in collected {
+        let what = if sql.starts_with("SELECT DISTINCT") {
+            "DISTINCT"
+        } else {
+            "GROUP BY"
+        };
+        assert!(builds(sql, what), "this should still collect: {sql}");
     }
 }

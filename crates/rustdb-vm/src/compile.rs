@@ -636,6 +636,9 @@ struct Body<'a> {
     plan: &'a PhysicalPlan,
     sorter: Option<u32>,
     distinct: Option<u32>,
+    /// Where the previous emitted row is kept, and the flag saying there is
+    /// one, when duplicates arrive next to each other and a set is not needed.
+    adjacent: Option<(u32, u32)>,
     limit_register: Option<u32>,
     offset_register: Option<u32>,
     sink: Sink,
@@ -1050,10 +1053,12 @@ impl Compiler {
         let (limit_register, offset_register) = self.compile_limits(plan)?;
         let sorter = self.open_order_sorter(plan);
         let distinct = self.open_distinct(plan);
+        let adjacent = self.open_adjacent(plan);
         let body = Body {
             plan,
             sorter,
             distinct,
+            adjacent,
             limit_register,
             offset_register,
             sink,
@@ -1146,10 +1151,12 @@ impl Compiler {
         }
         let sorter = self.open_order_sorter(&drain);
         let distinct = self.open_distinct(&drain);
+        let adjacent = self.open_adjacent(&drain);
         let body = Body {
             plan: &drain,
             sorter,
             distinct,
+            adjacent,
             limit_register,
             offset_register,
             sink,
@@ -1263,6 +1270,7 @@ impl Compiler {
             plan: &drain,
             sorter,
             distinct: None,
+            adjacent: None,
             limit_register,
             offset_register,
             sink,
@@ -1391,9 +1399,38 @@ impl Compiler {
         Some(sorter)
     }
 
+    /// Reserves the registers an adjacent de-duplication needs.
+    ///
+    /// A `DISTINCT` whose duplicates arrive next to each other does not need a
+    /// set that remembers every row: it needs the row before it. The flag is a
+    /// register rather than an assumption because the first row has nothing to
+    /// compare against, and a NULL-filled block would compare equal to a row of
+    /// NULLs and drop it.
+    /// @param plan - the block being compiled
+    fn open_adjacent(&mut self, plan: &PhysicalPlan) -> Option<(u32, u32)> {
+        if !plan.select.distinct || !plan.distinct_walk {
+            return None;
+        }
+        let width = plan.select.columns.len().max(1);
+        let previous = self.register_block(width);
+        let started = self.register();
+        self.emit(
+            Instruction::new(Opcode::Load, 0, started as i32, 0).with_p4(Operand::Integer(0)),
+        );
+        for index in 0..width {
+            self.emit(Instruction::new(
+                Opcode::Null,
+                0,
+                previous.saturating_add(index as u32) as i32,
+                0,
+            ));
+        }
+        Some((previous, started))
+    }
+
     /// Opens the DISTINCT set, when the statement needs one.
     fn open_distinct(&mut self, plan: &PhysicalPlan) -> Option<u32> {
-        if !plan.select.distinct {
+        if !plan.select.distinct || plan.distinct_walk {
             return None;
         }
         let set = self.distincts;
@@ -1503,6 +1540,93 @@ impl Compiler {
         Ok(())
     }
 
+    /// Compiles a grouped aggregate whose rows already arrive grouped.
+    ///
+    /// The same shape as the sorted form with the sorter taken out: the scan
+    /// closes a group when the key changes rather than after everything has
+    /// been collected and ordered. What makes that legal is a property of the
+    /// *walk* - the planner only sets `grouped_walk` when the access path's
+    /// leading keys are exactly the group columns, so every row of a group
+    /// arrives before the next group starts.
+    ///
+    /// The subroutine that emits one group is shared with the sorted form and
+    /// runs with the same substitutions, because by then the group key is no
+    /// longer a row: it is the registers holding the key of the group that has
+    /// just ended.
+    /// @param body - the block being compiled
+    fn compile_streamed_aggregate(&mut self, body: &Body<'_>) -> DbResult<()> {
+        let group_count = body.plan.select.group_by.len();
+        let width = body.plan.select.columns.len();
+        let previous = self.register_block(group_count.max(1));
+        let current = self.register_block(group_count.max(1));
+        let result_block = self.register_block(width.max(1));
+        let tail_return = self.register();
+        let group_return = self.register();
+        let started = self.register();
+
+        let skip = self.emit_jump(Instruction::new(Opcode::Goto, 0, -1, 0));
+        let tail = self.here();
+        self.substitutions = group_substitutions(&body.plan.select.group_by, previous);
+        self.compile_tail(body, result_block, width, true, tail_return)?;
+        let group_emit = self.here();
+        self.emit_group_subroutine(body, result_block, tail, tail_return, group_return)?;
+        self.substitutions.clear();
+        self.patch_here(skip);
+
+        self.emit(
+            Instruction::new(Opcode::Load, 0, started as i32, 0).with_p4(Operand::Integer(0)),
+        );
+        // The key of the group being accumulated is written before the scan as
+        // well as inside it. The first row overwrites it before anything reads
+        // it - `started` sees to that - but the verifier proves "no register is
+        // read before it is written" over the control flow graph, where the
+        // path that enters the loop for the first time has not been round it.
+        for index in 0..group_count {
+            self.emit(Instruction::new(
+                Opcode::Null,
+                0,
+                previous.saturating_add(index as u32) as i32,
+                0,
+            ));
+        }
+        self.reset_accumulators(&body.plan.select.aggregates);
+        let collations: Vec<Collation> = body
+            .plan
+            .select
+            .group_by
+            .iter()
+            .map(|expr| rustdb_sql::bind::result_collation(expr))
+            .collect();
+        let step = InnerBody::GroupStream {
+            previous,
+            current,
+            group_count,
+            collations,
+            group_emit,
+            group_return,
+            started,
+        };
+        self.guard_constant_filter(body)?;
+        self.compile_level(body, 0, &step)?;
+        self.compile_antijoins(body)?;
+
+        // The last group has nothing after it to close it, and a scan that
+        // matched no rows has no group to close at all - which is why `started`
+        // is a register rather than an assumption.
+        let none = self.emit_jump(Instruction::new(Opcode::IfPos, started as i32, -1, 0));
+        let done = self.emit_jump(Instruction::new(Opcode::Goto, 0, -1, 0));
+        self.patch_here(none);
+        self.emit(Instruction::new(
+            Opcode::Gosub,
+            group_return as i32,
+            group_emit,
+            0,
+        ));
+        self.patch_here(done);
+        self.drain_sorter(body, width)?;
+        Ok(())
+    }
+
     /// Compiles a grouped aggregate: sort by the group key, then stream.
     ///
     /// The order matters and is easy to get wrong. The scan writes the group
@@ -1512,6 +1636,9 @@ impl Compiler {
     /// key is no longer a row - it is the registers holding the key of the
     /// group the sorter has just finished.
     fn compile_grouped_aggregate(&mut self, body: &Body<'_>) -> DbResult<()> {
+        if body.plan.grouped_walk {
+            return self.compile_streamed_aggregate(body);
+        }
         let group_count = body.plan.select.group_by.len();
         let payload = self.aggregate_payload(&body.plan.select.aggregates);
         let sorter = self.sorters;
@@ -1728,6 +1855,41 @@ impl Compiler {
         Ok(())
     }
 
+    /// Steps every aggregate from the row the cursors are standing on.
+    ///
+    /// The same code the whole-table aggregate runs per row and the streaming
+    /// group runs per row of its group - one place, because two would be two
+    /// answers to "what does this row contribute".
+    /// @param body - the block being compiled
+    fn step_aggregates(&mut self, body: &Body<'_>) -> DbResult<()> {
+        let aggregates = body.plan.select.aggregates.clone();
+        self.aggregates = self.aggregates.max(aggregates.len() as u32);
+        for (slot, aggregate) in aggregates.iter().enumerate() {
+            let count = aggregate.arguments.len();
+            let block = self.register_block(count.max(1));
+            for (index, argument) in aggregate.arguments.iter().enumerate() {
+                let register = self.compile_expr(argument)?;
+                self.emit(Instruction::new(
+                    Opcode::Copy,
+                    register as i32,
+                    block.saturating_add(index as u32) as i32,
+                    0,
+                ));
+            }
+            self.emit(
+                Instruction::new(Opcode::AggStep, block as i32, count as i32, slot as i32).with_p4(
+                    Operand::Aggregate(AggregateCall {
+                        func: aggregate.func,
+                        external: aggregate.external.clone(),
+                        distinct: aggregate.distinct,
+                        collation: aggregate.collation,
+                    }),
+                ),
+            );
+        }
+        Ok(())
+    }
+
     /// Resets every accumulator, which starts a fresh group.
     fn reset_accumulators(&mut self, aggregates: &[BoundAggregate]) {
         self.aggregates = self.aggregates.max(aggregates.len() as u32);
@@ -1847,6 +2009,38 @@ impl Compiler {
                     Instruction::new(Opcode::DistinctCheck, set as i32, -1, block as i32)
                         .with_p5(width as u16),
                 ),
+            );
+        }
+        if let Some((previous, started)) = body.adjacent {
+            let collations: Vec<Collation> = body
+                .plan
+                .select
+                .columns
+                .iter()
+                .map(|column| rustdb_sql::bind::result_collation(&column.expr))
+                .collect();
+            let compare = self.emit_jump(Instruction::new(Opcode::IfPos, started as i32, -1, 0));
+            let first = self.emit_jump(Instruction::new(Opcode::Goto, 0, -1, 0));
+            self.patch_here(compare);
+            let same = self.compile_group_key_equal(width, previous, block, &collations);
+            // Falling out of the comparison means the rows differ.
+            let differs = self.emit_jump(Instruction::new(Opcode::Goto, 0, -1, 0));
+            for label in same {
+                self.patch_here(label);
+            }
+            skip.push(self.emit_jump(Instruction::new(Opcode::Goto, 0, -1, 0)));
+            self.patch_here(differs);
+            self.patch_here(first);
+            for index in 0..width {
+                self.emit(Instruction::new(
+                    Opcode::Copy,
+                    block.saturating_add(index as u32) as i32,
+                    previous.saturating_add(index as u32) as i32,
+                    0,
+                ));
+            }
+            self.emit(
+                Instruction::new(Opcode::Load, 0, started as i32, 0).with_p4(Operand::Integer(1)),
             );
         }
         if let Some(sorter) = body.sorter {
@@ -2232,6 +2426,9 @@ impl Compiler {
         let reverse = body.plan.reverse && level == 0;
         if level == 0 && !body.plan.needs_sort && !body.plan.select.order_by.is_empty() {
             self.used |= Levers::ORDERED_WALK;
+        }
+        if level == 0 && (body.plan.grouped_walk || body.plan.distinct_walk) {
+            self.used |= Levers::STREAMING_GROUP;
         }
         match path {
             AccessPath::TableScan { .. } => {
@@ -2938,31 +3135,67 @@ impl Compiler {
                 ));
                 Ok(())
             }
-            InnerBody::AggregateStep => {
-                let aggregates = body.plan.select.aggregates.clone();
-                self.aggregates = self.aggregates.max(aggregates.len() as u32);
-                for (slot, aggregate) in aggregates.iter().enumerate() {
-                    let count = aggregate.arguments.len();
-                    let block = self.register_block(count.max(1));
-                    for (index, argument) in aggregate.arguments.iter().enumerate() {
-                        let register = self.compile_expr(argument)?;
-                        self.emit(Instruction::new(
-                            Opcode::Copy,
-                            register as i32,
-                            block.saturating_add(index as u32) as i32,
-                            0,
-                        ));
-                    }
-                    self.emit(
-                        Instruction::new(Opcode::AggStep, block as i32, count as i32, slot as i32)
-                            .with_p4(Operand::Aggregate(AggregateCall {
-                                func: aggregate.func,
-                                external: aggregate.external.clone(),
-                                distinct: aggregate.distinct,
-                                collation: aggregate.collation,
-                            })),
-                    );
+            InnerBody::AggregateStep => self.step_aggregates(body),
+            InnerBody::GroupStream {
+                previous,
+                current,
+                group_count,
+                collations,
+                group_emit,
+                group_return,
+                started,
+            } => {
+                let group_by = body.plan.select.group_by.clone();
+                for (index, expr) in group_by.iter().enumerate() {
+                    let register = self.compile_expr(expr)?;
+                    self.emit(Instruction::new(
+                        Opcode::Copy,
+                        register as i32,
+                        current.saturating_add(index as u32) as i32,
+                        0,
+                    ));
                 }
+                // The first row has no previous group to close, so it only
+                // adopts the key. Every later row either continues the group it
+                // is in or ends it.
+                let started_already =
+                    self.emit_jump(Instruction::new(Opcode::IfPos, *started as i32, -1, 0));
+                for index in 0..*group_count {
+                    self.emit(Instruction::new(
+                        Opcode::Copy,
+                        current.saturating_add(index as u32) as i32,
+                        previous.saturating_add(index as u32) as i32,
+                        0,
+                    ));
+                }
+                self.emit(
+                    Instruction::new(Opcode::Load, 0, *started as i32, 0)
+                        .with_p4(Operand::Integer(1)),
+                );
+                let to_step = self.emit_jump(Instruction::new(Opcode::Goto, 0, -1, 0));
+                self.patch_here(started_already);
+                let same =
+                    self.compile_group_key_equal(*group_count, *previous, *current, collations);
+                self.emit(Instruction::new(
+                    Opcode::Gosub,
+                    *group_return as i32,
+                    *group_emit,
+                    0,
+                ));
+                self.reset_accumulators(&body.plan.select.aggregates);
+                for index in 0..*group_count {
+                    self.emit(Instruction::new(
+                        Opcode::Copy,
+                        current.saturating_add(index as u32) as i32,
+                        previous.saturating_add(index as u32) as i32,
+                        0,
+                    ));
+                }
+                for label in same {
+                    self.patch_here(label);
+                }
+                self.patch_here(to_step);
+                self.step_aggregates(body)?;
                 Ok(())
             }
             InnerBody::GroupInsert {
@@ -3058,6 +3291,27 @@ enum InnerBody {
     },
     /// Step every aggregate.
     AggregateStep,
+    /// Close the previous group when the key changes, then step the aggregates
+    /// from this row.
+    ///
+    /// What the sorter's drain loop does, done as the rows arrive - which is
+    /// only correct when the walk already brings each group's rows together.
+    GroupStream {
+        /// The registers holding the key of the group being accumulated.
+        previous: u32,
+        /// The registers this row's key is read into.
+        current: u32,
+        /// How many columns the key has.
+        group_count: usize,
+        /// The collation each key column is compared with.
+        collations: Vec<Collation>,
+        /// The address of the subroutine that emits a finished group.
+        group_emit: i32,
+        /// The register holding that subroutine's return address.
+        group_return: u32,
+        /// The register that is zero until the first row has been absorbed.
+        started: u32,
+    },
     /// Write the group key and aggregate arguments into a sorter.
     GroupInsert {
         /// The sorter.

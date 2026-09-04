@@ -88,6 +88,13 @@ const ORDERED_READS: [&str; 3] = [
     "SELECT key FROM main_table WHERE key BETWEEN 100 AND 300 ORDER BY key",
 ];
 
+/// The reads the streaming-group lever is about.
+const STREAMED_GROUPS: [&str; 3] = [
+    "SELECT category, count(*) FROM main_table GROUP BY category",
+    "SELECT category, count(*), sum(key) FROM main_table GROUP BY category ORDER BY category",
+    "SELECT DISTINCT category FROM main_table ORDER BY category",
+];
+
 /// The writes the indexed-write lever is about.
 const INDEXED_WRITES: [&str; 3] = [
     "UPDATE main_table SET category = category + 1 WHERE key BETWEEN 10 AND 40",
@@ -159,6 +166,42 @@ fn the_ordered_walk_arm_changes_the_plan_and_not_the_answer() {
         );
         assert_eq!(
             off & Levers::ORDERED_WALK,
+            0,
+            "the lever should be gone with it off: {sql}"
+        );
+        assert_eq!(
+            with, without,
+            "the two arms disagree about the answer: {sql}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Turning the streaming-group lever off changes the plan and not the answer.
+#[test]
+fn the_streaming_group_arm_changes_the_plan_and_not_the_answer() {
+    let directory = std::env::temp_dir().join("rustdb-levers-grouped");
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("the scratch directory is made");
+    let database = fixture(&directory.join("arm.db"));
+    let connection = database.connect().expect("it connects");
+
+    for sql in STREAMED_GROUPS {
+        connection.disable_optimizations(0);
+        let on = used(&connection, sql);
+        let with = answer(&connection, sql);
+
+        connection.disable_optimizations(Levers::STREAMING_GROUP);
+        let off = used(&connection, sql);
+        let without = answer(&connection, sql);
+
+        assert_eq!(
+            on & Levers::STREAMING_GROUP,
+            Levers::STREAMING_GROUP,
+            "the lever should be used with it on: {sql}"
+        );
+        assert_eq!(
+            off & Levers::STREAMING_GROUP,
             0,
             "the lever should be gone with it off: {sql}"
         );
@@ -251,7 +294,12 @@ fn an_unknown_lever_is_ignored_rather_than_stored() {
     assert_eq!(levers.disabled(), Levers::EVERY);
     assert_eq!(
         levers.names_disabled(),
-        vec!["covering-index", "indexed-write", "ordered-walk"]
+        vec![
+            "covering-index",
+            "indexed-write",
+            "ordered-walk",
+            "streaming-group"
+        ]
     );
     assert!(Levers::all().names_disabled().is_empty());
     assert!(Levers::all().has(Levers::COVERING_INDEX));

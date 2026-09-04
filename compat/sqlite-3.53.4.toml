@@ -1154,7 +1154,12 @@ source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::windows_match_the_oracle", "rustdb-compat::the_foundational_select_suite_is_green"]
+tests = [
+  "rustdb-compat::windows_match_the_oracle",
+  "rustdb-compat::the_foundational_select_suite_is_green",
+  "rustdb-compat::ordered_statements_match_the_oracle",
+  "rustdb-compat::the_sort_is_skipped_exactly_where_the_walk_answers_the_order",
+]
 
 [[capability]]
 id = "sql.select.distinct"
@@ -1162,7 +1167,12 @@ source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::compounds_match_the_oracle", "rustdb-compat::windows_match_the_oracle"]
+tests = [
+  "rustdb-compat::compounds_match_the_oracle",
+  "rustdb-compat::windows_match_the_oracle",
+  "rustdb-compat::ordered_statements_match_the_oracle",
+  "rustdb-compat::the_sort_is_skipped_exactly_where_the_walk_answers_the_order",
+]
 
 [[capability]]
 id = "sql.with.cte"
@@ -1792,6 +1802,7 @@ tests = [
   "rustdb-compat::the_covering_index_arm_changes_the_plan_and_not_the_answer",
   "rustdb-compat::the_indexed_write_arm_changes_the_plan_and_not_the_outcome",
   "rustdb-compat::the_ordered_walk_arm_changes_the_plan_and_not_the_answer",
+  "rustdb-compat::the_streaming_group_arm_changes_the_plan_and_not_the_answer",
   "rustdb-compat::a_prepared_statement_keeps_the_arm_it_was_compiled_under",
   "rustdb-compat::an_unknown_lever_is_ignored_rather_than_stored",
 ]

@@ -544,6 +544,7 @@
 {"test_id": "rustdb-compat::the_shipped_report_is_reproducible", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_sort_is_skipped_exactly_where_the_walk_answers_the_order", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_special_commands_are_accepted", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::the_streaming_group_arm_changes_the_plan_and_not_the_answer", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_tokenizer_folds_case_and_splits_on_punctuation", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_trigger_forms_sqlite_omits_are_refused", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_two_engines_take_turns_writing_the_same_file", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}

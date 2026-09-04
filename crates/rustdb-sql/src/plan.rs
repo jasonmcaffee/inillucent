@@ -317,6 +317,20 @@ pub struct PhysicalPlan {
     /// set when [`needs_sort`](Self::needs_sort) is false: a plan that sorts
     /// does not care which way its input arrived.
     pub reverse: bool,
+    /// Whether the walk already brings the rows of each group together.
+    ///
+    /// Grouping needs adjacency, not order: if every row of a group arrives
+    /// before the next group starts, the aggregate can be finished and emitted
+    /// as the key changes and nothing has to be collected first. A walk whose
+    /// leading keys are exactly the `GROUP BY` columns delivers that, whichever
+    /// direction it runs in.
+    pub grouped_walk: bool,
+    /// Whether the walk already brings duplicate result rows together.
+    ///
+    /// The same property for `DISTINCT`: adjacent duplicates can be dropped by
+    /// comparing each row with the one before it, where a set has to remember
+    /// every row it has seen.
+    pub distinct_walk: bool,
     /// The later arms of a compound, each with the operator that joined it.
     pub compounds: Vec<(CompoundOp, PhysicalPlan)>,
 }
@@ -362,13 +376,16 @@ impl PhysicalPlan {
             lines.push(format!("COMPOUND QUERY {}", compound_name(*op)));
             lines.extend(arm.describe());
         }
-        if self.aggregation == AggregationMode::Grouped {
+        // A temp b-tree is only named when there is one. Grouping and
+        // de-duplicating that the walk already delivers build nothing, and a
+        // plan that said otherwise would be describing a different program.
+        if self.aggregation == AggregationMode::Grouped && !self.grouped_walk {
             lines.push("USE TEMP B-TREE FOR GROUP BY".to_string());
         }
         if self.needs_sort {
             lines.push("USE TEMP B-TREE FOR ORDER BY".to_string());
         }
-        if self.select.distinct {
+        if self.select.distinct && !self.distinct_walk {
             lines.push("USE TEMP B-TREE FOR DISTINCT".to_string());
         }
         lines
@@ -416,8 +433,15 @@ impl Levers {
     /// Answer an `ORDER BY` by walking a B-tree in its own key order, forwards
     /// or backwards, instead of sorting every row and throwing most away.
     pub const ORDERED_WALK: u32 = 4;
+    /// Group and de-duplicate as the rows arrive, when the walk already brings
+    /// equal keys together, instead of collecting every row into a sorter or a
+    /// set first.
+    pub const STREAMING_GROUP: u32 = 8;
     /// Every lever this build has.
-    pub const EVERY: u32 = Levers::COVERING_INDEX | Levers::INDEXED_WRITE | Levers::ORDERED_WALK;
+    pub const EVERY: u32 = Levers::COVERING_INDEX
+        | Levers::INDEXED_WRITE
+        | Levers::ORDERED_WALK
+        | Levers::STREAMING_GROUP;
 
     /// Returns the shipped configuration: everything on.
     pub fn all() -> Levers {
@@ -454,6 +478,9 @@ impl Levers {
         }
         if !self.has(Levers::ORDERED_WALK) {
             names.push("ordered-walk");
+        }
+        if !self.has(Levers::STREAMING_GROUP) {
+            names.push("streaming-group");
         }
         names
     }
@@ -557,6 +584,18 @@ pub fn plan_select_with(select: BoundSelect, levers: Levers) -> PhysicalPlan {
     };
     let needs_sort = !select.order_by.is_empty() && provided.is_none();
     let reverse = provided.unwrap_or(false);
+    // Adjacency is a weaker property than order, so it is asked separately and
+    // for a wider set of statements: a grouped aggregate is disqualified from
+    // the ORDER BY analysis above and can still be streamed.
+    let adjacent = levers.has(Levers::STREAMING_GROUP)
+        && sources.len() == 1
+        && select.windows.is_empty()
+        && select.compounds.is_empty();
+    let outer = sources.first();
+    let grouped_walk = adjacent
+        && aggregation == AggregationMode::Grouped
+        && outer.is_some_and(|outer| grouped_by_walk(&select, outer));
+    let distinct_walk = adjacent && outer.is_some_and(|outer| distinct_by_walk(&select, outer));
     let compounds = compound_arms
         .into_iter()
         .map(|(op, arm)| (op, plan_select_with(arm, levers)))
@@ -569,7 +608,113 @@ pub fn plan_select_with(select: BoundSelect, levers: Levers) -> PhysicalPlan {
         aggregation,
         needs_sort,
         reverse,
+        grouped_walk,
+        distinct_walk,
         compounds,
+    }
+}
+
+/// Returns whether the walk brings the rows of each `GROUP BY` key together.
+///
+/// Grouping needs adjacency rather than order, so the direction does not
+/// matter: what matters is that the walk's leading keys are exactly the group
+/// columns. Exactly, not merely a superset - a walk ordered by `(a, b)` groups
+/// `a` and groups `(a, b)`, and does not group `b`.
+///
+/// The collation does matter. Grouping compares keys with the result collation
+/// and the walk compares them with the structure's, so a `NOCASE` index does
+/// not group a `BINARY` key: it would put `Ada` and `ADA` next to each other
+/// and the grouping would then treat them as one.
+/// @param select - the bound statement
+/// @param outer - the planned outer term
+fn grouped_by_walk(select: &BoundSelect, outer: &PlannedSource) -> bool {
+    if select.group_by.is_empty() {
+        return false;
+    }
+    let Some(key) = path_ordering(&outer.table, &outer.path) else {
+        return false;
+    };
+    let mut wanted: Vec<(OrderedBy, Collation)> = Vec::new();
+    for expr in &select.group_by {
+        let Some(named) = walk_key_of(expr, outer.id, &outer.table) else {
+            return false;
+        };
+        let collation = crate::bind::result_collation(expr);
+        if !wanted.iter().any(|(held, _)| *held == named) {
+            wanted.push((named, collation));
+        }
+    }
+    covers_prefix(&key, &wanted)
+}
+
+/// Returns whether the walk brings duplicate result rows together.
+///
+/// The same rule as [`grouped_by_walk`], over the result columns rather than
+/// the group ones - and it is only asked when there is no grouping, because a
+/// `DISTINCT` over aggregates is distinct over values the walk never saw.
+/// @param select - the bound statement
+/// @param outer - the planned outer term
+fn distinct_by_walk(select: &BoundSelect, outer: &PlannedSource) -> bool {
+    if !select.distinct || !select.group_by.is_empty() || !select.aggregates.is_empty() {
+        return false;
+    }
+    let Some(key) = path_ordering(&outer.table, &outer.path) else {
+        return false;
+    };
+    let mut wanted: Vec<(OrderedBy, Collation)> = Vec::new();
+    for column in &select.columns {
+        let Some(named) = walk_key_of(&column.expr, outer.id, &outer.table) else {
+            return false;
+        };
+        let collation = crate::bind::result_collation(&column.expr);
+        if !wanted.iter().any(|(held, _)| *held == named) {
+            wanted.push((named, collation));
+        }
+    }
+    covers_prefix(&key, &wanted)
+}
+
+/// Returns whether a set of keys is exactly the walk's leading keys.
+///
+/// A key an equality pinned counts as held: it has one value for every row the
+/// walk returns, so it is constant across the whole scan and cannot separate
+/// two rows that are otherwise equal.
+/// @param key - what the walk is ordered by
+/// @param wanted - the keys that have to arrive together, with their collations
+fn covers_prefix(key: &PathOrdering, wanted: &[(OrderedBy, Collation)]) -> bool {
+    let free: Vec<&(OrderedBy, Collation)> = wanted
+        .iter()
+        .filter(|(named, _)| !key.pinned.contains(named))
+        .collect();
+    if free.len() > key.columns.len() {
+        return false;
+    }
+    let prefix = match key.columns.get(..free.len()) {
+        Some(prefix) => prefix,
+        None => return false,
+    };
+    free.iter().all(|(named, collation)| {
+        prefix
+            .iter()
+            .any(|(held, _, held_collation)| held == named && held_collation == collation)
+    })
+}
+
+/// Returns which of the walk's keys an expression names, if it names one.
+/// @param expr - the expression to resolve
+/// @param id - the outer term's source id
+/// @param table - the table being walked
+fn walk_key_of(expr: &BoundExpr, id: usize, table: &TableInfo) -> Option<OrderedBy> {
+    let mut expr = expr;
+    while let BoundExpr::Collate { operand, .. } = expr {
+        expr = operand;
+    }
+    match expr {
+        BoundExpr::Column { source, column, .. } if *source == id => {
+            Some(named_key(table, OrderedBy::Column(*column)))
+        }
+        BoundExpr::Rowid { source } if *source == id => Some(OrderedBy::Rowid),
+        _ => None,
     }
 }
 
