@@ -229,10 +229,14 @@ fn statistics_reorder_the_join() {
             .is_some_and(|line| line.contains("small")),
         "before: {plan_before:?}\nafter: {plan_after:?}"
     );
+    // Through `large_tag`, whether or not the index turns out to carry every
+    // column the query wants: the join order is what this test is about, and
+    // asserting on the exact wording made a *better* plan - a covering search
+    // rather than a plain one - fail a test about something else.
     assert!(
         plan_after
             .iter()
-            .any(|line| line.contains("SEARCH large USING INDEX large_tag")),
+            .any(|line| line.starts_with("SEARCH large USING") && line.contains("large_tag")),
         "{plan_after:?}"
     );
 }

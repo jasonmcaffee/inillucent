@@ -19,6 +19,8 @@
 
 use std::cmp::Ordering;
 
+extern crate alloc;
+
 use rustdb_base::bytes;
 use rustdb_base::error::{corrupt, too_big};
 use rustdb_base::limits::{Limit, Limits};
@@ -146,8 +148,13 @@ impl SerialType {
 }
 
 /// Where one field lives inside a record's payload area.
+///
+/// Public so that a caller reading several columns of one row can keep the
+/// spans between reads. Parsing a record is a walk of its whole header, and a
+/// machine that parsed it once per column read was doing that walk - and one
+/// heap allocation - for every column of every row.
 #[derive(Clone, Copy, Debug)]
-struct FieldSpan {
+pub struct FieldSpan {
     /// The field's serial type.
     serial: SerialType,
     /// The byte offset of the field's payload within the whole record.
@@ -160,7 +167,9 @@ struct FieldSpan {
 #[derive(Clone, Debug)]
 pub struct RecordRef<'a> {
     bytes: &'a [u8],
-    fields: Vec<FieldSpan>,
+    /// Where each field is, owned when this parsed the record and borrowed when
+    /// a caller kept the spans from an earlier parse of the same row.
+    fields: alloc::borrow::Cow<'a, [FieldSpan]>,
     header_len: usize,
     encoding: TextEncoding,
 }
@@ -190,10 +199,79 @@ impl<'a> RecordRef<'a> {
                 bytes.len()
             )));
         }
-        let payload_area = bytes.len().saturating_sub(header_len);
-
         let mut fields: Vec<FieldSpan> = Vec::new();
-        let mut cursor = header.len;
+        let header_len =
+            RecordRef::parse_fields(bytes, header_len, header.len, limits, &mut fields)?;
+        Ok(RecordRef {
+            bytes,
+            fields: alloc::borrow::Cow::Owned(fields),
+            header_len,
+            encoding,
+        })
+    }
+
+    /// Rebuilds a record from spans a previous parse produced.
+    ///
+    /// No parsing and no allocation: the spans describe this record's fields
+    /// and were validated when they were made. The caller promises the bytes
+    /// are the ones the spans came from, which is why this is only reachable
+    /// through a cursor that clears its cache whenever it moves.
+    /// @param bytes - the record, as the spans were parsed from
+    /// @param fields - the spans
+    /// @param header_len - where the payload area begins
+    /// @param encoding - how text fields are decoded
+    pub fn with_fields(
+        bytes: &'a [u8],
+        fields: &'a [FieldSpan],
+        header_len: usize,
+        encoding: TextEncoding,
+    ) -> RecordRef<'a> {
+        RecordRef {
+            bytes,
+            fields: alloc::borrow::Cow::Borrowed(fields),
+            header_len,
+            encoding,
+        }
+    }
+
+    /// Parses a record's header into a caller's buffer, returning the header
+    /// length.
+    ///
+    /// The buffer is cleared and refilled, so a caller that keeps one across
+    /// rows allocates once rather than once per row.
+    /// @param bytes - the record
+    /// @param encoding - unused here, kept so the two entry points read alike
+    /// @param limits - the run-time limits the fields are checked against
+    /// @param into - the buffer to fill
+    pub fn parse_into(
+        bytes: &'a [u8],
+        limits: &Limits,
+        into: &mut Vec<FieldSpan>,
+    ) -> DbResult<usize> {
+        let header = varint::decode(bytes)
+            .map_err(|_| corrupt("a record's header size varint is truncated"))?;
+        let header_len = usize::try_from(header.value)
+            .map_err(|_| corrupt("a record's header size does not fit in memory"))?;
+        if header_len < header.len || header_len > bytes.len() {
+            return Err(corrupt(format!(
+                "a record claims a {header_len}-byte header inside {} bytes",
+                bytes.len()
+            )));
+        }
+        RecordRef::parse_fields(bytes, header_len, header.len, limits, into)
+    }
+
+    /// Walks a record's header, filling in where every field lives.
+    fn parse_fields(
+        bytes: &[u8],
+        header_len: usize,
+        header_varint: usize,
+        limits: &Limits,
+        fields: &mut Vec<FieldSpan>,
+    ) -> DbResult<usize> {
+        let payload_area = bytes.len().saturating_sub(header_len);
+        fields.clear();
+        let mut cursor = header_varint;
         let mut payload_used: usize = 0;
         while cursor < header_len {
             let window = bytes
@@ -239,12 +317,7 @@ impl<'a> RecordRef<'a> {
                 "a record's fields use {payload_used} of {payload_area} payload bytes"
             )));
         }
-        Ok(RecordRef {
-            bytes,
-            fields,
-            header_len,
-            encoding,
-        })
+        Ok(header_len)
     }
 
     /// Returns the number of fields the record holds.

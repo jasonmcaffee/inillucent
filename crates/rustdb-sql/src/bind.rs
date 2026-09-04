@@ -501,33 +501,49 @@ impl BoundExpr {
         }
     }
 
-    /// Returns the expression's direct children.
-    pub fn children(&self) -> Vec<BoundExpr> {
-        let mut out = Vec::new();
+    /// Returns every sub-expression one expression holds, in no order.
+    ///
+    /// The match is exhaustive on purpose: there is no `_` arm, so a variant
+    /// added later is a compilation error here rather than a silently unvisited
+    /// subtree. That matters because the covering-index decision is built on
+    /// this walk, and a missed subtree there would be a column read from an
+    /// index that does not hold it.
+    ///
+    /// A subquery's *block* is deliberately not a child. It is a query of its
+    /// own with its own FROM terms, and the only thing about it that concerns
+    /// an enclosing term is which of that term's columns it correlates to -
+    /// which the block records separately and which the caller reads.
+    pub fn children(&self) -> Vec<&BoundExpr> {
         match self {
+            BoundExpr::Null
+            | BoundExpr::Integer(_)
+            | BoundExpr::Real(_)
+            | BoundExpr::Text(_)
+            | BoundExpr::Blob(_)
+            | BoundExpr::Parameter(_)
+            | BoundExpr::Raise { .. }
+            | BoundExpr::Column { .. }
+            | BoundExpr::Rowid { .. }
+            | BoundExpr::WindowRef { .. }
+            | BoundExpr::Aggregate { .. }
+            | BoundExpr::SorterColumn { .. } => Vec::new(),
             BoundExpr::Unary { operand, .. }
             | BoundExpr::Not(operand)
             | BoundExpr::IsNull { operand, .. }
             | BoundExpr::Collate { operand, .. }
-            | BoundExpr::Cast { operand, .. } => out.push((**operand).clone()),
+            | BoundExpr::Cast { operand, .. } => vec![operand],
             BoundExpr::Arithmetic { left, right, .. }
             | BoundExpr::Compare { left, right, .. }
             | BoundExpr::Is { left, right, .. }
             | BoundExpr::And(left, right)
-            | BoundExpr::Or(left, right) => {
-                out.push((**left).clone());
-                out.push((**right).clone());
-            }
+            | BoundExpr::Or(left, right) => vec![left, right],
             BoundExpr::Between {
                 operand, low, high, ..
-            } => {
-                out.push((**operand).clone());
-                out.push((**low).clone());
-                out.push((**high).clone());
-            }
+            } => vec![operand, low, high],
             BoundExpr::InList { operand, list, .. } => {
-                out.push((**operand).clone());
-                out.extend(list.iter().cloned());
+                let mut found: Vec<&BoundExpr> = vec![operand];
+                found.extend(list.iter());
+                found
             }
             BoundExpr::Case {
                 operand,
@@ -535,16 +551,18 @@ impl BoundExpr {
                 otherwise,
                 ..
             } => {
+                let mut found: Vec<&BoundExpr> = Vec::new();
                 if let Some(operand) = operand {
-                    out.push((**operand).clone());
+                    found.push(operand);
                 }
                 for (when, then) in branches {
-                    out.push(when.clone());
-                    out.push(then.clone());
+                    found.push(when);
+                    found.push(then);
                 }
                 if let Some(otherwise) = otherwise {
-                    out.push((**otherwise).clone());
+                    found.push(otherwise);
                 }
+                found
             }
             BoundExpr::Pattern {
                 operand,
@@ -552,25 +570,81 @@ impl BoundExpr {
                 escape,
                 ..
             } => {
-                out.push((**operand).clone());
-                out.push((**pattern).clone());
+                let mut found: Vec<&BoundExpr> = vec![operand, pattern];
                 if let Some(escape) = escape {
-                    out.push((**escape).clone());
+                    found.push(escape);
                 }
+                found
             }
-            BoundExpr::Function { arguments, .. }
+            BoundExpr::External { arguments, .. }
+            | BoundExpr::VirtualFunction { arguments, .. }
+            | BoundExpr::Function { arguments, .. }
             | BoundExpr::Math { arguments, .. }
-            | BoundExpr::Time { arguments, .. } => out.extend(arguments.iter().cloned()),
-            BoundExpr::Subquery { operand, .. } => {
-                if let Some(operand) = operand {
-                    out.push((**operand).clone());
-                }
+            | BoundExpr::Json { arguments, .. }
+            | BoundExpr::Time { arguments, .. } => arguments.iter().collect(),
+            BoundExpr::Subquery { operand, .. } => operand.iter().map(|held| &**held).collect(),
+        }
+    }
+
+    /// Records which of one FROM term's columns this expression reads.
+    ///
+    /// A correlated subquery makes the answer unknowable from here - the block
+    /// is a query of its own and could read any column of the term it
+    /// correlates to - so it is recorded as opaque rather than guessed at.
+    /// @param source - the FROM term to look for
+    /// @param into - what has been found so far
+    pub fn columns_read(&self, source: usize, into: &mut ColumnUse) {
+        match self {
+            BoundExpr::Column {
+                source: held, slot, ..
+            } if *held == source => into.add(*slot),
+            BoundExpr::Rowid { source: held } if *held == source => into.rowid = true,
+            BoundExpr::Subquery { block, .. } if block.correlations.contains(&source) => {
+                into.opaque = true;
             }
             _ => {}
         }
-        out
+        for child in self.children() {
+            child.columns_read(source, into);
+        }
+    }
+}
+
+/// Which of one FROM term's columns a query reads.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ColumnUse {
+    /// The record slots read, ascending and without duplicates.
+    pub columns: Vec<u16>,
+    /// Whether the term's rowid is read.
+    pub rowid: bool,
+    /// Whether something was met whose column reads cannot be enumerated.
+    ///
+    /// An opaque use is never coverable. It is set rather than ignored because
+    /// the whole value of this answer is that it is complete: a covering path
+    /// that turned out not to cover a column would read it from an index that
+    /// does not hold it.
+    pub opaque: bool,
+}
+
+impl ColumnUse {
+    /// Records that one slot is read.
+    pub fn add(&mut self, slot: u16) {
+        if let Err(position) = self.columns.binary_search(&slot) {
+            self.columns.insert(position, slot);
+        }
     }
 
+    /// Folds another use into this one.
+    pub fn merge(&mut self, other: &ColumnUse) {
+        for slot in &other.columns {
+            self.add(*slot);
+        }
+        self.rowid |= other.rowid;
+        self.opaque |= other.opaque;
+    }
+}
+
+impl BoundExpr {
     /// Returns which FROM terms the expression reads.
     pub fn sources_used(&self, into: &mut Vec<usize>) {
         match self {
@@ -879,6 +953,103 @@ pub struct BoundSelect {
 }
 
 impl BoundSelect {
+    /// Returns which of one FROM term's columns this block reads.
+    ///
+    /// Every expression the block holds is visited, because the question this
+    /// answers is whether an index carries everything the query needs from a
+    /// table - and a single missed expression would be a column read from an
+    /// index that does not hold it. The walk is therefore written to be
+    /// obviously complete rather than briefly: every field of the block that
+    /// can hold an expression is named here, and `BoundExpr::children` is
+    /// exhaustive so a new expression variant is a compilation error rather
+    /// than an unvisited subtree.
+    ///
+    /// Anything it cannot enumerate marks the answer opaque, and an opaque
+    /// answer is never coverable. A nested block that correlates to this term
+    /// is the case that matters: it is a query of its own and could read any
+    /// column of the term it correlates to.
+    /// @param source - the statement-wide number of the FROM term
+    pub fn columns_read(&self, source: usize) -> ColumnUse {
+        let mut used = ColumnUse::default();
+        self.gather_columns(source, &mut used);
+        used
+    }
+
+    /// Adds this block's reads of one FROM term, and its compounds' reads.
+    fn gather_columns(&self, source: usize, into: &mut ColumnUse) {
+        for term in &self.sources {
+            if let Some(constraint) = &term.constraint {
+                constraint.columns_read(source, into);
+            }
+            match &term.rows {
+                SourceRows::Table | SourceRows::RecursiveSelf { .. } => {}
+                SourceRows::Subquery(block) => {
+                    if block.correlations.contains(&source) {
+                        into.opaque = true;
+                    }
+                }
+                SourceRows::Recursive(body) => {
+                    for (_, arm) in body.seeds.iter().chain(body.steps.iter()) {
+                        if arm.correlations.contains(&source) {
+                            into.opaque = true;
+                        }
+                    }
+                }
+            }
+        }
+        for expr in self.filter.iter().chain(self.having.iter()) {
+            expr.columns_read(source, into);
+        }
+        for expr in self
+            .group_by
+            .iter()
+            .chain(self.limit.iter())
+            .chain(self.offset.iter())
+        {
+            expr.columns_read(source, into);
+        }
+        for column in &self.columns {
+            column.expr.columns_read(source, into);
+        }
+        for term in &self.order_by {
+            term.expr.columns_read(source, into);
+        }
+        for aggregate in &self.aggregates {
+            for argument in &aggregate.arguments {
+                argument.columns_read(source, into);
+            }
+        }
+        for window in &self.windows {
+            for argument in &window.arguments {
+                argument.columns_read(source, into);
+            }
+            if let Some(filter) = &window.filter {
+                filter.columns_read(source, into);
+            }
+            for expr in &window.partition_by {
+                expr.columns_read(source, into);
+            }
+            for term in &window.order_by {
+                term.expr.columns_read(source, into);
+            }
+            // A frame bound is an expression when it is `n PRECEDING`, and a
+            // window over a covering index would read it like anything else.
+            for bound in [&window.start, &window.end] {
+                if let BoundFrameBound::Preceding(expr) | BoundFrameBound::Following(expr) = bound {
+                    expr.columns_read(source, into);
+                }
+            }
+        }
+        for row in &self.values {
+            for expr in row {
+                expr.columns_read(source, into);
+            }
+        }
+        for (_, arm) in &self.compounds {
+            arm.gather_columns(source, into);
+        }
+    }
+
     /// Returns whether the statement aggregates its input into one group or
     /// into groups.
     pub fn is_aggregate(&self) -> bool {

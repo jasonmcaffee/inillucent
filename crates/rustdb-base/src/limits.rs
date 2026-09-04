@@ -9,6 +9,8 @@
 //! failing, including for a negative argument, which means "query the current
 //! value". rust-db reproduces that shape exactly because callers rely on it.
 
+extern crate alloc;
+
 mod generated {
     //! The table generated from `compat/limits.toml` at build time.
     #![allow(missing_docs)]
@@ -69,14 +71,26 @@ static UNRECOGNISED_LIMIT_ROW: LimitRow = LimitRow {
 /// One connection's current limit values.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Limits {
-    values: Vec<i64>,
+    /// The current value of every limit, in manifest order.
+    ///
+    /// Shared rather than owned, because a `Limits` is *cloned* far more often
+    /// than it is changed. The machine clones one on nine paths, several of
+    /// them per column of per row - and while it held a `Vec` that was a heap
+    /// allocation and a free for every column any query read, which measured at
+    /// a fifth of the cost of reading the column itself. Setting a limit is a
+    /// `PRAGMA` or an `sqlite3_limit` call and can afford to copy.
+    values: alloc::sync::Arc<[i64]>,
 }
 
 impl Default for Limits {
     /// Starts every limit at its manifest default.
     fn default() -> Limits {
         Limits {
-            values: LIMIT_ROWS.iter().map(|row| row.default).collect(),
+            values: LIMIT_ROWS
+                .iter()
+                .map(|row| row.default)
+                .collect::<Vec<i64>>()
+                .into(),
         }
     }
 }
@@ -102,11 +116,12 @@ impl Limits {
         if requested < 0 {
             return previous;
         }
-        if let Some(slot) = self
-            .index_of(limit)
-            .and_then(|index| self.values.get_mut(index))
-        {
-            *slot = limit.clamp(requested);
+        if let Some(index) = self.index_of(limit) {
+            let mut owned = self.values.to_vec();
+            if let Some(slot) = owned.get_mut(index) {
+                *slot = limit.clamp(requested);
+            }
+            self.values = owned.into();
         }
         previous
     }

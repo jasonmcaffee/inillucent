@@ -16,7 +16,7 @@
 use rustdb_value::Collation;
 
 use crate::ast::{BinaryOp, CompoundOp, JoinKind};
-use crate::bind::{BoundExpr, BoundSelect, BoundSource, SourceRows};
+use crate::bind::{BoundExpr, BoundSelect, BoundSource, ColumnUse, SourceRows};
 use crate::catalog_view::{IndexInfo, TableInfo};
 use crate::cost;
 
@@ -96,6 +96,19 @@ pub enum AccessPath {
         /// rowid table, and empty when the index is the table's own key - then
         /// the entry the seek landed on already is the row.
         key_entry_slots: Vec<usize>,
+        /// Where in the index entry every column the query reads sits, when the
+        /// index holds all of them.
+        ///
+        /// An index entry is the indexed columns followed by the row's key, so
+        /// a query that reads only those columns never has to go to the table
+        /// at all - which halves the descents and, on a range, is the whole
+        /// difference between a search and a scan. `None` means the query needs
+        /// something the entry does not carry, and the row is fetched.
+        ///
+        /// The pairs are `(record slot in the table, slot in the index entry)`.
+        /// The rowid is not in the list: it is always the entry's last field
+        /// for a rowid table, and the compiler reads it with `IdxRowid`.
+        covering: Option<Vec<(u16, usize)>>,
     },
     /// Rows produced by a nested query, materialised and then scanned.
     Subquery {
@@ -201,8 +214,20 @@ impl AccessPath {
                 equalities,
                 low,
                 high,
+                covering,
                 ..
             } => {
+                if equalities.is_empty() && low.is_none() && high.is_none() {
+                    return format!(
+                        "SCAN {table} USING COVERING INDEX {}",
+                        String::from_utf8_lossy(index_name)
+                    );
+                }
+                let kind = if covering.is_some() {
+                    "COVERING INDEX"
+                } else {
+                    "INDEX"
+                };
                 let mut detail = String::new();
                 for index in 0..equalities.len() {
                     if index > 0 {
@@ -217,7 +242,7 @@ impl AccessPath {
                     detail.push_str("?>?");
                 }
                 format!(
-                    "SEARCH {table} USING INDEX {} ({detail})",
+                    "SEARCH {table} USING {kind} {} ({detail})",
                     String::from_utf8_lossy(index_name)
                 )
             }
@@ -556,6 +581,7 @@ fn path_cost(source: &BoundSource, path: &AccessPath) -> (f64, f64) {
             equalities,
             low,
             high,
+            covering,
             ..
         } => {
             let index = source
@@ -569,7 +595,20 @@ fn path_cost(source: &BoundSource, path: &AccessPath) -> (f64, f64) {
                 equalities.len(),
                 low.is_some() || high.is_some(),
             );
-            (cost::search_cost(rows, matches, false), matches)
+            let Some(index) = index else {
+                return (cost::search_cost(rows, matches, false), matches);
+            };
+            if covering.is_none() {
+                return (cost::search_cost(rows, matches, false), matches);
+            }
+            // A covering path reads entries rather than rows, and an entry is
+            // the indexed columns plus the key rather than the whole row. Cost
+            // is bytes touched, so the narrower shape is the saving - and it is
+            // the whole reason a covering scan of a two-column index beats a
+            // table scan of a five-column table when there is no predicate at
+            // all to narrow either of them.
+            let width = cost::entry_share(index.columns.len(), source.table.columns.len());
+            (cost::search_cost(rows, matches * width, true), matches)
         }
         // A materialised term is built once and then scanned; the build is
         // charged where it happens, which is the block that fills it.
@@ -633,6 +672,39 @@ pub fn split_conjunction(expr: &BoundExpr, into: &mut Vec<BoundExpr>) {
         BoundExpr::And(left, right) => {
             split_conjunction(left, into);
             split_conjunction(right, into);
+        }
+        // `x BETWEEN a AND b` *is* `x >= a AND x <= b`, so splitting it lets an
+        // index range be found where otherwise the whole thing sat in the
+        // residual and the table was scanned. It is split only when `x` is a
+        // column, which is both the case that can drive an index and the case
+        // where evaluating the operand twice cannot change an answer: a
+        // volatile expression tested twice is a different question.
+        BoundExpr::Between {
+            negated: false,
+            operand,
+            low,
+            high,
+            affinity,
+            collation,
+        } if matches!(
+            **operand,
+            BoundExpr::Column { .. } | BoundExpr::Rowid { .. }
+        ) =>
+        {
+            into.push(BoundExpr::Compare {
+                op: BinaryOp::GreaterEqual,
+                left: operand.clone(),
+                right: low.clone(),
+                affinity: *affinity,
+                collation: *collation,
+            });
+            into.push(BoundExpr::Compare {
+                op: BinaryOp::LessEqual,
+                left: operand.clone(),
+                right: high.clone(),
+                affinity: *affinity,
+                collation: *collation,
+            });
         }
         other => into.push(other.clone()),
     }
@@ -740,7 +812,8 @@ fn choose_path(
     // already been struck off the residual list and the scan then returned
     // every row of the table, silently.
     let mut trial = consumed.to_vec();
-    if let Some(path) = index_path(id, position, ids, source, terms, &mut trial) {
+    let needed = select.columns_read(id);
+    if let Some(path) = index_path(id, position, ids, source, terms, &mut trial, &needed) {
         // A scan beats a search that returns most of the table: an index that
         // has to fetch every row costs a second descent per row on top of the
         // scan it was meant to avoid.
@@ -965,7 +1038,12 @@ pub fn write_path(table: &TableInfo, source_id: usize, filter: Option<&BoundExpr
         suppressed: Vec::new(),
     };
     let mut consumed = vec![false; terms.len()];
-    let Some(path) = index_path(source_id, 0, &ids, &source, &terms, &mut consumed) else {
+    // A write reads the whole row it is about to change, so no index covers it.
+    let needed = ColumnUse {
+        opaque: true,
+        ..ColumnUse::default()
+    };
+    let Some(path) = index_path(source_id, 0, &ids, &source, &terms, &mut consumed, &needed) else {
         return scan;
     };
     // The same crossover the read planner uses: an index that has to fetch most
@@ -1077,6 +1155,7 @@ fn index_path(
     source: &BoundSource,
     terms: &[BoundExpr],
     consumed: &mut [bool],
+    needed: &ColumnUse,
 ) -> Option<AccessPath> {
     let table = &source.table;
     let mut best: Option<(f64, AccessPath, Vec<usize>)> = None;
@@ -1087,7 +1166,8 @@ fn index_path(
             // rows, and the implication test is phase 8's.
             continue;
         }
-        let Some((path, used)) = index_candidate(id, position, ids, table, index, terms, consumed)
+        let Some((path, used)) =
+            index_candidate(id, position, ids, table, index, terms, consumed, needed)
         else {
             continue;
         };
@@ -1115,6 +1195,7 @@ fn index_path(
 }
 
 /// Builds the best path over one index, or `None` if it cannot be used.
+#[allow(clippy::too_many_arguments)]
 fn index_candidate(
     id: usize,
     position: usize,
@@ -1123,6 +1204,7 @@ fn index_candidate(
     index: &IndexInfo,
     terms: &[BoundExpr],
     consumed: &[bool],
+    needed: &ColumnUse,
 ) -> Option<(AccessPath, Vec<usize>)> {
     let mut equalities = Vec::new();
     let mut used = Vec::new();
@@ -1202,7 +1284,10 @@ fn index_candidate(
             }
         }
     }
-    if equalities.is_empty() && low.is_none() && high.is_none() {
+    let covering = covering_slots(table, index, needed);
+    if equalities.is_empty() && low.is_none() && high.is_none() && covering.is_none() {
+        // Nothing to seek to and nothing to save by reading the entries: this
+        // index has no part in answering the query.
         return None;
     }
     Some((
@@ -1225,9 +1310,56 @@ fn index_candidate(
             } else {
                 Vec::new()
             },
+            covering,
         },
         used,
     ))
+}
+
+/// The entry slot that stands for the row's own key rather than a field.
+///
+/// An index entry over a rowid table ends with the rowid, and the machine reads
+/// it with `IdxRowid` rather than out of the entry's record - so a column that
+/// *is* the rowid needs a marker rather than a slot number. It is the largest
+/// `usize` because no entry can have that many fields, and because a number
+/// that could also be a real slot would be a silent misread.
+pub const ROWID_ENTRY_SLOT: usize = usize::MAX;
+
+/// Returns where each column the query reads sits in one index's entries.
+///
+/// `None` when the index does not hold them all, which is the ordinary case and
+/// is why a covering path is worth naming when it happens. A `WITHOUT ROWID`
+/// table is excluded: its rows *are* index entries, so the question is already
+/// answered by whether the seek is on the table's own key, and mixing the two
+/// would be two answers to one question.
+/// @param table - the table being read
+/// @param index - the index being considered
+/// @param needed - what the query reads from this term
+fn covering_slots(
+    table: &TableInfo,
+    index: &IndexInfo,
+    needed: &ColumnUse,
+) -> Option<Vec<(u16, usize)>> {
+    if needed.opaque || table.without_rowid || index.partial_sql.is_some() {
+        return None;
+    }
+    let mut slots = Vec::with_capacity(needed.columns.len());
+    for slot in &needed.columns {
+        // The rowid alias is a column of the table and the *rowid* of the
+        // entry, so it is covered whatever the index holds - but it is read
+        // with `IdxRowid` rather than out of the entry's record, so it is not
+        // in the list.
+        if table.rowid_alias == Some(*slot) {
+            slots.push((*slot, ROWID_ENTRY_SLOT));
+            continue;
+        }
+        let position = index
+            .columns
+            .iter()
+            .position(|key| key.column == Some(*slot))?;
+        slots.push((*slot, position));
+    }
+    Some(slots)
 }
 
 /// Finds an equality predicate on one column with a matching collation.

@@ -42,6 +42,31 @@ pub fn read_payload(
     overflow: Option<PageId>,
     limits: &Limits,
 ) -> DbResult<Vec<u8>> {
+    let mut payload = Vec::new();
+    read_payload_into(pager, local, total, overflow, limits, &mut payload)?;
+    Ok(payload)
+}
+
+/// Reads a payload into a buffer the caller keeps.
+///
+/// The buffer is cleared and refilled, so a caller that keeps one across rows
+/// allocates once rather than once per row. That matters because reading a row
+/// is what a scan does per row, and an allocation and a free were a fifth of
+/// the cost of the whole step.
+/// @param pager - the pager holding the overflow pages
+/// @param local - the part of the payload that is on the cell's own page
+/// @param total - how long the whole payload is
+/// @param overflow - the first overflow page, when there is one
+/// @param limits - the run-time limits
+/// @param payload - the buffer to fill
+pub fn read_payload_into(
+    pager: &mut Pager,
+    local: &[u8],
+    total: u64,
+    overflow: Option<PageId>,
+    limits: &Limits,
+    payload: &mut Vec<u8>,
+) -> DbResult<()> {
     if !limits.permits_length(total) {
         return Err(too_big(format!(
             "a payload of {total} bytes exceeds the length limit of {}",
@@ -64,13 +89,14 @@ pub fn read_payload(
     if local.len() > total_usize {
         return Err(corrupt("a cell whose local payload exceeds its total"));
     }
-    let mut payload = Vec::with_capacity(total_usize);
+    payload.clear();
+    payload.reserve(total_usize);
     payload.extend_from_slice(local);
     if payload.len() == total_usize {
         if overflow.is_some() {
             return Err(corrupt("a complete payload that also has an overflow page"));
         }
-        return Ok(payload);
+        return Ok(());
     }
     let Some(head) = overflow else {
         return Err(corrupt(format!(
@@ -125,7 +151,7 @@ pub fn read_payload(
             "an overflow chain that continues past the end of its payload",
         ));
     }
-    Ok(payload)
+    Ok(())
 }
 
 /// Where a payload keeps one run of its bytes.
