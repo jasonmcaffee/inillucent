@@ -394,6 +394,7 @@
 {"test_id": "rustdb-compat::oracle::tests::every_storage_class_round_trips_through_the_protocol", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::oracle::tests::the_comparator_names_every_difference", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::order_limit_and_offset_work_together", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::ordered_statements_match_the_oracle", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::output_redirection_matches", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::overflow_payloads_are_reassembled_exactly", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::parameters_are_numbered_the_way_sqlite_numbers_them", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
@@ -516,6 +517,7 @@
 {"test_id": "rustdb-compat::the_oracle_reports_the_same_error_as_sqlite", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_oracle_round_trips_every_storage_class_against_sqlite", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_oracle_writes_only_under_the_agent_output_root", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::the_ordered_walk_arm_changes_the_plan_and_not_the_answer", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_pager_pragmas_describe_the_file", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_parser_performs_no_io", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_pinned_release_reads_what_rust_db_wrote", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
@@ -540,6 +542,7 @@
 {"test_id": "rustdb-compat::the_shadow_tables_are_the_documented_ones", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_shipped_manifest_is_structurally_sound", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_shipped_report_is_reproducible", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::the_sort_is_skipped_exactly_where_the_walk_answers_the_order", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_special_commands_are_accepted", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_tokenizer_folds_case_and_splits_on_punctuation", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_trigger_forms_sqlite_omits_are_refused", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
@@ -848,6 +851,8 @@
 {"test_id": "rustdb-storage::header::tests::the_largest_page_size_is_encoded_as_one", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-storage::header::tests::the_page_count_follows_the_version_valid_for_rule", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-storage::header::tests::the_vacuum_mode_is_read_from_both_of_its_fields", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-storage::mutate::tests::a_batched_append_builds_the_same_tree_as_one_at_a_time", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-storage::mutate::tests::a_batched_append_places_every_entry_in_order", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-storage::mutate::tests::a_created_database_is_a_valid_empty_database", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-storage::mutate::tests::a_cursor_is_restored_across_a_write_that_moves_its_page", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-storage::mutate::tests::a_cursor_whose_row_was_deleted_lands_on_the_next_one", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
