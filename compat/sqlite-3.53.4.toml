@@ -948,7 +948,14 @@ source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-compat::order_limit_and_offset_work_together", "rustdb-compat::nulls_sort_where_sqlite_sorts_them", "rustdb-vm::sorter::tests::null_ordering_is_independent_of_direction"]
+tests = [
+  "rustdb-compat::the_foundational_select_suite_is_green",
+  "rustdb-compat::order_limit_and_offset_work_together",
+  "rustdb-compat::nulls_sort_where_sqlite_sorts_them",
+  "rustdb-vm::sorter::tests::null_ordering_is_independent_of_direction",
+  "rustdb-compat::ordered_statements_match_the_oracle",
+  "rustdb-compat::the_sort_is_skipped_exactly_where_the_walk_answers_the_order",
+]
 
 [[capability]]
 id = "sql.select.limit-offset"
@@ -1777,6 +1784,7 @@ status = "pass"
 tests = [
   "rustdb-compat::the_covering_index_arm_changes_the_plan_and_not_the_answer",
   "rustdb-compat::the_indexed_write_arm_changes_the_plan_and_not_the_outcome",
+  "rustdb-compat::the_ordered_walk_arm_changes_the_plan_and_not_the_answer",
   "rustdb-compat::a_prepared_statement_keeps_the_arm_it_was_compiled_under",
   "rustdb-compat::an_unknown_lever_is_ignored_rather_than_stored",
 ]

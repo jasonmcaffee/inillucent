@@ -409,23 +409,42 @@ impl BTreeCursor {
                 return Err(corrupt("an index cursor reached a table page"));
             }
 
+            // Which side of the equal entries to stop on. `AtOrAfter` wants
+            // the *first* entry at or after the probe, so it searches for the
+            // lower bound; `AtOrBefore` wants the *last* entry at or before it,
+            // which is the upper bound stepped back one. Landing on the first
+            // equal entry either way looks right until the caller is walking
+            // backwards over an equality prefix - it then starts at the front of
+            // the run it meant to start at the back of, steps away, and returns
+            // exactly one row.
+            let upper = bias == SeekBias::AtOrBefore;
             let mut low = 0usize;
             let mut high = cell_count;
             while low < high {
                 let middle = low.saturating_add(high.saturating_sub(low) / 2);
                 let ordering =
                     self.compare_probe(pager, &frame, middle, probe, encoding, &limits)?;
-                if ordering == Ordering::Greater {
+                let after = if upper {
+                    ordering != Ordering::Less
+                } else {
+                    ordering == Ordering::Greater
+                };
+                if after {
                     low = middle.saturating_add(1);
                 } else {
                     high = middle;
                 }
             }
-            if low < cell_count
-                && self.compare_probe(pager, &frame, low, probe, encoding, &limits)?
-                    == Ordering::Equal
-            {
-                exact = true;
+            // The equal run sits at `low` for a lower bound and just before it
+            // for an upper one, so that is where each looks for it.
+            let at_equal = if upper { low.checked_sub(1) } else { Some(low) };
+            if let Some(at) = at_equal {
+                if at < cell_count
+                    && self.compare_probe(pager, &frame, at, probe, encoding, &limits)?
+                        == Ordering::Equal
+                {
+                    exact = true;
+                }
             }
 
             if kind == PageKind::LeafIndex {
@@ -433,15 +452,14 @@ impl BTreeCursor {
                 frame.slot = low;
                 self.stack.push(frame);
                 self.state = CursorState::OnEntry;
-                if low < cell_count && (exact || bias == SeekBias::AtOrAfter) {
-                    return Ok(exact);
-                }
                 match bias {
                     SeekBias::AtOrAfter => {
                         if low >= cell_count {
                             self.step_forward(pager)?;
                         }
                     }
+                    // `low` is the first entry strictly after the probe, so the
+                    // one before it is the last entry at or before it.
                     SeekBias::AtOrBefore => {
                         self.step_backward(pager)?;
                     }

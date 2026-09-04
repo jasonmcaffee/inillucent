@@ -15,7 +15,7 @@
 
 use rustdb_value::Collation;
 
-use crate::ast::{BinaryOp, CompoundOp, JoinKind};
+use crate::ast::{BinaryOp, CompoundOp, JoinKind, NullOrder, SortOrder};
 use crate::bind::{BoundExpr, BoundSelect, BoundSource, ColumnUse, SourceRows};
 use crate::catalog_view::{IndexInfo, TableInfo};
 use crate::cost;
@@ -309,6 +309,14 @@ pub struct PhysicalPlan {
     pub aggregation: AggregationMode,
     /// Whether the results have to pass through a sorter.
     pub needs_sort: bool,
+    /// Whether the outermost term is walked backwards.
+    ///
+    /// A B-tree read from its last entry to its first produces exactly the
+    /// reverse of what it produces read forwards, so a descending `ORDER BY`
+    /// over an ascending structure is a direction rather than a sort. Only ever
+    /// set when [`needs_sort`](Self::needs_sort) is false: a plan that sorts
+    /// does not care which way its input arrived.
+    pub reverse: bool,
     /// The later arms of a compound, each with the operator that joined it.
     pub compounds: Vec<(CompoundOp, PhysicalPlan)>,
 }
@@ -405,8 +413,11 @@ impl Levers {
     /// Find the rows an UPDATE or DELETE touches through an index or a rowid,
     /// rather than by scanning the table.
     pub const INDEXED_WRITE: u32 = 2;
+    /// Answer an `ORDER BY` by walking a B-tree in its own key order, forwards
+    /// or backwards, instead of sorting every row and throwing most away.
+    pub const ORDERED_WALK: u32 = 4;
     /// Every lever this build has.
-    pub const EVERY: u32 = Levers::COVERING_INDEX | Levers::INDEXED_WRITE;
+    pub const EVERY: u32 = Levers::COVERING_INDEX | Levers::INDEXED_WRITE | Levers::ORDERED_WALK;
 
     /// Returns the shipped configuration: everything on.
     pub fn all() -> Levers {
@@ -440,6 +451,9 @@ impl Levers {
         }
         if !self.has(Levers::INDEXED_WRITE) {
             names.push("indexed-write");
+        }
+        if !self.has(Levers::ORDERED_WALK) {
+            names.push("ordered-walk");
         }
         names
     }
@@ -519,7 +533,30 @@ pub fn plan_select_with(select: BoundSelect, levers: Levers) -> PhysicalPlan {
     } else {
         AggregationMode::None
     };
-    let needs_sort = !select.order_by.is_empty();
+    // The sort is only needed when the outer term's path does not already
+    // produce the order that was asked for. Walking a B-tree *is* walking it in
+    // key order, and a statement asking for that order has been answered by the
+    // walk - which is the difference between reading fifty rows and reading,
+    // sorting and throwing away six hundred thousand.
+    // A window function sorts the rows into its own order to compute over them,
+    // so whatever order the walk delivered is not the order the result comes
+    // out in - which is why `windows` disqualifies a statement here even though
+    // it has nothing to do with the access path.
+    let single = levers.has(Levers::ORDERED_WALK)
+        && sources.len() == 1
+        && aggregation == AggregationMode::None
+        && !select.distinct
+        && select.windows.is_empty()
+        && select.compounds.is_empty();
+    let provided = if single {
+        sources
+            .first()
+            .and_then(|outer| ordering_provided(&select, outer.id, &outer.table, &outer.path))
+    } else {
+        None
+    };
+    let needs_sort = !select.order_by.is_empty() && provided.is_none();
+    let reverse = provided.unwrap_or(false);
     let compounds = compound_arms
         .into_iter()
         .map(|(op, arm)| (op, plan_select_with(arm, levers)))
@@ -531,7 +568,180 @@ pub fn plan_select_with(select: BoundSelect, levers: Levers) -> PhysicalPlan {
         select,
         aggregation,
         needs_sort,
+        reverse,
         compounds,
+    }
+}
+
+/// What a term of an `ORDER BY` names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OrderedBy {
+    /// A column of the table, by its declared position.
+    Column(u16),
+    /// The row's key.
+    Rowid,
+}
+
+/// The order one access path's own walk produces.
+struct PathOrdering {
+    /// What the walk is ordered by, in order, with each key's direction and the
+    /// collation the structure compares it with.
+    columns: Vec<(OrderedBy, bool, Collation)>,
+    /// What an equality has pinned to a single value, which therefore holds
+    /// still across the whole walk and cannot affect its order.
+    pinned: Vec<OrderedBy>,
+}
+
+/// Returns whether the outer term's path already produces the `ORDER BY`, and
+/// whether it has to be walked backwards to do it.
+///
+/// `None` means it does not and the rows have to go through a sorter.
+/// `Some(false)` means a forward walk answers it, `Some(true)` a backward one.
+///
+/// The rules are narrow on purpose, because getting this wrong returns rows in
+/// the wrong order and nothing about the result looks wrong:
+///
+/// - every `ORDER BY` term is a plain column of the outer term, or its rowid;
+/// - the path is one whose order is a key's - every rowid path, and an index
+///   seek over whatever columns the equalities did not pin;
+/// - the directions agree, all with the structure or all against it, because a
+///   B-tree can be read either way but not both at once;
+/// - the collation is the one the structure holds the column in;
+/// - the NULLs land where the structure puts them, which for the SQL defaults
+///   they already do: first ascending, last descending, exactly as an index
+///   holds them.
+///
+/// A column an equality pinned is skipped rather than matched: it holds one
+/// value for every row the path returns, so ordering by it changes nothing.
+/// @param select - the bound statement, for its ORDER BY
+/// @param outer - the planned outer term
+fn ordering_provided(
+    select: &BoundSelect,
+    id: usize,
+    table: &TableInfo,
+    path: &AccessPath,
+) -> Option<bool> {
+    if select.order_by.is_empty() {
+        return Some(false);
+    }
+    let key = path_ordering(table, path)?;
+    let mut reverse: Option<bool> = None;
+    let mut at = 0usize;
+    for term in &select.order_by {
+        // `ORDER BY name COLLATE NOCASE` binds to a `Collate` around the
+        // column, and the collation it names is already on the term - so the
+        // wrapper is unwrapped rather than refused, or the one case an index
+        // exists precisely to answer would be the one case that sorted.
+        let mut expr = &term.expr;
+        while let BoundExpr::Collate { operand, .. } = expr {
+            expr = operand;
+        }
+        let named = match expr {
+            BoundExpr::Column { source, column, .. } if *source == id => {
+                named_key(table, OrderedBy::Column(*column))
+            }
+            BoundExpr::Rowid { source } if *source == id => OrderedBy::Rowid,
+            _ => return None,
+        };
+        let descending = matches!(term.order, SortOrder::Descending);
+        // The binder has already defaulted this, so what is left is a written
+        // placement - and only the one the structure already produces can be
+        // answered by a walk: an index holds NULLs first, so a forward walk is
+        // NULLS FIRST and a backward one is NULLS LAST.
+        let natural = match term.nulls {
+            NullOrder::First => !descending,
+            NullOrder::Last => descending,
+        };
+        if !natural {
+            return None;
+        }
+        if key.pinned.contains(&named) {
+            continue;
+        }
+        let (held, held_descending, held_collation) = key.columns.get(at).copied()?;
+        if held != named || held_collation != term.collation {
+            return None;
+        }
+        let walk = descending != held_descending;
+        match reverse {
+            None => reverse = Some(walk),
+            Some(existing) if existing == walk => {}
+            Some(_) => return None,
+        }
+        at = at.saturating_add(1);
+    }
+    Some(reverse.unwrap_or(false))
+}
+
+/// Returns the order one access path's walk produces, if it produces one.
+/// @param table - the table being read
+/// @param path - the chosen path
+fn path_ordering(table: &TableInfo, path: &AccessPath) -> Option<PathOrdering> {
+    match path {
+        // A table B-tree is keyed by rowid, and a range over it is a slice of
+        // that same walk.
+        AccessPath::TableScan { .. } | AccessPath::RowidRange { .. } => Some(PathOrdering {
+            columns: rowid_key(table),
+            pinned: Vec::new(),
+        }),
+        // One row is in every order at once.
+        AccessPath::RowidSeek { .. } => Some(PathOrdering {
+            columns: Vec::new(),
+            pinned: Vec::new(),
+        }),
+        AccessPath::IndexSeek {
+            index_name,
+            equalities,
+            ..
+        } => {
+            let index = table
+                .indexes
+                .iter()
+                .find(|candidate| candidate.name == *index_name)?;
+            let mut columns: Vec<(OrderedBy, bool, Collation)> = Vec::new();
+            let mut pinned: Vec<OrderedBy> = Vec::new();
+            for (at, key_column) in index.columns.iter().enumerate() {
+                // An expression key orders by something no ORDER BY term here
+                // can name, so the walk stops describing itself at that point.
+                let Some(column) = key_column.column else {
+                    break;
+                };
+                let named = named_key(table, OrderedBy::Column(column));
+                let collation = collation_of(&key_column.collation);
+                if at < equalities.len() {
+                    pinned.push(named);
+                    continue;
+                }
+                columns.push((named, key_column.descending, collation));
+            }
+            // Every index entry ends with the row's key, so the walk is a total
+            // order even where the indexed columns tie.
+            columns.push((OrderedBy::Rowid, false, Collation::Binary));
+            Some(PathOrdering { columns, pinned })
+        }
+        _ => None,
+    }
+}
+
+/// Returns the ordering a rowid walk produces.
+/// @param table - the table being walked
+fn rowid_key(table: &TableInfo) -> Vec<(OrderedBy, bool, Collation)> {
+    let _ = table;
+    vec![(OrderedBy::Rowid, false, Collation::Binary)]
+}
+
+/// Returns the one name a key goes by.
+///
+/// `INTEGER PRIMARY KEY` is the rowid under another name, so a statement that
+/// ordered by the declared column and one that ordered by `rowid` asked for the
+/// same walk. Folding the two spellings into one here is what lets the rest of
+/// the comparison be an equality.
+/// @param table - the table the column belongs to
+/// @param named - the key as the statement or the index spelled it
+fn named_key(table: &TableInfo, named: OrderedBy) -> OrderedBy {
+    match named {
+        OrderedBy::Column(column) if table.rowid_alias == Some(column) => OrderedBy::Rowid,
+        other => other,
     }
 }
 
@@ -898,32 +1108,89 @@ fn choose_path(
     if let Some(module) = table.module.clone() {
         return virtual_path(id, position, ids, source, select, module, terms, consumed);
     }
-    let mut trial = consumed.to_vec();
-    if let Some(path) = rowid_path(id, position, ids, table, terms, &mut trial) {
-        consumed.copy_from_slice(&trial);
-        return path;
-    }
-    // The candidate is built against a *copy* of the consumed list, because a
+    // Every candidate is built against a *copy* of the consumed list, because a
     // path that is not chosen must not leave its predicates marked as handled.
     // It did: when a scan beat an index range, the range's own comparison had
     // already been struck off the residual list and the scan then returned
     // every row of the table, silently.
+    let mut candidates: Vec<(AccessPath, Vec<bool>)> = Vec::new();
+    let mut trial = consumed.to_vec();
+    if let Some(path) = rowid_path(id, position, ids, table, terms, &mut trial) {
+        candidates.push((path, trial));
+    }
     let mut trial = consumed.to_vec();
     let needed = select.columns_read(id);
     if let Some(path) = index_path(
         id, position, ids, source, terms, &mut trial, &needed, levers,
     ) {
-        // A scan beats a search that returns most of the table: an index that
-        // has to fetch every row costs a second descent per row on top of the
-        // scan it was meant to avoid.
-        let (index_cost, _) = path_cost(source, &path);
-        let (scan_cost, _) = path_cost(source, &AccessPath::TableScan { root: table.root });
-        if index_cost <= scan_cost {
-            consumed.copy_from_slice(&trial);
-            return path;
+        candidates.push((path, trial));
+    }
+    candidates.push((
+        AccessPath::TableScan { root: table.root },
+        consumed.to_vec(),
+    ));
+
+    // A scan beats a search that returns most of the table: an index that has
+    // to fetch every row costs a second descent per row on top of the scan it
+    // was meant to avoid. And a path that already produces the ORDER BY beats
+    // one that does not by the whole cost of the sort it saves, which is how a
+    // `LIMIT 50` over six hundred thousand rows becomes fifty rows read rather
+    // than six hundred thousand read, sorted and thrown away.
+    let sort = sort_penalty(select, position, source, levers);
+    let mut best: Option<(f64, AccessPath, Vec<bool>)> = None;
+    for (path, trial) in candidates {
+        let (mut cost, _) = path_cost(source, &path);
+        if !levers.has(Levers::ORDERED_WALK)
+            || ordering_provided(select, id, table, &path).is_none()
+        {
+            cost += sort;
+        }
+        if best
+            .as_ref()
+            .is_none_or(|(existing, _, _)| cost < *existing - 1e-9)
+        {
+            best = Some((cost, path, trial));
         }
     }
-    AccessPath::TableScan { root: table.root }
+    match best {
+        Some((_, path, trial)) => {
+            consumed.copy_from_slice(&trial);
+            path
+        }
+        None => AccessPath::TableScan { root: table.root },
+    }
+}
+
+/// Returns what a sort would cost this term, or nothing when no path could
+/// avoid one anyway.
+///
+/// Only the outermost term of a single-term statement can answer an `ORDER BY`
+/// by walking: an inner loop restarts for every outer row, and the order it
+/// produces inside one of those runs is not the order of the result. Charging
+/// the sort anywhere else would tilt a plan towards an index for a saving it
+/// would not make.
+/// @param select - the bound statement
+/// @param position - which visiting position this term is at
+/// @param source - the term being priced
+fn sort_penalty(
+    select: &BoundSelect,
+    position: usize,
+    source: &BoundSource,
+    levers: Levers,
+) -> f64 {
+    let answerable = levers.has(Levers::ORDERED_WALK)
+        && position == 0
+        && select.sources.len() == 1
+        && select.group_by.is_empty()
+        && select.aggregates.is_empty()
+        && select.windows.is_empty()
+        && select.compounds.is_empty()
+        && !select.distinct
+        && !select.order_by.is_empty();
+    if !answerable {
+        return 0.0;
+    }
+    cost::sort_cost(estimated_rows(&source.table))
 }
 
 /// Builds the offer a virtual table's module will be shown.
@@ -1379,36 +1646,28 @@ fn index_candidate(
                 if !is_available(position, ids, &value) || comparison_collation(term) != collation {
                     continue;
                 }
-                match op {
-                    BinaryOp::Greater if low.is_none() => {
-                        low = Some(RangeBound {
-                            kind: BoundKind::Greater,
-                            value,
-                        });
-                        used.push(term_index);
-                    }
-                    BinaryOp::GreaterEqual if low.is_none() => {
-                        low = Some(RangeBound {
-                            kind: BoundKind::GreaterEqual,
-                            value,
-                        });
-                        used.push(term_index);
-                    }
-                    BinaryOp::Less if high.is_none() => {
-                        high = Some(RangeBound {
-                            kind: BoundKind::Less,
-                            value,
-                        });
-                        used.push(term_index);
-                    }
-                    BinaryOp::LessEqual if high.is_none() => {
-                        high = Some(RangeBound {
-                            kind: BoundKind::LessEqual,
-                            value,
-                        });
-                        used.push(term_index);
-                    }
-                    _ => {}
+                // `low` and `high` are the two ends of the *walk*, not of the
+                // value. A column the index holds descending runs the other
+                // way, so `k > 5` is where its walk starts rather than where it
+                // stops - and reading it as a low bound seeks past every row it
+                // was meant to return. It did: `WHERE k > 5` on a descending
+                // index returned nothing at all, silently, with no ORDER BY
+                // anywhere near it.
+                let (kind, at_low) = match (op, key_column.descending) {
+                    (BinaryOp::Greater, false) => (BoundKind::Greater, true),
+                    (BinaryOp::GreaterEqual, false) => (BoundKind::GreaterEqual, true),
+                    (BinaryOp::Less, false) => (BoundKind::Less, false),
+                    (BinaryOp::LessEqual, false) => (BoundKind::LessEqual, false),
+                    (BinaryOp::Greater, true) => (BoundKind::Less, false),
+                    (BinaryOp::GreaterEqual, true) => (BoundKind::LessEqual, false),
+                    (BinaryOp::Less, true) => (BoundKind::Greater, true),
+                    (BinaryOp::LessEqual, true) => (BoundKind::GreaterEqual, true),
+                    _ => continue,
+                };
+                let slot = if at_low { &mut low } else { &mut high };
+                if slot.is_none() {
+                    *slot = Some(RangeBound { kind, value });
+                    used.push(term_index);
                 }
             }
             if low.is_some() || high.is_some() {

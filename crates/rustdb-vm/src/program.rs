@@ -50,11 +50,29 @@ pub enum Opcode {
     SeekGe,
     /// As [`Opcode::SeekGe`], but strictly after.
     SeekGt,
+    /// `p1`: cursor, `p2`: jump when no row is at or before the key,
+    /// `p3`: first key register, `p5`: key column count.
+    ///
+    /// The mirror of [`Opcode::SeekGe`], for a walk that runs backwards. A
+    /// descending `ORDER BY` is the same B-tree read from the other end, and
+    /// without a way to land on the last entry at or before a bound the walk
+    /// would have to start at the end of the table and step back to it.
+    SeekLe,
+    /// As [`Opcode::SeekLe`], but strictly before.
+    SeekLt,
     /// `p1`: cursor, `p2`: jump when the entry is past the key's upper bound,
     /// `p3`: first key register, `p5`: key column count.
     IdxGe,
     /// As [`Opcode::IdxGe`], but strictly after.
     IdxGt,
+    /// `p1`: cursor, `p2`: jump when the entry is past the key's lower bound,
+    /// `p3`: first key register, `p5`: key column count.
+    ///
+    /// The mirror of [`Opcode::IdxGe`]: the stopping test of a backward walk,
+    /// which ends at the *low* end of the range rather than the high one.
+    IdxLe,
+    /// As [`Opcode::IdxLe`], but strictly before.
+    IdxLt,
     /// `p1`: cursor, `p2`: destination register. Read the trailing rowid.
     IdxRowid,
     /// `p1`: cursor, `p2`: column, `p3`: destination register.
@@ -428,8 +446,12 @@ impl Opcode {
                 | Opcode::SeekRowid
                 | Opcode::SeekGe
                 | Opcode::SeekGt
+                | Opcode::SeekLe
+                | Opcode::SeekLt
                 | Opcode::IdxGe
                 | Opcode::IdxGt
+                | Opcode::IdxLe
+                | Opcode::IdxLt
                 | Opcode::If
                 | Opcode::IfNot
                 | Opcode::IfNull
@@ -471,8 +493,12 @@ impl Opcode {
             Opcode::SeekRowid => "SeekRowid",
             Opcode::SeekGe => "SeekGE",
             Opcode::SeekGt => "SeekGT",
+            Opcode::SeekLe => "SeekLE",
+            Opcode::SeekLt => "SeekLT",
             Opcode::IdxGe => "IdxGE",
             Opcode::IdxGt => "IdxGT",
+            Opcode::IdxLe => "IdxLE",
+            Opcode::IdxLt => "IdxLT",
             Opcode::IdxRowid => "IdxRowid",
             Opcode::Column => "Column",
             Opcode::IdxColumn => "IdxColumn",
