@@ -55,7 +55,17 @@ pub use connection::{
     Access, CommitHook, Connection, Hooks, OpenOptions, Outcome, RollbackHook, SessionDatabase,
     UpdateHook,
 };
+// The kind an update hook is told about is part of that hook's signature, so a
+// caller that can name the hook has to be able to name this too.
+pub use rustdb_vm::program::RowChangeKind;
 pub use serialize::{serialize, Deserialized};
+// The file-system contract, so a caller of the facade can supply one. It is
+// re-exported rather than duplicated: a second copy of the trait would be a
+// second thing to keep in step with the pager.
+pub use rustdb_vfs as vfs;
+// The registries an application registers into, for the same reason.
+pub use rustdb_ext::registry as extensions;
+pub use rustdb_value::collation;
 pub use statement::{ColumnMetadata, Statement};
 
 /// The implementation phase that filled this crate in, as named by the TDD.

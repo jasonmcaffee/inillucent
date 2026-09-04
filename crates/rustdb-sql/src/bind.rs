@@ -144,6 +144,18 @@ pub enum BoundExpr {
         /// Which FROM term.
         source: usize,
     },
+    /// A call to a function an application registered.
+    ///
+    /// It carries the name and nothing else: the binder resolved that such a
+    /// function exists and takes this many arguments, and the machine looks up
+    /// what it does when it runs. A closure in a bound tree would make the tree
+    /// depend on who was holding it.
+    External {
+        /// The folded name.
+        name: Vec<u8>,
+        /// The arguments, already bound.
+        arguments: Vec<BoundExpr>,
+    },
     /// One of a module's auxiliary functions, written `f(table, ...)`.
     ///
     /// It reads the module's cursor rather than a column, which is why it
@@ -417,6 +429,7 @@ impl BoundExpr {
             BoundExpr::Raise { .. }
             | BoundExpr::Column { .. }
             | BoundExpr::Rowid { .. }
+            | BoundExpr::External { .. }
             | BoundExpr::VirtualFunction { .. }
             | BoundExpr::Aggregate { .. }
             | BoundExpr::WindowRef { .. }
@@ -719,6 +732,8 @@ pub struct BoundSource {
 pub struct BoundAggregate {
     /// Which aggregate.
     pub func: AggregateFunc,
+    /// The name, when the aggregate is one an application registered.
+    pub external: Option<Vec<u8>>,
     /// Whether `DISTINCT` was written.
     pub distinct: bool,
     /// The arguments, or empty for `count(*)`.
@@ -959,6 +974,14 @@ pub struct Binder<'a> {
     /// as, and the arena holds spans rather than the bytes they cut.
     pub(crate) source: &'a [u8],
     pub(crate) authorizer: &'a dyn Authorizer,
+    /// The functions an application registered on this connection.
+    ///
+    /// Names and arities only - what they do is the machine's business - so a
+    /// bound statement stays a pure function of the SQL, the catalog
+    /// generation, and this list.
+    pub(crate) externals: &'a [function::ExternalFunction],
+    /// The collations an application defined on this connection.
+    pub(crate) collations: &'a [(String, Collation)],
     pub(crate) sources: Vec<BoundSource>,
     /// One entry per query block currently being bound, innermost last, each
     /// holding the ids of the FROM terms that block owns.
@@ -1137,6 +1160,18 @@ impl<'a> Binder<'a> {
         self
     }
 
+    /// Names the functions an application registered on this connection.
+    pub fn with_functions(mut self, functions: &'a [function::ExternalFunction]) -> Binder<'a> {
+        self.externals = functions;
+        self
+    }
+
+    /// Names the collations an application defined on this connection.
+    pub fn with_collations(mut self, collations: &'a [(String, Collation)]) -> Binder<'a> {
+        self.collations = collations;
+        self
+    }
+
     /// Returns a binder over one catalog snapshot and one parse.
     pub fn new(
         catalog: &'a dyn CatalogView,
@@ -1148,6 +1183,8 @@ impl<'a> Binder<'a> {
             ast,
             source: &[],
             authorizer,
+            externals: &[],
+            collations: &[],
             sources: Vec::new(),
             scopes: Vec::new(),
             aggregates: Vec::new(),
@@ -2495,10 +2532,8 @@ impl<'a> Binder<'a> {
                 (
                     index as u16,
                     column.affinity,
-                    Collation::from_name(
-                        core::str::from_utf8(&column.collation).unwrap_or("BINARY"),
-                    )
-                    .unwrap_or(Collation::Binary),
+                    self.collation_named(&column.collation)
+                        .unwrap_or(Collation::Binary),
                 )
             })
             .collect();
@@ -2525,6 +2560,87 @@ impl<'a> Binder<'a> {
             });
         }
         Ok(())
+    }
+
+    /// Returns the collation a name selects.
+    ///
+    /// A connection's own definitions come first, so an application that
+    /// defines `NOCASE` gets its own rather than the built-in - which is what
+    /// SQLite does, and is the only way `sqlite3_create_collation` can be used
+    /// to change how an existing schema compares.
+    fn collation_named(&self, name: &[u8]) -> Option<Collation> {
+        let folded = name.to_ascii_uppercase();
+        if let Some((_, collation)) = self
+            .collations
+            .iter()
+            .find(|(candidate, _)| candidate.as_bytes() == folded)
+        {
+            return Some(*collation);
+        }
+        Collation::from_name(core::str::from_utf8(name).unwrap_or(""))
+    }
+
+    /// Binds a call to a function an application registered, if there is one.
+    ///
+    /// Registered functions are consulted before the built-ins, which is what
+    /// makes `sqlite3_create_function("upper", 1, ...)` replace `upper` rather
+    /// than collide with it - the same order SQLite resolves in.
+    fn bind_external_call(
+        &mut self,
+        folded: &[u8],
+        arguments: &[ExprId],
+        distinct: bool,
+        span: Span,
+    ) -> Result<Option<BoundExpr>, ParseError> {
+        let Some(found) = function::lookup_external(self.externals, folded, arguments.len()) else {
+            return Ok(None);
+        };
+        let aggregate = found.aggregate;
+        if !aggregate {
+            if distinct {
+                return Err(unsupported("DISTINCT on a scalar function", span));
+            }
+            let mut bound = Vec::with_capacity(arguments.len());
+            for argument in arguments {
+                bound.push(self.bind_expr(*argument)?);
+            }
+            return Ok(Some(BoundExpr::External {
+                name: folded.to_vec(),
+                arguments: bound,
+            }));
+        }
+        if !self.allow_aggregates || self.inside_aggregate {
+            return Err(unsupported("misuse of aggregate function", span));
+        }
+        self.inside_aggregate = true;
+        let mut bound = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            bound.push(self.bind_expr(*argument)?);
+        }
+        self.inside_aggregate = false;
+        let collation = bound
+            .first()
+            .and_then(BoundExpr::collation)
+            .unwrap_or(Collation::Binary);
+        let candidate = BoundAggregate {
+            func: AggregateFunc::External,
+            external: Some(folded.to_vec()),
+            distinct,
+            arguments: bound,
+            star: false,
+            collation,
+        };
+        if let Some(slot) = self
+            .aggregates
+            .iter()
+            .position(|existing| existing == &candidate)
+        {
+            return Ok(Some(BoundExpr::Aggregate { slot }));
+        }
+        self.aggregates.push(candidate);
+        Ok(Some(BoundExpr::Aggregate {
+            slot: self.aggregates.len().saturating_sub(1),
+        }))
     }
 
     /// Binds `f(table, ...)` as a module's auxiliary function, if that is what
@@ -2815,9 +2931,9 @@ impl<'a> Binder<'a> {
             return Err(unsupported("unknown column", Span::default()));
         };
         let affinity = info.affinity;
-        let collation =
-            Collation::from_name(core::str::from_utf8(&info.collation).unwrap_or("BINARY"))
-                .unwrap_or(Collation::Binary);
+        let collation = self
+            .collation_named(&info.collation)
+            .unwrap_or(Collation::Binary);
         if bound.table.rowid_alias == Some(column) {
             // An INTEGER PRIMARY KEY column *is* the rowid, and reading it
             // through the record would read a NULL placeholder.
@@ -2919,9 +3035,7 @@ impl<'a> Binder<'a> {
             Expr::Binary { op, left, right } => self.bind_binary(op, left, right),
             Expr::Collate { operand, collation } => {
                 let name = self.ast.text(collation);
-                let Some(collation) =
-                    Collation::from_name(core::str::from_utf8(name).unwrap_or(""))
-                else {
+                let Some(collation) = self.collation_named(name) else {
                     return Err(no_such_collation(name, span));
                 };
                 let bound = self.bind_expr(operand)?;
@@ -3190,9 +3304,9 @@ impl<'a> Binder<'a> {
             let Some(info) = table.column(position) else {
                 return Err(no_such_column(folded, span));
             };
-            let collation =
-                Collation::from_name(core::str::from_utf8(&info.collation).unwrap_or("BINARY"))
-                    .unwrap_or(Collation::Binary);
+            let collation = self
+                .collation_named(&info.collation)
+                .unwrap_or(Collation::Binary);
             return Ok(BoundExpr::Column {
                 source: EXCLUDED_SOURCE,
                 column: position,
@@ -3243,9 +3357,9 @@ impl<'a> Binder<'a> {
             let Some(info) = table.column(position) else {
                 return Err(no_such_column(folded, span));
             };
-            let collation =
-                Collation::from_name(core::str::from_utf8(&info.collation).unwrap_or("BINARY"))
-                    .unwrap_or(Collation::Binary);
+            let collation = self
+                .collation_named(&info.collation)
+                .unwrap_or(Collation::Binary);
             return Ok(BoundExpr::Column {
                 source,
                 column: position,
@@ -3468,6 +3582,11 @@ impl<'a> Binder<'a> {
                 return Ok(bound);
             }
         }
+        if !star {
+            if let Some(bound) = self.bind_external_call(&folded, &list, distinct, span)? {
+                return Ok(bound);
+            }
+        }
         if function::is_aggregate_call(&folded, list.len(), star) {
             let Some(func) =
                 function::lookup_aggregate(&folded).or_else(|| function::minmax_aggregate(&folded))
@@ -3495,6 +3614,7 @@ impl<'a> Binder<'a> {
                 .unwrap_or(Collation::Binary);
             let candidate = BoundAggregate {
                 func,
+                external: None,
                 distinct,
                 arguments: bound,
                 star,

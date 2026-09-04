@@ -58,6 +58,8 @@ pub struct Statement<'connection> {
     body: Body,
     sql: Vec<u8>,
     columns: Vec<ColumnMetadata>,
+    used: usize,
+    parameters: Vec<(Vec<u8>, u32)>,
     rows: Vec<Vec<Value<'static>>>,
     row: usize,
     current: Vec<Value<'static>>,
@@ -111,6 +113,7 @@ impl<'connection> Statement<'connection> {
             connection.limits().clone(),
         );
         machine.set_progress(connection.progress_handler());
+        machine.set_functions(Some(connection.function_table()));
         let access = if compiled.program.readonly {
             Access::Read
         } else {
@@ -123,6 +126,8 @@ impl<'connection> Statement<'connection> {
             body: compiled.body,
             sql: compiled.sql,
             columns,
+            used: compiled.used,
+            parameters: compiled.parameters,
             rows: Vec::new(),
             row: 0,
             current: Vec::new(),
@@ -135,6 +140,31 @@ impl<'connection> Statement<'connection> {
     /// Returns the statement's result columns.
     pub fn columns(&self) -> &[ColumnMetadata] {
         &self.columns
+    }
+
+    /// Returns how many bytes of the prepared text this statement occupied.
+    ///
+    /// It is where the *next* statement starts as a C caller counts: the
+    /// semicolon belongs to this statement and the whitespace after it does
+    /// not.
+    pub fn sql_used(&self) -> usize {
+        self.used
+    }
+
+    /// Returns the highest parameter index the statement uses.
+    ///
+    /// Named and numbered parameters share one space, so this is the count a
+    /// caller binds against whichever way the statement was written.
+    pub fn parameter_count(&self) -> u32 {
+        self.program.parameter_count
+    }
+
+    /// Returns each named parameter and the index it was assigned.
+    ///
+    /// The name includes its prefix - `:id`, `@id`, `$id` - because that is
+    /// what the statement wrote and what a caller looking one up will pass.
+    pub fn parameter_names(&self) -> &[(Vec<u8>, u32)] {
+        &self.parameters
     }
 
     /// Returns how many columns the statement returns.
@@ -548,6 +578,8 @@ fn explain(
         body: Body::Program,
         sql: statement_sql,
         consumed,
+        used: statement_extent(sql, parsed.span.end as usize, consumed),
+        parameters: parsed.parameters.names.clone(),
     })
 }
 
@@ -570,6 +602,27 @@ struct Compiled {
     body: Body,
     sql: Vec<u8>,
     consumed: usize,
+    /// How many input bytes the statement occupies, its semicolon included.
+    used: usize,
+    /// Named parameters and the index each was assigned.
+    parameters: Vec<(Vec<u8>, u32)>,
+}
+
+/// Returns how many bytes of `sql` one statement occupies.
+///
+/// The span the parser reports stops before the semicolon; this walks past any
+/// whitespace after it and takes the semicolon too, which is where a C caller's
+/// `pzTail` is left and therefore where the statement text has to end.
+fn statement_extent(sql: &[u8], span_end: usize, consumed: usize) -> usize {
+    let mut at = span_end.min(sql.len());
+    while at < consumed.min(sql.len()) {
+        match sql.get(at) {
+            Some(byte) if byte.is_ascii_whitespace() => at = at.saturating_add(1),
+            Some(b';') => return at.saturating_add(1),
+            _ => return span_end.min(sql.len()),
+        }
+    }
+    span_end.min(sql.len())
 }
 
 impl Clone for Body {
@@ -620,8 +673,12 @@ fn compile_sql(
     let limits = connection.limits().clone();
     let parsed = parse_next_statement(sql, 0, &limits)?;
     let catalog = connection.catalog()?;
+    let functions = connection.external_functions();
+    let collations = connection.collations();
     let mut binder = Binder::new(catalog.as_ref(), &parsed.ast, authorizer)
         .with_source(sql)
+        .with_functions(&functions)
+        .with_collations(&collations)
         .with_foreign_keys(connection.foreign_keys(), connection.defer_foreign_keys());
     if let rustdb_sql::ast::Statement::Explain { query_plan, inner } = &parsed.statement {
         return explain(
@@ -701,6 +758,8 @@ fn compile_sql(
         body,
         sql: statement_sql,
         consumed: parsed.consumed,
+        used: statement_extent(sql, parsed.span.end as usize, parsed.consumed),
+        parameters: parsed.parameters.names.clone(),
     })
 }
 

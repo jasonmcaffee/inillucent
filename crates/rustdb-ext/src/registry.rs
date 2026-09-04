@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use rustdb_base::{DbError, DbResult};
+use rustdb_value::Value;
 
 use crate::vtab::{
     fts5::Fts5Module, json_each::JsonWalkModule, rtree::RTreeModule, series::SeriesModule, Module,
@@ -104,11 +105,66 @@ pub enum CallSite {
     Schema,
 }
 
+/// What an application-defined scalar function does.
+pub type ScalarBody = Arc<dyn Fn(&[Value<'static>]) -> DbResult<Value<'static>> + Send + Sync>;
+
+/// What an application-defined aggregate does with a whole group.
+///
+/// It is handed every row the group collected, in order, and returns the one
+/// value the group reduces to. Rows rather than a running accumulator is a
+/// deliberate choice: an implementation written in C keeps its state in memory
+/// this engine must not look inside, and driving `xStep` and `xFinal` at the
+/// end of the group is how that state stays entirely on the other side of the
+/// boundary.
+pub type AggregateBody =
+    Arc<dyn Fn(&[Vec<Value<'static>>]) -> DbResult<Value<'static>> + Send + Sync>;
+
+/// What a registered function is.
+#[derive(Clone)]
+pub enum UserBody {
+    /// One value per row.
+    Scalar(ScalarBody),
+    /// One value per group.
+    Aggregate(AggregateBody),
+}
+
+/// One function an application registered.
+#[derive(Clone)]
+pub struct UserFunction {
+    /// The name as registered, in its original case.
+    pub name: String,
+    /// How many arguments it takes, or -1 for any number.
+    pub arity: i32,
+    /// What it promises about itself.
+    pub flags: FunctionFlags,
+    /// What it does.
+    pub body: UserBody,
+}
+
+impl UserFunction {
+    /// Returns whether the function reduces a group rather than a row.
+    pub fn is_aggregate(&self) -> bool {
+        matches!(self.body, UserBody::Aggregate(_))
+    }
+
+    /// Returns whether the function accepts a call with this many arguments.
+    pub fn accepts(&self, argc: usize) -> bool {
+        self.arity < 0 || self.arity as usize == argc
+    }
+}
+
 /// Everything a connection can reach by name.
 #[derive(Clone, Default)]
 pub struct Registry {
     modules: BTreeMap<String, Arc<dyn Module>>,
     function_flags: BTreeMap<String, FunctionFlags>,
+    /// Application functions, keyed by folded name and then by arity.
+    ///
+    /// Two arities of one name are two functions - `overlay(a,b,c)` and
+    /// `overlay(a,b,c,d)` are separate registrations in SQLite too - and the
+    /// any-arity form is kept under -1 and consulted when no exact match is
+    /// there, which is the order SQLite resolves in.
+    functions: BTreeMap<(String, i32), Arc<UserFunction>>,
     /// The extensions an application has explicitly allowed to be loaded.
     ///
     /// An allow-list rather than a search path: "load whatever is at this path"
@@ -140,6 +196,39 @@ impl Registry {
         registry.register_module(Arc::new(RTreeModule::integer()));
         registry.register_module(Arc::new(Fts5Module));
         registry
+    }
+
+    /// Registers a function, replacing one of the same name and arity.
+    pub fn register_function(&mut self, function: UserFunction) {
+        let key = (function.name.to_ascii_lowercase(), function.arity);
+        self.function_flags.insert(key.0.clone(), function.flags);
+        self.functions.insert(key, Arc::new(function));
+    }
+
+    /// Removes a function by name and arity, reporting whether one went.
+    pub fn unregister_function(&mut self, name: &str, arity: i32) -> bool {
+        self.functions
+            .remove(&(name.to_ascii_lowercase(), arity))
+            .is_some()
+    }
+
+    /// Looks up a function by name and how many arguments a call passes.
+    ///
+    /// An exact arity wins over the any-arity registration, which is how an
+    /// application can define both a fast two-argument form and a general one.
+    pub fn function(&self, name: &[u8], argc: usize) -> Option<Arc<UserFunction>> {
+        let folded = String::from_utf8_lossy(name).to_ascii_lowercase();
+        if let Ok(arity) = i32::try_from(argc) {
+            if let Some(found) = self.functions.get(&(folded.clone(), arity)) {
+                return Some(Arc::clone(found));
+            }
+        }
+        self.functions.get(&(folded, -1)).map(Arc::clone)
+    }
+
+    /// Returns every registered function, for the binder and `function_list`.
+    pub fn functions(&self) -> Vec<Arc<UserFunction>> {
+        self.functions.values().map(Arc::clone).collect()
     }
 
     /// Registers one module, replacing any module of the same name.

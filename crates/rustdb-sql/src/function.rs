@@ -116,6 +116,54 @@ pub enum AggregateFunc {
     JsonGroupObject,
     /// `jsonb_group_object(label, x)`
     JsonbGroupObject,
+    /// An aggregate an application registered, named beside the call.
+    ///
+    /// The name is not in here because this enum is `Copy` and travels through
+    /// the program's operands; it rides in `AggregateCall` instead.
+    External,
+}
+
+/// A function an application registered, as the binder needs to see it.
+///
+/// Only what resolution needs: a name, how many arguments it takes, and whether
+/// it reduces a group. What it does is the machine's business.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternalFunction {
+    /// The folded name.
+    pub name: Vec<u8>,
+    /// How many arguments it takes, or -1 for any number.
+    pub arity: i32,
+    /// Whether it reduces a group rather than a row.
+    pub aggregate: bool,
+}
+
+impl ExternalFunction {
+    /// Returns whether this registration answers a call with this many
+    /// arguments.
+    pub fn accepts(&self, argc: usize) -> bool {
+        self.arity < 0 || self.arity as usize == argc
+    }
+}
+
+/// Returns the registration that answers a call, preferring an exact arity.
+///
+/// SQLite resolves the same way: a function registered for exactly this many
+/// arguments wins over one registered for any number, so an application can
+/// define both a fast two-argument form and a general one.
+pub fn lookup_external<'a>(
+    functions: &'a [ExternalFunction],
+    name: &[u8],
+    argc: usize,
+) -> Option<&'a ExternalFunction> {
+    let folded = name.to_ascii_lowercase();
+    functions
+        .iter()
+        .find(|function| function.name == folded && function.arity as usize == argc)
+        .or_else(|| {
+            functions
+                .iter()
+                .find(|function| function.name == folded && function.arity < 0)
+        })
 }
 
 /// A date or time built-in.
@@ -620,6 +668,9 @@ pub fn aggregate_arity_ok(func: AggregateFunc, count: usize, star: bool) -> bool
         AggregateFunc::GroupConcat => !star && (count == 1 || count == 2),
         AggregateFunc::JsonGroupArray | AggregateFunc::JsonbGroupArray => !star && count == 1,
         AggregateFunc::JsonGroupObject | AggregateFunc::JsonbGroupObject => !star && count == 2,
+        // An application's aggregate declared its own arity, and the binder
+        // checked it against the registration before getting here.
+        AggregateFunc::External => !star,
     }
 }
 
