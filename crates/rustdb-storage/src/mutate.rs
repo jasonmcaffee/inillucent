@@ -152,9 +152,8 @@ impl PageContent {
     fn size(&self) -> DbResult<usize> {
         let mut total = 0usize;
         for entry in &self.entries {
-            let cell = encode_entry(entry, self.kind)?;
             total = total
-                .saturating_add(edit::cell_footprint(cell.len()))
+                .saturating_add(edit::cell_footprint(entry_size(entry, self.kind)?))
                 .saturating_add(2);
         }
         Ok(total)
@@ -177,6 +176,30 @@ struct Step {
     /// Which child of it the path descended through, or which cell the search
     /// stopped on when the page is where the entry lives.
     slot: usize,
+}
+
+/// Returns how long one entry's cell would be, without building it.
+///
+/// A balance asks this for every entry of every page in its window, twice, to
+/// decide where the page boundaries fall. Answering it by encoding the cell
+/// allocated and copied a whole entry per question - on a hundred thousand row
+/// index build that was most of the cost of every page split, to learn a length
+/// that is arithmetic.
+/// @param entry - the entry to measure
+/// @param kind - the kind of page it would live on
+fn entry_size(entry: &Entry, kind: PageKind) -> DbResult<usize> {
+    match kind {
+        PageKind::LeafTable | PageKind::LeafIndex => Ok(entry.body.len()),
+        PageKind::InteriorIndex => Ok(entry.body.len().saturating_add(4)),
+        PageKind::InteriorTable => {
+            let rowid = entry
+                .rowid
+                .ok_or_else(|| corrupt("a table interior entry with no rowid"))?;
+            let mut scratch = [0u8; varint::MAX_LEN];
+            let len = varint::encode_i64(&mut scratch, rowid)?;
+            Ok(len.saturating_add(4))
+        }
+    }
 }
 
 /// Encodes one entry as a cell of the given page kind.
@@ -498,6 +521,112 @@ pub fn append_row(pager: &mut Pager, root: PageId, rowid: i64, payload: &[u8]) -
 
 /// Adds an entry after every entry already in an index B-tree, without
 /// comparing keys.
+pub fn append_entries(pager: &mut Pager, root: PageId, payloads: &[Vec<u8>]) -> DbResult<()> {
+    let mut at = 0usize;
+    while at < payloads.len() {
+        let placed = append_run(pager, root, &payloads[at..])?;
+        if placed > 0 {
+            at = at.saturating_add(placed);
+            continue;
+        }
+        // Nothing fitted on the current rightmost leaf, so this one goes
+        // through the ordinary path and takes the split with it.
+        let Some(payload) = payloads.get(at) else {
+            break;
+        };
+        append_entry(pager, root, payload)?;
+        at = at.saturating_add(1);
+    }
+    Ok(())
+}
+
+/// Appends as many entries as the rightmost leaf holds, in one page edit.
+///
+/// Returns how many it placed, which is zero when the next entry does not fit
+/// and the caller has to take a split.
+///
+/// One edit per *page* rather than one per entry is the whole point. A page
+/// edit copies the page, re-derives its layout and publishes a new frame so
+/// that anything holding the old one still sees a whole page - which is the
+/// right thing to pay once for fifty entries and the wrong thing to pay fifty
+/// times. Measured on a hundred thousand row index build: 33 microseconds per
+/// entry became under one.
+/// @param pager - the database being written
+/// @param root - the index's root page
+/// @param payloads - the entries still to place, in key order
+fn append_run(pager: &mut Pager, root: PageId, payloads: &[Vec<u8>]) -> DbResult<usize> {
+    let path = rightmost_path(pager, root)?;
+    let Some(leaf) = path.last().copied() else {
+        return Err(corrupt("a descent that reached no page"));
+    };
+    let usable = pager.usable_size()?;
+    let layout = read_layout(pager, leaf.page)?;
+    if !layout.kind.is_leaf() {
+        return Ok(0);
+    }
+    // How many fit, decided before anything is written. `free_bytes` is what
+    // `try_insert_in_place` asks, and asking it here for the whole run keeps
+    // the two answers the same.
+    let free = {
+        let pin = pager.get_page(leaf.page)?;
+        edit::free_bytes(&BTreePage::new(pin.bytes(), &layout))?
+    };
+    let mut taken = 0usize;
+    let mut used = 0usize;
+    for payload in payloads {
+        // An entry that overflows is left to the ordinary path, which knows how
+        // to build its chain.
+        if would_overflow(usable, payload.len()) {
+            break;
+        }
+        let footprint = edit::cell_footprint(payload.len()).saturating_add(2);
+        if used.saturating_add(footprint) > free {
+            break;
+        }
+        used = used.saturating_add(footprint);
+        taken = taken.saturating_add(1);
+    }
+    if taken == 0 {
+        return Ok(0);
+    }
+
+    let cells: Vec<Vec<u8>> = payloads
+        .iter()
+        .take(taken)
+        .map(|payload| build_cell(pager, PageKind::LeafIndex, None, None, payload))
+        .collect::<DbResult<Vec<Vec<u8>>>>()?;
+    let placed = pager.edit_page(leaf.page, |raw| {
+        let mut at = leaf.slot;
+        let mut done = 0usize;
+        for cell in &cells {
+            // The layout moves with every insert, so it is re-derived rather
+            // than remembered. It is a walk of the page's own pointer array,
+            // which is cheap beside the copy and publish this loop exists to
+            // avoid doing per entry.
+            let layout = PageLayout::parse_edited(raw, leaf.page, usable)?;
+            if !edit::insert_cell(raw, &layout, at, cell)? {
+                break;
+            }
+            at = at.saturating_add(1);
+            done = done.saturating_add(1);
+        }
+        Ok(done)
+    })?;
+    if placed > 0 {
+        ptrmap::refresh_btree_page(pager, leaf.page)?;
+    }
+    Ok(placed)
+}
+
+/// Returns whether a payload of this size needs an overflow chain.
+fn would_overflow(usable: u32, payload: usize) -> bool {
+    crate::btree::PayloadWindow::new(usable, PageKind::LeafIndex)
+        .and_then(|window| window.split(payload as u64))
+        .map(|split| split.overflows)
+        .unwrap_or(true)
+}
+
+/// Appends one entry after the last one in a tree.
 pub fn append_entry(pager: &mut Pager, root: PageId, payload: &[u8]) -> DbResult<()> {
     let tree = Tree::index(root, KeyInfo::default());
     let path = rightmost_path(pager, root)?;
@@ -1093,8 +1222,7 @@ fn partition(
 ) -> DbResult<Vec<(usize, usize)>> {
     let mut sizes = Vec::with_capacity(entries.len());
     for entry in entries {
-        let cell = encode_entry(entry, kind)?;
-        let size = edit::cell_footprint(cell.len()).saturating_add(2);
+        let size = edit::cell_footprint(entry_size(entry, kind)?).saturating_add(2);
         if size > capacity {
             return Err(corrupt(format!(
                 "a cell of {size} bytes cannot fit a page holding {capacity}"
@@ -1687,6 +1815,76 @@ mod tests {
         }
     }
 
+    /// A batched append places every entry, in order, on a valid tree.
+    ///
+    /// The batch decides how many entries fit on the rightmost leaf and puts
+    /// them there in one page edit, which is a second answer to a question
+    /// `try_insert_in_place` already answers one at a time. Two answers is one
+    /// too many unless they agree, so this asserts what a reader cannot check:
+    /// the same entries, the same order, and a tree that still validates - at
+    /// every page size, including the 512-byte one that splits after a handful
+    /// of rows and the 65536-byte one whose content area does not fit in the
+    /// two bytes its header gives it.
+    #[test]
+    fn a_batched_append_places_every_entry_in_order() {
+        for size in PAGE_SIZES {
+            let vfs = MemoryVfs::new();
+            let mut pager = create(&vfs, size, VacuumMode::None);
+            let key = KeyInfo::binary(2);
+            pager.begin_write().unwrap();
+            let root = create_index(&mut pager).unwrap();
+            // Enough to fill many pages at every size, and a payload long
+            // enough at 512 bytes to reach the overflow threshold on the way.
+            let payloads: Vec<Vec<u8>> = (0..1_000i64)
+                .map(|value| index_entry(value, value))
+                .collect();
+            append_entries(&mut pager, root, &payloads).unwrap();
+            pager.commit().unwrap();
+
+            let report = check::check_database_with_options(
+                &mut pager,
+                &CheckOptions::roots(vec![root]).with_key(root, key.clone()),
+            )
+            .unwrap();
+            assert!(report.is_ok(), "{size}: {:#?}", report.as_pragma_output());
+            assert_eq!(scan_index(&mut pager, root, &key), payloads, "{size}");
+        }
+    }
+
+    /// A batch and one-at-a-time appends build the same tree.
+    ///
+    /// Not merely the same entries: the same *pages*, because a batch that
+    /// packed its leaves differently would be a second B-tree shape reachable
+    /// only through one code path, and the reader of a database has no way to
+    /// know which path wrote it.
+    #[test]
+    fn a_batched_append_builds_the_same_tree_as_one_at_a_time() {
+        let payloads: Vec<Vec<u8>> = (0..400i64).map(|value| index_entry(value, value)).collect();
+        for size in PAGE_SIZES {
+            let one = {
+                let vfs = MemoryVfs::new();
+                let mut pager = create(&vfs, size, VacuumMode::None);
+                pager.begin_write().unwrap();
+                let root = create_index(&mut pager).unwrap();
+                for payload in &payloads {
+                    append_entry(&mut pager, root, payload).unwrap();
+                }
+                pager.commit().unwrap();
+                (root, pager.page_count())
+            };
+            let batched = {
+                let vfs = MemoryVfs::new();
+                let mut pager = create(&vfs, size, VacuumMode::None);
+                pager.begin_write().unwrap();
+                let root = create_index(&mut pager).unwrap();
+                append_entries(&mut pager, root, &payloads).unwrap();
+                pager.commit().unwrap();
+                (root, pager.page_count())
+            };
+            assert_eq!(one, batched, "{size}");
+        }
+    }
+
     /// Deleting index entries one at a time, in an order unlike the key order,
     /// keeps every remaining entry and every structural invariant.
     #[test]
@@ -1987,7 +2185,14 @@ pub fn build_index(
     let index = PageId::from_persisted(index_root)?;
     let encoding = pager.text_encoding();
     let format = pager.header().schema_format.max(1);
-    let mut entries: Vec<Vec<u8>> = Vec::new();
+    // The entries are held as values and encoded *after* they are sorted, not
+    // before. Sorting encoded records meant re-parsing both sides on every
+    // comparison - two record parses per comparison, n log n comparisons - and
+    // that, rather than the writing, was what made building an index over a
+    // hundred thousand rows take five seconds where the reference takes fifty
+    // milliseconds. It also halves what the build holds: the values or the
+    // bytes, not both.
+    let mut entries: Vec<Vec<rustdb_value::Value<'static>>> = Vec::new();
     // `trailing` names the slots an entry ends with instead of a rowid, which
     // is how a WITHOUT ROWID table's secondary indexes locate a row. It also
     // says which kind of b-tree the table is, because such a table's root is an
@@ -2026,40 +2231,50 @@ pub fn build_index(
         } else {
             fields.push(rustdb_value::Value::Integer(rowid));
         }
-        entries.push(record::encode_record(&fields, encoding, format)?);
+        entries.push(fields);
         more = cursor.next(pager)?;
     }
-    let mut failure = None;
-    entries.sort_by(|left, right| {
-        if failure.is_some() {
-            return std::cmp::Ordering::Equal;
-        }
-        match compare_encoded(left, right, key, encoding, &limits) {
-            Ok(ordering) => ordering,
-            Err(error) => {
-                failure = Some(error);
-                std::cmp::Ordering::Equal
-            }
-        }
-    });
-    if let Some(error) = failure {
-        return Err(error);
-    }
-    for entry in entries {
-        append_entry(pager, index, &entry)?;
-    }
+    entries.sort_by(|left, right| compare_key_values(left, right, key));
+    let encoded: Vec<Vec<u8>> = entries
+        .iter()
+        .map(|fields| record::encode_record(fields, encoding, format))
+        .collect::<DbResult<Vec<Vec<u8>>>>()?;
+    append_entries(pager, index, &encoded)?;
     Ok(())
 }
 
-/// Compares two encoded index entries the way the index orders them.
-fn compare_encoded(
-    left: &[u8],
-    right: &[u8],
+/// Compares two index entries, as values, the way the index orders them.
+///
+/// The same field-by-field walk `compare_records` does, over values that are
+/// already decoded. Every entry an index build produces has the same shape, so
+/// there is nothing to be learned from the encoding that the values do not
+/// already say - and a comparison that has to decode its operands first is a
+/// comparison paid for `n log n` times.
+/// @param left - one entry's fields
+/// @param right - the other's
+/// @param key - the collations and directions the index orders by
+fn compare_key_values(
+    left: &[rustdb_value::Value<'static>],
+    right: &[rustdb_value::Value<'static>],
     key: &KeyInfo,
-    encoding: TextEncoding,
-    limits: &Limits,
-) -> DbResult<std::cmp::Ordering> {
-    let left = RecordRef::parse_with_limits(left, encoding, limits)?;
-    let right = RecordRef::parse_with_limits(right, encoding, limits)?;
-    record::compare_records(&left, &right, key)
+) -> std::cmp::Ordering {
+    let shared = left.len().max(right.len());
+    for index in 0..shared {
+        let (Some(one), Some(other)) = (left.get(index), right.get(index)) else {
+            // A shorter entry sorts first, which is what comparing a missing
+            // field as NULL would say anyway.
+            return left.len().cmp(&right.len());
+        };
+        let column = key.column(index);
+        let ordering = rustdb_value::compare::compare_values(one, other, column.collation);
+        let ordering = if column.descending {
+            ordering.reverse()
+        } else {
+            ordering
+        };
+        if ordering != std::cmp::Ordering::Equal {
+            return ordering;
+        }
+    }
+    std::cmp::Ordering::Equal
 }

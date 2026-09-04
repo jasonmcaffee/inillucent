@@ -1067,7 +1067,13 @@ source = "https://sqlite.org/lang_createindex.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::an_index_is_backfilled_and_maintained", "rustdb-compat::index_maintenance_matches_sqlite", "rustdb-compat::sqlite_reads_what_rustdb_wrote"]
+tests = [
+  "rustdb-compat::an_index_is_backfilled_and_maintained",
+  "rustdb-compat::index_maintenance_matches_sqlite",
+  "rustdb-compat::sqlite_reads_what_rustdb_wrote",
+  "rustdb-storage::mutate::tests::a_batched_append_places_every_entry_in_order",
+  "rustdb-storage::mutate::tests::a_batched_append_builds_the_same_tree_as_one_at_a_time",
+]
 
 [[capability]]
 id = "sql.conflict-resolution"

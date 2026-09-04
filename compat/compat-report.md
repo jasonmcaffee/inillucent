@@ -149,7 +149,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `sql.parser.keyword-set` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
 | `sql.select.basic` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
 | `sql.select.where` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
-| `sql.select.order-by` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `sql.select.order-by` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
 | `sql.select.limit-offset` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `sql.expr.operators` | pass | pass | linux-x86_64, windows-x86_64 | 7 |
 | `sql.expr.case` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
@@ -163,7 +163,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `sql.delete` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
 | `sql.create-table` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `sql.drop-table` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
-| `sql.create-index` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
+| `sql.create-index` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
 | `sql.conflict-resolution` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
 | `txn.begin-commit-rollback` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
 | `txn.rollback-journal` | pass | pass | linux-x86_64, windows-x86_64 | 7 |
@@ -245,7 +245,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `search.transactional-visibility` | pass | pass | linux-x86_64, windows-x86_64 | 13 |
 | `search.legacy-migration` | pass | pass | linux-x86_64, windows-x86_64 | 11 |
 | `perf.qualified-measurement` | pass | pass | linux-x86_64, windows-x86_64 | 11 |
-| `perf.optimization-arms` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `perf.optimization-arms` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
 | `perf.regression-tracking` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
 | `optional.session-extension` | missing | missing | - | 0 |
 | `optional.preupdate-hook` | missing | missing | - | 0 |
