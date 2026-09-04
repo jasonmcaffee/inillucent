@@ -88,8 +88,12 @@ impl<'connection> Statement<'connection> {
         authorizer: &dyn Authorizer,
     ) -> DbResult<(Statement<'connection>, usize)> {
         let compiled = compile_sql(connection, sql, authorizer)?;
-        let statement = Statement::from_compiled(connection, compiled.clone());
-        Ok((statement, compiled.consumed))
+        // The consumed length is read off before the statement takes ownership,
+        // because cloning a whole compiled program to keep one integer is a
+        // deep copy of every instruction it holds.
+        let consumed = compiled.consumed;
+        let statement = Statement::from_compiled(connection, compiled);
+        Ok((statement, consumed))
     }
 
     /// Builds a statement around a compiled program or directive.
