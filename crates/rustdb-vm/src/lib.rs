@@ -62,6 +62,7 @@ pub mod aggregate;
 pub mod builtin;
 pub mod compile;
 pub mod compile_dml;
+mod compile_vtab;
 pub mod datetime;
 pub mod ephemeral;
 pub mod eval;

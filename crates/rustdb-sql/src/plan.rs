@@ -826,6 +826,45 @@ fn order_offer(id: usize, position: usize, select: &BoundSelect) -> Vec<crate::v
     offer
 }
 
+/// Builds the offer a module is shown for one term and one predicate list.
+///
+/// The write paths use it too: a `DELETE FROM t WHERE rowid = ?` on a virtual
+/// table has to be able to offer that equality, or every delete is a scan.
+pub fn virtual_offer(id: usize, table: &TableInfo, terms: &[BoundExpr]) -> Vec<VirtualConstraint> {
+    let mut offer = Vec::new();
+    for term in terms {
+        let Some((column, op, value)) = virtual_constraint(id, table, term) else {
+            continue;
+        };
+        offer.push(VirtualConstraint {
+            spec: crate::vtab::ConstraintSpec {
+                column,
+                op,
+                // A write scans one term and nothing else, so every value it
+                // could use is available before the loop starts.
+                usable: value.is_constant() || !mentions(&value, id),
+            },
+            value,
+            predicate: term.clone(),
+        });
+    }
+    offer
+}
+
+/// Returns whether an expression reads one FROM term.
+fn mentions(expr: &BoundExpr, id: usize) -> bool {
+    let mut used = Vec::new();
+    expr.sources_used(&mut used);
+    used.contains(&id)
+}
+
+/// Splits a predicate into the conjunction the offer is built from.
+pub fn conjunction(filter: &BoundExpr) -> Vec<BoundExpr> {
+    let mut terms = Vec::new();
+    split_conjunction(filter, &mut terms);
+    terms
+}
+
 /// Returns the column, operator and value when a term constrains this term.
 fn virtual_constraint(
     id: usize,

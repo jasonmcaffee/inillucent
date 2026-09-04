@@ -745,7 +745,19 @@ impl<'a> Binder<'a> {
                 self.record_write_dependency(table.database);
                 return Ok(expanded);
             }
-            TableKind::Virtual => return Err(unsupported("writing to a virtual table", span)),
+            TableKind::Virtual => {
+                // A module decides whether it can be written; a module that
+                // cannot refuses the call rather than the statement, because
+                // "this table is read-only" is the module's fact and not the
+                // binder's. What the binder still checks is that the table has
+                // a module at all - a virtual table this build has no module
+                // for has no columns either, and nothing can be written to it.
+                if table.columns.is_empty() {
+                    return Err(unsupported("that virtual table's module", span));
+                }
+                self.record_write_dependency(table.database);
+                return Ok(table);
+            }
             TableKind::Subquery => return Err(unsupported("writing to a subquery", span)),
             TableKind::Table => {}
         }

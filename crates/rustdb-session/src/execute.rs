@@ -200,6 +200,10 @@ fn create_virtual_table(
         )
     })??;
     connection.with_database(*database, |pager| ddl::bump_schema_cookie(pager))??;
+    // The schema is re-read before the module is connected, because the module
+    // is about to be handed the roots of its shadow tables and those roots are
+    // in the schema this statement has just written.
+    connection.refresh_catalog()?;
     // The module is connected with `creating` set once the shadow tables and
     // the row are both there, so that anything it writes lands in a schema that
     // already describes it.

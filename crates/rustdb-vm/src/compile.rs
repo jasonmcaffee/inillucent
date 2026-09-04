@@ -194,6 +194,25 @@ impl Compiler {
         self
     }
 
+    /// Puts one offer to a module directly, outside a plan.
+    ///
+    /// The write paths need this: a `DELETE FROM t WHERE ...` scans the term
+    /// without ever building a `PhysicalPlan`, and it still has to ask the
+    /// module which of the predicates it can use.
+    pub(crate) fn ask_module(
+        &mut self,
+        reference: &crate::program::VirtualRef,
+        query: &mut rustdb_sql::vtab::IndexQuery,
+    ) -> DbResult<()> {
+        let mut planner = match self.virtual_planner.take() {
+            Some(planner) => planner,
+            None => Box::new(NoVirtualPlanner) as Box<dyn VirtualPlanner>,
+        };
+        let outcome = planner.best_index(reference, query);
+        self.virtual_planner = Some(planner);
+        outcome
+    }
+
     /// Puts every virtual scan in a plan to its module, and records the answer.
     ///
     /// A plan with no virtual scan in it never reaches the planner at all, so a
@@ -259,6 +278,29 @@ impl Compiler {
             .copied()
             .flatten()
             .map_or(source as i32, |cursors| cursors.table as i32)
+    }
+
+    /// Allocates one cursor.
+    pub(crate) fn take_cursor(&mut self) -> u32 {
+        let cursor = self.cursors;
+        self.cursors = self.cursors.saturating_add(1);
+        cursor
+    }
+
+    /// Records that a FROM term's rows come from a module.
+    pub(crate) fn register_virtual_source(&mut self, id: usize, cursor: u32) {
+        self.register_source(
+            id,
+            SourceCursors {
+                table: cursor,
+                index: None,
+                ephemeral: false,
+                index_table: false,
+                virtual_table: true,
+                built: None,
+                matched: None,
+            },
+        );
     }
 
     /// Allocates one ephemeral row store.

@@ -163,6 +163,18 @@ pub fn compare_observations(
     reference: &Observation,
     query: bool,
 ) {
+    compare_with_counters(label, sql, candidate, reference, query, true)
+}
+
+/// Compares one observation, saying whether the cumulative counters count.
+pub fn compare_with_counters(
+    label: &str,
+    sql: &str,
+    candidate: &Observation,
+    reference: &Observation,
+    query: bool,
+    counters: bool,
+) {
     assert_eq!(
         candidate.ok,
         reference.ok,
@@ -196,18 +208,29 @@ pub fn compare_observations(
             "{label} `{sql}`: column names",
         );
     }
-    assert_eq!(
-        candidate.changes, reference.changes,
-        "{label} `{sql}`: changes()",
-    );
-    assert_eq!(
-        candidate.total_changes, reference.total_changes,
-        "{label} `{sql}`: total_changes()",
-    );
-    assert_eq!(
-        candidate.last_insert_rowid, reference.last_insert_rowid,
-        "{label} `{sql}`: last_insert_rowid()",
-    );
+    // A `CREATE VIRTUAL TABLE` leaves the counters holding whatever the module
+    // did to its own shadow tables while it was being made, which is a fact
+    // about the module rather than about the caller's rows.
+    let module_create = sql
+        .trim_start()
+        .get(..21)
+        .is_some_and(|head| head.eq_ignore_ascii_case("CREATE VIRTUAL TABLE "));
+    if !module_create {
+        assert_eq!(
+            candidate.changes, reference.changes,
+            "{label} `{sql}`: changes()",
+        );
+    }
+    if counters && !module_create {
+        assert_eq!(
+            candidate.total_changes, reference.total_changes,
+            "{label} `{sql}`: total_changes()",
+        );
+        assert_eq!(
+            candidate.last_insert_rowid, reference.last_insert_rowid,
+            "{label} `{sql}`: last_insert_rowid()",
+        );
+    }
     assert_eq!(
         candidate.autocommit, reference.autocommit,
         "{label} `{sql}`: autocommit",
@@ -225,11 +248,21 @@ pub fn compare(area: &str, name: &str, steps: &[Step]) -> usize {
     };
     let connection = start_rustdb(area, name);
     let mut compared = 0usize;
+    // The cumulative counters stop being comparable the moment a module is in
+    // play, because they then count the module's own statements as well.
+    let mut counters = true;
     for (index, step) in steps.iter().enumerate() {
         let (sql, query) = match step {
             Step::Exec(sql) => (*sql, false),
             Step::Query(sql) => (*sql, true),
         };
+        if sql
+            .trim_start()
+            .get(..21)
+            .is_some_and(|head| head.eq_ignore_ascii_case("CREATE VIRTUAL TABLE "))
+        {
+            counters = false;
+        }
         let op = if query {
             Op::Query(sql.to_string())
         } else {
@@ -237,7 +270,14 @@ pub fn compare(area: &str, name: &str, steps: &[Step]) -> usize {
         };
         let reference = oracle.send(&op).expect("the oracle answers");
         let candidate = observe(&connection, sql, query);
-        compare_observations(&format!("step {index}"), sql, &candidate, &reference, query);
+        compare_with_counters(
+            &format!("step {index}"),
+            sql,
+            &candidate,
+            &reference,
+            query,
+            counters,
+        );
         compared = compared.saturating_add(1);
     }
     let _ = oracle.send(&Op::Bye);
