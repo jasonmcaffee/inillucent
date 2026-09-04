@@ -226,3 +226,80 @@ fn the_tokenizer_folds_case_and_splits_on_punctuation() {
         ],
     );
 }
+
+/// The special commands are writes to the table's own hidden column.
+#[test]
+fn the_special_commands_are_accepted() {
+    check(
+        "commands",
+        &[
+            Step::Exec("INSERT INTO docs(docs) VALUES('integrity-check')"),
+            Step::Exec("INSERT INTO docs(docs) VALUES('rebuild')"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'quick'"),
+            Step::Query("SELECT rowid, title FROM docs ORDER BY rowid"),
+            Step::Exec("INSERT INTO docs(docs) VALUES('optimize')"),
+            Step::Exec("INSERT INTO docs(docs) VALUES('flush')"),
+            Step::Exec("INSERT INTO docs(docs, rank) VALUES('merge', 16)"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'fox'"),
+            Step::Query("PRAGMA integrity_check"),
+        ],
+    );
+}
+
+/// A rebuild puts back exactly the index the inserts built.
+#[test]
+fn a_rebuild_restores_every_answer() {
+    check(
+        "rebuild",
+        &[
+            Step::Exec("DELETE FROM docs WHERE rowid = 2"),
+            Step::Exec("INSERT INTO docs(rowid, title, body) VALUES (7, 'seven quick', 'foxes')"),
+            Step::Exec("INSERT INTO docs(docs) VALUES('rebuild')"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'quick'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'turtle'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'foxes'"),
+            Step::Query("SELECT rowid, rank FROM docs WHERE docs MATCH 'quick' ORDER BY rank"),
+            Step::Query("SELECT count(*) FROM docs"),
+        ],
+    );
+}
+
+/// A command nobody defined is refused rather than stored as a row.
+#[test]
+fn an_unknown_command_is_refused() {
+    check(
+        "unknown",
+        &[
+            Step::Exec("INSERT INTO docs(docs) VALUES('nonsense')"),
+            // A setting written without a value is not a command either, and
+            // a value written to a name nobody defined is refused rather than
+            // kept.
+            Step::Exec("INSERT INTO docs(docs) VALUES('pgsz')"),
+            Step::Exec("INSERT INTO docs(docs, rank) VALUES('nonsense', 1)"),
+            Step::Exec("INSERT INTO docs(docs) VALUES('delete-all')"),
+            Step::Query("SELECT count(*) FROM docs"),
+            Step::Query("SELECT k, v FROM docs_config ORDER BY k"),
+        ],
+    );
+}
+
+/// A setting is kept where an application can read it back.
+#[test]
+fn the_settings_are_written_to_the_config_table() {
+    check(
+        "settings",
+        &[
+            Step::Exec("INSERT INTO docs(docs, rank) VALUES('pgsz', 64)"),
+            Step::Exec("INSERT INTO docs(docs, rank) VALUES('automerge', 4)"),
+            Step::Exec("INSERT INTO docs(docs, rank) VALUES('crisismerge', 8)"),
+            Step::Exec("INSERT INTO docs(docs, rank) VALUES('usermerge', 4)"),
+            Step::Exec("INSERT INTO docs(docs, rank) VALUES('deletemerge', 10)"),
+            Step::Exec("INSERT INTO docs(docs, rank) VALUES('secure-delete', 1)"),
+            Step::Exec("INSERT INTO docs(docs, rank) VALUES('rank', 'bm25(10.0,1.0)')"),
+            Step::Query("SELECT k, v FROM docs_config ORDER BY k"),
+            Step::Exec("INSERT INTO docs(docs, rank) VALUES('pgsz', 128)"),
+            Step::Query("SELECT k, v FROM docs_config ORDER BY k"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'quick'"),
+        ],
+    );
+}
