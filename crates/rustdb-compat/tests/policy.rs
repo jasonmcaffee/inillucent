@@ -15,7 +15,7 @@ use std::process::Command;
 use rustdb_compat::workspace_root;
 
 /// The crates the policy applies to.
-const GOVERNED: [&str; 12] = [
+const GOVERNED: [&str; 14] = [
     "rustdb-base",
     "rustdb-vfs",
     "rustdb-sim",
@@ -27,8 +27,20 @@ const GOVERNED: [&str; 12] = [
     "rustdb-vm",
     "rustdb-session",
     "rustdb",
+    "rustdb-capi",
+    "rustdb-cli",
     "rustdb-compat",
 ];
+
+/// The crates whose whole point is an unsafe boundary.
+///
+/// `rustdb-capi` is the C ABI: every entry point takes raw pointers a C caller
+/// owns, so `unsafe` is not an exception in it - it is the medium. Requiring a
+/// `SAFETY:` note on each of two hundred entry points would produce two hundred
+/// copies of one sentence, which is worse than useless: a reviewer would learn
+/// to skip them. What is required instead is checked by
+/// `every_exported_c_function_documents_itself` below.
+const UNSAFE_CRATES: [&str; 1] = ["rustdb-capi"];
 
 /// The only files allowed to contain `unsafe`.
 ///
@@ -86,6 +98,9 @@ fn unsafe_code_is_confined_and_justified() {
     let mut offenders = Vec::new();
     let mut justified = 0usize;
     for crate_name in GOVERNED {
+        if UNSAFE_CRATES.contains(&crate_name) {
+            continue;
+        }
         for file in rust_files(&root.join("crates").join(crate_name)) {
             let name = relative(&root, &file);
             // This file names the word in every check it makes.
@@ -123,13 +138,70 @@ fn unsafe_code_is_confined_and_justified() {
     );
 }
 
+/// Every symbol the C ABI exports must document what it does with its
+/// pointers.
+///
+/// This is what stands in for the `SAFETY:` rule in `rustdb-capi`. An entry
+/// point that takes raw pointers and says nothing about them is one a caller
+/// cannot use correctly except by reading its body, which is the situation a C
+/// ABI exists to avoid.
+#[test]
+fn every_exported_c_function_documents_itself() {
+    let root = workspace_root();
+    let mut offenders = Vec::new();
+    let mut checked = 0usize;
+    for crate_name in UNSAFE_CRATES {
+        for file in rust_files(&root.join("crates").join(crate_name)) {
+            let name = relative(&root, &file);
+            let text = std::fs::read_to_string(&file).expect("the source reads");
+            let lines: Vec<&str> = text.lines().collect();
+            for (index, line) in lines.iter().enumerate() {
+                if !line.starts_with("pub unsafe extern \"C\" fn")
+                    && !line.starts_with("pub extern \"C\" fn")
+                {
+                    continue;
+                }
+                checked += 1;
+                let start = index.saturating_sub(30);
+                let preceding = lines.get(start..index).unwrap_or(&[]);
+                let documented = preceding
+                    .iter()
+                    .rev()
+                    .take_while(|line| {
+                        line.trim_start().starts_with("///") || line.trim_start().starts_with("#[")
+                    })
+                    .any(|line| line.trim_start().starts_with("///"));
+                let safety = !line.starts_with("pub unsafe")
+                    || preceding.iter().any(|line| line.contains("# Safety"));
+                if !documented {
+                    offenders.push(format!("{name}:{}: no doc comment", index + 1));
+                } else if !safety {
+                    offenders.push(format!("{name}:{}: no `# Safety` section", index + 1));
+                }
+            }
+        }
+    }
+    assert!(offenders.is_empty(), "{offenders:#?}");
+    assert!(
+        checked >= 60,
+        "the C ABI should export many symbols, found {checked}"
+    );
+}
+
 /// Every governed crate must deny undocumented public items, so a public
 /// function without a doc comment is a build error rather than a review note.
 #[test]
 fn every_governed_crate_denies_undocumented_items() {
     let root = workspace_root();
     for crate_name in GOVERNED {
-        let lib = root.join("crates").join(crate_name).join("src/lib.rs");
+        // A binary crate's root is `main.rs`; the rule is about the root, not
+        // about which kind of crate it is.
+        let directory = root.join("crates").join(crate_name).join("src");
+        let lib = if directory.join("lib.rs").is_file() {
+            directory.join("lib.rs")
+        } else {
+            directory.join("main.rs")
+        };
         let text = std::fs::read_to_string(&lib).expect("the crate root reads");
         assert!(
             text.contains("#![deny(missing_docs)]"),
