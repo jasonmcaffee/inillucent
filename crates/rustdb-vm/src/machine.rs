@@ -1079,6 +1079,7 @@ impl Machine {
             | Opcode::VNext
             | Opcode::VColumn
             | Opcode::VRowid
+            | Opcode::VAux
             | Opcode::VUpdate
             | Opcode::VBegin
             | Opcode::VSync
@@ -2159,6 +2160,25 @@ impl Machine {
                         return Ok(Value::Null);
                     }
                     cursor.column(context, column)
+                })?;
+                self.store(instruction.p3, value);
+                Ok(Flow::Next)
+            }
+            Opcode::VAux => {
+                let Operand::Text(name) = &instruction.p4 else {
+                    return Err(error::misuse("VAux with no function name"));
+                };
+                let name = name.clone();
+                let count = usize::from(instruction.p5);
+                let mut arguments = Vec::with_capacity(count);
+                for offset in 0..count {
+                    arguments.push(self.register(instruction.p2 + offset as i32).into_owned()?);
+                }
+                let value = self.with_virtual_cursor(instruction.p1, host, |cursor, context| {
+                    if cursor.eof() {
+                        return Ok(Value::Null);
+                    }
+                    cursor.auxiliary(context, &name, &arguments)
                 })?;
                 self.store(instruction.p3, value);
                 Ok(Flow::Next)

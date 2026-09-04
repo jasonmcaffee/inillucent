@@ -147,7 +147,6 @@ impl Compiler {
             let block = self.register_block(width.saturating_add(2));
             // The old rowid is NULL, which is what makes this an insert.
             self.emit(Instruction::new(Opcode::Null, 0, block as i32, 0));
-            // The new rowid comes from the statement when it named one.
             self.emit(Instruction::new(
                 Opcode::Null,
                 0,
@@ -159,6 +158,20 @@ impl Compiler {
             let mut supplied = Vec::with_capacity(row.len());
             for value in row {
                 supplied.push(self.compile_expr(value)?);
+            }
+            // The new rowid comes from the statement when it named one -
+            // `INSERT INTO fts(rowid, a) VALUES (9, 'x')` - and stays NULL
+            // otherwise, which is what tells the module to allocate one.
+            if let Some(register) = insert
+                .named_rowid
+                .and_then(|index| supplied.get(index).copied())
+            {
+                self.emit(Instruction::new(
+                    Opcode::Copy,
+                    register as i32,
+                    block.saturating_add(1) as i32,
+                    0,
+                ));
             }
             for (position, column) in insert.columns.iter().enumerate() {
                 let slot = block.saturating_add(2).saturating_add(position as u32);

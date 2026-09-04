@@ -367,7 +367,10 @@ impl TableInfo {
 
     /// Returns whether the table has a rowid a query may refer to.
     pub fn has_rowid(&self) -> bool {
-        self.kind == TableKind::Table && !self.without_rowid
+        // A virtual table has one unless its module declared otherwise: FTS5
+        // and the R-Tree both key their rows by it, and `SELECT rowid FROM t`
+        // is how an application joins to them.
+        matches!(self.kind, TableKind::Table | TableKind::Virtual) && !self.without_rowid
     }
 
     /// Returns a table that stands for a nested query's result.

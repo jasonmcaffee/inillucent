@@ -18,6 +18,7 @@
 //! the module says `omit` - and `omit` is the module promising, not the engine
 //! assuming.
 
+pub mod fts5;
 pub mod json_each;
 pub mod rtree;
 pub mod series;
@@ -204,6 +205,25 @@ pub trait VirtualCursor: Send {
 
     /// Returns the current row's rowid.
     fn rowid(&self) -> DbResult<i64>;
+
+    /// Answers one of the module's auxiliary functions on the current row.
+    ///
+    /// An auxiliary function is written `f(table, ...)` and reads the cursor
+    /// rather than a column: `bm25(docs)` is the whole reason the mechanism
+    /// exists. A module that has none refuses by name, which is what makes
+    /// `sillyname(docs)` an error rather than a null.
+    fn auxiliary(
+        &mut self,
+        context: &mut Context<'_>,
+        name: &[u8],
+        arguments: &[Value<'static>],
+    ) -> DbResult<Value<'static>> {
+        let _ = (context, arguments);
+        Err(failure(format!(
+            "no such function: {}",
+            String::from_utf8_lossy(name)
+        )))
+    }
 }
 
 /// Returns the error a module that cannot be written reports.

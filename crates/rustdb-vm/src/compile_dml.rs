@@ -1996,12 +1996,17 @@ impl Compiler {
         writer: &Writer,
         insert: &BoundInsert,
         values: &[u32],
+        named: Option<u32>,
     ) -> DbResult<Option<u32>> {
         let table = &insert.table;
-        let Some(alias) = table.rowid_alias else {
+        if table.rowid_alias.is_none() && named.is_none() {
             return Ok(None);
-        };
-        let supplied = values.get(usize::from(alias)).copied();
+        }
+        let supplied = named.or_else(|| {
+            table
+                .rowid_alias
+                .and_then(|alias| values.get(usize::from(alias)).copied())
+        });
         let register = self.register();
         self.emit(
             Instruction::new(
@@ -2182,7 +2187,12 @@ impl Compiler {
                     .with_p4(Operand::Affinity(column.affinity)),
             );
         }
-        let rowid = self.emit_insert_rowid(writer, insert, &values)?;
+        // A statement may have named the rowid rather than a column - the
+        // register is in the supplied row, not among the table's columns.
+        let named = insert
+            .named_rowid
+            .and_then(|index| sources.get(index).copied());
+        let rowid = self.emit_insert_rowid(writer, insert, &values, named)?;
         self.emit_generated_values(table, &generated, &mut values, rowid)?;
         if table.autoincrement && insert.sequence_root != 0 {
             // Before the row is written, and for an explicit rowid as well as a
@@ -2284,9 +2294,10 @@ impl Compiler {
         writer: &Writer,
         insert: &BoundInsert,
         values: &[u32],
+        named: Option<u32>,
     ) -> DbResult<u32> {
         if insert.table.autoincrement && insert.sequence_root != 0 {
-            if let Some(register) = self.emit_autoincrement_rowid(writer, insert, values)? {
+            if let Some(register) = self.emit_autoincrement_rowid(writer, insert, values, named)? {
                 return Ok(register);
             }
         }
@@ -2299,17 +2310,14 @@ impl Compiler {
             return Ok(register);
         }
         let table = &insert.table;
-        let Some(alias) = table.rowid_alias else {
-            let rowid = self.register();
-            self.emit(Instruction::new(
-                Opcode::NewRowid,
-                writer.table as i32,
-                rowid as i32,
-                0,
-            ));
-            return Ok(rowid);
-        };
-        let Some(supplied) = values.get(alias as usize).copied() else {
+        // A named rowid wins over the alias: they are the same key written two
+        // ways, and a statement that wrote both is naming one value twice.
+        let supplied = named.or_else(|| {
+            table
+                .rowid_alias
+                .and_then(|alias| values.get(alias as usize).copied())
+        });
+        let Some(supplied) = supplied else {
             let rowid = self.register();
             self.emit(Instruction::new(
                 Opcode::NewRowid,
@@ -2366,10 +2374,13 @@ impl Compiler {
                     format!(
                         "datatype mismatch: {}.{} must be an integer",
                         String::from_utf8_lossy(&table.name),
+                        // With no `INTEGER PRIMARY KEY` to name, the key is the
+                        // rowid and that is what it is called.
                         table
-                            .column(alias)
+                            .rowid_alias
+                            .and_then(|alias| table.column(alias))
                             .map(|column| String::from_utf8_lossy(&column.name).into_owned())
-                            .unwrap_or_default()
+                            .unwrap_or_else(|| "rowid".to_string())
                     )
                     .into_bytes(),
                 ),

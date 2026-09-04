@@ -3731,6 +3731,34 @@ impl Compiler {
                 self.emit(read);
                 Ok(register)
             }
+            BoundExpr::VirtualFunction {
+                source,
+                name,
+                arguments,
+            } => {
+                // The arguments go in a contiguous block because that is what
+                // the module is handed: one slice, in the order they were
+                // written, with the table itself already accounted for by the
+                // cursor the opcode names.
+                let first = self.register_block(arguments.len().max(1));
+                for (offset, argument) in arguments.iter().enumerate() {
+                    let value = self.compile_expr(argument)?;
+                    self.emit(Instruction::new(
+                        Opcode::Copy,
+                        value as i32,
+                        first as i32 + offset as i32,
+                        0,
+                    ));
+                }
+                let register = self.register();
+                let cursor = self.cursor_for_source(*source);
+                self.emit(
+                    Instruction::new(Opcode::VAux, cursor, first as i32, register as i32)
+                        .with_p4(Operand::Text(name.clone()))
+                        .with_p5(arguments.len() as u16),
+                );
+                Ok(register)
+            }
             BoundExpr::Rowid { source } => {
                 let register = self.register();
                 let cursor = self.cursor_for_source(*source);

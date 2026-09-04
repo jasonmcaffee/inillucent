@@ -17,7 +17,9 @@ use std::sync::Arc;
 
 use rustdb_base::{DbError, DbResult};
 
-use crate::vtab::{json_each::JsonWalkModule, rtree::RTreeModule, series::SeriesModule, Module};
+use crate::vtab::{
+    fts5::Fts5Module, json_each::JsonWalkModule, rtree::RTreeModule, series::SeriesModule, Module,
+};
 
 /// What a registered function promises about itself.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -136,6 +138,7 @@ impl Registry {
         registry.register_module(Arc::new(SeriesModule));
         registry.register_module(Arc::new(RTreeModule::float()));
         registry.register_module(Arc::new(RTreeModule::integer()));
+        registry.register_module(Arc::new(Fts5Module));
         registry
     }
 

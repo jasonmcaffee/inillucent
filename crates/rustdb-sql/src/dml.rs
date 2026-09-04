@@ -116,6 +116,14 @@ pub struct BoundInsert {
     pub columns: Vec<ColumnSource>,
     /// Where the rowid comes from, when the statement supplies one.
     pub rowid: Option<ColumnSource>,
+    /// Which value of the supplied row is the rowid, when the statement named
+    /// it outright.
+    ///
+    /// `INSERT INTO t(rowid, a) VALUES (7, 'x')` is legal on any rowid table,
+    /// including one with no `INTEGER PRIMARY KEY` to alias it and including a
+    /// virtual table. It is recorded separately from `rowid` because it is not
+    /// a column: nothing writes it into the record.
+    pub named_rowid: Option<usize>,
     /// The rows.
     pub source: BoundInsertSource,
     /// How many values each source row supplies.
@@ -297,6 +305,18 @@ fn has_instead_of(table: &TableInfo, event: &TriggerEventInfo) -> bool {
         .any(|trigger| trigger.time == ast::TriggerTime::InsteadOf && trigger.fires_for(event, &[]))
 }
 
+/// The target position that stands for the rowid rather than a column.
+///
+/// A table cannot have this many columns - SQLite's limit is two thousand - so
+/// there is no position it can collide with, and one sentinel is cheaper than
+/// a parallel `Option` threaded through every target list.
+const ROWID_TARGET: u16 = u16::MAX;
+
+/// Returns whether a name is one of the rowid's three spellings.
+fn is_rowid_name(folded: &[u8]) -> bool {
+    matches!(folded, b"rowid" | b"oid" | b"_rowid_")
+}
+
 impl<'a> Binder<'a> {
     /// Binds an `INSERT` or `REPLACE`.
     pub fn bind_insert(&mut self, insert: &ast::Insert) -> Result<BoundInsert, ParseError> {
@@ -329,6 +349,7 @@ impl<'a> Binder<'a> {
             ));
         }
         let (columns, rowid) = self.column_sources(&table, &targets)?;
+        let named_rowid = targets.iter().position(|target| *target == ROWID_TARGET);
         let checks = self.bind_checks(&table)?;
         let upsert = self.bind_upsert(&table, insert)?;
         let returning = self.bind_returning(&insert.returning)?;
@@ -351,6 +372,7 @@ impl<'a> Binder<'a> {
             target_source,
             columns,
             rowid,
+            named_rowid,
             source,
             arity,
             on_conflict: insert.on_conflict,
@@ -964,19 +986,29 @@ impl<'a> Binder<'a> {
             // can write, which is every column that is not generated - so a
             // table with a generated column takes fewer values than it has
             // columns, exactly as SQLite counts them.
+            // A hidden column is not one of them either: a module's arguments
+            // and its `rank` are named by an application that wants them, and
+            // an `INSERT INTO fts VALUES ('a', 'b')` supplies the two indexed
+            // columns and nothing else.
             return Ok((0..table.columns.len() as u16)
                 .filter(|position| {
                     table
                         .column(*position)
-                        .is_some_and(|column| !column.generated)
+                        .is_some_and(|column| !column.generated && !column.hidden)
                 })
                 .collect());
         }
         let mut targets = Vec::with_capacity(columns.len());
         for name in columns {
             let folded = self.ast.folded(*name).to_vec();
-            let Some(position) = table.column_position(&folded) else {
-                return Err(no_such_column(self.ast.text(*name), Span::default()));
+            let position = match table.column_position(&folded) {
+                Some(position) => position,
+                // A rowid table lets the statement name its rowid, under any
+                // of its three spellings, and that is not a column: it is the
+                // key. A declared column of the same name wins, which is why
+                // this is the fallback rather than the first thing tried.
+                None if table.has_rowid() && is_rowid_name(&folded) => ROWID_TARGET,
+                None => return Err(no_such_column(self.ast.text(*name), Span::default())),
             };
             if targets.contains(&position) {
                 return Err(refused(
@@ -987,7 +1019,9 @@ impl<'a> Binder<'a> {
                     Span::default(),
                 ));
             }
-            self.refuse_generated(table, position, Span::default())?;
+            if position != ROWID_TARGET {
+                self.refuse_generated(table, position, Span::default())?;
+            }
             targets.push(position);
         }
         Ok(targets)

@@ -1255,6 +1255,7 @@ name = "rustdb-ext"
 version = "0.1.0"
 dependencies = [
  "rustdb-base",
+ "rustdb-catalog",
  "rustdb-sql",
  "rustdb-storage",
  "rustdb-transaction",
@@ -1276,6 +1277,7 @@ version = "0.1.0"
 dependencies = [
  "rustdb-base",
  "rustdb-catalog",
+ "rustdb-ext",
  "rustdb-sql",
  "rustdb-storage",
  "rustdb-transaction",

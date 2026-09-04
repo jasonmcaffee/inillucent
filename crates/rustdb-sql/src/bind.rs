@@ -144,6 +144,20 @@ pub enum BoundExpr {
         /// Which FROM term.
         source: usize,
     },
+    /// One of a module's auxiliary functions, written `f(table, ...)`.
+    ///
+    /// It reads the module's cursor rather than a column, which is why it
+    /// names a FROM term instead of taking the table as an argument: `bm25`
+    /// wants to know which phrase matched where in the row the cursor is on,
+    /// and no column carries that.
+    VirtualFunction {
+        /// Which FROM term - the virtual table the call is about.
+        source: usize,
+        /// The function's folded name, for the module to recognise.
+        name: Vec<u8>,
+        /// The arguments after the table.
+        arguments: Vec<BoundExpr>,
+    },
     /// A unary operator.
     Unary {
         /// Which operator.
@@ -403,6 +417,7 @@ impl BoundExpr {
             BoundExpr::Raise { .. }
             | BoundExpr::Column { .. }
             | BoundExpr::Rowid { .. }
+            | BoundExpr::VirtualFunction { .. }
             | BoundExpr::Aggregate { .. }
             | BoundExpr::WindowRef { .. }
             | BoundExpr::SorterColumn { .. } => false,
@@ -2512,6 +2527,72 @@ impl<'a> Binder<'a> {
         Ok(())
     }
 
+    /// Binds `f(table, ...)` as a module's auxiliary function, if that is what
+    /// it is.
+    ///
+    /// The tell is the first argument: a bare reference to a virtual table's
+    /// own hidden column, which is a thing no ordinary function is ever handed
+    /// on purpose. `bm25(docs)` takes this path; an unknown name is refused by
+    /// the module rather than here, because the module is what knows its own
+    /// functions.
+    fn bind_auxiliary_call(
+        &mut self,
+        name: &[u8],
+        arguments: &[ExprId],
+        span: Span,
+    ) -> Result<Option<BoundExpr>, ParseError> {
+        let Some(first) = arguments.first() else {
+            return Ok(None);
+        };
+        let Some(&Expr::Column {
+            database: None,
+            table: None,
+            column,
+        }) = self.ast.expr(*first)
+        else {
+            return Ok(None);
+        };
+        let Ok(BoundExpr::Column { source, column, .. }) =
+            self.bind_column_reference(None, None, column, span)
+        else {
+            return Ok(None);
+        };
+        let Some(entry) = self.sources.get(source) else {
+            return Ok(None);
+        };
+        if entry.table.kind != TableKind::Virtual {
+            return Ok(None);
+        }
+        // The self column is the hidden one named after the table, and only
+        // that one: `rank` is a column, not a handle.
+        let self_column = entry
+            .table
+            .column(column)
+            .is_some_and(|info| info.folded == entry.table.folded);
+        if !self_column {
+            return Ok(None);
+        }
+        let mut rest = Vec::with_capacity(arguments.len() - 1);
+        for argument in arguments.iter().skip(1) {
+            rest.push(self.bind_expr(*argument)?);
+        }
+        Ok(Some(BoundExpr::VirtualFunction {
+            source,
+            name: name.to_ascii_lowercase(),
+            arguments: rest,
+        }))
+    }
+
+    /// Returns whether an expression is a column of a virtual table.
+    fn is_virtual_column(&self, expr: &BoundExpr) -> bool {
+        let BoundExpr::Column { source, .. } = expr else {
+            return false;
+        };
+        self.sources
+            .get(*source)
+            .is_some_and(|source| source.table.kind == TableKind::Virtual)
+    }
+
     /// Expands `*` or `table.*` into one bound column per visible column.
     ///
     /// Only the block's own FROM terms are expanded. An enclosing block's terms
@@ -2859,15 +2940,27 @@ impl<'a> Binder<'a> {
                 pattern,
                 escape,
             } => {
-                if matches!(op, PatternOp::Regexp | PatternOp::Match) {
-                    return Err(no_such_function(
-                        if op == PatternOp::Regexp {
-                            b"regexp"
-                        } else {
-                            b"match"
-                        },
-                        span,
-                    ));
+                if op == PatternOp::Regexp {
+                    return Err(no_such_function(b"regexp", span));
+                }
+                if op == PatternOp::Match {
+                    // `x MATCH y` is a call to a function called `match`, which
+                    // does not exist - unless `x` is a column of a virtual
+                    // table, in which case it is a constraint the module is
+                    // offered and the module says what it means. That is the
+                    // whole of how `t MATCH 'word'` reaches FTS5.
+                    let left = self.bind_expr(operand)?;
+                    if !self.is_virtual_column(&left) {
+                        return Err(no_such_function(b"match", span));
+                    }
+                    let pattern = Box::new(self.bind_expr(pattern)?);
+                    return Ok(BoundExpr::Pattern {
+                        negated,
+                        op: PatternOp::Match,
+                        operand: Box::new(left),
+                        pattern,
+                        escape: None,
+                    });
                 }
                 let operand = Box::new(self.bind_expr(operand)?);
                 let pattern = Box::new(self.bind_expr(pattern)?);
@@ -3370,6 +3463,11 @@ impl<'a> Binder<'a> {
         }
         let star = arguments.is_none();
         let list = arguments.unwrap_or_default();
+        if !star && !distinct && !list.is_empty() {
+            if let Some(bound) = self.bind_auxiliary_call(&folded, &list, span)? {
+                return Ok(bound);
+            }
+        }
         if function::is_aggregate_call(&folded, list.len(), star) {
             let Some(func) =
                 function::lookup_aggregate(&folded).or_else(|| function::minmax_aggregate(&folded))

@@ -152,6 +152,135 @@ impl ShadowTables {
     }
 }
 
+impl ShadowTables {
+    /// Reads one row of a keyed shadow table, or nothing when there is not one.
+    ///
+    /// A `WITHOUT ROWID` table's b-tree holds the whole row as its key, ordered
+    /// by the primary key's columns - so a lookup is a seek on a record and
+    /// what comes back is the record itself.
+    pub fn read_keyed(
+        &self,
+        context: &mut Context<'_>,
+        suffix: &[u8],
+        key: &[Value<'static>],
+        columns: usize,
+    ) -> DbResult<Option<Vec<Value<'static>>>> {
+        let root = self.root(suffix)?;
+        let info = key_info(key.len());
+        let limits = context.limits.clone();
+        let pager = context.host.pager(context.database)?;
+        let mut cursor = BTreeCursor::index(root, info);
+        if !cursor.seek_index(pager, key, SeekBias::AtOrAfter)? {
+            return Ok(None);
+        }
+        let payload = cursor.payload(pager, &limits)?;
+        let record = record::RecordRef::parse(&payload, TextEncoding::Utf8)?;
+        let values = record.values()?;
+        for (position, wanted) in key.iter().enumerate() {
+            let Some(found) = values.get(position) else {
+                return Ok(None);
+            };
+            if rustdb_value::compare::compare_values(found, wanted, rustdb_value::Collation::Binary)
+                != core::cmp::Ordering::Equal
+            {
+                return Ok(None);
+            }
+        }
+        // `columns` may be `usize::MAX`, meaning "however many are there" - so
+        // the capacity is what the record actually holds, not what was asked
+        // for.
+        let mut owned = Vec::with_capacity(values.len().min(columns));
+        for value in values.into_iter().take(columns) {
+            owned.push(value.into_owned()?);
+        }
+        Ok(Some(owned))
+    }
+
+    /// Writes one row of a keyed shadow table, replacing whatever was there.
+    pub fn write_keyed(
+        &self,
+        context: &mut Context<'_>,
+        suffix: &[u8],
+        key_columns: usize,
+        values: &[Value<'static>],
+    ) -> DbResult<()> {
+        let key: Vec<Value<'static>> = values.iter().take(key_columns).cloned().collect();
+        self.delete_keyed(context, suffix, &key)?;
+        let root = self.root(suffix)?;
+        let payload = record::encode_record(values, TextEncoding::Utf8, 4)?;
+        let info = key_info(key_columns);
+        let pager = context.host.pager(context.database)?;
+        mutate::insert_entry(pager, root, &info, &payload)?;
+        Ok(())
+    }
+
+    /// Removes one row of a keyed shadow table.
+    pub fn delete_keyed(
+        &self,
+        context: &mut Context<'_>,
+        suffix: &[u8],
+        key: &[Value<'static>],
+    ) -> DbResult<()> {
+        let Some(existing) = self.read_keyed(context, suffix, key, usize::MAX)? else {
+            return Ok(());
+        };
+        let root = self.root(suffix)?;
+        let payload = record::encode_record(&existing, TextEncoding::Utf8, 4)?;
+        let info = key_info(key.len());
+        let pager = context.host.pager(context.database)?;
+        mutate::delete_entry(pager, root, &info, &payload)?;
+        Ok(())
+    }
+
+    /// Runs a body over every row of a keyed shadow table, in key order.
+    pub fn scan_keyed(
+        &self,
+        context: &mut Context<'_>,
+        suffix: &[u8],
+        key_columns: usize,
+        mut body: impl FnMut(&[Value<'static>]) -> DbResult<bool>,
+    ) -> DbResult<()> {
+        let root = self.root(suffix)?;
+        let info = key_info(key_columns);
+        let limits = context.limits.clone();
+        let pager = context.host.pager(context.database)?;
+        let mut cursor = BTreeCursor::index(root, info);
+        if !cursor.first(pager)? {
+            return Ok(());
+        }
+        loop {
+            let payload = cursor.payload(pager, &limits)?;
+            let record = record::RecordRef::parse(&payload, TextEncoding::Utf8)?;
+            let mut values = Vec::new();
+            for value in record.values()? {
+                values.push(value.into_owned()?);
+            }
+            if !body(&values)? {
+                return Ok(());
+            }
+            if !cursor.next(pager)? {
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// Returns the ordering a keyed shadow table's b-tree is in.
+///
+/// Every key column compares as `BINARY` and ascending, which is what a
+/// `PRIMARY KEY` with no `COLLATE` and no `DESC` declares - and every shadow
+/// table here declares exactly that.
+fn key_info(columns: usize) -> record::KeyInfo {
+    record::KeyInfo {
+        columns: (0..columns)
+            .map(|_| record::KeyColumn {
+                collation: rustdb_value::Collation::Binary,
+                descending: false,
+            })
+            .collect(),
+    }
+}
+
 /// Returns one row's values, with the rowid in the first column.
 ///
 /// A rowid table stores a NULL where its `INTEGER PRIMARY KEY` column would be

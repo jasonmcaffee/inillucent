@@ -190,6 +190,12 @@ fn check_operand_ranges(program: &Program, address: usize, problems: &mut Vec<Ve
         Opcode::ResultRow | Opcode::ApplyAffinity => blocks.push((instruction.p1, instruction.p2)),
         Opcode::VFilter => blocks.push((instruction.p3, i32::from(instruction.p5))),
         Opcode::VColumn => registers.push((instruction.p3, "destination")),
+        Opcode::VAux => {
+            registers.push((instruction.p3, "destination"));
+            for offset in 0..i32::from(instruction.p5) {
+                registers.push((instruction.p2 + offset, "argument"));
+            }
+        }
         Opcode::VRowid => registers.push((instruction.p2, "destination")),
         Opcode::VUpdate => {
             blocks.push((instruction.p1, instruction.p2));
@@ -518,6 +524,7 @@ fn writes_of(program: &Program, address: usize) -> Vec<u32> {
         | Opcode::JsonCall => single(instruction.p3),
         Opcode::AggFinal | Opcode::VRowid => single(instruction.p2),
         Opcode::VColumn => single(instruction.p3),
+        Opcode::VAux => single(instruction.p3),
         Opcode::VUpdate => {
             if instruction.p3 >= 0 {
                 single(instruction.p3)
