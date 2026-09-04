@@ -996,7 +996,7 @@ struct Fts5Cursor {
     /// What each phrase matched, kept so `bm25(t, w1, w2)` can score the row
     /// again with the weights that call asked for. `rank` is the same score
     /// with every weight one, so the two cannot disagree.
-    matched: Vec<(i64, Vec<expr::Hits>)>,
+    matched: Vec<expr::Hits>,
     /// The phrases, in the order `matched` holds them.
     phrases: Vec<Phrase>,
     /// The collection totals the score is relative to.
@@ -1032,9 +1032,10 @@ impl VirtualCursor for Fts5Cursor {
         self.pattern = pattern.clone();
         let query = Query::parse(&pattern, &self.tokenizer, &self.names)?;
         let totals = get_totals(context, &self.shadows, self.columns);
-        let matched = expr::evaluate(&query, context, &self.shadows, self.columns)?;
+        let (rows, hits) = expr::evaluate(&query, context, &self.shadows, self.columns)?;
         let scores = bm25::score(
-            &matched,
+            &rows,
+            &hits,
             &query,
             context,
             &self.shadows,
@@ -1043,7 +1044,7 @@ impl VirtualCursor for Fts5Cursor {
         )?;
         self.phrases = query.phrases.clone();
         self.totals = totals;
-        self.matched = matched;
+        self.matched = hits;
         self.rows = scores
             .into_iter()
             .map(|(rowid, score)| MatchedRow { rowid, score })
@@ -1128,10 +1129,8 @@ impl VirtualCursor for Fts5Cursor {
         for (index, argument) in arguments.iter().take(self.columns).enumerate() {
             weights[index] = argument.as_real().unwrap_or(1.0);
         }
-        let Some((_, hits)) = self.matched.iter().find(|(rowid, _)| *rowid == row.rowid) else {
-            return Ok(Value::Real(0.0));
-        };
-        let hits = hits.clone();
+        // The hits are the query's, so the same maps score every row of it.
+        let hits = self.matched.clone();
         let sizes = bm25::row_sizes(context, &self.shadows, row.rowid, self.columns)?;
         Ok(Value::Real(bm25::score_row(
             row.rowid,

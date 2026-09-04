@@ -374,18 +374,18 @@ pub fn evaluate(
     context: &mut Context<'_>,
     shadows: &ShadowTables,
     columns: usize,
-) -> DbResult<Vec<(i64, Vec<Hits>)>> {
+) -> DbResult<(Vec<i64>, Vec<Hits>)> {
     let mut hits = Vec::with_capacity(query.phrases.len());
     for phrase in &query.phrases {
         hits.push(phrase_hits(phrase, context, shadows, columns)?);
     }
     let mut counter = 0usize;
     let rows = walk(&query.root, &hits, &mut counter);
-    let mut out = Vec::with_capacity(rows.len());
-    for rowid in rows {
-        out.push((rowid, hits.clone()));
-    }
-    Ok(out)
+    // The hits belong to the *query*, not to a row: they are one map per
+    // phrase, over every row that phrase appears in. Handing back a copy per
+    // matched row - which is what this used to do - meant a common term cost a
+    // clone of the whole index for every row it found.
+    Ok((rows, hits))
 }
 
 /// Returns the rows one expression matches.
