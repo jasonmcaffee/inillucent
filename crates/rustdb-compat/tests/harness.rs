@@ -81,13 +81,16 @@ const FINISHED_PHASES: [&str; 13] = [
 /// listed here fails, and a row listed here that has not moved fails too, so
 /// the manifest and this list cannot drift apart in either direction.
 ///
-/// Nothing is in flight at the moment. The list stays, empty, because the next
-/// phase to be started will need it on its first day and rediscovering why it
-/// exists is worse than carrying two lines.
+/// Phase 13 is in flight, and all three of its rows have evidence: the module,
+/// its transactional visibility, and the legacy migration.
 const IN_PROGRESS_PHASE: &str = "phase 13:";
 
 /// The rows of [`IN_PROGRESS_PHASE`] that have evidence behind them.
-const IN_PROGRESS_ROWS: [&str; 0] = [];
+const IN_PROGRESS_ROWS: [&str; 3] = [
+    "search.virtual-table",
+    "search.transactional-visibility",
+    "search.legacy-migration",
+];
 
 /// Every row in a finished phase must claim `pass`, and every later row must
 /// not.

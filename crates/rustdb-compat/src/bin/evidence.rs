@@ -29,7 +29,7 @@ use rustdb_vfs::path::DbPath;
 /// Every crate that carries engine behaviour is here, including the C ABI and
 /// the shell: a manifest row that names one of their tests can only be believed
 /// if the run that produced the results actually ran it.
-const PACKAGES: [&str; 15] = [
+const PACKAGES: [&str; 17] = [
     "rustdb-base",
     "rustdb-vfs",
     "rustdb-sim",
@@ -39,11 +39,13 @@ const PACKAGES: [&str; 15] = [
     "rustdb-sql",
     "rustdb-catalog",
     "rustdb-ext",
+    "rustdb-search",
     "rustdb-vm",
     "rustdb-session",
     "rustdb",
     "rustdb-capi",
     "rustdb-cli",
+    "rustdb-migrate",
     "rustdb-compat",
 ];
 

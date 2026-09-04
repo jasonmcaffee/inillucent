@@ -1263,6 +1263,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustdb-migrate"
+version = "0.1.0"
+dependencies = [
+ "rustdb",
+ "rustdb-base",
+ "rustdb-core",
+ "rustdb-search",
+ "rustdb-value",
+]
+
+[[package]]
 name = "rustdb-search"
 version = "0.1.0"
 dependencies = [

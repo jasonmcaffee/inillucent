@@ -186,6 +186,23 @@ may_depend_on = [
   "rustdb-session",
 ]
 
+# `rustdb-migrate` is the one production crate that names both engines, and it
+# has to: it reads a legacy generation directory through `rustdb-core`'s own
+# reader and writes a database through the public facade. Both edges are
+# downward. It is a tool rather than a library the engine uses, so nothing
+# depends on it.
+[[crate]]
+name = "rustdb-migrate"
+kind = "production"
+layer = 10
+may_depend_on = [
+  "rustdb-base",
+  "rustdb-value",
+  "rustdb-core",
+  "rustdb-search",
+  "rustdb",
+]
+
 [[crate]]
 name = "rustdb-capi"
 kind = "production"

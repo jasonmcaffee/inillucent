@@ -18,6 +18,7 @@ members = [
     "crates/rustdb-capi",
     "crates/rustdb-cli",
     "crates/rustdb-search",
+    "crates/rustdb-migrate",
     # Existing retrieval engine and its grading harness.
     "crates/rustdb-core",
     "crates/rustdb-bench",
@@ -49,6 +50,7 @@ rustdb-session = { path = "crates/rustdb-session" }
 rustdb = { path = "crates/rustdb" }
 rustdb-core = { path = "crates/rustdb-core" }
 rustdb-search = { path = "crates/rustdb-search" }
+rustdb-migrate = { path = "crates/rustdb-migrate" }
 
 # ---------------------------------------------------------------------------
 # Third-party dependencies. docs/dependency-policy.md records why each one is

@@ -7,105 +7,26 @@
 //! evidence model hashes artifacts and the reference metadata pins SQLite's
 //! published SHA3-256 sums, so both algorithms are part of a contract that must
 //! not change when a dependency is upgraded; and neither is used for anything
-//! secret, so there is no argument for a hardened implementation. They are
-//! test-only either way: `rustdb-compat` never enters a production graph.
-
-/// The SHA-256 round constants.
-const SHA256_K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-];
+//! secret, so there is no argument for a hardened implementation.
+//!
+//! SHA-256 now lives in `rustdb-base` and is re-exported here, because the
+//! migration tool needs the same function in a production crate and a hash with
+//! two implementations is one that eventually disagrees with itself. SHA3-256
+//! stays here: nothing but the reference pinning uses it, and that is test-only.
 
 /// Returns the SHA-256 digest of `data` as lowercase hex.
+///
+/// Delegated to `rustdb_base::hash`, which is where it moved when the migration
+/// tool needed the same function in a production crate. Two implementations of
+/// one hash is exactly the kind of thing that drifts, and the manifests a
+/// rollback decision is made from would be the place it showed up.
 pub fn sha256_hex(data: &[u8]) -> String {
-    to_hex(&sha256(data))
+    rustdb_base::hash::sha256_hex(data)
 }
 
 /// Returns the SHA-256 digest of `data`.
 pub fn sha256(data: &[u8]) -> [u8; 32] {
-    let mut state: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-    ];
-    let mut padded = data.to_vec();
-    let bit_length = (data.len() as u64).wrapping_mul(8);
-    padded.push(0x80);
-    while padded.len() % 64 != 56 {
-        padded.push(0);
-    }
-    padded.extend_from_slice(&bit_length.to_be_bytes());
-    let (blocks, _) = padded.as_chunks::<64>();
-    for block in blocks {
-        compress_sha256(&mut state, block);
-    }
-    let mut digest = [0u8; 32];
-    for (index, word) in state.iter().enumerate() {
-        let bytes = word.to_be_bytes();
-        for (offset, byte) in bytes.iter().enumerate() {
-            if let Some(slot) = digest.get_mut(index * 4 + offset) {
-                *slot = *byte;
-            }
-        }
-    }
-    digest
-}
-
-/// Runs one SHA-256 compression round over a 64-byte block.
-fn compress_sha256(state: &mut [u32; 8], block: &[u8; 64]) {
-    let mut schedule = [0u32; 64];
-    let (words, _) = block.as_chunks::<4>();
-    for (index, chunk) in words.iter().enumerate().take(16) {
-        if let Some(entry) = schedule.get_mut(index) {
-            *entry = u32::from_be_bytes(*chunk);
-        }
-    }
-    for index in 16..64 {
-        let read = |offset: usize| schedule.get(offset).copied().unwrap_or(0);
-        let s0 = read(index - 15).rotate_right(7)
-            ^ read(index - 15).rotate_right(18)
-            ^ (read(index - 15) >> 3);
-        let s1 = read(index - 2).rotate_right(17)
-            ^ read(index - 2).rotate_right(19)
-            ^ (read(index - 2) >> 10);
-        let value = read(index - 16)
-            .wrapping_add(s0)
-            .wrapping_add(read(index - 7))
-            .wrapping_add(s1);
-        if let Some(entry) = schedule.get_mut(index) {
-            *entry = value;
-        }
-    }
-    let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
-    for index in 0..64 {
-        let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-        let choose = (e & f) ^ ((!e) & g);
-        let temp1 = h
-            .wrapping_add(s1)
-            .wrapping_add(choose)
-            .wrapping_add(SHA256_K.get(index).copied().unwrap_or(0))
-            .wrapping_add(schedule.get(index).copied().unwrap_or(0));
-        let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-        let majority = (a & b) ^ (a & c) ^ (b & c);
-        let temp2 = s0.wrapping_add(majority);
-        h = g;
-        g = f;
-        f = e;
-        e = d.wrapping_add(temp1);
-        d = c;
-        c = b;
-        b = a;
-        a = temp1.wrapping_add(temp2);
-    }
-    let round = [a, b, c, d, e, f, g, h];
-    for (slot, value) in state.iter_mut().zip(round.iter()) {
-        *slot = slot.wrapping_add(*value);
-    }
+    rustdb_base::hash::sha256(data)
 }
 
 /// The Keccak-f[1600] round constants.

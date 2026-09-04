@@ -1689,24 +1689,63 @@ id = "search.virtual-table"
 source = "https://sqlite.org/vtab.html"
 profile = "default"
 phase = "phase 13: transactional rust-db search and legacy migration"
-status = "missing"
-tests = []
+status = "pass"
+tests = [
+  "rustdb-compat::a_search_table_answers_a_match",
+  "rustdb-compat::the_two_spellings_agree",
+  "rustdb-compat::the_hit_count_is_the_modules_own_control",
+  "rustdb-compat::rank_orders_best_first",
+  "rustdb-compat::a_search_table_joins",
+  "rustdb-compat::the_auxiliary_functions_describe_the_hit",
+  "rustdb-compat::the_declaration_is_stored_and_read_back",
+  "rustdb-compat::an_unimplemented_metric_is_refused_at_create",
+  "rustdb-compat::a_vector_table_finds_the_nearest_row",
+  "rustdb-compat::a_vector_of_the_wrong_width_is_refused",
+  "rustdb-compat::a_lexical_table_refuses_a_vector",
+  "rustdb-compat::the_integrity_check_notices_an_edited_shadow_table",
+  "rustdb-compat::an_unknown_command_is_refused",
+]
 
 [[capability]]
 id = "search.transactional-visibility"
 source = "https://sqlite.org/isolation.html"
 profile = "default"
 phase = "phase 13: transactional rust-db search and legacy migration"
-status = "missing"
-tests = []
+status = "pass"
+tests = [
+  "rustdb-compat::a_rolled_back_write_is_invisible_to_the_search",
+  "rustdb-compat::a_committed_write_survives_reopening",
+  "rustdb-compat::a_savepoint_takes_back_what_it_covered",
+  "rustdb-compat::a_delete_removes_the_row_from_the_ranking",
+  "rustdb-compat::an_update_reindexes_the_row",
+  "rustdb-compat::one_transaction_publishes_one_commit_sequence",
+  "rustdb-compat::compaction_publishes_a_generation_and_changes_no_answer",
+  "rustdb-compat::an_old_generation_survives_until_it_is_dropped",
+  "rustdb-compat::a_rebuild_reproduces_the_index_from_the_rows",
+  "rustdb-compat::a_rollback_journal_commit_is_atomic_across_both",
+  "rustdb-compat::a_wal_commit_is_atomic_across_both",
+  "rustdb-compat::a_reported_write_failure_never_produces_a_mixture",
+  "rustdb-compat::a_crash_during_compaction_leaves_the_index_it_started_from",
+]
 
 [[capability]]
 id = "search.legacy-migration"
 source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 13: transactional rust-db search and legacy migration"
-status = "missing"
-tests = []
+status = "pass"
+tests = [
+  "rustdb-migrate::a_legacy_index_migrates_and_every_check_passes",
+  "rustdb-migrate::the_manifest_is_the_rollback_record",
+  "rustdb-migrate::an_interrupted_migration_resumes",
+  "rustdb-migrate::a_source_that_moved_is_refused_rather_than_half_copied",
+  "rustdb-migrate::an_existing_destination_is_never_overwritten",
+  "rustdb-migrate::rolling_back_is_opening_the_source",
+  "rustdb-migrate::a_lexical_only_source_migrates",
+  "rustdb-migrate::the_two_implementations_answer_identically",
+  "rustdb-migrate::a_tombstone_removes_the_same_row_from_both",
+  "rustdb-migrate::a_replace_reindexes_on_both_sides",
+]
 
 [[capability]]
 id = "perf.qualified-measurement"
