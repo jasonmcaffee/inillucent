@@ -56,7 +56,7 @@ fn the_shipped_manifest_is_structurally_sound() {
 /// a phase nobody has reached yet does not. A row that quietly claims a phase
 /// it has not reached is the thing the report exists to prevent, and a phase
 /// added to this list without its rows moving is caught by the same assertion.
-const FINISHED_PHASES: [&str; 11] = [
+const FINISHED_PHASES: [&str; 13] = [
     "phase 0:",
     "phase 1:",
     "phase 2:",
@@ -68,6 +68,8 @@ const FINISHED_PHASES: [&str; 11] = [
     "phase 8:",
     "phase 9:",
     "phase 10:",
+    "phase 11:",
+    "phase 12:",
 ];
 
 /// The phase that is under way, and exactly which of its rows have evidence.
@@ -82,7 +84,7 @@ const FINISHED_PHASES: [&str; 11] = [
 /// Nothing is in flight at the moment. The list stays, empty, because the next
 /// phase to be started will need it on its first day and rediscovering why it
 /// exists is worse than carrying two lines.
-const IN_PROGRESS_PHASE: &str = "phase 11:";
+const IN_PROGRESS_PHASE: &str = "phase 13:";
 
 /// The rows of [`IN_PROGRESS_PHASE`] that have evidence behind them.
 const IN_PROGRESS_ROWS: [&str; 0] = [];
@@ -144,6 +146,56 @@ fn an_empty_scorecard_is_generated_without_any_results() {
         !generated.problems.is_empty(),
         "unsupported claims must be reported"
     );
+}
+
+/// The obligation registers on disk must be what the engine generates.
+///
+/// They are the denominator for phases 11 and 12: a claim that every built-in,
+/// every PRAGMA and every exported symbol is accounted for means nothing unless
+/// the list being counted is the engine's own. Regenerating and comparing is
+/// what stops the list from becoming a wish.
+#[test]
+fn the_registers_match_the_engine() {
+    let directory = workspace_root().join("compat/api");
+    for (name, expected) in rustdb_compat::obligations::registers() {
+        let path = directory.join(name);
+        let found = std::fs::read_to_string(&path)
+            .unwrap_or_else(|_| panic!("{} is missing; run `rustdb-obligations`", path.display()))
+            .replace(
+                "
+", "
+",
+            );
+        assert_eq!(
+            found,
+            expected,
+            "{} is out of date; run `cargo run -p rustdb-compat --bin rustdb-obligations`",
+            path.display()
+        );
+    }
+}
+
+/// The registers have to be big enough to be describing the whole surface.
+///
+/// A generator that silently produced nothing would agree with an empty file
+/// and every other check here would pass, so the size is asserted separately.
+#[test]
+fn the_registers_cover_the_whole_surface() {
+    let registers = rustdb_compat::obligations::registers();
+    for (name, body, least) in [
+        ("builtins.toml", 0, 140usize),
+        ("pragmas.toml", 1, 60),
+        ("symbols.toml", 2, 100),
+    ] {
+        let (_, text) = registers.get(body).expect("the register was generated");
+        let count = text
+            .matches(
+                "
+name = ",
+            )
+            .count();
+        assert!(count >= least, "{name} holds only {count} entries");
+    }
 }
 
 /// The workspace must obey its own dependency contract. This is the check that

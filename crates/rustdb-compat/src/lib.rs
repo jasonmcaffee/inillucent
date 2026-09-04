@@ -31,6 +31,7 @@ pub mod hash;
 pub mod layering;
 pub mod manifest;
 pub mod model;
+pub mod obligations;
 pub mod oracle;
 pub mod report;
 pub mod results;

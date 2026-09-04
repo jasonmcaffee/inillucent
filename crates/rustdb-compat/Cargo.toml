@@ -31,6 +31,14 @@ name = "rustdb-slt"
 path = "src/bin/slt.rs"
 
 [[bin]]
+name = "rustdb-featureperf"
+path = "src/bin/featureperf.rs"
+
+[[bin]]
+name = "rustdb-obligations"
+path = "src/bin/obligations.rs"
+
+[[bin]]
 name = "rustdb-manifest"
 path = "src/bin/manifest.rs"
 

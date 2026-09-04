@@ -54,24 +54,79 @@ pub fn import(shell: &mut Shell, arguments: &[&str]) {
 }
 
 /// Inserts every parsed row, reporting the first line that will not go in.
+///
+/// One prepared statement for the whole file. Compiling an `INSERT` per row is
+/// the obvious way to write this and it is the wrong one: the statement is
+/// identical every time, and preparing it five thousand times is five thousand
+/// compilations of the same text.
 fn insert(shell: &mut Shell, table: &str, rows: &[Vec<String>], path: &str) {
-    let quoted = quote_identifier(table);
+    let width = rows.first().map_or(0, Vec::len);
+    if width == 0 {
+        return;
+    }
+    let marks: Vec<&str> = std::iter::repeat("?").take(width).collect();
+    let sql = format!(
+        "INSERT INTO {} VALUES({})",
+        quote_identifier(table),
+        marks.join(",")
+    );
     if let Err(message) = shell.execute("BEGIN") {
         shell.complain(&format!("Error: {message}"));
         return;
     }
-    for (index, row) in rows.iter().enumerate() {
-        let values: Vec<String> = row.iter().map(|field| sql_text(field)).collect();
-        let statement = format!("INSERT INTO {quoted} VALUES({})", values.join(","));
-        if let Err(message) = shell.execute(&statement) {
-            shell.complain(&format!("{path}:{}: {message}", index + 1));
+    let failure = fill(shell.connection(), &sql, rows);
+    match failure {
+        None => {
+            if let Err(message) = shell.execute("COMMIT") {
+                shell.complain(&format!("Error: {message}"));
+            }
+        }
+        Some((line, message)) => {
+            shell.complain(&format!("{path}:{line}: {message}"));
             let _ = shell.execute("ROLLBACK");
-            return;
         }
     }
-    if let Err(message) = shell.execute("COMMIT") {
-        shell.complain(&format!("Error: {message}"));
+}
+
+/// Binds and runs every row, returning the first line that would not go in.
+///
+/// It borrows the connection for the whole loop, which is why it reports rather
+/// than complains: the shell cannot be borrowed mutably while a statement it
+/// prepared is alive.
+fn fill(
+    connection: &rustdb::Connection,
+    sql: &str,
+    rows: &[Vec<String>],
+) -> Option<(usize, String)> {
+    let mut statement = match connection.prepare(sql) {
+        Ok(statement) => statement,
+        Err(error) => return Some((0, error.message().to_string())),
+    };
+    for (index, row) in rows.iter().enumerate() {
+        if let Err(error) = statement.reset() {
+            return Some((index + 1, error.message().to_string()));
+        }
+        for (position, field) in row.iter().enumerate() {
+            if let Err(error) = statement.bind_text(position as u32 + 1, field) {
+                return Some((index + 1, error.message().to_string()));
+            }
+        }
+        // A row shorter than the first one leaves the rest NULL, which is what
+        // an `INSERT` with fewer values would have done.
+        for position in row.len()..statement.parameter_count() as usize {
+            if let Err(error) = statement.bind_null(position as u32 + 1) {
+                return Some((index + 1, error.message().to_string()));
+            }
+        }
+        loop {
+            match statement.step() {
+                Ok(true) => continue,
+                Ok(false) => break,
+                Err(error) => return Some((index + 1, error.message().to_string())),
+            }
+        }
     }
+    None
 }
 
 /// Reports whether a table is already there.
@@ -137,11 +192,6 @@ fn parse(text: &str, separator: char, quoted: bool) -> Vec<Vec<String>> {
         rows.push(row);
     }
     rows
-}
-
-/// Returns a field as an SQL string literal.
-fn sql_text(field: &str) -> String {
-    format!("'{}'", field.replace('\'', "''"))
 }
 
 /// Returns an identifier quoted the way SQL wants it.

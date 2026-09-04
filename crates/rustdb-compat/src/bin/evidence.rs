@@ -24,8 +24,12 @@ use rustdb_vfs::memory::MemoryVfs;
 use rustdb_vfs::os::OsVfs;
 use rustdb_vfs::path::DbPath;
 
-/// The packages whose tests are evidence for phases 0 through 7.
-const PACKAGES: [&str; 12] = [
+/// The packages whose tests are the evidence.
+///
+/// Every crate that carries engine behaviour is here, including the C ABI and
+/// the shell: a manifest row that names one of their tests can only be believed
+/// if the run that produced the results actually ran it.
+const PACKAGES: [&str; 15] = [
     "rustdb-base",
     "rustdb-vfs",
     "rustdb-sim",
@@ -34,9 +38,12 @@ const PACKAGES: [&str; 12] = [
     "rustdb-transaction",
     "rustdb-sql",
     "rustdb-catalog",
+    "rustdb-ext",
     "rustdb-vm",
     "rustdb-session",
     "rustdb",
+    "rustdb-capi",
+    "rustdb-cli",
     "rustdb-compat",
 ];
 

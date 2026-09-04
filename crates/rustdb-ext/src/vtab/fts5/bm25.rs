@@ -37,7 +37,8 @@ const B: f64 = 0.75;
 
 /// Scores every matched row, returning `(rowid, score)` pairs.
 pub fn score(
-    matched: &[(i64, Vec<BTreeMap<i64, Vec<(usize, Vec<u32>)>>>)],
+    rows: &[i64],
+    hits: &[BTreeMap<i64, Vec<(usize, Vec<u32>)>>],
     query: &Query,
     context: &mut Context<'_>,
     shadows: &ShadowTables,
@@ -45,8 +46,8 @@ pub fn score(
     columns: usize,
 ) -> DbResult<Vec<(i64, f64)>> {
     let weights = vec![1.0f64; columns];
-    let mut out = Vec::with_capacity(matched.len());
-    for (rowid, hits) in matched {
+    let mut out = Vec::with_capacity(rows.len());
+    for rowid in rows {
         let sizes = row_sizes(context, shadows, *rowid, columns)?;
         out.push((
             *rowid,

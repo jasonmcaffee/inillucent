@@ -1505,8 +1505,8 @@ id = "functions.json"
 source = "https://sqlite.org/json1.html"
 profile = "default"
 phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::json_text_round_trips", "rustdb-compat::json5_input_is_accepted_and_converted", "rustdb-compat::jsonb_blobs_are_byte_identical", "rustdb-compat::construction_follows_the_json_mark", "rustdb-compat::paths_resolve_the_way_the_pinned_release_resolves_them", "rustdb-compat::a_bad_path_is_an_error", "rustdb-compat::editing_follows_presence", "rustdb-compat::documents_survive_a_round_trip_through_a_table"]
 
 [[capability]]
 id = "functions.window"
@@ -1521,168 +1521,168 @@ id = "pragma.schema"
 source = "https://sqlite.org/pragma.html"
 profile = "default"
 phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_schema_pragmas_describe_the_schema", "rustdb-compat::table_list_reports_every_table", "rustdb-compat::the_connection_lists_are_a_subset_of_the_reference", "rustdb-compat::the_registers_match_the_engine"]
 
 [[capability]]
 id = "pragma.pager"
 source = "https://sqlite.org/pragma.html"
 profile = "default"
 phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_pager_pragmas_describe_the_file", "rustdb-compat::an_unknown_pragma_is_silent"]
 
 [[capability]]
 id = "pragma.integrity"
 source = "https://sqlite.org/pragma.html"
 profile = "default"
 phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_integrity_checks_agree_on_a_healthy_file"]
 
 [[capability]]
 id = "pragma.query-only"
 source = "https://sqlite.org/pragma.html"
 profile = "default"
 phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_policy_pragmas_are_flags"]
 
 [[capability]]
 id = "vtab.contract"
 source = "https://sqlite.org/vtab.html"
 profile = "default"
 phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::an_argument_and_a_where_are_the_same_thing", "rustdb-compat::an_unconsumed_predicate_is_still_tested", "rustdb-compat::a_module_can_satisfy_the_ordering", "rustdb-compat::a_virtual_table_joins", "rustdb-compat::hidden_columns_stay_hidden", "rustdb-compat::an_unknown_module_is_refused", "rustdb-compat::writes_reach_the_module"]
 
 [[capability]]
 id = "vtab.eponymous"
 source = "https://sqlite.org/vtab.html"
 profile = "default"
 phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::a_table_valued_function_takes_its_arguments", "rustdb-compat::the_json_walkers_match_the_pinned_release", "rustdb-compat::a_walker_joins_a_real_table", "rustdb-compat::an_eponymous_only_module_cannot_be_created"]
 
 [[capability]]
 id = "ext.fts5.queries"
 source = "https://sqlite.org/fts5.html"
 profile = "default"
 phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_shadow_tables_are_the_documented_ones", "rustdb-compat::the_content_table_holds_the_rows", "rustdb-compat::a_term_finds_its_rows", "rustdb-compat::a_phrase_requires_the_words_together", "rustdb-compat::the_operators_combine_matches", "rustdb-compat::a_prefix_matches_every_term_that_starts_with_it", "rustdb-compat::a_column_filter_restricts_the_match", "rustdb-compat::near_requires_the_terms_close_together", "rustdb-compat::the_index_follows_the_rows", "rustdb-compat::a_scan_and_a_rowid_lookup_need_no_match", "rustdb-compat::an_unindexed_column_is_stored_but_not_matched", "rustdb-compat::the_tokenizer_folds_case_and_splits_on_punctuation", "rustdb-compat::the_special_commands_are_accepted", "rustdb-compat::a_rebuild_restores_every_answer", "rustdb-compat::an_unknown_command_is_refused", "rustdb-compat::the_settings_are_written_to_the_config_table"]
 
 [[capability]]
 id = "ext.fts5.ranking"
 source = "https://sqlite.org/fts5.html"
 profile = "default"
 phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_rank_is_bm25_and_ascends", "rustdb-ext::vtab::fts5::bm25::tests::the_score_is_negative", "rustdb-ext::vtab::fts5::bm25::tests::more_occurrences_score_better", "rustdb-ext::vtab::fts5::bm25::tests::a_shorter_row_scores_better", "rustdb-ext::vtab::fts5::bm25::tests::an_unmatched_row_scores_nothing"]
 
 [[capability]]
 id = "ext.rtree"
 source = "https://sqlite.org/rtree.html"
 profile = "default"
 phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::every_row_round_trips", "rustdb-compat::a_bounded_query_answers_the_box", "rustdb-compat::a_split_tree_answers_every_query", "rustdb-compat::the_pinned_release_reads_what_rust_db_wrote", "rustdb-compat::rust_db_reads_what_the_pinned_release_wrote"]
 
 [[capability]]
 id = "capi.open-close"
 source = "https://sqlite.org/c3ref/funclist.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_c_probe_agrees_with_the_pinned_engine", "rustdb-compat::every_exported_c_function_documents_itself", "rustdb-compat::the_registers_match_the_engine"]
 
 [[capability]]
 id = "capi.prepare-step-finalize"
 source = "https://sqlite.org/c3ref/funclist.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_c_probe_agrees_with_the_pinned_engine", "rustdb-compat::every_exported_c_function_documents_itself", "rustdb-compat::the_registers_match_the_engine"]
 
 [[capability]]
 id = "capi.bind"
 source = "https://sqlite.org/c3ref/funclist.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_c_probe_agrees_with_the_pinned_engine", "rustdb-compat::every_exported_c_function_documents_itself", "rustdb-compat::the_registers_match_the_engine"]
 
 [[capability]]
 id = "capi.column-metadata"
 source = "https://sqlite.org/c3ref/funclist.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_c_probe_agrees_with_the_pinned_engine", "rustdb-compat::every_exported_c_function_documents_itself", "rustdb-compat::the_registers_match_the_engine"]
 
 [[capability]]
 id = "capi.hooks"
 source = "https://sqlite.org/c3ref/funclist.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_c_probe_agrees_with_the_pinned_engine", "rustdb-compat::every_exported_c_function_documents_itself", "rustdb-compat::the_registers_match_the_engine"]
 
 [[capability]]
 id = "capi.backup"
 source = "https://sqlite.org/backup.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_c_probe_agrees_with_the_pinned_engine", "rustdb-compat::every_exported_c_function_documents_itself", "rustdb-compat::the_registers_match_the_engine"]
 
 [[capability]]
 id = "capi.blob-io"
 source = "https://sqlite.org/c3ref/blob_open.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_c_probe_agrees_with_the_pinned_engine", "rustdb-compat::every_exported_c_function_documents_itself", "rustdb-compat::the_registers_match_the_engine"]
 
 [[capability]]
 id = "capi.serialize-deserialize"
 source = "https://sqlite.org/c3ref/serialize.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_c_probe_agrees_with_the_pinned_engine", "rustdb-compat::every_exported_c_function_documents_itself", "rustdb-compat::the_registers_match_the_engine"]
 
 [[capability]]
 id = "capi.custom-functions"
 source = "https://sqlite.org/c3ref/funclist.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_c_probe_agrees_with_the_pinned_engine", "rustdb-compat::every_exported_c_function_documents_itself", "rustdb-compat::a_registered_scalar_is_callable", "rustdb-compat::a_registration_overrides_a_builtin", "rustdb-compat::a_registered_aggregate_reduces_a_group", "rustdb-compat::a_registered_collation_orders_rows", "rustdb-compat::a_declared_collation_reaches_the_column", "rustdb-compat::a_removed_function_is_unknown_again"]
 
 [[capability]]
 id = "capi.vfs-registration"
 source = "https://sqlite.org/vfs.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_c_probe_agrees_with_the_pinned_engine", "rustdb-compat::every_exported_c_function_documents_itself", "rustdb-capi::vfs::tests::the_method_table_has_the_header_s_shape"]
 
 [[capability]]
 id = "cli.dot-commands"
 source = "https://sqlite.org/cli.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_catalog_commands_match", "rustdb-compat::a_dump_matches", "rustdb-compat::a_dump_round_trips", "rustdb-compat::an_import_matches", "rustdb-compat::output_redirection_matches", "rustdb-compat::errors_and_bail_match", "rustdb-compat::print_and_echo_match", "rustdb-compat::the_database_list_matches", "rustdb-compat::a_multi_line_statement_matches", "rustdb-compat::a_trigger_body_is_one_statement"]
 
 [[capability]]
 id = "cli.output-modes"
 source = "https://sqlite.org/cli.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
-status = "missing"
-tests = []
+status = "pass"
+tests = ["rustdb-compat::the_default_mode_matches", "rustdb-compat::headers_match", "rustdb-compat::every_output_mode_matches", "rustdb-compat::the_separator_and_null_value_match", "rustdb-compat::widths_match", "rustdb-cli::render::tests::the_default_is_a_pipe_separated_line", "rustdb-cli::render::tests::control_characters_are_escaped", "rustdb-cli::render::tests::quote_mode_writes_literals", "rustdb-cli::render::tests::every_mode_name_round_trips"]
 
 [[capability]]
 id = "search.virtual-table"
