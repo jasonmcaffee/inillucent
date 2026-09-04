@@ -4,8 +4,8 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 
 | status | capabilities |
 |---|---|
-| missing | 5 |
-| pass | 258 |
+| missing | 2 |
+| pass | 261 |
 | **total** | **263** |
 
 ## By phase
@@ -16,7 +16,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | phase 10: WAL and concurrent connection semantics | 12 | 0 | 0 | 0 |
 | phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree | 10 | 0 | 0 | 0 |
 | phase 12: C ABI and CLI completion | 12 | 0 | 0 | 0 |
-| phase 13: transactional rust-db search and legacy migration | 0 | 0 | 3 | 0 |
+| phase 13: transactional rust-db search and legacy migration | 3 | 0 | 0 | 0 |
 | phase 14: performance qualification and release | 0 | 0 | 2 | 0 |
 | phase 1: VFS, binary primitives, and simulator | 46 | 0 | 0 | 0 |
 | phase 2: values, affinities, collations, and records | 17 | 0 | 0 | 0 |
@@ -240,9 +240,9 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `capi.vfs-registration` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `cli.dot-commands` | pass | pass | linux-x86_64, windows-x86_64 | 10 |
 | `cli.output-modes` | pass | pass | linux-x86_64, windows-x86_64 | 9 |
-| `search.virtual-table` | missing | missing | - | 0 |
-| `search.transactional-visibility` | missing | missing | - | 0 |
-| `search.legacy-migration` | missing | missing | - | 0 |
+| `search.virtual-table` | pass | pass | linux-x86_64, windows-x86_64 | 13 |
+| `search.transactional-visibility` | pass | pass | linux-x86_64, windows-x86_64 | 13 |
+| `search.legacy-migration` | pass | pass | linux-x86_64, windows-x86_64 | 10 |
 | `perf.qualified-measurement` | missing | missing | - | 0 |
 | `perf.regression-tracking` | missing | missing | - | 0 |
 | `sql.negative.right-outer-join-pre-3-39` | pass | pass | linux-x86_64, windows-x86_64 | 2 |

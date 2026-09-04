@@ -64,7 +64,22 @@ pub trait RetrievalIndex {
     /// many chunks landed.
     fn append(&mut self, chunks: Vec<ChunkInput>, embeddings: &[Vec<f32>]) -> DbResult<usize>;
 
-    /// Marks one document unreachable, reporting whether there was one.
+    /// Makes one document unreachable, reporting whether there was one.
+    ///
+    /// The two implementations differ here, and the difference is real rather
+    /// than an oversight. The direct engine *tombstones*: the chunk stays in
+    /// the inverted index and in the corpus statistics, and is excluded when a
+    /// query filters it out - which is what makes a delete cost nothing and is
+    /// why `deleted_ratio` exists to say when a rebuild is worth it. A search
+    /// table *deletes*: the row is gone, and the document frequencies and
+    /// average length are those of the corpus that is left.
+    ///
+    /// Both make the document unreachable, immediately and identically. What
+    /// can differ afterwards is the ordering of results deep in a list, because
+    /// the two are scoring against corpora of different sizes until the legacy
+    /// index is rebuilt. A caller who needs the legacy behaviour keeps the row
+    /// and filters it in SQL, which is what the migration's own `document`
+    /// table is for.
     fn tombstone(&mut self, source: &str, external_doc_id: &str) -> DbResult<bool>;
 
     /// Replaces one document's chunks, returning how many chunks landed.

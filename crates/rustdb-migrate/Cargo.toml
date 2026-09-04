@@ -1,0 +1,17 @@
+[package]
+name = "rustdb-migrate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Resumable copy-and-verify migration of a legacy rust-db index directory into a rust-db database, and the legacy direct index API over one."
+
+[dependencies]
+rustdb-base = { workspace = true }
+rustdb-value = { workspace = true }
+rustdb-core = { workspace = true }
+rustdb-search = { workspace = true }
+rustdb = { workspace = true }
+
+[[bin]]
+name = "rustdb-migrate"
+path = "src/main.rs"

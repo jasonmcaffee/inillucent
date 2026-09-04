@@ -204,14 +204,31 @@ pub fn configuration(options: &Options) -> IndexConfig {
 
 /// Builds a chunk from one stored row.
 ///
-/// The heading path is the first declared column and the content is every
-/// column joined by newlines, so a chunk's text begins with its heading -
-/// which is the shape the existing corpus has and the shape the heading boost
-/// and proximity weighting were measured against.
+/// The content is every column joined by newlines. When there is more than one
+/// column the first is *also* the heading path, so a chunk's text begins with
+/// its heading - which is the shape the existing corpus has and the shape the
+/// heading boost and proximity weighting were measured against.
+///
+/// A one-column table has text and no heading, and that distinction matters
+/// rather than being tidiness: the legacy migration declares exactly one column
+/// and puts the source chunk's text in it verbatim, so that the terms and the
+/// corpus statistics of the migrated index are the ones the source index had.
+/// Fabricating a heading equal to the whole content would leave the two indexes
+/// scoring differently the moment anybody turned the heading boost on.
+///
+/// Each row is its own document. That is a real consequence and it is stated
+/// where it can be read: the per-document cap in the fusion never binds on a
+/// `rustdb_search` table, because no two rows share a document. An application
+/// that wants documents made of several chunks models them in SQL - a document
+/// table and a join - which is what a relational engine is for.
 /// @param id - the rowid, which is the document identity
 /// @param row - the stored row
 pub fn chunk_of(id: i64, row: &Row) -> ChunkInput {
-    let heading = row.columns.first().cloned().unwrap_or_default();
+    let heading = if row.columns.len() > 1 {
+        row.columns.first().cloned().unwrap_or_default()
+    } else {
+        String::new()
+    };
     ChunkInput {
         source: SOURCE.to_string(),
         external_doc_id: id.to_string(),

@@ -42,6 +42,7 @@ pub mod buffer;
 pub mod bytes;
 pub mod checksum;
 pub mod error;
+pub mod hash;
 pub mod ids;
 pub mod limits;
 pub mod page;
