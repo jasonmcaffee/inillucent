@@ -26,6 +26,21 @@ members = [
     "crates/rustdb-compat",
 ]
 
+# The release profile, which is part of the fairness contract rather than a
+# tuning preference.
+#
+# SQLite ships as an amalgamation: one translation unit, so every call in the
+# engine is a candidate for inlining and every constant is visible to the
+# optimiser. A Rust workspace of eighteen crates compiled with the default
+# sixteen codegen units and no link-time optimisation is not the same build, and
+# comparing the two would be comparing build configurations rather than engines.
+# Fat LTO and one codegen unit is the closest equivalent, and it is what the
+# scorecard measures.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "unwind"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

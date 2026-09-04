@@ -23,7 +23,7 @@
 
 use rustdb_base::error::ExtendedCode;
 use rustdb_base::{error, DbResult};
-use rustdb_sql::ast::{ConflictAction, TriggerTime};
+use rustdb_sql::ast::{BinaryOp, ConflictAction, TriggerTime};
 use rustdb_sql::bind::{BoundExpr, BoundResultColumn};
 use rustdb_sql::bind::{BoundSelect, EXCLUDED_SOURCE, NEW_SOURCE, OLD_SOURCE};
 use rustdb_sql::catalog_view::{IndexInfo, IndexOrigin, TableInfo, TableKind};
@@ -31,9 +31,11 @@ use rustdb_sql::dml::{
     BoundAssignment, BoundCheck, BoundDelete, BoundInsert, BoundInsertSource, BoundTrigger,
     BoundTriggerStatement, BoundUpdate, BoundUpsert, ColumnSource,
 };
+use rustdb_sql::plan::{self, BoundKind, RangeBound};
 use rustdb_value::{Affinity, Collation};
 
 use crate::compile::{Compiler, Label, Sink};
+use crate::program::Comparison;
 use crate::program::{
     IndexKey, Instruction, Opcode, Operand, Program, ProgramDependencies, ResultColumn,
     RowChangeKind, SortColumn, SortKey, StrictType,
@@ -1702,7 +1704,13 @@ impl Compiler {
         }
         let writer = self.open_for_write(&delete.table, delete.source);
         let sorter = self.open_rowid_sorter();
-        self.emit_collect_rowids(&writer, delete.filter.as_ref(), sorter)?;
+        self.emit_collect_rowids(
+            &writer,
+            &delete.table,
+            delete.source,
+            delete.filter.as_ref(),
+            sorter,
+        )?;
 
         let empty = self.emit_jump(Instruction::new(Opcode::SorterSort, sorter as i32, -1, 0));
         let top = self.here();
@@ -1781,7 +1789,13 @@ impl Compiler {
         }
         let writer = self.open_for_write(&update.table, update.source);
         let sorter = self.open_rowid_sorter();
-        self.emit_collect_rowids(&writer, update.filter.as_ref(), sorter)?;
+        self.emit_collect_rowids(
+            &writer,
+            &update.table,
+            update.source,
+            update.filter.as_ref(),
+            sorter,
+        )?;
 
         let empty = self.emit_jump(Instruction::new(Opcode::SorterSort, sorter as i32, -1, 0));
         let top = self.here();
@@ -2737,11 +2751,53 @@ impl Compiler {
     fn emit_collect_rowids(
         &mut self,
         writer: &Writer,
+        table: &TableInfo,
+        source: usize,
         filter: Option<&BoundExpr>,
         sorter: u32,
     ) -> DbResult<()> {
-        let end = self.emit_jump(Instruction::new(Opcode::Rewind, writer.table as i32, -1, 0));
-        let top = self.here();
+        match plan::write_path(table, source, filter) {
+            plan::AccessPath::RowidSeek { key, .. } => {
+                self.emit_collect_by_rowid(writer, filter, sorter, &key)
+            }
+            plan::AccessPath::RowidRange { low, high, .. } => {
+                self.emit_collect_rowid_range(writer, filter, sorter, low, high)
+            }
+            plan::AccessPath::IndexSeek {
+                index_name,
+                equalities,
+                low,
+                high,
+                columns,
+                ..
+            } => self.emit_collect_by_index(
+                writer,
+                table,
+                filter,
+                sorter,
+                &index_name,
+                &equalities,
+                low,
+                high,
+                &columns,
+            ),
+            _ => self.emit_collect_by_scan(writer, filter, sorter),
+        }
+    }
+
+    /// Emits the body of the collection loop: test the predicate, keep the rowid.
+    ///
+    /// The whole `WHERE` clause is tested here whatever path found the row,
+    /// rather than only the part the path did not consume. A path narrows which
+    /// rows are *visited*; it never decides which are kept. That is a few
+    /// redundant comparisons on a path that already pinned the row exactly, and
+    /// it is the reason this optimisation cannot change an answer.
+    fn emit_collect_body(
+        &mut self,
+        writer: &Writer,
+        filter: Option<&BoundExpr>,
+        sorter: u32,
+    ) -> DbResult<Option<Label>> {
         let mut skip = None;
         if let Some(filter) = filter {
             let register = self.compile_expr(filter)?;
@@ -2762,12 +2818,294 @@ impl Compiler {
             rowid as i32,
             1,
         ));
+        Ok(skip)
+    }
+
+    /// Collects every row of the table, which is what a write with no usable
+    /// predicate has to do.
+    fn emit_collect_by_scan(
+        &mut self,
+        writer: &Writer,
+        filter: Option<&BoundExpr>,
+        sorter: u32,
+    ) -> DbResult<()> {
+        let end = self.emit_jump(Instruction::new(Opcode::Rewind, writer.table as i32, -1, 0));
+        let top = self.here();
+        let skip = self.emit_collect_body(writer, filter, sorter)?;
         if let Some(skip) = skip {
             self.patch_here(skip);
         }
         self.emit(Instruction::new(Opcode::Next, writer.table as i32, top, 0));
         self.patch_here(end);
         Ok(())
+    }
+
+    /// Collects the one row a rowid equality names.
+    fn emit_collect_by_rowid(
+        &mut self,
+        writer: &Writer,
+        filter: Option<&BoundExpr>,
+        sorter: u32,
+        key: &BoundExpr,
+    ) -> DbResult<()> {
+        let register = self.compile_expr(key)?;
+        let missing = self.emit_jump(Instruction::new(
+            Opcode::SeekRowid,
+            writer.table as i32,
+            -1,
+            register as i32,
+        ));
+        let skip = self.emit_collect_body(writer, filter, sorter)?;
+        if let Some(skip) = skip {
+            self.patch_here(skip);
+        }
+        self.patch_here(missing);
+        Ok(())
+    }
+
+    /// Collects the run of rows a rowid range covers.
+    fn emit_collect_rowid_range(
+        &mut self,
+        writer: &Writer,
+        filter: Option<&BoundExpr>,
+        sorter: u32,
+        low: Option<RangeBound>,
+        high: Option<RangeBound>,
+    ) -> DbResult<()> {
+        let empty = match &low {
+            Some(bound) => {
+                let register = self.compile_expr(&bound.value)?;
+                self.emit(
+                    Instruction::new(Opcode::Cast, register as i32, register as i32, 0)
+                        .with_p4(Operand::Affinity(Affinity::Integer)),
+                );
+                let opcode = if bound.kind == BoundKind::Greater {
+                    Opcode::SeekGt
+                } else {
+                    Opcode::SeekGe
+                };
+                self.emit_jump(
+                    Instruction::new(opcode, writer.table as i32, -1, register as i32).with_p5(1),
+                )
+            }
+            None => self.emit_jump(Instruction::new(Opcode::Rewind, writer.table as i32, -1, 0)),
+        };
+        let top = self.here();
+        let mut done: Vec<Label> = Vec::new();
+        if let Some(bound) = &high {
+            let limit = self.compile_expr(&bound.value)?;
+            let rowid = self.register();
+            self.emit(Instruction::new(
+                Opcode::Rowid,
+                writer.table as i32,
+                rowid as i32,
+                0,
+            ));
+            let result = self.register();
+            let op = if bound.kind == BoundKind::Less {
+                BinaryOp::Less
+            } else {
+                BinaryOp::LessEqual
+            };
+            self.emit(
+                Instruction::new(Opcode::Compare, rowid as i32, limit as i32, result as i32)
+                    .with_p4(Operand::Comparison(Comparison {
+                        op,
+                        affinity: Some(Affinity::Integer),
+                        collation: Collation::Binary,
+                    })),
+            );
+            done.push(
+                self.emit_jump(Instruction::new(Opcode::IfNot, result as i32, -1, 0).with_p5(1)),
+            );
+        }
+        let skip = self.emit_collect_body(writer, filter, sorter)?;
+        if let Some(skip) = skip {
+            self.patch_here(skip);
+        }
+        self.emit(Instruction::new(Opcode::Next, writer.table as i32, top, 0));
+        for label in done {
+            self.patch_here(label);
+        }
+        self.patch_here(empty);
+        Ok(())
+    }
+
+    /// Collects the rows an index seek or range finds.
+    ///
+    /// The index cursor is the *write* cursor the statement already opened for
+    /// that index, so no second cursor is needed - and it is positioned before
+    /// anything is written, which is the whole point of the collection pass.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_collect_by_index(
+        &mut self,
+        writer: &Writer,
+        table: &TableInfo,
+        filter: Option<&BoundExpr>,
+        sorter: u32,
+        index_name: &[u8],
+        equalities: &[BoundExpr],
+        low: Option<RangeBound>,
+        high: Option<RangeBound>,
+        columns: &[u16],
+    ) -> DbResult<()> {
+        let position = writer
+            .definitions
+            .iter()
+            .position(|index| index.name == index_name);
+        let (Some(position), Some(index_cursor)) = (
+            position,
+            position.and_then(|slot| writer.indexes.get(slot)).copied(),
+        ) else {
+            return self.emit_collect_by_scan(writer, filter, sorter);
+        };
+        let _ = position;
+        let key_len = equalities.len().saturating_add(usize::from(low.is_some()));
+        let key = self.register_block(key_len.max(1));
+        for (slot, expr) in equalities.iter().enumerate() {
+            let register = self.compile_expr(expr)?;
+            self.emit(Instruction::new(
+                Opcode::Copy,
+                register as i32,
+                key.saturating_add(slot as u32) as i32,
+                0,
+            ));
+        }
+        let mut seek_len = equalities.len();
+        let mut opcode = Opcode::SeekGe;
+        if let Some(bound) = &low {
+            let register = self.compile_expr(&bound.value)?;
+            self.emit(Instruction::new(
+                Opcode::Copy,
+                register as i32,
+                key.saturating_add(equalities.len() as u32) as i32,
+                0,
+            ));
+            seek_len = seek_len.saturating_add(1);
+            opcode = if bound.kind == BoundKind::Greater {
+                Opcode::SeekGt
+            } else {
+                Opcode::SeekGe
+            };
+        }
+        self.apply_write_index_affinity(table, columns, key, seek_len);
+        // A NULL equality key matches nothing: `x = NULL` is unknown rather
+        // than true, and an index that stores NULLs together would otherwise
+        // hand back the rows whose column is NULL.
+        let mut null_key: Vec<Label> = Vec::new();
+        for slot in 0..equalities.len() {
+            null_key.push(self.emit_jump(Instruction::new(
+                Opcode::IfNull,
+                key.saturating_add(slot as u32) as i32,
+                -1,
+                0,
+            )));
+        }
+        let empty = self.emit_jump(
+            Instruction::new(opcode, index_cursor as i32, -1, key as i32).with_p5(seek_len as u16),
+        );
+        let top = self.here();
+        let mut done: Vec<Label> = Vec::new();
+        if !equalities.is_empty() {
+            done.push(
+                self.emit_jump(
+                    Instruction::new(Opcode::IdxGt, index_cursor as i32, -1, key as i32)
+                        .with_p5(equalities.len() as u16),
+                ),
+            );
+        }
+        if let Some(bound) = &high {
+            let high_key = self.register_block(equalities.len().saturating_add(1));
+            for slot in 0..equalities.len() {
+                self.emit(Instruction::new(
+                    Opcode::Copy,
+                    key.saturating_add(slot as u32) as i32,
+                    high_key.saturating_add(slot as u32) as i32,
+                    0,
+                ));
+            }
+            let register = self.compile_expr(&bound.value)?;
+            self.emit(Instruction::new(
+                Opcode::Copy,
+                register as i32,
+                high_key.saturating_add(equalities.len() as u32) as i32,
+                0,
+            ));
+            let length = equalities.len().saturating_add(1);
+            self.apply_write_index_affinity(table, columns, high_key, length);
+            let opcode = if bound.kind == BoundKind::Less {
+                Opcode::IdxGe
+            } else {
+                Opcode::IdxGt
+            };
+            done.push(
+                self.emit_jump(
+                    Instruction::new(opcode, index_cursor as i32, -1, high_key as i32)
+                        .with_p5(length as u16),
+                ),
+            );
+        }
+        let rowid = self.register();
+        self.emit(Instruction::new(
+            Opcode::IdxRowid,
+            index_cursor as i32,
+            rowid as i32,
+            0,
+        ));
+        let mut skip: Vec<Label> = vec![self.emit_jump(Instruction::new(
+            Opcode::SeekRowid,
+            writer.table as i32,
+            -1,
+            rowid as i32,
+        ))];
+        if let Some(label) = self.emit_collect_body(writer, filter, sorter)? {
+            skip.push(label);
+        }
+        for label in skip {
+            self.patch_here(label);
+        }
+        self.emit(Instruction::new(Opcode::Next, index_cursor as i32, top, 0));
+        for label in done {
+            self.patch_here(label);
+        }
+        self.patch_here(empty);
+        for label in null_key {
+            self.patch_here(label);
+        }
+        Ok(())
+    }
+
+    /// Applies the indexed columns' affinities to a seek key.
+    ///
+    /// A seek key has to be converted the way the index's own values were, or
+    /// the comparison holds a text `'5'` against an integer 5 and finds
+    /// nothing. This is the single most common way an index seek silently
+    /// returns no rows, and a write that found no rows would be a write that
+    /// silently did nothing.
+    fn apply_write_index_affinity(
+        &mut self,
+        table: &TableInfo,
+        columns: &[u16],
+        key: u32,
+        length: usize,
+    ) {
+        for position in 0..length {
+            let Some(column) = columns.get(position).copied() else {
+                continue;
+            };
+            let Some(info) = table.column(column) else {
+                continue;
+            };
+            self.emit(
+                Instruction::new(
+                    Opcode::ApplyAffinity,
+                    key.saturating_add(position as u32) as i32,
+                    1,
+                    0,
+                )
+                .with_p4(Operand::Affinity(info.affinity)),
+            );
+        }
     }
 }
 

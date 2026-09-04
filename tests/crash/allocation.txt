@@ -1,4 +1,4 @@
-points: 61, refused: 61
+points: 53, refused: 53
 1	refused
 2	refused
 3	refused
@@ -52,11 +52,3 @@ points: 61, refused: 61
 51	refused
 52	refused
 53	refused
-54	refused
-55	refused
-56	refused
-57	refused
-58	refused
-59	refused
-60	refused
-61	refused

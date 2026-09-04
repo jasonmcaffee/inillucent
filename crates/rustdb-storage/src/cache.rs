@@ -550,15 +550,42 @@ impl PageCache {
     /// `path_is_current` exists to give. Mutating in place would change a
     /// page under a cursor that had already parsed it.
     pub fn publish(&self, key: PageKey, bytes: PageBuffer, state: PageState) -> DbResult<PagePin> {
+        self.publish_with(key, bytes, state, None)
+    }
+
+    /// Publishes a page, seeding the layout the writer already computed.
+    ///
+    /// A writer publishes a new frame rather than mutating the resident one, so
+    /// the layout cached on the old frame cannot describe the new bytes and is
+    /// deliberately not carried across. What *can* be carried across is a
+    /// layout the writer parsed from the bytes it is publishing - and since it
+    /// has just laid those bytes out, it knows them. Without this the next
+    /// reader parses the page again, which on a full index leaf is six
+    /// microseconds paid once per cell inserted or removed.
+    /// @param key - which page
+    /// @param bytes - the page's new contents
+    /// @param state - what the frame is doing
+    /// @param layout - the layout of `bytes`, when the caller already has it
+    pub fn publish_with(
+        &self,
+        key: PageKey,
+        bytes: PageBuffer,
+        state: PageState,
+        layout: Option<Arc<PageLayout>>,
+    ) -> DbResult<PagePin> {
         let size = bytes.as_slice().len();
         let version = PageVersion(self.next_version.fetch_add(1, Ordering::Relaxed));
+        let seeded = OnceLock::new();
+        if let Some(layout) = layout {
+            let _ = seeded.set(layout);
+        }
         let frame = Arc::new(PageFrame {
             key,
             bytes,
             pins: AtomicU32::new(1),
             version,
             state: AtomicU8::new(state.to_code()),
-            layout: OnceLock::new(),
+            layout: seeded,
             referenced: AtomicBool::new(true),
         });
         let removed = {

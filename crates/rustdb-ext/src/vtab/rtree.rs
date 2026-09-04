@@ -533,8 +533,8 @@ impl RTreeTable {
     fn cell_of(&self, key: i64, values: &[Value<'static>]) -> DbResult<Cell> {
         let mut box_ = Vec::with_capacity(self.dimensions * 2);
         for dimension in 0..self.dimensions {
-            let low = coordinate(values.get(1 + dimension * 2), self.coordinates);
-            let high = coordinate(values.get(2 + dimension * 2), self.coordinates);
+            let low = coordinate(values.get(1 + dimension * 2), self.coordinates, Edge::Low);
+            let high = coordinate(values.get(2 + dimension * 2), self.coordinates, Edge::High);
             if low > high {
                 return Err(constraint(
                     "rtree constraint failed: a minimum is greater than its maximum",
@@ -796,8 +796,52 @@ fn split(cells: &[Cell], dimensions: usize) -> (Vec<Cell>, Vec<Cell>) {
     (sorted, right)
 }
 
+/// Which end of a bounding box a coordinate is.
+///
+/// It decides which way a value is rounded when it will not fit in the
+/// thirty-two bits the format stores, and that is not a detail: a box is a
+/// promise that everything inside it is inside it, so a minimum has to round
+/// *down* and a maximum *up*. Rounding both to nearest shrinks the box, and a
+/// shrunken box loses rows - the query walks past a subtree whose stored bounds
+/// no longer contain the row it holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edge {
+    /// The lower bound of a dimension, which rounds towards minus infinity.
+    Low,
+    /// The upper bound, which rounds towards plus infinity.
+    High,
+    /// A value being compared rather than stored, which rounds to nearest.
+    Probe,
+}
+
+/// The factor a coordinate that has to grow is multiplied by.
+///
+/// One part in 2^23, which is the width of a 32-bit float's mantissa. SQLite
+/// calls these `RNDAWAY` and `RNDTOWARDS` and applies them to the *double*
+/// before the conversion, so the result is not always the next representable
+/// float - at some magnitudes the product lands two steps away. Matching the
+/// arithmetic rather than the intent is what makes the stored bytes identical.
+const ROUND_AWAY: f64 = 1.0 + 1.0 / 8_388_608.0;
+
+/// The factor a coordinate that has to shrink is multiplied by.
+const ROUND_TOWARDS: f64 = 1.0 - 1.0 / 8_388_608.0;
+
 /// Returns one coordinate as the module reads it.
-fn coordinate(value: Option<&Value<'static>>, coordinates: Coordinates) -> f64 {
+///
+/// A stored box is a promise that everything inside it is inside it, so a
+/// minimum rounds *down* and a maximum *up* when the value will not fit in the
+/// thirty-two bits the format holds. Rounding both to nearest shrinks the box,
+/// and a shrunken box loses rows: the query walks past a subtree whose stored
+/// bounds no longer contain the row it holds.
+///
+/// This was found by the performance scorecard rather than by reading. Both
+/// engines inserted the same boxes and then disagreed about how many a range
+/// held, because a maximum of 1103528600 was being stored here as 1103528576 -
+/// a number smaller than the value it claims to bound.
+/// @param value - the bound value, when there is one
+/// @param coordinates - whether the table stores integers or floats
+/// @param edge - which end of the box this is
+fn coordinate(value: Option<&Value<'static>>, coordinates: Coordinates, edge: Edge) -> f64 {
     let Some(value) = value else {
         return 0.0;
     };
@@ -813,9 +857,29 @@ fn coordinate(value: Option<&Value<'static>>, coordinates: Coordinates) -> f64 {
     if coordinates == Coordinates::Integer {
         return number.round();
     }
-    // The format stores 32-bit coordinates, so the value a query compares
-    // against is the value the file can hold and not the one it was given.
-    f64::from(number as f32)
+    // The format stores 32-bit coordinates, so the value the file can hold is
+    // the value everything downstream compares against.
+    let nearest = f64::from(number as f32);
+    match edge {
+        Edge::Probe => nearest,
+        Edge::Low if nearest > number => {
+            let factor = if number < 0.0 {
+                ROUND_AWAY
+            } else {
+                ROUND_TOWARDS
+            };
+            f64::from((number * factor) as f32)
+        }
+        Edge::High if nearest < number => {
+            let factor = if number < 0.0 {
+                ROUND_TOWARDS
+            } else {
+                ROUND_AWAY
+            };
+            f64::from((number * factor) as f32)
+        }
+        _ => nearest,
+    }
 }
 
 /// A cursor over the rows one query matched.
@@ -864,7 +928,7 @@ impl VirtualCursor for RTreeCursor {
             let Some(value) = arguments.next() else {
                 continue;
             };
-            let value = coordinate(Some(value), self.coordinates);
+            let value = coordinate(Some(value), self.coordinates, Edge::Probe);
             let column = usize::from(column.saturating_sub(b'0'));
             if column == 0 || column > self.dimensions * 2 {
                 continue;

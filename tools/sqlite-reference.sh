@@ -76,5 +76,21 @@ cc -O2 -o "$ref_dir/sqlite-oracle" \
 echo "building the amalgamation object the ABI probes link against"
 cc -O2 -c -o "$ref_dir/sqlite3.o"   -DSQLITE_ENABLE_FTS5   -DSQLITE_ENABLE_RTREE   -DSQLITE_ENABLE_MATH_FUNCTIONS   -DSQLITE_ENABLE_COLUMN_METADATA   -DSQLITE_ENABLE_PREUPDATE_HOOK   -DSQLITE_ENABLE_SESSION   -DSQLITE_ENABLE_DBSTAT_VTAB   -DSQLITE_THREADSAFE=1   -I "$src_dir"   "$src_dir/sqlite3.c"
 
+echo "building the benchmark driver"
+cc -O2 -o "$ref_dir/sqlite-bench" \
+  -DSQLITE_ENABLE_FTS5 \
+  -DSQLITE_ENABLE_RTREE \
+  -DSQLITE_ENABLE_MATH_FUNCTIONS \
+  -DSQLITE_ENABLE_COLUMN_METADATA \
+  -DSQLITE_ENABLE_PREUPDATE_HOOK \
+  -DSQLITE_ENABLE_SESSION \
+  -DSQLITE_ENABLE_DBSTAT_VTAB \
+  -DSQLITE_THREADSAFE=1 \
+  -I "$src_dir" \
+  "$root/compat/oracle/sqlite_bench.c" \
+  "$src_dir/sqlite3.c" \
+  -lm -lpthread
+
 echo "oracle: $ref_dir/sqlite-oracle"
+echo "bench: $ref_dir/sqlite-bench"
 echo "set RUSTDB_SQLITE_ORACLE=$ref_dir/sqlite-oracle to run the differential tests"

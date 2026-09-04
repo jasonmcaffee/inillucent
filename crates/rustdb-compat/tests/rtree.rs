@@ -300,6 +300,40 @@ fn query_with_rustdb(path: &PathBuf, sql: &str) -> Vec<String> {
     rows
 }
 
+/// A coordinate too wide for a 32-bit float is rounded outwards, not to nearest.
+///
+/// A stored box promises that everything inside it is inside it. Rounding a
+/// maximum to nearest can make it *smaller* than the value it bounds, and then
+/// a query walks past the subtree holding the row - which is a lost row rather
+/// than a slow one, and nothing about the file looks wrong.
+///
+/// The values here are the ones the performance scorecard found the two engines
+/// disagreeing on, and they are chosen to land on both sides of the rounding:
+/// 1103528600 rounds up by one step of the mantissa and 2061584312 by two,
+/// because SQLite multiplies the double by one part in 2^23 before converting
+/// rather than stepping to the next representable float.
+#[test]
+fn a_wide_coordinate_rounds_outwards() {
+    check(
+        "wide-coordinates",
+        &[
+            Step::Exec("INSERT INTO spots VALUES (10, 1103528590, 1103528600, 12345, 12355)"),
+            Step::Exec("INSERT INTO spots VALUES (11, 2061584302, 2061584312, 1, 11)"),
+            Step::Exec("INSERT INTO spots VALUES (12, -2061584312, -2061584302, -5.5, 5.5)"),
+            Step::Query("SELECT id, minX, maxX, minY, maxY FROM spots ORDER BY id"),
+            // The row has to be found by a query whose bounds are the values
+            // that were inserted, which is the property the rounding exists for.
+            Step::Query(
+                "SELECT count(*) FROM spots WHERE minX >= 1103528590 AND maxX <= 1103528600",
+            ),
+            Step::Query("SELECT count(*) FROM spots WHERE minX > 2061584301 AND maxX < 2061584313"),
+            Step::Query(
+                "SELECT count(*) FROM spots WHERE minX >= -2061584312 AND maxX <= -2061584302",
+            ),
+        ],
+    );
+}
+
 /// The oracle has to be present for the comparisons above to mean anything.
 #[test]
 fn the_oracle_is_available() {

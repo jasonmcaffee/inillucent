@@ -314,6 +314,46 @@ impl PageLayout {
     /// offset zero. `usable` is the page size less the reserved tail, which is
     /// what every calculation in the format is against.
     pub fn parse(bytes: &[u8], page_number: PageId, usable: u32) -> DbResult<PageLayout> {
+        PageLayout::read(bytes, page_number, usable, true)
+    }
+
+    /// Parses a page this process wrote, without decoding every cell again.
+    ///
+    /// `parse` decodes every cell on the page to prove each one lies inside it.
+    /// That is the right thing to do with bytes that came out of a file: they
+    /// are the one input this engine cannot vouch for, and a cell pointing past
+    /// the page is how a corrupt database turns into a read of somebody else's
+    /// memory. It is also, measured, the single most expensive thing the
+    /// storage layer does - a full index leaf holds four hundred cells and
+    /// parsing it costs six microseconds, which is twenty times a rowid seek.
+    ///
+    /// Bytes this process has just written are a different input. They were
+    /// validated when the page was read, and everything that has happened to
+    /// them since came out of `edit::insert_cell`, `edit::remove_cell` or
+    /// `edit::rewrite_page` - the only code in the workspace that writes a
+    /// B-tree page, all of which measure before they move anything. Re-proving
+    /// their output on every edit is proving this crate against itself, and it
+    /// was costing a page parse per cell inserted or removed.
+    ///
+    /// What is *not* skipped: the header, the cell-pointer array bounds, the
+    /// freeblock chain, and every later read of an individual cell, which is
+    /// still checked by `cell`. And under `debug_assertions` - which is how the
+    /// whole test suite runs - the full validation still happens, so a bug in
+    /// an edit primitive fails a test rather than surviving to a release.
+    /// @param bytes - the page as this process just wrote it
+    /// @param page_number - which page it is
+    /// @param usable - the usable bytes per page
+    pub fn parse_edited(bytes: &[u8], page_number: PageId, usable: u32) -> DbResult<PageLayout> {
+        PageLayout::read(bytes, page_number, usable, cfg!(debug_assertions))
+    }
+
+    /// Parses a page, validating every cell only when asked.
+    fn read(
+        bytes: &[u8],
+        page_number: PageId,
+        usable: u32,
+        validate: bool,
+    ) -> DbResult<PageLayout> {
         let base = if page_number.get() == 1 { 100 } else { 0 };
         let usable = usable as usize;
         if usable > bytes.len() {
@@ -420,7 +460,9 @@ impl PageLayout {
         };
         let page = BTreePage::new(bytes, &layout);
         page.free_blocks()?;
-        page.validate_cells()?;
+        if validate {
+            page.validate_cells()?;
+        }
         Ok(layout)
     }
 }

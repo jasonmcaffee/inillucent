@@ -1,0 +1,760 @@
+//! The performance scorecard: the plan both engines read, and the statistics
+//! that turn paired timings into a verdict.
+//!
+//! Invariant: **there is one copy of the workload and both engines are driven
+//! from it.** The plan is rendered to a text file; the rust-db arm reads it and
+//! so does the SQLite arm, which is a separate C program compiled from the
+//! pinned amalgamation. The SQL, the parameter generator, the transaction
+//! grouping, the prepared-statement policy, the page size, the journal mode and
+//! the durability level are therefore the same bytes for both, rather than two
+//! implementations of one intention that are meant to agree.
+//!
+//! The second invariant is that a timing is only a measurement if both engines
+//! produced the same answer. Every workload accumulates a digest over the values
+//! it returned, computed the same way on both sides; a workload whose digests
+//! differ is not a slow result, it is a wrong one, and the analyser refuses to
+//! time it rather than reporting a ratio nobody should read.
+//!
+//! What the statistics do, and why:
+//!
+//! - The samples are **paired**: one round runs both engines over the same
+//!   freshly cloned database, so a machine that was busy for a second penalises
+//!   both arms of that pair. The quantity analysed is the log of the ratio
+//!   within each pair, which is what makes "a 2x win and a 2x loss average to
+//!   no change" true rather than a 1.25x win.
+//! - The interval is a **bootstrap** over the paired log ratios, because a ratio
+//!   of medians has no closed-form interval and a normal approximation on
+//!   timings is wrong in the direction that flatters the winner: latency
+//!   distributions have a long right tail.
+//! - No sample is removed for being slow. The only exclusion is a digest
+//!   mismatch, which is declared before the run and is a correctness gate rather
+//!   than an outlier policy.
+
+use std::fmt::Write as _;
+
+use rustdb_base::rng::Rng;
+
+/// The plan format version, written into the file both engines read.
+pub const PLAN_VERSION: u32 = 1;
+
+/// How a parameter is generated, identically on both sides.
+///
+/// The formulas are here and in `compat/oracle/sqlite_bench.c`, and they have to
+/// agree exactly: a benchmark whose two arms read different rows is not a
+/// comparison. They are deliberately trivial - a modulus, a multiply, a fixed
+/// sentence - so that "the same" is checkable by reading them side by side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bind {
+    /// `1 + (iteration % rows)`: a sequential walk of existing keys.
+    Rowid,
+    /// `1 + ((iteration * 2654435761) % rows)`: a scattered walk of the same.
+    Scatter,
+    /// `rows + 1 + iteration`: a key that is not there yet, for inserts.
+    Counter,
+    /// `(iteration * 1103515245 + 12345) & 0x7fffffff`: an unclustered integer.
+    Int,
+    /// `"row <iteration> lorem ipsum dolor sit amet consectetur"`.
+    Text,
+    /// Sixty-four bytes, byte `j` being `(iteration + j) & 0xff`.
+    Blob,
+}
+
+impl Bind {
+    /// Returns the name the plan file writes.
+    pub fn name(self) -> &'static str {
+        match self {
+            Bind::Rowid => "rowid",
+            Bind::Scatter => "scatter",
+            Bind::Counter => "counter",
+            Bind::Int => "int",
+            Bind::Text => "text",
+            Bind::Blob => "blob",
+        }
+    }
+}
+
+/// The number of bytes a `Bind::Blob` produces.
+pub const BLOB_BYTES: usize = 64;
+
+/// How a workload groups its statements into transactions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Grouping {
+    /// Every statement commits on its own.
+    Autocommit,
+    /// One transaction around the whole repeat.
+    Single,
+    /// A commit every so many statements.
+    Every(u32),
+}
+
+impl Grouping {
+    /// Returns the value the plan file writes.
+    pub fn name(self) -> String {
+        match self {
+            Grouping::Autocommit => "none".to_string(),
+            Grouping::Single => "all".to_string(),
+            Grouping::Every(count) => count.to_string(),
+        }
+    }
+}
+
+/// One measured workload.
+#[derive(Clone, Debug)]
+pub struct Workload {
+    /// The workload's own name, unique in the plan.
+    pub name: String,
+    /// The family it is weighted under.
+    pub family: String,
+    /// The statement that is measured.
+    pub sql: String,
+    /// A statement run untimed before the measurement, or nothing.
+    pub pre: Option<String>,
+    /// A statement run untimed after the measurement, or nothing.
+    pub post: Option<String>,
+    /// How many times the statement runs.
+    pub repeat: u32,
+    /// How the statements are grouped into transactions.
+    pub grouping: Grouping,
+    /// Whether the statement is prepared once or per iteration.
+    ///
+    /// Once is the fair default and matches how an application uses a database.
+    /// Per iteration is a family of its own - it is what "prepare" costs - and
+    /// mixing the two into one number would hide whichever is worse.
+    pub prepare_each: bool,
+    /// The parameters, in order.
+    pub binds: Vec<Bind>,
+    /// Whether the workload changes the database.
+    pub mutates: bool,
+}
+
+/// One scale of one plan.
+#[derive(Clone, Debug)]
+pub struct Plan {
+    /// The scale's name: `small`, `medium` or `large`.
+    pub scale: String,
+    /// How many rows the base table holds.
+    pub rows: u32,
+    /// The journal mode both engines run in.
+    pub journal: String,
+    /// The durability level both engines run at.
+    pub synchronous: String,
+    /// The page size both engines use.
+    pub page_size: u32,
+    /// The page cache budget both engines use, in SQLite's own units.
+    pub cache_size: i32,
+    /// The statements that build the pristine database.
+    pub setup: Vec<String>,
+    /// The workloads, in the order both engines run them.
+    pub workloads: Vec<Workload>,
+}
+
+impl Plan {
+    /// Renders the plan as the file both engines read.
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        out.push_str("# rust-db performance plan. Both engines read this file.\n");
+        let _ = writeln!(out, "version\t{PLAN_VERSION}");
+        let _ = writeln!(out, "scale\t{}", self.scale);
+        let _ = writeln!(out, "rows\t{}", self.rows);
+        let _ = writeln!(out, "journal\t{}", self.journal);
+        let _ = writeln!(out, "synchronous\t{}", self.synchronous);
+        let _ = writeln!(out, "page_size\t{}", self.page_size);
+        let _ = writeln!(out, "cache_size\t{}", self.cache_size);
+        for statement in &self.setup {
+            let _ = writeln!(out, "setup\t{}", one_line(statement));
+        }
+        for workload in &self.workloads {
+            let _ = writeln!(out, "workload\t{}", workload.name);
+            let _ = writeln!(out, "family\t{}", workload.family);
+            let _ = writeln!(out, "repeat\t{}", workload.repeat);
+            let _ = writeln!(out, "txn\t{}", workload.grouping.name());
+            let _ = writeln!(
+                out,
+                "prepare\t{}",
+                if workload.prepare_each {
+                    "each"
+                } else {
+                    "once"
+                }
+            );
+            if !workload.binds.is_empty() {
+                let names: Vec<&str> = workload.binds.iter().map(|bind| bind.name()).collect();
+                let _ = writeln!(out, "bind\t{}", names.join(","));
+            }
+            if let Some(pre) = &workload.pre {
+                let _ = writeln!(out, "pre\t{}", one_line(pre));
+            }
+            let _ = writeln!(out, "sql\t{}", one_line(&workload.sql));
+            if let Some(post) = &workload.post {
+                let _ = writeln!(out, "post\t{}", one_line(post));
+            }
+        }
+        out
+    }
+}
+
+/// Returns a statement with its line breaks flattened.
+///
+/// The plan is line oriented, so a statement that spanned lines would be read
+/// as several keys. Flattening rather than escaping keeps the format one a
+/// person can read, and SQL does not care.
+fn one_line(sql: &str) -> String {
+    sql.split_whitespace().collect::<Vec<&str>>().join(" ")
+}
+
+/// One engine's result for one workload in one round.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sample {
+    /// The workload's name.
+    pub workload: String,
+    /// How long it took, in nanoseconds.
+    pub nanos: f64,
+    /// How many rows it produced.
+    pub rows: u64,
+    /// The digest of everything it produced.
+    pub digest: u64,
+}
+
+impl Sample {
+    /// Reads a sample from one line of a driver's output.
+    pub fn parse(line: &str) -> Option<Sample> {
+        let mut fields = line.split('\t');
+        let workload = fields.next()?.to_string();
+        let nanos = fields.next()?.trim().parse::<f64>().ok()?;
+        let rows = fields.next()?.trim().parse::<u64>().ok()?;
+        let digest = u64::from_str_radix(fields.next()?.trim(), 16).ok()?;
+        Some(Sample {
+            workload,
+            nanos,
+            rows,
+            digest,
+        })
+    }
+
+    /// Renders the sample the way a driver prints it.
+    pub fn render(&self) -> String {
+        format!(
+            "{}\t{:.0}\t{}\t{:016x}",
+            self.workload, self.nanos, self.rows, self.digest
+        )
+    }
+}
+
+/// A digest over the values a workload produced.
+///
+/// FNV-1a, tagged by storage class, matching `sqlite_bench.c` byte for byte. It
+/// is not a security property: what it has to do is notice that two engines
+/// disagreed about an answer, and it is checked against the C implementation by
+/// a test rather than assumed.
+#[derive(Clone, Copy, Debug)]
+pub struct Digest {
+    hash: u64,
+}
+
+impl Default for Digest {
+    /// Returns an empty digest.
+    fn default() -> Digest {
+        Digest::new()
+    }
+}
+
+impl Digest {
+    /// Returns a digest over nothing.
+    pub fn new() -> Digest {
+        Digest {
+            hash: 0xcbf2_9ce4_8422_2325,
+        }
+    }
+
+    /// Adds bytes.
+    pub fn bytes(&mut self, data: &[u8]) {
+        for byte in data {
+            self.hash ^= u64::from(*byte);
+            self.hash = self.hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+
+    /// Adds a tag byte.
+    pub fn tag(&mut self, tag: u8) {
+        self.bytes(&[tag]);
+    }
+
+    /// Adds a 64-bit value, little endian.
+    pub fn word(&mut self, value: u64) {
+        self.bytes(&value.to_le_bytes());
+    }
+
+    /// Returns the digest.
+    pub fn finish(self) -> u64 {
+        self.hash
+    }
+}
+
+/// One workload's paired timings across every round.
+#[derive(Clone, Debug, Default)]
+pub struct Paired {
+    /// The workload's name.
+    pub workload: String,
+    /// The family it is weighted under.
+    pub family: String,
+    /// One `(rustdb, sqlite)` pair per round, in nanoseconds.
+    pub pairs: Vec<(f64, f64)>,
+    /// Whether every round agreed on the answer.
+    pub agreed: bool,
+    /// What disagreed, when something did.
+    pub disagreement: String,
+}
+
+impl Paired {
+    /// Returns the median speed ratio, SQLite over rust-db.
+    ///
+    /// Above one means rust-db is faster, which is the direction a reader
+    /// expects of a number called a speedup.
+    pub fn ratio(&self) -> f64 {
+        median(&self.log_ratios()).exp()
+    }
+
+    /// Returns the paired log speedups.
+    pub fn log_ratios(&self) -> Vec<f64> {
+        self.pairs
+            .iter()
+            .filter(|(ours, theirs)| *ours > 0.0 && *theirs > 0.0)
+            .map(|(ours, theirs)| (theirs / ours).ln())
+            .collect()
+    }
+
+    /// Returns the bootstrap 95% interval of the speed ratio.
+    pub fn interval(&self, seed: u64) -> (f64, f64) {
+        let (low, high) = bootstrap(&self.log_ratios(), seed);
+        (low.exp(), high.exp())
+    }
+
+    /// Returns the median nanoseconds each engine took.
+    pub fn medians(&self) -> (f64, f64) {
+        let ours: Vec<f64> = self.pairs.iter().map(|(ours, _)| *ours).collect();
+        let theirs: Vec<f64> = self.pairs.iter().map(|(_, theirs)| *theirs).collect();
+        (median(&ours), median(&theirs))
+    }
+}
+
+/// What a family's interval says about it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// The lower bound is at least 1.20x.
+    Win,
+    /// The whole interval lies inside 0.95x to 1.05x.
+    Equivalent,
+    /// The upper bound is below 1.00x.
+    Loss,
+    /// None of the above.
+    Inconclusive,
+}
+
+impl Verdict {
+    /// Returns the verdict an interval earns.
+    pub fn of(lower: f64, upper: f64) -> Verdict {
+        if lower >= 1.20 {
+            return Verdict::Win;
+        }
+        if lower >= 0.95 && upper <= 1.05 {
+            return Verdict::Equivalent;
+        }
+        if upper < 1.00 {
+            return Verdict::Loss;
+        }
+        Verdict::Inconclusive
+    }
+
+    /// Returns the verdict's name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Verdict::Win => "win",
+            Verdict::Equivalent => "equivalent",
+            Verdict::Loss => "loss",
+            Verdict::Inconclusive => "inconclusive",
+        }
+    }
+}
+
+/// How many bootstrap resamples the interval is built from.
+///
+/// Two thousand: enough that the 2.5th and 97.5th percentiles are stable to
+/// three digits across seeds, cheap enough to run for every workload at every
+/// scale.
+pub const RESAMPLES: usize = 2_000;
+
+/// Returns the 95% bootstrap interval of the mean of a sample.
+///
+/// The mean of the *log* ratios, which is the geometric mean of the ratios -
+/// the right centre for a quantity where halving and doubling are the same size
+/// of change.
+pub fn bootstrap(values: &[f64], seed: u64) -> (f64, f64) {
+    if values.is_empty() {
+        return (0.0, 0.0);
+    }
+    if values.len() == 1 {
+        let only = values.first().copied().unwrap_or(0.0);
+        return (only, only);
+    }
+    let mut rng = Rng::new(seed);
+    let mut means: Vec<f64> = Vec::with_capacity(RESAMPLES);
+    for _ in 0..RESAMPLES {
+        let mut total = 0.0;
+        for _ in 0..values.len() {
+            let index = rng.below(values.len() as u64) as usize;
+            total += values.get(index).copied().unwrap_or(0.0);
+        }
+        means.push(total / values.len() as f64);
+    }
+    means.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let low = percentile(&means, 0.025);
+    let high = percentile(&means, 0.975);
+    (low, high)
+}
+
+/// Returns one percentile of a sorted sample.
+fn percentile(sorted: &[f64], fraction: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let position = (fraction * (sorted.len() as f64 - 1.0)).round() as usize;
+    sorted
+        .get(position.min(sorted.len().saturating_sub(1)))
+        .copied()
+        .unwrap_or(0.0)
+}
+
+/// Returns the median of a sample.
+pub fn median(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let middle = sorted.len() / 2;
+    if sorted.len() % 2 == 1 {
+        return sorted.get(middle).copied().unwrap_or(0.0);
+    }
+    let lower = sorted.get(middle.saturating_sub(1)).copied().unwrap_or(0.0);
+    let upper = sorted.get(middle).copied().unwrap_or(0.0);
+    (lower + upper) / 2.0
+}
+
+/// Returns the median absolute deviation of a sample.
+pub fn deviation(values: &[f64]) -> f64 {
+    let centre = median(values);
+    let spread: Vec<f64> = values.iter().map(|value| (value - centre).abs()).collect();
+    median(&spread)
+}
+
+/// One family's weight in the headline number, and whether it has a floor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FamilyWeight {
+    /// The family's identifier.
+    pub id: String,
+    /// Its share of the weighted geometric mean.
+    pub weight: f64,
+    /// Whether it may not fall below the floor.
+    pub required: bool,
+    /// What the family is, in words.
+    pub description: String,
+}
+
+/// The weights, floors and thresholds a release is judged against.
+#[derive(Clone, Debug, Default)]
+pub struct Contract {
+    /// The weight of every family.
+    pub families: Vec<FamilyWeight>,
+    /// The lower bound the weighted geometric mean must reach.
+    pub headline: f64,
+    /// The lower bound below which a required family fails.
+    pub floor: f64,
+}
+
+impl Contract {
+    /// Reads the contract from its checked-in file.
+    pub fn parse(text: &str) -> Result<Contract, String> {
+        let document = crate::toml_lite::parse(text)?;
+        let headline = document
+            .top
+            .get("headline")
+            .and_then(crate::toml_lite::Value::as_str)
+            .and_then(|value| value.parse::<f64>().ok())
+            .ok_or_else(|| "the contract needs a `headline` bound".to_string())?;
+        let floor = document
+            .top
+            .get("floor")
+            .and_then(crate::toml_lite::Value::as_str)
+            .and_then(|value| value.parse::<f64>().ok())
+            .ok_or_else(|| "the contract needs a `floor` bound".to_string())?;
+        let mut families = Vec::new();
+        for table in document.array("family") {
+            let field = |name: &str| {
+                table
+                    .get(name)
+                    .and_then(crate::toml_lite::Value::as_str)
+                    .map(str::to_string)
+            };
+            let id = field("id").ok_or_else(|| "a family needs an `id`".to_string())?;
+            let weight = field("weight")
+                .and_then(|value| value.parse::<f64>().ok())
+                .ok_or_else(|| format!("{id} needs a `weight`"))?;
+            let required = table
+                .get("required")
+                .and_then(crate::toml_lite::Value::as_bool)
+                .unwrap_or(true);
+            families.push(FamilyWeight {
+                id,
+                weight,
+                required,
+                description: field("description").unwrap_or_default(),
+            });
+        }
+        if families.is_empty() {
+            return Err("the contract names no families".to_string());
+        }
+        let total: f64 = families.iter().map(|family| family.weight).sum();
+        if (total - 1.0).abs() > 1.0e-6 {
+            return Err(format!("the family weights sum to {total}, not 1"));
+        }
+        Ok(Contract {
+            families,
+            headline,
+            floor,
+        })
+    }
+
+    /// Returns one family's weight, or zero for a family nobody declared.
+    pub fn weight_of(&self, family: &str) -> f64 {
+        self.families
+            .iter()
+            .find(|declared| declared.id == family)
+            .map(|declared| declared.weight)
+            .unwrap_or(0.0)
+    }
+
+    /// Returns whether a family has a floor under it.
+    pub fn is_required(&self, family: &str) -> bool {
+        self.families
+            .iter()
+            .find(|declared| declared.id == family)
+            .map(|declared| declared.required)
+            .unwrap_or(false)
+    }
+}
+
+/// Returns the weighted geometric mean's bootstrap interval.
+///
+/// The headline number. Each round contributes one weighted mean of that
+/// round's log ratios, so the bootstrap resamples *rounds* rather than
+/// workloads - which is what keeps the pairing intact: a round in which the
+/// machine was busy is one draw, not one draw per workload.
+/// @param families - the log ratios of every workload, by family, per round
+/// @param contract - the weights
+/// @param seed - the bootstrap seed
+pub fn weighted_headline(
+    rounds: &[Vec<(String, f64)>],
+    contract: &Contract,
+    seed: u64,
+) -> (f64, f64, f64) {
+    let per_round: Vec<f64> = rounds
+        .iter()
+        .map(|round| weighted_mean(round, contract))
+        .collect();
+    let centre = median(&per_round).exp();
+    let (low, high) = bootstrap(&per_round, seed);
+    (centre, low.exp(), high.exp())
+}
+
+/// Returns one round's weighted mean log ratio.
+///
+/// A family with several workloads contributes the mean of its workloads, so a
+/// family is not weighted by how many cases somebody happened to write for it.
+fn weighted_mean(round: &[(String, f64)], contract: &Contract) -> f64 {
+    let mut total = 0.0;
+    let mut weight_used = 0.0;
+    for family in &contract.families {
+        let values: Vec<f64> = round
+            .iter()
+            .filter(|(id, _)| *id == family.id)
+            .map(|(_, value)| *value)
+            .collect();
+        if values.is_empty() {
+            continue;
+        }
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        total += mean * family.weight;
+        weight_used += family.weight;
+    }
+    if weight_used <= 0.0 {
+        return 0.0;
+    }
+    total / weight_used
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The plan renders one line per key, with the SQL flattened.
+    #[test]
+    fn a_plan_renders_one_line_per_key() {
+        let plan = Plan {
+            scale: "small".to_string(),
+            rows: 1000,
+            journal: "delete".to_string(),
+            synchronous: "full".to_string(),
+            page_size: 4096,
+            cache_size: -2000,
+            setup: vec!["CREATE TABLE t(a INTEGER PRIMARY KEY,\n b TEXT)".to_string()],
+            workloads: vec![Workload {
+                name: "read.point".to_string(),
+                family: "read.point".to_string(),
+                sql: "SELECT b FROM t WHERE a = ?1".to_string(),
+                pre: None,
+                post: None,
+                repeat: 100,
+                grouping: Grouping::Autocommit,
+                prepare_each: false,
+                binds: vec![Bind::Rowid],
+                mutates: false,
+            }],
+        };
+        let rendered = plan.render();
+        assert!(rendered.contains("rows\t1000\n"));
+        assert!(rendered.contains("setup\tCREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT)\n"));
+        assert!(rendered.contains("bind\trowid\n"));
+        assert!(rendered.contains("prepare\tonce\n"));
+        assert!(!rendered.contains("\n \n"));
+    }
+
+    /// A sample survives the round trip through a driver's output line.
+    #[test]
+    fn a_sample_round_trips() {
+        let sample = Sample {
+            workload: "write.insert".to_string(),
+            nanos: 1234.0,
+            rows: 7,
+            digest: 0xdead_beef_1234_5678,
+        };
+        let parsed = Sample::parse(&sample.render()).expect("it parses");
+        assert_eq!(parsed, sample);
+        assert!(Sample::parse("nonsense").is_none());
+    }
+
+    /// The digest is FNV-1a over tagged values, and it moves with the content.
+    #[test]
+    fn the_digest_notices_a_different_answer() {
+        let mut first = Digest::new();
+        first.tag(1);
+        first.word(42);
+        let mut second = Digest::new();
+        second.tag(1);
+        second.word(43);
+        assert_ne!(first.finish(), second.finish());
+        assert_eq!(Digest::new().finish(), 0xcbf2_9ce4_8422_2325);
+    }
+
+    /// The digest is the *published* FNV-1a, checked against a value computed
+    /// outside this file.
+    ///
+    /// This is not ceremony. The prime was written `0x1000_0000_01b3` here,
+    /// which is one hex digit too long and is a different, perfectly
+    /// well-behaved hash - self-consistent, so every test that compared this
+    /// implementation against itself passed. It was caught by the C arm
+    /// disagreeing with it on every read workload in the scorecard's first run,
+    /// and the only thing that would have caught it sooner is a vector.
+    #[test]
+    fn the_digest_is_the_published_function() {
+        let mut hasher = Digest::new();
+        hasher.bytes(b"a");
+        assert_eq!(hasher.finish(), 0xaf63_dc4c_8601_ec8c);
+        let mut longer = Digest::new();
+        longer.bytes(b"foobar");
+        assert_eq!(longer.finish(), 0x85944171_f73967e8);
+    }
+
+    /// One row of `SELECT 1` digests to the value the reference driver reports.
+    ///
+    /// The number on the right came out of `sqlite-bench` and was reproduced
+    /// with an independent implementation of FNV-1a. It is the check that the
+    /// two arms of the scorecard hash the same way, and it fails if either side
+    /// changes its tagging.
+    #[test]
+    fn one_integer_row_matches_the_reference_driver() {
+        let mut hasher = Digest::new();
+        hasher.tag(1);
+        hasher.word(1);
+        assert_eq!(hasher.finish(), 0x7194_f3e5_9ae4_7dcd);
+    }
+
+    /// A ratio and a reciprocal average to no change on a log scale.
+    #[test]
+    fn a_win_and_a_loss_cancel() {
+        let paired = Paired {
+            workload: "x".to_string(),
+            family: "y".to_string(),
+            pairs: vec![(1.0, 2.0), (2.0, 1.0)],
+            agreed: true,
+            disagreement: String::new(),
+        };
+        assert!((paired.ratio() - 1.0).abs() < 1.0e-9);
+    }
+
+    /// The bootstrap interval brackets the centre and narrows with more data.
+    #[test]
+    fn the_bootstrap_brackets_the_centre() {
+        let tight: Vec<f64> = (0..200)
+            .map(|index| 0.5 + (index % 3) as f64 * 0.001)
+            .collect();
+        let (low, high) = bootstrap(&tight, 7);
+        assert!(low < 0.5015 && high > 0.4995, "{low} {high}");
+        let loose: Vec<f64> = (0..200)
+            .map(|index| 0.5 + (index % 17) as f64 * 0.1)
+            .collect();
+        let (wide_low, wide_high) = bootstrap(&loose, 7);
+        assert!(wide_high - wide_low > high - low);
+    }
+
+    /// The verdicts are the thresholds the TDD names.
+    #[test]
+    fn the_verdicts_are_the_declared_thresholds() {
+        assert_eq!(Verdict::of(1.25, 1.40), Verdict::Win);
+        assert_eq!(Verdict::of(0.96, 1.03), Verdict::Equivalent);
+        assert_eq!(Verdict::of(0.70, 0.90), Verdict::Loss);
+        assert_eq!(Verdict::of(0.90, 1.30), Verdict::Inconclusive);
+    }
+
+    /// A contract whose weights do not sum to one is refused.
+    #[test]
+    fn a_contract_must_sum_to_one() {
+        let text = "headline = \"1.50\"\nfloor = \"0.90\"\n\n[[family]]\nid = \"a\"\nweight = \"0.4\"\n\n[[family]]\nid = \"b\"\nweight = \"0.4\"\n";
+        assert!(Contract::parse(text).is_err());
+        let fixed = text.replace(
+            "weight = \"0.4\"\n\n[[family]]\nid = \"b\"\nweight = \"0.4\"",
+            "weight = \"0.5\"\n\n[[family]]\nid = \"b\"\nweight = \"0.5\"",
+        );
+        let contract = Contract::parse(&fixed).expect("it parses");
+        assert_eq!(contract.families.len(), 2);
+        assert!((contract.weight_of("a") - 0.5).abs() < 1.0e-9);
+        assert!((contract.headline - 1.50).abs() < 1.0e-9);
+    }
+
+    /// The headline weights families rather than counting workloads.
+    #[test]
+    fn the_headline_weights_families() {
+        let text = "headline = \"1.50\"\nfloor = \"0.90\"\n\n[[family]]\nid = \"read\"\nweight = \"0.5\"\n\n[[family]]\nid = \"write\"\nweight = \"0.5\"\n";
+        let contract = Contract::parse(text).expect("it parses");
+        // Three read workloads at 2x and one write workload at 0.5x average to
+        // no change, because the families weigh the same however many cases
+        // each one happens to have.
+        let round = vec![
+            ("read".to_string(), 2.0f64.ln()),
+            ("read".to_string(), 2.0f64.ln()),
+            ("read".to_string(), 2.0f64.ln()),
+            ("write".to_string(), 0.5f64.ln()),
+        ];
+        let (centre, _, _) = weighted_headline(&[round], &contract, 3);
+        assert!((centre - 1.0).abs() < 1.0e-9, "{centre}");
+    }
+}
