@@ -4,141 +4,141 @@ Platform `windows-x86_64`. Every number is the paired speed ratio, SQLite over r
 
 ## Scale `small`
 
-| workload | release-candidate (no covering-index) | release-candidate (no indexed-write) | release-candidate (no ordered-walk) | release-candidate |
-|---|---:|---:|---:|---:|
-| `*headline*` | 0.216x | 0.166x | 0.207x | 0.240x |
-| `*family* open.prepare` | 0.212x | 0.221x | 0.216x | 0.223x |
-| `*family* read.point` | 0.891x | 0.820x | 0.902x | 0.854x |
-| `*family* read.range` | 0.144x | 0.210x | 0.063x | 0.212x |
-| `*family* read.analytical` | 0.035x | 0.054x | 0.055x | 0.055x |
-| `*family* read.join` | 0.208x | 0.276x | 0.295x | 0.280x |
-| `*family* write` | 0.207x | 0.060x | 0.195x | 0.206x |
-| `*family* transaction` | 0.297x | 0.092x | 0.287x | 0.306x |
-| `*family* schema` | 0.207x | 0.201x | 0.190x | 0.211x |
-| `*family* extension` | 0.098x | 0.103x | 0.096x | 0.098x |
-| `*family* large.values` | 0.802x | 0.546x | 0.849x | 0.805x |
-| `prepare.trivial` | 0.044x | 0.050x | 0.048x | 0.052x |
-| `prepare.point` | 1.073x | 1.000x | 1.074x | 0.993x |
-| `point.rowid` | 1.546x | 1.584x | 1.788x | 1.591x |
-| `point.index` | 0.881x | 0.807x | 0.879x | 0.893x |
-| `point.miss` | 0.424x | 0.375x | 0.421x | 0.373x |
-| `range.covering` | 0.038x | 0.144x | 0.183x | 0.143x |
-| `range.lookaside` | 0.085x | 0.078x | 0.073x | 0.075x |
-| `range.reverse` | 0.834x | 0.727x | 0.016x | 0.759x |
-| `scan.aggregate` | 0.055x | 0.074x | 0.079x | 0.073x |
-| `scan.group` | 0.044x | 0.077x | 0.083x | 0.080x |
-| `scan.sort` | 0.070x | 0.085x | 0.075x | 0.086x |
-| `scan.distinct` | 0.009x | 0.016x | 0.018x | 0.016x |
-| `join.selective` | 0.903x | 0.955x | 0.959x | 0.949x |
-| `join.range` | 0.048x | 0.073x | 0.080x | 0.076x |
-| `write.insert.batch` | 0.079x | 0.067x | 0.071x | 0.061x |
-| `write.insert.autocommit` | 0.997x | 0.976x | 0.977x | 0.982x |
-| `write.update.indexed` | 0.095x | 0.006x | 0.087x | 0.101x |
-| `write.delete` | 0.135x | 0.006x | 0.112x | 0.134x |
-| `write.upsert` | 0.412x | 0.390x | 0.432x | 0.433x |
-| `txn.autocommit` | 0.911x | 0.657x | 0.882x | 0.934x |
-| `txn.batched` | 0.791x | 0.451x | 0.800x | 0.798x |
-| `txn.large` | 0.035x | 0.003x | 0.036x | 0.035x |
-| `schema.index` | 0.211x | 0.203x | 0.199x | 0.214x |
-| `extension.json` | 0.039x | 0.040x | 0.037x | 0.038x |
-| `extension.fts.build` | 0.019x | 0.019x | 0.018x | 0.020x |
-| `extension.fts.query` | 0.058x | 0.067x | 0.051x | 0.051x |
-| `extension.rtree.insert` | 0.249x | 0.246x | 0.249x | 0.249x |
-| `extension.rtree.query` | 0.989x | 0.975x | 0.878x | 0.892x |
-| `large.read` | 0.950x | 1.086x | 0.860x | 0.830x |
-| `large.write` | 0.724x | 0.289x | 0.711x | 0.699x |
+| workload | release-candidate (no covering-index) | release-candidate (no indexed-write) | release-candidate (no ordered-walk) | release-candidate (no streaming-group) | release-candidate (no fused-bytecode) | release-candidate |
+|---|---:|---:|---:|---:|---:|---:|
+| `*headline*` | 0.208x | 0.166x | 0.213x | 0.239x | 0.244x | 0.256x |
+| `*family* open.prepare` | 0.210x | 0.198x | 0.211x | 0.208x | 0.216x | 0.199x |
+| `*family* read.point` | 0.789x | 0.834x | 0.874x | 0.781x | 0.826x | 0.894x |
+| `*family* read.range` | 0.128x | 0.221x | 0.065x | 0.213x | 0.216x | 0.236x |
+| `*family* read.analytical` | 0.036x | 0.066x | 0.064x | 0.058x | 0.060x | 0.068x |
+| `*family* read.join` | 0.186x | 0.272x | 0.281x | 0.270x | 0.275x | 0.304x |
+| `*family* write` | 0.208x | 0.061x | 0.210x | 0.211x | 0.219x | 0.212x |
+| `*family* transaction` | 0.304x | 0.092x | 0.302x | 0.304x | 0.298x | 0.300x |
+| `*family* schema` | 0.210x | 0.198x | 0.216x | 0.205x | 0.205x | 0.204x |
+| `*family* extension` | 0.103x | 0.095x | 0.100x | 0.100x | 0.097x | 0.102x |
+| `*family* large.values` | 0.771x | 0.481x | 0.777x | 0.781x | 0.781x | 0.853x |
+| `prepare.trivial` | 0.049x | 0.049x | 0.050x | 0.051x | 0.053x | 0.042x |
+| `prepare.point` | 0.929x | 0.804x | 0.939x | 0.835x | 0.882x | 0.911x |
+| `point.rowid` | 1.557x | 1.559x | 1.744x | 1.532x | 1.541x | 1.723x |
+| `point.index` | 0.771x | 0.855x | 0.873x | 0.780x | 0.820x | 0.953x |
+| `point.miss` | 0.376x | 0.389x | 0.404x | 0.372x | 0.377x | 0.426x |
+| `range.covering` | 0.032x | 0.152x | 0.163x | 0.151x | 0.144x | 0.197x |
+| `range.lookaside` | 0.077x | 0.083x | 0.080x | 0.077x | 0.080x | 0.081x |
+| `range.reverse` | 0.750x | 0.785x | 0.016x | 0.779x | 0.754x | 0.765x |
+| `scan.aggregate` | 0.060x | 0.086x | 0.084x | 0.083x | 0.076x | 0.088x |
+| `scan.group` | 0.046x | 0.111x | 0.111x | 0.081x | 0.097x | 0.113x |
+| `scan.sort` | 0.070x | 0.093x | 0.077x | 0.091x | 0.083x | 0.098x |
+| `scan.distinct` | 0.008x | 0.019x | 0.024x | 0.017x | 0.017x | 0.021x |
+| `join.selective` | 0.781x | 0.914x | 0.916x | 0.920x | 0.927x | 1.172x |
+| `join.range` | 0.039x | 0.074x | 0.079x | 0.075x | 0.073x | 0.085x |
+| `write.insert.batch` | 0.069x | 0.066x | 0.070x | 0.076x | 0.070x | 0.072x |
+| `write.insert.autocommit` | 0.995x | 0.990x | 0.990x | 0.999x | 1.038x | 1.014x |
+| `write.update.indexed` | 0.096x | 0.006x | 0.095x | 0.099x | 0.098x | 0.095x |
+| `write.delete` | 0.134x | 0.005x | 0.131x | 0.139x | 0.134x | 0.140x |
+| `write.upsert` | 0.420x | 0.400x | 0.471x | 0.419x | 0.429x | 0.432x |
+| `txn.autocommit` | 0.906x | 0.649x | 0.909x | 0.932x | 0.899x | 0.993x |
+| `txn.batched` | 0.824x | 0.445x | 0.826x | 0.852x | 0.829x | 0.823x |
+| `txn.large` | 0.036x | 0.003x | 0.036x | 0.036x | 0.035x | 0.036x |
+| `schema.index` | 0.208x | 0.194x | 0.217x | 0.204x | 0.204x | 0.210x |
+| `extension.json` | 0.044x | 0.043x | 0.040x | 0.043x | 0.045x | 0.037x |
+| `extension.fts.build` | 0.020x | 0.019x | 0.018x | 0.020x | 0.019x | 0.021x |
+| `extension.fts.query` | 0.051x | 0.049x | 0.052x | 0.050x | 0.048x | 0.057x |
+| `extension.rtree.insert` | 0.245x | 0.233x | 0.243x | 0.264x | 0.248x | 0.246x |
+| `extension.rtree.query` | 0.891x | 0.819x | 0.941x | 0.846x | 0.827x | 0.979x |
+| `large.read` | 1.005x | 0.835x | 0.896x | 0.831x | 0.825x | 0.936x |
+| `large.write` | 0.634x | 0.302x | 0.774x | 0.672x | 0.711x | 0.703x |
 
 ## Scale `medium`
 
-| workload | release-candidate (no covering-index) | release-candidate (no indexed-write) | release-candidate (no ordered-walk) | release-candidate |
-|---|---:|---:|---:|---:|
-| `*headline*` | - | - | - | 0.192x |
-| `*family* open.prepare` | - | - | - | 0.186x |
-| `*family* read.point` | - | - | - | 0.646x |
-| `*family* read.range` | - | - | - | 0.217x |
-| `*family* read.analytical` | - | - | - | 0.029x |
-| `*family* read.join` | - | - | - | 0.163x |
-| `*family* write` | - | - | - | 0.171x |
-| `*family* transaction` | - | - | - | 0.313x |
-| `*family* schema` | - | - | - | 0.073x |
-| `*family* extension` | - | - | - | 0.099x |
-| `*family* large.values` | - | - | - | 0.760x |
-| `prepare.trivial` | - | - | - | 0.047x |
-| `prepare.point` | - | - | - | 0.704x |
-| `point.rowid` | - | - | - | 1.125x |
-| `point.index` | - | - | - | 0.805x |
-| `point.miss` | - | - | - | 0.288x |
-| `range.covering` | - | - | - | 0.144x |
-| `range.lookaside` | - | - | - | 0.073x |
-| `range.reverse` | - | - | - | 0.751x |
-| `scan.aggregate` | - | - | - | 0.070x |
-| `scan.group` | - | - | - | 0.064x |
-| `scan.sort` | - | - | - | 0.121x |
-| `scan.distinct` | - | - | - | 0.001x |
-| `join.selective` | - | - | - | 0.618x |
-| `join.range` | - | - | - | 0.040x |
-| `write.insert.batch` | - | - | - | 0.150x |
-| `write.insert.autocommit` | - | - | - | 0.998x |
-| `write.update.indexed` | - | - | - | 0.051x |
-| `write.delete` | - | - | - | 0.047x |
-| `write.upsert` | - | - | - | 0.478x |
-| `txn.autocommit` | - | - | - | 0.925x |
-| `txn.batched` | - | - | - | 0.821x |
-| `txn.large` | - | - | - | 0.041x |
-| `schema.index` | - | - | - | 0.072x |
-| `extension.json` | - | - | - | 0.041x |
-| `extension.fts.build` | - | - | - | 0.021x |
-| `extension.fts.query` | - | - | - | 0.052x |
-| `extension.rtree.insert` | - | - | - | 0.242x |
-| `extension.rtree.query` | - | - | - | 0.896x |
-| `large.read` | - | - | - | 0.866x |
-| `large.write` | - | - | - | 0.689x |
+| workload | release-candidate (no covering-index) | release-candidate (no indexed-write) | release-candidate (no ordered-walk) | release-candidate (no streaming-group) | release-candidate (no fused-bytecode) | release-candidate |
+|---|---:|---:|---:|---:|---:|---:|
+| `*headline*` | - | - | - | - | - | 0.198x |
+| `*family* open.prepare` | - | - | - | - | - | 0.187x |
+| `*family* read.point` | - | - | - | - | - | 0.661x |
+| `*family* read.range` | - | - | - | - | - | 0.230x |
+| `*family* read.analytical` | - | - | - | - | - | 0.036x |
+| `*family* read.join` | - | - | - | - | - | 0.180x |
+| `*family* write` | - | - | - | - | - | 0.172x |
+| `*family* transaction` | - | - | - | - | - | 0.318x |
+| `*family* schema` | - | - | - | - | - | 0.073x |
+| `*family* extension` | - | - | - | - | - | 0.107x |
+| `*family* large.values` | - | - | - | - | - | 0.826x |
+| `prepare.trivial` | - | - | - | - | - | 0.046x |
+| `prepare.point` | - | - | - | - | - | 0.776x |
+| `point.rowid` | - | - | - | - | - | 1.095x |
+| `point.index` | - | - | - | - | - | 0.894x |
+| `point.miss` | - | - | - | - | - | 0.273x |
+| `range.covering` | - | - | - | - | - | 0.160x |
+| `range.lookaside` | - | - | - | - | - | 0.079x |
+| `range.reverse` | - | - | - | - | - | 0.799x |
+| `scan.aggregate` | - | - | - | - | - | 0.078x |
+| `scan.group` | - | - | - | - | - | 0.094x |
+| `scan.sort` | - | - | - | - | - | 0.143x |
+| `scan.distinct` | - | - | - | - | - | 0.001x |
+| `join.selective` | - | - | - | - | - | 0.650x |
+| `join.range` | - | - | - | - | - | 0.044x |
+| `write.insert.batch` | - | - | - | - | - | 0.149x |
+| `write.insert.autocommit` | - | - | - | - | - | 0.982x |
+| `write.update.indexed` | - | - | - | - | - | 0.055x |
+| `write.delete` | - | - | - | - | - | 0.050x |
+| `write.upsert` | - | - | - | - | - | 0.475x |
+| `txn.autocommit` | - | - | - | - | - | 0.879x |
+| `txn.batched` | - | - | - | - | - | 0.850x |
+| `txn.large` | - | - | - | - | - | 0.041x |
+| `schema.index` | - | - | - | - | - | 0.074x |
+| `extension.json` | - | - | - | - | - | 0.040x |
+| `extension.fts.build` | - | - | - | - | - | 0.021x |
+| `extension.fts.query` | - | - | - | - | - | 0.068x |
+| `extension.rtree.insert` | - | - | - | - | - | 0.254x |
+| `extension.rtree.query` | - | - | - | - | - | 0.985x |
+| `large.read` | - | - | - | - | - | 0.999x |
+| `large.write` | - | - | - | - | - | 0.712x |
 
 ## Scale `large`
 
-| workload | release-candidate (no covering-index) | release-candidate (no indexed-write) | release-candidate (no ordered-walk) | release-candidate |
-|---|---:|---:|---:|---:|
-| `*headline*` | - | - | - | 0.209x |
-| `*family* open.prepare` | - | - | - | 0.195x |
-| `*family* read.point` | - | - | - | 0.694x |
-| `*family* read.range` | - | - | - | 0.196x |
-| `*family* read.analytical` | - | - | - | 0.031x |
-| `*family* read.join` | - | - | - | 0.180x |
-| `*family* write` | - | - | - | 0.263x |
-| `*family* transaction` | - | - | - | 0.249x |
-| `*family* schema` | - | - | - | 0.018x |
-| `*family* extension` | - | - | - | 0.159x |
-| `*family* large.values` | - | - | - | 1.013x |
-| `prepare.trivial` | - | - | - | 0.050x |
-| `prepare.point` | - | - | - | 0.749x |
-| `point.rowid` | - | - | - | 1.094x |
-| `point.index` | - | - | - | 0.708x |
-| `point.miss` | - | - | - | 0.413x |
-| `range.covering` | - | - | - | 0.154x |
-| `range.lookaside` | - | - | - | 0.061x |
-| `range.reverse` | - | - | - | 0.747x |
-| `scan.aggregate` | - | - | - | 0.097x |
-| `scan.group` | - | - | - | 0.095x |
-| `scan.sort` | - | - | - | 0.123x |
-| `scan.distinct` | - | - | - | 0.001x |
-| `join.selective` | - | - | - | 0.756x |
-| `join.range` | - | - | - | 0.039x |
-| `write.insert.batch` | - | - | - | 0.246x |
-| `write.insert.autocommit` | - | - | - | 1.016x |
-| `write.update.indexed` | - | - | - | 0.084x |
-| `write.delete` | - | - | - | 0.119x |
-| `write.upsert` | - | - | - | 0.531x |
-| `txn.autocommit` | - | - | - | 0.893x |
-| `txn.batched` | - | - | - | 0.755x |
-| `txn.large` | - | - | - | 0.023x |
-| `schema.index` | - | - | - | 0.018x |
-| `extension.json` | - | - | - | 0.045x |
-| `extension.fts.build` | - | - | - | 0.050x |
-| `extension.fts.query` | - | - | - | 0.088x |
-| `extension.rtree.insert` | - | - | - | 0.380x |
-| `extension.rtree.query` | - | - | - | 1.151x |
-| `large.read` | - | - | - | 1.243x |
-| `large.write` | - | - | - | 0.770x |
+| workload | release-candidate (no covering-index) | release-candidate (no indexed-write) | release-candidate (no ordered-walk) | release-candidate (no streaming-group) | release-candidate (no fused-bytecode) | release-candidate |
+|---|---:|---:|---:|---:|---:|---:|
+| `*headline*` | - | - | - | - | - | 0.219x |
+| `*family* open.prepare` | - | - | - | - | - | 0.196x |
+| `*family* read.point` | - | - | - | - | - | 0.812x |
+| `*family* read.range` | - | - | - | - | - | 0.243x |
+| `*family* read.analytical` | - | - | - | - | - | 0.040x |
+| `*family* read.join` | - | - | - | - | - | 0.182x |
+| `*family* write` | - | - | - | - | - | 0.247x |
+| `*family* transaction` | - | - | - | - | - | 0.235x |
+| `*family* schema` | - | - | - | - | - | 0.018x |
+| `*family* extension` | - | - | - | - | - | 0.162x |
+| `*family* large.values` | - | - | - | - | - | 1.026x |
+| `prepare.trivial` | - | - | - | - | - | 0.043x |
+| `prepare.point` | - | - | - | - | - | 0.854x |
+| `point.rowid` | - | - | - | - | - | 1.263x |
+| `point.index` | - | - | - | - | - | 0.917x |
+| `point.miss` | - | - | - | - | - | 0.498x |
+| `range.covering` | - | - | - | - | - | 0.223x |
+| `range.lookaside` | - | - | - | - | - | 0.074x |
+| `range.reverse` | - | - | - | - | - | 0.844x |
+| `scan.aggregate` | - | - | - | - | - | 0.119x |
+| `scan.group` | - | - | - | - | - | 0.169x |
+| `scan.sort` | - | - | - | - | - | 0.149x |
+| `scan.distinct` | - | - | - | - | - | 0.001x |
+| `join.selective` | - | - | - | - | - | 0.692x |
+| `join.range` | - | - | - | - | - | 0.048x |
+| `write.insert.batch` | - | - | - | - | - | 0.221x |
+| `write.insert.autocommit` | - | - | - | - | - | 0.969x |
+| `write.update.indexed` | - | - | - | - | - | 0.088x |
+| `write.delete` | - | - | - | - | - | 0.116x |
+| `write.upsert` | - | - | - | - | - | 0.508x |
+| `txn.autocommit` | - | - | - | - | - | 0.869x |
+| `txn.batched` | - | - | - | - | - | 0.705x |
+| `txn.large` | - | - | - | - | - | 0.023x |
+| `schema.index` | - | - | - | - | - | 0.018x |
+| `extension.json` | - | - | - | - | - | 0.037x |
+| `extension.fts.build` | - | - | - | - | - | 0.051x |
+| `extension.fts.query` | - | - | - | - | - | 0.123x |
+| `extension.rtree.insert` | - | - | - | - | - | 0.445x |
+| `extension.rtree.query` | - | - | - | - | - | 1.112x |
+| `large.read` | - | - | - | - | - | 1.417x |
+| `large.write` | - | - | - | - | - | 0.843x |
 
 ## Regressions
 
