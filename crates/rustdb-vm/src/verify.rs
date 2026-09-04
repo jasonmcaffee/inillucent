@@ -519,7 +519,7 @@ fn check_registers(program: &Program, problems: &mut Vec<VerifyError>) {
 /// No opcode writes more than one, which is what lets this be an `Option`
 /// rather than a vector - and a vector here was an allocation per instruction
 /// per round of the dataflow pass.
-fn writes_of(program: &Program, address: usize) -> Option<u32> {
+pub(crate) fn writes_of(program: &Program, address: usize) -> Option<u32> {
     let Some(instruction) = program.instructions.get(address) else {
         return None;
     };
@@ -569,7 +569,7 @@ fn writes_of(program: &Program, address: usize) -> Option<u32> {
 }
 
 /// Returns the registers an instruction reads.
-fn reads_of(program: &Program, address: usize) -> Vec<u32> {
+pub(crate) fn reads_of(program: &Program, address: usize) -> Vec<u32> {
     let Some(instruction) = program.instructions.get(address) else {
         return Vec::new();
     };

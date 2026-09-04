@@ -437,11 +437,15 @@ impl Levers {
     /// equal keys together, instead of collecting every row into a sorter or a
     /// set first.
     pub const STREAMING_GROUP: u32 = 8;
+    /// Fold a value written into a scratch register and immediately copied
+    /// into the one instruction that writes it where it was going.
+    pub const FUSED_BYTECODE: u32 = 16;
     /// Every lever this build has.
     pub const EVERY: u32 = Levers::COVERING_INDEX
         | Levers::INDEXED_WRITE
         | Levers::ORDERED_WALK
-        | Levers::STREAMING_GROUP;
+        | Levers::STREAMING_GROUP
+        | Levers::FUSED_BYTECODE;
 
     /// Returns the shipped configuration: everything on.
     pub fn all() -> Levers {
@@ -481,6 +485,9 @@ impl Levers {
         }
         if !self.has(Levers::STREAMING_GROUP) {
             names.push("streaming-group");
+        }
+        if !self.has(Levers::FUSED_BYTECODE) {
+            names.push("fused-bytecode");
         }
         names
     }
