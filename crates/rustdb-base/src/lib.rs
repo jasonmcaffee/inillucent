@@ -46,6 +46,7 @@ pub mod hash;
 pub mod ids;
 pub mod limits;
 pub mod page;
+pub mod probe;
 pub mod rng;
 pub mod varint;
 

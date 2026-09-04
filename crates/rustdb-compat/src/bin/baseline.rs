@@ -129,10 +129,49 @@ fn collect(root: &Path, directory: &Path, found: &mut Vec<Digest>) -> Result<(),
     Ok(())
 }
 
-/// Digests one file, recording its path relative to the workspace root.
-fn digest_of(root: &Path, path: &Path) -> Result<Digest, String> {
-    let bytes =
+/// Returns a file's bytes with every CRLF reduced to LF.
+///
+/// The guard is a statement about the retrieval engine's *content*, so it has
+/// to be one the content alone decides. Hashing the working copy's raw bytes
+/// made it a statement about the checkout instead: this repository is used on
+/// Windows with `core.autocrlf=true`, so a file git rewrites gains a byte per
+/// line and its digest changes although not one character of it did.
+///
+/// That is not hypothetical. Five files were reported as moved when the working
+/// tree was clean and none of them had been edited since before the baseline was
+/// captured - the byte difference was exactly each file's line count, and
+/// `persist.rs` matched its own task-1790 amendment digest once the line endings
+/// were normalised. The same check would also disagree with itself between this
+/// machine and the Linux evidence run, which is the platform matrix the release
+/// is supposed to be qualified on.
+///
+/// Normalising here rather than at the call sites keeps `capture`, `verify` and
+/// `amend` hashing the same thing, which is the property that makes an
+/// amendment recorded on one machine verify on another.
+fn content_bytes(path: &Path) -> Result<Vec<u8>, String> {
+    let raw =
         std::fs::read(path).map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let mut normalised = Vec::with_capacity(raw.len());
+    let mut index = 0usize;
+    while let Some(byte) = raw.get(index) {
+        // A lone CR is left alone: it is not a line ending this repository
+        // produces, and silently rewriting one would hide a real change.
+        if *byte == b'\r' && raw.get(index.saturating_add(1)) == Some(&b'\n') {
+            index = index.saturating_add(1);
+            continue;
+        }
+        normalised.push(*byte);
+        index = index.saturating_add(1);
+    }
+    Ok(normalised)
+}
+
+/// Digests one file, recording its path relative to the workspace root.
+///
+/// The size recorded is the normalised size, for the same reason the digest is
+/// of the normalised bytes: both have to mean the same thing on both platforms.
+fn digest_of(root: &Path, path: &Path) -> Result<Digest, String> {
+    let bytes = content_bytes(path)?;
     let relative = path
         .strip_prefix(root)
         .unwrap_or(path)
