@@ -499,6 +499,7 @@
 {"test_id": "rustdb-compat::the_dependency_policy_covers_what_the_contract_allows", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_foundational_select_suite_is_green", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_freelist_fixture_has_a_freelist_the_check_agrees_with", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::the_fused_bytecode_arm_changes_the_program_and_not_the_answer", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_governed_crates_are_formatted", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_hit_count_is_the_modules_own_control", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_index_follows_the_rows", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
@@ -1089,6 +1090,13 @@
 {"test_id": "rustdb-vm::eval::tests::null_propagates_where_sqlite_says_it_does", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-vm::eval::tests::shifts_saturate_and_reverse", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-vm::eval::tests::three_valued_logic_is_three_valued", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-vm::fuse::tests::a_chain_of_copies_folds_once", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-vm::fuse::tests::a_copy_that_is_a_jump_target_is_not_folded", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-vm::fuse::tests::a_normalising_copy_is_not_folded", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-vm::fuse::tests::a_register_read_twice_is_not_folded", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-vm::fuse::tests::a_scratch_copy_folds", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-vm::fuse::tests::an_opcode_with_another_effect_is_not_folded", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-vm::fuse::tests::jumps_are_retargeted", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-vm::machine::tests::limit_and_offset_normalise_the_way_sqlite_reads_them", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-vm::mathfn::tests::a_domain_error_is_null_rather_than_a_nan", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-vm::mathfn::tests::ceil_and_floor_answer_in_the_class_they_were_asked_in", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}

@@ -526,6 +526,14 @@ impl Statement<'_> {
         self.inner.is_readonly()
     }
 
+    /// Returns how many instructions the compiled program holds.
+    ///
+    /// The measurement the bytecode fold is read against: an arm that changed
+    /// no instruction count folded nothing, whatever its timing said.
+    pub fn instruction_count(&self) -> usize {
+        self.inner.program().instructions.len()
+    }
+
     /// Returns which planner optimizations this statement's plan used.
     ///
     /// A bitmask of [`Levers`] names. It is the observation the A/B arms are

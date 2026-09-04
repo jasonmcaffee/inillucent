@@ -95,6 +95,17 @@ const STREAMED_GROUPS: [&str; 3] = [
     "SELECT DISTINCT category FROM main_table ORDER BY category",
 ];
 
+/// The reads the fused-bytecode lever is about.
+///
+/// Every one of these computes a value into a register and copies it somewhere
+/// - a result row, an aggregate's argument - which is the shape the fold is
+/// for.
+const FUSED_READS: [&str; 3] = [
+    "SELECT id, key, category FROM main_table WHERE id = 40",
+    "SELECT count(*), sum(key), max(category) FROM main_table",
+    "SELECT key + 1, label FROM main_table WHERE id BETWEEN 10 AND 20",
+];
+
 /// The writes the indexed-write lever is about.
 const INDEXED_WRITES: [&str; 3] = [
     "UPDATE main_table SET category = category + 1 WHERE key BETWEEN 10 AND 40",
@@ -213,6 +224,58 @@ fn the_streaming_group_arm_changes_the_plan_and_not_the_answer() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// Turning the fused-bytecode lever off changes the program and not the answer.
+///
+/// The other arms change which structures a plan builds; this one changes the
+/// instructions themselves, so it is the one where a mistake is a wrong value
+/// rather than a slow query.
+#[test]
+fn the_fused_bytecode_arm_changes_the_program_and_not_the_answer() {
+    let directory = std::env::temp_dir().join("rustdb-levers-fused");
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("the scratch directory is made");
+    let database = fixture(&directory.join("arm.db"));
+    let connection = database.connect().expect("it connects");
+
+    for sql in FUSED_READS {
+        connection.disable_optimizations(0);
+        let on = used(&connection, sql);
+        let short = connection
+            .prepare(sql)
+            .expect("it prepares")
+            .instruction_count();
+        let with = answer(&connection, sql);
+
+        connection.disable_optimizations(Levers::FUSED_BYTECODE);
+        let off = used(&connection, sql);
+        let long = connection
+            .prepare(sql)
+            .expect("it prepares")
+            .instruction_count();
+        let without = answer(&connection, sql);
+
+        assert_eq!(
+            on & Levers::FUSED_BYTECODE,
+            Levers::FUSED_BYTECODE,
+            "the lever should be used with it on: {sql}"
+        );
+        assert_eq!(
+            off & Levers::FUSED_BYTECODE,
+            0,
+            "the lever should be gone with it off: {sql}"
+        );
+        assert!(
+            short < long,
+            "the folded program should be shorter: {sql} ({short} against {long})"
+        );
+        assert_eq!(
+            with, without,
+            "the two arms disagree about the answer: {sql}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 /// Turning the indexed-write lever off changes the plan and not the outcome.
 ///
 /// The two arms run against separate databases built the same way, because a
@@ -298,7 +361,8 @@ fn an_unknown_lever_is_ignored_rather_than_stored() {
             "covering-index",
             "indexed-write",
             "ordered-walk",
-            "streaming-group"
+            "streaming-group",
+            "fused-bytecode"
         ]
     );
     assert!(Levers::all().names_disabled().is_empty());

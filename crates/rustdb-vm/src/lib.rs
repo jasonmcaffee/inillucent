@@ -66,6 +66,7 @@ mod compile_vtab;
 pub mod datetime;
 pub mod ephemeral;
 pub mod eval;
+pub mod fuse;
 pub mod host;
 pub mod machine;
 pub mod mathfn;

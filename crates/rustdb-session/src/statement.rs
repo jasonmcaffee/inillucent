@@ -747,6 +747,17 @@ fn compile_sql(
         }
         BoundStatement::Empty => (empty_program(dependencies), Body::Program),
     };
+    // The peephole pass runs before the verifier, never after it. A rewrite of
+    // the compiler's output is exactly the kind of code that is right until one
+    // opcode nobody thought about, so the program it produces is proved the
+    // same way the compiler's own output is, against the same rules.
+    let mut program = program;
+    if rustdb_sql::plan::Levers::without(connection.disabled_optimizations())
+        .has(rustdb_sql::plan::Levers::FUSED_BYTECODE)
+        && rustdb_vm::fuse::fold_scratch_copies(&mut program) > 0
+    {
+        program.optimizations_used |= rustdb_sql::plan::Levers::FUSED_BYTECODE;
+    }
     let problems = verify(&program);
     if !problems.is_empty() {
         return Err(error::misuse(format!(

@@ -102,9 +102,10 @@ fn parse_levers(names: &str) -> Result<u32, String> {
             "indexed-write" => Levers::INDEXED_WRITE,
             "ordered-walk" => Levers::ORDERED_WALK,
             "streaming-group" => Levers::STREAMING_GROUP,
+            "fused-bytecode" => Levers::FUSED_BYTECODE,
             other => {
                 return Err(format!(
-                    "unknown lever `{other}`; the levers are covering-index, indexed-write, \n                     ordered-walk, streaming-group, all"
+                    "unknown lever `{other}`; the levers are covering-index, indexed-write, \n                     ordered-walk, streaming-group, fused-bytecode, all"
                 ))
             }
         };
