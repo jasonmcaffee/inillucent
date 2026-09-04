@@ -28,12 +28,17 @@ fn reference() -> Option<PathBuf> {
 }
 
 /// Returns the pinned amalgamation object, if it has been built.
+///
+/// This platform's own object and no other. Both are checked in beside each
+/// other, and handing a linker the wrong one produces a wall of undefined
+/// symbols that looks like a broken library rather than the wrong file.
 fn reference_object() -> Option<PathBuf> {
-    let object = workspace_root().join(".sqlite-ref/3.53.4/sqlite3.obj");
-    if object.is_file() {
-        return Some(object);
-    }
-    let object = workspace_root().join(".sqlite-ref/3.53.4/sqlite3.o");
+    let name = if cfg!(windows) {
+        "sqlite3.obj"
+    } else {
+        "sqlite3.o"
+    };
+    let object = workspace_root().join(".sqlite-ref/3.53.4").join(name);
     object.is_file().then_some(object)
 }
 
