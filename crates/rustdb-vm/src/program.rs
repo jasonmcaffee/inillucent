@@ -310,6 +310,14 @@ pub enum Opcode {
     VColumn,
     /// `p1`: cursor, `p2`: destination register.
     VRowid,
+    /// `p1`: cursor, `p2`: first argument register, `p3`: destination
+    /// register, `p4`: the function's folded name, `p5`: argument count.
+    ///
+    /// One of a module's auxiliary functions - `bm25(docs)` and its cousins.
+    /// It reads the cursor's current row, so it is the module rather than the
+    /// value stack that answers, and a module that does not know the name
+    /// refuses it rather than returning null.
+    VAux,
     /// `p1`: first register of the change, `p2`: how many, `p3`: destination
     /// for the rowid an insert allocated, `p4`: which virtual table.
     ///
@@ -345,6 +353,7 @@ impl Opcode {
                 | Opcode::VNext
                 | Opcode::VColumn
                 | Opcode::VRowid
+                | Opcode::VAux
                 | Opcode::VUpdate
                 | Opcode::VBegin
                 | Opcode::VSync
@@ -505,6 +514,7 @@ impl Opcode {
             Opcode::VNext => "VNext",
             Opcode::VColumn => "VColumn",
             Opcode::VRowid => "VRowid",
+            Opcode::VAux => "VAux",
             Opcode::VUpdate => "VUpdate",
             Opcode::VBegin => "VBegin",
             Opcode::VSync => "VSync",
