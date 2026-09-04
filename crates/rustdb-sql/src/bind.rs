@@ -3831,23 +3831,23 @@ pub(crate) fn unsupported(what: &'static str, span: Span) -> ParseError {
 }
 
 /// Returns a "no such table" failure in SQLite's wording.
+///
+/// It deliberately carries no position. SQLite reports one for `no such
+/// column` and not for this, and a caller that draws a caret under the offset -
+/// the shell does - would otherwise point at a table name where the reference
+/// points at nothing.
 pub(crate) fn no_such_table(name: &[u8], span: Span) -> ParseError {
+    let _ = span;
     ParseError::new(
-        ParseErrorKind::Unexpected {
-            found: format!("no such table: {}", String::from_utf8_lossy(name)),
-            expected: Vec::new(),
-        },
-        span,
+        ParseErrorKind::Refused(format!("no such table: {}", String::from_utf8_lossy(name))),
+        Span::default(),
     )
 }
 
 /// Returns a "no such column" failure in SQLite's wording.
 pub(crate) fn no_such_column(name: &[u8], span: Span) -> ParseError {
     ParseError::new(
-        ParseErrorKind::Unexpected {
-            found: format!("no such column: {}", String::from_utf8_lossy(name)),
-            expected: Vec::new(),
-        },
+        ParseErrorKind::Refused(format!("no such column: {}", String::from_utf8_lossy(name))),
         span,
     )
 }
@@ -3855,10 +3855,10 @@ pub(crate) fn no_such_column(name: &[u8], span: Span) -> ParseError {
 /// Returns an "ambiguous column name" failure.
 fn ambiguous_column(name: &[u8], span: Span) -> ParseError {
     ParseError::new(
-        ParseErrorKind::Unexpected {
-            found: format!("ambiguous column name: {}", String::from_utf8_lossy(name)),
-            expected: Vec::new(),
-        },
+        ParseErrorKind::Refused(format!(
+            "ambiguous column name: {}",
+            String::from_utf8_lossy(name)
+        )),
         span,
     )
 }
@@ -3866,10 +3866,10 @@ fn ambiguous_column(name: &[u8], span: Span) -> ParseError {
 /// Returns a "no such function" failure.
 fn no_such_function(name: &[u8], span: Span) -> ParseError {
     ParseError::new(
-        ParseErrorKind::Unexpected {
-            found: format!("no such function: {}", String::from_utf8_lossy(name)),
-            expected: Vec::new(),
-        },
+        ParseErrorKind::Refused(format!(
+            "no such function: {}",
+            String::from_utf8_lossy(name)
+        )),
         span,
     )
 }
@@ -3877,13 +3877,10 @@ fn no_such_function(name: &[u8], span: Span) -> ParseError {
 /// Returns a "wrong number of arguments" failure.
 fn wrong_arguments(name: &[u8], span: Span) -> ParseError {
     ParseError::new(
-        ParseErrorKind::Unexpected {
-            found: format!(
-                "wrong number of arguments to function {}()",
-                String::from_utf8_lossy(name)
-            ),
-            expected: Vec::new(),
-        },
+        ParseErrorKind::Refused(format!(
+            "wrong number of arguments to function {}()",
+            String::from_utf8_lossy(name)
+        )),
         span,
     )
 }
@@ -3891,37 +3888,27 @@ fn wrong_arguments(name: &[u8], span: Span) -> ParseError {
 /// Returns a "no such collation" failure.
 fn no_such_collation(name: &[u8], span: Span) -> ParseError {
     ParseError::new(
-        ParseErrorKind::Unexpected {
-            found: format!(
-                "no such collation sequence: {}",
-                String::from_utf8_lossy(name)
-            ),
-            expected: Vec::new(),
-        },
+        ParseErrorKind::Refused(format!(
+            "no such collation sequence: {}",
+            String::from_utf8_lossy(name)
+        )),
         span,
     )
 }
 
 /// Returns an "ORDER BY term out of range" failure.
 fn order_out_of_range(ordinal: usize, span: Span) -> ParseError {
-    ParseError::new(
-        ParseErrorKind::Unexpected {
-            found: format!(
+    ParseError::new(ParseErrorKind::Refused(format!(
                 "{ordinal}th ORDER BY term out of range - should be between 1 and the number of result columns"
-            ),
-            expected: Vec::new(),
-        },
-        span,
-    )
+            )), span)
 }
 
 /// Returns the failure a compound's `ORDER BY` gives when it names nothing.
 fn compound_order_unmatched(span: Span) -> ParseError {
     ParseError::new(
-        ParseErrorKind::Unexpected {
-            found: "ORDER BY term does not match any column in the result set".to_string(),
-            expected: Vec::new(),
-        },
+        ParseErrorKind::Refused(
+            "ORDER BY term does not match any column in the result set".to_string(),
+        ),
         span,
     )
 }
@@ -4021,10 +4008,7 @@ fn window_aggregate(folded: &[u8], arguments: usize) -> Option<AggregateFunc> {
 /// Returns a "no such window" failure.
 fn no_such_window(name: &[u8], span: Span) -> ParseError {
     ParseError::new(
-        ParseErrorKind::Unexpected {
-            found: format!("no such window: {}", String::from_utf8_lossy(name)),
-            expected: Vec::new(),
-        },
+        ParseErrorKind::Refused(format!("no such window: {}", String::from_utf8_lossy(name))),
         span,
     )
 }
