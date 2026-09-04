@@ -508,6 +508,23 @@ impl Machine {
             .unwrap_or(Value::Null)
     }
 
+    /// Borrows a register, for an opcode that only reads it.
+    ///
+    /// Cloning a `Value` copies whatever it holds, so a text or blob register
+    /// read cost a heap allocation and a copy - and an opcode that reads two
+    /// registers paid it twice, per row. The comparison in a `WHERE` clause is
+    /// exactly that shape, which is why one filtered scan of fifty thousand
+    /// rows was making a hundred thousand allocations nobody needed.
+    ///
+    /// A register that is not there reads as NULL, the same as the owning form,
+    /// because a program the verifier passed cannot name one - and returning an
+    /// error from a borrow would put a `Result` on the hottest path in the
+    /// machine to describe a state that cannot happen.
+    fn register_ref(&self, index: i32) -> &Value<'static> {
+        const ABSENT: Value<'static> = Value::Null;
+        self.registers.get(index.max(0) as usize).unwrap_or(&ABSENT)
+    }
+
     /// Stores a value into a register, clearing its JSON mark.
     ///
     /// Clearing is the safe default and the common case: every opcode but
@@ -660,19 +677,22 @@ impl Machine {
                 let Operand::Arithmetic(op) = instruction.p4 else {
                     return Err(error::misuse("Arithmetic without an operator"));
                 };
-                let left = self.register(instruction.p1);
-                let right = self.register(instruction.p2);
-                let value = eval::arithmetic(op, &left, &right, self.encoding);
+                let value = eval::arithmetic(
+                    op,
+                    self.register_ref(instruction.p1),
+                    self.register_ref(instruction.p2),
+                    self.encoding,
+                );
                 self.store(instruction.p3, value);
                 Ok(Flow::Next)
             }
             Opcode::Negate => {
-                let value = eval::negate(&self.register(instruction.p1));
+                let value = eval::negate(self.register_ref(instruction.p1));
                 self.store(instruction.p2, value);
                 Ok(Flow::Next)
             }
             Opcode::BitNot => {
-                let value = eval::bit_not(&self.register(instruction.p1));
+                let value = eval::bit_not(self.register_ref(instruction.p1));
                 self.store(instruction.p2, value);
                 Ok(Flow::Next)
             }
@@ -706,19 +726,19 @@ impl Machine {
             Opcode::InList => self.in_list(instruction),
             Opcode::If | Opcode::IfNot => self.branch(instruction),
             Opcode::IfNull => {
-                if self.register(instruction.p1).is_null() {
+                if self.register_ref(instruction.p1).is_null() {
                     return Ok(Flow::Jump(instruction.p2.max(0) as usize));
                 }
                 Ok(Flow::Next)
             }
             Opcode::IfNotNull => {
-                if !self.register(instruction.p1).is_null() {
+                if !self.register_ref(instruction.p1).is_null() {
                     return Ok(Flow::Jump(instruction.p2.max(0) as usize));
                 }
                 Ok(Flow::Next)
             }
             Opcode::IfPos => {
-                let value = cast::integer_value(&self.register(instruction.p1));
+                let value = cast::integer_value(self.register_ref(instruction.p1));
                 if value > 0 {
                     let decrement = i64::from(instruction.p3);
                     self.store(
@@ -2047,26 +2067,28 @@ impl Machine {
         let Operand::Comparison(comparison) = instruction.p4 else {
             return Err(error::misuse("a comparison without its rules"));
         };
-        let left = self.register(instruction.p1);
-        let right = self.register(instruction.p2);
-        let value = if instruction.opcode == Opcode::Is {
-            eval::is_comparison(
-                comparison.op == BinaryOp::NotEqual,
-                &left,
-                &right,
-                comparison.affinity,
-                comparison.collation,
-                self.encoding,
-            )
-        } else {
-            eval::comparison(
-                comparison.op,
-                &left,
-                &right,
-                comparison.affinity,
-                comparison.collation,
-                self.encoding,
-            )
+        let value = {
+            let left = self.register_ref(instruction.p1);
+            let right = self.register_ref(instruction.p2);
+            if instruction.opcode == Opcode::Is {
+                eval::is_comparison(
+                    comparison.op == BinaryOp::NotEqual,
+                    left,
+                    right,
+                    comparison.affinity,
+                    comparison.collation,
+                    self.encoding,
+                )
+            } else {
+                eval::comparison(
+                    comparison.op,
+                    left,
+                    right,
+                    comparison.affinity,
+                    comparison.collation,
+                    self.encoding,
+                )
+            }
         };
         self.store(instruction.p3, value);
         Ok(Flow::Next)
@@ -2414,8 +2436,7 @@ impl Machine {
 
     /// Takes a branch on a register's truth value.
     fn branch(&mut self, instruction: &Instruction) -> DbResult<Flow> {
-        let value = self.register(instruction.p1);
-        let truth = eval::truth(&value);
+        let truth = eval::truth(self.register_ref(instruction.p1));
         let jump = match instruction.opcode {
             Opcode::If => match truth {
                 rustdb_value::compare::Truth::True => true,

@@ -23,7 +23,8 @@ use rustdb_sql::bind::{
 };
 use rustdb_sql::catalog_view::TableInfo;
 use rustdb_sql::plan::{
-    is_outer, plan_select, AccessPath, AggregationMode, BoundKind, PhysicalPlan, RangeBound,
+    is_outer, plan_select_with, AccessPath, AggregationMode, BoundKind, Levers, PhysicalPlan,
+    RangeBound,
 };
 use rustdb_value::{Affinity, Collation};
 
@@ -39,6 +40,19 @@ pub(crate) struct Label(pub(crate) usize);
 
 /// The compiler's working state.
 pub struct Compiler {
+    /// Which planner optimizations this program has actually used so far.
+    ///
+    /// Set where the decision is made rather than inferred afterwards, because
+    /// "did this plan use a covering index" is a question about a choice, and
+    /// the only place that knows is the code that made it.
+    pub(crate) used: u32,
+    /// Which planner optimizations are switched on for this program.
+    ///
+    /// Compiler state rather than an argument because the write paths that
+    /// consult it are several calls below the entry point that knows it, and
+    /// an arm that reached the read planner but not the write planner would
+    /// measure a mixture and report it as one number.
+    pub(crate) levers: Levers,
     pub(crate) instructions: Vec<Instruction>,
     pub(crate) registers: u32,
     pub(crate) cursors: u32,
@@ -168,7 +182,15 @@ impl VirtualPlanner for NoVirtualPlanner {
 impl Compiler {
     /// Returns an empty compiler.
     pub fn new() -> Compiler {
+        Compiler::with_levers(Levers::all())
+    }
+
+    /// Returns a compiler that plans under the given arm.
+    /// @param levers - which optimizations are on
+    pub fn with_levers(levers: Levers) -> Compiler {
         Compiler {
+            used: 0,
+            levers,
             instructions: Vec::new(),
             // Register 0 is never handed out, so a zero in an unset operand is
             // visibly wrong rather than silently the first register.
@@ -490,6 +512,7 @@ pub fn compile_into(
         result_columns,
         dependencies,
         readonly: true,
+        optimizations_used: compiler.used,
         parameter_count: parameters,
     })
 }
@@ -897,6 +920,7 @@ impl Compiler {
                     } = path
                     {
                         self.covering_slots.insert(source.id, slots.clone());
+                        self.used |= Levers::COVERING_INDEX;
                     }
                     self.register_defaults(source.id, &source.table);
                 }
@@ -952,7 +976,7 @@ impl Compiler {
             if self.subquery_plans.contains_key(&id) {
                 continue;
             }
-            let mut nested = plan_select((*block).clone());
+            let mut nested = plan_select_with((*block).clone(), self.levers);
             // A block used as a value is planned here rather than by the
             // planner that built the enclosing one, so it has not been shown
             // to any module yet.
@@ -4394,8 +4418,9 @@ pub fn compile_select_with(
     parameters: u32,
     planner: Option<Box<dyn VirtualPlanner>>,
 ) -> DbResult<(Program, PhysicalPlan)> {
-    let mut plan = rustdb_sql::plan::plan_select(select);
-    let mut compiler = Compiler::new();
+    let levers = rustdb_sql::plan::Levers::without(dependencies.levers);
+    let mut plan = rustdb_sql::plan::plan_select_with(select, levers);
+    let mut compiler = Compiler::with_levers(levers);
     if let Some(planner) = planner {
         compiler = compiler.with_virtual_planner(planner);
     }
@@ -4460,6 +4485,7 @@ pub fn compile_rows(
             .collect(),
         dependencies,
         readonly: true,
+        optimizations_used: compiler.used,
         parameter_count: 0,
     })
 }

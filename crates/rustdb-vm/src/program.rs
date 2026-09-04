@@ -910,6 +910,15 @@ pub struct ProgramDependencies {
     pub schemas: Vec<(usize, u32)>,
     /// The catalog generation it was compiled against.
     pub generation: u64,
+    /// Which planner optimizations were switched *off* when it was compiled.
+    ///
+    /// This belongs with the schema cookie rather than beside it: a program is
+    /// only reusable while everything it was compiled against still holds, and
+    /// the arm it was planned under is one of those things. A cached plan built
+    /// with covering indexes disabled is not the plan the next statement wants
+    /// once they are enabled again, and a cache that compared only the schema
+    /// would hand it over anyway.
+    pub levers: u32,
 }
 
 /// A compiled program.
@@ -935,6 +944,14 @@ pub struct Program {
     pub dependencies: ProgramDependencies,
     /// Whether the program writes.
     pub readonly: bool,
+    /// Which planner optimizations this program actually used.
+    ///
+    /// The counter the A/B arms are read against. "The covering-index lever is
+    /// on" is a setting; "this statement used it" is an observation, and only
+    /// the second one can show that an arm did anything. A workload whose
+    /// programs report the same mask under both arms measured nothing, however
+    /// different the two timings came out.
+    pub optimizations_used: u32,
     /// The highest parameter index the statement uses.
     pub parameter_count: u32,
 }

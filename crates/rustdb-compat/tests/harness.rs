@@ -56,7 +56,7 @@ fn the_shipped_manifest_is_structurally_sound() {
 /// a phase nobody has reached yet does not. A row that quietly claims a phase
 /// it has not reached is the thing the report exists to prevent, and a phase
 /// added to this list without its rows moving is caught by the same assertion.
-const FINISHED_PHASES: [&str; 13] = [
+const FINISHED_PHASES: [&str; 14] = [
     "phase 0:",
     "phase 1:",
     "phase 2:",
@@ -70,6 +70,7 @@ const FINISHED_PHASES: [&str; 13] = [
     "phase 10:",
     "phase 11:",
     "phase 12:",
+    "phase 13:",
 ];
 
 /// The phase that is under way, and exactly which of its rows have evidence.
@@ -81,15 +82,19 @@ const FINISHED_PHASES: [&str; 13] = [
 /// listed here fails, and a row listed here that has not moved fails too, so
 /// the manifest and this list cannot drift apart in either direction.
 ///
-/// Phase 13 is in flight, and all three of its rows have evidence: the module,
-/// its transactional visibility, and the legacy migration.
-const IN_PROGRESS_PHASE: &str = "phase 13:";
+/// Phase 14 is in flight. Both of its rows have evidence - the measurement is
+/// correctness-qualified and the regression tracking is in - but neither of
+/// those rows is the release gate. That gate is the headline speedup, and it is
+/// not a manifest row on purpose: a capability is a thing the engine can do,
+/// and the scorecard is the artifact that says whether a number was reached.
+/// The scorecard currently says it was not.
+const IN_PROGRESS_PHASE: &str = "phase 14:";
 
 /// The rows of [`IN_PROGRESS_PHASE`] that have evidence behind them.
 const IN_PROGRESS_ROWS: [&str; 3] = [
-    "search.virtual-table",
-    "search.transactional-visibility",
-    "search.legacy-migration",
+    "perf.qualified-measurement",
+    "perf.regression-tracking",
+    "perf.optimization-arms",
 ];
 
 /// Every row in a finished phase must claim `pass`, and every later row must

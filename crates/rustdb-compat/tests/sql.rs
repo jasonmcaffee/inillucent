@@ -71,22 +71,30 @@ fn rows(connection: &rustdb::Connection, sql: &str) -> Vec<String> {
     out
 }
 
-/// A full scan returns every row, in rowid order, with the storage class each
-/// value was written with.
+/// A scan returns every row with the storage class each value was written with.
+///
+/// The order is the one the *plan* produces, not rowid order, and the two are
+/// not the same once a covering index can answer the query: `people` has three
+/// indexes and `id, name` is carried by two of them, so both engines read the
+/// narrower structure instead of the table. The order below is `people_nocase`
+/// order, and it is what the pinned SQLite 3.53.4 returns for this query on
+/// this fixture - checked, not assumed. SQL promises no order without an
+/// `ORDER BY`, so what this asserts is the storage classes and the fact that
+/// the two engines agree about which path to take.
 #[test]
-fn a_full_scan_returns_every_row_in_rowid_order() {
+fn a_full_scan_returns_every_row_the_plan_produces() {
     let connection = connect("basic-p4096-utf8.db");
     let found = rows(&connection, "SELECT id, name FROM people");
     assert_eq!(
         found,
         vec![
-            "int:-5|text:negative rowid",
-            "int:1|text:alpha",
-            "int:2|text:Bravo",
             "int:3|text:",
+            "int:1|text:alpha",
+            "int:9007199254740993|text:big rowid",
+            "int:2|text:Bravo",
             "int:7|text:delta echo",
             "int:100|text:héllo ☃ 😀",
-            "int:9007199254740993|text:big rowid",
+            "int:-5|text:negative rowid",
         ]
     );
 }

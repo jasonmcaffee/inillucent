@@ -140,7 +140,7 @@
 {"test_id": "rustdb-compat::a_failed_vacuum_leaves_the_tree_untouched", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::a_full_checkpoint_reports_a_reader_it_cannot_wait_out", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::a_full_disk_at_every_cut_point_is_recoverable", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
-{"test_id": "rustdb-compat::a_full_scan_returns_every_row_in_rowid_order", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::a_full_scan_returns_every_row_the_plan_produces", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::a_function_that_always_fails_leaves_the_connection_usable", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::a_function_that_fails_mid_statement_rolls_the_statement_back", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::a_join_spans_two_databases", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
@@ -157,6 +157,7 @@
 {"test_id": "rustdb-compat::a_phrase_requires_the_words_together", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::a_point_seek_agrees_with_a_scan", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::a_prefix_matches_every_term_that_starts_with_it", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::a_prepared_statement_keeps_the_arm_it_was_compiled_under", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::a_progress_handler_stops_a_long_statement", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::a_read_only_blob_refuses_a_write", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::a_reader_keeps_its_snapshot_while_a_writer_commits", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
@@ -223,6 +224,7 @@
 {"test_id": "rustdb-compat::a_wal_database_reopens_in_wal_mode", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::a_wal_index_left_by_a_crash_is_rebuilt", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::a_walker_joins_a_real_table", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::a_wide_coordinate_rounds_outwards", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::a_without_rowid_table_scans_as_an_index_tree", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::a_write_that_fails_at_the_file_system_is_reported_and_sticks", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::abandoning_a_cursor_releases_its_pins", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
@@ -255,6 +257,7 @@
 {"test_id": "rustdb-compat::an_unindexed_column_is_stored_but_not_matched", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::an_unknown_command_is_refused", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::an_unknown_command_is_refused", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::an_unknown_lever_is_ignored_rather_than_stored", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::an_unknown_module_is_refused", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::an_unknown_name_fails_at_prepare_with_an_offset", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::an_unknown_parameter_is_a_misuse", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
@@ -342,6 +345,11 @@
 {"test_id": "rustdb-compat::hash::tests::sha3_256_matches_its_published_vectors", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::headers_match", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::hidden_columns_stay_hidden", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::history::tests::a_regression_needs_two_runs", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::history::tests::a_small_movement_is_not_a_regression", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::history::tests::an_entry_round_trips", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::history::tests::platforms_are_compared_separately", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::history::tests::the_dashboard_lists_every_run", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::index_maintenance_matches_sqlite", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::index_order_matches_sqlites_own_order_by", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::insert_from_select_matches_sqlite", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
@@ -391,6 +399,19 @@
 {"test_id": "rustdb-compat::parameters_bind_and_rebind", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::paths_resolve_the_way_the_pinned_release_resolves_them", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::payloads_at_the_local_boundary_match_the_model", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::perf::tests::a_contract_must_sum_to_one", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::perf::tests::a_disagreeing_workload_is_not_timed", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::perf::tests::a_plan_renders_one_line_per_key", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::perf::tests::a_sample_round_trips", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::perf::tests::a_win_and_a_loss_cancel", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::perf::tests::a_zero_duration_is_not_a_ratio", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::perf::tests::one_failure_does_not_report_parity", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::perf::tests::one_integer_row_matches_the_reference_driver", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::perf::tests::the_bootstrap_brackets_the_centre", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::perf::tests::the_digest_is_the_published_function", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::perf::tests::the_digest_notices_a_different_answer", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::perf::tests::the_headline_weights_families", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::perf::tests::the_verdicts_are_the_declared_thresholds", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::power_loss_at_every_cut_point_of_a_full_commit", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::power_loss_at_every_cut_point_of_a_persist_commit", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::power_loss_at_every_cut_point_of_a_truncate_commit", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
@@ -469,6 +490,7 @@
 {"test_id": "rustdb-compat::the_content_table_holds_the_rows", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_corpus_matches_its_manifest", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_counters_report_what_a_statement_changed", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::the_covering_index_arm_changes_the_plan_and_not_the_answer", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_database_list_matches", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_declaration_is_stored_and_read_back", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_default_mode_matches", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
@@ -478,6 +500,7 @@
 {"test_id": "rustdb-compat::the_governed_crates_are_formatted", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_hit_count_is_the_modules_own_control", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_index_follows_the_rows", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::the_indexed_write_arm_changes_the_plan_and_not_the_outcome", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_integrity_check_notices_an_edited_shadow_table", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_integrity_checks_agree_on_a_healthy_file", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_json_walkers_match_the_pinned_release", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
@@ -643,6 +666,7 @@
 {"test_id": "rustdb-ext::vtab::tests::a_read_only_module_refuses_a_write", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-migrate::a_legacy_index_migrates_and_every_check_passes", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-migrate::a_lexical_only_source_migrates", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-migrate::a_release_sized_index_migrates_and_every_check_passes", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-migrate::a_replace_reindexes_on_both_sides", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-migrate::a_source_that_moved_is_refused_rather_than_half_copied", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-migrate::a_tombstone_removes_the_same_row_from_both", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}

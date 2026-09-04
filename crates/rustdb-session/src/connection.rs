@@ -17,7 +17,7 @@
 //! `BEGIN` does not. That is the whole of the difference, and putting it in one
 //! place is what stops a new statement kind forgetting to commit.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -517,9 +517,38 @@ pub struct Connection {
     vfs: Arc<dyn Vfs>,
     options: OpenOptions,
     hooks: RefCell<Hooks>,
+    /// The planner optimizations this connection has switched *off*.
+    ///
+    /// Deliberately not reachable from SQL. It is a measurement control, and
+    /// SQLite puts its equivalent behind `sqlite3_test_control` for the reason
+    /// that a knob on the SQL surface becomes something applications depend on
+    /// - and then it is a compatibility obligation rather than an instrument.
+    /// Zero, the default, is the shipped engine.
+    levers: Cell<u32>,
 }
 
 impl Connection {
+    /// Returns the planner optimizations this connection has switched off.
+    pub fn disabled_optimizations(&self) -> u32 {
+        self.levers.get()
+    }
+
+    /// Switches planner optimizations off, by mask, for A/B measurement.
+    ///
+    /// The mask names what to *disable*, so zero restores the shipped engine.
+    /// An optimization that cannot be switched off cannot be measured: the
+    /// claim that a lever made something faster is a comparison, and without
+    /// an arm to compare against it is a comparison with a build that no
+    /// longer exists.
+    ///
+    /// Programs already prepared on this connection were compiled under the
+    /// previous arm and keep it, because the arm is part of what a program was
+    /// compiled against. Prepare again to plan under the new one.
+    /// @param mask - the levers to turn off
+    pub fn disable_optimizations(&self, mask: u32) {
+        self.levers.set(mask);
+    }
+
     /// Opens a connection, recovering a hot journal first, and loads the
     /// catalog.
     pub fn open(path: &DbPath, vfs: Arc<dyn Vfs>, options: OpenOptions) -> DbResult<Connection> {
@@ -581,6 +610,7 @@ impl Connection {
             vfs,
             options,
             hooks: RefCell::new(Hooks::default()),
+            levers: Cell::new(0),
         })
     }
 
