@@ -319,6 +319,24 @@ impl Connection {
         self.inner.disable_optimizations(mask);
     }
 
+    /// Bounds how many frames one automatic checkpoint copies.
+    ///
+    /// `None`, the default, copies as many as are safe, which is what the
+    /// reference does. See [`rustdb_session::connection::Connection::set_checkpoint_budget`].
+    /// @param budget - the cap, or `None` for no cap
+    pub fn set_checkpoint_budget(&self, budget: Option<u32>) -> DbResult<()> {
+        self.inner.set_checkpoint_budget(budget)
+    }
+
+    /// Returns the write-ahead log's running totals.
+    ///
+    /// The counters a measurement of the log is read against: a benchmark that
+    /// reports a timing difference without them cannot say whether the thing it
+    /// changed ever happened.
+    pub fn wal_stats(&self) -> rustdb_storage::wal::WalStats {
+        self.inner.wal_stats()
+    }
+
     /// Returns which planner optimizations this connection has switched off.
     pub fn disabled_optimizations(&self) -> u32 {
         self.inner.disabled_optimizations()

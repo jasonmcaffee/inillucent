@@ -93,3 +93,7 @@ path = "src/bin/storageprofile.rs"
 [[bin]]
 name = "rustdb-release"
 path = "src/bin/release.rs"
+
+[[bin]]
+name = "rustdb-checkpointperf"
+path = "src/bin/checkpointperf.rs"

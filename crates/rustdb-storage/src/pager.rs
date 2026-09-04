@@ -203,6 +203,8 @@ pub struct Pager {
     file_bytes: u64,
     page_count: u32,
     cache: Arc<PageCache>,
+    /// How many frames one automatic checkpoint copies, when it is bounded.
+    checkpoint_budget: Option<u32>,
     database: DatabaseId,
     state: PagerState,
     sticky: Option<DbError>,
@@ -305,6 +307,7 @@ impl Pager {
             file_bytes,
             page_count,
             cache,
+            checkpoint_budget: None,
             database: options.database,
             state: PagerState::Open,
             sticky: None,
@@ -815,6 +818,7 @@ impl Pager {
             file_bytes,
             page_count: 0,
             cache: Arc::new(PageCache::new(options.cache_bytes)),
+            checkpoint_budget: None,
             database: options.database,
             state: PagerState::Open,
             sticky: None,
@@ -1800,12 +1804,23 @@ impl Pager {
     /// other, and holding both through one borrow would say they were the
     /// same.
     pub fn checkpoint(&mut self, mode: CheckpointMode) -> DbResult<CheckpointOutcome> {
+        self.checkpoint_within(mode, None)
+    }
+
+    /// Checkpoints, copying at most `budget` frames when one is given.
+    /// @param mode - which checkpoint to run
+    /// @param budget - the most frames to copy, or `None` for all of them
+    pub fn checkpoint_within(
+        &mut self,
+        mode: CheckpointMode,
+        budget: Option<u32>,
+    ) -> DbResult<CheckpointOutcome> {
         let Some(mut wal) = self.wal.take() else {
             return Err(misuse(
                 "a checkpoint was asked for on a database with no write-ahead log",
             ));
         };
-        let outcome = wal.checkpoint(mode, self.file.as_ref());
+        let outcome = wal.checkpoint(mode, self.file.as_ref(), budget);
         self.wal = Some(wal);
         let outcome = outcome?;
         self.file_bytes = self.file.file_size()?;
@@ -2031,6 +2046,14 @@ impl Pager {
     }
 
     /// Checkpoints when the log has grown past the configured threshold.
+    ///
+    /// A little at a time rather than all at once. Copying the whole log makes
+    /// one commit in every thousand pay for the other nine hundred and
+    /// ninety-nine - the throughput is the same and the worst commit is a
+    /// hundred times the median, which for an application is the number that
+    /// shows. The backfill point lives in the shared index, so a bounded copy
+    /// is not a partial job to be finished later: it is the job, resumed by
+    /// whichever commit comes next.
     fn run_automatic_checkpoint(&mut self) -> DbResult<()> {
         let threshold = self.wal.as_ref().map_or(0, |wal| wal.auto_checkpoint());
         let frames = self.wal.as_ref().map_or(0, |wal| wal.frame_count());
@@ -2039,8 +2062,22 @@ impl Pager {
         }
         // A checkpoint that cannot run is not a failure: it means a reader is
         // using the frames, and the next commit will try again.
-        let _ = self.checkpoint(CheckpointMode::Passive)?;
+        let _ = self.checkpoint_within(CheckpointMode::Passive, self.checkpoint_budget)?;
         Ok(())
+    }
+
+    /// Returns how many frames one automatic checkpoint copies.
+    pub fn checkpoint_budget(&self) -> Option<u32> {
+        self.checkpoint_budget
+    }
+
+    /// Sets how many frames one automatic checkpoint copies.
+    ///
+    /// `None` restores the all-at-once behaviour, which is what the arm that
+    /// measures this uses.
+    /// @param budget - the cap, or `None` for no cap
+    pub fn set_checkpoint_budget(&mut self, budget: Option<u32>) {
+        self.checkpoint_budget = budget;
     }
 
     /// Returns an error unless a write transaction is open.

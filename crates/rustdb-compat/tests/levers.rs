@@ -350,6 +350,67 @@ fn a_prepared_statement_keeps_the_arm_it_was_compiled_under() {
     let _ = std::fs::remove_dir_all(&directory);
 }
 
+/// Bounding the checkpoint moves the same pages, and loses none of them.
+///
+/// The bound changes when work happens rather than what it is, so the assertion
+/// is equality: the two arms must leave databases that hold the same rows and
+/// pass the same integrity check. A bounded copy that dropped a frame would
+/// look exactly like a faster checkpoint until something read the page.
+///
+/// The measurement says the bound buys nothing - see
+/// `_agent_output/task-1790/checkpoint/checkpoint.md` - so it is off by
+/// default. This is what keeps the mechanism honest anyway: a tunable nothing
+/// exercises is a tunable that quietly stops working.
+#[test]
+fn the_checkpoint_arm_moves_the_same_pages() {
+    let directory = std::env::temp_dir().join("rustdb-levers-checkpoint");
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("the scratch directory is made");
+
+    let mut contents = Vec::new();
+    for (name, budget) in [("spread", Some(100u32)), ("at-once", None)] {
+        let path = directory.join(format!("{name}.db"));
+        let database = Database::open(&path).expect("the database opens");
+        let connection = database.connect().expect("it connects");
+        connection
+            .set_checkpoint_budget(budget)
+            .expect("the budget is set");
+        connection
+            .execute_batch(
+                "PRAGMA journal_mode=wal;                 PRAGMA synchronous=normal;                 CREATE TABLE t(id INTEGER PRIMARY KEY, label TEXT, payload BLOB);",
+            )
+            .expect("the schema is created");
+        // Enough single-row transactions to cross the thousand-frame threshold
+        // several times over, so the bounded copy runs and resumes repeatedly.
+        for row in 0..4_000 {
+            connection
+                .execute_batch(&format!(
+                    "INSERT INTO t(id, label, payload) VALUES ({row}, 'row {row}', zeroblob(256))"
+                ))
+                .expect("the row is inserted");
+        }
+        drop(connection);
+        drop(database);
+
+        // Reopened, because what matters is what reached the file rather than
+        // what a live connection can still see in its own log.
+        let database = Database::open(&path).expect("the database reopens");
+        let connection = database.connect().expect("it reconnects");
+        let integrity = answer(&connection, "PRAGMA integrity_check");
+        assert_eq!(integrity.trim(), "|ok", "{name}: {integrity}");
+        contents.push(answer(
+            &connection,
+            "SELECT count(*), sum(id), sum(length(label)) FROM t",
+        ));
+    }
+    assert_eq!(
+        contents.first(),
+        contents.get(1),
+        "the two arms left different databases"
+    );
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 /// The mask only ever names levers this build has.
 #[test]
 fn an_unknown_lever_is_ignored_rather_than_stored() {
