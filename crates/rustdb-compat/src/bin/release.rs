@@ -77,7 +77,7 @@ fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let out = flag(&arguments, "--out")
         .map(PathBuf::from)
-        .unwrap_or_else(|| workspace_root().join("_agent_output/task-1790/release"));
+        .unwrap_or_else(|| workspace_root().join("compat/release"));
     match run(&out) {
         Ok(passed) => {
             println!("release candidate written to {}", out.display());
@@ -234,10 +234,18 @@ fn run(out: &Path) -> Result<bool, String> {
         ),
     ] {
         if let Some(found) = artifact(&scorecard_dir, relative, description) {
-            artifacts.push(Artifact {
-                name: named(relative),
-                ..found
-            });
+            // Copied into the candidate rather than referenced where they were
+            // produced. A release is a directory somebody can hand over; a
+            // report pointing at a gitignored scratch path on one machine is
+            // not one, however correct its digests are.
+            let landed = out.join(landing_name(relative));
+            match std::fs::copy(scorecard_dir.join(relative), &landed) {
+                Ok(_) => artifacts.push(Artifact {
+                    name: format!("compat/release/{}", landing_name(relative)),
+                    ..found
+                }),
+                Err(error) => missing.push(format!("{}: {error}", named(relative))),
+            }
         } else {
             missing.push(named(relative));
         }
@@ -253,6 +261,19 @@ fn run(out: &Path) -> Result<bool, String> {
     std::fs::write(out.join("release.md"), &report)
         .map_err(|error| format!("cannot write the release report: {error}"))?;
     Ok(passed)
+}
+
+/// Returns the name one measurement artifact takes inside the candidate.
+///
+/// Flattened from its path rather than from its file name, because the two
+/// migration reports are both called `corpus.db.migration-report.md` and one
+/// would silently overwrite the other - which it did.
+/// @param relative - the path as the gathering loop wrote it
+fn landing_name(relative: &str) -> String {
+    match relative.strip_prefix("../") {
+        Some(rest) => rest.replace('/', "-"),
+        None => relative.to_string(),
+    }
 }
 
 /// Returns the repository-relative name of one measurement artifact.
@@ -372,8 +393,53 @@ fn render(
     );
 
     out.push_str("\n## Known limitations\n\n");
-    out.push_str(&limitations());
+    out.push_str(&limitations(history));
     out
+}
+
+/// Returns what each optimization lever was worth, read from the history.
+///
+/// Computed rather than written down, because a sentence carrying numbers is a
+/// sentence that goes stale the next time anything is measured - and a stale
+/// number in a release report is worse than no number.
+/// @param history - the recorded runs
+fn arms(history: &History) -> String {
+    let platform = platform_name();
+    let headline = |arm: &str| -> Option<f64> {
+        history
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.platform == platform
+                    && entry.scale == "small"
+                    && entry.workload == "*headline*"
+                    && entry.arm == arm
+            })
+            .next_back()
+            .map(|entry| entry.ratio)
+    };
+    let Some(shipped) = headline("") else {
+        return String::new();
+    };
+    let mut measured: Vec<String> = Vec::new();
+    for (lever, name) in [
+        ("covering-index", "the covering-index lever"),
+        ("indexed-write", "the indexed-write lever"),
+    ] {
+        if let Some(without) = headline(lever) {
+            measured.push(format!("without {name} it is {without:.3}x"));
+        }
+    }
+    if measured.is_empty() {
+        return String::new();
+    }
+    format!(
+        "- **What the levers that did land are worth**, measured rather than asserted, at the \
+           small scale over thirty paired rounds: with everything on the weighted geometric mean \
+           is {shipped:.3}x, and {}. Both arms are in this candidate, and the correctness shard \
+           that runs under each of them shows the plans change and the answers do not.\n",
+        measured.join(", and ")
+    )
 }
 
 /// Returns the compatibility gate, read from the report the manifest produced.
@@ -523,7 +589,8 @@ fn performance_gates(
 }
 
 /// Returns the known limitations, in the words the modules that own them use.
-fn limitations() -> String {
+/// @param history - the recorded runs, which the arm comparison is read from
+fn limitations(history: &History) -> String {
     let mut out = String::new();
     out.push_str(
         "- **Performance.** The engine is slower than the pinned reference on every family except \
@@ -535,17 +602,13 @@ fn limitations() -> String {
            superinstructions, and specialised scan loops.\n",
     );
     out.push_str(
-        "- **What the levers that did land were worth**, measured rather than asserted, at the \
-           small scale over thirty paired rounds: with everything on the weighted geometric mean \
-           is 0.178x; with the covering-index lever switched off it is 0.135x; with the \
-           indexed-write lever switched off it is 0.116x. Both arms are in this candidate, and \
-           the correctness shard that runs under each of them shows the plans change and the \
-           answers do not.\n",
+        "- **Seven optional SQLite surfaces are not implemented**, and the manifest carries a \
+           row for each so the denominator says so: the session extension, the pre-update hook, \
+           the snapshot API, `unlock_notify`, RBU, geopoly, and the R-Tree geometry callbacks. \
+           None of them is reachable from SQL or from the file format, so a database written by \
+           this engine is not affected by their absence - an application that calls them is.\n",
     );
-    out.push_str(
-        "- **Seven optional SQLite surfaces are not implemented**, and the manifest carries a row            for each so the denominator says so: the session extension, the pre-update hook, the            snapshot API, `unlock_notify`, RBU, geopoly, and the R-Tree geometry callbacks. None            of them is reachable from SQL or from the file format, so a database written by this            engine is not affected by their absence - an application that calls them is.
-",
-    );
+    out.push_str(&arms(history));
     out.push_str(
         "- **FTS5's segment format inside `%_data` is first-party.** SQLite's is described only in \
            comments in `fts5_index.c` and is explicitly not a published format, unlike the \
@@ -576,8 +639,14 @@ fn limitations() -> String {
            than the window, so the window never binds.\n",
     );
     out.push_str(
-        "- **A migrated vector index is not the same graph.** The legacy index's graph grew one            insert at a time; a migrated one is built in a single pass over every row, which is            better connected - that is what makes compaction worth its cost. Two different graphs            searched approximately give slightly different answers, sometimes one better and            sometimes the other, so the migration compares them with the approximation switched            off and reports separately what each finds of the exact answer at its default width.            An application that depends on a particular ranking of near-ties should expect it to            move.
-",
+        "- **A migrated vector index is not the same graph.** The legacy index's graph grew one \
+           insert at a time; a migrated one is built in a single pass over every row, which is \
+           better connected - that is what makes compaction worth its cost. Two different graphs \
+           searched approximately give slightly different answers, sometimes one better and \
+           sometimes the other, so the migration compares them with the approximation switched \
+           off and reports separately what each finds of the exact answer at its default width. \
+           An application that depends on a particular ranking of near-ties should expect it to \
+           move.\n",
     );
     out.push_str(
         "- **A tombstone and a delete differ.** The legacy engine keeps a tombstoned chunk in the \

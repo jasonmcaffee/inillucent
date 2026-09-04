@@ -48,6 +48,15 @@ pub struct Entry {
     pub high: f64,
     /// How many paired samples it came from.
     pub samples: usize,
+    /// The optimizations that were switched off, or empty for the shipped
+    /// engine.
+    ///
+    /// Part of the series key, not decoration. A run with a lever switched off
+    /// is a different experiment, and comparing it against the run before it as
+    /// though it were the next measurement of the same thing reports the arm
+    /// itself as a regression - which it did, the first time three arms were
+    /// recorded in a row.
+    pub arm: String,
 }
 
 impl Entry {
@@ -65,6 +74,7 @@ impl Entry {
             low: number("low")?,
             high: number("high")?,
             samples: number("samples").unwrap_or(0.0) as usize,
+            arm: text("arm").unwrap_or_default(),
         })
     }
 
@@ -72,7 +82,7 @@ impl Entry {
     pub fn render(&self) -> String {
         format!(
             "{{\"label\": {}, \"platform\": {}, \"scale\": {}, \"workload\": {}, \"family\": {}, \
-             \"ratio\": {:.6}, \"low\": {:.6}, \"high\": {:.6}, \"samples\": {}}}",
+             \"ratio\": {:.6}, \"low\": {:.6}, \"high\": {:.6}, \"samples\": {}, \"arm\": {}}}",
             json_string(&self.label),
             json_string(&self.platform),
             json_string(&self.scale),
@@ -81,17 +91,19 @@ impl Entry {
             self.ratio,
             self.low,
             self.high,
-            self.samples
+            self.samples,
+            json_string(&self.arm)
         )
     }
 
     /// Returns the key a run is compared within: one platform, one scale, one
-    /// workload.
-    pub fn series(&self) -> (String, String, String) {
+    /// workload, one arm.
+    pub fn series(&self) -> (String, String, String, String) {
         (
             self.platform.clone(),
             self.scale.clone(),
             self.workload.clone(),
+            self.arm.clone(),
         )
     }
 }
@@ -156,7 +168,7 @@ impl History {
     /// series had reached before them, by more than the practical threshold.
     /// One run is noise; the third-to-last is what "before them" means.
     pub fn regressions(&self, platform: &str) -> Vec<Regression> {
-        let mut series: BTreeMap<(String, String, String), Vec<&Entry>> = BTreeMap::new();
+        let mut series: BTreeMap<(String, String, String, String), Vec<&Entry>> = BTreeMap::new();
         for entry in &self.entries {
             if entry.platform != platform {
                 continue;
@@ -164,7 +176,7 @@ impl History {
             series.entry(entry.series()).or_default().push(entry);
         }
         let mut found = Vec::new();
-        for ((_, scale, workload), runs) in series {
+        for ((_, scale, workload, arm), runs) in series {
             if runs.len() < 3 {
                 continue;
             }
@@ -188,6 +200,7 @@ impl History {
                 found.push(Regression {
                     scale,
                     workload,
+                    arm,
                     best,
                     now: latest,
                     labels: recent.iter().map(|entry| entry.label.clone()).collect(),
@@ -205,6 +218,8 @@ pub struct Regression {
     pub scale: String,
     /// The workload.
     pub workload: String,
+    /// The arm it regressed under, or empty for the shipped engine.
+    pub arm: String,
     /// The best lower bound the series had reached.
     pub best: f64,
     /// The lower bound it has now.
@@ -285,12 +300,20 @@ pub fn dashboard(history: &History, platform: &str) -> String {
         );
         return out;
     }
-    out.push_str("| scale | workload | best lower bound | now | runs |\n|---|---|---:|---:|---|\n");
+    out.push_str(
+        "| scale | workload | arm | best lower bound | now | runs |\n\
+         |---|---|---|---:|---:|---|\n",
+    );
     for regression in regressions {
         out.push_str(&format!(
-            "| `{}` | `{}` | {:.3}x | {:.3}x | {} |\n",
+            "| `{}` | `{}` | {} | {:.3}x | {:.3}x | {} |\n",
             regression.scale,
             regression.workload,
+            if regression.arm.is_empty() {
+                "shipped".to_string()
+            } else {
+                format!("no `{}`", regression.arm)
+            },
             regression.best,
             regression.now,
             regression.labels.join(", ")
@@ -314,6 +337,7 @@ mod tests {
             low,
             high: low + 0.2,
             samples: 30,
+            arm: String::new(),
         }
     }
 
@@ -370,6 +394,28 @@ mod tests {
         }
         assert!(history.regressions("windows-x86_64").is_empty());
         assert_eq!(history.regressions("linux-x86_64").len(), 0);
+    }
+
+    /// A run with a lever switched off is a different experiment.
+    ///
+    /// Three arms recorded in a row are three measurements of three different
+    /// things. Comparing them as one series reported the arm itself as a
+    /// regression, which is what this pins.
+    #[test]
+    fn an_arm_is_its_own_series() {
+        let mut history = History::default();
+        for label in ["a", "b", "c", "d"] {
+            history.entries.push(entry(label, "point.rowid", 1.00));
+        }
+        for label in ["e", "f"] {
+            let mut arm = entry(label, "point.rowid", 0.40);
+            arm.arm = "covering-index".to_string();
+            history.entries.push(arm);
+        }
+        assert!(
+            history.regressions("windows-x86_64").is_empty(),
+            "the arm is not a slower measurement of the shipped engine"
+        );
     }
 
     /// The dashboard names every run it has, and says so when nothing regressed.

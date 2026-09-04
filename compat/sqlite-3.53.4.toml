@@ -1793,6 +1793,7 @@ tests = [
   "rustdb-compat::history::tests::a_small_movement_is_not_a_regression",
   "rustdb-compat::history::tests::platforms_are_compared_separately",
   "rustdb-compat::history::tests::the_dashboard_lists_every_run",
+  "rustdb-compat::history::tests::an_arm_is_its_own_series",
 ]
 
 [[capability]]

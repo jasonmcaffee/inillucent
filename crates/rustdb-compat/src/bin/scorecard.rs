@@ -175,7 +175,7 @@ fn run(
         .map_err(|error| format!("cannot write the scorecard: {error}"))?;
     std::fs::write(out.join("scorecard.json"), &json)
         .map_err(|error| format!("cannot write the scorecard: {error}"))?;
-    append_history(out, &sections, &contract, label)?;
+    append_history(out, &sections, &contract, label, disabled)?;
 
     let mut summary = String::new();
     for (plan, measured) in &sections {
@@ -1243,9 +1243,11 @@ fn append_history(
     sections: &[(Plan, Vec<Paired>)],
     contract: &Contract,
     label: &str,
+    disabled: u32,
 ) -> Result<(), String> {
     let path = out.join("history.jsonl");
     let platform = platform_name();
+    let arm = Levers::without(disabled).names_disabled().join(",");
     let mut lines = Vec::new();
     for (plan, measured) in sections {
         let (centre, low, high) = headline(measured, contract);
@@ -1260,6 +1262,7 @@ fn append_history(
                 low,
                 high,
                 samples: measured.first().map(|entry| entry.pairs.len()).unwrap_or(0),
+                arm: arm.clone(),
             }
             .render(),
         );
@@ -1278,6 +1281,7 @@ fn append_history(
                     low,
                     high,
                     samples,
+                    arm: arm.clone(),
                 }
                 .render(),
             );
@@ -1295,6 +1299,7 @@ fn append_history(
                     low,
                     high,
                     samples: paired.pairs.len(),
+                    arm: arm.clone(),
                 }
                 .render(),
             );

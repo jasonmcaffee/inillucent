@@ -1,0 +1,55 @@
+manifest 1
+tool rustdb-migrate
+source.path C:\jason\dev\rust-db\_agent_output/task-1790/migrate\release\index
+source.generation g000000000001
+source.file config.bin 697 30d01bbc0668357f54d3e93050bca520f2b0a6a413ff37435e2719f5d7e35ff8
+source.file graph.bin 342524 f69a5a471cc197e455745b3c4e16e87218f28905eb9a315f12ea5823ac0fceee
+source.file lexical.bin 1749276 b9b417c5e7aa65cf0258dd7fc7b8f559e445e845f8a6034f73066381810713df
+source.file store.bin 1582946 8b61460a47610fbc382848fdf3c33a81965687c2530ca3c474dffbfd7cee6ee6
+source.file vectors.bin 588565 cf60b436f716bbc58220e2d38ed5fc749c27dc3060be24a3eabdea5bc176b166
+destination.staging C:\jason\dev\rust-db\_agent_output/task-1790/migrate\release\corpus.db.migrating
+destination.final C:\jason\dev\rust-db\_agent_output/task-1790/migrate\release\corpus.db
+stage schema
+copied document 468
+copied chunk 512
+copied chunk 1024
+copied chunk 1536
+copied chunk 2048
+copied chunk 2299
+copied search 512
+copied search 1024
+copied search 1536
+copied search 2048
+copied search 2299
+copied indexed 2299
+stage build
+target.table document 468 dd0f1ad86417a85adacb317d667c57c7613ad86236b898ad61254deaaa468d19
+target.table chunk 2299 308505b7673ea9193ac68f43114e8b58573bced9365015c074f0af338fbc2f93
+target.table document_label 936 e34e4fd50c712876d2cac3accb95989963120caec985b599c3037015efbb1fc3
+target.table document_attribute 468 c4f15cc483e84dc930708a2098d606ffe6c94989dc286fc918b80d3cea1e589d
+target.table document_flag 78 91ad6421b35f9b9e71c87e2e14c5cce459c47698cf837332eaf3f1e791f4c04d
+target.commit_sequence 5
+target.search_generation 1
+verify sqlite.integrity ok integrity_check ok; the other engine reads 2299/2299 rows out of chunk and out of the search index's own storage
+verify counts.document ok 468 rows
+verify counts.chunk ok 2299 rows
+verify counts.label ok 936 rows
+verify counts.attribute ok 468 rows
+verify counts.flag ok 78 rows
+verify counts.search ok 2299 indexed rows
+verify digest.chunk ok 2299 chunks, 308505b7673ea9193ac68f43114e8b58573bced9365015c074f0af338fbc2f93
+verify digest.document ok 468 documents, dd0f1ad86417a85adacb317d667c57c7613ad86236b898ad61254deaaa468d19
+verify tombstone ok 205 tombstoned documents preserved
+verify dictionary ok 2 sources and 21 labels resolve to the same text
+verify bm25.raw ok 12 probes rank identically before grouping
+verify bm25.grouped ok 12 probes answer identically once the per-document cap of 2 is applied through the document table
+verify bm25.scores ok 120 hits carry the same fused score
+verify vector.exact ok 12 probes rank identically when both graphs are traversed in full
+verify vector.recall ok at the default width the source finds 1.000 of the exact answer and the copy finds 1.000
+verify hybrid.exact ok 12 fused rankings agree when both graphs are traversed in full
+verify filter.deleted ok 205 tombstoned chunks excluded identically
+verify reopen ok 17 checks pass again on a fresh open
+stage verify
+destination.published C:\jason\dev\rust-db\_agent_output/task-1790/migrate\release\corpus.db
+stage publish
+source.retained C:\jason\dev\rust-db\_agent_output/task-1790/migrate\release\index

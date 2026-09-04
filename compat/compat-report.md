@@ -246,7 +246,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `search.legacy-migration` | pass | pass | linux-x86_64, windows-x86_64 | 11 |
 | `perf.qualified-measurement` | pass | pass | linux-x86_64, windows-x86_64 | 11 |
 | `perf.optimization-arms` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
-| `perf.regression-tracking` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
+| `perf.regression-tracking` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
 | `optional.session-extension` | missing | missing | - | 0 |
 | `optional.preupdate-hook` | missing | missing | - | 0 |
 | `optional.snapshot-api` | missing | missing | - | 0 |
