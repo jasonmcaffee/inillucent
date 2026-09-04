@@ -227,6 +227,18 @@ fn run(out: &Path) -> Result<bool, String> {
             "arm-no-ordered-walk.md",
             "the same scorecard with the ordered-walk lever switched off",
         ),
+        (
+            "arm-no-streaming-group.md",
+            "the same scorecard with the streaming-group lever switched off",
+        ),
+        (
+            "arm-no-fused-bytecode.md",
+            "the same scorecard with the fused-bytecode lever switched off",
+        ),
+        (
+            "../checkpoint/checkpoint.md",
+            "the checkpoint-scheduling lever, measured against its own arm and left off",
+        ),
         ("scorecard.json", "the same, machine readable"),
         (
             "history.jsonl",
@@ -430,6 +442,8 @@ fn arms(history: &History) -> String {
         ("covering-index", "the covering-index lever"),
         ("indexed-write", "the indexed-write lever"),
         ("ordered-walk", "the ordered-walk lever"),
+        ("streaming-group", "the streaming-group lever"),
+        ("fused-bytecode", "the fused-bytecode lever"),
     ] {
         if let Some(without) = headline(lever) {
             measured.push(format!("without {name} {without:.3}x"));
@@ -615,6 +629,29 @@ fn limitations(history: &History) -> String {
            this engine is not affected by their absence - an application that calls them is.\n",
     );
     out.push_str(&arms(history));
+    out.push_str(
+        "- **Two of the TDD's optimisation levers were implemented, measured, and left off.** \
+           Checkpoint scheduling - bounding how many frames one automatic checkpoint copies, so \
+           the cost is spread over the commits that caused it - makes no difference, and its own \
+           counters say why: the checkpoint already runs after nearly every commit once the log \
+           passes its threshold, about 5,700 times in 6,000, so there is no accumulated batch to \
+           spread. The bound is a tunable rather than a default and the shipped behaviour is \
+           unchanged. Group commit has nothing to group: writers are serialised, so transactions \
+           do not overlap, and a commit already takes exactly the barriers the reference takes - \
+           one sync in a write-ahead log at `synchronous=full`, none at `normal`, two in a \
+           rollback journal. The evidence is that the two families where the barrier dominates \
+           are at parity: `write.insert.autocommit` at 0.99x and `txn.autocommit` at 0.92x. \
+           Sharing one barrier between two writers would need overlapping write transactions, \
+           which is a change to the locking rather than a tuning lever.\n",
+    );
+    out.push_str(
+        "- **Vectorisation and SIMD are not applicable to this execution model.** The lever's \
+           name pairs them with bytecode fusion, which is implemented; the other two need a \
+           columnar or batched interpreter, where one instruction works on many rows. This is a \
+           row-at-a-time virtual machine, so there is no vector for an instruction to act on, and \
+           saying so is more use than a benchmark of nothing.\n",
+    );
+
     out.push_str(
         "- **FTS5's segment format inside `%_data` is first-party.** SQLite's is described only in \
            comments in `fts5_index.c` and is explicitly not a published format, unlike the \
