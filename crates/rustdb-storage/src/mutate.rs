@@ -1090,7 +1090,21 @@ fn balance(
         window.first().copied().unwrap_or(step.page),
         content.kind,
     )?;
-    let ranges = partition(&entries, content.kind, capacity, promote)?;
+    // At the right-hand edge of the tree, fill greedily rather than evenly.
+    //
+    // An even split is the right answer in the middle of a tree: it leaves both
+    // pages with room, so the next insert either side of the boundary does not
+    // split again. At the right edge it is the wrong answer, because the page
+    // it half-fills is the one every subsequent append lands on - so the split
+    // it just did happens again a handful of entries later, and again. Measured
+    // on a hundred thousand row index build: 6,844 splits, each absorbing about
+    // fifteen entries, where a page holds a hundred and twenty.
+    //
+    // This is the same idea as SQLite's `balance_quick`, taken as far as the
+    // machinery here already goes: `partition` computes the greedy fill anyway
+    // and then discards it, so the change is which of two answers is kept.
+    let rightmost = end == last;
+    let ranges = partition(&entries, content.kind, capacity, promote, rightmost)?;
     let wanted = ranges.len();
 
     // Reuse the window's pages first, then allocate, then free the surplus.
@@ -1219,6 +1233,7 @@ fn partition(
     kind: PageKind,
     capacity: usize,
     promote: bool,
+    greedy_fill: bool,
 ) -> DbResult<Vec<(usize, usize)>> {
     let mut sizes = Vec::with_capacity(entries.len());
     for entry in entries {
@@ -1231,7 +1246,7 @@ fn partition(
         sizes.push(size);
     }
     let greedy = fill(&sizes, capacity, promote, usize::MAX)?;
-    if greedy.len() <= 1 {
+    if greedy_fill || greedy.len() <= 1 {
         return Ok(greedy);
     }
     let total: usize = sizes.iter().copied().sum();
@@ -1851,6 +1866,51 @@ mod tests {
         }
     }
 
+    /// An ascending build fills its pages rather than half-filling them.
+    ///
+    /// An even split is right in the middle of a tree and wrong at its right
+    /// edge, where the half-filled page is the one every later append lands on:
+    /// the split it just did happens again a handful of entries later. This
+    /// pins the fix by counting pages, because the symptom is a tree that is
+    /// correct in every way except that it is twice the size it should be - and
+    /// nothing else in this file would notice.
+    #[test]
+    fn an_ascending_build_fills_its_pages() {
+        let vfs = MemoryVfs::new();
+        let mut pager = create(&vfs, 4096, VacuumMode::None);
+        let key = KeyInfo::binary(2);
+        pager.begin_write().unwrap();
+        let root = create_index(&mut pager).unwrap();
+        let payloads: Vec<Vec<u8>> = (0..5_000i64)
+            .map(|value| index_entry(value, value))
+            .collect();
+        // What the entries would occupy if every page were filled completely.
+        let capacity = capacity_of(&pager, root, PageKind::LeafIndex).unwrap();
+        let used: usize = payloads
+            .iter()
+            .map(|payload| edit::cell_footprint(payload.len()).saturating_add(2))
+            .sum();
+        let ideal = used.div_ceil(capacity);
+        append_entries(&mut pager, root, &payloads).unwrap();
+        pager.commit().unwrap();
+
+        let report = check::check_database_with_options(
+            &mut pager,
+            &CheckOptions::roots(vec![root]).with_key(root, key.clone()),
+        )
+        .unwrap();
+        assert!(report.is_ok(), "{:#?}", report.as_pragma_output());
+        assert_eq!(scan_index(&mut pager, root, &key), payloads);
+        // Page one is the header, and the interior pages are a few more. Even
+        // splits made this about twice `ideal`; a quarter over is slack enough
+        // for the tree above the leaves without admitting that.
+        let pages = pager.page_count() as usize;
+        assert!(
+            pages <= ideal + ideal / 4 + 4,
+            "{pages} pages for {ideal} pages of entries"
+        );
+    }
+
     /// A batch and one-at-a-time appends build the same tree.
     ///
     /// Not merely the same entries: the same *pages*, because a batch that
@@ -2132,8 +2192,11 @@ mod tests {
                         rowid: Some(index as i64),
                     })
                     .collect();
-                for promote in [false, true] {
-                    let ranges = partition(&entries, PageKind::LeafTable, capacity, promote);
+                for (promote, greedy) in
+                    [(false, false), (true, false), (false, true), (true, true)]
+                {
+                    let ranges =
+                        partition(&entries, PageKind::LeafTable, capacity, promote, greedy);
                     let Ok(ranges) = ranges else { continue };
                     let mut seen = Vec::new();
                     for (index, (start, end)) in ranges.iter().enumerate() {

@@ -163,7 +163,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `sql.delete` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
 | `sql.create-table` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `sql.drop-table` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
-| `sql.create-index` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
+| `sql.create-index` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
 | `sql.conflict-resolution` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
 | `txn.begin-commit-rollback` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
 | `txn.rollback-journal` | pass | pass | linux-x86_64, windows-x86_64 | 7 |
