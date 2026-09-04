@@ -159,6 +159,15 @@ fn grow(pager: &mut Pager) -> DbResult<PageId> {
     let lock_byte = lock_byte_page(pager.page_size());
     for _ in 0..4 {
         let candidate = pager.page_count().saturating_add(1);
+        // The limit an application set with `PRAGMA max_page_count` is what
+        // bounds a runaway statement's effect on the disk, so it is enforced
+        // here rather than by whoever set it: this is the only place the file
+        // can get bigger.
+        if candidate > pager.max_page_count() {
+            return Err(rustdb_base::error::too_big(
+                "database or disk is full: the page limit was reached",
+            ));
+        }
         let page = PageId::from_persisted(candidate)?;
         pager.set_page_count(candidate)?;
         if candidate == lock_byte {

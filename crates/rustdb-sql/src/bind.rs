@@ -2609,6 +2609,30 @@ impl<'a> Binder<'a> {
 
     /// Returns the origin triple and declared type of a bound column.
     fn column_origin(&self, expr: &BoundExpr) -> (Option<(Vec<u8>, Vec<u8>, Vec<u8>)>, Vec<u8>) {
+        // A rowid alias is a column, and `SELECT a FROM t` where `a` is the
+        // INTEGER PRIMARY KEY binds to the rowid rather than to a record slot.
+        // It still has an origin and a declared type, and reporting neither
+        // made `sqlite3_column_decltype` empty for the commonest column there
+        // is - and `PRAGMA table_info` on a view over one report no type.
+        let expr = match expr {
+            BoundExpr::Rowid { source } => {
+                let alias = self
+                    .sources
+                    .get(*source)
+                    .and_then(|source| source.table.rowid_alias);
+                match alias {
+                    Some(column) => &BoundExpr::Column {
+                        source: *source,
+                        column,
+                        slot: column,
+                        affinity: Affinity::Integer,
+                        collation: Collation::Binary,
+                    },
+                    None => return (None, Vec::new()),
+                }
+            }
+            other => other,
+        };
         let BoundExpr::Column { source, column, .. } = expr else {
             return (None, Vec::new());
         };

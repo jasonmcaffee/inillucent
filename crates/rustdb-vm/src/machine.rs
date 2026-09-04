@@ -2244,11 +2244,13 @@ impl Machine {
         };
         let limits = self.limits.clone();
         let database = taken.reference.database;
+        let schema = host.schema();
         let outcome = {
             let mut context = rustdb_ext::vtab::Context {
-                pagers: host.pagers(),
+                host: host.services(),
                 database,
                 limits: &limits,
+                catalog: schema.as_deref(),
             };
             body(taken.cursor.as_mut(), &mut context)
         };

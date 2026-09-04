@@ -254,9 +254,10 @@ mod tests {
         let mut pagers = NoPagers;
         let limits = Limits::default();
         let mut context = Context {
-            pagers: &mut pagers,
+            host: &mut pagers,
             database: 0,
             limits: &limits,
+            catalog: None,
         };
         cursor
             .filter(
@@ -285,6 +286,8 @@ mod tests {
 
     /// A pager set with no databases, for a module that reads none.
     struct NoPagers;
+
+    impl crate::vtab::Host for NoPagers {}
 
     impl rustdb_storage::PagerSet for NoPagers {
         fn pager(&mut self, _database: usize) -> DbResult<&mut rustdb_storage::Pager> {

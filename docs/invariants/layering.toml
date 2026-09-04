@@ -126,6 +126,7 @@ may_depend_on = [
   "rustdb-storage",
   "rustdb-transaction",
   "rustdb-sql",
+  "rustdb-catalog",
 ]
 
 [[crate]]

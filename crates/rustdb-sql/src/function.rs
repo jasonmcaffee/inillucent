@@ -684,3 +684,234 @@ mod tests {
         assert!(!aggregate_arity_ok(AggregateFunc::Sum, 0, true));
     }
 }
+
+/// One row of `PRAGMA function_list`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FunctionEntry {
+    /// The name as it is written.
+    pub name: &'static str,
+    /// `s` for a scalar, `w` for a window function, `a` for an aggregate.
+    pub kind: &'static str,
+    /// How many arguments, or -1 for any number.
+    pub arity: i64,
+    /// The flag word the C surface reports.
+    ///
+    /// 2048 is `SQLITE_INNOCUOUS` and 524288 is `SQLITE_DETERMINISTIC`, which
+    /// is what a built-in carries: it does nothing an expression could not, and
+    /// it answers the same thing twice.
+    pub flags: i64,
+}
+
+/// The flags every built-in carries: innocuous and deterministic.
+const BUILTIN_FLAGS: i64 = 2048 | 524288;
+
+/// The flags a built-in that is not deterministic carries.
+const VOLATILE_FLAGS: i64 = 2048;
+
+/// Returns every built-in this build has, in the order `function_list` reports.
+///
+/// The list is written out rather than derived from the lookup tables because
+/// the arity is per *overload*: `substr` is here twice, at two and at three
+/// arguments, which is what SQLite reports and what an application checking
+/// whether a call will bind needs to see.
+pub fn every_function() -> Vec<FunctionEntry> {
+    let mut out = Vec::new();
+    let mut scalar = |name: &'static str, arity: i64| {
+        out.push(FunctionEntry {
+            name,
+            kind: "s",
+            arity,
+            flags: BUILTIN_FLAGS,
+        });
+    };
+    for (name, arity) in SCALARS {
+        scalar(name, *arity);
+    }
+    for (name, arity) in VOLATILE {
+        out.push(FunctionEntry {
+            name,
+            kind: "s",
+            arity: *arity,
+            flags: VOLATILE_FLAGS,
+        });
+    }
+    for (name, arity) in AGGREGATES {
+        out.push(FunctionEntry {
+            name,
+            kind: "a",
+            arity: *arity,
+            flags: BUILTIN_FLAGS,
+        });
+    }
+    for (name, arity) in WINDOWS {
+        out.push(FunctionEntry {
+            name,
+            kind: "w",
+            arity: *arity,
+            flags: BUILTIN_FLAGS,
+        });
+    }
+    out.sort_by(|left, right| left.name.cmp(right.name).then(left.arity.cmp(&right.arity)));
+    out
+}
+
+/// The deterministic scalars, with one row per overload.
+const SCALARS: &[(&str, i64)] = &[
+    ("abs", 1),
+    ("acos", 1),
+    ("acosh", 1),
+    ("asin", 1),
+    ("asinh", 1),
+    ("atan", 1),
+    ("atan2", 2),
+    ("atanh", 1),
+    ("ceil", 1),
+    ("ceiling", 1),
+    ("char", -1),
+    ("coalesce", -1),
+    ("concat", -1),
+    ("concat_ws", -1),
+    ("cos", 1),
+    ("cosh", 1),
+    ("date", -1),
+    ("datetime", -1),
+    ("degrees", 1),
+    ("exp", 1),
+    ("floor", 1),
+    ("format", -1),
+    ("glob", 2),
+    ("hex", 1),
+    ("ifnull", 2),
+    ("iif", 3),
+    ("instr", 2),
+    ("json", 1),
+    ("json_array", -1),
+    ("json_array_length", 1),
+    ("json_array_length", 2),
+    ("json_error_position", 1),
+    ("json_extract", -1),
+    ("json_insert", -1),
+    ("json_object", -1),
+    ("json_patch", 2),
+    ("json_pretty", 1),
+    ("json_pretty", 2),
+    ("json_quote", 1),
+    ("json_remove", -1),
+    ("json_replace", -1),
+    ("json_set", -1),
+    ("json_type", 1),
+    ("json_type", 2),
+    ("json_valid", 1),
+    ("json_valid", 2),
+    ("jsonb", 1),
+    ("jsonb_array", -1),
+    ("jsonb_extract", -1),
+    ("jsonb_insert", -1),
+    ("jsonb_object", -1),
+    ("jsonb_patch", 2),
+    ("jsonb_remove", -1),
+    ("jsonb_replace", -1),
+    ("jsonb_set", -1),
+    ("julianday", -1),
+    ("length", 1),
+    ("like", 2),
+    ("like", 3),
+    ("likelihood", 2),
+    ("likely", 1),
+    ("ln", 1),
+    ("log", 1),
+    ("log", 2),
+    ("log10", 1),
+    ("log2", 1),
+    ("lower", 1),
+    ("ltrim", 1),
+    ("ltrim", 2),
+    ("max", -1),
+    ("min", -1),
+    ("mod", 2),
+    ("nullif", 2),
+    ("octet_length", 1),
+    ("pi", 0),
+    ("pow", 2),
+    ("power", 2),
+    ("printf", -1),
+    ("quote", 1),
+    ("radians", 1),
+    ("replace", 3),
+    ("round", 1),
+    ("round", 2),
+    ("rtrim", 1),
+    ("rtrim", 2),
+    ("sign", 1),
+    ("sin", 1),
+    ("sinh", 1),
+    ("sqlite_source_id", 0),
+    ("sqlite_version", 0),
+    ("sqrt", 1),
+    ("strftime", -1),
+    ("substr", 2),
+    ("substr", 3),
+    ("substring", 2),
+    ("substring", 3),
+    ("tan", 1),
+    ("tanh", 1),
+    ("time", -1),
+    ("timediff", 2),
+    ("trim", 1),
+    ("trim", 2),
+    ("trunc", 1),
+    ("typeof", 1),
+    ("unhex", 1),
+    ("unhex", 2),
+    ("unicode", 1),
+    ("unixepoch", -1),
+    ("unlikely", 1),
+    ("upper", 1),
+    ("zeroblob", 1),
+];
+
+/// The scalars whose answer depends on something other than their arguments.
+const VOLATILE: &[(&str, i64)] = &[
+    ("changes", 0),
+    ("last_insert_rowid", 0),
+    ("random", 0),
+    ("randomblob", 1),
+    ("total_changes", 0),
+];
+
+/// The aggregates, with one row per overload.
+const AGGREGATES: &[(&str, i64)] = &[
+    ("avg", 1),
+    ("count", 0),
+    ("count", 1),
+    ("group_concat", 1),
+    ("group_concat", 2),
+    ("json_group_array", 1),
+    ("json_group_object", 2),
+    ("jsonb_group_array", 1),
+    ("jsonb_group_object", 2),
+    ("max", 1),
+    ("min", 1),
+    ("string_agg", 2),
+    ("sum", 1),
+    ("total", 1),
+];
+
+/// The window functions that are not aggregates.
+const WINDOWS: &[(&str, i64)] = &[
+    ("cume_dist", 0),
+    ("dense_rank", 0),
+    ("first_value", 1),
+    ("lag", 1),
+    ("lag", 2),
+    ("lag", 3),
+    ("last_value", 1),
+    ("lead", 1),
+    ("lead", 2),
+    ("lead", 3),
+    ("nth_value", 2),
+    ("ntile", 1),
+    ("percent_rank", 0),
+    ("rank", 0),
+    ("row_number", 0),
+];

@@ -38,13 +38,45 @@ pub use rustdb_sql::vtab::{
 /// borrow. Passing it also makes the reach explicit at every call site: a
 /// method with no context cannot touch the database at all.
 pub struct Context<'host> {
-    /// The databases the connection has open.
-    pub pagers: &'host mut dyn PagerSet,
+    /// The connection, as a module is allowed to see it.
+    pub host: &'host mut dyn Host,
     /// Which one this table lives in.
     pub database: usize,
     /// The run-time limits.
     pub limits: &'host Limits,
+    /// The schema the statement was compiled against.
+    ///
+    /// It is here for the modules that introspect: `pragma_table_info` is a
+    /// table-valued function over exactly this, and a module that had to be
+    /// handed a schema through its arguments could not be one. Everything else
+    /// ignores it.
+    pub catalog: Option<&'host rustdb_catalog::snapshot::CatalogSnapshot>,
 }
+
+/// What a module may ask the connection for.
+///
+/// `PagerSet` is a supertrait, so a module that only wants to read its own
+/// shadow tables uses this exactly as it would use a pager set. The one thing
+/// on top is the pragma register, because the `pragma_*` table-valued functions
+/// are a module whose rows *are* a pragma's answer - and there must be one
+/// implementation of that answer, not two.
+pub trait Host: PagerSet {
+    /// Answers a pragma that only reads, or `None` when there is no such thing.
+    ///
+    /// The default refuses everything, which is what a host with no connection
+    /// behind it can honestly say.
+    fn pragma(
+        &mut self,
+        _database: Option<usize>,
+        _name: &[u8],
+        _argument: Option<&Value<'static>>,
+    ) -> DbResult<Option<Vec<Vec<Value<'static>>>>> {
+        Ok(None)
+    }
+}
+
+/// A pager on its own is a host with no pragmas.
+impl Host for rustdb_storage::Pager {}
 
 /// A registered virtual-table module.
 pub trait Module: Send + Sync {

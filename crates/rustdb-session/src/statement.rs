@@ -734,7 +734,7 @@ fn directive_program(dependencies: ProgramDependencies, directive: &Directive) -
             | Directive::Pragma { .. }
     );
     if let Directive::Pragma { name, .. } = directive {
-        program.result_columns = execute::pragma_columns(name)
+        program.result_columns = crate::pragma::columns(name)
             .into_iter()
             .map(|name| rustdb_vm::program::ResultColumn {
                 name,

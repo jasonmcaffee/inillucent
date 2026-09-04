@@ -12,6 +12,8 @@
 //! transaction is open, so they cannot run inside one. They go straight to the
 //! connection.
 
+use crate::pragma::argument_text;
+use crate::settings::Setting;
 use rustdb_base::error::misuse;
 use rustdb_base::DbResult;
 use rustdb_catalog::ddl::{self, SchemaRow};
@@ -101,7 +103,11 @@ pub fn run_directive(
             connection.detach(schema)?;
             Ok(Vec::new())
         }
-        Directive::Pragma { name, argument } => pragma(connection, name, argument.as_ref()),
+        Directive::Pragma {
+            database,
+            name,
+            argument,
+        } => pragma(connection, *database, name, argument.as_ref()),
     }
 }
 
@@ -208,9 +214,10 @@ fn create_virtual_table(
             crate::vtab::connect(&registry, &reference, b"main", shadows, true)?;
         {
             let mut context = rustdb_ext::vtab::Context {
-                pagers: state,
+                host: state,
                 database: *database,
                 limits: &limits,
+                catalog: None,
             };
             table.begin(&mut context)?;
             table.sync(&mut context)?;
@@ -1131,7 +1138,9 @@ fn backfill_index(connection: &Connection, database: usize, name: &[u8]) -> DbRe
 }
 
 /// Returns the ordering an index's entries are compared with.
-fn index_key_info(index: &rustdb_sql::catalog_view::IndexInfo) -> rustdb_value::record::KeyInfo {
+pub(crate) fn index_key_info(
+    index: &rustdb_sql::catalog_view::IndexInfo,
+) -> rustdb_value::record::KeyInfo {
     rustdb_value::record::KeyInfo {
         columns: index
             .columns
@@ -1240,113 +1249,168 @@ fn forget_sequence(connection: &Connection, folded: &[u8]) -> DbResult<()> {
 
 /// Answers or applies a `PRAGMA`.
 ///
+/// The writes are here, because a write needs the transaction machinery and
+/// only the connection has it. The reads are in the register, because the
+/// `pragma_*` table-valued functions need exactly the same answers at a moment
+/// when the connection is already borrowed and only its state can be reached -
+/// and two implementations of the same answer would be two answers.
+///
 /// An unrecognised pragma returns no rows and changes nothing, which is
 /// SQLite's behaviour and the reason a typo in one is so easy to miss.
 fn pragma(
     connection: &Connection,
+    database: Option<usize>,
     name: &[u8],
     argument: Option<&PragmaArgument>,
 ) -> DbResult<DirectiveRows> {
-    match name {
-        b"journal_mode" => {
-            if let Some(argument) = argument {
-                let text = argument_text(argument);
-                let Some(mode) = JournalMode::parse(&text) else {
-                    return Ok(vec![vec![text_value(
-                        connection.journal_options().mode.as_str(),
-                    )?]]);
-                };
-                connection.set_journal_mode(mode)?;
+    if crate::pragma::spec(name).is_none() {
+        return Ok(Vec::new());
+    }
+    // The write forms first: each one either does its work and returns, or
+    // falls through to the read below so that the pragma answers with the value
+    // it now holds.
+    if let Some(argument) = argument {
+        match name {
+            b"user_version" => {
+                return header_write(connection, database, argument, HeaderField::UserVersion)
             }
-            Ok(vec![vec![text_value(
-                connection.journal_options().mode.as_str(),
-            )?]])
-        }
-        b"synchronous" => {
-            if let Some(argument) = argument {
-                let text = argument_text(argument);
+            b"application_id" => {
+                return header_write(connection, database, argument, HeaderField::ApplicationId)
+            }
+            b"schema_version" => {
+                return header_write(connection, database, argument, HeaderField::SchemaCookie)
+            }
+            b"journal_mode" => {
+                let text = crate::pragma::argument_text(argument);
+                if let Some(mode) = JournalMode::parse(&text) {
+                    connection.set_journal_mode(mode)?;
+                }
+            }
+            b"synchronous" => {
+                let text = crate::pragma::argument_text(argument);
                 if let Some(level) = Synchronous::parse(&text) {
                     connection.set_synchronous(level)?;
                 }
             }
-            Ok(vec![vec![Value::Integer(
-                connection.journal_options().synchronous.as_number(),
-            )]])
-        }
-        b"user_version" => {
-            if let Some(argument) = argument {
-                let value = argument_integer(argument);
-                // `PRAGMA user_version = N` writes the main database, which
-                // is where the pragma reads it from too.
-                return run_write(connection, &Directive::Commit, |connection| {
-                    connection.with_state(|state| {
-                        let mut header = *state.pager.header();
-                        header.user_version = value as i32;
-                        state.pager.set_header(header)
-                    })??;
-                    Ok(Vec::new())
-                });
-            }
-            let version = connection.with_state(|state| state.pager.header().user_version)?;
-            Ok(vec![vec![Value::Integer(i64::from(version))]])
-        }
-        b"schema_version" => {
-            let cookie = connection.with_state(|state| state.pager.header().schema_cookie)?;
-            Ok(vec![vec![Value::Integer(i64::from(cookie))]])
-        }
-        b"page_size" => {
-            let size = connection.with_state(|state| state.pager.page_size().bytes())?;
-            Ok(vec![vec![Value::Integer(i64::from(size))]])
-        }
-        b"page_count" => {
-            let pages = connection.with_state(|state| state.pager.page_count())?;
-            Ok(vec![vec![Value::Integer(i64::from(pages))]])
-        }
-        b"foreign_keys" => {
-            if let Some(argument) = argument {
-                connection.set_foreign_keys(argument_boolean(argument))?;
-                return Ok(Vec::new());
-            }
-            Ok(vec![vec![Value::Integer(i64::from(
-                connection.foreign_keys(),
-            ))]])
-        }
-        b"defer_foreign_keys" => {
-            if let Some(argument) = argument {
-                connection.set_defer_foreign_keys(argument_boolean(argument))?;
-                return Ok(Vec::new());
-            }
-            Ok(vec![vec![Value::Integer(i64::from(
-                connection.defer_foreign_keys(),
-            ))]])
-        }
-        b"foreign_key_list" => foreign_key_list(connection, argument),
-        b"foreign_key_check" => foreign_key_check(connection, argument),
-        b"wal_checkpoint" => wal_checkpoint(connection, argument),
-        b"wal_autocheckpoint" => {
-            if let Some(argument) = argument {
-                let frames = argument_integer(argument).clamp(0, i64::from(u32::MAX)) as u32;
+            b"wal_autocheckpoint" => {
+                let frames =
+                    crate::pragma::argument_integer(argument).clamp(0, i64::from(u32::MAX)) as u32;
                 connection.set_wal_auto_checkpoint(frames)?;
             }
-            Ok(vec![vec![Value::Integer(i64::from(
-                connection.wal_auto_checkpoint(),
-            ))]])
+            b"foreign_keys" => {
+                connection.set_foreign_keys(crate::pragma::argument_boolean(argument))?;
+                return Ok(Vec::new());
+            }
+            b"defer_foreign_keys" => {
+                connection.set_defer_foreign_keys(crate::pragma::argument_boolean(argument))?;
+                return Ok(Vec::new());
+            }
+            b"defensive" | b"trusted_schema" | b"writable_schema" => {
+                let value = crate::pragma::argument_boolean(argument);
+                connection.with_state(|state| {
+                    let registry = std::sync::Arc::make_mut(&mut state.registry);
+                    let policy = registry.policy_mut();
+                    match name {
+                        b"defensive" => policy.defensive = value,
+                        b"trusted_schema" => policy.trusted_schema = value,
+                        _ => policy.writable_schema = value,
+                    }
+                })?;
+                return Ok(Vec::new());
+            }
+            b"locking_mode" => {
+                let text = crate::pragma::argument_text(argument).to_ascii_lowercase();
+                connection
+                    .set_setting(Setting::ExclusiveLocking, i64::from(text == "exclusive"))?;
+            }
+            b"wal_checkpoint" => return wal_checkpoint(connection, Some(argument)),
+            other => {
+                if let Some(setting) = Setting::named(other) {
+                    let value = if setting.is_boolean() {
+                        i64::from(crate::pragma::argument_boolean(argument))
+                    } else {
+                        crate::pragma::argument_integer(argument)
+                    };
+                    connection.set_setting(setting, value)?;
+                    if !setting.answers_after_a_write() {
+                        return Ok(Vec::new());
+                    }
+                }
+            }
         }
-        _ => Ok(Vec::new()),
     }
+    if name == b"wal_checkpoint" {
+        return wal_checkpoint(connection, argument);
+    }
+    if name == b"foreign_key_check" {
+        return foreign_key_check(connection, argument);
+    }
+    // Everything that reads pages needs a read transaction, and a pragma is a
+    // directive rather than a program, so nothing has opened one for it. The
+    // schema pragmas need it too: the catalog they read was loaded through the
+    // pager and a DDL statement in this same transaction may have replaced it.
+    connection.begin_statement(Access::Read)?;
+    let rows = connection.with_state(|state| crate::pragma::read(state, database, name, argument));
+    let ending = if rows.is_ok() {
+        Outcome::Done
+    } else {
+        Outcome::Abort
+    };
+    let closed = connection.end_statement(Access::Read, ending);
+    let rows = rows??;
+    closed?;
+    Ok(rows.unwrap_or_default())
 }
 
-/// Returns a pragma argument as text.
-fn argument_text(argument: &PragmaArgument) -> String {
-    match argument {
-        PragmaArgument::Name(name) => String::from_utf8_lossy(name).into_owned(),
-        PragmaArgument::Value(expr) => match expr {
-            rustdb_sql::bind::BoundExpr::Text(text) => String::from_utf8_lossy(text).into_owned(),
-            rustdb_sql::bind::BoundExpr::Integer(value) => value.to_string(),
-            _ => String::new(),
-        },
-    }
+/// Which header field a pragma writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HeaderField {
+    /// `PRAGMA user_version`.
+    UserVersion,
+    /// `PRAGMA application_id`.
+    ApplicationId,
+    /// `PRAGMA schema_version`.
+    SchemaCookie,
 }
+
+/// Writes one of the three header fields an application owns.
+///
+/// It goes through the ordinary write path rather than editing the page: the
+/// header is part of the database, so changing it has to be journalled,
+/// committed and rolled back like anything else.
+fn header_write(
+    connection: &Connection,
+    database: Option<usize>,
+    argument: &PragmaArgument,
+    field: HeaderField,
+) -> DbResult<DirectiveRows> {
+    let database = target(database);
+    let value = crate::pragma::argument_integer(argument);
+    run_write(connection, &Directive::Commit, |connection| {
+        connection.with_database(database, |pager| {
+            let mut header = *pager.header();
+            match field {
+                HeaderField::UserVersion => header.user_version = value as i32,
+                HeaderField::ApplicationId => header.application_id = value as i32,
+                HeaderField::SchemaCookie => header.schema_cookie = value as u32,
+            }
+            pager.set_header(header)
+        })??;
+        Ok(Vec::new())
+    })
+}
+
+/// Which database a pragma with no qualifier reads.
+fn target(database: Option<usize>) -> usize {
+    database.unwrap_or(rustdb_storage::MAIN_DATABASE)
+}
+
+/// Reads or writes one policy flag, which lives on the module registry.
+///
+/// They are there rather than beside the other settings because they are what
+/// the registry consults: whether a schema may name a function, whether a
+/// shadow table may be written, whether the schema table itself may be. A copy
+/// beside them would be a second answer to the same question.
 
 /// Runs `PRAGMA wal_checkpoint` and reports what it managed.
 ///
@@ -1379,66 +1443,6 @@ fn wal_checkpoint(
 
 /// Reads a pragma argument as the boolean SQLite accepts.
 ///
-/// `ON`, `TRUE`, `YES` and any non-zero number are on; everything else is off,
-/// which is SQLite's rule and is why `PRAGMA foreign_keys = maybe` turns them
-/// off rather than failing.
-fn argument_boolean(argument: &PragmaArgument) -> bool {
-    let text = argument_text(argument).to_ascii_lowercase();
-    match text.as_str() {
-        "on" | "true" | "yes" => true,
-        "off" | "false" | "no" => false,
-        _ => text.parse::<i64>().is_ok_and(|value| value != 0),
-    }
-}
-
-/// Reports the foreign keys one table declares.
-fn foreign_key_list(
-    connection: &Connection,
-    argument: Option<&PragmaArgument>,
-) -> DbResult<DirectiveRows> {
-    use rustdb_sql::catalog_view::CatalogView;
-    let Some(argument) = argument else {
-        return Ok(Vec::new());
-    };
-    let wanted = argument_text(argument).to_ascii_lowercase();
-    let catalog = connection.catalog()?;
-    let Some(table) = catalog.find_table(None, wanted.as_bytes()) else {
-        return Ok(Vec::new());
-    };
-    let mut rows = Vec::new();
-    for key in &table.foreign_keys {
-        let parent = catalog.find_table(None, &key.parent_folded);
-        let targets = parent
-            .and_then(|parent| rustdb_sql::foreign_key::parent_columns(key, parent))
-            .unwrap_or_default();
-        for (position, column) in key.columns.iter().enumerate() {
-            let from = table
-                .columns
-                .get(usize::from(*column))
-                .map(|info| info.name.clone())
-                .unwrap_or_default();
-            let to = targets.get(position).cloned();
-            rows.push(vec![
-                Value::Integer(i64::from(key.id)),
-                Value::Integer(position as i64),
-                Value::owned_text(&key.parent)?,
-                Value::owned_text(&from)?,
-                match to.as_deref() {
-                    Some(name) => Value::owned_text(name)?,
-                    None => Value::Null,
-                },
-                Value::owned_text(action_name(key.on_update).as_bytes())?,
-                Value::owned_text(action_name(key.on_delete).as_bytes())?,
-                Value::owned_text(if key.match_clause.is_empty() {
-                    b"NONE"
-                } else {
-                    key.match_clause.as_slice()
-                })?,
-            ]);
-        }
-    }
-    Ok(rows)
-}
 
 /// Reports every child row whose foreign key has no parent.
 ///
@@ -1590,32 +1594,6 @@ pub fn internal_query(connection: &Connection, sql: &str) -> DbResult<Vec<Vec<Va
         rows.push(statement.row().to_vec());
     }
     Ok(rows)
-}
-
-/// Returns the spelling `PRAGMA foreign_key_list` reports for an action.
-fn action_name(action: rustdb_sql::ast::ReferentialAction) -> &'static str {
-    match action {
-        rustdb_sql::ast::ReferentialAction::NoAction => "NO ACTION",
-        rustdb_sql::ast::ReferentialAction::Restrict => "RESTRICT",
-        rustdb_sql::ast::ReferentialAction::SetNull => "SET NULL",
-        rustdb_sql::ast::ReferentialAction::SetDefault => "SET DEFAULT",
-        rustdb_sql::ast::ReferentialAction::Cascade => "CASCADE",
-    }
-}
-
-/// Returns a pragma argument as an integer.
-fn argument_integer(argument: &PragmaArgument) -> i64 {
-    match argument {
-        PragmaArgument::Name(name) => String::from_utf8_lossy(name).parse().unwrap_or(0),
-        PragmaArgument::Value(rustdb_sql::bind::BoundExpr::Integer(value)) => *value,
-        PragmaArgument::Value(rustdb_sql::bind::BoundExpr::Real(value)) => *value as i64,
-        _ => 0,
-    }
-}
-
-/// Returns a text value, for a pragma that answers with a word.
-fn text_value(text: &str) -> DbResult<Value<'static>> {
-    Value::owned_text(text.as_bytes())
 }
 
 /// Returns the column names a pragma reports.
