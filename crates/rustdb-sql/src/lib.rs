@@ -56,6 +56,7 @@ pub mod lexer;
 pub mod parser;
 pub mod plan;
 pub mod precedence;
+pub mod vtab;
 
 pub use ast::{Ast, Statement};
 pub use diagnostic::{ParseError, ParseErrorKind};

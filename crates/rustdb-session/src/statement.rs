@@ -451,7 +451,7 @@ fn explain(
     parsed: &rustdb_sql::parser::ParsedStatement,
     authorizer: &dyn Authorizer,
 ) -> DbResult<Compiled> {
-    let _ = (connection, authorizer);
+    let _ = authorizer;
     let bound = binder.bind_statement(inner)?;
     let dependencies = ProgramDependencies {
         schemas: binder.dependencies().schemas.clone(),
@@ -463,20 +463,39 @@ fn explain(
 
     let (program, plan) = match bound {
         BoundStatement::Select(select) => {
-            let (program, plan) =
-                compile::compile_select(*select, dependencies.clone(), parameters)?;
+            let (program, plan) = compile::compile_select_with(
+                *select,
+                dependencies.clone(),
+                parameters,
+                Some(virtual_planner(connection)?),
+            )?;
             (program, Some(plan))
         }
         BoundStatement::Insert(insert) => (
-            compile_dml::compile_insert(&insert, dependencies.clone(), parameters)?,
+            compile_dml::compile_insert_with(
+                &insert,
+                dependencies.clone(),
+                parameters,
+                Some(virtual_planner(connection)?),
+            )?,
             None,
         ),
         BoundStatement::Update(update) => (
-            compile_dml::compile_update(&update, dependencies.clone(), parameters)?,
+            compile_dml::compile_update_with(
+                &update,
+                dependencies.clone(),
+                parameters,
+                Some(virtual_planner(connection)?),
+            )?,
             None,
         ),
         BoundStatement::Delete(delete) => (
-            compile_dml::compile_delete(&delete, dependencies.clone(), parameters)?,
+            compile_dml::compile_delete_with(
+                &delete,
+                dependencies.clone(),
+                parameters,
+                Some(virtual_planner(connection)?),
+            )?,
             None,
         ),
         BoundStatement::Directive(directive) => {
@@ -624,19 +643,39 @@ fn compile_sql(
     let parameters = parsed.parameters.count;
     let (program, body) = match bound {
         BoundStatement::Select(select) => {
-            let (program, _) = compile::compile_select(*select, dependencies, parameters)?;
+            let (program, _) = compile::compile_select_with(
+                *select,
+                dependencies,
+                parameters,
+                Some(virtual_planner(connection)?),
+            )?;
             (program, Body::Program)
         }
         BoundStatement::Insert(insert) => (
-            compile_dml::compile_insert(&insert, dependencies, parameters)?,
+            compile_dml::compile_insert_with(
+                &insert,
+                dependencies,
+                parameters,
+                Some(virtual_planner(connection)?),
+            )?,
             Body::Program,
         ),
         BoundStatement::Update(update) => (
-            compile_dml::compile_update(&update, dependencies, parameters)?,
+            compile_dml::compile_update_with(
+                &update,
+                dependencies,
+                parameters,
+                Some(virtual_planner(connection)?),
+            )?,
             Body::Program,
         ),
         BoundStatement::Delete(delete) => (
-            compile_dml::compile_delete(&delete, dependencies, parameters)?,
+            compile_dml::compile_delete_with(
+                &delete,
+                dependencies,
+                parameters,
+                Some(virtual_planner(connection)?),
+            )?,
             Body::Program,
         ),
         BoundStatement::Directive(directive) => {
@@ -663,6 +702,19 @@ fn compile_sql(
         sql: statement_sql,
         consumed: parsed.consumed,
     })
+}
+
+/// Returns a planner over one connection's modules and connected tables.
+fn virtual_planner(
+    connection: &Connection,
+) -> DbResult<Box<dyn rustdb_vm::compile::VirtualPlanner>> {
+    let (registry, tables) = connection.with_state(|state| {
+        (
+            std::sync::Arc::clone(&state.registry),
+            std::rc::Rc::clone(&state.virtual_tables),
+        )
+    })?;
+    Ok(Box::new(crate::vtab::SessionPlanner::new(registry, tables)))
 }
 
 /// Returns the placeholder program a directive carries.

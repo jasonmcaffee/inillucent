@@ -32,6 +32,14 @@ pub struct CatalogSnapshot {
     pub databases: Vec<DatabaseCatalog>,
     /// The generation, which increases whenever a new snapshot is built.
     pub generation: u64,
+    /// The eponymous virtual tables the connection's modules provide.
+    ///
+    /// They belong to no database and have no `sqlite_schema` row: the name
+    /// *is* the table. They are resolved last, so a real table called
+    /// `generate_series` shadows the module rather than the other way round -
+    /// which is SQLite's order and the only safe one, because the file was
+    /// there first.
+    pub eponymous: Vec<TableInfo>,
 }
 
 impl CatalogSnapshot {
@@ -40,6 +48,7 @@ impl CatalogSnapshot {
         CatalogSnapshot {
             databases: vec![database],
             generation,
+            eponymous: Vec::new(),
         }
     }
 
@@ -96,7 +105,7 @@ impl CatalogView for CatalogSnapshot {
                 return Some(found);
             }
         }
-        None
+        self.eponymous.iter().find(|table| table.folded == folded)
     }
 
     /// Returns the table an index belongs to, and the index.
@@ -177,6 +186,7 @@ mod tests {
             checks: Vec::new(),
             foreign_keys: Vec::new(),
             foreign_key_triggers: Vec::new(),
+            module: None,
         }
     }
 
@@ -198,6 +208,7 @@ mod tests {
                 },
             ],
             generation: 1,
+            eponymous: Vec::new(),
         };
         assert_eq!(
             snapshot.find_table(None, b"t").map(|table| table.database),

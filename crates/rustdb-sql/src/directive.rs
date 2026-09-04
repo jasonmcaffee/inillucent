@@ -230,6 +230,23 @@ pub enum Directive {
         /// Whether the table already exists.
         exists: bool,
     },
+    /// `CREATE VIRTUAL TABLE`.
+    CreateVirtualTable {
+        /// Whether `IF NOT EXISTS` was written.
+        if_not_exists: bool,
+        /// Which attached database.
+        database: usize,
+        /// The table name as written.
+        name: Vec<u8>,
+        /// The module name as written.
+        module: Vec<u8>,
+        /// The arguments inside the parentheses, as written.
+        arguments: Vec<Vec<u8>>,
+        /// The byte the name starts at in the statement's source.
+        name_offset: u32,
+        /// Whether the table already exists.
+        exists: bool,
+    },
     /// `ALTER TABLE`.
     Alter {
         /// Which attached database.
@@ -405,6 +422,15 @@ impl<'a> Binder<'a> {
                 name,
                 body,
             } => self.bind_create_table(*temporary, *if_not_exists, *database, *name, body),
+            ast::Statement::CreateVirtualTable {
+                if_not_exists,
+                database,
+                name,
+                module,
+                arguments,
+            } => {
+                self.bind_create_virtual_table(*if_not_exists, *database, *name, *module, arguments)
+            }
             ast::Statement::CreateIndex {
                 unique,
                 if_not_exists,
@@ -488,6 +514,53 @@ impl<'a> Binder<'a> {
     }
 
     /// Binds a `CREATE TABLE`.
+    fn bind_create_virtual_table(
+        &mut self,
+        if_not_exists: bool,
+        database: Option<ast::NameId>,
+        name: ast::NameId,
+        module: ast::NameId,
+        arguments: &[Vec<u8>],
+    ) -> Result<Directive, ParseError> {
+        let index = self.resolve_database(database)?;
+        let written = self.ast.text(name).to_vec();
+        if written.to_ascii_lowercase().starts_with(b"sqlite_") {
+            return Err(refused(
+                format!(
+                    "object name reserved for internal use: {}",
+                    String::from_utf8_lossy(&written)
+                ),
+                Span::default(),
+            ));
+        }
+        let folded = self.ast.folded(name).to_vec();
+        let database_name = self.catalog.database_name(index).to_vec();
+        let exists = self
+            .catalog
+            .find_table(Some(database_name.as_slice()), &folded)
+            .is_some();
+        if exists && !if_not_exists {
+            return Err(refused(
+                format!("table {} already exists", String::from_utf8_lossy(&written)),
+                Span::default(),
+            ));
+        }
+        Ok(Directive::CreateVirtualTable {
+            if_not_exists,
+            database: index,
+            name: written,
+            module: self.ast.text(module).to_vec(),
+            arguments: arguments.to_vec(),
+            name_offset: self
+                .ast
+                .name(name)
+                .map(|entry| entry.span.start)
+                .unwrap_or_default(),
+            exists,
+        })
+    }
+
+    /// Binds `CREATE TABLE`, refusing what the file format cannot hold.
     fn bind_create_table(
         &mut self,
         temporary: bool,

@@ -188,6 +188,101 @@ pub struct ConnectionState {
     /// statement that deferred a check cannot leave the next transaction
     /// deferring them too.
     pub defer_foreign_keys: bool,
+    /// The modules, collations and policy flags this connection can reach.
+    pub registry: std::sync::Arc<rustdb_ext::registry::Registry>,
+    /// The virtual tables this connection has connected, by database and name.
+    ///
+    /// Shared with whatever is compiling a statement, because a module is
+    /// asked for its plan at compile time and for its rows at run time,
+    /// and both are questions about the same connected table.
+    pub virtual_tables: std::rc::Rc<core::cell::RefCell<crate::vtab::VirtualTables>>,
+    /// The run-time limits, so a module can be told what they are.
+    pub limits: rustdb_base::limits::Limits,
+}
+
+impl rustdb_vm::host::Host for ConnectionState {
+    /// The databases the connection has open.
+    fn pagers(&mut self) -> &mut dyn rustdb_storage::PagerSet {
+        self
+    }
+
+    /// Opens a cursor on one virtual table, connecting it if it is not yet.
+    fn open_virtual(
+        &mut self,
+        reference: &rustdb_vm::program::VirtualRef,
+    ) -> DbResult<Box<dyn rustdb_ext::vtab::VirtualCursor>> {
+        self.ensure_connected(reference)?;
+        let tables = std::rc::Rc::clone(&self.virtual_tables);
+        let borrowed = tables
+            .try_borrow()
+            .map_err(|_| error::misuse("the virtual tables are in use"))?;
+        crate::vtab::open_cursor(&borrowed, &crate::vtab::key_of(reference))
+    }
+
+    /// Runs a body with one virtual table and a context over the pagers.
+    fn with_virtual(
+        &mut self,
+        reference: &rustdb_vm::program::VirtualRef,
+        body: &mut dyn FnMut(
+            &mut dyn rustdb_ext::vtab::VirtualTable,
+            &mut rustdb_ext::vtab::Context<'_>,
+        ) -> DbResult<rustdb_vm::host::VirtualAnswer>,
+    ) -> DbResult<rustdb_vm::host::VirtualAnswer> {
+        self.ensure_connected(reference)?;
+        let key = crate::vtab::key_of(reference);
+        let limits = self.limits.clone();
+        let database = reference.database;
+        let handle = std::rc::Rc::clone(&self.virtual_tables);
+        // The table comes out under a short borrow that ends before the call,
+        // because the module reads its shadow tables through the very pagers
+        // this method is about to lend it.
+        let Some(mut taken) = handle
+            .try_borrow_mut()
+            .map_err(|_| error::misuse("the virtual tables are in use"))?
+            .take(&key)
+        else {
+            return Err(error::misuse("that virtual table is not connected"));
+        };
+        let outcome = {
+            let mut context = rustdb_ext::vtab::Context {
+                pagers: self,
+                database,
+                limits: &limits,
+            };
+            body(taken.as_mut(), &mut context)
+        };
+        if let Ok(mut tables) = handle.try_borrow_mut() {
+            tables.insert(key, taken);
+        }
+        outcome
+    }
+}
+
+impl ConnectionState {
+    /// Connects one virtual table if the connection has not connected it yet.
+    ///
+    /// A module is connected once per schema generation: the declaration and
+    /// the shadow roots both came from the schema, so a reload throws every
+    /// connected table away and the next statement rebuilds the ones it needs.
+    pub fn ensure_connected(&mut self, reference: &rustdb_vm::program::VirtualRef) -> DbResult<()> {
+        let key = crate::vtab::key_of(reference);
+        let handle = std::rc::Rc::clone(&self.virtual_tables);
+        let shadows = {
+            let tables = handle
+                .try_borrow()
+                .map_err(|_| error::misuse("the virtual tables are in use"))?;
+            if tables.is_connected(&key) {
+                return Ok(());
+            }
+            tables.shadows(&key)
+        };
+        let registry = std::sync::Arc::clone(&self.registry);
+        let (table, _, _) = crate::vtab::connect(&registry, reference, b"main", shadows, false)?;
+        if let Ok(mut tables) = handle.try_borrow_mut() {
+            tables.insert(key, table);
+        }
+        Ok(())
+    }
 }
 
 impl rustdb_storage::PagerSet for ConnectionState {
@@ -377,7 +472,7 @@ impl Connection {
                 writable: options.writable,
             },
         )?;
-        let catalog = load_catalog(&mut pager, &options.main_name, 0, options.busy_timeout)?;
+        let mut catalog = load_catalog(&mut pager, &options.main_name, 0, options.busy_timeout)?;
         let journal = JournalOptions {
             mode: if pager.has_wal() {
                 JournalMode::Wal
@@ -386,18 +481,25 @@ impl Connection {
             },
             synchronous: options.journal.synchronous,
         };
+        let mut state = ConnectionState {
+            pager,
+            active: 0,
+            temp: None,
+            attached: Vec::new(),
+            writing: Vec::new(),
+            transaction: Transaction::new(),
+            journal,
+            foreign_keys: false,
+            defer_foreign_keys: false,
+            registry: std::sync::Arc::new(rustdb_ext::registry::Registry::with_builtins()),
+            virtual_tables: std::rc::Rc::new(core::cell::RefCell::new(
+                crate::vtab::VirtualTables::default(),
+            )),
+            limits: options.limits.clone(),
+        };
+        declare_virtual_tables(&mut state, &mut catalog)?;
         Ok(Connection {
-            state: RefCell::new(ConnectionState {
-                pager,
-                active: 0,
-                temp: None,
-                attached: Vec::new(),
-                writing: Vec::new(),
-                transaction: Transaction::new(),
-                journal,
-                foreign_keys: false,
-                defer_foreign_keys: false,
-            }),
+            state: RefCell::new(state),
             catalog: RefCell::new(Arc::new(catalog)),
             interrupt: Arc::new(AtomicBool::new(false)),
             limits: options.limits.clone(),
@@ -1027,6 +1129,8 @@ impl Connection {
             self.options.busy_timeout,
         )?;
         state.pager = pager;
+        let mut loaded = loaded;
+        declare_virtual_tables(&mut state, &mut loaded)?;
         drop(state);
         let mut catalog = self
             .catalog
@@ -1659,10 +1763,92 @@ fn read_every_catalog(
         strays.append(&mut orphans);
     }
     attach_strays(&mut databases, &strays)?;
-    Ok(CatalogSnapshot {
+    let mut snapshot = CatalogSnapshot {
         databases,
         generation,
-    })
+        eponymous: Vec::new(),
+    };
+    declare_virtual_tables(state, &mut snapshot)?;
+    Ok(snapshot)
+}
+
+/// Asks every module what its tables look like, and writes the answers down.
+///
+/// This is the moment SQLite calls `xConnect`. Two things come out of it: the
+/// columns a virtual table declares, which go into the snapshot so that
+/// everything above the session sees an ordinary table with an ordinary column
+/// list; and the eponymous tables the registry provides, which belong to no
+/// database and are resolved last.
+///
+/// A module that refuses to connect does not stop the schema from loading. The
+/// table is left with no columns, exactly as an unrecognised one is, so that a
+/// database naming a module this build does not have still opens and every
+/// other table in it still works.
+fn declare_virtual_tables(
+    state: &mut ConnectionState,
+    snapshot: &mut CatalogSnapshot,
+) -> DbResult<()> {
+    let handle = std::rc::Rc::clone(&state.virtual_tables);
+    if let Ok(mut tables) = handle.try_borrow_mut() {
+        tables.clear();
+    }
+    let registry = std::sync::Arc::clone(&state.registry);
+    let mut declared: Vec<(
+        crate::vtab::VirtualKey,
+        Box<dyn rustdb_ext::vtab::VirtualTable>,
+    )> = Vec::new();
+    let mut columns: Vec<(
+        usize,
+        usize,
+        Vec<rustdb_sql::catalog_view::ColumnInfo>,
+        bool,
+    )> = Vec::new();
+    for (index, database) in snapshot.databases.iter().enumerate() {
+        for (position, table) in database.tables.iter().enumerate() {
+            let Some(module) = table.module.clone() else {
+                continue;
+            };
+            let reference = rustdb_vm::program::VirtualRef {
+                database: index,
+                table: table.name.clone(),
+                module,
+            };
+            let key = crate::vtab::key_of(&reference);
+            let shadows = crate::vtab::shadow_roots(snapshot, index, &table.name);
+            if let Ok(mut tables) = handle.try_borrow_mut() {
+                tables.set_shadows(key.clone(), shadows.clone());
+            }
+            let Ok((connected, declaration, without_rowid)) =
+                crate::vtab::connect(&registry, &reference, &database.name, shadows, false)
+            else {
+                continue;
+            };
+            columns.push((index, position, declaration, without_rowid));
+            declared.push((key, connected));
+        }
+    }
+    for (database, position, declaration, without_rowid) in columns {
+        let Some(table) = snapshot
+            .databases
+            .get_mut(database)
+            .and_then(|catalog| catalog.tables.get_mut(position))
+        else {
+            continue;
+        };
+        table.columns = declaration;
+        table.without_rowid = without_rowid;
+    }
+    if let Ok(mut tables) = handle.try_borrow_mut() {
+        for (key, connected) in declared {
+            tables.insert(key, connected);
+        }
+    }
+    for name in registry.module_names() {
+        if let Ok(Some(table)) = crate::vtab::eponymous_table(&registry, &name) {
+            snapshot.eponymous.push(table);
+        }
+    }
+    Ok(())
 }
 
 /// Puts every trigger that fires for a table in another database on that table.
@@ -1997,6 +2183,7 @@ fn load_catalog(
     Ok(CatalogSnapshot {
         databases: vec![database, empty_temp_catalog()],
         generation,
+        eponymous: Vec::new(),
     })
 }
 

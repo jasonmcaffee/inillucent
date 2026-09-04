@@ -68,6 +68,9 @@ pub fn run_directive(
         Directive::CreateTable { .. } => run_write(connection, directive, |connection| {
             create_table(connection, directive, source)
         }),
+        Directive::CreateVirtualTable { .. } => run_write(connection, directive, |connection| {
+            create_virtual_table(connection, directive, source)
+        }),
         Directive::Analyze { .. } => run_write(connection, directive, |connection| {
             analyze(connection, directive)
         }),
@@ -100,6 +103,126 @@ pub fn run_directive(
         }
         Directive::Pragma { name, argument } => pragma(connection, name, argument.as_ref()),
     }
+}
+
+/// Creates a virtual table: its shadow tables, its row, and its connection.
+///
+/// The order matters and is SQLite's. The shadow tables are made first, because
+/// the module is about to be connected with `creating` set and may write into
+/// them - FTS5 writes its configuration row there and then reads it back on
+/// every later open. The virtual table's own row is written next, with a root
+/// page of zero: it has no b-tree of its own, and the zero is what says so.
+///
+/// A module that refuses leaves nothing behind, because the whole directive
+/// runs inside the statement's own transaction and a failure rolls it back.
+fn create_virtual_table(
+    connection: &Connection,
+    directive: &Directive,
+    source: &[u8],
+) -> DbResult<DirectiveRows> {
+    let Directive::CreateVirtualTable {
+        database,
+        name,
+        module,
+        arguments,
+        name_offset,
+        exists,
+        ..
+    } = directive
+    else {
+        return Err(misuse("not a CREATE VIRTUAL TABLE"));
+    };
+    if *exists {
+        return Ok(Vec::new());
+    }
+    let registry = connection.with_state(|state| std::sync::Arc::clone(&state.registry))?;
+    let Some(found) = registry.module(module) else {
+        // A statement error rather than a misuse: the caller's API use was
+        // correct and the *statement* named something that is not there, which
+        // is the same class of failure as naming a table that does not exist.
+        return Err(
+            rustdb_base::DbError::primary(rustdb_base::PrimaryCode::Error).with_detail(format!(
+                "no such module: {}",
+                String::from_utf8_lossy(module)
+            )),
+        );
+    };
+    if !found.constructible() {
+        return Err(
+            rustdb_base::DbError::primary(rustdb_base::PrimaryCode::Error).with_detail(format!(
+                "{} is an eponymous-only module and cannot be created",
+                String::from_utf8_lossy(module)
+            )),
+        );
+    }
+    let reference = rustdb_vm::program::VirtualRef {
+        database: *database,
+        table: name.clone(),
+        module: rustdb_sql::vtab::ModuleRef {
+            folded: module.to_ascii_lowercase(),
+            name: module.clone(),
+            arguments: arguments.clone(),
+        },
+    };
+    let shadow_tables =
+        found.shadow_tables(&crate::vtab::arguments_of(&reference, b"main", Vec::new()))?;
+    for shadow in &shadow_tables {
+        let sql = shadow
+            .create_sql
+            .replace('%', &String::from_utf8_lossy(name));
+        crate::statement::execute_batch(connection, sql.as_bytes())?;
+    }
+    let sql = ddl::canonical_sql(
+        "CREATE VIRTUAL TABLE",
+        source,
+        *name_offset,
+        source.len() as u32,
+    );
+    connection.with_database(*database, |pager| {
+        ddl::insert_schema_row(
+            pager,
+            &SchemaRow {
+                kind: SchemaKind::Table,
+                name: name.clone(),
+                table: name.clone(),
+                // A virtual table has no b-tree, and zero is how the file says
+                // so. Every reader - this engine's catalog and SQLite's - tells
+                // a virtual table from an ordinary one by exactly this.
+                root: 0,
+                sql: Some(sql.clone()),
+            },
+        )
+    })??;
+    connection.with_database(*database, |pager| ddl::bump_schema_cookie(pager))??;
+    // The module is connected with `creating` set once the shadow tables and
+    // the row are both there, so that anything it writes lands in a schema that
+    // already describes it.
+    let shadows = {
+        let catalog = connection.catalog()?;
+        crate::vtab::shadow_roots(&catalog, *database, name)
+    };
+    connection.with_state(|state| -> DbResult<()> {
+        let registry = std::sync::Arc::clone(&state.registry);
+        let limits = state.limits.clone();
+        let (mut table, _, _) =
+            crate::vtab::connect(&registry, &reference, b"main", shadows, true)?;
+        {
+            let mut context = rustdb_ext::vtab::Context {
+                pagers: state,
+                database: *database,
+                limits: &limits,
+            };
+            table.begin(&mut context)?;
+            table.sync(&mut context)?;
+            table.commit(&mut context)?;
+        }
+        let handle = std::rc::Rc::clone(&state.virtual_tables);
+        if let Ok(mut tables) = handle.try_borrow_mut() {
+            tables.insert(crate::vtab::key_of(&reference), table);
+        }
+        Ok(())
+    })??;
+    Ok(Vec::new())
 }
 
 /// Returns the transaction mode a `BEGIN` keyword names.
@@ -138,6 +261,7 @@ fn run_write(
 fn target_database(directive: &Directive) -> usize {
     match directive {
         Directive::CreateTable { database, .. }
+        | Directive::CreateVirtualTable { database, .. }
         | Directive::Alter { database, .. }
         | Directive::Reindex { database, .. }
         | Directive::Vacuum { database, .. }

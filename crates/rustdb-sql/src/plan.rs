@@ -121,6 +121,57 @@ pub enum AccessPath {
         /// The FROM term whose store holds the queue.
         cte: usize,
     },
+    /// Rows produced by a virtual table's module.
+    VirtualScan {
+        /// The module and the arguments its `CREATE` gave it.
+        module: crate::vtab::ModuleRef,
+        /// The constraints offered to `best_index`, in the order the module
+        /// will see them.
+        offer: Vec<VirtualConstraint>,
+        /// The ordering offered to `best_index`.
+        order_by: Vec<crate::vtab::OrderSpec>,
+        /// What the module answered, once it has been asked.
+        ///
+        /// It is `None` while the plan is still the planner's, and filled in by
+        /// a pass that runs before compilation. Keeping the two apart is what
+        /// lets the planner stay a pure function of the SQL and one catalog
+        /// generation while the program still carries a real plan.
+        chosen: Option<VirtualChoice>,
+    },
+}
+
+/// What a module answered when it was shown the offer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VirtualChoice {
+    /// The plan number, passed back to the module's `filter`.
+    pub index_number: i32,
+    /// The plan string, passed back to the module's `filter`.
+    pub index_string: String,
+    /// The offer positions whose values feed `filter`, in argument order.
+    pub arguments: Vec<usize>,
+    /// The offer positions the engine must still test for itself.
+    ///
+    /// Everything the module did not take, and everything it took without
+    /// promising to apply. A module that says `omit` is promising; anything
+    /// else and the predicate is tested twice, which is the safe direction.
+    pub recheck: Vec<usize>,
+    /// Whether the module will produce the requested order by itself.
+    pub ordered: bool,
+}
+
+/// One predicate offered to a module, with what it was made of.
+///
+/// The predicate is kept whole beside the constraint because the compiler may
+/// have to test it after all: a module that used the constraint without
+/// promising to apply it leaves the engine responsible for the answer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VirtualConstraint {
+    /// The constraint as the module is shown it.
+    pub spec: crate::vtab::ConstraintSpec,
+    /// The value on the other side, which becomes an argument to `filter`.
+    pub value: BoundExpr,
+    /// The whole predicate, for the compiler to re-test when it must.
+    pub predicate: BoundExpr,
 }
 
 impl AccessPath {
@@ -137,6 +188,7 @@ impl AccessPath {
             }
             AccessPath::Recursive { .. } => format!("SCAN {table} USING RECURSIVE QUEUE"),
             AccessPath::RecursiveSelf { .. } => format!("SCAN {table}"),
+            AccessPath::VirtualScan { .. } => format!("SCAN {table} VIRTUAL TABLE INDEX"),
             AccessPath::Subquery { correlated, .. } => {
                 if *correlated {
                     format!("CORRELATED SCALAR SUBQUERY {table}")
@@ -339,7 +391,7 @@ pub fn plan_select(select: BoundSelect) -> PhysicalPlan {
         let Some(source) = select.sources.get(*position) else {
             continue;
         };
-        let path = choose_path(level, &ids, source, &terms, &mut consumed);
+        let path = choose_path(level, &ids, source, &select, &terms, &mut consumed);
         let (cost, rows) = path_cost(source, &path);
         sources.push(PlannedSource {
             cost,
@@ -468,7 +520,7 @@ fn order_cost(select: &BoundSelect, terms: &[BoundExpr], order: &[usize]) -> f64
         let Some(source) = select.sources.get(*position) else {
             continue;
         };
-        let path = choose_path(level, &ids, source, terms, &mut consumed);
+        let path = choose_path(level, &ids, source, select, terms, &mut consumed);
         let (cost, rows) = path_cost(source, &path);
         total += outer_rows * cost;
         outer_rows *= rows.max(1.0);
@@ -481,6 +533,19 @@ fn path_cost(source: &BoundSource, path: &AccessPath) -> (f64, f64) {
     let rows = estimated_rows(&source.table);
     match path {
         AccessPath::TableScan { .. } => (cost::scan_cost(rows), rows),
+        // A module prices its own scan, and the planner cannot ask it here
+        // without making the plan depend on run-time state. What it can do is
+        // reward an offer: a virtual table that was given a constraint will be
+        // cheaper than one that was not, whatever the module then says.
+        AccessPath::VirtualScan { offer, .. } => {
+            let usable = offer.iter().filter(|item| item.spec.usable).count();
+            let rows = if usable == 0 {
+                rows
+            } else {
+                rows / (usable as f64 * 8.0)
+            };
+            (cost::scan_cost(rows.max(1.0)), rows.max(1.0))
+        }
         AccessPath::RowidSeek { .. } => (cost::search_cost(rows, 1.0, true), 1.0),
         AccessPath::RowidRange { .. } => {
             let matches = (rows / cost::RANGE_SHARE).max(1.0);
@@ -624,6 +689,7 @@ fn choose_path(
     position: usize,
     ids: &[usize],
     source: &BoundSource,
+    select: &BoundSelect,
     terms: &[BoundExpr],
     consumed: &mut [bool],
 ) -> AccessPath {
@@ -660,6 +726,9 @@ fn choose_path(
     }
     let id = ids.get(position).copied().unwrap_or(position);
     let table = &source.table;
+    if let Some(module) = table.module.clone() {
+        return virtual_path(id, position, ids, source, select, module, terms, consumed);
+    }
     let mut trial = consumed.to_vec();
     if let Some(path) = rowid_path(id, position, ids, table, terms, &mut trial) {
         consumed.copy_from_slice(&trial);
@@ -683,6 +752,133 @@ fn choose_path(
         }
     }
     AccessPath::TableScan { root: table.root }
+}
+
+/// Builds the offer a virtual table's module will be shown.
+///
+/// Every predicate that compares one of this term's columns - or its rowid - to
+/// something is offered, whether or not the value is available yet: a
+/// constraint the loop order has put out of reach is offered as *not usable*,
+/// which is what lets one answer serve every position the term could take.
+fn virtual_path(
+    id: usize,
+    position: usize,
+    ids: &[usize],
+    source: &BoundSource,
+    select: &BoundSelect,
+    module: crate::vtab::ModuleRef,
+    terms: &[BoundExpr],
+    consumed: &mut [bool],
+) -> AccessPath {
+    let table = &source.table;
+    let mut offer = Vec::new();
+    for (index, term) in terms.iter().enumerate() {
+        if consumed.get(index).copied().unwrap_or(false) {
+            continue;
+        }
+        let Some((column, op, value)) = virtual_constraint(id, table, term) else {
+            continue;
+        };
+        offer.push(VirtualConstraint {
+            spec: crate::vtab::ConstraintSpec {
+                column,
+                op,
+                usable: is_available(position, ids, &value),
+            },
+            value,
+            predicate: term.clone(),
+        });
+        if let Some(slot) = consumed.get_mut(index) {
+            *slot = true;
+        }
+    }
+    let order_by = order_offer(id, position, select);
+    AccessPath::VirtualScan {
+        module,
+        offer,
+        order_by,
+        chosen: None,
+    }
+}
+
+/// Returns the `ORDER BY` a module may be able to satisfy for itself.
+///
+/// Only the outermost loop is offered one. An inner loop restarts for every row
+/// of the loops around it, so an ordering it produced would be an ordering
+/// within each of those restarts - which is not the statement's ordering and
+/// would let the sorter be skipped wrongly.
+fn order_offer(id: usize, position: usize, select: &BoundSelect) -> Vec<crate::vtab::OrderSpec> {
+    if position != 0 {
+        return Vec::new();
+    }
+    let mut offer = Vec::new();
+    for term in &select.order_by {
+        let column = match &term.expr {
+            BoundExpr::Column { source, column, .. } if *source == id => i32::from(*column),
+            BoundExpr::Rowid { source } if *source == id => crate::vtab::ROWID_COLUMN,
+            _ => return Vec::new(),
+        };
+        offer.push(crate::vtab::OrderSpec {
+            column,
+            descending: term.order == crate::ast::SortOrder::Descending,
+        });
+    }
+    offer
+}
+
+/// Returns the column, operator and value when a term constrains this term.
+fn virtual_constraint(
+    id: usize,
+    table: &TableInfo,
+    term: &BoundExpr,
+) -> Option<(i32, crate::vtab::ConstraintOp, BoundExpr)> {
+    use crate::vtab::{ConstraintOp, ROWID_COLUMN};
+    // `x MATCH 'y'`, `x LIKE 'y'`, `x GLOB 'y'` and `x REGEXP 'y'` are the
+    // operators a module exists to give meaning to, so they are offered first.
+    if let BoundExpr::Pattern {
+        negated: false,
+        op,
+        operand,
+        pattern,
+        escape: None,
+    } = term
+    {
+        if let BoundExpr::Column { source, column, .. } = operand.as_ref() {
+            if *source == id {
+                let op = match op {
+                    crate::ast::PatternOp::Match => ConstraintOp::Match,
+                    crate::ast::PatternOp::Like => ConstraintOp::Like,
+                    crate::ast::PatternOp::Glob => ConstraintOp::Glob,
+                    crate::ast::PatternOp::Regexp => ConstraintOp::Regexp,
+                };
+                return Some((i32::from(*column), op, pattern.as_ref().clone()));
+            }
+        }
+    }
+    if let Some((op, value)) = comparison_against_rowid(id, term) {
+        return binary_constraint(op).map(|op| (ROWID_COLUMN, op, value));
+    }
+    for column in 0..table.columns.len() {
+        let column = column as u16;
+        if let Some((op, value)) = comparison_against_column(id, column, term) {
+            return binary_constraint(op).map(|op| (i32::from(column), op, value));
+        }
+    }
+    None
+}
+
+/// Returns the constraint operator one comparison offers, if any.
+fn binary_constraint(op: BinaryOp) -> Option<crate::vtab::ConstraintOp> {
+    use crate::vtab::ConstraintOp;
+    Some(match op {
+        BinaryOp::Equal => ConstraintOp::Eq,
+        BinaryOp::NotEqual => ConstraintOp::Ne,
+        BinaryOp::Less => ConstraintOp::Lt,
+        BinaryOp::LessEqual => ConstraintOp::Le,
+        BinaryOp::Greater => ConstraintOp::Gt,
+        BinaryOp::GreaterEqual => ConstraintOp::Ge,
+        _ => return None,
+    })
 }
 
 /// Returns a rowid equality or range path, when the predicates allow one.

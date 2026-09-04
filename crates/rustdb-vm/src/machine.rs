@@ -29,6 +29,7 @@ use crate::aggregate::Accumulator;
 use crate::builtin;
 use crate::ephemeral::Ephemeral;
 use crate::eval;
+use crate::host::Host;
 use crate::program::{Instruction, Opcode, Operand, Program, RowChange};
 use crate::sorter::{DistinctSet, Sorter};
 
@@ -89,6 +90,16 @@ impl CursorSlot {
     }
 }
 
+/// One open virtual-table cursor.
+struct VirtualSlot {
+    /// Which table the cursor is on, so the host can find its module again.
+    reference: crate::program::VirtualRef,
+    /// The module's cursor.
+    cursor: Box<dyn rustdb_ext::vtab::VirtualCursor>,
+    /// Whether `filter` has positioned it.
+    filtered: bool,
+}
+
 /// The machine.
 pub struct Machine {
     program: Arc<Program>,
@@ -106,6 +117,13 @@ pub struct Machine {
     /// being written to a row.
     register_marks: Vec<bool>,
     cursors: Vec<Option<CursorSlot>>,
+    /// The virtual cursors, numbered alongside the b-tree ones.
+    ///
+    /// A parallel array rather than a variant of `CursorSlot`, because a
+    /// virtual cursor shares nothing with a b-tree cursor: no page, no
+    /// saved position, no null row. Every opcode that touches one is a
+    /// virtual opcode, so nothing has to ask which kind it is holding.
+    virtual_cursors: Vec<Option<VirtualSlot>>,
     sorters: Vec<Option<Sorter>>,
     distincts: Vec<DistinctSet>,
     ephemerals: Vec<Option<Ephemeral>>,
@@ -183,6 +201,8 @@ impl Machine {
         let register_marks = vec![false; program.register_count as usize];
         let mut cursors = Vec::new();
         cursors.resize_with(program.cursor_count as usize, || None);
+        let mut virtual_cursors = Vec::new();
+        virtual_cursors.resize_with(program.cursor_count as usize, || None);
         let mut sorters = Vec::new();
         sorters.resize_with(program.sorter_count as usize, || None);
         let distincts = vec![DistinctSet::new(); program.distinct_count as usize];
@@ -196,6 +216,7 @@ impl Machine {
             registers,
             register_marks,
             cursors,
+            virtual_cursors,
             sorters,
             distincts,
             ephemerals,
@@ -332,6 +353,9 @@ impl Machine {
         self.cursors.clear();
         self.cursors
             .resize_with(self.program.cursor_count as usize, || None);
+        self.virtual_cursors.clear();
+        self.virtual_cursors
+            .resize_with(self.program.cursor_count as usize, || None);
         self.sorters.clear();
         self.sorters
             .resize_with(self.program.sorter_count as usize, || None);
@@ -371,7 +395,7 @@ impl Machine {
     }
 
     /// Runs until the program produces a row or finishes.
-    pub fn step(&mut self, databases: &mut dyn PagerSet) -> DbResult<StepOutcome> {
+    pub fn step(&mut self, host: &mut dyn Host) -> DbResult<StepOutcome> {
         if self.state == MachineState::Failed {
             return Err(error::misuse("this statement has failed and must be reset"));
         }
@@ -384,7 +408,7 @@ impl Machine {
         // reason - so reading them once from `main` is reading them from all of
         // them.
         {
-            let main = databases.pager(rustdb_storage::MAIN_DATABASE)?;
+            let main = host.pagers().pager(rustdb_storage::MAIN_DATABASE)?;
             self.encoding = main.text_encoding();
             self.file_format = main.header().schema_format.max(1);
         }
@@ -402,7 +426,12 @@ impl Machine {
                 return Ok(StepOutcome::Done);
             };
             self.steps = self.steps.saturating_add(1);
-            match self.execute(&instruction, databases) {
+            let outcome = if instruction.opcode.is_virtual() {
+                self.execute_virtual(&instruction, host)
+            } else {
+                self.execute(&instruction, host.pagers())
+            };
+            match outcome {
                 Ok(Flow::Next) => self.counter = self.counter.saturating_add(1),
                 Ok(Flow::Jump(target)) => self.counter = target,
                 Ok(Flow::Row) => {
@@ -1045,6 +1074,19 @@ impl Machine {
                 let pager = databases.pager(usize::from(instruction.p5))?;
                 self.sequence_rowid(instruction, pager)
             }
+            Opcode::VOpen
+            | Opcode::VFilter
+            | Opcode::VNext
+            | Opcode::VColumn
+            | Opcode::VRowid
+            | Opcode::VUpdate
+            | Opcode::VBegin
+            | Opcode::VSync
+            | Opcode::VCommit
+            | Opcode::VRollback
+            | Opcode::VSavepoint => Err(error::misuse(
+                "a virtual-table opcode reached the ordinary dispatch",
+            )),
             Opcode::SeqUpdate => {
                 let pager = databases.pager(usize::from(instruction.p5))?;
                 self.sequence_update(instruction, pager)
@@ -2046,6 +2088,176 @@ impl Machine {
         Ok(Flow::Next)
     }
 
+    /// Runs one virtual-table instruction against the host.
+    ///
+    /// Every arm here is a call into somebody else's code, so every arm treats
+    /// what comes back as data: a module that answers a column out of range, a
+    /// rowid for a row it is not on, or an error mid-scan leaves the statement
+    /// resettable rather than the machine confused.
+    fn execute_virtual(
+        &mut self,
+        instruction: &Instruction,
+        host: &mut dyn Host,
+    ) -> DbResult<Flow> {
+        match instruction.opcode {
+            Opcode::VOpen => {
+                let Operand::Virtual(reference) = &instruction.p4 else {
+                    return Err(error::misuse("VOpen without a table"));
+                };
+                let cursor = host.open_virtual(reference)?;
+                let slot = instruction.p1.max(0) as usize;
+                let Some(place) = self.virtual_cursors.get_mut(slot) else {
+                    return Err(error::misuse("a virtual cursor that does not exist"));
+                };
+                *place = Some(VirtualSlot {
+                    reference: (**reference).clone(),
+                    cursor,
+                    filtered: false,
+                });
+                Ok(Flow::Next)
+            }
+            Opcode::VFilter => {
+                let Operand::VirtualPlan(chosen) = &instruction.p4 else {
+                    return Err(error::misuse("VFilter without a plan"));
+                };
+                let arguments = self.block(instruction.p3, i32::from(instruction.p5));
+                let plan = rustdb_ext::vtab::FilterPlan {
+                    index_number: chosen.index_number,
+                    index_string: chosen.index_string.clone(),
+                    arguments,
+                };
+                let empty = self.with_virtual_cursor(instruction.p1, host, |cursor, context| {
+                    cursor.filter(context, &plan)?;
+                    Ok(cursor.eof())
+                })?;
+                if let Some(slot) = self
+                    .virtual_cursors
+                    .get_mut(instruction.p1.max(0) as usize)
+                    .and_then(Option::as_mut)
+                {
+                    slot.filtered = true;
+                }
+                if empty {
+                    return Ok(Flow::Jump(instruction.p2.max(0) as usize));
+                }
+                Ok(Flow::Next)
+            }
+            Opcode::VNext => {
+                let more = self.with_virtual_cursor(instruction.p1, host, |cursor, context| {
+                    cursor.next(context)?;
+                    Ok(!cursor.eof())
+                })?;
+                if more {
+                    return Ok(Flow::Jump(instruction.p2.max(0) as usize));
+                }
+                Ok(Flow::Next)
+            }
+            Opcode::VColumn => {
+                let column = instruction.p2.max(0) as usize;
+                let value = self.with_virtual_cursor(instruction.p1, host, |cursor, context| {
+                    if cursor.eof() {
+                        return Ok(Value::Null);
+                    }
+                    cursor.column(context, column)
+                })?;
+                self.store(instruction.p3, value);
+                Ok(Flow::Next)
+            }
+            Opcode::VRowid => {
+                let rowid = self.with_virtual_cursor(instruction.p1, host, |cursor, _| {
+                    if cursor.eof() {
+                        return Ok(None);
+                    }
+                    cursor.rowid().map(Some)
+                })?;
+                self.store(instruction.p2, rowid.map_or(Value::Null, Value::Integer));
+                Ok(Flow::Next)
+            }
+            Opcode::VUpdate => {
+                let Operand::Virtual(reference) = &instruction.p4 else {
+                    return Err(error::misuse("VUpdate without a table"));
+                };
+                let values = self.block(instruction.p1, instruction.p2);
+                let change = change_of(&values)?;
+                let rowid = host.with_virtual(reference, &mut |table, context| {
+                    table.update(context, &change)
+                })?;
+                if instruction.p3 >= 0 {
+                    self.store(instruction.p3, rowid.map_or(Value::Null, Value::Integer));
+                }
+                self.changes = self.changes.saturating_add(1);
+                if let Some(rowid) = rowid {
+                    self.last_insert_rowid = rowid;
+                }
+                Ok(Flow::Next)
+            }
+            Opcode::VBegin
+            | Opcode::VSync
+            | Opcode::VCommit
+            | Opcode::VRollback
+            | Opcode::VSavepoint => {
+                let Operand::Virtual(reference) = &instruction.p4 else {
+                    return Err(error::misuse("a transaction opcode without a table"));
+                };
+                let opcode = instruction.opcode;
+                let number = instruction.p1;
+                let kind = instruction.p3;
+                host.with_virtual(reference, &mut |table, context| {
+                    match opcode {
+                        Opcode::VBegin => table.begin(context)?,
+                        Opcode::VSync => table.sync(context)?,
+                        Opcode::VCommit => table.commit(context)?,
+                        Opcode::VRollback => table.rollback(context)?,
+                        _ => match kind {
+                            0 => table.savepoint(context, number)?,
+                            1 => table.release(context, number)?,
+                            _ => table.rollback_to(context, number)?,
+                        },
+                    }
+                    Ok(None)
+                })?;
+                Ok(Flow::Next)
+            }
+            _ => Err(error::misuse("not a virtual-table opcode")),
+        }
+    }
+
+    /// Runs a body with one open virtual cursor and a context over the pagers.
+    ///
+    /// The cursor is taken out of its slot for the call and put back
+    /// afterwards, error included: the module reads its shadow tables through
+    /// the same pagers the machine holds, and the two cannot be borrowed at
+    /// once. A cursor lost to an early return would be a cursor the next
+    /// instruction could not find.
+    fn with_virtual_cursor<T>(
+        &mut self,
+        slot: i32,
+        host: &mut dyn Host,
+        body: impl FnOnce(
+            &mut dyn rustdb_ext::vtab::VirtualCursor,
+            &mut rustdb_ext::vtab::Context<'_>,
+        ) -> DbResult<T>,
+    ) -> DbResult<T> {
+        let index = slot.max(0) as usize;
+        let Some(mut taken) = self.virtual_cursors.get_mut(index).and_then(Option::take) else {
+            return Err(error::misuse("a virtual cursor that is not open"));
+        };
+        let limits = self.limits.clone();
+        let database = taken.reference.database;
+        let outcome = {
+            let mut context = rustdb_ext::vtab::Context {
+                pagers: host.pagers(),
+                database,
+                limits: &limits,
+            };
+            body(taken.cursor.as_mut(), &mut context)
+        };
+        if let Some(place) = self.virtual_cursors.get_mut(index) {
+            *place = Some(taken);
+        }
+        outcome
+    }
+
     /// Takes a branch on a register's truth value.
     fn branch(&mut self, instruction: &Instruction) -> DbResult<Flow> {
         let value = self.register(instruction.p1);
@@ -2067,6 +2279,34 @@ impl Machine {
         }
         Ok(Flow::Next)
     }
+}
+
+/// Reads a `VUpdate` register block as the change it describes.
+///
+/// The vector is SQLite's: the old rowid, then - unless this is a delete - the
+/// new rowid and one value per declared column. A block of one is a delete, and
+/// a NULL old rowid is an insert; everything else is an update. Three
+/// operations out of one shape, which is what lets one opcode carry all three.
+fn change_of(values: &[Value<'static>]) -> DbResult<rustdb_ext::vtab::Change> {
+    let Some(old) = values.first().cloned() else {
+        return Err(error::misuse("VUpdate with no arguments"));
+    };
+    if values.len() == 1 {
+        return Ok(rustdb_ext::vtab::Change::Delete(old));
+    }
+    let new = values.get(1).cloned().unwrap_or(Value::Null);
+    let columns = values.get(2..).unwrap_or_default().to_vec();
+    if old.is_null() {
+        return Ok(rustdb_ext::vtab::Change::Insert {
+            rowid: new,
+            values: columns,
+        });
+    }
+    Ok(rustdb_ext::vtab::Change::Update {
+        old_rowid: old,
+        new_rowid: new,
+        values: columns,
+    })
 }
 
 /// What an instruction decided about control flow.

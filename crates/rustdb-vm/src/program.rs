@@ -294,6 +294,85 @@ pub enum Opcode {
     /// It runs for an explicit rowid too: `sqlite_sequence` holds the largest
     /// ever used, not the largest this statement generated.
     SeqUpdate,
+    /// `p1`: cursor, `p4`: which virtual table. Opens a module's cursor.
+    VOpen,
+    /// `p1`: cursor, `p2`: jump when the module produces no rows,
+    /// `p3`: first argument register, `p5`: argument count,
+    /// `p4`: the plan `best_index` chose.
+    ///
+    /// It is a jump like `Rewind`, and for the same reason: a module that
+    /// produces nothing must skip the loop body rather than run it once on an
+    /// unpositioned cursor.
+    VFilter,
+    /// `p1`: cursor, `p2`: jump when another row exists.
+    VNext,
+    /// `p1`: cursor, `p2`: column, `p3`: destination register.
+    VColumn,
+    /// `p1`: cursor, `p2`: destination register.
+    VRowid,
+    /// `p1`: first register of the change, `p2`: how many, `p3`: destination
+    /// for the rowid an insert allocated, `p4`: which virtual table.
+    ///
+    /// The register block is SQLite's `xUpdate` argument vector: the old rowid,
+    /// the new rowid, then one value per declared column. A block of one is a
+    /// delete, and that is the whole encoding of the three operations.
+    VUpdate,
+    /// `p4`: which virtual table. Starts the module's transaction.
+    VBegin,
+    /// `p4`: which virtual table. Flushes the module before the commit.
+    VSync,
+    /// `p4`: which virtual table. Ends the module's transaction.
+    VCommit,
+    /// `p4`: which virtual table. Abandons the module's transaction.
+    VRollback,
+    /// `p1`: the savepoint number, `p3`: 0 to open, 1 to release, 2 to roll
+    /// back to it, `p4`: which virtual table.
+    VSavepoint,
+}
+
+impl Opcode {
+    /// Returns whether the opcode reaches a virtual table's module.
+    ///
+    /// These are dispatched apart from the rest because they need the whole
+    /// host - the module registry and the connected tables - rather than only
+    /// the pagers, and borrowing the host for every instruction would mean no
+    /// instruction could reach the pagers at all.
+    pub fn is_virtual(self) -> bool {
+        matches!(
+            self,
+            Opcode::VOpen
+                | Opcode::VFilter
+                | Opcode::VNext
+                | Opcode::VColumn
+                | Opcode::VRowid
+                | Opcode::VUpdate
+                | Opcode::VBegin
+                | Opcode::VSync
+                | Opcode::VCommit
+                | Opcode::VRollback
+                | Opcode::VSavepoint
+        )
+    }
+}
+
+/// Which virtual table an instruction is about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VirtualRef {
+    /// Which attached database the table lives in.
+    pub database: usize,
+    /// The table's name, or the module's name for an eponymous one.
+    pub table: Vec<u8>,
+    /// The module and the arguments its `CREATE` gave it.
+    pub module: rustdb_sql::vtab::ModuleRef,
+}
+
+/// The plan `best_index` chose, as the program carries it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VirtualPlan {
+    /// The plan number.
+    pub index_number: i32,
+    /// The plan string.
+    pub index_string: String,
 }
 
 impl Opcode {
@@ -315,6 +394,7 @@ impl Opcode {
                 | Opcode::CreateBtree
                 | Opcode::DestroyBtree
                 | Opcode::ClearBtree
+                | Opcode::VUpdate
         )
     }
 
@@ -351,6 +431,8 @@ impl Opcode {
                 | Opcode::EphFound
                 | Opcode::EphNotFound
                 | Opcode::EphRemove
+                | Opcode::VFilter
+                | Opcode::VNext
         )
     }
 
@@ -418,6 +500,17 @@ impl Opcode {
             Opcode::ApplyAffinity => "Affinity",
             Opcode::Function => "Function",
             Opcode::JsonCall => "JsonCall",
+            Opcode::VOpen => "VOpen",
+            Opcode::VFilter => "VFilter",
+            Opcode::VNext => "VNext",
+            Opcode::VColumn => "VColumn",
+            Opcode::VRowid => "VRowid",
+            Opcode::VUpdate => "VUpdate",
+            Opcode::VBegin => "VBegin",
+            Opcode::VSync => "VSync",
+            Opcode::VCommit => "VCommit",
+            Opcode::VRollback => "VRollback",
+            Opcode::VSavepoint => "VSavepoint",
             Opcode::Pattern => "Pattern",
             Opcode::MathCall => "Function",
             Opcode::TimeCall => "Function",
@@ -650,6 +743,10 @@ pub enum Operand {
     Time(TimeFunc),
     /// A JSON function.
     Json(JsonFunc),
+    /// Which virtual table an instruction is about.
+    Virtual(Box<VirtualRef>),
+    /// The plan a virtual scan runs.
+    VirtualPlan(Box<VirtualPlan>),
     /// An aggregate call.
     Aggregate(AggregateCall),
     /// A sorter key.
