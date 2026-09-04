@@ -223,6 +223,10 @@ fn run(out: &Path) -> Result<bool, String> {
             "arm-no-indexed-write.md",
             "the same scorecard with the indexed-write lever switched off",
         ),
+        (
+            "arm-no-ordered-walk.md",
+            "the same scorecard with the ordered-walk lever switched off",
+        ),
         ("scorecard.json", "the same, machine readable"),
         (
             "history.jsonl",
@@ -425,9 +429,10 @@ fn arms(history: &History) -> String {
     for (lever, name) in [
         ("covering-index", "the covering-index lever"),
         ("indexed-write", "the indexed-write lever"),
+        ("ordered-walk", "the ordered-walk lever"),
     ] {
         if let Some(without) = headline(lever) {
-            measured.push(format!("without {name} it is {without:.3}x"));
+            measured.push(format!("without {name} {without:.3}x"));
         }
     }
     if measured.is_empty() {
@@ -436,9 +441,10 @@ fn arms(history: &History) -> String {
     format!(
         "- **What the levers that did land are worth**, measured rather than asserted, at the \
            small scale over thirty paired rounds: with everything on the weighted geometric mean \
-           is {shipped:.3}x, and {}. Both arms are in this candidate, and the correctness shard \
-           that runs under each of them shows the plans change and the answers do not.\n",
-        measured.join(", and ")
+           is {shipped:.3}x; {}. Every arm is in this candidate, and the correctness \
+           shard that runs under each of them shows the plans change and the answers do \
+           not.\n",
+        measured.join("; ")
     )
 }
 
