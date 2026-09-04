@@ -581,8 +581,9 @@ impl Wal {
         &mut self,
         mode: CheckpointMode,
         database: &dyn VfsFile,
+        budget: Option<u32>,
     ) -> DbResult<CheckpointOutcome> {
-        checkpoint::run(self, mode, database)
+        checkpoint::run(self, mode, database, budget)
     }
 
     /// Returns the index, so a test can put it in a state a crash would.
@@ -788,6 +789,7 @@ impl WriteAheadLog for Wal {
         &mut self,
         mode: CheckpointMode,
         database: &dyn VfsFile,
+        budget: Option<u32>,
     ) -> DbResult<CheckpointOutcome> {
         if self.lock(CHECKPOINT_LOCK, 1, true, true).is_err() {
             return Ok(CheckpointOutcome {
@@ -797,7 +799,7 @@ impl WriteAheadLog for Wal {
             });
         }
         self.checkpoint_lock = true;
-        let outcome = self.checkpoint_locked(mode, database);
+        let outcome = self.checkpoint_locked(mode, database, budget);
         let released = self.lock(CHECKPOINT_LOCK, 1, true, false);
         self.checkpoint_lock = false;
         let outcome = outcome?;
@@ -823,7 +825,7 @@ impl WriteAheadLog for Wal {
             return self.index.unmap(false);
         }
         self.exclusive = true;
-        let checkpointed = checkpoint::run(self, CheckpointMode::Truncate, database);
+        let checkpointed = checkpoint::run(self, CheckpointMode::Truncate, database, None);
         // The log goes when there is nothing left in it, which is a stronger
         // test than "the checkpoint said it truncated": a log that was already
         // empty is one nobody needs either.

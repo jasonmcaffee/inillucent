@@ -486,6 +486,7 @@
 {"test_id": "rustdb-compat::the_c_probe_agrees_with_the_pinned_engine", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_catalog_commands_match", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_catalog_reads_a_real_schema", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "rustdb-compat::the_checkpoint_arm_moves_the_same_pages", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_conformance_files_round_trip", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_connection_is_in_autocommit_and_read_only", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "rustdb-compat::the_connection_lists_are_a_subset_of_the_reference", "platform": "windows-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}

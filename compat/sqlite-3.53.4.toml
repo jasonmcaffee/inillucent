@@ -1804,6 +1804,7 @@ tests = [
   "rustdb-compat::the_ordered_walk_arm_changes_the_plan_and_not_the_answer",
   "rustdb-compat::the_streaming_group_arm_changes_the_plan_and_not_the_answer",
   "rustdb-compat::the_fused_bytecode_arm_changes_the_program_and_not_the_answer",
+  "rustdb-compat::the_checkpoint_arm_moves_the_same_pages",
   "rustdb-vm::fuse::tests::a_scratch_copy_folds",
   "rustdb-vm::fuse::tests::a_chain_of_copies_folds_once",
   "rustdb-vm::fuse::tests::a_normalising_copy_is_not_folded",

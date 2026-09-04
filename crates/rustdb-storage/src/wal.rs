@@ -116,6 +116,11 @@ pub struct CheckpointOutcome {
     pub restarted: bool,
     /// Whether the log file was shortened to nothing.
     pub truncated: bool,
+    /// Whether a budget stopped the copy before it reached what was safe.
+    ///
+    /// Not a failure and not busy: the frames it did not take are the next
+    /// commit's to take, which is the whole point of spreading the work.
+    pub bounded: bool,
 }
 
 /// What the log has cost, for the write baselines.
@@ -213,10 +218,16 @@ pub trait WriteAheadLog: std::fmt::Debug + Send {
     fn frame_count(&self) -> u32;
 
     /// Copies frames into the database file.
+    ///
+    /// `budget` caps how many frames one call copies, which is what lets the
+    /// automatic checkpoint be spread across commits instead of landing on
+    /// one. `None` is "as many as are safe", which is what an explicit
+    /// `PRAGMA wal_checkpoint` asks for.
     fn checkpoint(
         &mut self,
         mode: CheckpointMode,
         database: &dyn VfsFile,
+        budget: Option<u32>,
     ) -> DbResult<CheckpointOutcome>;
 
     /// Closes the log, checkpointing and removing it when this is the last

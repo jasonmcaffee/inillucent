@@ -37,6 +37,7 @@ pub fn run(
     wal: &mut Wal,
     mode: CheckpointMode,
     database: &dyn VfsFile,
+    budget: Option<u32>,
 ) -> DbResult<CheckpointOutcome> {
     if wal.index.header()?.is_none() {
         wal.recover()?;
@@ -58,15 +59,24 @@ pub fn run(
         return Ok(outcome);
     }
     let safe = safe_frame(wal, mode)?;
+    // A budget stops the copy short of what is safe, on purpose. The backfill
+    // point is in the shared index, so where this one stops is where the next
+    // one starts - it is the same job, spread over the commits that caused it,
+    // rather than a job left half done.
+    let safe = match budget {
+        Some(budget) => safe.min(wal.index.backfill()?.saturating_add(budget)),
+        None => safe,
+    };
     backfill(wal, database, safe, &mut outcome)?;
     let copied = wal.index.backfill()?;
     outcome.checkpointed_frames = copied;
+    outcome.bounded = budget.is_some() && copied < wal.header.max_frame;
     // A mode that promised to copy the whole log has to say when it did not.
     // `PASSIVE` promised nothing, so a reader in its way is an ordinary
     // outcome; for the three above it a short copy is the `SQLITE_BUSY` the
     // caller is waiting to hear, and reporting success instead would have an
     // application believe its log had been emptied when it had not.
-    if mode.waits_for_readers() && copied < wal.header.max_frame {
+    if mode.waits_for_readers() && copied < wal.header.max_frame && budget.is_none() {
         outcome.busy = true;
     }
     if mode.restarts_the_log() && copied == wal.header.max_frame {
@@ -322,7 +332,7 @@ mod tests {
         commit(&mut wal, 2, 0xaa, 3);
         commit(&mut wal, 3, 0xbb, 3);
         let outcome = wal
-            .checkpoint(CheckpointMode::Passive, database.as_ref())
+            .checkpoint(CheckpointMode::Passive, database.as_ref(), None)
             .unwrap();
         assert!(!outcome.busy);
         assert_eq!(outcome.checkpointed_frames, outcome.log_frames);
@@ -354,7 +364,7 @@ mod tests {
 
         commit(&mut writer, 2, 0x22, 3);
         let outcome = writer
-            .checkpoint(CheckpointMode::Passive, database.as_ref())
+            .checkpoint(CheckpointMode::Passive, database.as_ref(), None)
             .unwrap();
         assert!(outcome.checkpointed_frames < outcome.log_frames);
 
@@ -372,7 +382,7 @@ mod tests {
         commit(&mut wal, 2, 0x33, 3);
         commit(&mut wal, 3, 0x44, 3);
         let outcome = wal
-            .checkpoint(CheckpointMode::Truncate, database.as_ref())
+            .checkpoint(CheckpointMode::Truncate, database.as_ref(), None)
             .unwrap();
         assert!(outcome.restarted, "the log was not restarted");
         assert!(outcome.truncated, "the log file was not shortened");
@@ -402,11 +412,11 @@ mod tests {
         let (mut wal, database) = open(&vfs, "/twice.db", 3);
         commit(&mut wal, 2, 0x66, 3);
         let first = wal
-            .checkpoint(CheckpointMode::Passive, database.as_ref())
+            .checkpoint(CheckpointMode::Passive, database.as_ref(), None)
             .unwrap();
         let before = wal.stats().frames_backfilled;
         let second = wal
-            .checkpoint(CheckpointMode::Passive, database.as_ref())
+            .checkpoint(CheckpointMode::Passive, database.as_ref(), None)
             .unwrap();
         assert_eq!(first.checkpointed_frames, second.checkpointed_frames);
         assert_eq!(wal.stats().frames_backfilled, before);
@@ -419,7 +429,7 @@ mod tests {
         let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
         let (mut wal, database) = open(&vfs, "/shrink.db", 8);
         commit(&mut wal, 2, 0x77, 2);
-        wal.checkpoint(CheckpointMode::Passive, database.as_ref())
+        wal.checkpoint(CheckpointMode::Passive, database.as_ref(), None)
             .unwrap();
         assert_eq!(database.file_size().unwrap(), 1024);
     }

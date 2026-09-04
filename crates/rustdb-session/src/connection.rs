@@ -549,6 +549,19 @@ impl Connection {
         self.levers.set(mask);
     }
 
+    /// Bounds how many frames one automatic checkpoint copies.
+    ///
+    /// `None`, the default, copies as many as are safe - which is what the
+    /// reference does and what the measurement says to keep. The bound exists
+    /// because the TDD names checkpoint scheduling as a lever and a lever
+    /// without an arm cannot be measured; the arm was measured and did not pay,
+    /// so it is a tunable an application can reach rather than a default.
+    /// See `_agent_output/task-1790/checkpoint/checkpoint.md`.
+    /// @param budget - the cap, or `None` for no cap
+    pub fn set_checkpoint_budget(&self, budget: Option<u32>) -> DbResult<()> {
+        self.with_state(|state| state.pager.set_checkpoint_budget(budget))
+    }
+
     /// Opens a connection, recovering a hot journal first, and loads the
     /// catalog.
     pub fn open(path: &DbPath, vfs: Arc<dyn Vfs>, options: OpenOptions) -> DbResult<Connection> {
