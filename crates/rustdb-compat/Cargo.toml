@@ -89,3 +89,7 @@ path = "src/bin/writeprofile.rs"
 [[bin]]
 name = "rustdb-storageprofile"
 path = "src/bin/storageprofile.rs"
+
+[[bin]]
+name = "rustdb-release"
+path = "src/bin/release.rs"

@@ -932,7 +932,7 @@ source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-compat::a_full_scan_returns_every_row_in_rowid_order", "rustdb-compat::every_storage_class_reads_back", "rustdb-compat::values_runs_without_a_table"]
+tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-compat::a_full_scan_returns_every_row_the_plan_produces", "rustdb-compat::every_storage_class_reads_back", "rustdb-compat::values_runs_without_a_table"]
 
 [[capability]]
 id = "sql.select.where"
@@ -1736,6 +1736,7 @@ phase = "phase 13: transactional rust-db search and legacy migration"
 status = "pass"
 tests = [
   "rustdb-migrate::a_legacy_index_migrates_and_every_check_passes",
+  "rustdb-migrate::a_release_sized_index_migrates_and_every_check_passes",
   "rustdb-migrate::the_manifest_is_the_rollback_record",
   "rustdb-migrate::an_interrupted_migration_resumes",
   "rustdb-migrate::a_source_that_moved_is_refused_rather_than_half_copied",
@@ -1749,17 +1750,104 @@ tests = [
 
 [[capability]]
 id = "perf.qualified-measurement"
-source = "https://sqlite.org/fileformat2.html"
+source = "https://sqlite.org/testing.html"
 profile = "default"
 phase = "phase 14: performance qualification and release"
+status = "pass"
+tests = [
+  "rustdb-compat::perf::tests::the_digest_notices_a_different_answer",
+  "rustdb-compat::perf::tests::the_digest_is_the_published_function",
+  "rustdb-compat::perf::tests::one_integer_row_matches_the_reference_driver",
+  "rustdb-compat::perf::tests::a_disagreeing_workload_is_not_timed",
+  "rustdb-compat::perf::tests::one_failure_does_not_report_parity",
+  "rustdb-compat::perf::tests::a_zero_duration_is_not_a_ratio",
+  "rustdb-compat::perf::tests::the_bootstrap_brackets_the_centre",
+  "rustdb-compat::perf::tests::the_verdicts_are_the_declared_thresholds",
+  "rustdb-compat::perf::tests::a_win_and_a_loss_cancel",
+  "rustdb-compat::perf::tests::the_headline_weights_families",
+  "rustdb-compat::perf::tests::a_contract_must_sum_to_one",
+]
+
+[[capability]]
+id = "perf.optimization-arms"
+source = "https://sqlite.org/testing.html"
+profile = "default"
+phase = "phase 14: performance qualification and release"
+status = "pass"
+tests = [
+  "rustdb-compat::the_covering_index_arm_changes_the_plan_and_not_the_answer",
+  "rustdb-compat::the_indexed_write_arm_changes_the_plan_and_not_the_outcome",
+  "rustdb-compat::a_prepared_statement_keeps_the_arm_it_was_compiled_under",
+  "rustdb-compat::an_unknown_lever_is_ignored_rather_than_stored",
+]
+
+[[capability]]
+id = "perf.regression-tracking"
+source = "https://sqlite.org/testing.html"
+profile = "default"
+phase = "phase 14: performance qualification and release"
+status = "pass"
+tests = [
+  "rustdb-compat::history::tests::an_entry_round_trips",
+  "rustdb-compat::history::tests::a_regression_needs_two_runs",
+  "rustdb-compat::history::tests::a_small_movement_is_not_a_regression",
+  "rustdb-compat::history::tests::platforms_are_compared_separately",
+  "rustdb-compat::history::tests::the_dashboard_lists_every_run",
+]
+
+[[capability]]
+id = "optional.session-extension"
+source = "https://sqlite.org/sessionintro.html"
+profile = "default"
+phase = "phase 15: optional surfaces this release does not implement"
 status = "missing"
 tests = []
 
 [[capability]]
-id = "perf.regression-tracking"
-source = "https://sqlite.org/fileformat2.html"
+id = "optional.preupdate-hook"
+source = "https://sqlite.org/c3ref/preupdate_blobwrite.html"
 profile = "default"
-phase = "phase 14: performance qualification and release"
+phase = "phase 15: optional surfaces this release does not implement"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "optional.snapshot-api"
+source = "https://sqlite.org/c3ref/snapshot.html"
+profile = "default"
+phase = "phase 15: optional surfaces this release does not implement"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "optional.unlock-notify"
+source = "https://sqlite.org/unlock_notify.html"
+profile = "default"
+phase = "phase 15: optional surfaces this release does not implement"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "optional.rbu"
+source = "https://sqlite.org/rbu.html"
+profile = "default"
+phase = "phase 15: optional surfaces this release does not implement"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "optional.geopoly"
+source = "https://sqlite.org/geopoly.html"
+profile = "default"
+phase = "phase 15: optional surfaces this release does not implement"
+status = "missing"
+tests = []
+
+[[capability]]
+id = "optional.rtree-geometry-callbacks"
+source = "https://sqlite.org/rtree.html"
+profile = "default"
+phase = "phase 15: optional surfaces this release does not implement"
 status = "missing"
 tests = []
 

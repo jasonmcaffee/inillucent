@@ -46,6 +46,10 @@ pub use rustdb_session::{
 };
 pub use rustdb_value::{cast, Affinity, Collation, StorageClass, TextEncoding, Value};
 
+/// The planner optimizations [`Connection::disable_optimizations`] can switch
+/// off, so a caller naming one does not have to depend on the SQL crate.
+pub use rustdb_session::Levers;
+
 use rustdb_session::{
     Connection as SessionConnection, OpenOptions, SessionDatabase, Statement as SessionStatement,
 };
@@ -301,6 +305,25 @@ impl Connection {
         self.inner.is_writable()
     }
 
+    /// Switches planner optimizations off, by mask, for A/B measurement.
+    ///
+    /// The mask names what to *disable*, so zero - the default - is the
+    /// shipped engine. The names are on [`rustdb_sql::plan::Levers`]. This is
+    /// the measurement channel, not a tuning surface: it is deliberately not
+    /// reachable from SQL, for the same reason SQLite puts its equivalent
+    /// behind `sqlite3_test_control` rather than behind a pragma.
+    ///
+    /// Statements already prepared keep the arm they were compiled under.
+    /// @param mask - the levers to turn off
+    pub fn disable_optimizations(&self, mask: u32) {
+        self.inner.disable_optimizations(mask);
+    }
+
+    /// Returns which planner optimizations this connection has switched off.
+    pub fn disabled_optimizations(&self) -> u32 {
+        self.inner.disabled_optimizations()
+    }
+
     /// Returns whether the connection is in autocommit mode.
     pub fn autocommit(&self) -> bool {
         self.inner.autocommit()
@@ -501,6 +524,15 @@ impl Statement<'_> {
     /// Returns whether the statement writes.
     pub fn is_readonly(&self) -> bool {
         self.inner.is_readonly()
+    }
+
+    /// Returns which planner optimizations this statement's plan used.
+    ///
+    /// A bitmask of [`Levers`] names. It is the observation the A/B arms are
+    /// read against: a workload whose plans report the same mask under both
+    /// arms measured nothing, however different its two timings came out.
+    pub fn optimizations_used(&self) -> u32 {
+        self.inner.program().optimizations_used
     }
 
     /// Returns the bytecode the statement compiled to, as `EXPLAIN` renders it.

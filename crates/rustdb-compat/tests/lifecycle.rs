@@ -242,6 +242,7 @@ fn valid_program() -> Program {
         result_columns: Vec::new(),
         dependencies: ProgramDependencies::default(),
         readonly: true,
+        optimizations_used: 0,
         parameter_count: 0,
     }
 }

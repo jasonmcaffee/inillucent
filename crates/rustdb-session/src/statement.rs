@@ -486,6 +486,7 @@ fn explain(
     let dependencies = ProgramDependencies {
         schemas: binder.dependencies().schemas.clone(),
         generation: binder.dependencies().generation,
+        levers: connection.disabled_optimizations(),
     };
     let parameters = parsed.parameters.count;
     let statement_sql = parsed.span.slice(sql).to_vec();
@@ -695,6 +696,7 @@ fn compile_sql(
     let dependencies = ProgramDependencies {
         schemas: binder.dependencies().schemas.clone(),
         generation: binder.dependencies().generation,
+        levers: connection.disabled_optimizations(),
     };
     let statement_sql = parsed.span.slice(sql).to_vec();
     let parameters = parsed.parameters.count;
@@ -809,6 +811,7 @@ fn directive_program(dependencies: ProgramDependencies, directive: &Directive) -
 fn empty_program(dependencies: ProgramDependencies) -> Program {
     use rustdb_vm::program::{Instruction, Opcode};
     Program {
+        optimizations_used: 0,
         ephemeral_count: 0,
         instructions: vec![
             Instruction::new(Opcode::Init, 0, 1, 0),

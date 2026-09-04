@@ -543,6 +543,47 @@ impl Contract {
     }
 }
 
+/// Returns the log ratios shaped one vector per round, over the workloads whose
+/// two engines agreed.
+///
+/// This is what "correctness-qualified measurement" means, and it is here
+/// rather than in the reporting binary because it is the rule the whole
+/// exercise rests on: a timing is evidence only if both engines produced the
+/// same answer. A workload that disagreed carries no pairs at all - the
+/// measurement loop records the disagreement instead of a duration - and it is
+/// reported as a correctness failure rather than as a fast or slow result.
+///
+/// The depth is the shortest agreeing workload's, so every round the headline
+/// is built from has a value for every workload in it. Taking the minimum over
+/// *all* workloads instead once made a single correctness failure report a
+/// headline of exactly 1.000x: depth zero, no rounds, an empty bootstrap. That
+/// is the most misleading number this report could produce, which is why the
+/// filter is applied before the minimum and not after.
+/// @param measured - every workload of one scale
+pub fn qualified_rounds(measured: &[Paired]) -> Vec<Vec<(String, f64)>> {
+    let depth = measured
+        .iter()
+        .filter(|paired| paired.agreed)
+        .map(|paired| paired.pairs.len())
+        .min()
+        .unwrap_or(0);
+    (0..depth)
+        .map(|round| {
+            measured
+                .iter()
+                .filter(|paired| paired.agreed)
+                .filter_map(|paired| {
+                    let (ours, theirs) = paired.pairs.get(round).copied()?;
+                    if ours <= 0.0 || theirs <= 0.0 {
+                        return None;
+                    }
+                    Some((paired.family.clone(), (theirs / ours).ln()))
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// Returns the weighted geometric mean's bootstrap interval.
 ///
 /// The headline number. Each round contributes one weighted mean of that
@@ -738,6 +779,85 @@ mod tests {
         assert_eq!(contract.families.len(), 2);
         assert!((contract.weight_of("a") - 0.5).abs() < 1.0e-9);
         assert!((contract.headline - 1.50).abs() < 1.0e-9);
+    }
+
+    /// Builds a paired result with the same ratio in every round.
+    fn paired(workload: &str, family: &str, ratio: f64, rounds: usize, agreed: bool) -> Paired {
+        Paired {
+            workload: workload.to_string(),
+            family: family.to_string(),
+            pairs: if agreed {
+                (0..rounds).map(|_| (1.0, ratio)).collect()
+            } else {
+                Vec::new()
+            },
+            agreed,
+            disagreement: if agreed {
+                String::new()
+            } else {
+                "row 1 differs".to_string()
+            },
+        }
+    }
+
+    /// A workload whose engines disagreed contributes nothing to the headline.
+    #[test]
+    fn a_disagreeing_workload_is_not_timed() {
+        let measured = vec![
+            paired("a", "read.point", 2.0, 4, true),
+            paired("b", "read.point", 8.0, 0, false),
+        ];
+        let rounds = qualified_rounds(&measured);
+        assert_eq!(
+            rounds.len(),
+            4,
+            "the agreeing workload still has its rounds"
+        );
+        for round in &rounds {
+            assert_eq!(round.len(), 1, "only the agreeing workload is in the round");
+        }
+    }
+
+    /// A correctness failure does not silently become a headline of 1.000x.
+    ///
+    /// The depth is taken over the agreeing workloads. Taking it over all of
+    /// them made one failure collapse the whole run to zero rounds, an empty
+    /// bootstrap, and a reported speedup of exactly one.
+    #[test]
+    fn one_failure_does_not_report_parity() {
+        let measured = vec![
+            paired("a", "read.point", 2.0, 6, true),
+            paired("b", "write", 2.0, 6, true),
+            paired("c", "write", 1.0, 0, false),
+        ];
+        let contract = Contract::parse(
+            "headline = \"1.50\"\nfloor = \"0.90\"\n\n[[family]]\nid = \"read.point\"\n\
+             weight = \"0.5\"\nrequired = true\ndescription = \"point reads\"\n\n\
+             [[family]]\nid = \"write\"\nweight = \"0.5\"\nrequired = true\n\
+             description = \"writes\"\n",
+        )
+        .expect("the contract parses");
+        let (centre, low, high) = weighted_headline(&qualified_rounds(&measured), &contract, 7);
+        assert!(
+            (centre - 2.0).abs() < 1.0e-6,
+            "the headline is the agreeing workloads' ratio, not parity: {centre}"
+        );
+        assert!(low > 1.9 && high < 2.1, "[{low}, {high}]");
+    }
+
+    /// A round in which an engine reported no time at all is dropped.
+    #[test]
+    fn a_zero_duration_is_not_a_ratio() {
+        let mut measured = vec![paired("a", "read.point", 2.0, 3, true)];
+        if let Some(first) = measured.first_mut() {
+            first.pairs.push((0.0, 5.0));
+        }
+        let rounds = qualified_rounds(&measured);
+        assert_eq!(rounds.len(), 4);
+        assert!(
+            rounds.last().map(Vec::is_empty).unwrap_or(false),
+            "the zero round contributes nothing"
+        );
     }
 
     /// The headline weights families rather than counting workloads.

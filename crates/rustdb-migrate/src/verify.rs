@@ -375,11 +375,27 @@ fn retrieval(source: &Index, sql: &mut SqlIndex) -> Vec<Check> {
     let mut checks = Vec::new();
 
     // The ungrouped ranking, which is BM25 and nothing else.
+    //
+    // Asked at `wide` and then truncated, rather than asked for ten. The legacy
+    // engine's lexical ranking is a function of the `k` it was given, not just
+    // of the corpus: position-aware rescoring reaches `k * lexical_rescore_depth`
+    // hits and only ever scales a score *down*, so a chunk just outside that
+    // window keeps its full BM25 score and competes against rescored ones. Move
+    // the window and the tail of the ranking moves with it.
+    //
+    // Every path into the engine that a search table can be on the other side of
+    // goes through `search_branches`, which retrieves at `candidates` depth. So
+    // asking the source for ten and the destination for ten would compare a
+    // window of sixty against a window of three hundred, and report the engine's
+    // own depth setting as a migration defect. On the small corpus next door the
+    // two windows both cover the whole corpus and the difference cannot appear,
+    // which is exactly why it took a corpus of real prose to find.
     let mut raw = Vec::new();
     for query in &probes {
         let expected: Vec<i64> = source
-            .lexical_search(query, &everything, PROBE_K)
+            .lexical_search(query, &everything, wide)
             .iter()
+            .take(PROBE_K)
             .map(|hit| i64::from(hit.chunk))
             .collect();
         match ranked(sql, query, &[], PROBE_K) {
@@ -430,13 +446,38 @@ fn retrieval(source: &Index, sql: &mut SqlIndex) -> Vec<Check> {
     checks.push(scores_match(source, sql, &probes, &everything, wide));
 
     if source.config().dims > 0 && source.vectors().len() == store.n_chunks() {
+        // Both sides are asked with their approximation switched off, so what
+        // is compared is the data rather than the luck of two graphs.
+        //
+        // The source's graph grew one insert at a time and the destination's
+        // was built in one pass over every row, which is better connected -
+        // that is the reason compaction is worth its cost. Two different graphs
+        // searched approximately give two slightly different answers, sometimes
+        // the destination's better and sometimes the source's, and a check that
+        // demanded they match would be demanding the migration reproduce the
+        // source's misses. So the graphs are traversed exhaustively here and
+        // the answers must be identical.
+        //
+        // What the approximation is actually worth is measured separately and
+        // reported rather than gated: `vector.recall` says how much of the
+        // exact answer each index finds at its default width, and the migration
+        // fails only if the destination finds less of it than the source did.
         let mut wrong = Vec::new();
+        let mut theirs_found = 0.0f64;
+        let mut ours_found = 0.0f64;
+        let mut probed = 0usize;
         for ordinal in sample(store.n_chunks(), PROBES) {
             let query = source.vectors().get(ordinal as u32).to_vec();
-            let (wanted, _) =
-                source.search_branches("", &query, &everything, PROBE_K, None, Branches::Vector);
+            let (wanted, _) = source.search_branches(
+                "",
+                &query,
+                &everything,
+                PROBE_K,
+                Some(usize::MAX),
+                Branches::Vector,
+            );
             let expected: Vec<i64> = wanted.iter().map(|hit| i64::from(hit.chunk)).collect();
-            match ranked(sql, "", &query, wide) {
+            match exhaustive(sql, "", &query, wide) {
                 Ok(found) => {
                     let capped = apply_cap(&found, &documents, cap, PROBE_K, &[]);
                     if capped != expected {
@@ -445,13 +486,47 @@ fn retrieval(source: &Index, sql: &mut SqlIndex) -> Vec<Check> {
                 }
                 Err(failure) => wrong.push(format!("chunk {ordinal}: {failure}")),
             }
+
+            // The same probe again, at the width each index uses by default,
+            // scored against the answer brute force says is right.
+            let truth = exact_neighbours(source, &query, &everything, PROBE_K);
+            let (approximate, _) =
+                source.search_branches("", &query, &everything, PROBE_K, None, Branches::Vector);
+            let theirs: Vec<i64> = approximate.iter().map(|hit| i64::from(hit.chunk)).collect();
+            theirs_found += recall(&theirs, &truth);
+            if let Ok(found) = ranked(sql, "", &query, wide) {
+                let capped = apply_cap(&found, &documents, cap, PROBE_K, &[]);
+                ours_found += recall(&capped, &truth);
+            }
+            probed = probed.saturating_add(1);
         }
         checks.push(if wrong.is_empty() {
-            Check::pass("vector.exact", format!("{PROBES} probes rank identically"))
+            Check::pass(
+                "vector.exact",
+                format!("{PROBES} probes rank identically when both graphs are traversed in full"),
+            )
         } else {
             Check::fail("vector.exact", wrong.join(" | "))
         });
+        let divisor = probed.max(1) as f64;
+        let (theirs, ours) = (theirs_found / divisor, ours_found / divisor);
+        checks.push(if ours + 1.0e-6 >= theirs {
+            Check::pass(
+                "vector.recall",
+                format!(
+                    "at the default width the source finds {theirs:.3} of the exact answer and \
+                     the copy finds {ours:.3}"
+                ),
+            )
+        } else {
+            Check::fail(
+                "vector.recall",
+                format!("recall fell from {theirs:.3} to {ours:.3} at the default width"),
+            )
+        });
 
+        // The same rule, for the same reason: a fused ranking inherits the
+        // vector branch's approximation, so both sides are asked with it off.
         let mut hybrid_wrong = Vec::new();
         for (position, ordinal) in sample(store.n_chunks(), probes.len())
             .into_iter()
@@ -461,10 +536,16 @@ fn retrieval(source: &Index, sql: &mut SqlIndex) -> Vec<Check> {
                 continue;
             };
             let vector = source.vectors().get(ordinal as u32).to_vec();
-            let (wanted, _) =
-                source.search_branches(query, &vector, &everything, PROBE_K, None, Branches::Both);
+            let (wanted, _) = source.search_branches(
+                query,
+                &vector,
+                &everything,
+                PROBE_K,
+                Some(usize::MAX),
+                Branches::Both,
+            );
             let expected: Vec<i64> = wanted.iter().map(|hit| i64::from(hit.chunk)).collect();
-            match ranked(sql, query, &vector, wide) {
+            match exhaustive(sql, query, &vector, wide) {
                 Ok(found) => {
                     let capped = apply_cap(&found, &documents, cap, PROBE_K, &[]);
                     if capped != expected {
@@ -477,7 +558,10 @@ fn retrieval(source: &Index, sql: &mut SqlIndex) -> Vec<Check> {
         checks.push(if hybrid_wrong.is_empty() {
             Check::pass(
                 "hybrid.exact",
-                format!("{} fused rankings agree", probes.len()),
+                format!(
+                    "{} fused rankings agree when both graphs are traversed in full",
+                    probes.len()
+                ),
             )
         } else {
             Check::fail("hybrid.exact", hybrid_wrong.join(" | "))
@@ -594,6 +678,84 @@ fn live_filter(
     } else {
         Check::fail("filter.deleted", wrong.join(" | "))
     }
+}
+
+/// Returns the destination's ranking with its graph traversed exhaustively.
+///
+/// `recall = 1` is the search table's way of saying "do not approximate": the
+/// module turns it into an unbounded traversal width, which visits every node
+/// rather than the neighbourhood the graph would have led it to.
+/// @param sql - the migrated index
+/// @param text - the query text, or empty for a vector-only search
+/// @param vector - the query vector
+/// @param limit - how many hits to ask for
+fn exhaustive(
+    sql: &mut SqlIndex,
+    text: &str,
+    vector: &[f32],
+    limit: usize,
+) -> Result<Vec<i64>, String> {
+    let hits = sql
+        .search(&Query {
+            text: text.to_string(),
+            vector: vector.to_vec(),
+            limit,
+            recall: Some(1.0),
+        })
+        .map_err(|error| error.message().to_string())?;
+    Ok(hits
+        .iter()
+        .filter_map(|hit| hit.id.parse::<i64>().ok())
+        .collect())
+}
+
+/// Returns the exactly-nearest chunks to a query, by comparing every vector.
+///
+/// Brute force on purpose. This is the answer both approximate indexes are
+/// scored against, so it cannot itself be approximate - and a corpus small
+/// enough to migrate in a test is small enough to scan.
+/// @param source - the legacy index, which owns the vectors
+/// @param query - the query vector
+/// @param filter - the same predicate the searches ran under
+/// @param limit - how many neighbours to return
+fn exact_neighbours(
+    source: &Index,
+    query: &[f32],
+    filter: &rustdb_core::filter::CompiledFilter,
+    limit: usize,
+) -> Vec<i64> {
+    let store = source.store();
+    let vectors = source.vectors();
+    let mut scored: Vec<(f32, u32)> = Vec::with_capacity(store.n_chunks());
+    for chunk in 0..store.n_chunks() as u32 {
+        if !filter.passes(chunk, store) {
+            continue;
+        }
+        scored.push((vectors.distance(chunk, query), chunk));
+    }
+    // Distance ascending, then chunk ascending, so ties are broken the way the
+    // engine breaks them and the comparison is about distance rather than order.
+    scored.sort_by(|a, b| {
+        a.0.partial_cmp(&b.0)
+            .unwrap_or(core::cmp::Ordering::Equal)
+            .then(a.1.cmp(&b.1))
+    });
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, chunk)| i64::from(chunk))
+        .collect()
+}
+
+/// Returns what share of the exact answer a ranking found.
+/// @param found - the ranking to score
+/// @param truth - the exact answer
+fn recall(found: &[i64], truth: &[i64]) -> f64 {
+    if truth.is_empty() {
+        return 1.0;
+    }
+    let hits = truth.iter().filter(|id| found.contains(id)).count();
+    hits as f64 / truth.len() as f64
 }
 
 /// Returns the destination's ranking for one query, as rowids in order.

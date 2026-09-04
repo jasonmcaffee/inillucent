@@ -21,7 +21,43 @@
 pub const DEFAULT_ROWS: f64 = 1_048_576.0;
 
 /// The share of a table an equality on an indexed column is assumed to select.
+///
+/// Used only where no index is involved. An equality *on an index* is estimated
+/// by [`default_equality_rows`] instead, which is an absolute count rather than
+/// a share - see the note there for why the difference matters.
 pub const EQUALITY_SHARE: f64 = 10.0;
+
+/// How many rows an equality on an unmeasured index is assumed to match.
+///
+/// SQLite's `sqlite3DefaultRowEst` fills an unanalysed index's estimates with
+/// these, as LogEst 33, 32, 30, 28, 26, 23 - about twenty rows for the first
+/// equality column, falling to ten and staying there. They are *counts*, not
+/// fractions of the table, and that distinction is the whole point: somebody
+/// who indexed a column and then compared it for equality was pinning down a
+/// row, not selecting a tenth of the table, and the bigger the table the more
+/// true that is.
+///
+/// Getting this wrong is not a rounding error, it reverses join orders. With a
+/// tenth-of-the-table estimate the planner priced a seek into a 25,000 row
+/// table at 2,500 rows, decided the seek was not worth it, and scanned that
+/// table once per outer row instead - which took a benchmark round from seconds
+/// to the better part of an hour, and put a `SCAN` where the reference had a
+/// `SEARCH ... USING INDEX`.
+const DEFAULT_EQUALITY_ROWS: [f64; 6] = [20.0, 18.0, 15.0, 13.0, 11.0, 10.0];
+
+/// Returns how many rows an equality on an unmeasured index is assumed to match.
+///
+/// Never more than the table holds: a two-row table cannot return twenty.
+/// @param equalities - how many leading index columns the search pins down
+/// @param rows - how many rows the table is estimated to hold
+pub fn default_equality_rows(equalities: usize, rows: f64) -> f64 {
+    let at = equalities.max(1).saturating_sub(1);
+    let estimate = DEFAULT_EQUALITY_ROWS
+        .get(at)
+        .copied()
+        .unwrap_or_else(|| DEFAULT_EQUALITY_ROWS.last().copied().unwrap_or(10.0));
+    estimate.min(rows.max(1.0))
+}
 
 /// The share a range on an indexed column is assumed to select.
 pub const RANGE_SHARE: f64 = 4.0;

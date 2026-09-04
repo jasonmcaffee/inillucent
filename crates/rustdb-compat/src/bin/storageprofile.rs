@@ -226,6 +226,66 @@ fn run() -> Result<(), String> {
     });
     println!("{:>44}  {nanos:>9.1} ns", "encode one four-column record");
 
+    // What one step of a scan costs, and what each thing built on top of it
+    // adds. These are the numbers a per-row cost has to be attributed to.
+    let mut walker = BTreeCursor::table(table_root);
+    let mut at_end = true;
+    let nanos = time(OPERATIONS, |_| {
+        if at_end {
+            at_end = !walker.first(&mut pager).unwrap_or(false);
+            return;
+        }
+        at_end = !walker.next(&mut pager).unwrap_or(false);
+    });
+    println!("{:>44}  {nanos:>9.1} ns", "one step of a table scan");
+
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut at_end = true;
+    let nanos = time(OPERATIONS, |_| {
+        if at_end {
+            at_end = !walker.first(&mut pager).unwrap_or(false);
+        } else {
+            at_end = !walker.next(&mut pager).unwrap_or(false);
+        }
+        if !at_end {
+            let _ = walker.payload_into(&mut pager, &limits, &mut buffer);
+        }
+    });
+    println!("{:>44}  {nanos:>9.1} ns", "  ... and reading the row");
+
+    let mut spans = Vec::new();
+    let mut at_end = true;
+    let nanos = time(OPERATIONS, |_| {
+        if at_end {
+            at_end = !walker.first(&mut pager).unwrap_or(false);
+        } else {
+            at_end = !walker.next(&mut pager).unwrap_or(false);
+        }
+        if !at_end {
+            let _ = walker.payload_into(&mut pager, &limits, &mut buffer);
+            let _ = RecordRef::parse_into(&buffer, &limits, &mut spans);
+        }
+    });
+    println!("{:>44}  {nanos:>9.1} ns", "  ... and finding its fields");
+
+    let mut at_end = true;
+    let nanos = time(OPERATIONS, |_| {
+        if at_end {
+            at_end = !walker.first(&mut pager).unwrap_or(false);
+        } else {
+            at_end = !walker.next(&mut pager).unwrap_or(false);
+        }
+        if !at_end {
+            let _ = walker.payload_into(&mut pager, &limits, &mut buffer);
+            let Ok(header) = RecordRef::parse_into(&buffer, &limits, &mut spans) else {
+                return;
+            };
+            let record = RecordRef::with_fields(&buffer, &spans, header, TextEncoding::Utf8);
+            let _ = std::hint::black_box(record.value(1));
+        }
+    });
+    println!("{:>44}  {nanos:>9.1} ns", "  ... and decoding one integer");
+
     // Parsing a page is the cost every edit pays again, because publishing a
     // new frame throws the cached layout away. A full index leaf is the worst
     // case and the common one.

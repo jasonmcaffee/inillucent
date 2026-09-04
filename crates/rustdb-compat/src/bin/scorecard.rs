@@ -25,7 +25,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Instant;
 
-use rustdb::{Connection, Database, Value};
+use rustdb::{Connection, Database, Levers, Value};
+use rustdb_compat::history;
 use rustdb_compat::perf::{
     Bind, Contract, Digest, Grouping, Paired, Plan, Sample, Verdict, Workload,
 };
@@ -56,7 +57,20 @@ fn main() -> ExitCode {
         Some(one) => vec![leak(one)],
     };
     let label = flag(&arguments, "--label").unwrap_or_else(|| "baseline".to_string());
-    match run(&out, &scales, rounds, &label) {
+    // The arm this run measures, as a mask of optimizations to switch *off*.
+    // Named levers rather than a raw number, because a run recorded as
+    // `--disable 3` is a number nobody can read back in six months.
+    let disabled = match flag(&arguments, "--disable") {
+        None => 0,
+        Some(names) => match parse_levers(&names) {
+            Ok(mask) => mask,
+            Err(reason) => {
+                eprintln!("{reason}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    match run(&out, &scales, rounds, &label, disabled) {
         Ok(message) => {
             println!("{message}");
             ExitCode::SUCCESS
@@ -66,6 +80,34 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Returns the lever mask named by a comma-separated list.
+///
+/// The names are the ones the report prints, so a command line and a report row
+/// say the same thing. An unknown name is refused rather than ignored: a typo
+/// that silently measured the shipped engine and labelled it as an arm would be
+/// worse than no arm at all.
+/// @param names - a comma-separated list, or `all`
+fn parse_levers(names: &str) -> Result<u32, String> {
+    let mut mask = 0;
+    for name in names
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        mask |= match name {
+            "all" => Levers::EVERY,
+            "covering-index" => Levers::COVERING_INDEX,
+            "indexed-write" => Levers::INDEXED_WRITE,
+            other => {
+                return Err(format!(
+                    "unknown lever `{other}`; the levers are covering-index, indexed-write, all"
+                ))
+            }
+        };
+    }
+    Ok(mask)
 }
 
 /// Returns the value of a `--flag value` argument.
@@ -92,7 +134,13 @@ fn sqlite_bench() -> Option<PathBuf> {
 }
 
 /// Runs every scale and writes the report.
-fn run(out: &Path, scales: &[&str], rounds: u32, label: &str) -> Result<String, String> {
+fn run(
+    out: &Path,
+    scales: &[&str],
+    rounds: u32,
+    label: &str,
+    disabled: u32,
+) -> Result<String, String> {
     let contract = Contract::parse(
         &std::fs::read_to_string(workspace_root().join("compat/perf/contract.toml"))
             .map_err(|error| format!("cannot read the performance contract: {error}"))?,
@@ -108,11 +156,20 @@ fn run(out: &Path, scales: &[&str], rounds: u32, label: &str) -> Result<String, 
     let mut sections = Vec::new();
     for scale in scales {
         let plan = plan_for(scale);
-        let measured = measure(&plan, &bench, out, rounds)?;
+        let measured = measure(&plan, &bench, out, rounds, disabled)?;
         sections.push((plan, measured));
     }
 
-    let markdown = render_markdown(&sections, &contract, label, rounds);
+    // The arm travels with the label into the history, so two runs of the same
+    // ticket under different arms are two series rather than one series that
+    // silently changed meaning halfway through.
+    let names = Levers::without(disabled).names_disabled();
+    let label = &if names.is_empty() {
+        label.to_string()
+    } else {
+        format!("{label} (no {})", names.join(", "))
+    };
+    let markdown = render_markdown(&sections, &contract, label, rounds, disabled);
     let json = render_json(&sections, &contract, label, rounds);
     std::fs::write(out.join("scorecard.md"), &markdown)
         .map_err(|error| format!("cannot write the scorecard: {error}"))?;
@@ -134,41 +191,18 @@ fn run(out: &Path, scales: &[&str], rounds: u32, label: &str) -> Result<String, 
 
 /// Returns the weighted headline for one scale.
 fn headline(measured: &[Paired], contract: &Contract) -> (f64, f64, f64) {
-    let rounds = round_shaped(measured);
+    let rounds = rustdb_compat::perf::qualified_rounds(measured);
     rustdb_compat::perf::weighted_headline(&rounds, contract, SEED)
 }
 
-/// Returns the log ratios shaped one vector per round.
-fn round_shaped(measured: &[Paired]) -> Vec<Vec<(String, f64)>> {
-    // Over the workloads that agreed, because one that did not has no pairs at
-    // all - and taking the minimum across everything made a single correctness
-    // failure silently report a headline of exactly 1.000x, which is the most
-    // misleading number the whole report could have produced.
-    let depth = measured
-        .iter()
-        .filter(|paired| paired.agreed)
-        .map(|paired| paired.pairs.len())
-        .min()
-        .unwrap_or(0);
-    (0..depth)
-        .map(|round| {
-            measured
-                .iter()
-                .filter(|paired| paired.agreed)
-                .filter_map(|paired| {
-                    let (ours, theirs) = paired.pairs.get(round).copied()?;
-                    if ours <= 0.0 || theirs <= 0.0 {
-                        return None;
-                    }
-                    Some((paired.family.clone(), (theirs / ours).ln()))
-                })
-                .collect()
-        })
-        .collect()
-}
-
 /// Runs one plan over both engines for the requested number of rounds.
-fn measure(plan: &Plan, bench: &Path, out: &Path, rounds: u32) -> Result<Vec<Paired>, String> {
+fn measure(
+    plan: &Plan,
+    bench: &Path,
+    out: &Path,
+    rounds: u32,
+    disabled: u32,
+) -> Result<Vec<Paired>, String> {
     let area = out.join(&plan.scale);
     std::fs::create_dir_all(&area).map_err(|error| format!("cannot create {area:?}: {error}"))?;
     let plan_path = area.join("plan.txt");
@@ -181,7 +215,7 @@ fn measure(plan: &Plan, bench: &Path, out: &Path, rounds: u32) -> Result<Vec<Pai
     let pristine_theirs = area.join("pristine-sqlite.db");
     remove(&pristine_ours);
     remove(&pristine_theirs);
-    build_rustdb(plan, &pristine_ours)?;
+    build_rustdb(plan, &pristine_ours, disabled)?;
     let built = Command::new(bench)
         .arg("build")
         .arg(&plan_path)
@@ -215,12 +249,12 @@ fn measure(plan: &Plan, bench: &Path, out: &Path, rounds: u32) -> Result<Vec<Pai
         // The order alternates, so neither engine is systematically the one
         // that ran while the file system cache was cold.
         let (ours, theirs) = if round % 2 == 0 {
-            let ours = run_rustdb(plan, &working_ours)?;
+            let ours = run_rustdb(plan, &working_ours, disabled)?;
             let theirs = run_sqlite(bench, &plan_path, &working_theirs)?;
             (ours, theirs)
         } else {
             let theirs = run_sqlite(bench, &plan_path, &working_theirs)?;
-            let ours = run_rustdb(plan, &working_ours)?;
+            let ours = run_rustdb(plan, &working_ours, disabled)?;
             (ours, theirs)
         };
         for entry in paired.iter_mut() {
@@ -288,12 +322,13 @@ fn run_sqlite(bench: &Path, plan: &Path, database: &Path) -> Result<Vec<Sample>,
 }
 
 /// Opens a database with the plan's settings applied.
-fn open(plan: &Plan, path: &Path) -> Result<(Database, Connection), String> {
+fn open(plan: &Plan, path: &Path, disabled: u32) -> Result<(Database, Connection), String> {
     let database = Database::open(path)
         .map_err(|error| format!("cannot open {path:?}: {}", error.message()))?;
     let connection = database
         .connect()
         .map_err(|error| format!("cannot connect: {}", error.message()))?;
+    connection.disable_optimizations(disabled);
     for pragma in [
         format!("PRAGMA page_size={};", plan.page_size),
         format!("PRAGMA journal_mode={};", plan.journal),
@@ -308,8 +343,8 @@ fn open(plan: &Plan, path: &Path) -> Result<(Database, Connection), String> {
 }
 
 /// Builds the rust-db pristine image from the plan's setup statements.
-fn build_rustdb(plan: &Plan, path: &Path) -> Result<(), String> {
-    let (_database, connection) = open(plan, path)?;
+fn build_rustdb(plan: &Plan, path: &Path, disabled: u32) -> Result<(), String> {
+    let (_database, connection) = open(plan, path, disabled)?;
     for statement in &plan.setup {
         connection
             .execute_batch(statement)
@@ -319,8 +354,8 @@ fn build_rustdb(plan: &Plan, path: &Path) -> Result<(), String> {
 }
 
 /// Runs every workload of the plan on rust-db, returning one sample each.
-fn run_rustdb(plan: &Plan, path: &Path) -> Result<Vec<Sample>, String> {
-    let (_database, connection) = open(plan, path)?;
+fn run_rustdb(plan: &Plan, path: &Path, disabled: u32) -> Result<Vec<Sample>, String> {
+    let (_database, connection) = open(plan, path, disabled)?;
     let mut samples = Vec::with_capacity(plan.workloads.len());
     for workload in &plan.workloads {
         samples.push(run_one(&connection, workload, plan.rows)?);
@@ -980,17 +1015,68 @@ fn plan_for(scale: &str) -> Plan {
 // Reporting.
 // ---------------------------------------------------------------------------
 
+/// Returns one family's aggregate ratio, its interval, and how many pairs it
+/// came from.
+///
+/// The contract's floor is written per *family*, so the number judged against
+/// it has to be the family's, not the worst workload inside it - a family of
+/// five workloads would otherwise fail on its slowest member no matter what the
+/// other four did. This is the one place that aggregate is computed, so the
+/// report and the history cannot disagree about it.
+///
+/// The geometric mean rather than the median, so the point estimate is the same
+/// statistic the interval brackets. A median beside a bootstrapped mean can sit
+/// outside its own interval, which reads like an arithmetic error and is one.
+/// @param measured - every workload of one scale
+/// @param family - the family to aggregate
+fn family_interval(measured: &[Paired], family: &str) -> Option<(f64, f64, f64, usize)> {
+    let members: Vec<&Paired> = measured
+        .iter()
+        .filter(|paired| paired.family == family)
+        .collect();
+    if members.is_empty() {
+        return None;
+    }
+    let logs: Vec<f64> = members
+        .iter()
+        .filter(|paired| paired.agreed)
+        .flat_map(|paired| paired.log_ratios())
+        .collect();
+    let mean = if logs.is_empty() {
+        0.0
+    } else {
+        logs.iter().sum::<f64>() / logs.len() as f64
+    };
+    let (low, high) = rustdb_compat::perf::bootstrap(&logs, SEED);
+    Some((mean.exp(), low.exp(), high.exp(), logs.len()))
+}
+
 /// Renders the scorecard a person reads.
 fn render_markdown(
     sections: &[(Plan, Vec<Paired>)],
     contract: &Contract,
     label: &str,
     rounds: u32,
+    disabled: u32,
 ) -> String {
     let mut out = String::new();
     out.push_str("# rust-db performance scorecard\n\n");
+    // The arm is named in the first paragraph rather than in a footnote,
+    // because a scorecard read out of context and mistaken for the shipped
+    // engine is worse than no scorecard.
+    let names = Levers::without(disabled).names_disabled();
+    let arm = if names.is_empty() {
+        "Every optimization is on, which is the shipped engine.".to_string()
+    } else {
+        format!(
+            "**Arm: `{}` switched off.** This is one side of an A/B pair and not the shipped \
+             engine; compare it with the run whose arm is empty.",
+            names.join("`, `")
+        )
+    };
     out.push_str(&format!(
-        "Label `{label}`, platform `{}`, {rounds} paired rounds per scale, bootstrap seed {SEED}.\n\n",
+        "Label `{label}`, platform `{}`, {rounds} paired rounds per scale, bootstrap seed \
+         {SEED}. {arm}\n\n",
         platform_name()
     ));
     out.push_str(
@@ -1025,30 +1111,9 @@ fn render_markdown(
              |---|---:|---:|---|---|---|\n",
         );
         for family in &contract.families {
-            let members: Vec<&Paired> = measured
-                .iter()
-                .filter(|paired| paired.family == family.id)
-                .collect();
-            if members.is_empty() {
+            let Some((ratio, low, high, _)) = family_interval(measured, &family.id) else {
                 continue;
-            }
-            let logs: Vec<f64> = members
-                .iter()
-                .filter(|paired| paired.agreed)
-                .flat_map(|paired| paired.log_ratios())
-                .collect();
-            // The geometric mean rather than the median, so the point estimate
-            // is the same statistic the interval brackets. A median beside a
-            // bootstrapped mean can sit outside its own interval, which reads
-            // like an arithmetic error and is one.
-            let mean = if logs.is_empty() {
-                0.0
-            } else {
-                logs.iter().sum::<f64>() / logs.len() as f64
             };
-            let ratio = mean.exp();
-            let (low, high) = rustdb_compat::perf::bootstrap(&logs, SEED);
-            let (low, high) = (low.exp(), high.exp());
             let verdict = Verdict::of(low, high);
             let floor = if family.required {
                 if low >= contract.floor {
@@ -1163,11 +1228,16 @@ fn render_json(
     out
 }
 
-/// Appends this run to the versioned performance history.
+/// The line separator the history file uses.
+const NEWLINE: char = '\n';
+
+/// Appends this run to the versioned performance history and redraws the
+/// dashboard.
 ///
-/// One line per workload per run, with the label and the platform, so a
-/// regression is a comparison against the file rather than against somebody's
-/// memory of the last number.
+/// One line per workload per run, plus one for the weighted headline, each
+/// carrying the label, the platform and the scale it belongs to. A regression
+/// is then a comparison against the file rather than against somebody's memory
+/// of the last number.
 fn append_history(
     out: &Path,
     sections: &[(Plan, Vec<Paired>)],
@@ -1175,37 +1245,74 @@ fn append_history(
     label: &str,
 ) -> Result<(), String> {
     let path = out.join("history.jsonl");
-    let mut text = String::new();
+    let platform = platform_name();
+    let mut lines = Vec::new();
     for (plan, measured) in sections {
         let (centre, low, high) = headline(measured, contract);
-        text.push_str(&format!(
-            "{{\"label\": {}, \"platform\": {}, \"scale\": {}, \"workload\": \"*headline*\", \
-             \"ratio\": {centre:.6}, \"low\": {low:.6}, \"high\": {high:.6}, \"samples\": {}}}\n",
-            json_string(label),
-            json_string(&platform_name()),
-            json_string(&plan.scale),
-            measured.first().map(|entry| entry.pairs.len()).unwrap_or(0)
-        ));
+        lines.push(
+            history::Entry {
+                label: label.to_string(),
+                platform: platform.clone(),
+                scale: plan.scale.clone(),
+                workload: "*headline*".to_string(),
+                family: "*weighted*".to_string(),
+                ratio: centre,
+                low,
+                high,
+                samples: measured.first().map(|entry| entry.pairs.len()).unwrap_or(0),
+            }
+            .render(),
+        );
+        for family in &contract.families {
+            let Some((ratio, low, high, samples)) = family_interval(measured, &family.id) else {
+                continue;
+            };
+            lines.push(
+                history::Entry {
+                    label: label.to_string(),
+                    platform: platform.clone(),
+                    scale: plan.scale.clone(),
+                    workload: format!("*family* {}", family.id),
+                    family: family.id.clone(),
+                    ratio,
+                    low,
+                    high,
+                    samples,
+                }
+                .render(),
+            );
+        }
         for paired in measured {
             let (low, high) = paired.interval(SEED);
-            let (ours, theirs) = paired.medians();
-            text.push_str(&format!(
-                "{{\"label\": {}, \"platform\": {}, \"scale\": {}, \"workload\": {}, \"family\": \
-                 {}, \"agreed\": {}, \"rustdb_nanos\": {ours:.1}, \"sqlite_nanos\": {theirs:.1}, \
-                 \"ratio\": {:.6}, \"low\": {low:.6}, \"high\": {high:.6}, \"samples\": {}}}\n",
-                json_string(label),
-                json_string(&platform_name()),
-                json_string(&plan.scale),
-                json_string(&paired.workload),
-                json_string(&paired.family),
-                paired.agreed,
-                paired.ratio(),
-                paired.pairs.len()
-            ));
+            lines.push(
+                history::Entry {
+                    label: label.to_string(),
+                    platform: platform.clone(),
+                    scale: plan.scale.clone(),
+                    workload: paired.workload.clone(),
+                    family: paired.family.clone(),
+                    ratio: paired.ratio(),
+                    low,
+                    high,
+                    samples: paired.pairs.len(),
+                }
+                .render(),
+            );
         }
     }
-    let mut existing = std::fs::read_to_string(&path).unwrap_or_default();
-    existing.push_str(&text);
-    std::fs::write(&path, existing)
-        .map_err(|error| format!("cannot write {}: {error}", path.display()))
+    let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+    for line in lines {
+        text.push_str(&line);
+        text.push(NEWLINE);
+    }
+    std::fs::write(&path, text)
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+
+    let recorded = history::History::load(&path);
+    std::fs::write(
+        out.join("dashboard.md"),
+        history::dashboard(&recorded, &platform),
+    )
+    .map_err(|error| format!("cannot write the dashboard: {error}"))?;
+    Ok(())
 }

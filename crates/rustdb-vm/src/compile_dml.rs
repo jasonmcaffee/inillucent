@@ -1493,7 +1493,7 @@ impl Compiler {
     /// reason to write a SELECT in a trigger body is the `RAISE()` in it, and a
     /// query that was optimised away would never reach it.
     fn emit_discarded_select(&mut self, select: &BoundSelect) -> DbResult<()> {
-        let mut plan = rustdb_sql::plan::plan_select(select.clone());
+        let mut plan = rustdb_sql::plan::plan_select_with(select.clone(), self.levers);
         self.resolve_plan(&mut plan)?;
         let width = plan.select.columns.len().max(1);
         let store = self.ephemeral();
@@ -1533,6 +1533,7 @@ fn finish(
         result_columns,
         dependencies,
         readonly: false,
+        optimizations_used: compiler.used,
         parameter_count: parameters,
     }
 }
@@ -1553,7 +1554,7 @@ pub fn compile_insert_with(
     parameters: u32,
     planner: Option<Box<dyn crate::compile::VirtualPlanner>>,
 ) -> DbResult<Program> {
-    let mut compiler = Compiler::new();
+    let mut compiler = Compiler::with_levers(plan::Levers::without(dependencies.levers));
     if let Some(planner) = planner {
         compiler = compiler.with_virtual_planner(planner);
     }
@@ -1644,7 +1645,7 @@ impl Compiler {
         insert: &BoundInsert,
         select: &BoundSelect,
     ) -> DbResult<()> {
-        let mut plan = rustdb_sql::plan::plan_select(select.clone());
+        let mut plan = rustdb_sql::plan::plan_select_with(select.clone(), self.levers);
         self.resolve_plan(&mut plan)?;
         let width = insert.arity.max(1);
         let store = self.ephemeral();
@@ -1883,7 +1884,7 @@ impl Compiler {
         triggers: &[BoundTrigger],
         assignments: Option<&[BoundAssignment]>,
     ) -> DbResult<()> {
-        let mut plan = rustdb_sql::plan::plan_select(rows.clone());
+        let mut plan = rustdb_sql::plan::plan_select_with(rows.clone(), self.levers);
         self.resolve_plan(&mut plan)?;
         let width = plan.select.columns.len().max(1);
         let store = self.ephemeral();
@@ -2422,7 +2423,7 @@ pub fn compile_delete_with(
     parameters: u32,
     planner: Option<Box<dyn crate::compile::VirtualPlanner>>,
 ) -> DbResult<Program> {
-    let mut compiler = Compiler::new();
+    let mut compiler = Compiler::with_levers(plan::Levers::without(dependencies.levers));
     if let Some(planner) = planner {
         compiler = compiler.with_virtual_planner(planner);
     }
@@ -2756,7 +2757,11 @@ impl Compiler {
         filter: Option<&BoundExpr>,
         sorter: u32,
     ) -> DbResult<()> {
-        match plan::write_path(table, source, filter) {
+        let chosen = plan::write_path_with(table, source, filter, self.levers);
+        if !matches!(chosen, plan::AccessPath::TableScan { .. }) {
+            self.used |= plan::Levers::INDEXED_WRITE;
+        }
+        match chosen {
             plan::AccessPath::RowidSeek { key, .. } => {
                 self.emit_collect_by_rowid(writer, filter, sorter, &key)
             }
@@ -3125,7 +3130,7 @@ pub fn compile_update_with(
     parameters: u32,
     planner: Option<Box<dyn crate::compile::VirtualPlanner>>,
 ) -> DbResult<Program> {
-    let mut compiler = Compiler::new();
+    let mut compiler = Compiler::with_levers(plan::Levers::without(dependencies.levers));
     if let Some(planner) = planner {
         compiler = compiler.with_virtual_planner(planner);
     }

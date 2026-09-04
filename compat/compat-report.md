@@ -4,9 +4,9 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 
 | status | capabilities |
 |---|---|
-| missing | 2 |
-| pass | 261 |
-| **total** | **263** |
+| missing | 7 |
+| pass | 264 |
+| **total** | **271** |
 
 ## By phase
 
@@ -17,7 +17,8 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree | 10 | 0 | 0 | 0 |
 | phase 12: C ABI and CLI completion | 12 | 0 | 0 | 0 |
 | phase 13: transactional rust-db search and legacy migration | 3 | 0 | 0 | 0 |
-| phase 14: performance qualification and release | 0 | 0 | 2 | 0 |
+| phase 14: performance qualification and release | 3 | 0 | 0 | 0 |
+| phase 15: optional surfaces this release does not implement | 0 | 0 | 7 | 0 |
 | phase 1: VFS, binary primitives, and simulator | 46 | 0 | 0 | 0 |
 | phase 2: values, affinities, collations, and records | 17 | 0 | 0 | 0 |
 | phase 3: read-only header, pager, page cache, and B-tree | 19 | 0 | 0 | 0 |
@@ -242,9 +243,17 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `cli.output-modes` | pass | pass | linux-x86_64, windows-x86_64 | 9 |
 | `search.virtual-table` | pass | pass | linux-x86_64, windows-x86_64 | 13 |
 | `search.transactional-visibility` | pass | pass | linux-x86_64, windows-x86_64 | 13 |
-| `search.legacy-migration` | pass | pass | linux-x86_64, windows-x86_64 | 10 |
-| `perf.qualified-measurement` | missing | missing | - | 0 |
-| `perf.regression-tracking` | missing | missing | - | 0 |
+| `search.legacy-migration` | pass | pass | linux-x86_64, windows-x86_64 | 11 |
+| `perf.qualified-measurement` | pass | pass | linux-x86_64, windows-x86_64 | 11 |
+| `perf.optimization-arms` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `perf.regression-tracking` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
+| `optional.session-extension` | missing | missing | - | 0 |
+| `optional.preupdate-hook` | missing | missing | - | 0 |
+| `optional.snapshot-api` | missing | missing | - | 0 |
+| `optional.unlock-notify` | missing | missing | - | 0 |
+| `optional.rbu` | missing | missing | - | 0 |
+| `optional.geopoly` | missing | missing | - | 0 |
+| `optional.rtree-geometry-callbacks` | missing | missing | - | 0 |
 | `sql.negative.right-outer-join-pre-3-39` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `sql.negative.grant-revoke` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `sql.negative.full-alter-table` | pass | pass | linux-x86_64, windows-x86_64 | 1 |

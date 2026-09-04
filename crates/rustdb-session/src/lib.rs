@@ -57,6 +57,7 @@ pub use connection::{
 };
 // The kind an update hook is told about is part of that hook's signature, so a
 // caller that can name the hook has to be able to name this too.
+pub use rustdb_sql::plan::Levers;
 pub use rustdb_vm::program::RowChangeKind;
 pub use serialize::{serialize, Deserialized};
 // The file-system contract, so a caller of the facade can supply one. It is

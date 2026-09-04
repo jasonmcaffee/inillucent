@@ -37,6 +37,12 @@ url = "https://sqlite.org/c3ref/get_autocommit.html"
 url = "https://sqlite.org/c3ref/interrupt.html"
 
 [[source]]
+url = "https://sqlite.org/c3ref/preupdate_blobwrite.html"
+
+[[source]]
+url = "https://sqlite.org/c3ref/snapshot.html"
+
+[[source]]
 url = "https://sqlite.org/c3ref/open.html"
 
 [[source]]
@@ -65,6 +71,9 @@ url = "https://sqlite.org/foreignkeys.html"
 
 [[source]]
 url = "https://sqlite.org/fts5.html"
+
+[[source]]
+url = "https://sqlite.org/geopoly.html"
 
 [[source]]
 url = "https://sqlite.org/isolation.html"
@@ -181,13 +190,25 @@ url = "https://sqlite.org/quirks.html"
 url = "https://sqlite.org/rescode.html"
 
 [[source]]
+url = "https://sqlite.org/rbu.html"
+
+[[source]]
 url = "https://sqlite.org/rtree.html"
 
 [[source]]
 url = "https://sqlite.org/schematab.html"
 
 [[source]]
+url = "https://sqlite.org/sessionintro.html"
+
+[[source]]
 url = "https://sqlite.org/tempfiles.html"
+
+[[source]]
+url = "https://sqlite.org/testing.html"
+
+[[source]]
+url = "https://sqlite.org/unlock_notify.html"
 
 [[source]]
 url = "https://sqlite.org/vfs.html"

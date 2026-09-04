@@ -377,6 +377,74 @@ fn compound_name(op: CompoundOp) -> &'static str {
     }
 }
 
+/// Which planner optimizations are switched on.
+///
+/// An optimization that cannot be switched off cannot be measured. The claim
+/// "the covering-index path made range reads thirty times faster" is a
+/// comparison, and without an arm to compare against it is a comparison with a
+/// build that no longer exists - which is an argument, not evidence.
+///
+/// The shape is SQLite's. `sqlite3_test_control(SQLITE_TESTCTRL_OPTIMIZATIONS)`
+/// takes a bitmask of optimizations to *disable*, reached through a control
+/// channel rather than through SQL, for exactly this reason: a knob on the SQL
+/// surface is a knob applications start depending on, and then it is not a
+/// measurement device any more, it is a feature with a compatibility story.
+///
+/// Disabling is what the mask names, so zero is the shipped engine and the
+/// default everywhere. A lever added later defaults to on without anybody
+/// having to remember to turn it on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Levers {
+    /// The optimizations that are turned *off*.
+    disabled: u32,
+}
+
+impl Levers {
+    /// Read a term's columns from the index entry, without fetching the row.
+    pub const COVERING_INDEX: u32 = 1;
+    /// Find the rows an UPDATE or DELETE touches through an index or a rowid,
+    /// rather than by scanning the table.
+    pub const INDEXED_WRITE: u32 = 2;
+    /// Every lever this build has.
+    pub const EVERY: u32 = Levers::COVERING_INDEX | Levers::INDEXED_WRITE;
+
+    /// Returns the shipped configuration: everything on.
+    pub fn all() -> Levers {
+        Levers { disabled: 0 }
+    }
+
+    /// Returns a configuration with the named levers turned off.
+    /// @param mask - the levers to disable
+    pub fn without(mask: u32) -> Levers {
+        Levers {
+            disabled: mask & Levers::EVERY,
+        }
+    }
+
+    /// Returns whether one lever is on.
+    /// @param lever - the lever to ask about
+    pub fn has(self, lever: u32) -> bool {
+        self.disabled & lever == 0
+    }
+
+    /// Returns the mask of what is off, which is what a report prints.
+    pub fn disabled(self) -> u32 {
+        self.disabled
+    }
+
+    /// Returns the names of the levers that are off, for a report.
+    pub fn names_disabled(self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if !self.has(Levers::COVERING_INDEX) {
+            names.push("covering-index");
+        }
+        if !self.has(Levers::INDEXED_WRITE) {
+            names.push("indexed-write");
+        }
+        names
+    }
+}
+
 /// Plans a bound SELECT, and every block nested inside it.
 ///
 /// The predicate list is split before any path is chosen, because a path can
@@ -385,6 +453,18 @@ fn compound_name(op: CompoundOp) -> &'static str {
 /// it is still emitted, null-extended, so treating it as a filter would drop
 /// exactly the rows the join exists to keep.
 pub fn plan_select(select: BoundSelect) -> PhysicalPlan {
+    plan_select_with(select, Levers::all())
+}
+
+/// Plans a bound SELECT with some optimizations switched off.
+///
+/// The levers travel with the recursion rather than being read from anywhere
+/// global, so a subquery is planned under the same arm as the statement that
+/// contains it. An arm that applied to the outer block and not the inner one
+/// would measure a mixture and report it as one number.
+/// @param select - the bound statement
+/// @param levers - which optimizations are on
+pub fn plan_select_with(select: BoundSelect, levers: Levers) -> PhysicalPlan {
     let mut select = select;
     let compound_arms = core::mem::take(&mut select.compounds);
     let mut terms = Vec::new();
@@ -403,7 +483,7 @@ pub fn plan_select(select: BoundSelect) -> PhysicalPlan {
     // then the paths are chosen in that order - because a path may use a value
     // from a term visited earlier, and which terms those are is exactly what the
     // order decides.
-    let order = choose_order(&select, &terms);
+    let order = choose_order(&select, &terms, levers);
     let ordered: Vec<usize> = order.clone();
     let ids: Vec<usize> = ordered
         .iter()
@@ -416,7 +496,7 @@ pub fn plan_select(select: BoundSelect) -> PhysicalPlan {
         let Some(source) = select.sources.get(*position) else {
             continue;
         };
-        let path = choose_path(level, &ids, source, &select, &terms, &mut consumed);
+        let path = choose_path(level, &ids, source, &select, &terms, &mut consumed, levers);
         let (cost, rows) = path_cost(source, &path);
         sources.push(PlannedSource {
             cost,
@@ -442,7 +522,7 @@ pub fn plan_select(select: BoundSelect) -> PhysicalPlan {
     let needs_sort = !select.order_by.is_empty();
     let compounds = compound_arms
         .into_iter()
-        .map(|(op, arm)| (op, plan_select(arm)))
+        .map(|(op, arm)| (op, plan_select_with(arm, levers)))
         .collect();
     PhysicalPlan {
         sources,
@@ -468,7 +548,7 @@ pub fn plan_select(select: BoundSelect) -> PhysicalPlan {
 /// that occur in practice are two to five terms - and falls back to the written
 /// order beyond, because a greedy answer that is worse than the written order
 /// is worse than not reordering at all.
-fn choose_order(select: &BoundSelect, terms: &[BoundExpr]) -> Vec<usize> {
+fn choose_order(select: &BoundSelect, terms: &[BoundExpr], levers: Levers) -> Vec<usize> {
     let count = select.sources.len();
     if count < 2 {
         return (0..count).collect();
@@ -481,19 +561,24 @@ fn choose_order(select: &BoundSelect, terms: &[BoundExpr]) -> Vec<usize> {
             .get(position)
             .is_some_and(|source| matches!(source.join, JoinKind::Cross) || is_outer(source.join));
         if pins {
-            order.extend(best_order(select, terms, &run));
+            order.extend(best_order(select, terms, &run, levers));
             run.clear();
             order.push(position);
             continue;
         }
         run.push(position);
     }
-    order.extend(best_order(select, terms, &run));
+    order.extend(best_order(select, terms, &run, levers));
     order
 }
 
 /// Returns the cheapest visiting order for one run of reorderable terms.
-fn best_order(select: &BoundSelect, terms: &[BoundExpr], run: &[usize]) -> Vec<usize> {
+fn best_order(
+    select: &BoundSelect,
+    terms: &[BoundExpr],
+    run: &[usize],
+    levers: Levers,
+) -> Vec<usize> {
     // Eight terms is 40,320 orders, which is milliseconds; beyond that the
     // written order stands rather than a guess being substituted for it.
     if run.len() < 2 || run.len() > 8 {
@@ -502,7 +587,7 @@ fn best_order(select: &BoundSelect, terms: &[BoundExpr], run: &[usize]) -> Vec<u
     let mut best: Option<(f64, Vec<usize>)> = None;
     let mut candidate = run.to_vec();
     permute(&mut candidate, 0, &mut |order| {
-        let cost = order_cost(select, terms, order);
+        let cost = order_cost(select, terms, order, levers);
         let better = best
             .as_ref()
             .is_none_or(|(existing, _)| cost < *existing - 1e-9);
@@ -532,7 +617,7 @@ fn permute(order: &mut Vec<usize>, at: usize, visit: &mut impl FnMut(&[usize])) 
 /// term before it produced - which is the whole reason the order matters, and
 /// why putting the most selective term first is usually right and sometimes
 /// spectacularly wrong.
-fn order_cost(select: &BoundSelect, terms: &[BoundExpr], order: &[usize]) -> f64 {
+fn order_cost(select: &BoundSelect, terms: &[BoundExpr], order: &[usize], levers: Levers) -> f64 {
     let ids: Vec<usize> = order
         .iter()
         .filter_map(|position| select.sources.get(*position))
@@ -545,7 +630,7 @@ fn order_cost(select: &BoundSelect, terms: &[BoundExpr], order: &[usize]) -> f64
         let Some(source) = select.sources.get(*position) else {
             continue;
         };
-        let path = choose_path(level, &ids, source, select, terms, &mut consumed);
+        let path = choose_path(level, &ids, source, select, terms, &mut consumed, levers);
         let (cost, rows) = path_cost(source, &path);
         total += outer_rows * cost;
         outer_rows *= rows.max(1.0);
@@ -572,8 +657,13 @@ fn path_cost(source: &BoundSource, path: &AccessPath) -> (f64, f64) {
             (cost::scan_cost(rows.max(1.0)), rows.max(1.0))
         }
         AccessPath::RowidSeek { .. } => (cost::search_cost(rows, 1.0, true), 1.0),
-        AccessPath::RowidRange { .. } => {
-            let matches = (rows / cost::RANGE_SHARE).max(1.0);
+        AccessPath::RowidRange { low, high, .. } => {
+            let bounds = usize::from(low.is_some()) + usize::from(high.is_some());
+            let mut matches = rows;
+            for _ in 0..bounds {
+                matches /= cost::RANGE_SHARE;
+            }
+            let matches = matches.max(1.0);
             (cost::search_cost(rows, matches, true), matches)
         }
         AccessPath::IndexSeek {
@@ -589,12 +679,8 @@ fn path_cost(source: &BoundSource, path: &AccessPath) -> (f64, f64) {
                 .indexes
                 .iter()
                 .find(|candidate| candidate.name == *index_name);
-            let matches = index_matches(
-                index,
-                rows,
-                equalities.len(),
-                low.is_some() || high.is_some(),
-            );
+            let bounds = usize::from(low.is_some()) + usize::from(high.is_some());
+            let matches = index_matches(index, rows, equalities.len(), bounds);
             let Some(index) = index else {
                 return (cost::search_cost(rows, matches, false), matches);
             };
@@ -630,7 +716,7 @@ fn estimated_rows(table: &TableInfo) -> f64 {
 }
 
 /// Returns how many rows an index search is estimated to return.
-fn index_matches(index: Option<&IndexInfo>, rows: f64, equalities: usize, ranged: bool) -> f64 {
+fn index_matches(index: Option<&IndexInfo>, rows: f64, equalities: usize, bounds: usize) -> f64 {
     let mut matches = match index {
         // Measured: the average number of rows sharing the prefix the search
         // pinned down. This is the number `ANALYZE` exists to supply.
@@ -640,9 +726,14 @@ fn index_matches(index: Option<&IndexInfo>, rows: f64, equalities: usize, ranged
             .copied()
             .map(|value| value as f64)
             .unwrap_or(rows),
-        // Unmeasured: a unique index pins one row, and every other equality is
-        // assumed to select a tenth.
+        // Unmeasured: a unique index pins one row.
         Some(index) if index.unique && equalities >= index.columns.len() => 1.0,
+        // Unmeasured, not unique: SQLite's own default, which is an absolute
+        // count rather than a share of the table. A column somebody indexed and
+        // then compared for equality has many distinct values - that is why it
+        // was indexed - so the number of rows behind one value does not grow
+        // with the table the way a fraction does.
+        Some(_) if equalities > 0 => cost::default_equality_rows(equalities, rows),
         _ => {
             let mut estimate = rows;
             for _ in 0..equalities {
@@ -651,7 +742,12 @@ fn index_matches(index: Option<&IndexInfo>, rows: f64, equalities: usize, ranged
             estimate
         }
     };
-    if ranged {
+    // Once per bound, not once per range. SQLite reduces the estimate by a
+    // factor for the lower bound and again for the upper, which is why
+    // `BETWEEN` is treated as sixteen times more selective than a bare `>` -
+    // and treating them alike made a two-sided range look like a quarter of the
+    // table, which is a quarter no join order can beat a scan with.
+    for _ in 0..bounds {
         matches /= cost::RANGE_SHARE;
     }
     matches.max(1.0)
@@ -764,13 +860,14 @@ fn choose_path(
     select: &BoundSelect,
     terms: &[BoundExpr],
     consumed: &mut [bool],
+    levers: Levers,
 ) -> AccessPath {
     match &source.rows {
         SourceRows::Subquery(block) => {
             let width = block.columns.len();
             let correlated = !block.correlations.is_empty();
             return AccessPath::Subquery {
-                plan: Box::new(plan_select((**block).clone())),
+                plan: Box::new(plan_select_with((**block).clone(), levers)),
                 width,
                 correlated,
             };
@@ -781,12 +878,12 @@ fn choose_path(
                 seeds: body
                     .seeds
                     .iter()
-                    .map(|(op, arm)| (*op, plan_select(arm.clone())))
+                    .map(|(op, arm)| (*op, plan_select_with(arm.clone(), levers)))
                     .collect(),
                 steps: body
                     .steps
                     .iter()
-                    .map(|(op, arm)| (*op, plan_select(arm.clone())))
+                    .map(|(op, arm)| (*op, plan_select_with(arm.clone(), levers)))
                     .collect(),
                 width,
             };
@@ -813,7 +910,9 @@ fn choose_path(
     // every row of the table, silently.
     let mut trial = consumed.to_vec();
     let needed = select.columns_read(id);
-    if let Some(path) = index_path(id, position, ids, source, terms, &mut trial, &needed) {
+    if let Some(path) = index_path(
+        id, position, ids, source, terms, &mut trial, &needed, levers,
+    ) {
         // A scan beats a search that returns most of the table: an index that
         // has to fetch every row costs a second descent per row on top of the
         // scan it was meant to avoid.
@@ -1014,6 +1113,24 @@ fn binary_constraint(op: BinaryOp) -> Option<crate::vtab::ConstraintOp> {
 /// @param source_id - the statement-wide number of the term being written
 /// @param filter - the `WHERE` clause, when there is one
 pub fn write_path(table: &TableInfo, source_id: usize, filter: Option<&BoundExpr>) -> AccessPath {
+    write_path_with(table, source_id, filter, Levers::all())
+}
+
+/// Returns how an UPDATE or a DELETE should find the rows it touches, with some
+/// optimizations switched off.
+/// @param table - the table being written
+/// @param source_id - the source the filter's columns are bound to
+/// @param filter - the WHERE clause, when there is one
+/// @param levers - which optimizations are on
+pub fn write_path_with(
+    table: &TableInfo,
+    source_id: usize,
+    filter: Option<&BoundExpr>,
+    levers: Levers,
+) -> AccessPath {
+    if !levers.has(Levers::INDEXED_WRITE) {
+        return AccessPath::TableScan { root: table.root };
+    }
     let scan = AccessPath::TableScan { root: table.root };
     if table.module.is_some() || table.without_rowid {
         return scan;
@@ -1043,7 +1160,16 @@ pub fn write_path(table: &TableInfo, source_id: usize, filter: Option<&BoundExpr
         opaque: true,
         ..ColumnUse::default()
     };
-    let Some(path) = index_path(source_id, 0, &ids, &source, &terms, &mut consumed, &needed) else {
+    let Some(path) = index_path(
+        source_id,
+        0,
+        &ids,
+        &source,
+        &terms,
+        &mut consumed,
+        &needed,
+        levers,
+    ) else {
         return scan;
     };
     // The same crossover the read planner uses: an index that has to fetch most
@@ -1156,6 +1282,7 @@ fn index_path(
     terms: &[BoundExpr],
     consumed: &mut [bool],
     needed: &ColumnUse,
+    levers: Levers,
 ) -> Option<AccessPath> {
     let table = &source.table;
     let mut best: Option<(f64, AccessPath, Vec<usize>)> = None;
@@ -1166,9 +1293,9 @@ fn index_path(
             // rows, and the implication test is phase 8's.
             continue;
         }
-        let Some((path, used)) =
-            index_candidate(id, position, ids, table, index, terms, consumed, needed)
-        else {
+        let Some((path, used)) = index_candidate(
+            id, position, ids, table, index, terms, consumed, needed, levers,
+        ) else {
             continue;
         };
         // The choice between two usable indexes is a cost, not a count of
@@ -1178,9 +1305,15 @@ fn index_path(
         // query constrained on both a two-valued column and a four-hundred-
         // valued one search the two-valued one.
         let (cost, _) = path_cost(source, &path);
+        // A tie goes to the index declared later, which is what the reference
+        // does - it keeps a candidate that is no worse than the one it holds,
+        // so the last equal one wins. It matters because a query with no
+        // `ORDER BY` returns rows in whatever order its path produces, and two
+        // engines that broke ties differently would return the same rows in
+        // different orders for the same SQL.
         let better = best
             .as_ref()
-            .is_none_or(|(existing, _, _)| cost < *existing - 1e-9);
+            .is_none_or(|(existing, _, _)| cost <= *existing + 1e-9);
         if better {
             best = Some((cost, path, used));
         }
@@ -1205,6 +1338,7 @@ fn index_candidate(
     terms: &[BoundExpr],
     consumed: &[bool],
     needed: &ColumnUse,
+    levers: Levers,
 ) -> Option<(AccessPath, Vec<usize>)> {
     let mut equalities = Vec::new();
     let mut used = Vec::new();
@@ -1284,7 +1418,10 @@ fn index_candidate(
             }
         }
     }
-    let covering = covering_slots(table, index, needed);
+    let covering = levers
+        .has(Levers::COVERING_INDEX)
+        .then(|| covering_slots(table, index, needed))
+        .flatten();
     if equalities.is_empty() && low.is_none() && high.is_none() && covering.is_none() {
         // Nothing to seek to and nothing to save by reading the entries: this
         // index has no part in answering the query.
