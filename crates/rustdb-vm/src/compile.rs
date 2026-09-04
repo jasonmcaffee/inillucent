@@ -2226,22 +2226,28 @@ impl Compiler {
             }
             return Ok(());
         }
+        // Only the outermost term can be walked backwards: an inner loop
+        // restarts for every outer row, and the order inside one of those runs
+        // is not the order of the result.
+        let reverse = body.plan.reverse && level == 0;
+        if level == 0 && !body.plan.needs_sort && !body.plan.select.order_by.is_empty() {
+            self.used |= Levers::ORDERED_WALK;
+        }
         match path {
             AccessPath::TableScan { .. } => {
-                let empty = self.emit_jump(Instruction::new(
-                    Opcode::Rewind,
-                    cursors.table as i32,
-                    -1,
-                    0,
-                ));
+                let (first, step) = if reverse {
+                    (Opcode::Last, Opcode::Prev)
+                } else {
+                    (Opcode::Rewind, Opcode::Next)
+                };
+                let empty = self.emit_jump(Instruction::new(first, cursors.table as i32, -1, 0));
                 let start = self.here();
                 let skip = self.compile_residual(body, level)?;
                 self.compile_level(body, level.saturating_add(1), inner)?;
                 for label in skip {
                     self.patch_here(label);
                 }
-                let more =
-                    self.emit_jump(Instruction::new(Opcode::Next, cursors.table as i32, -1, 0));
+                let more = self.emit_jump(Instruction::new(step, cursors.table as i32, -1, 0));
                 self.patch(more, start);
                 self.patch_here(empty);
             }
@@ -2261,13 +2267,14 @@ impl Compiler {
                 self.patch_here(missing);
             }
             AccessPath::RowidRange { low, high, .. } => {
-                self.compile_rowid_range(body, level, cursors, low, high, inner)?;
+                self.compile_rowid_range(body, level, cursors, low, high, reverse, inner)?;
             }
             AccessPath::IndexSeek {
                 equalities,
                 low,
                 high,
                 columns,
+                descending,
                 without_rowid,
                 key_entry_slots,
                 covering,
@@ -2281,9 +2288,11 @@ impl Compiler {
                     low,
                     high,
                     &columns,
+                    &descending,
                     without_rowid,
                     &key_entry_slots,
                     covering.is_some(),
+                    reverse,
                     inner,
                 )?;
             }
@@ -2307,26 +2316,40 @@ impl Compiler {
         cursors: SourceCursors,
         low: Option<RangeBound>,
         high: Option<RangeBound>,
+        reverse: bool,
         inner: &InnerBody,
     ) -> DbResult<()> {
-        let empty = match &low {
+        // Backwards, the two ends of the range swap jobs: the walk starts at
+        // the high bound and stops at the low one. Everything else about the
+        // loop is the same shape, which is the point of naming them by role.
+        let (from, until) = if reverse {
+            (&high, &low)
+        } else {
+            (&low, &high)
+        };
+        let empty = match from {
             Some(bound) => {
                 let register = self.compile_expr(&bound.value)?;
                 self.emit(
                     Instruction::new(Opcode::Cast, register as i32, register as i32, 0)
                         .with_p4(Operand::Affinity(Affinity::Integer)),
                 );
-                let opcode = if bound.kind == BoundKind::Greater {
-                    Opcode::SeekGt
-                } else {
-                    Opcode::SeekGe
+                let opcode = match (reverse, bound.kind) {
+                    (false, BoundKind::Greater) => Opcode::SeekGt,
+                    (false, _) => Opcode::SeekGe,
+                    (true, BoundKind::Less) => Opcode::SeekLt,
+                    (true, _) => Opcode::SeekLe,
                 };
                 self.emit_jump(
                     Instruction::new(opcode, cursors.table as i32, -1, register as i32).with_p5(1),
                 )
             }
             None => self.emit_jump(Instruction::new(
-                Opcode::Rewind,
+                if reverse {
+                    Opcode::Last
+                } else {
+                    Opcode::Rewind
+                },
                 cursors.table as i32,
                 -1,
                 0,
@@ -2334,7 +2357,7 @@ impl Compiler {
         };
         let start = self.here();
         let mut done: Vec<Label> = Vec::new();
-        if let Some(bound) = &high {
+        if let Some(bound) = until {
             let limit = self.compile_expr(&bound.value)?;
             let rowid = self.register();
             self.emit(Instruction::new(
@@ -2344,10 +2367,11 @@ impl Compiler {
                 0,
             ));
             let result = self.register();
-            let op = if bound.kind == BoundKind::Less {
-                BinaryOp::Less
-            } else {
-                BinaryOp::LessEqual
+            let op = match (reverse, bound.kind) {
+                (false, BoundKind::Less) => BinaryOp::Less,
+                (false, _) => BinaryOp::LessEqual,
+                (true, BoundKind::Greater) => BinaryOp::Greater,
+                (true, _) => BinaryOp::GreaterEqual,
             };
             self.emit(
                 Instruction::new(Opcode::Compare, rowid as i32, limit as i32, result as i32)
@@ -2366,7 +2390,12 @@ impl Compiler {
         for label in skip {
             self.patch_here(label);
         }
-        let more = self.emit_jump(Instruction::new(Opcode::Next, cursors.table as i32, -1, 0));
+        let more = self.emit_jump(Instruction::new(
+            if reverse { Opcode::Prev } else { Opcode::Next },
+            cursors.table as i32,
+            -1,
+            0,
+        ));
         self.patch(more, start);
         for label in done {
             self.patch_here(label);
@@ -2375,7 +2404,7 @@ impl Compiler {
         Ok(())
     }
 
-    /// Compiles an index seek: position, walk, stop at the upper bound, and
+    /// Compiles an index seek: position, walk, stop at the far bound, and
     /// fetch the table row for each index entry.
     #[allow(clippy::too_many_arguments)]
     fn compile_index_seek(
@@ -2387,15 +2416,42 @@ impl Compiler {
         low: Option<RangeBound>,
         high: Option<RangeBound>,
         columns: &[u16],
+        descending: &[bool],
         without_rowid: bool,
         key_slots: &[usize],
         covering: bool,
+        reverse: bool,
         inner: &InnerBody,
     ) -> DbResult<()> {
         let Some(index_cursor) = cursors.index else {
             return Err(error::misuse("an index path with no index cursor"));
         };
-        let key_len = equalities.len().saturating_add(usize::from(low.is_some()));
+        // Backwards, the two ends of the range swap jobs: the walk is seeked to
+        // the high bound and stops at the low one.
+        let (from, until) = if reverse {
+            (&high, &low)
+        } else {
+            (&low, &high)
+        };
+        // A bound on a column never matches a NULL in it - `k < 5` is unknown
+        // for a NULL k, not true - and an index holds its NULLs at the front. A
+        // forward walk carrying only a far bound therefore has to start *past*
+        // them rather than at the beginning, which is a seek strictly after
+        // NULL. Without it `WHERE k < 5` returned every NULL row in the table
+        // ahead of its answer, silently, on any index and with no ORDER BY in
+        // sight.
+        //
+        // Backwards there is nothing to do: the NULLs sit at the far end of that
+        // walk, and the bound's own stopping test reaches them and stops.
+        // Only an *ascending* column keeps its NULLs at the front; a
+        // descending one keeps them at the back, where a forward walk reaches
+        // them last and the seek would jump clean past the answer.
+        let ranged_descending =
+            (low.is_some() || high.is_some()) && descending.last().copied().unwrap_or(false);
+        let skip_nulls = !reverse && from.is_none() && until.is_some() && !ranged_descending;
+        let key_len = equalities
+            .len()
+            .saturating_add(usize::from(from.is_some() || skip_nulls));
         let key = self.register_block(key_len.max(1));
         for (position, expr) in equalities.iter().enumerate() {
             let register = self.compile_expr(expr)?;
@@ -2407,8 +2463,12 @@ impl Compiler {
             ));
         }
         let mut seek_len = equalities.len();
-        let mut opcode = Opcode::SeekGe;
-        if let Some(bound) = &low {
+        let mut opcode = if reverse {
+            Opcode::SeekLe
+        } else {
+            Opcode::SeekGe
+        };
+        if let Some(bound) = from {
             let register = self.compile_expr(&bound.value)?;
             self.emit(Instruction::new(
                 Opcode::Copy,
@@ -2417,11 +2477,21 @@ impl Compiler {
                 0,
             ));
             seek_len = seek_len.saturating_add(1);
-            opcode = if bound.kind == BoundKind::Greater {
-                Opcode::SeekGt
-            } else {
-                Opcode::SeekGe
+            opcode = match (reverse, bound.kind) {
+                (false, BoundKind::Greater) => Opcode::SeekGt,
+                (false, _) => Opcode::SeekGe,
+                (true, BoundKind::Less) => Opcode::SeekLt,
+                (true, _) => Opcode::SeekLe,
             };
+        } else if skip_nulls {
+            self.emit(Instruction::new(
+                Opcode::Null,
+                0,
+                key.saturating_add(equalities.len() as u32) as i32,
+                0,
+            ));
+            seek_len = seek_len.saturating_add(1);
+            opcode = Opcode::SeekGt;
         }
         self.apply_index_affinity(body, level, columns, key, seek_len)?;
         // A NULL equality key matches nothing at all. The index *stores* NULLs
@@ -2443,7 +2513,16 @@ impl Compiler {
         // which is worth choosing when the index carries every column the query
         // reads, because an entry is narrower than a row.
         let empty = if seek_len == 0 {
-            self.emit_jump(Instruction::new(Opcode::Rewind, index_cursor as i32, -1, 0))
+            self.emit_jump(Instruction::new(
+                if reverse {
+                    Opcode::Last
+                } else {
+                    Opcode::Rewind
+                },
+                index_cursor as i32,
+                -1,
+                0,
+            ))
         } else {
             self.emit_jump(
                 Instruction::new(opcode, index_cursor as i32, -1, key as i32)
@@ -2458,18 +2537,27 @@ impl Compiler {
         if !equalities.is_empty() {
             done.push(
                 self.emit_jump(
-                    Instruction::new(Opcode::IdxGt, index_cursor as i32, -1, key as i32)
-                        .with_p5(equalities.len() as u16),
+                    Instruction::new(
+                        if reverse {
+                            Opcode::IdxLt
+                        } else {
+                            Opcode::IdxGt
+                        },
+                        index_cursor as i32,
+                        -1,
+                        key as i32,
+                    )
+                    .with_p5(equalities.len() as u16),
                 ),
             );
         }
-        if let Some(bound) = &high {
-            let high_key = self.register_block(equalities.len().saturating_add(1));
+        if let Some(bound) = until {
+            let stop_key = self.register_block(equalities.len().saturating_add(1));
             for index in 0..equalities.len() {
                 self.emit(Instruction::new(
                     Opcode::Copy,
                     key.saturating_add(index as u32) as i32,
-                    high_key.saturating_add(index as u32) as i32,
+                    stop_key.saturating_add(index as u32) as i32,
                     0,
                 ));
             }
@@ -2477,24 +2565,41 @@ impl Compiler {
             self.emit(Instruction::new(
                 Opcode::Copy,
                 register as i32,
-                high_key.saturating_add(equalities.len() as u32) as i32,
+                stop_key.saturating_add(equalities.len() as u32) as i32,
                 0,
             ));
             let length = equalities.len().saturating_add(1);
-            self.apply_index_affinity(body, level, columns, high_key, length)?;
-            let opcode = if bound.kind == BoundKind::Less {
-                Opcode::IdxGe
-            } else {
-                Opcode::IdxGt
+            self.apply_index_affinity(body, level, columns, stop_key, length)?;
+            let opcode = match (reverse, bound.kind) {
+                (false, BoundKind::Less) => Opcode::IdxGe,
+                (false, _) => Opcode::IdxGt,
+                (true, BoundKind::Greater) => Opcode::IdxLe,
+                (true, _) => Opcode::IdxLt,
             };
             done.push(
                 self.emit_jump(
-                    Instruction::new(opcode, index_cursor as i32, -1, high_key as i32)
+                    Instruction::new(opcode, index_cursor as i32, -1, stop_key as i32)
                         .with_p5(length as u16),
                 ),
             );
         }
         let mut skip: Vec<Label> = Vec::new();
+        // A range never matches a NULL: `k < 5` is unknown for a NULL k, not
+        // true. Seeking past them covers the common case at no per-row cost,
+        // but only in one of the four combinations of direction and key order,
+        // so the guard is what actually makes it right - and a walk that
+        // reaches a NULL from the far end has no seek that could have skipped
+        // it. One read of an index column the entry already holds.
+        if low.is_some() || high.is_some() {
+            let value = self.register();
+            self.emit(Instruction::new(
+                Opcode::IdxColumn,
+                index_cursor as i32,
+                equalities.len() as i32,
+                value as i32,
+            ));
+            skip.push(self.emit_jump(Instruction::new(Opcode::IfNull, value as i32, -1, 0)));
+        }
         if covering {
             // The entry holds everything the query reads, so there is no row
             // to fetch - which is the whole of what makes a covering path
@@ -2537,7 +2642,12 @@ impl Compiler {
         for label in skip {
             self.patch_here(label);
         }
-        let more = self.emit_jump(Instruction::new(Opcode::Next, index_cursor as i32, -1, 0));
+        let more = self.emit_jump(Instruction::new(
+            if reverse { Opcode::Prev } else { Opcode::Next },
+            index_cursor as i32,
+            -1,
+            0,
+        ));
         self.patch(more, start);
         for label in done {
             self.patch_here(label);

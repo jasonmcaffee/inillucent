@@ -184,9 +184,14 @@ fn check_operand_ranges(program: &Program, address: usize, problems: &mut Vec<Ve
         | Opcode::Gosub
         | Opcode::Return => registers.push((instruction.p1, "operand")),
         Opcode::SeekRowid => registers.push((instruction.p3, "key")),
-        Opcode::SeekGe | Opcode::SeekGt | Opcode::IdxGe | Opcode::IdxGt => {
-            blocks.push((instruction.p3, i32::from(instruction.p5)))
-        }
+        Opcode::SeekGe
+        | Opcode::SeekGt
+        | Opcode::SeekLe
+        | Opcode::SeekLt
+        | Opcode::IdxGe
+        | Opcode::IdxGt
+        | Opcode::IdxLe
+        | Opcode::IdxLt => blocks.push((instruction.p3, i32::from(instruction.p5))),
         Opcode::ResultRow | Opcode::ApplyAffinity => blocks.push((instruction.p1, instruction.p2)),
         Opcode::VFilter => blocks.push((instruction.p3, i32::from(instruction.p5))),
         Opcode::VColumn => registers.push((instruction.p3, "destination")),
@@ -329,6 +334,8 @@ fn check_cursors(program: &Program, problems: &mut Vec<VerifyError>) {
             Opcode::IdxRowid
             | Opcode::IdxGe
             | Opcode::IdxGt
+            | Opcode::IdxLe
+            | Opcode::IdxLt
             | Opcode::IdxColumn
             | Opcode::IdxInsert
             | Opcode::IdxDelete
@@ -575,9 +582,14 @@ fn reads_of(program: &Program, address: usize) -> Vec<u32> {
         | Opcode::DecrJumpZero
         | Opcode::Return => vec![instruction.p1.max(0) as u32],
         Opcode::SeekRowid => vec![instruction.p3.max(0) as u32],
-        Opcode::SeekGe | Opcode::SeekGt | Opcode::IdxGe | Opcode::IdxGt => {
-            block(instruction.p3, instruction.p5 as i32)
-        }
+        Opcode::SeekGe
+        | Opcode::SeekGt
+        | Opcode::SeekLe
+        | Opcode::SeekLt
+        | Opcode::IdxGe
+        | Opcode::IdxGt
+        | Opcode::IdxLe
+        | Opcode::IdxLt => block(instruction.p3, instruction.p5 as i32),
         Opcode::ResultRow | Opcode::ApplyAffinity => block(instruction.p1, instruction.p2),
         Opcode::Function
         | Opcode::Pattern

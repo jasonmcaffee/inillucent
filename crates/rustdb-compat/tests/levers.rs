@@ -81,6 +81,13 @@ const COVERING_READS: [&str; 3] = [
     "SELECT category, count(*) FROM main_table WHERE category BETWEEN 2 AND 8 GROUP BY category",
 ];
 
+/// The reads the ordered-walk lever is about.
+const ORDERED_READS: [&str; 3] = [
+    "SELECT id FROM main_table ORDER BY id DESC LIMIT 50",
+    "SELECT id FROM main_table WHERE id <= 900 ORDER BY id DESC LIMIT 20",
+    "SELECT key FROM main_table WHERE key BETWEEN 100 AND 300 ORDER BY key",
+];
+
 /// The writes the indexed-write lever is about.
 const INDEXED_WRITES: [&str; 3] = [
     "UPDATE main_table SET category = category + 1 WHERE key BETWEEN 10 AND 40",
@@ -113,6 +120,45 @@ fn the_covering_index_arm_changes_the_plan_and_not_the_answer() {
         );
         assert_eq!(
             off & Levers::COVERING_INDEX,
+            0,
+            "the lever should be gone with it off: {sql}"
+        );
+        assert_eq!(
+            with, without,
+            "the two arms disagree about the answer: {sql}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Turning the ordered-walk lever off changes the plan and not the answer.
+///
+/// This one is the most dangerous of the three to get wrong, because its
+/// failure is silent: rows in the wrong order look exactly like rows.
+#[test]
+fn the_ordered_walk_arm_changes_the_plan_and_not_the_answer() {
+    let directory = std::env::temp_dir().join("rustdb-levers-ordered");
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("the scratch directory is made");
+    let database = fixture(&directory.join("arm.db"));
+    let connection = database.connect().expect("it connects");
+
+    for sql in ORDERED_READS {
+        connection.disable_optimizations(0);
+        let on = used(&connection, sql);
+        let with = answer(&connection, sql);
+
+        connection.disable_optimizations(Levers::ORDERED_WALK);
+        let off = used(&connection, sql);
+        let without = answer(&connection, sql);
+
+        assert_eq!(
+            on & Levers::ORDERED_WALK,
+            Levers::ORDERED_WALK,
+            "the lever should be used with it on: {sql}"
+        );
+        assert_eq!(
+            off & Levers::ORDERED_WALK,
             0,
             "the lever should be gone with it off: {sql}"
         );
@@ -205,7 +251,7 @@ fn an_unknown_lever_is_ignored_rather_than_stored() {
     assert_eq!(levers.disabled(), Levers::EVERY);
     assert_eq!(
         levers.names_disabled(),
-        vec!["covering-index", "indexed-write"]
+        vec!["covering-index", "indexed-write", "ordered-walk"]
     );
     assert!(Levers::all().names_disabled().is_empty());
     assert!(Levers::all().has(Levers::COVERING_INDEX));

@@ -100,9 +100,10 @@ fn parse_levers(names: &str) -> Result<u32, String> {
             "all" => Levers::EVERY,
             "covering-index" => Levers::COVERING_INDEX,
             "indexed-write" => Levers::INDEXED_WRITE,
+            "ordered-walk" => Levers::ORDERED_WALK,
             other => {
                 return Err(format!(
-                    "unknown lever `{other}`; the levers are covering-index, indexed-write, all"
+                    "unknown lever `{other}`; the levers are covering-index, indexed-write, \n                     ordered-walk, all"
                 ))
             }
         };

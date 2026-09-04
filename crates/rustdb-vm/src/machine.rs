@@ -615,11 +615,11 @@ impl Machine {
                 let pager = self.pager_for_cursor(instruction.p1, databases)?;
                 self.seek_rowid(instruction, pager)
             }
-            Opcode::SeekGe | Opcode::SeekGt => {
+            Opcode::SeekGe | Opcode::SeekGt | Opcode::SeekLe | Opcode::SeekLt => {
                 let pager = self.pager_for_cursor(instruction.p1, databases)?;
                 self.seek(instruction, pager)
             }
-            Opcode::IdxGe | Opcode::IdxGt => {
+            Opcode::IdxGe | Opcode::IdxGt | Opcode::IdxLe | Opcode::IdxLt => {
                 let pager = self.pager_for_cursor(instruction.p1, databases)?;
                 self.index_bound(instruction, pager)
             }
@@ -1901,7 +1901,16 @@ impl Machine {
 
     /// Positions a cursor at the start of a range.
     fn seek(&mut self, instruction: &Instruction, pager: &mut Pager) -> DbResult<Flow> {
-        let strict = instruction.opcode == Opcode::SeekGt;
+        let strict = matches!(instruction.opcode, Opcode::SeekGt | Opcode::SeekLt);
+        // Which way the walk that follows runs. The two directions are exact
+        // mirrors: `Le` lands on the last entry at or before the key and steps
+        // back, where `Ge` lands on the first at or after it and steps on.
+        let backwards = matches!(instruction.opcode, Opcode::SeekLe | Opcode::SeekLt);
+        let bias = if backwards {
+            SeekBias::AtOrBefore
+        } else {
+            SeekBias::AtOrAfter
+        };
         let count = i32::from(instruction.p5);
         let key = self.block(instruction.p3, count);
         let Some(Some(slot)) = self.cursors.get_mut(instruction.p1.max(0) as usize) else {
@@ -1911,28 +1920,28 @@ impl Machine {
         if !slot.is_index {
             let rowid = key.first().map(cast::integer_value).unwrap_or(0);
             // `> n` on a table cursor is `>= n + 1`, because a rowid is an
-            // integer and there is nothing between n and n + 1.
-            let target = if strict {
-                rowid.saturating_add(1)
-            } else {
-                rowid
+            // integer and there is nothing between n and n + 1. Backwards, the
+            // same reasoning gives `< n` as `<= n - 1`.
+            let target = match (strict, backwards) {
+                (true, false) => rowid.saturating_add(1),
+                (true, true) => rowid.saturating_sub(1),
+                (false, _) => rowid,
             };
-            let found = slot.cursor.seek_rowid(pager, target, SeekBias::AtOrAfter)?;
+            let found = slot.cursor.seek_rowid(pager, target, bias)?;
             if !found {
                 return Ok(Flow::Jump(instruction.p2.max(0) as usize));
             }
             return Ok(Flow::Next);
         }
         let borrowed: Vec<Value<'_>> = key.clone();
-        let exact = slot
-            .cursor
-            .seek_index(pager, &borrowed, SeekBias::AtOrAfter)?;
+        let exact = slot.cursor.seek_index(pager, &borrowed, bias)?;
         if !slot.cursor.is_positioned() {
             return Ok(Flow::Jump(instruction.p2.max(0) as usize));
         }
         if exact && strict {
             // The seek landed on an equal entry and the range excludes it, so
-            // walk forward past every entry equal on the probed prefix.
+            // walk past every entry equal on the probed prefix - in whichever
+            // direction the walk is going to run.
             loop {
                 let payload = slot.cursor.payload(pager, &self.limits)?;
                 let record = RecordRef::parse_with_limits(&payload, self.encoding, &self.limits)?;
@@ -1942,7 +1951,12 @@ impl Machine {
                     break;
                 }
                 slot.moved();
-                if !slot.cursor.next(pager)? {
+                let more = if backwards {
+                    slot.cursor.previous(pager)?
+                } else {
+                    slot.cursor.next(pager)?
+                };
+                if !more {
                     return Ok(Flow::Jump(instruction.p2.max(0) as usize));
                 }
             }
@@ -1965,11 +1979,14 @@ impl Machine {
         let payload = slot.cursor.payload(pager, &limits)?;
         let record = RecordRef::parse_with_limits(&payload, encoding, &limits)?;
         let ordering = rustdb_value::record::compare_values_to_record(&key, &record, &slot.key)?;
-        // `ordering` compares the probe against the entry, so an entry past the
-        // bound makes the probe compare Less.
+        // `ordering` compares the probe against the entry, so an entry past a
+        // *high* bound makes the probe compare Less - and an entry past a *low*
+        // one, which is where a backward walk ends, makes it compare Greater.
         let past = match instruction.opcode {
             Opcode::IdxGe => ordering != std::cmp::Ordering::Greater,
-            _ => ordering == std::cmp::Ordering::Less,
+            Opcode::IdxGt => ordering == std::cmp::Ordering::Less,
+            Opcode::IdxLe => ordering != std::cmp::Ordering::Less,
+            _ => ordering == std::cmp::Ordering::Greater,
         };
         if past {
             return Ok(Flow::Jump(instruction.p2.max(0) as usize));
