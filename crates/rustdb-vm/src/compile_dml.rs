@@ -1605,6 +1605,9 @@ impl Compiler {
         if insert.table.kind == TableKind::View {
             return self.emit_view_insert(insert);
         }
+        if insert.table.module.is_some() {
+            return self.emit_virtual_insert(insert);
+        }
         let writer = self.open_for_write(&insert.table, insert.target_source);
         match &insert.source {
             BoundInsertSource::Values(rows) => {
@@ -1685,6 +1688,9 @@ impl Compiler {
         if let Some(rows) = delete.view_rows.as_ref() {
             return self.emit_view_write(&delete.table, rows, &delete.triggers, None);
         }
+        if delete.table.module.is_some() {
+            return self.emit_virtual_delete(delete);
+        }
         if delete.table.without_rowid {
             return self.emit_keyed_write(
                 &delete.table,
@@ -1760,6 +1766,9 @@ impl Compiler {
                 &update.triggers,
                 Some(&update.assignments),
             );
+        }
+        if update.table.module.is_some() {
+            return self.emit_virtual_update(update);
         }
         if update.table.without_rowid {
             return self.emit_keyed_write(

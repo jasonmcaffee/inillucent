@@ -25,13 +25,6 @@ use rustdb_value::Value;
 
 use crate::pragma::{PragmaSpec, REGISTER};
 
-/// How many hidden columns a pragma function declares after its own.
-///
-/// They are last rather than first because a pragma's own columns may include
-/// one called `schema` - `pragma_table_list` does - and a hidden column of the
-/// same name in front of it would shadow the answer with the argument.
-const HIDDEN_COLUMNS: usize = 2;
-
 /// The plan bit that says an argument was supplied.
 const HAS_ARGUMENT: i32 = 1;
 /// The plan bit that says a schema was supplied.
@@ -294,7 +287,10 @@ mod tests {
         let columns = &table.declaration().columns;
         assert_eq!(columns[0].name, b"cid");
         assert!(!columns[0].hidden);
-        let hidden = columns.len().saturating_sub(HIDDEN_COLUMNS);
+        // The two hidden columns are last, because a pragma's own columns may
+        // include one called `schema` - `pragma_table_list` does - and a
+        // hidden one in front of it would shadow the answer with the argument.
+        let hidden = columns.len().saturating_sub(2);
         assert_eq!(columns[hidden].name, b"arg");
         assert!(columns[hidden].hidden);
         assert_eq!(columns[hidden + 1].name, b"schema");

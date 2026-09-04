@@ -15,7 +15,11 @@ use rustdb_session::connection::{OpenOptions, SessionDatabase};
 /// Reads SQL from standard input, runs each statement, and prints the outcome.
 fn main() {
     let path = std::env::args().nth(1).unwrap_or_else(|| ":memory:".into());
-    let _ = std::fs::remove_file(&path);
+    // A second argument means "open what is there", which is how a file the
+    // other engine wrote is read back.
+    if std::env::args().nth(2).is_none() {
+        let _ = std::fs::remove_file(&path);
+    }
     let database =
         SessionDatabase::open_with_options(&path, OpenOptions::default()).expect("opens");
     let connection = database.connect().expect("connects");

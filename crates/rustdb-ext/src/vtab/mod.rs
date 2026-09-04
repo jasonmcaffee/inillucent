@@ -19,6 +19,7 @@
 //! assuming.
 
 pub mod json_each;
+pub mod rtree;
 pub mod series;
 
 use rustdb_base::limits::Limits;

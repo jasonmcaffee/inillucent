@@ -31,6 +31,7 @@
 
 pub mod json;
 pub mod registry;
+pub mod shadow;
 pub mod vtab;
 
 /// The implementation phase that filled this crate in, as named by the TDD.
