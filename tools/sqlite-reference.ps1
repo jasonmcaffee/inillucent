@@ -74,5 +74,16 @@ Write-Host 'building the oracle driver'
 & cmd.exe /c $command
 if ($LASTEXITCODE -ne 0) { throw 'the oracle driver failed to build' }
 
+# The performance scorecard's SQLite arm. It reads the same plan file the
+# rust-db arm reads, so the fairness contract is one copy of the SQL rather than
+# two that are meant to agree.
+$bench = Join-Path $root 'compat/oracle/sqlite_bench.c'
+$benchOutput = Join-Path $refDir 'sqlite-bench.exe'
+$benchCommand = "call `"$vcvars`" >nul && cd /d `"$refDir`" && cl /nologo /O2 /MD $defines /I `"$srcDir`" `"$bench`" `"$srcDir\sqlite3.c`" /Fe:`"$benchOutput`" /link /INCREMENTAL:NO"
+Write-Host 'building the benchmark driver'
+& cmd.exe /c $benchCommand
+if ($LASTEXITCODE -ne 0) { throw 'the benchmark driver failed to build' }
+
 Write-Host "oracle: $output"
+Write-Host "bench: $benchOutput"
 Write-Host "set RUSTDB_SQLITE_ORACLE=$output to run the differential tests"

@@ -680,8 +680,26 @@ fn delete_at(pager: &mut Pager, tree: &Tree, path: Vec<Step>) -> DbResult<()> {
     let layout = read_layout(pager, target.page)?;
     if layout.kind.is_leaf() {
         remove_cell_at(pager, target.page, target.slot)?;
-        let content = gather_page(pager, target.page)?;
         let depth = path.len().saturating_sub(1);
+        // `remove_cell_at` has already edited the page in place, so the page on
+        // disk is correct. The only question left is whether it is now empty
+        // enough to be worth merging with a neighbour, and that is a comparison
+        // of two integers the page header already knows.
+        //
+        // Reading it that way rather than through `gather_page` is what makes a
+        // delete cost a memmove instead of a page rebuild. Gathering copies
+        // every cell body into its own allocation and `settle` then writes the
+        // whole page back from them: on an index leaf holding three hundred
+        // entries that is three hundred allocations to remove one, which
+        // measured at 29 microseconds a delete and made an `UPDATE` of one row
+        // with two indexes cost 145 - against the reference's 30.
+        if !is_underfull(pager, target.page, depth)? {
+            if depth == 0 {
+                return collapse_root(pager, tree);
+            }
+            return ptrmap::refresh_btree_page(pager, target.page);
+        }
+        let content = gather_page(pager, target.page)?;
         return settle(pager, tree, &path, depth, content);
     }
 
@@ -815,6 +833,54 @@ fn settle(
         return Ok(());
     }
     balance(pager, tree, path, depth, content)
+}
+
+/// Reports whether a page now holds too little to stand on its own.
+///
+/// The same test `settle` makes, made against the page rather than against a
+/// gathered copy of it. The two measures agree exactly: `PageContent::size` is
+/// the sum of every cell's footprint plus two bytes of pointer each, and
+/// `used_bytes` is that same sum plus the header - so subtracting the header
+/// gives the number `settle` would have computed.
+///
+/// The root is never underfull: it has no sibling to merge with, and a root
+/// that emptied is handled by `collapse_root` instead.
+/// @param pager - the pager holding the page
+/// @param page - the page that just lost a cell
+/// @param depth - how far down the path the page sits, zero being the root
+fn is_underfull(pager: &mut Pager, page: PageId, depth: usize) -> DbResult<bool> {
+    if depth == 0 {
+        return Ok(false);
+    }
+    let layout = read_layout(pager, page)?;
+    let capacity = capacity_of(pager, page, layout.kind)?;
+    let pin = pager.get_page(page)?;
+    let view = BTreePage::new(pin.bytes(), &layout);
+    // What `settle` calls the content's size is everything on the page except
+    // its header, and that is the capacity minus what is free - which the
+    // freeblock chain, the fragment count and the gap already say. Counting it
+    // the other way round, by decoding every cell, is exact and costs four
+    // microseconds on a full index leaf; this is exact too and costs a walk of
+    // a chain that is almost always empty.
+    //
+    // The two agree whenever every cell is at least four bytes, because that
+    // is the point below which a cell's *footprint* stops being its length.
+    // Every cell any of the four page kinds can hold is longer than that, and
+    // the debug build checks it rather than the comment asserting it.
+    let free = edit::free_bytes(&view)?;
+    let size = capacity.saturating_sub(free);
+    #[cfg(debug_assertions)]
+    {
+        let counted = edit::used_bytes(&view)?.saturating_sub(layout.kind.header_len());
+        debug_assert_eq!(
+            counted,
+            size,
+            "page {} accounts for {counted} bytes by cell and {size} by free space",
+            page.get()
+        );
+    }
+    drop(pin);
+    Ok(size.saturating_mul(UNDERFULL_DENOMINATOR) < capacity.saturating_mul(UNDERFULL_NUMERATOR))
 }
 
 /// Lays a page and its siblings out again so that the content fits.

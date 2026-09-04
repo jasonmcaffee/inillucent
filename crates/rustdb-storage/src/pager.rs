@@ -1078,12 +1078,22 @@ impl Pager {
             database: self.database,
             page,
         };
-        self.cache.publish(
+        // The page was just written by one of the `edit` primitives, so its
+        // layout is known here and re-deriving it on the next read would be
+        // this crate proving its own output to itself. A page that is not a
+        // B-tree page at all - the header, a freelist page, an overflow page -
+        // has no layout to carry, and gets none.
+        let usable = self.usable_size()?;
+        let layout = crate::btree::PageLayout::parse_edited(buffer.as_slice(), page, usable)
+            .ok()
+            .map(std::sync::Arc::new);
+        self.cache.publish_with(
             key,
             buffer,
             PageState::Dirty {
                 before_image_saved: true,
             },
+            layout,
         )?;
         self.dirty.insert(page.get());
         if self.state == PagerState::WriterLocked {

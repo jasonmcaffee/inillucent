@@ -33,6 +33,7 @@ pub mod manifest;
 pub mod model;
 pub mod obligations;
 pub mod oracle;
+pub mod perf;
 pub mod report;
 pub mod results;
 pub mod slt;

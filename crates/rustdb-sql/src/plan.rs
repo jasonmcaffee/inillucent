@@ -920,6 +920,65 @@ fn binary_constraint(op: BinaryOp) -> Option<crate::vtab::ConstraintOp> {
     })
 }
 
+/// Chooses the access path a write's collection pass should walk.
+///
+/// An `UPDATE` or a `DELETE` finds the rows it will change before it changes
+/// any of them - the two passes are what stop a write from tripping over its
+/// own edits while it walks the tree it is editing. What the first pass had no
+/// way to say, until this existed, was *which* rows to look at: it rewound the
+/// table and read all of them, so `DELETE FROM t WHERE id = ?` visited every
+/// row of `t` to find the one it was told about. On a five-thousand-row table
+/// that is sixty page reads and half a millisecond where the same predicate in
+/// a `SELECT` costs two page reads and ten microseconds.
+///
+/// The path chosen here is the same one the read planner would choose for the
+/// same predicate, and the caller keeps applying the whole `WHERE` clause
+/// afterwards. That is what makes this safe to add: a path can only narrow
+/// which rows are *visited*, and every row it visits is still tested. A path
+/// that wrongly excluded a row would be a bug, so the paths offered are only
+/// the ones whose bounds provably cover every row the predicate accepts.
+/// @param table - the table being written
+/// @param source_id - the statement-wide number of the term being written
+/// @param filter - the `WHERE` clause, when there is one
+pub fn write_path(table: &TableInfo, source_id: usize, filter: Option<&BoundExpr>) -> AccessPath {
+    let scan = AccessPath::TableScan { root: table.root };
+    if table.module.is_some() || table.without_rowid {
+        return scan;
+    }
+    let Some(filter) = filter else {
+        return scan;
+    };
+    let mut terms = Vec::new();
+    split_conjunction(filter, &mut terms);
+    let ids = [source_id];
+    let mut consumed = vec![false; terms.len()];
+    if let Some(path) = rowid_path(source_id, 0, &ids, table, &terms, &mut consumed) {
+        return path;
+    }
+    let source = BoundSource {
+        id: source_id,
+        rows: SourceRows::Table,
+        table: table.clone(),
+        alias: table.name.clone(),
+        join: JoinKind::Inner,
+        constraint: None,
+        suppressed: Vec::new(),
+    };
+    let mut consumed = vec![false; terms.len()];
+    let Some(path) = index_path(source_id, 0, &ids, &source, &terms, &mut consumed) else {
+        return scan;
+    };
+    // The same crossover the read planner uses: an index that has to fetch most
+    // of the table costs a second descent per row on top of the scan it was
+    // meant to replace.
+    let (index_cost, _) = path_cost(&source, &path);
+    let (scan_cost, _) = path_cost(&source, &scan);
+    if index_cost <= scan_cost {
+        return path;
+    }
+    scan
+}
+
 /// Returns a rowid equality or range path, when the predicates allow one.
 fn rowid_path(
     id: usize,

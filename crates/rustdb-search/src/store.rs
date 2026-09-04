@@ -150,7 +150,7 @@ impl Row {
         let mut eat = |bytes: &[u8]| {
             for byte in bytes {
                 hash ^= u64::from(*byte);
-                hash = hash.wrapping_mul(0x1000_0000_01b3);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
             }
         };
         for column in &self.columns {

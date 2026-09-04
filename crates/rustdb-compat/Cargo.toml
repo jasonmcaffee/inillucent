@@ -77,3 +77,15 @@ path = "src/bin/txnperf.rs"
 [[bin]]
 name = "rustdb-walperf"
 path = "src/bin/walperf.rs"
+
+[[bin]]
+name = "rustdb-scorecard"
+path = "src/bin/scorecard.rs"
+
+[[bin]]
+name = "rustdb-writeprofile"
+path = "src/bin/writeprofile.rs"
+
+[[bin]]
+name = "rustdb-storageprofile"
+path = "src/bin/storageprofile.rs"
