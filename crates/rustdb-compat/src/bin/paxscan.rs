@@ -321,8 +321,8 @@ fn scan(tree: &Tree, shape: Shape) -> DbResult<Aggregate> {
                 let (Some(key), Some(category)) = (key_bytes.next(), category_bytes.next()) else {
                     break;
                 };
-                sum_key = sum_key
-                    .wrapping_add(i64::from_le_bytes(key.try_into().unwrap_or([0; 8])));
+                sum_key =
+                    sum_key.wrapping_add(i64::from_le_bytes(key.try_into().unwrap_or([0; 8])));
                 let value = i64::from_le_bytes(category.try_into().unwrap_or([0; 8]));
                 if value > max_category {
                     max_category = value;

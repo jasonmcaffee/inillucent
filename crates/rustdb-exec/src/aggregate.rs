@@ -134,7 +134,8 @@ impl Accumulator {
                 self.count = self.count.saturating_add(rows as i64);
                 if self.is_real {
                     for chunk in bytes.chunks_exact(8) {
-                        self.real_sum += i64::from_le_bytes(chunk.try_into().unwrap_or([0; 8])) as f64;
+                        self.real_sum +=
+                            i64::from_le_bytes(chunk.try_into().unwrap_or([0; 8])) as f64;
                     }
                     return;
                 }
@@ -308,9 +309,18 @@ mod tests {
     #[test]
     fn empty_aggregates_follow_the_dialect() {
         assert!(matches!(fold(AggregateKind::Sum, &[]), OwnedDatum::Null));
-        assert!(matches!(fold(AggregateKind::Average, &[]), OwnedDatum::Null));
-        assert!(matches!(fold(AggregateKind::Minimum, &[]), OwnedDatum::Null));
-        assert!(matches!(fold(AggregateKind::Maximum, &[]), OwnedDatum::Null));
+        assert!(matches!(
+            fold(AggregateKind::Average, &[]),
+            OwnedDatum::Null
+        ));
+        assert!(matches!(
+            fold(AggregateKind::Minimum, &[]),
+            OwnedDatum::Null
+        ));
+        assert!(matches!(
+            fold(AggregateKind::Maximum, &[]),
+            OwnedDatum::Null
+        ));
         assert!(matches!(
             fold(AggregateKind::GroupConcat(",".into()), &[]),
             OwnedDatum::Null
@@ -319,7 +329,10 @@ mod tests {
             OwnedDatum::Real(number) => assert_eq!(number, 0.0),
             other => panic!("total of nothing was {other:?}"),
         }
-        assert!(matches!(fold(AggregateKind::Count, &[]), OwnedDatum::Int(0)));
+        assert!(matches!(
+            fold(AggregateKind::Count, &[]),
+            OwnedDatum::Int(0)
+        ));
         assert!(matches!(
             fold(AggregateKind::CountStar, &[]),
             OwnedDatum::Int(0)
@@ -468,12 +481,13 @@ mod tests {
             }
         }
         assert_eq!(
-            dense.finish().unwrap().borrow().compare(&per_row.finish().unwrap().borrow()),
+            dense
+                .finish()
+                .unwrap()
+                .borrow()
+                .compare(&per_row.finish().unwrap().borrow()),
             std::cmp::Ordering::Equal
         );
-        assert!(matches!(
-            dense.finish().unwrap(),
-            OwnedDatum::Int(124_750)
-        ));
+        assert!(matches!(dense.finish().unwrap(), OwnedDatum::Int(124_750)));
     }
 }

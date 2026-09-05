@@ -1,7 +1,7 @@
 //! The plan cache returns the same answers as no plan cache, and lets go of a
 //! program whenever something it was compiled against changes.
 //!
-//! Invariant under test: a cache hit is indistinguishable from a compile. That
+//! Invariant: a cache hit is indistinguishable from a compile. That
 //! is not a performance property, it is a correctness one, and it is the only
 //! interesting thing about a cache - the speed is easy and the staleness is
 //! where the bugs are. Every case here is a way the compiled program *should*
@@ -39,8 +39,8 @@ fn open(name: &str, setup: &[&str]) -> Database {
     let path = scratch(name);
     // A fresh file per run: the process id is in the name, so a second run does
     // not inherit the first one's schema and nothing has to be removed.
-    let database = Database::open_with_busy_timeout(&path, std::time::Duration::from_secs(5))
-        .expect("open");
+    let database =
+        Database::open_with_busy_timeout(&path, std::time::Duration::from_secs(5)).expect("open");
     let connection = database.connect().expect("connect");
     connection
         .execute_batch("PRAGMA journal_mode=delete")
@@ -79,10 +79,13 @@ fn rows(connection: &rustdb::Connection, sql: &str) -> Vec<String> {
 /// rather than an empty one.
 #[test]
 fn preparing_the_same_statement_twice_keeps_one_program() {
-    let database = open("preparing_twice", &[
-        "CREATE TABLE t(a INTEGER, b TEXT)",
-        "INSERT INTO t VALUES (1, 'one'), (2, 'two')",
-    ]);
+    let database = open(
+        "preparing_twice",
+        &[
+            "CREATE TABLE t(a INTEGER, b TEXT)",
+            "INSERT INTO t VALUES (1, 'one'), (2, 'two')",
+        ],
+    );
     let connection = database.connect().expect("connect");
     assert_eq!(connection.cached_plan_count(), 0);
     let first = rows(&connection, "SELECT a, b FROM t ORDER BY a");
@@ -105,10 +108,13 @@ fn preparing_the_same_statement_twice_keeps_one_program() {
 /// cached program read the wrong slot.
 #[test]
 fn a_schema_change_is_not_answered_from_the_cache() {
-    let database = open("schema_change", &[
-        "CREATE TABLE t(a INTEGER, b TEXT)",
-        "INSERT INTO t VALUES (1, 'one')",
-    ]);
+    let database = open(
+        "schema_change",
+        &[
+            "CREATE TABLE t(a INTEGER, b TEXT)",
+            "INSERT INTO t VALUES (1, 'one')",
+        ],
+    );
     let connection = database.connect().expect("connect");
     assert_eq!(rows(&connection, "SELECT * FROM t"), vec!["1|one"]);
     connection
@@ -123,11 +129,16 @@ fn a_schema_change_is_not_answered_from_the_cache() {
 /// the cache either.
 #[test]
 fn a_recreated_table_is_not_answered_from_the_cache() {
-    let database = open("recreated_table", &["CREATE TABLE t(a INTEGER)", "INSERT INTO t VALUES (1)"]);
+    let database = open(
+        "recreated_table",
+        &["CREATE TABLE t(a INTEGER)", "INSERT INTO t VALUES (1)"],
+    );
     let connection = database.connect().expect("connect");
     assert_eq!(rows(&connection, "SELECT * FROM t"), vec!["1"]);
     connection
-        .execute_batch("DROP TABLE t; CREATE TABLE t(x TEXT, y TEXT); INSERT INTO t VALUES ('p','q')")
+        .execute_batch(
+            "DROP TABLE t; CREATE TABLE t(x TEXT, y TEXT); INSERT INTO t VALUES ('p','q')",
+        )
         .expect("recreate");
     assert_eq!(rows(&connection, "SELECT * FROM t"), vec!["p|q"]);
 }
@@ -141,7 +152,10 @@ fn a_recreated_table_is_not_answered_from_the_cache() {
 /// keep failing to bind after `twice` had been registered.
 #[test]
 fn registering_a_function_drops_the_cached_programs() {
-    let database = open("function_registration", &["CREATE TABLE t(a INTEGER)", "INSERT INTO t VALUES (21)"]);
+    let database = open(
+        "function_registration",
+        &["CREATE TABLE t(a INTEGER)", "INSERT INTO t VALUES (21)"],
+    );
     let connection = database.connect().expect("connect");
     // Warm the cache with something that binds today.
     assert_eq!(rows(&connection, "SELECT a FROM t"), vec!["21"]);
@@ -174,10 +188,13 @@ fn registering_a_function_drops_the_cached_programs() {
 /// under BINARY does not keep comparing under BINARY.
 #[test]
 fn defining_a_collation_drops_the_cached_programs() {
-    let database = open("collation", &[
-        "CREATE TABLE t(a TEXT)",
-        "INSERT INTO t VALUES ('b'), ('A'), ('a')",
-    ]);
+    let database = open(
+        "collation",
+        &[
+            "CREATE TABLE t(a TEXT)",
+            "INSERT INTO t VALUES ('b'), ('A'), ('a')",
+        ],
+    );
     let connection = database.connect().expect("connect");
     assert_eq!(
         rows(&connection, "SELECT a FROM t ORDER BY a"),
@@ -258,10 +275,13 @@ fn the_cache_changes_no_answer() {
     ];
     let mut answers = Vec::new();
     for disabled in [0u32, rustdb::Levers::PLAN_CACHE] {
-        let database = open("cache_off", &[
-            "CREATE TABLE t(a INTEGER, b TEXT)",
-            "INSERT INTO t VALUES (1, 'one'), (2, 'two'), (3, 'two')",
-        ]);
+        let database = open(
+            "cache_off",
+            &[
+                "CREATE TABLE t(a INTEGER, b TEXT)",
+                "INSERT INTO t VALUES (1, 'one'), (2, 'two'), (3, 'two')",
+            ],
+        );
         let connection = database.connect().expect("connect");
         connection.disable_optimizations(disabled);
         let mut held = Vec::new();

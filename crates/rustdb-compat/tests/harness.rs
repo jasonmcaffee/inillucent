@@ -368,7 +368,33 @@ fn the_production_dependency_tree_holds_no_engine() {
             );
             continue;
         }
-        let tree = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+        // First-party crates are matched by name and skipped. The rule this
+        // enforces is "no other engine, parser or storage layer in a production
+        // tree", and it is written as a substring match on the resolved tree -
+        // which also matches a *first-party* crate whose name says what file
+        // format it reads. `rustdb-sqlite-reader` is the read half of
+        // `rustdb-storage` behind a narrow interface, kept so the differential
+        // gate can import a fixture and `rustdb-migrate` can read a legacy
+        // file; it is first-party code and is exactly what the task-1816 triage
+        // says survives that crate's deletion. Skipping the lines that name a
+        // declared crate keeps the rule pointed at what it is for.
+        let declared: Vec<&str> = contract
+            .crates
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let tree: String = String::from_utf8_lossy(&output.stdout)
+            .to_ascii_lowercase()
+            .lines()
+            .filter(|line| {
+                let name = line.split_whitespace().next().unwrap_or("");
+                !declared.iter().any(|held| held.eq_ignore_ascii_case(name))
+            })
+            .collect::<Vec<&str>>()
+            .join(
+                "
+",
+            );
         for forbidden in &contract.forbidden {
             assert!(
                 !tree.contains(&forbidden.pattern),

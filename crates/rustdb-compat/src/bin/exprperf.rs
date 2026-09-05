@@ -60,7 +60,9 @@ fn main() {
 fn run(rounds: u32) -> DbResult<()> {
     // Two integer columns and one text column, dense, as a scan of a clean leaf
     // produces them.
-    let keys: Vec<i64> = (0..ROWS as i64).map(|n| (n * 2_654_435_761) % 100_000).collect();
+    let keys: Vec<i64> = (0..ROWS as i64)
+        .map(|n| (n * 2_654_435_761) % 100_000)
+        .collect();
     let categories: Vec<i64> = (0..ROWS as i64).map(|n| n % 64).collect();
     let key_bytes: Vec<u8> = keys.iter().flat_map(|value| value.to_le_bytes()).collect();
     let category_bytes: Vec<u8> = categories
@@ -190,13 +192,10 @@ fn run(rounds: u32) -> DbResult<()> {
         })?;
         let speedup = slow_ns / fast_ns.max(f64::MIN_POSITIVE);
         speedups.push(speedup);
-        println!(
-            "  {name:<32} {fast_ns:>11.2}  {slow_ns:>11.2}  {speedup:>7.2}x  {matched}"
-        );
+        println!("  {name:<32} {fast_ns:>11.2}  {slow_ns:>11.2}  {speedup:>7.2}x  {matched}");
     }
-    let geomean = (speedups.iter().map(|value| value.ln()).sum::<f64>()
-        / speedups.len() as f64)
-        .exp();
+    let geomean =
+        (speedups.iter().map(|value| value.ln()).sum::<f64>() / speedups.len() as f64).exp();
     println!();
     println!("  geometric mean speedup of compilation over interpretation: {geomean:.2}x");
     Ok(())
@@ -322,17 +321,12 @@ fn interpret<'p>(expr: &Expr, batch: &Batch<'p>, row: usize) -> DbResult<Datum<'
         Expr::IsNotNull(inner) => Datum::Int(i64::from(!interpret(inner, batch, row)?.is_null())),
         Expr::Length(inner) => match interpret(inner, batch, row)? {
             Datum::Null => Datum::Null,
-            Datum::Text(bytes) => Datum::Int(
-                bytes
-                    .iter()
-                    .filter(|byte| (**byte & 0xC0) != 0x80)
-                    .count() as i64,
-            ),
+            Datum::Text(bytes) => {
+                Datum::Int(bytes.iter().filter(|byte| (**byte & 0xC0) != 0x80).count() as i64)
+            }
             Datum::Blob(bytes) => Datum::Int(bytes.len() as i64),
             Datum::Int(number) => Datum::Int(number.to_string().len() as i64),
-            Datum::Real(number) => {
-                Datum::Int(rustdb_exec::expr::format_real(number).len() as i64)
-            }
+            Datum::Real(number) => Datum::Int(rustdb_exec::expr::format_real(number).len() as i64),
         },
     })
 }

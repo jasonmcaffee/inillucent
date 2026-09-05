@@ -95,10 +95,7 @@ impl<'p> Vector<'p> {
     /// bytes with `chunks_exact(8)` and pay nothing per row.
     pub fn dense_int_bytes(&self) -> Option<&'p [u8]> {
         match self {
-            Vector::Int64 {
-                bytes,
-                class: None,
-            } => Some(bytes),
+            Vector::Int64 { bytes, class: None } => Some(bytes),
             _ => None,
         }
     }
@@ -107,10 +104,7 @@ impl<'p> Vector<'p> {
     /// with no NULLs.
     pub fn dense_real_bytes(&self) -> Option<&'p [u8]> {
         match self {
-            Vector::Float64 {
-                bytes,
-                class: None,
-            } => Some(bytes),
+            Vector::Float64 { bytes, class: None } => Some(bytes),
             _ => None,
         }
     }
@@ -249,13 +243,7 @@ mod tests {
     #[test]
     fn a_clean_integer_column_is_dense() {
         let rows: Vec<Vec<Datum<'static>>> = (0..100)
-            .map(|n| {
-                vec![
-                    Datum::Int(n),
-                    Datum::Int(n * 7),
-                    Datum::Text(b"label"),
-                ]
-            })
+            .map(|n| vec![Datum::Int(n), Datum::Int(n * 7), Datum::Text(b"label")])
             .collect();
         let page = leaf_page(rows);
         let leaf = LeafRef::parse(&page).unwrap();
@@ -276,7 +264,11 @@ mod tests {
             .map(|n| {
                 vec![
                     Datum::Int(n),
-                    if n == 17 { Datum::Null } else { Datum::Int(n * 7) },
+                    if n == 17 {
+                        Datum::Null
+                    } else {
+                        Datum::Int(n * 7)
+                    },
                     Datum::Text(b"label"),
                 ]
             })
@@ -313,7 +305,12 @@ mod tests {
     /// A selection vector renumbers the live rows without moving any data.
     #[test]
     fn a_selection_vector_renumbers_without_copying() {
-        let values = [Datum::Int(10), Datum::Int(20), Datum::Int(30), Datum::Int(40)];
+        let values = [
+            Datum::Int(10),
+            Datum::Int(20),
+            Datum::Int(30),
+            Datum::Int(40),
+        ];
         let selection = [1u32, 3];
         let batch = Batch {
             rows: 4,

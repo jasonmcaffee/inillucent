@@ -327,7 +327,9 @@ impl Tree {
         });
         let replaces = rows
             .get(at)
-            .map(|held| compare_rows(&borrow_row(held), row, key_columns) == std::cmp::Ordering::Equal)
+            .map(|held| {
+                compare_rows(&borrow_row(held), row, key_columns) == std::cmp::Ordering::Equal
+            })
             .unwrap_or(false);
         if replaces {
             if let Some(slot) = rows.get_mut(at) {
@@ -413,9 +415,7 @@ impl Tree {
                             produced.push(page);
                             at = at.saturating_add(packed);
                         }
-                        Packed::RowTooLarge => {
-                            return Err(misuse("a row is larger than a page"))
-                        }
+                        Packed::RowTooLarge => return Err(misuse("a row is larger than a page")),
                     }
                 }
                 self.pages.splice(index..index.saturating_add(1), produced);
@@ -735,7 +735,12 @@ mod tests {
         let tree = Tree::bulk_build(8192, 1, columns(), 1, &rows).unwrap();
         for n in 0..2_000i64 {
             let found = tree.point(&[Datum::Int(n * 2)]).unwrap();
-            assert_eq!(found.unwrap()[1].as_int().unwrap(), n * 2 * 3, "key {}", n * 2);
+            assert_eq!(
+                found.unwrap()[1].as_int().unwrap(),
+                n * 2 * 3,
+                "key {}",
+                n * 2
+            );
             assert!(tree.point(&[Datum::Int(n * 2 + 1)]).unwrap().is_none());
         }
         assert!(tree.point(&[Datum::Int(-1)]).unwrap().is_none());
@@ -763,7 +768,11 @@ mod tests {
             let key = (next() % 800) as i64;
             if next() % 3 == 0 {
                 let removed = tree.delete(&[Datum::Int(key)]).unwrap();
-                assert_eq!(removed, model.remove(&key).is_some(), "step {step} key {key}");
+                assert_eq!(
+                    removed,
+                    model.remove(&key).is_some(),
+                    "step {step} key {key}"
+                );
             } else {
                 let payload = (next() % 100_000) as i64;
                 tree.insert(&[
@@ -871,12 +880,8 @@ mod tests {
     fn insert_replaces_an_existing_key() {
         let mut tree = Tree::new(8192, 1, columns(), 1).unwrap();
         tree.insert(&row(5)).unwrap();
-        tree.insert(&[
-            Datum::Int(5),
-            Datum::Int(999),
-            Datum::Text(b"replaced"),
-        ])
-        .unwrap();
+        tree.insert(&[Datum::Int(5), Datum::Int(999), Datum::Text(b"replaced")])
+            .unwrap();
         let rows = tree.rows().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0][1].as_int().unwrap(), 999);

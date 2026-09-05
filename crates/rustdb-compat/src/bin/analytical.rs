@@ -32,8 +32,8 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::process::{Command, ExitCode};
+use std::rc::Rc;
 use std::time::Instant;
 
 use rustdb_compat::newengine::ImportedDatabase;
@@ -91,7 +91,14 @@ fn main() -> ExitCode {
     let repeat = flag(&arguments, "--repeat")
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(default_repeat);
-    match run(&PathBuf::from(fixture), rounds, page_size, repeat, &scale, rows) {
+    match run(
+        &PathBuf::from(fixture),
+        rounds,
+        page_size,
+        repeat,
+        &scale,
+        rows,
+    ) {
         Ok(passed) => {
             if passed {
                 ExitCode::SUCCESS
@@ -148,10 +155,8 @@ fn run(
 
     // The plan file both arms read. Written once, so there is one copy of the
     // SQL and neither side can drift from it.
-    let plan_path = std::env::temp_dir().join(format!(
-        "rustdb-analytical-{}.plan",
-        std::process::id()
-    ));
+    let plan_path =
+        std::env::temp_dir().join(format!("rustdb-analytical-{}.plan", std::process::id()));
     std::fs::write(&plan_path, plan_file(repeat, scale, rows))
         .map_err(|error| format!("could not write the plan: {error}"))?;
 
@@ -563,10 +568,14 @@ fn plan_file(repeat: u32, scale: &str, rows: u32) -> String {
     let mut out = String::new();
     out.push_str("# read.analytical, Phase 1 gate. Both engines read this file.\n");
     out.push_str("version\t1\n");
-    out.push_str(&format!("scale	{scale}
-"));
-    out.push_str(&format!("rows	{rows}
-"));
+    out.push_str(&format!(
+        "scale	{scale}
+"
+    ));
+    out.push_str(&format!(
+        "rows	{rows}
+"
+    ));
     out.push_str("journal\tdelete\n");
     out.push_str("synchronous\tfull\n");
     out.push_str("page_size\t4096\n");

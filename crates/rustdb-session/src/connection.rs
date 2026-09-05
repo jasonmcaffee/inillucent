@@ -579,7 +579,10 @@ impl Connection {
 
     /// Returns how many compiled programs are held, for tests.
     pub fn cached_plan_count(&self) -> usize {
-        self.plans.try_borrow().map(|plans| plans.len()).unwrap_or(0)
+        self.plans
+            .try_borrow()
+            .map(|plans| plans.len())
+            .unwrap_or(0)
     }
 
     /// Switches planner optimizations off, by mask, for A/B measurement.
@@ -848,7 +851,8 @@ impl Connection {
             .state
             .try_borrow_mut()
             .map_err(|_| error::misuse("the connection is in use"))?;
-        let removed = std::sync::Arc::make_mut(&mut state.registry).unregister_function(name, arity);
+        let removed =
+            std::sync::Arc::make_mut(&mut state.registry).unregister_function(name, arity);
         drop(state);
         self.invalidate_plan_cache();
         Ok(removed)

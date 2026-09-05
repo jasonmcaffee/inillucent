@@ -254,7 +254,9 @@ impl<'p> LeafRef<'p> {
                 )));
             }
             if start % 8 != 0 {
-                return Err(corrupt(format!("mini-column {index} is not 8-byte aligned")));
+                return Err(corrupt(format!(
+                    "mini-column {index} is not 8-byte aligned"
+                )));
             }
         }
         let mut seen_exception = false;
@@ -262,7 +264,9 @@ impl<'p> LeafRef<'p> {
             seen_exception = seen_exception || self.column(index)?.any_exception()?;
         }
         if seen_exception != self.has_exceptions() {
-            return Err(corrupt("the exception flag disagrees with the class arrays"));
+            return Err(corrupt(
+                "the exception flag disagrees with the class arrays",
+            ));
         }
         for row in 1..self.row_count {
             let mut previous = Vec::with_capacity(self.key_columns);
@@ -354,7 +358,10 @@ impl<'p> LeafRef<'p> {
         let mut live = self.row_count;
         if self.has_tombstones() {
             let bitmap = self.tombstones()?;
-            let dead = bitmap.iter().map(|byte| byte.count_ones() as usize).sum::<usize>();
+            let dead = bitmap
+                .iter()
+                .map(|byte| byte.count_ones() as usize)
+                .sum::<usize>();
             live = live.saturating_sub(dead);
         }
         Ok(live.saturating_add(self.delta_count))
@@ -476,8 +483,10 @@ impl<'p> LeafRef<'p> {
                 .ok_or_else(|| corrupt("delta row runs past the page"))?;
             let mut cursor = 0usize;
             for column in 0..self.column_count {
-                let (_, used) = Datum::decode_tagged(row.get(cursor..).unwrap_or(&[]))
-                    .map_err(|_| corrupt(format!("delta row {index} column {column} is corrupt")))?;
+                let (_, used) =
+                    Datum::decode_tagged(row.get(cursor..).unwrap_or(&[])).map_err(|_| {
+                        corrupt(format!("delta row {index} column {column} is corrupt"))
+                    })?;
                 cursor = cursor.saturating_add(used);
             }
             if cursor != length {
@@ -622,7 +631,8 @@ impl<'p> LeafRef<'p> {
     /// This is what compaction, the property tests and the slow scan path all
     /// need, and it is deliberately the one place the merge is written.
     pub fn live(&self) -> DbResult<Vec<Vec<Datum<'p>>>> {
-        let mut rows: Vec<Vec<Datum<'p>>> = Vec::with_capacity(self.row_count.saturating_add(self.delta_count));
+        let mut rows: Vec<Vec<Datum<'p>>> =
+            Vec::with_capacity(self.row_count.saturating_add(self.delta_count));
         for row in 0..self.row_count {
             if self.is_tombstoned(row)? {
                 continue;
@@ -651,7 +661,11 @@ impl<'p> LeafRef<'p> {
 /// @param left - one row
 /// @param right - the other row
 /// @param key_columns - how many leading columns form the key
-pub fn compare_rows(left: &[Datum<'_>], right: &[Datum<'_>], key_columns: usize) -> std::cmp::Ordering {
+pub fn compare_rows(
+    left: &[Datum<'_>],
+    right: &[Datum<'_>],
+    key_columns: usize,
+) -> std::cmp::Ordering {
     for index in 0..key_columns {
         let (Some(a), Some(b)) = (left.get(index), right.get(index)) else {
             return std::cmp::Ordering::Equal;
@@ -805,9 +819,9 @@ impl<'p> MiniColumn<'p> {
             }
             ValueClass::Typed => match self.physical {
                 PhysicalType::Int64 => Ok(Datum::Int(self.int_unchecked(row)?)),
-                PhysicalType::Float64 => Ok(Datum::Real(f64::from_bits(
-                    self.int_unchecked(row)? as u64,
-                ))),
+                PhysicalType::Float64 => {
+                    Ok(Datum::Real(f64::from_bits(self.int_unchecked(row)? as u64)))
+                }
                 PhysicalType::Text | PhysicalType::Blob => {
                     let bytes = self.heap_slice(row)?;
                     Ok(if self.physical == PhysicalType::Text {
@@ -989,7 +1003,8 @@ impl LeafBuilder {
         // Lay the mini-columns out first so the directory can name them.
         let mut offsets = Vec::with_capacity(self.columns.len());
         let mut at = align8(
-            leaf_header::DIRECTORY.saturating_add(self.columns.len().saturating_mul(DIRECTORY_ENTRY)),
+            leaf_header::DIRECTORY
+                .saturating_add(self.columns.len().saturating_mul(DIRECTORY_ENTRY)),
         );
         for column in &self.columns {
             offsets.push(at);
@@ -1017,7 +1032,8 @@ impl LeafBuilder {
                     has_exceptions = true;
                 }
                 set_class(&mut page, base, row, class)?;
-                let slot = values_at.saturating_add(row.saturating_mul(column.physical.slot_width()));
+                let slot =
+                    values_at.saturating_add(row.saturating_mul(column.physical.slot_width()));
                 match class {
                     ValueClass::Null => {}
                     ValueClass::Typed => match column.physical {
@@ -1047,11 +1063,7 @@ impl LeafBuilder {
                                 .ok_or_else(|| misuse("the heap overflowed the page"))?;
                             target.copy_from_slice(bytes);
                             page::write_u32(&mut page, slot, heap_end as u32)?;
-                            page::write_u32(
-                                &mut page,
-                                slot.saturating_add(4),
-                                bytes.len() as u32,
-                            )?;
+                            page::write_u32(&mut page, slot.saturating_add(4), bytes.len() as u32)?;
                         }
                         PhysicalType::Any => {
                             heap_end = write_tagged(&mut page, heap_end, &value)?;
@@ -1075,7 +1087,11 @@ impl LeafBuilder {
         let delta_start = heap_end;
         page::write_u16(&mut page, leaf_header::ROW_COUNT, count as u16)?;
         page::write_u16(&mut page, leaf_header::DELTA_COUNT, 0)?;
-        page::write_u16(&mut page, leaf_header::COLUMN_COUNT, self.columns.len() as u16)?;
+        page::write_u16(
+            &mut page,
+            leaf_header::COLUMN_COUNT,
+            self.columns.len() as u16,
+        )?;
         page::write_u16(&mut page, leaf_header::KEY_COLUMNS, self.key_columns as u16)?;
         page::write_u32(&mut page, leaf_header::HEAP_START, heap_end as u32)?;
         page::write_u32(&mut page, leaf_header::DELTA_START, delta_start as u32)?;
@@ -1087,7 +1103,8 @@ impl LeafBuilder {
             .unwrap_or(0);
         page::write_u64(&mut page, leaf_header::LOW_FENCE, low_fence as u64)?;
         for (index, column) in self.columns.iter().enumerate() {
-            let entry = leaf_header::DIRECTORY.saturating_add(index.saturating_mul(DIRECTORY_ENTRY));
+            let entry =
+                leaf_header::DIRECTORY.saturating_add(index.saturating_mul(DIRECTORY_ENTRY));
             let type_slot = page
                 .get_mut(entry)
                 .ok_or_else(|| misuse("the directory does not fit"))?;
@@ -1320,7 +1337,11 @@ mod tests {
                     .map(|n| {
                         vec![
                             Datum::Int(n as i64),
-                            if n == null_at { Datum::Null } else { Datum::Int(1) },
+                            if n == null_at {
+                                Datum::Null
+                            } else {
+                                Datum::Int(1)
+                            },
                         ]
                     })
                     .collect();
@@ -1331,10 +1352,13 @@ mod tests {
                     !column.all_typed(),
                     "count {count} with a NULL at {null_at} claimed to be all typed"
                 );
-                let by_row = (0..count).all(|row| {
-                    matches!(column.class_at(row), Ok(ValueClass::Typed))
-                });
-                assert_eq!(column.all_typed(), by_row, "count {count} null at {null_at}");
+                let by_row =
+                    (0..count).all(|row| matches!(column.class_at(row), Ok(ValueClass::Typed)));
+                assert_eq!(
+                    column.all_typed(),
+                    by_row,
+                    "count {count} null at {null_at}"
+                );
             }
             let rows: Vec<Vec<Datum<'static>>> = (0..count)
                 .map(|n| vec![Datum::Int(n as i64), Datum::Int(1)])
@@ -1399,7 +1423,6 @@ mod tests {
         let rows = vec![vec![Datum::Int(1), Datum::Blob(&big)]];
         assert_eq!(builder.pack(&rows, 0.9).unwrap(), Packed::RowTooLarge);
     }
-
 
     /// Writes a delta area into an already-built page.
     ///
@@ -1502,7 +1525,10 @@ mod tests {
         assert!(!leaf.is_clean(), "a delta area leaves the fast path");
         assert_eq!(leaf.live_rows().unwrap(), 5);
         assert_eq!(leaf.delta_value(0, 0).unwrap().as_int(), Some(25));
-        assert_eq!(leaf.delta_value(0, 2).unwrap().as_bytes(), Some(b"delta-a".as_slice()));
+        assert_eq!(
+            leaf.delta_value(0, 2).unwrap().as_bytes(),
+            Some(b"delta-a".as_slice())
+        );
         assert_eq!(leaf.delta_value(1, 0).unwrap().as_int(), Some(5));
         assert!(leaf.delta_value(1, 1).unwrap().is_null());
         assert!(!leaf.delta_row(1).unwrap().is_empty());
@@ -1600,8 +1626,7 @@ mod tests {
     fn tombstones_are_read_only_when_they_exist() {
         let columns = vec![ColumnSpec::key(PhysicalType::Int64)];
         let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();
-        let rows: Vec<Vec<Datum<'static>>> =
-            (0..20).map(|n| vec![Datum::Int(n as i64)]).collect();
+        let rows: Vec<Vec<Datum<'static>>> = (0..20).map(|n| vec![Datum::Int(n as i64)]).collect();
         let page = builder.encode(&rows).unwrap();
         let leaf = LeafRef::parse(&page).unwrap();
         assert!(!leaf.has_tombstones());
@@ -1626,28 +1651,15 @@ mod tests {
     #[test]
     fn the_builder_refuses_impossible_leaves() {
         assert!(LeafBuilder::new(8192, 1, Vec::new(), 1).is_err());
-        assert!(LeafBuilder::new(
-            8192,
-            1,
-            vec![ColumnSpec::key(PhysicalType::Int64)],
-            0
-        )
-        .is_err());
-        assert!(LeafBuilder::new(
-            8192,
-            1,
-            vec![ColumnSpec::key(PhysicalType::Int64)],
-            2
-        )
-        .is_err());
+        assert!(LeafBuilder::new(8192, 1, vec![ColumnSpec::key(PhysicalType::Int64)], 0).is_err());
+        assert!(LeafBuilder::new(8192, 1, vec![ColumnSpec::key(PhysicalType::Int64)], 2).is_err());
         assert!(LeafBuilder::new(32, 1, vec![ColumnSpec::key(PhysicalType::Int64)], 1).is_err());
 
         // More rows than the row count field can hold.
         let builder =
             LeafBuilder::new(65_536, 1, vec![ColumnSpec::key(PhysicalType::Int64)], 1).unwrap();
-        let too_many: Vec<Vec<Datum<'static>>> = (0..70_000)
-            .map(|n| vec![Datum::Int(n as i64)])
-            .collect();
+        let too_many: Vec<Vec<Datum<'static>>> =
+            (0..70_000).map(|n| vec![Datum::Int(n as i64)]).collect();
         assert!(builder.encode(&too_many).is_err());
 
         // Enough rows that the mini-columns alone overflow the page.
@@ -1699,9 +1711,15 @@ mod tests {
         assert_eq!(leaf.value(1, 1).unwrap().as_f64(), Some(2.5));
         assert!(leaf.value(2, 1).unwrap().is_null());
         assert_eq!(leaf.value(0, 2).unwrap().as_int(), Some(-3));
-        assert_eq!(leaf.value(1, 2).unwrap().as_bytes(), Some(b"anything".as_slice()));
+        assert_eq!(
+            leaf.value(1, 2).unwrap().as_bytes(),
+            Some(b"anything".as_slice())
+        );
         assert!(leaf.value(2, 2).unwrap().is_null());
-        assert!(!leaf.has_exceptions(), "affinity conversion is not an exception");
+        assert!(
+            !leaf.has_exceptions(),
+            "affinity conversion is not an exception"
+        );
         leaf.integrity().unwrap();
     }
 
@@ -1813,7 +1831,6 @@ mod tests {
         assert!(LeafRef::parse(&page).unwrap().integrity().is_err());
     }
 
-
     /// The paths a corrupt or empty leaf takes through the class array.
     ///
     /// `all_typed` has two answers nothing else asked for: an empty column is
@@ -1831,7 +1848,10 @@ mod tests {
         let empty = builder.encode(&[]).unwrap();
         let leaf = LeafRef::parse(&empty).unwrap();
         assert_eq!(leaf.row_count(), 0);
-        assert!(leaf.column(0).unwrap().all_typed(), "no rows, nothing untyped");
+        assert!(
+            leaf.column(0).unwrap().all_typed(),
+            "no rows, nothing untyped"
+        );
         assert!(!leaf.column(0).unwrap().any_exception().unwrap());
         assert_eq!(leaf.live_rows().unwrap(), 0);
         assert!(leaf.live().unwrap().is_empty());
@@ -1919,7 +1939,10 @@ mod tests {
                             Some(b"an exception in an integer column".as_slice())
                         ),
                     }
-                    assert_eq!(leaf.value(row, 2).unwrap().as_bytes(), Some(long.as_slice()));
+                    assert_eq!(
+                        leaf.value(row, 2).unwrap().as_bytes(),
+                        Some(long.as_slice())
+                    );
                 }
             }
             Packed::RowTooLarge => panic!("these rows fit"),
@@ -2109,7 +2132,10 @@ mod tests {
     #[test]
     fn every_physical_type_round_trips() {
         for physical in PhysicalType::all() {
-            let columns = vec![ColumnSpec::key(PhysicalType::Int64), ColumnSpec::new(physical)];
+            let columns = vec![
+                ColumnSpec::key(PhysicalType::Int64),
+                ColumnSpec::new(physical),
+            ];
             let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();
             let sample = match physical {
                 PhysicalType::Int64 => Datum::Int(-7),
