@@ -1,0 +1,13 @@
+[package]
+name = "rustdb-pool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Buffer pool: frames, version latches, pointer swizzling, cooling FIFO, writeback, free map, blob extents"
+
+[dependencies]
+rustdb-base = { workspace = true }
+rustdb-vfs = { workspace = true }
+
+[dev-dependencies]
+rustdb-sim = { workspace = true }

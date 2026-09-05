@@ -15,16 +15,18 @@ use std::process::Command;
 use rustdb_compat::workspace_root;
 
 /// The crates the policy applies to.
-const GOVERNED: [&str; 18] = [
+const GOVERNED: [&str; 20] = [
     "rustdb-base",
     "rustdb-vfs",
     "rustdb-sim",
     "rustdb-value",
-    // The rearchitected engine (task-1816). It is held to the same standards as
-    // the engine it replaces from its first commit rather than from its last:
-    // a crate that is exempt while it is being written is a crate that is
-    // exempt.
+    // The rearchitected engine (task-1816, task-1817). It is held to the same
+    // standards as the engine it replaces from its first commit rather than
+    // from its last: a crate that is exempt while it is being written is a
+    // crate that is exempt.
+    "rustdb-pool",
     "rustdb-tree",
+    "rustdb-scalar",
     "rustdb-exec",
     "rustdb-sqlite-reader",
     "rustdb-storage",

@@ -8,6 +8,7 @@ description = "Bytecode representation, compiler, verifier, virtual machine, cur
 [dependencies]
 rustdb-base = { workspace = true }
 rustdb-value = { workspace = true }
+rustdb-scalar = { workspace = true }
 rustdb-sql = { workspace = true }
 rustdb-catalog = { workspace = true }
 rustdb-storage = { workspace = true }
