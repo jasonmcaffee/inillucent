@@ -20,7 +20,9 @@
 //! every hit, which is the operation that actually happens millions of times.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+
+use crate::pinstate::{PinState, Sweep};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use rustdb_base::buffer::PageBuffer;
@@ -147,14 +149,16 @@ pub struct PageFrame {
     pub key: PageKey,
     /// The page's bytes.
     bytes: PageBuffer,
-    /// How many pins are outstanding.
-    pins: AtomicU32,
+    /// The pin count and CLOCK reference bit this frame is evicted by.
+    ///
+    /// Its own type because it is the one part of this structure that is
+    /// synchronised without the shard's mutex, and therefore the one part Loom
+    /// has anything to say about. See [`crate::pinstate`].
+    pin: PinState,
     /// The frame's version.
     version: PageVersion,
     /// What the frame is doing, as a [`PageState`] code.
     state: AtomicU8,
-    /// The CLOCK reference bit.
-    referenced: AtomicBool,
 }
 
 impl PageFrame {
@@ -180,7 +184,7 @@ impl PageFrame {
 
     /// Returns how many pins are outstanding.
     pub fn pin_count(&self) -> u32 {
-        self.pins.load(Ordering::Acquire)
+        self.pin.pins()
     }
 
     /// Returns the page's validated layout, parsing it the first time.
@@ -244,7 +248,7 @@ impl Clone for PagePin {
     /// Taking a second pin on the same frame increments the count, so both
     /// have to be dropped before the frame can be evicted.
     fn clone(&self) -> PagePin {
-        self.frame.pins.fetch_add(1, Ordering::AcqRel);
+        self.frame.pin.acquire();
         PagePin {
             frame: Arc::clone(&self.frame),
         }
@@ -254,7 +258,7 @@ impl Clone for PagePin {
 impl Drop for PagePin {
     /// Releases the pin.
     fn drop(&mut self) {
-        self.frame.pins.fetch_sub(1, Ordering::AcqRel);
+        self.frame.pin.release();
     }
 }
 
@@ -354,17 +358,13 @@ impl Shard {
             let Some(frame) = self.frames.get(&key) else {
                 continue;
             };
-            if frame.pin_count() != 0 {
-                continue;
-            }
-            if !frame.state().is_evictable() {
-                // A dirty frame cannot leave until the durability protocol has
-                // written it. Evicting one would lose a change that only this
-                // cache holds, so eviction skips it and the budget is exceeded
-                // instead - which is the failure a caller can survive.
-                continue;
-            }
-            if frame.referenced.swap(false, Ordering::AcqRel) {
+            // A pinned frame is in use; a frame that is not evictable holds a
+            // change only this cache has, and evicting one would lose it, so
+            // the budget is exceeded instead - which is the failure a caller
+            // can survive; and a referenced frame spends its bit and gets one
+            // more sweep. The three refusals and their orderings are
+            // `PinState::sweep`, which Loom drives directly.
+            if frame.pin.sweep(frame.state().is_evictable()) != Sweep::Evict {
                 continue;
             }
             let size = frame.bytes.as_slice().len();
@@ -424,8 +424,7 @@ impl PageCache {
         let shard = self.lock(key.shard())?;
         let frame = shard.find(key)?;
         drop(shard);
-        frame.referenced.store(true, Ordering::Release);
-        frame.pins.fetch_add(1, Ordering::AcqRel);
+        frame.pin.acquire();
         self.hits.fetch_add(1, Ordering::Relaxed);
         Some(PagePin { frame })
     }
@@ -459,11 +458,10 @@ impl PageCache {
         let frame = Arc::new(PageFrame {
             key,
             bytes,
-            pins: AtomicU32::new(1),
+            pin: PinState::held(),
             version,
             state: AtomicU8::new(PageState::Clean.to_code()),
             layout: OnceLock::new(),
-            referenced: AtomicBool::new(true),
         });
         {
             let Some(mut shard) = self.lock(key.shard()) else {
@@ -471,8 +469,7 @@ impl PageCache {
             };
             if let Some(existing) = shard.find(key) {
                 drop(shard);
-                existing.referenced.store(true, Ordering::Release);
-                existing.pins.fetch_add(1, Ordering::AcqRel);
+                existing.pin.acquire();
                 return Ok(PagePin { frame: existing });
             }
             shard.put(key, Arc::clone(&frame));
@@ -582,11 +579,10 @@ impl PageCache {
         let frame = Arc::new(PageFrame {
             key,
             bytes,
-            pins: AtomicU32::new(1),
+            pin: PinState::held(),
             version,
             state: AtomicU8::new(state.to_code()),
             layout: seeded,
-            referenced: AtomicBool::new(true),
         });
         let removed = {
             let Some(mut shard) = self.lock(key.shard()) else {
