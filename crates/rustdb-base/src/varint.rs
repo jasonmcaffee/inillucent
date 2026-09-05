@@ -243,7 +243,13 @@ mod tests {
     fn arbitrary_bytes_never_panic() {
         let mut rng = Rng::new(0x1782_0002);
         let mut buffer = [0u8; 12];
-        for _ in 0..200_000 {
+        // Miri interprets every instruction, so two hundred thousand rounds of
+        // this take hours rather than milliseconds. The property being checked
+        // is "no input panics", which a smaller sample still exercises against
+        // the interpreter's much stricter memory model - and the full sample
+        // still runs on every ordinary build.
+        let rounds = if cfg!(miri) { 2_000 } else { 200_000 };
+        for _ in 0..rounds {
             rng.fill(&mut buffer);
             let len = rng.below(buffer.len() as u64 + 1) as usize;
             let _ = decode(&buffer[..len]);
