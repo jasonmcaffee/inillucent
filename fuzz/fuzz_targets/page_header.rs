@@ -7,8 +7,8 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use rustdb_base::ids::PageId;
-use rustdb_base::page::{self, PageSize};
+use inillucent_base::ids::PageId;
+use inillucent_base::page::{self, PageSize};
 
 fuzz_target!(|data: &[u8]| {
     let mut encoded = [0u8; 2];

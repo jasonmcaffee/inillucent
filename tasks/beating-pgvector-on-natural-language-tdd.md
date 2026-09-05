@@ -1,12 +1,12 @@
 # Beating pgvector on every graded measurement
 
-A technical design for the changes that took rust-db from *19 won, 4 tied, 7 lost* against
+A technical design for the changes that took inillucent from *19 won, 4 tied, 7 lost* against
 PostgreSQL + pgvector to **26 won, 4 tied, 0 lost**, and for the testing strategy that made choosing them cost
 minutes instead of hours.
 
 ## Introduction
 
-rust-db is an embedded vector search engine for retrieval augmented generation. It is graded against
+inillucent is an embedded vector search engine for retrieval augmented generation. It is graded against
 the stack it replaces: PostgreSQL with the pgvector extension, in two configurations — the
 extension's own defaults, and a correctly configured one that every comparison is scored against.
 Both engines are loaded with byte-identical vectors, so a score difference is attributable to
@@ -45,7 +45,7 @@ and the tuning harness that made the search for those changes cheap.
 Seven measurements were lost. Six of them were the same problem seen from different angles, and one
 was a rounding error.
 
-| scenario | measurement | rust-db | best pgvector |
+| scenario | measurement | inillucent | best pgvector |
 |---|---|---|---|
 | Filtered vector search | `source = github`, rows returned of 50 | 34.800 | 34.960 |
 | Lexical retrieval | natural language headings, success@10 | 0.6556 | 0.7778 |
@@ -55,7 +55,7 @@ was a rounding error.
 | Hybrid retrieval | natural language headings, success@10 | 0.5778 | 0.7444 |
 | Hybrid retrieval | natural language headings, MRR | 0.3694 | 0.5188 |
 
-The diagnosis is in one pair of numbers that is not in that table. On heading queries rust-db's
+The diagnosis is in one pair of numbers that is not in that table. On heading queries inillucent's
 lexical side returned **49.5 rows of 50**; PostgreSQL returned **6.7**. And PostgreSQL scored higher.
 
 PostgreSQL's full text search does two things BM25 does not:
@@ -67,7 +67,7 @@ PostgreSQL's full text search does two things BM25 does not:
    together, so a chunk that is *about* the phrase outranks one that mentions the same words in
    different paragraphs.
 
-BM25 has neither. It scores any term, and it has no idea where in a chunk a term occurred. rust-db
+BM25 has neither. It scores any term, and it has no idea where in a chunk a term occurred. inillucent
 was therefore finding more of the right chunks and putting them lower — exactly what
 `success@10 0.66 / MRR 0.48` against `0.78 / 0.62` describes.
 
@@ -169,9 +169,9 @@ Measured on `source = slack`: **p50 1.558 ms → 0.730 ms, p95 2.728 ms → 0.94
 range. The difference is what happens to a weak list: min-max maps every list onto the whole of
 `[0, 1]`, so three cosine similarities a hundredth apart come out as 1.0, 0.5 and 0.0.
 
-**The important part is not the new method, it is who gets it.** Changing rust-db's fusion while
+**The important part is not the new method, it is who gets it.** Changing inillucent's fusion while
 leaving pgvector on Reciprocal Rank Fusion would make the hybrid family measure ranking policy rather
-than retrieval. So the harness now sets one fusion on rust-db and on both pgvector configurations
+than retrieval. So the harness now sets one fusion on inillucent and on both pgvector configurations
 together, and `PgVectorEngine` fuses through the same arithmetic over its keys. pgvector's scores went
 *up* as a result: its natural-language nDCG rose from 0.557 to 0.644.
 
@@ -180,7 +180,7 @@ Coverage and proximity stay one-sided, and only because PostgreSQL already has w
 ### 5. Report rendering
 
 Three families — the `ef_search` sweep, the fusion comparison and the quantization ladder — rendered
-**`n/a` in every cell**. Their columns are rust-db settings rather than engine names, and the renderer
+**`n/a` in every cell**. Their columns are inillucent settings rather than engine names, and the renderer
 only knew the three engines. Each table now takes its columns from the measurements it actually has.
 
 ## Data flows and risks
@@ -188,7 +188,7 @@ only knew the three engines. Each table now takes its columns from the measureme
 ```mermaid
 sequenceDiagram
     participant H as harness
-    participant R as rust-db
+    participant R as inillucent
     participant P as pgvector
 
     H->>H: embed each query once
@@ -219,7 +219,7 @@ recording them conditional.
 |---|---|---|---|
 | **Bigram / phrase index** instead of positions | Smaller than full positions; direct phrase evidence | Only captures adjacency, not "three terms within five words"; a second dictionary to build and persist | Rejected — positions are more general for similar memory |
 | **Field weighting (BM25F) on title and heading path** | Standard, strong on heading queries | On *this* corpus the ground truth is built from headings, so it encodes the answer; the win would not transfer | Rejected as benchmark-shaped |
-| **Hard `&` semantics to match PostgreSQL** | Simplest way to match its precision | Throws away the recall that is rust-db's actual advantage: 49.5 rows against 6.7 | Rejected; tiering is the same idea without the loss |
+| **Hard `&` semantics to match PostgreSQL** | Simplest way to match its precision | Throws away the recall that is inillucent's actual advantage: 49.5 rows against 6.7 | Rejected; tiering is the same idea without the loss |
 | **Tiering by matched term count** | Reproduces `&` ordering exactly, keeps partial matches | Blunter than idf mass: two rare terms can matter more than three common ones | Kept, defaulted off — it is what rescues `coverage = 0` |
 | **Matching the baseline's filtered `ef_search`** | Parity: pgvector is given 400 on a filtered query and 100 on an unfiltered one | Slower on a filtered query, which the card does not measure | **Taken** — it is what closed the last loss |
 | **Reciprocal Rank Fusion, kept** | Parameter-light, no tuning | Bruch et al. (TOIS 2023) measure convex combination above it in and out of domain, and it measured worse here by a wide margin | Replaced as the default, kept as an option |
@@ -258,7 +258,7 @@ and almost none of the questions need one.**
 
 | stage | corpus | wall clock | what it is for |
 |---|---|---|---|
-| `cargo test -p rustdb-core` | fixtures | **2 s** | every ranking property, in isolation |
+| `cargo test -p inillucent-core` | fixtures | **2 s** | every ranking property, in isolation |
 | `tune` on the small corpus | 18,685 chunks | **31 s** for 55 settings | choosing a default |
 | `grade` on the small corpus | 18,685 chunks | **1 m 19 s** | the whole card, both engines |
 | `tune` on the full corpus | 185,078 chunks | ~30 min for 48 settings | confirming a default at scale |
@@ -276,7 +276,7 @@ vectors are all the same whatever the settings are. `tune` therefore builds **on
 every setting against it:
 
 ```sh
-rustdb-bench tune --cache corpus-small.cache \
+inillucent-bench tune --cache corpus-small.cache \
   --coverages 0,1,2,3 --proximities 0,0.5,1 --weights 0.2,0.35,0.5 \
   --prefixes true,false --tiers true,false --seed-offset 100
 ```

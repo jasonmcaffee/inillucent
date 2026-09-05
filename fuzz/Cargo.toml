@@ -1,5 +1,5 @@
 [package]
-name = "rustdb-fuzz"
+name = "inillucent-fuzz"
 version = "0.0.0"
 edition = "2021"
 publish = false
@@ -16,10 +16,10 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-rustdb-base = { path = "../crates/rustdb-base" }
-rustdb-vfs = { path = "../crates/rustdb-vfs" }
-rustdb-pool = { path = "../crates/rustdb-pool" }
-rustdb-tree = { path = "../crates/rustdb-tree" }
+inillucent-base = { path = "../crates/inillucent-base" }
+inillucent-vfs = { path = "../crates/inillucent-vfs" }
+inillucent-pool = { path = "../crates/inillucent-pool" }
+inillucent-tree = { path = "../crates/inillucent-tree" }
 
 [[bin]]
 name = "varint"

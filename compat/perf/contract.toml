@@ -7,7 +7,7 @@
 # answer you wanted.
 #
 # The headline is the lower bound of the bootstrap 95% interval of the weighted
-# geometric mean of the paired speed ratios, SQLite over rust-db. The floor is
+# geometric mean of the paired speed ratios, SQLite over inillucent. The floor is
 # the lower bound below which a required family fails the release outright,
 # however good the headline is - because an engine that is twice as fast on
 # average and half as fast at writing is not a faster engine, it is a differently

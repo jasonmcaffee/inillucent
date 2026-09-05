@@ -22,8 +22,8 @@ set -euo pipefail
 # $RAW, so a relative invocation could not find the extract scripts.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-RAW="${RAW:-$HOME/.cache/rust-db-corpus/raw}"
-DERIVED="${DERIVED:-$HOME/.cache/rust-db-corpus/derived}"
+RAW="${RAW:-$HOME/.cache/inillucent-corpus/raw}"
+DERIVED="${DERIVED:-$HOME/.cache/inillucent-corpus/derived}"
 DUMP_DATE="${DUMP_DATE:-20251222}"
 # Long articles wanted from the English dump. It is 43 GB, far too large to
 # download, so it is streamed and the reader stops once it has this many.
@@ -125,4 +125,4 @@ fi
 
 echo
 echo "the public material is in $DERIVED"
-echo "next: rustdb-bench synth-build, then synth-check, then synth-embed"
+echo "next: inillucent-bench synth-build, then synth-check, then synth-embed"

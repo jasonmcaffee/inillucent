@@ -2,12 +2,12 @@
 #
 # One row per syntax diagram SQLite publishes on lang.html and the pages it
 # links. A row carries a positive example that must parse, an optional negative
-# example that must be refused, and — where rust-db deliberately does not
+# example that must be refused, and — where inillucent deliberately does not
 # implement a production yet — the reason and the phase that will.
 #
 # The point of the file is that a production with no row cannot be forgotten:
 # `syntax.every_published_production_has_evidence` fails on a row with no
-# example, and `rustdb-syntax` renders the whole register into
+# example, and `inillucent-syntax` renders the whole register into
 # compat/syntax-report.md so the coverage is readable rather than inferred.
 #
 # `status` is one of:

@@ -1,4 +1,4 @@
-# rust-db syntax obligations
+# inillucent syntax obligations
 
 Measured against sqlite-3.53.4. 60 productions: 60 parsed, 0 omitted, 297 examples.
 

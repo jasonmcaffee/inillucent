@@ -1,0 +1,2355 @@
+//! The physical pass: the existing planner's output becomes a pipeline.
+//!
+//! Invariant: this pass never changes what a query means, only how it is run.
+//! Every construct it does not recognise is **refused** rather than
+//! approximated - [`unsupported`] returns an error naming what was not handled,
+//! so a query the new engine cannot run yet fails loudly instead of returning a
+//! plausible wrong answer. That is the whole reason it is written as a
+//! whitelist: a differential digest comparison catches a wrong answer, but only
+//! for a query somebody thought to put in the corpus.
+//!
+//! ## Where this sits
+//!
+//! `inillucent-sql`'s lexer, parser, binder and planner survive the rearchitecture
+//! unchanged - the TDD's component triage says so, and they are the part of the
+//! old engine that was never the problem. What they produce is a
+//! [`PhysicalPlan`]: FROM terms with access paths, residual predicates, an
+//! aggregation mode, and a bound result list. This module turns that into the
+//! operator chain in [`crate::ops`], [`crate::paged`] and [`crate::join`].
+//!
+//! ## Stages, and why a FROM term can be two of them
+//!
+//! The planner's unit is a FROM term. The executor's unit is a **stage**: one
+//! tree, read one way, contributing a run of columns to the joined row. Most
+//! terms are one stage, but a non-covering index seek is two - the index scan
+//! that finds the rowids, and the table probe that fetches the rest of the row.
+//! The TDD calls the second one `RowidLookup` and lists it as an operator; here
+//! it is an [`crate::join::IndexNestedLoopJoin`] into the table tree keyed on
+//! the index entry's rowid, because that is exactly what it is, and writing it
+//! twice would be two chances to get the null handling different.
+//!
+//! Columns are numbered across the stages in order, so stage `i` owns
+//! `offset[i] .. offset[i] + width[i]`, and a bound `Column { source, slot }`
+//! resolves to whichever of that term's stages carries the slot - the table
+//! stage if there is one, the index stage otherwise.
+//!
+//! ## How a bound column finds its vector
+//!
+//! A `BoundExpr::Column` names a *record slot* in the SQLite sense, because the
+//! binder and the catalog were built for that layout. The new engine's trees do
+//! not have record slots; they have mini-columns. [`SourceLayout`] is the map
+//! between them, and it is built by whatever imported the table, because that
+//! is the only thing that knows which slot became which column. Keying it that
+//! way - rather than by name - is what lets the whole front end stay unchanged.
+
+use inillucent_base::error::misuse;
+use inillucent_base::DbResult;
+use inillucent_pool::Pool;
+use inillucent_sql::ast::{BinaryOp, NullOrder, PatternOp, SortOrder};
+use inillucent_sql::bind::{BoundExpr, BoundSelect};
+use inillucent_sql::function::{AggregateFunc, ScalarFunc};
+use inillucent_sql::plan::{AccessPath, AggregationMode, BoundKind, PhysicalPlan, RangeBound};
+use inillucent_tree::datum::{Datum, OwnedDatum};
+use inillucent_tree::PagedTree;
+use inillucent_value::affinity::Affinity;
+use inillucent_value::collation::Collation;
+
+use crate::aggregate::AggregateKind;
+use crate::expr::{compile, ArithOp, CompareOp, Expr, StaticType};
+use crate::join::{IndexNestedLoopJoin, JoinKind};
+use crate::ops::{
+    AdjacentDistinct, AggregateSpec, CollectInto, Distinct, Filter, Flow, HashAggregate, Limit,
+    Project, SimpleAggregate, Sink, Sort, SortKey, StreamAggregate, TopN,
+};
+use crate::paged::{FullScan, PointProbe, ReverseScan, SkipScan, SpanScan};
+use crate::scan::Projection;
+
+/// How one imported table's record slots map onto a tree's columns.
+#[derive(Clone, Debug)]
+pub struct SourceLayout {
+    /// The tree holding the rows or entries.
+    pub tree_key: u32,
+    /// For each record slot, which tree column holds it.
+    ///
+    /// `None` means the tree does not carry that slot, which is how a covering
+    /// index says it does not hold a column.
+    pub slots: Vec<Option<usize>>,
+    /// Which tree column holds the row's rowid.
+    pub rowid: Option<usize>,
+    /// The static type of each tree column, for the expression compiler.
+    pub types: Vec<StaticType>,
+    /// How many columns the tree has.
+    pub width: usize,
+    /// The tree columns the leaves are ordered by, in order.
+    ///
+    /// A scan of the tree therefore produces rows sorted by these, which is
+    /// what lets `GROUP BY`, `DISTINCT` and `ORDER BY` over a prefix of them
+    /// run as a streaming pass instead of building a hash table or a sorter.
+    /// Getting this wrong would be a wrong answer rather than a slow one, so it
+    /// is set by the import - which built the tree - and never inferred.
+    pub key_columns: Vec<usize>,
+}
+
+/// Where the executor finds its trees, its layouts and its pages.
+pub trait TreeCatalog {
+    /// Returns the buffer pool the trees' pages live in.
+    fn pool(&self) -> &Pool;
+
+    /// Returns the tree a plan's root page id refers to.
+    ///
+    /// The key is the SQLite root page from the fixture the data was imported
+    /// from. That sounds like a leftover and is deliberate: the plan comes from
+    /// a binder reading that fixture's schema, so the root page is the one
+    /// identifier both sides already agree on, and using it means the import
+    /// decides the mapping rather than a name lookup guessing at it.
+    ///
+    /// @param root - the root page id the plan named
+    fn tree(&self, root: u32) -> Option<&PagedTree>;
+
+    /// Returns the layout for a plan's root page id.
+    ///
+    /// @param root - the root page id the plan named
+    fn layout(&self, root: u32) -> Option<&SourceLayout>;
+
+    /// Returns the index trees that might cover a query over one table.
+    ///
+    /// Smallest tree first, so the physical pass takes the cheapest structure
+    /// that carries every column the query reads. This is the TDD's "covering
+    /// when the projection is inside the index key" rule, and it is what makes
+    /// the comparison against SQLite like for like: SQLite answers
+    /// `count(*), sum(key), max(category) FROM main_table` from
+    /// `main_category(category, key)` rather than from the table, and an engine
+    /// measured on a 14 MB table scan against a 1.4 MB index scan is being
+    /// measured on a different amount of work.
+    ///
+    /// @param table_root - the table's root page id
+    fn covering_candidates(&self, table_root: u32) -> Vec<u32> {
+        let _ = table_root;
+        Vec::new()
+    }
+}
+
+/// A physical choice a test or a `PRAGMA` can force.
+///
+/// The TDD's `PRAGMA inillucent.force_plan`, and the metamorphic tests' whole
+/// mechanism: the same query is run under each applicable alternative and must
+/// produce the same digest. A choice the plan cannot honour is an **error**,
+/// not a silent fallback - a metamorphic test that quietly ran the default
+/// twice would pass while proving nothing.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ForcePlan {
+    /// Read the table rather than any covering index.
+    pub table_scan: bool,
+    /// Sort rather than keep a bounded heap, even under a `LIMIT`.
+    pub full_sort: bool,
+    /// Build a hash set rather than de-duplicating adjacent rows.
+    pub hash_distinct: bool,
+    /// Build a hash table rather than streaming a grouped aggregate.
+    pub hash_group: bool,
+    /// Walk every row rather than seeking one per distinct key prefix.
+    pub no_skip_scan: bool,
+}
+
+impl ForcePlan {
+    /// Returns the choice a `PRAGMA inillucent.force_plan` string names.
+    ///
+    /// The string is a comma-separated list of operator names, matching the
+    /// TDD's `'<operator list>'`. An unknown name is refused rather than
+    /// ignored, because a test that misspelled its own lever would otherwise
+    /// report a pass.
+    ///
+    /// @param text - the pragma's value
+    pub fn parse(text: &str) -> DbResult<ForcePlan> {
+        let mut forced = ForcePlan::default();
+        for name in text.split(',') {
+            let name = name.trim().to_ascii_lowercase();
+            if name.is_empty() {
+                continue;
+            }
+            match name.as_str() {
+                "scan" | "tablescan" => forced.table_scan = true,
+                "sort" => forced.full_sort = true,
+                "distinct" | "hashdistinct" => forced.hash_distinct = true,
+                "hashaggregate" | "hashgroup" => forced.hash_group = true,
+                "noskipscan" | "noskip" => forced.no_skip_scan = true,
+                other => {
+                    return Err(misuse(format!(
+                        "force_plan does not know the operator '{other}'"
+                    )))
+                }
+            }
+        }
+        Ok(forced)
+    }
+
+    /// Returns every lever, for the metamorphic sweep.
+    pub fn alternatives() -> Vec<(&'static str, ForcePlan)> {
+        vec![
+            ("default", ForcePlan::default()),
+            (
+                "scan",
+                ForcePlan {
+                    table_scan: true,
+                    ..ForcePlan::default()
+                },
+            ),
+            (
+                "sort",
+                ForcePlan {
+                    full_sort: true,
+                    ..ForcePlan::default()
+                },
+            ),
+            (
+                "distinct",
+                ForcePlan {
+                    hash_distinct: true,
+                    ..ForcePlan::default()
+                },
+            ),
+            (
+                "hashgroup",
+                ForcePlan {
+                    hash_group: true,
+                    ..ForcePlan::default()
+                },
+            ),
+            (
+                "noskip",
+                ForcePlan {
+                    no_skip_scan: true,
+                    ..ForcePlan::default()
+                },
+            ),
+        ]
+    }
+}
+
+/// The values bound to `?1`, `?2`, ... for one execution.
+#[derive(Clone, Debug, Default)]
+pub struct Params {
+    values: Vec<OwnedDatum>,
+}
+
+impl Params {
+    /// Returns an empty parameter set.
+    pub fn new() -> Params {
+        Params { values: Vec::new() }
+    }
+
+    /// Returns a parameter set over a list of values, `?1` first.
+    ///
+    /// @param values - the values, in parameter order
+    pub fn from_values(values: Vec<OwnedDatum>) -> Params {
+        Params { values }
+    }
+
+    /// Returns the value bound to a parameter.
+    ///
+    /// An unbound parameter is NULL, which is what SQLite does.
+    ///
+    /// @param index - the one-based parameter number
+    pub fn get(&self, index: u32) -> OwnedDatum {
+        self.values
+            .get(index.saturating_sub(1) as usize)
+            .cloned()
+            .unwrap_or(OwnedDatum::Null)
+    }
+
+    /// Returns how many parameters are bound.
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    /// Reports whether nothing is bound.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+}
+
+/// How one stage reads its tree.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AccessKind {
+    /// Every row of the tree, in key order.
+    Full,
+    /// A key range, forward.
+    Span,
+    /// A key range, backward.
+    Reverse,
+    /// One row per distinct key prefix.
+    Skip,
+    /// One row by key.
+    Point,
+    /// A probe of this tree once per row of the stage before it.
+    Nested,
+}
+
+impl AccessKind {
+    /// Returns the name `EXPLAIN` prints.
+    pub fn describe(self) -> &'static str {
+        match self {
+            AccessKind::Full => "SCAN",
+            AccessKind::Span => "RANGE",
+            AccessKind::Reverse => "RANGE REVERSE",
+            AccessKind::Skip => "SKIP SCAN",
+            AccessKind::Point => "POINT PROBE",
+            AccessKind::Nested => "INDEX NESTED LOOP",
+        }
+    }
+}
+
+/// One stage's physical choice.
+#[derive(Clone, Debug)]
+pub struct PreparedStage {
+    /// The tree this stage reads.
+    pub root: u32,
+    /// How it reads it.
+    pub kind: AccessKind,
+    /// Which planner FROM term this stage belongs to.
+    pub source: usize,
+    /// Whether this stage is the table fetch behind a non-covering index seek.
+    pub is_lookup: bool,
+    /// The first column index this stage contributes to the joined row.
+    pub offset: usize,
+    /// How many columns it contributes.
+    pub width: usize,
+}
+
+/// What a statement's physical choices are, decided once.
+///
+/// The structural decisions - which tree to read, and therefore whether a sort,
+/// a hash table or a set is needed at all - depend on the statement and the
+/// schema and not on the data, so they belong to prepare rather than to
+/// execution. Keeping them here is not only tidiness: the covering rule tries
+/// candidate trees by *building* a pipeline over each, and doing that on every
+/// execution made a 64-row query spend more time choosing than answering.
+#[derive(Clone, Debug)]
+pub struct Prepared {
+    /// The stages, outermost first.
+    pub stages: Vec<PreparedStage>,
+    /// The levers this plan was prepared under.
+    pub forced: ForcePlan,
+}
+
+impl Prepared {
+    /// Returns the tree the outermost stage reads.
+    ///
+    /// Kept because the gate harness reports the structure each engine chose,
+    /// and "which tree" is most of that answer.
+    pub fn root(&self) -> u32 {
+        self.stages.first().map(|stage| stage.root).unwrap_or(0)
+    }
+
+    /// Returns one line per stage, for `EXPLAIN`.
+    pub fn describe(&self) -> Vec<String> {
+        self.stages
+            .iter()
+            .map(|stage| {
+                format!(
+                    "{} tree {}{}",
+                    stage.kind.describe(),
+                    stage.root,
+                    if stage.is_lookup {
+                        " (rowid lookup)"
+                    } else {
+                        ""
+                    }
+                )
+            })
+            .collect()
+    }
+}
+
+/// A built pipeline, ready to run.
+pub struct Pipeline<'t> {
+    /// What drives it.
+    pub source: Source<'t>,
+    /// The head of the operator chain.
+    ///
+    /// It borrows for `'t` because an index nested loop holds the inner tree
+    /// and the pool, and it sits at the *bottom* of the chain - closest to the
+    /// source - so everything above it is still an ordinary owned operator.
+    /// That is why only this one box carries a lifetime and none of the
+    /// operators in [`crate::ops`] had to grow one.
+    pub head: Box<dyn Sink + 't>,
+    /// The pool the source's pages live in.
+    pub pool: &'t Pool,
+}
+
+impl Pipeline<'_> {
+    /// Drives the pipeline to completion.
+    pub fn run(&mut self) -> DbResult<()> {
+        self.source.run(self.pool, self.head.as_mut())
+    }
+}
+
+/// What drives a pipeline.
+pub enum Source<'t> {
+    /// Every row of a tree, in key order.
+    Scan(FullScan<'t>),
+    /// A key range, forward.
+    Span(SpanScan<'t>),
+    /// A key range, backward.
+    Reverse(ReverseScan<'t>),
+    /// One row per distinct value of a key prefix.
+    Skip(SkipScan<'t>),
+    /// One row by key.
+    Point(PointProbe<'t>, Vec<OwnedDatum>),
+}
+
+impl Source<'_> {
+    /// Drives the source until the pipeline is done.
+    ///
+    /// @param pool - the buffer pool
+    /// @param downstream - the head of the operator chain
+    pub fn run(&self, pool: &Pool, downstream: &mut dyn Sink) -> DbResult<()> {
+        match self {
+            Source::Scan(scan) => scan.run(pool, downstream),
+            Source::Span(scan) => scan.run(pool, downstream),
+            Source::Reverse(scan) => scan.run(pool, downstream),
+            Source::Skip(scan) => scan.run(pool, downstream),
+            Source::Point(probe, key) => {
+                let borrowed: Vec<Datum<'_>> = key.iter().map(OwnedDatum::borrow).collect();
+                probe.run(pool, &borrowed, downstream)
+            }
+        }
+    }
+
+    /// Names the source, for a plan description.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Source::Scan(_) => "SCAN",
+            Source::Span(_) => "RANGE",
+            Source::Reverse(_) => "RANGE REVERSE",
+            Source::Skip(_) => "SKIP SCAN",
+            Source::Point(_, _) => "POINT PROBE",
+        }
+    }
+}
+
+/// What a built plan produces, so a caller can name its columns.
+#[derive(Clone, Debug)]
+pub struct Shape {
+    /// The name of each output column, as the binder assigned it.
+    pub names: Vec<Vec<u8>>,
+    /// The operator chain, source first: the TDD's "`EXPLAIN` prints the
+    /// physical operator tree".
+    ///
+    /// It is built as the chain is built rather than derived afterwards,
+    /// because a description derived from the plan is a description of what the
+    /// builder was *asked* for. This one says what it made. The first thing it
+    /// showed was a `Filter` under a range scan whose bounds already excluded
+    /// every row it was testing.
+    pub operators: Vec<String>,
+}
+
+/// Returns an error naming what the physical pass will not run.
+///
+/// @param what - the construct, in words
+fn unsupported<T>(what: &str) -> DbResult<T> {
+    Err(misuse(format!(
+        "the new engine's physical pass does not handle {what} yet"
+    )))
+}
+
+/// Chooses a statement's physical plan.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees and layouts come from
+/// @param forced - the levers a `PRAGMA` or a metamorphic test set
+pub fn prepare(
+    plan: &PhysicalPlan,
+    catalog: &dyn TreeCatalog,
+    forced: ForcePlan,
+) -> DbResult<Prepared> {
+    let mut stages = plan_stages(plan, catalog, None)?;
+    // The covering rule. A plain scan of a table is replaced by a scan of the
+    // smallest index tree that carries every column the query reads, because
+    // reading 2.66 MiB instead of 14.6 MiB is the single largest lever
+    // available on an analytical query and it is the structure SQLite itself
+    // chooses. The test for "carries every column" is not a heuristic: the
+    // whole pipeline is built against the candidate's layout, and translation
+    // fails by name on a column the tree does not hold. A candidate that
+    // builds, covers.
+    let single_scan = stages.len() == 1
+        && stages
+            .first()
+            .map(|stage| stage.kind == AccessKind::Full)
+            .unwrap_or(false)
+        && matches!(
+            plan.sources.first().map(|source| &source.path),
+            Some(AccessPath::TableScan { .. })
+        );
+    if single_scan && !forced.table_scan && !order_sensitive(&plan.select) {
+        let table_root = stages.first().map(|stage| stage.root).unwrap_or(0);
+        for candidate in catalog.covering_candidates(table_root) {
+            let trial = plan_stages(plan, catalog, Some(candidate))?;
+            let attempt = Prepared {
+                stages: trial,
+                forced,
+            };
+            if build_prepared(plan, catalog, &attempt, &Params::new(), dummy_sink()).is_ok() {
+                return Ok(attempt);
+            }
+        }
+    }
+    // A skip scan is a structural choice too, and it is decided here so that
+    // execution never has to.
+    if let Some(stage) = stages.first_mut() {
+        if stage.kind == AccessKind::Full
+            && !forced.no_skip_scan
+            && skip_scan_applies(plan, catalog, stage.root)?
+        {
+            stage.kind = AccessKind::Skip;
+        }
+    }
+    Ok(Prepared { stages, forced })
+}
+
+/// Returns the collation an expression is compared and ordered under.
+///
+/// SQLite's rule, in the part that matters here: an explicit `COLLATE` wins; a
+/// column carries its own; everything else is BINARY. It is deliberately not a
+/// full implementation of the rule - a `CASE` whose branches are columns has an
+/// assignable collation in SQLite and BINARY here - because the conservative
+/// answer is the one that sorts and groups by bytes, which is what an engine
+/// that did not know about collations at all would do, and never a wrong answer
+/// dressed as a right one.
+///
+/// @param expr - the bound expression
+fn expression_collation(expr: &BoundExpr) -> Collation {
+    match expr {
+        BoundExpr::Collate { collation, .. } => *collation,
+        BoundExpr::Column { collation, .. } => *collation,
+        _ => Collation::Binary,
+    }
+}
+
+/// Reports whether the statement's answer depends on the order its rows arrive.
+///
+/// The covering rule replaces a table scan with an index scan, which is the
+/// single largest lever in the whole design - and it *changes the order the
+/// rows reach the aggregate in*. Floating-point addition is not associative, so
+/// that is not a free change: the SLT corpus has a `score` column holding
+/// `-1e300`, nine ordinary values and `+1e300`, and
+/// `SELECT sum(score) FROM people` is 124.25 in table order and **0.0** in
+/// score order, because the small values are absorbed into the first huge one
+/// and cancelled by the second. SQLite scans the table and gets 124.25; we
+/// scanned `people_by_score` and got 0.0.
+///
+/// So the rule is skipped when a `sum`, `total` or `avg` has an argument that
+/// is not statically an integer, and when a `group_concat` is present - it
+/// concatenates in arrival order by definition. An integer sum accumulates in
+/// `i128` and is exact, so its order does not matter, which is what keeps the
+/// scorecard's `sum(key)` on the covering index where SQLite also puts it.
+///
+/// This is the Phase 1 lesson from the other side. Structure was the largest
+/// lever there; here it is a wrong answer.
+///
+/// @param select - the bound statement
+fn order_sensitive(select: &BoundSelect) -> bool {
+    select.aggregates.iter().any(|call| match call.func {
+        AggregateFunc::Sum | AggregateFunc::Total | AggregateFunc::Avg => call
+            .arguments
+            .first()
+            .map(|argument| !integer_typed(argument))
+            .unwrap_or(false),
+        AggregateFunc::GroupConcat => true,
+        _ => false,
+    })
+}
+
+/// Reports whether a bound expression is statically an integer.
+///
+/// Conservative: anything it cannot prove is treated as not an integer, because
+/// the cost of being wrong is a wrong answer and the cost of being cautious is
+/// a table scan.
+///
+/// @param expr - the aggregate's argument
+fn integer_typed(expr: &BoundExpr) -> bool {
+    match expr {
+        BoundExpr::Integer(_) => true,
+        BoundExpr::Rowid { .. } => true,
+        BoundExpr::Column { affinity, .. } => {
+            *affinity == inillucent_value::affinity::Affinity::Integer
+        }
+        _ => false,
+    }
+}
+
+/// Returns a sink that discards everything, for the covering-rule trial build.
+///
+/// The trial exists because "does this index cover the query" is answered by
+/// building the pipeline rather than by a separate predicate that could drift
+/// away from what the builder actually accepts. The trial's sink is never
+/// pushed into.
+fn dummy_sink() -> Box<dyn Sink> {
+    Box::new(CollectInto::new(std::rc::Rc::new(std::cell::RefCell::new(
+        Vec::new(),
+    ))))
+}
+
+/// Turns the planner's FROM terms into stages.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees and layouts come from
+/// @param override_root - a covering index to read instead of the table
+fn plan_stages(
+    plan: &PhysicalPlan,
+    catalog: &dyn TreeCatalog,
+    override_root: Option<u32>,
+) -> DbResult<Vec<PreparedStage>> {
+    refuse_unhandled(&plan.select)?;
+    if !plan.compounds.is_empty() {
+        return unsupported("a compound query");
+    }
+    if plan.sources.is_empty() {
+        return unsupported("a query with no FROM term");
+    }
+    let mut stages: Vec<PreparedStage> = Vec::new();
+    let mut offset = 0usize;
+    let sensitive = order_sensitive(&plan.select);
+    for (position, source) in plan.sources.iter().enumerate() {
+        let outermost = position == 0;
+        match &source.path {
+            AccessPath::TableScan { root } => {
+                let root = if outermost {
+                    override_root.unwrap_or(*root)
+                } else {
+                    *root
+                };
+                push_stage(
+                    &mut stages,
+                    catalog,
+                    root,
+                    if outermost {
+                        AccessKind::Full
+                    } else {
+                        // An inner term with no usable index is a nested loop
+                        // over every row, which the builder refuses rather than
+                        // running: it is a cross product with a residual, and
+                        // the shapes Phase 2 must answer never produce one.
+                        return unsupported("a join whose inner term has no index");
+                    },
+                    position,
+                    false,
+                    &mut offset,
+                )?;
+            }
+            AccessPath::RowidSeek { root, .. } => {
+                push_stage(
+                    &mut stages,
+                    catalog,
+                    *root,
+                    if outermost {
+                        AccessKind::Point
+                    } else {
+                        AccessKind::Nested
+                    },
+                    position,
+                    false,
+                    &mut offset,
+                )?;
+            }
+            AccessPath::RowidRange { root, .. } => {
+                let kind = if !outermost {
+                    return unsupported("a rowid range as an inner join term");
+                } else if plan.reverse {
+                    AccessKind::Reverse
+                } else {
+                    AccessKind::Span
+                };
+                push_stage(
+                    &mut stages,
+                    catalog,
+                    *root,
+                    kind,
+                    position,
+                    false,
+                    &mut offset,
+                )?;
+            }
+            AccessPath::IndexSeek {
+                table_root,
+                index_root,
+                covering,
+                equalities,
+                low,
+                high,
+                ..
+            } => {
+                // An index seek with no equality and no bound is a *scan* of
+                // the index, not a range over it. The distinction is not
+                // cosmetic: the covering rule and the skip-scan rule both key
+                // on `Full`, and calling this a range left `scan.distinct`
+                // reading every row of the index where SQLite seeks 64 times.
+                let unbounded = equalities.is_empty() && low.is_none() && high.is_none();
+                // The planner's *own* covering choice is subject to the same
+                // rule the physical pass's covering rule is: reading fewer
+                // bytes out of an index changes the order the rows reach an
+                // aggregate in, and a floating-point sum is not associative.
+                // `SELECT sum(score) FROM people` over `people_by_score` is
+                // 0.0 where the table gives 124.25, because the corpus holds
+                // `-1e300` and `+1e300` and the small values vanish between
+                // them. SQLite reads the table here, and so must this.
+                if unbounded && covering.is_some() && outermost && sensitive {
+                    push_stage(
+                        &mut stages,
+                        catalog,
+                        *table_root,
+                        AccessKind::Full,
+                        position,
+                        false,
+                        &mut offset,
+                    )?;
+                    continue;
+                }
+                let kind = if outermost {
+                    if plan.reverse {
+                        AccessKind::Reverse
+                    } else if unbounded {
+                        AccessKind::Full
+                    } else {
+                        AccessKind::Span
+                    }
+                } else {
+                    AccessKind::Nested
+                };
+                push_stage(
+                    &mut stages,
+                    catalog,
+                    *index_root,
+                    kind,
+                    position,
+                    false,
+                    &mut offset,
+                )?;
+                if covering.is_none() {
+                    // The index does not carry every column the query reads, so
+                    // the row is fetched from the table by rowid. That is the
+                    // TDD's `RowidLookup`, expressed as what it is: a nested
+                    // loop into the table tree keyed on the entry's rowid.
+                    push_stage(
+                        &mut stages,
+                        catalog,
+                        *table_root,
+                        AccessKind::Nested,
+                        position,
+                        true,
+                        &mut offset,
+                    )?;
+                }
+            }
+            AccessPath::Subquery { .. } => return unsupported("a subquery source"),
+            AccessPath::Recursive { .. } | AccessPath::RecursiveSelf { .. } => {
+                return unsupported("a recursive CTE")
+            }
+            AccessPath::VirtualScan { .. } => return unsupported("a virtual table"),
+        }
+    }
+    Ok(stages)
+}
+
+/// Adds one stage and advances the column offset.
+///
+/// @param stages - the stages built so far
+/// @param catalog - where the layouts come from
+/// @param root - the tree this stage reads
+/// @param kind - how it reads it
+/// @param source - which planner FROM term it belongs to
+/// @param is_lookup - whether it is the table fetch behind an index seek
+/// @param offset - the next free column index, advanced
+#[allow(clippy::too_many_arguments)]
+fn push_stage(
+    stages: &mut Vec<PreparedStage>,
+    catalog: &dyn TreeCatalog,
+    root: u32,
+    kind: AccessKind,
+    source: usize,
+    is_lookup: bool,
+    offset: &mut usize,
+) -> DbResult<()> {
+    let layout = catalog
+        .layout(root)
+        .ok_or_else(|| misuse(format!("no layout imported for root page {root}")))?;
+    stages.push(PreparedStage {
+        root,
+        kind,
+        source,
+        is_lookup,
+        offset: *offset,
+        width: layout.width,
+    });
+    *offset = offset.saturating_add(layout.width);
+    Ok(())
+}
+
+/// Refuses the parts of a bound select the physical pass does not implement.
+///
+/// @param select - the bound statement
+fn refuse_unhandled(select: &BoundSelect) -> DbResult<()> {
+    if !select.windows.is_empty() {
+        return unsupported("a window function");
+    }
+    if !select.values.is_empty() {
+        return unsupported("a VALUES arm");
+    }
+    if select.having.is_some() {
+        return unsupported("HAVING");
+    }
+    if select.aggregates.iter().any(|call| call.distinct) {
+        return unsupported("an aggregate with DISTINCT");
+    }
+    Ok(())
+}
+
+/// The column space one statement's stages define.
+struct Space<'c> {
+    /// The stages, in order.
+    stages: &'c [PreparedStage],
+    /// Each stage's layout.
+    layouts: Vec<&'c SourceLayout>,
+    /// The static type of every column of the joined row.
+    types: Vec<StaticType>,
+    /// The tree columns the *joined* rows arrive sorted by, when they do.
+    order: Vec<usize>,
+}
+
+impl Space<'_> {
+    /// Returns the joined-row column a bound column reference names.
+    ///
+    /// A FROM term may be two stages, so the slot is looked for in the table
+    /// stage first and the index stage second: the table carries every column
+    /// and the index only some, and preferring the table means a query that
+    /// reads a column the index happens to hold still reads it from wherever
+    /// the row was actually fetched.
+    ///
+    /// @param source - the planner FROM term
+    /// @param slot - the record slot
+    fn column(&self, source: usize, slot: usize) -> Option<usize> {
+        let mut found = None;
+        for (index, stage) in self.stages.iter().enumerate() {
+            if stage.source != source {
+                continue;
+            }
+            let layout = self.layouts.get(index)?;
+            if let Some(Some(tree_column)) = layout.slots.get(slot) {
+                let resolved = stage.offset.saturating_add(*tree_column);
+                if stage.is_lookup {
+                    return Some(resolved);
+                }
+                found = Some(resolved);
+            }
+        }
+        found
+    }
+
+    /// Returns the joined-row column holding a FROM term's rowid.
+    ///
+    /// @param source - the planner FROM term
+    fn rowid(&self, source: usize) -> Option<usize> {
+        for (index, stage) in self.stages.iter().enumerate() {
+            if stage.source != source {
+                continue;
+            }
+            let layout = self.layouts.get(index)?;
+            if let Some(rowid) = layout.rowid {
+                return Some(stage.offset.saturating_add(rowid));
+            }
+        }
+        None
+    }
+}
+
+/// Builds a pipeline for a planned statement.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees and layouts come from
+/// @param params - the values bound to `?1`, `?2`, ...
+/// @param sink - the end of the pipeline
+pub fn build<'t>(
+    plan: &PhysicalPlan,
+    catalog: &'t dyn TreeCatalog,
+    params: &Params,
+    sink: Box<dyn Sink>,
+) -> DbResult<(Pipeline<'t>, Shape)> {
+    let prepared = prepare(plan, catalog, ForcePlan::default())?;
+    build_prepared(plan, catalog, &prepared, params, sink)
+}
+
+/// Builds a pipeline over already-chosen stages.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees and layouts come from
+/// @param prepared - the structural choices [`prepare`] made
+/// @param params - the values bound to `?1`, `?2`, ...
+/// @param sink - the end of the pipeline
+pub fn build_prepared<'t>(
+    plan: &PhysicalPlan,
+    catalog: &'t dyn TreeCatalog,
+    prepared: &Prepared,
+    params: &Params,
+    sink: Box<dyn Sink>,
+) -> DbResult<(Pipeline<'t>, Shape)> {
+    let select = &plan.select;
+    refuse_unhandled(select)?;
+
+    let mut layouts = Vec::with_capacity(prepared.stages.len());
+    let mut types: Vec<StaticType> = Vec::new();
+    for stage in &prepared.stages {
+        let layout = catalog
+            .layout(stage.root)
+            .ok_or_else(|| misuse(format!("no layout imported for root page {}", stage.root)))?;
+        types.extend(layout.types.iter().copied());
+        layouts.push(layout);
+    }
+    // Only the outermost stage's key order survives into the joined row: a
+    // nested loop emits its inner matches grouped by the outer row, which
+    // preserves the outer order and destroys any inner one.
+    let order = match (prepared.stages.first(), layouts.first()) {
+        (Some(stage), Some(layout)) if prepared.stages.len() == 1 => {
+            if stage.kind == AccessKind::Reverse {
+                Vec::new()
+            } else {
+                layout.key_columns.clone()
+            }
+        }
+        _ => Vec::new(),
+    };
+    let space = Space {
+        stages: &prepared.stages,
+        layouts,
+        types: types.clone(),
+        order,
+    };
+
+    let scan_types = space.types.clone();
+    let group_width = select.group_by.len();
+    let skipping = prepared
+        .stages
+        .first()
+        .map(|stage| stage.kind == AccessKind::Skip)
+        .unwrap_or(false);
+
+    // Result columns and ORDER BY terms, in the space that exists after any
+    // aggregation. Terms that are not already result columns are carried
+    // through the sort as extra columns and trimmed afterwards.
+    let mut projected: Vec<Expr> = Vec::with_capacity(select.columns.len());
+    for column in &select.columns {
+        projected.push(translate_post(
+            &column.expr,
+            select,
+            &space,
+            params,
+            group_width,
+        )?);
+    }
+    let result_width = projected.len();
+    let mut sort_keys: Vec<SortKey> = Vec::new();
+    for term in &select.order_by {
+        let translated = translate_post(&term.expr, select, &space, params, group_width)?;
+        let existing = projected
+            .iter()
+            .position(|held| same_expr(held, &translated));
+        let column = match existing {
+            Some(index) => index,
+            None => {
+                if select.distinct {
+                    return unsupported(
+                        "ORDER BY over an expression not in a DISTINCT select list",
+                    );
+                }
+                projected.push(translated);
+                projected.len().saturating_sub(1)
+            }
+        };
+        let descending = term.order == SortOrder::Descending;
+        sort_keys.push(SortKey {
+            column,
+            descending,
+            collation: term.collation,
+            // SQLite's default is NULLS FIRST ascending and NULLS LAST
+            // descending, which is what reversing an ordering that puts NULL
+            // lowest already gives. An explicit clause is the case that has to
+            // be carried, and the binder has already resolved the default.
+            nulls_first: match term.nulls {
+                NullOrder::First => true,
+                NullOrder::Last => false,
+            },
+        });
+    }
+    let needs_trim = projected.len() > result_width;
+
+    let scan_order = &space.order;
+    let group_exprs = select
+        .group_by
+        .iter()
+        .map(|expr| translate_scan(expr, &space, params))
+        .collect::<DbResult<Vec<Expr>>>()?;
+    // `GROUP BY team` on a `COLLATE NOCASE` column has one group for `blue`
+    // and `Blue`; grouping by bytes has two, and the counts are then wrong
+    // rather than merely differently ordered.
+    let group_collations: Vec<Collation> =
+        select.group_by.iter().map(expression_collation).collect();
+    let grouped_walk = plan.aggregation == AggregationMode::Grouped
+        && !prepared.forced.hash_group
+        && is_scan_prefix(&group_exprs, scan_order);
+
+    // Whether the projected rows arrive in the order the ORDER BY asks for.
+    let reversed = prepared
+        .stages
+        .first()
+        .map(|stage| stage.kind == AccessKind::Reverse)
+        .unwrap_or(false);
+    // A non-default NULL placement is a real ordering requirement, and no scan
+    // order satisfies it by accident.
+    let default_nulls = sort_keys
+        .iter()
+        .all(|term| term.nulls_first != term.descending);
+    let sorted_already = if !default_nulls {
+        false
+    } else if reversed {
+        // A reverse scan produces descending key order, so a descending
+        // ORDER BY over the key is satisfied by the direction rather than by a
+        // sorter. `plan.reverse` is only ever set when the planner already
+        // decided that, which is why the condition is the planner's answer
+        // rather than a second derivation of it.
+        !sort_keys.is_empty() && !plan.needs_sort
+    } else {
+        !sort_keys.is_empty()
+            && sort_keys.iter().all(|term| !term.descending)
+            && output_is_sorted_by(&sort_keys, &projected, plan, scan_order, grouped_walk)
+    };
+    let sorted_already = sorted_already || (skipping && !sort_keys.is_empty());
+
+    // Built bottom-up, because each operator owns the one below it. The
+    // description is collected in the same order and reversed at the end, so it
+    // reads source-first the way a plan should.
+    let mut operators: Vec<String> = Vec::new();
+    let mut chain: Box<dyn Sink> = sink;
+
+    let limit = constant_limit(select, params)?;
+    let offset = constant_offset(select, params)?.unwrap_or(0);
+    if sort_keys.is_empty() || sorted_already {
+        if let Some(limit) = limit {
+            chain = Box::new(Limit::new(limit, offset, chain));
+            operators.push(format!("LIMIT {limit} OFFSET {offset}"));
+        }
+        if needs_trim {
+            chain = Box::new(Project::new(trim(result_width, &scan_types)?, chain));
+            operators.push("TRIM".to_string());
+        }
+    } else if let Some(limit) = limit {
+        if needs_trim {
+            chain = Box::new(Project::new(trim(result_width, &scan_types)?, chain));
+            operators.push("TRIM".to_string());
+        }
+        let bounded = limit.saturating_add(offset);
+        if bounded <= TopN::MAX_LIMIT && !prepared.forced.full_sort {
+            if offset > 0 {
+                chain = Box::new(Limit::new(limit, offset, chain));
+                operators.push(format!("LIMIT {limit} OFFSET {offset}"));
+            }
+            chain = Box::new(TopN::new(sort_keys.clone(), bounded, chain));
+            operators.push(format!("TOP {bounded}"));
+        } else {
+            chain = Box::new(Limit::new(limit, offset, chain));
+            chain = Box::new(Sort::new(sort_keys.clone(), chain));
+            operators.push(format!("LIMIT {limit} OFFSET {offset}"));
+            operators.push("SORT".to_string());
+        }
+    } else {
+        if needs_trim {
+            chain = Box::new(Project::new(trim(result_width, &scan_types)?, chain));
+            operators.push("TRIM".to_string());
+        }
+        chain = Box::new(Sort::new(sort_keys.clone(), chain));
+        operators.push("SORT".to_string());
+    }
+
+    // The collation of each output column, for `DISTINCT`. A `DISTINCT` over a
+    // `COLLATE NOCASE` column keeps one of `blue` and `Blue`, and one that
+    // compared bytes keeps both.
+    let output_collations: Vec<Collation> = select
+        .columns
+        .iter()
+        .map(|column| expression_collation(&column.expr))
+        .collect();
+    if select.distinct && !skipping {
+        if plan.aggregation == AggregationMode::None
+            && !prepared.forced.hash_distinct
+            && is_scan_prefix(&projected, scan_order)
+        {
+            chain = Box::new(AdjacentDistinct::new(output_collations.clone(), chain));
+            operators.push("DISTINCT ADJACENT".to_string());
+        } else {
+            chain = Box::new(Distinct::new(output_collations.clone(), chain));
+            operators.push("DISTINCT HASH".to_string());
+        }
+    }
+
+    let projection_input_types = if plan.aggregation == AggregationMode::None {
+        scan_types.clone()
+    } else {
+        aggregate_output_types(select, &space, params)?
+    };
+    // A skip scan hands up exactly the projected key columns, already in
+    // output order, so the projection over it reads column i for column i.
+    let projected = if skipping {
+        (0..projected.len()).map(Expr::Column).collect()
+    } else {
+        projected
+    };
+    let compiled_projection = projected
+        .iter()
+        .map(|expr| compile(expr, &projection_input_types))
+        .collect::<DbResult<Vec<_>>>()?;
+    chain = Box::new(Project::new(compiled_projection, chain));
+    operators.push("PROJECT".to_string());
+
+    match plan.aggregation {
+        AggregationMode::None => {}
+        AggregationMode::Whole => {
+            chain = Box::new(SimpleAggregate::new(
+                aggregate_specs(select, &space, params, &scan_types)?,
+                chain,
+            ));
+            operators.push("AGGREGATE".to_string());
+        }
+        AggregationMode::Grouped => {
+            let keys = group_exprs
+                .iter()
+                .map(|expr| compile(expr, &scan_types))
+                .collect::<DbResult<Vec<_>>>()?;
+            let specs = aggregate_specs(select, &space, params, &scan_types)?;
+            chain = if grouped_walk {
+                operators.push("GROUP STREAM".to_string());
+                Box::new(StreamAggregate::new(
+                    keys,
+                    group_collations.clone(),
+                    specs,
+                    chain,
+                ))
+            } else {
+                operators.push("GROUP HASH".to_string());
+                Box::new(HashAggregate::new(
+                    keys,
+                    group_collations.clone(),
+                    specs,
+                    chain,
+                ))
+            };
+        }
+    }
+
+    // `select.filter` is the *whole* `WHERE`, and `plan.residuals` is what the
+    // access paths did not consume. Testing both re-tests every predicate the
+    // planner turned into a seek or a range - `WHERE key BETWEEN ?1 AND ?1+200`
+    // was evaluated once per row of a range whose bounds already excluded
+    // everything outside it - so only the residuals are tested here. That is
+    // also what the bytecode VM does, and it is not merely a speed question: a
+    // predicate with `random()` in it would answer differently the second time.
+    //
+    // The operator chain in `Shape::operators` is what showed this: it printed
+    // `RANGE tree 3 -> FILTER -> AGGREGATE` and the `FILTER` had nothing to do.
+    if let Some(constant) = &plan.constant_filter {
+        let translated = translate_scan(constant, &space, params)?;
+        chain = Box::new(Filter::new(compile(&translated, &scan_types)?, chain));
+        operators.push("FILTER CONSTANT".to_string());
+    }
+    for residual in plan.residuals.iter().flatten() {
+        let translated = translate_scan(residual, &space, params)?;
+        chain = Box::new(Filter::new(compile(&translated, &scan_types)?, chain));
+        operators.push("FILTER RESIDUAL".to_string());
+    }
+
+    // The inner stages, innermost first, so each ends up above the one before
+    // it in the chain the source pushes into. The chain widens from `'static`
+    // to `'t` here and only here: an index nested loop borrows its inner tree,
+    // and it wraps everything built so far rather than being wrapped by it.
+    let mut chain: Box<dyn Sink + 't> = chain;
+    for index in (1..prepared.stages.len()).rev() {
+        let stage = prepared
+            .stages
+            .get(index)
+            .ok_or_else(|| misuse("a stage vanished while building"))?;
+        chain = build_nested(plan, catalog, &space, params, stage, index, chain)?;
+        operators.push(format!(
+            "{} tree {}{}",
+            stage.kind.describe(),
+            stage.root,
+            if stage.is_lookup {
+                " (rowid lookup)"
+            } else {
+                ""
+            }
+        ));
+    }
+
+    let names = select
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect();
+
+    let head_stage = prepared
+        .stages
+        .first()
+        .ok_or_else(|| misuse("a plan with no stages"))?;
+    let source = build_source(plan, catalog, &space, params, head_stage, limit)?;
+    operators.push(format!(
+        "{} tree {}",
+        head_stage.kind.describe(),
+        head_stage.root
+    ));
+    operators.reverse();
+    Ok((
+        Pipeline {
+            source,
+            head: chain,
+            pool: catalog.pool(),
+        },
+        Shape { names, operators },
+    ))
+}
+
+/// Builds the driving source for the outermost stage.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees come from
+/// @param space - the joined column space
+/// @param params - the bound parameters
+/// @param stage - the outermost stage
+/// @param limit - the statement's `LIMIT`, when it has a constant one
+fn build_source<'t>(
+    plan: &PhysicalPlan,
+    catalog: &'t dyn TreeCatalog,
+    space: &Space<'_>,
+    params: &Params,
+    stage: &PreparedStage,
+    limit: Option<usize>,
+) -> DbResult<Source<'t>> {
+    let tree = catalog
+        .tree(stage.root)
+        .ok_or_else(|| misuse(format!("no tree imported for root page {}", stage.root)))?;
+    let projection = Projection::all(stage.width);
+    let source_term = plan
+        .sources
+        .get(stage.source)
+        .ok_or_else(|| misuse("a stage names a FROM term the plan does not have"))?;
+    let path = &source_term.path;
+    let table = &source_term.table;
+    match stage.kind {
+        AccessKind::Full => Ok(Source::Scan(FullScan::new(tree, projection))),
+        AccessKind::Skip => {
+            let prefix = space
+                .order
+                .len()
+                .min(projected_prefix(plan, space, params)?);
+            Ok(Source::Skip(SkipScan::new(tree, prefix.max(1))))
+        }
+        AccessKind::Point => {
+            let key = point_key(path, space, params)?;
+            Ok(Source::Point(PointProbe::new(tree, projection), key))
+        }
+        AccessKind::Span => {
+            let bounds = span_bounds(path, table, space, params)?;
+            Ok(Source::Span(SpanScan::new(
+                tree,
+                projection,
+                bounds.low,
+                bounds.low_inclusive,
+                bounds.high,
+                bounds.high_inclusive,
+            )))
+        }
+        AccessKind::Reverse => {
+            let bounds = span_bounds(path, table, space, params)?;
+            let high = bounds.high;
+            Ok(Source::Reverse(ReverseScan::new(
+                tree, projection, high, limit,
+            )))
+        }
+        AccessKind::Nested => Err(misuse("a nested stage cannot drive a pipeline")),
+    }
+}
+
+/// Builds one inner stage as an index nested loop join.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees come from
+/// @param space - the joined column space
+/// @param params - the bound parameters
+/// @param stage - the inner stage
+/// @param index - the stage's position
+/// @param downstream - what to push joined rows into
+#[allow(clippy::too_many_arguments)]
+fn build_nested<'t>(
+    plan: &PhysicalPlan,
+    catalog: &'t dyn TreeCatalog,
+    space: &Space<'_>,
+    params: &Params,
+    stage: &PreparedStage,
+    index: usize,
+    downstream: Box<dyn Sink + 't>,
+) -> DbResult<Box<dyn Sink + 't>> {
+    let tree = catalog
+        .tree(stage.root)
+        .ok_or_else(|| misuse(format!("no tree imported for root page {}", stage.root)))?;
+    let outer_types: Vec<StaticType> = space
+        .types
+        .get(..stage.offset)
+        .map(<[StaticType]>::to_vec)
+        .unwrap_or_default();
+    let (keys, full_key) = if stage.is_lookup {
+        // The rowid the index entry carries, which is the previous stage's
+        // rowid column.
+        let previous = space
+            .stages
+            .get(index.saturating_sub(1))
+            .ok_or_else(|| misuse("a rowid lookup with no index stage before it"))?;
+        let previous_layout = space
+            .layouts
+            .get(index.saturating_sub(1))
+            .ok_or_else(|| misuse("a rowid lookup with no layout before it"))?;
+        let rowid = previous_layout
+            .rowid
+            .ok_or_else(|| misuse("the index entry carries no rowid to look the row up by"))?;
+        (
+            vec![Expr::Column(previous.offset.saturating_add(rowid))],
+            true,
+        )
+    } else {
+        let source_term = plan
+            .sources
+            .get(stage.source)
+            .ok_or_else(|| misuse("a stage names a FROM term the plan does not have"))?;
+        nested_key(&source_term.path, &source_term.table, space, params)?
+    };
+    let compiled = keys
+        .iter()
+        .map(|expr| compile(expr, &outer_types))
+        .collect::<DbResult<Vec<_>>>()?;
+    Ok(Box::new(IndexNestedLoopJoin::new(
+        JoinKind::Inner,
+        tree,
+        catalog.pool(),
+        compiled,
+        Projection::all(stage.width),
+        full_key,
+        downstream,
+    )))
+}
+
+/// Returns the key expressions an inner stage probes with.
+///
+/// @param path - the FROM term's access path
+/// @param space - the joined column space
+/// @param params - the bound parameters
+fn nested_key(
+    path: &AccessPath,
+    table: &inillucent_sql::catalog_view::TableInfo,
+    space: &Space<'_>,
+    params: &Params,
+) -> DbResult<(Vec<Expr>, bool)> {
+    match path {
+        AccessPath::RowidSeek { key, .. } => Ok((
+            vec![with_affinity(
+                translate_scan(key, space, params)?,
+                Some(Affinity::Integer),
+            )],
+            true,
+        )),
+        AccessPath::IndexSeek {
+            equalities,
+            low,
+            high,
+            columns,
+            ..
+        } => {
+            if equalities.is_empty() {
+                return unsupported("a join whose inner index seek has no equality");
+            }
+            if low.is_some() || high.is_some() {
+                return unsupported("a join whose inner index seek also has a range");
+            }
+            let mut keys = Vec::with_capacity(equalities.len());
+            for (position, expr) in equalities.iter().enumerate() {
+                keys.push(with_affinity(
+                    translate_scan(expr, space, params)?,
+                    index_affinity(table, columns, position),
+                ));
+            }
+            // A prefix of the index key, so the probe is a range over every
+            // entry sharing it.
+            Ok((keys, false))
+        }
+        _ => unsupported("that inner access path in a join"),
+    }
+}
+
+/// Returns the key a point probe looks up.
+///
+/// @param path - the FROM term's access path
+/// @param space - the joined column space
+/// @param params - the bound parameters
+fn point_key(path: &AccessPath, space: &Space<'_>, params: &Params) -> DbResult<Vec<OwnedDatum>> {
+    match path {
+        AccessPath::RowidSeek { key, .. } => Ok(vec![constant_value(
+            key,
+            space,
+            params,
+            Some(Affinity::Integer),
+        )?]),
+        _ => unsupported("a point probe over that access path"),
+    }
+}
+
+/// The bounds of a range scan, with the inclusivity of each end.
+///
+/// A struct rather than a tuple because a bare `(low, high, inclusive)` is what
+/// hid the bug: the single `inclusive` was the *high* bound's, and the low
+/// bound was applied inclusively whatever the predicate said. `WHERE id > 495`
+/// returned `id >= 495`.
+#[derive(Clone, Debug, Default)]
+pub struct SpanBounds {
+    /// The lower bound, or `None` for the start of the tree.
+    pub low: Option<Vec<OwnedDatum>>,
+    /// Whether a key equal to the lower bound is in the range.
+    pub low_inclusive: bool,
+    /// The upper bound, or `None` for the end of the tree.
+    pub high: Option<Vec<OwnedDatum>>,
+    /// Whether a key equal to the upper bound is in the range.
+    pub high_inclusive: bool,
+}
+
+/// Returns the affinity of one column of an index key.
+///
+/// The index's `columns` list says which table column each key position holds,
+/// and the table says what that column's affinity is. A position past the end
+/// of the list - the rowid at the end of an entry - is an integer.
+///
+/// @param table - the indexed table
+/// @param columns - which table column each index position holds
+/// @param position - the key position
+fn index_affinity(
+    table: &inillucent_sql::catalog_view::TableInfo,
+    columns: &[u16],
+    position: usize,
+) -> Option<Affinity> {
+    match columns.get(position) {
+        Some(column) => table
+            .columns
+            .get(usize::from(*column))
+            .map(|info| info.affinity),
+        None => Some(Affinity::Integer),
+    }
+}
+
+/// Returns the bounds of a range scan.
+///
+/// @param path - the FROM term's access path
+/// @param space - the joined column space
+/// @param params - the bound parameters
+fn span_bounds(
+    path: &AccessPath,
+    table: &inillucent_sql::catalog_view::TableInfo,
+    space: &Space<'_>,
+    params: &Params,
+) -> DbResult<SpanBounds> {
+    match path {
+        AccessPath::TableScan { .. } => Ok(SpanBounds {
+            low: None,
+            low_inclusive: true,
+            high: None,
+            high_inclusive: true,
+        }),
+        AccessPath::RowidRange { low, high, .. } => {
+            // A rowid range compares against the rowid, which is an integer.
+            let (low_value, low_inclusive) =
+                bound_value(low.as_ref(), space, params, Some(Affinity::Integer))?;
+            let (high_value, high_inclusive) =
+                bound_value(high.as_ref(), space, params, Some(Affinity::Integer))?;
+            Ok(SpanBounds {
+                low: low_value.map(|value| vec![value]),
+                low_inclusive,
+                high: high_value.map(|value| vec![value]),
+                high_inclusive,
+            })
+        }
+        AccessPath::IndexSeek {
+            equalities,
+            low,
+            high,
+            columns,
+            ..
+        } => {
+            let mut prefix = Vec::with_capacity(equalities.len());
+            for (position, expr) in equalities.iter().enumerate() {
+                prefix.push(constant_value(
+                    expr,
+                    space,
+                    params,
+                    index_affinity(table, columns, position),
+                )?);
+            }
+            // The range is on the column after the equality prefix.
+            let range_affinity = index_affinity(table, columns, equalities.len());
+            let (low_value, low_inclusive) =
+                bound_value(low.as_ref(), space, params, range_affinity)?;
+            let (high_value, high_inclusive) =
+                bound_value(high.as_ref(), space, params, range_affinity)?;
+            let mut low_key = prefix.clone();
+            let mut high_key = prefix;
+            if low_value.is_none() && high_value.is_none() {
+                if low_key.is_empty() {
+                    return Ok(SpanBounds {
+                        low: None,
+                        low_inclusive: true,
+                        high: None,
+                        high_inclusive: true,
+                    });
+                }
+                // An equality prefix with no range is the run of every entry
+                // sharing it, so both ends are the prefix and both inclusive.
+                return Ok(SpanBounds {
+                    low: Some(low_key),
+                    low_inclusive: true,
+                    high: Some(high_key),
+                    high_inclusive: true,
+                });
+            }
+            if let Some(value) = low_value {
+                low_key.push(value);
+            }
+            if let Some(value) = high_value {
+                high_key.push(value);
+            }
+            Ok(SpanBounds {
+                low: if low_key.is_empty() {
+                    None
+                } else {
+                    Some(low_key)
+                },
+                low_inclusive,
+                high: if high_key.is_empty() {
+                    None
+                } else {
+                    Some(high_key)
+                },
+                high_inclusive,
+            })
+        }
+        _ => unsupported("a range over that access path"),
+    }
+}
+
+/// Returns one range bound's value and whether it is inclusive.
+///
+/// @param bound - the bound, when there is one
+/// @param space - the joined column space
+/// @param params - the bound parameters
+fn bound_value(
+    bound: Option<&RangeBound>,
+    space: &Space<'_>,
+    params: &Params,
+    affinity: Option<Affinity>,
+) -> DbResult<(Option<OwnedDatum>, bool)> {
+    let Some(bound) = bound else {
+        return Ok((None, true));
+    };
+    let value = constant_value(&bound.value, space, params, affinity)?;
+    let inclusive = matches!(bound.kind, BoundKind::GreaterEqual | BoundKind::LessEqual);
+    Ok((Some(value), inclusive))
+}
+
+/// Evaluates an expression that must not read any column.
+///
+/// A bound, a seek key and a `LIMIT` are all "known before the scan starts", and
+/// an expression that reads a column is not - so one is refused here rather
+/// than evaluated against whatever row happened to be current.
+///
+/// @param expr - the bound expression
+/// @param space - the joined column space
+/// @param params - the bound parameters
+fn constant_value(
+    expr: &BoundExpr,
+    space: &Space<'_>,
+    params: &Params,
+    affinity: Option<Affinity>,
+) -> DbResult<OwnedDatum> {
+    let translated = translate_scan(expr, space, params)?;
+    let value = fold(&translated)
+        .ok_or_else(|| misuse("a seek key or range bound reads a column, which it may not"))?;
+    // A seek key is one side of a comparison and takes the comparison's
+    // affinity like any other. `WHERE id = '4'` against an `INTEGER PRIMARY
+    // KEY` finds row 4 in SQLite, because the text is converted before the
+    // rowid is compared - and a probe that descended for the *text* `'4'`
+    // found nothing at all. The predicate path already applied this; the seek
+    // path did not, and the two disagreeing is worse than either being wrong.
+    let Some(affinity) = affinity else {
+        return Ok(value);
+    };
+    let borrowed = value.borrow();
+    let converted = inillucent_value::affinity::apply_affinity(
+        crate::scalar::to_value(borrowed),
+        affinity,
+        inillucent_value::encoding::TextEncoding::Utf8,
+    )
+    .unwrap_or(inillucent_value::value::Value::Null);
+    Ok(crate::scalar::from_value(converted))
+}
+
+/// Wraps a key expression so an affinity is applied before it is compared.
+///
+/// A join's inner probe evaluates its key once per outer row, so the conversion
+/// cannot be folded away the way a constant seek key's can.
+///
+/// @param expr - the translated key expression
+/// @param affinity - the affinity to apply, if any
+fn with_affinity(expr: Expr, affinity: Option<Affinity>) -> Expr {
+    match affinity {
+        None => expr,
+        Some(affinity) => Expr::Cast {
+            operand: Box::new(expr),
+            affinity,
+        },
+    }
+}
+
+/// Folds a constant expression to a value, or returns `None` if it reads a
+/// column.
+///
+/// @param expr - the translated expression
+fn fold(expr: &Expr) -> Option<OwnedDatum> {
+    match expr {
+        Expr::Literal(value) => Some(value.clone()),
+        Expr::Arith(op, left, right) => {
+            let left = fold(left)?;
+            let right = fold(right)?;
+            let (a, b) = (left.borrow(), right.borrow());
+            match (a.as_int(), b.as_int()) {
+                (Some(a), Some(b)) => Some(OwnedDatum::Int(match op {
+                    ArithOp::Add => a.wrapping_add(b),
+                    ArithOp::Subtract => a.wrapping_sub(b),
+                    ArithOp::Multiply => a.wrapping_mul(b),
+                })),
+                _ => {
+                    let a = a.as_f64()?;
+                    let b = b.as_f64()?;
+                    Some(OwnedDatum::Real(match op {
+                        ArithOp::Add => a + b,
+                        ArithOp::Subtract => a - b,
+                        ArithOp::Multiply => a * b,
+                    }))
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Reports whether a query is the shape a skip scan answers.
+///
+/// Every condition is load bearing:
+///
+/// - `DISTINCT` with no aggregation, because a skip scan produces one row per
+///   distinct prefix and nothing else;
+/// - no `WHERE`, because a skipped row might have been the one that passed it;
+/// - one stage, because a skip scan produces representatives rather than rows
+///   and a join over representatives is not the query;
+/// - the projected columns are exactly a prefix of the tree's key order,
+///   because that is what makes "one row per distinct value" the same set as
+///   the query's;
+/// - every ordering term ascending, so the rows the seek produces are the
+///   answer in the order asked for.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the layouts come from
+/// @param root - the tree the outermost stage reads
+fn skip_scan_applies(plan: &PhysicalPlan, catalog: &dyn TreeCatalog, root: u32) -> DbResult<bool> {
+    let select = &plan.select;
+    if !select.distinct
+        || plan.aggregation != AggregationMode::None
+        || select.filter.is_some()
+        || plan.constant_filter.is_some()
+        || plan.residuals.iter().any(Option::is_some)
+        || select.limit.is_some()
+        || plan.sources.len() != 1
+        || select
+            .order_by
+            .iter()
+            .any(|term| term.order == SortOrder::Descending)
+    {
+        return Ok(false);
+    }
+    let Some(layout) = catalog.layout(root) else {
+        return Ok(false);
+    };
+    // The projected columns must be exactly the leading key columns.
+    if select.columns.len() > layout.key_columns.len() {
+        return Ok(false);
+    }
+    for (position, column) in select.columns.iter().enumerate() {
+        let slot = match &column.expr {
+            BoundExpr::Column { slot, .. } => *slot as usize,
+            _ => return Ok(false),
+        };
+        let tree_column = match layout.slots.get(slot) {
+            Some(Some(tree_column)) => *tree_column,
+            _ => return Ok(false),
+        };
+        if layout.key_columns.get(position) != Some(&tree_column) {
+            return Ok(false);
+        }
+    }
+    Ok(!select.columns.is_empty())
+}
+
+/// Returns how many leading key columns a skip scan produces.
+///
+/// @param plan - the planner's output
+/// @param space - the joined column space
+/// @param params - the bound parameters
+fn projected_prefix(plan: &PhysicalPlan, space: &Space<'_>, params: &Params) -> DbResult<usize> {
+    let _ = (space, params);
+    Ok(plan.select.columns.len())
+}
+
+/// Reports whether a list of expressions is a prefix of the scan's key order.
+///
+/// Every expression must be a bare column reference, and the columns must be
+/// exactly the scan order's leading columns in the same order - not a subset
+/// and not a permutation, because "the rows arrive sorted by these" is only
+/// true of a prefix.
+///
+/// @param exprs - the expressions to test
+/// @param scan_order - the tree columns the leaves are ordered by
+fn is_scan_prefix(exprs: &[Expr], scan_order: &[usize]) -> bool {
+    if exprs.is_empty() || exprs.len() > scan_order.len() {
+        return false;
+    }
+    exprs.iter().enumerate().all(|(position, expr)| {
+        matches!(expr, Expr::Column(index) if scan_order.get(position) == Some(index))
+    })
+}
+
+/// Reports whether the projected rows already arrive in the ORDER BY's order.
+///
+/// @param sort_keys - the ordering terms, in output-column space
+/// @param projected - the output expressions
+/// @param plan - the planner's output
+/// @param scan_order - the tree columns the leaves are ordered by
+/// @param grouped_walk - whether a streaming grouped aggregate is in the chain
+fn output_is_sorted_by(
+    sort_keys: &[SortKey],
+    projected: &[Expr],
+    plan: &PhysicalPlan,
+    scan_order: &[usize],
+    grouped_walk: bool,
+) -> bool {
+    match plan.aggregation {
+        AggregationMode::Grouped => {
+            grouped_walk
+                && sort_keys.iter().enumerate().all(|(position, term)| {
+                    matches!(projected.get(term.column), Some(Expr::Column(index)) if *index == position)
+                })
+        }
+        AggregationMode::Whole => false,
+        AggregationMode::None => {
+            let ordered: Vec<Expr> = sort_keys
+                .iter()
+                .filter_map(|term| projected.get(term.column).cloned())
+                .collect();
+            ordered.len() == sort_keys.len() && is_scan_prefix(&ordered, scan_order)
+        }
+    }
+}
+
+/// Builds a plan and runs it, returning the rows.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees and layouts come from
+/// @param params - the values bound to `?1`, `?2`, ...
+pub fn run(
+    plan: &PhysicalPlan,
+    catalog: &dyn TreeCatalog,
+    params: &Params,
+) -> DbResult<(Vec<Vec<OwnedDatum>>, Shape)> {
+    let prepared = prepare(plan, catalog, ForcePlan::default())?;
+    run_prepared(plan, catalog, &prepared, params)
+}
+
+/// Runs an already-prepared statement and returns the rows.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees and layouts come from
+/// @param prepared - the structural choices [`prepare`] made
+/// @param params - the values bound to `?1`, `?2`, ...
+pub fn run_prepared(
+    plan: &PhysicalPlan,
+    catalog: &dyn TreeCatalog,
+    prepared: &Prepared,
+    params: &Params,
+) -> DbResult<(Vec<Vec<OwnedDatum>>, Shape)> {
+    let rows = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = Box::new(CollectInto::new(std::rc::Rc::clone(&rows)));
+    let (mut pipeline, shape) = build_prepared(plan, catalog, prepared, params, sink)?;
+    pipeline.run()?;
+    let collected = rows.borrow().clone();
+    Ok((collected, shape))
+}
+
+/// Translates a bound expression that reads the scan's columns.
+///
+/// @param expr - the bound expression
+/// @param space - the joined column space
+/// @param params - the bound parameters
+fn translate_scan(expr: &BoundExpr, space: &Space<'_>, params: &Params) -> DbResult<Expr> {
+    Ok(match expr {
+        BoundExpr::Null => Expr::Literal(OwnedDatum::Null),
+        BoundExpr::Integer(number) => Expr::Literal(OwnedDatum::Int(*number)),
+        BoundExpr::Real(number) => Expr::Literal(OwnedDatum::Real(*number)),
+        BoundExpr::Text(bytes) => Expr::Literal(OwnedDatum::Text(bytes.clone())),
+        BoundExpr::Blob(bytes) => Expr::Literal(OwnedDatum::Blob(bytes.clone())),
+        BoundExpr::Parameter(index) => Expr::Literal(params.get(*index)),
+        BoundExpr::Column { source, slot, .. } => {
+            let index = space.column(*source, *slot as usize).ok_or_else(|| {
+                misuse(format!(
+                    "the tree read for FROM term {source} does not carry record slot {slot}"
+                ))
+            })?;
+            Expr::Column(index)
+        }
+        BoundExpr::Rowid { source } => Expr::Column(
+            space
+                .rowid(*source)
+                .ok_or_else(|| misuse("the tree read does not carry a rowid"))?,
+        ),
+        BoundExpr::Not(operand) => Expr::Not(Box::new(translate_scan(operand, space, params)?)),
+        BoundExpr::IsNull { operand, negated } => {
+            let inner = Box::new(translate_scan(operand, space, params)?);
+            if *negated {
+                Expr::IsNotNull(inner)
+            } else {
+                Expr::IsNull(inner)
+            }
+        }
+        BoundExpr::And(left, right) => Expr::And(
+            Box::new(translate_scan(left, space, params)?),
+            Box::new(translate_scan(right, space, params)?),
+        ),
+        BoundExpr::Or(left, right) => Expr::Or(
+            Box::new(translate_scan(left, space, params)?),
+            Box::new(translate_scan(right, space, params)?),
+        ),
+        BoundExpr::Arithmetic { op, left, right } => {
+            let left = Box::new(translate_scan(left, space, params)?);
+            let right = Box::new(translate_scan(right, space, params)?);
+            // `+`, `-` and `*` have a specialised integer node; everything else
+            // - divide, modulo, concatenation, the bitwise operators - goes
+            // through the shared implementation.
+            match arith_op(*op) {
+                Ok(op) => Expr::Arith(op, left, right),
+                Err(_) => Expr::General {
+                    op: *op,
+                    left,
+                    right,
+                },
+            }
+        }
+        BoundExpr::Compare {
+            op,
+            left,
+            right,
+            affinity,
+            collation,
+        } => {
+            // Affinity conversion before comparison and a non-BINARY
+            // collation both change the answer, so an executor that ignored
+            // them would be quietly wrong rather than incomplete. The plain
+            // form is kept for the case where there is nothing to apply,
+            // because it is the fast path and most comparisons are it.
+            let op = compare_op(*op)?;
+            let left = Box::new(translate_scan(left, space, params)?);
+            let right = Box::new(translate_scan(right, space, params)?);
+            if affinity.is_none() && *collation == inillucent_value::collation::Collation::Binary {
+                Expr::Compare(op, left, right)
+            } else {
+                Expr::CompareWith {
+                    op,
+                    affinity: *affinity,
+                    collation: *collation,
+                    left,
+                    right,
+                }
+            }
+        }
+        BoundExpr::Unary { op, operand } => Expr::Unary {
+            op: *op,
+            operand: Box::new(translate_scan(operand, space, params)?),
+        },
+        BoundExpr::Cast { operand, affinity } => Expr::Cast {
+            operand: Box::new(translate_scan(operand, space, params)?),
+            affinity: *affinity,
+        },
+        BoundExpr::Collate { operand, .. } => translate_scan(operand, space, params)?,
+        BoundExpr::Is {
+            negated,
+            left,
+            right,
+            affinity,
+            collation,
+        } => Expr::Is {
+            negated: *negated,
+            left: Box::new(translate_scan(left, space, params)?),
+            right: Box::new(translate_scan(right, space, params)?),
+            affinity: *affinity,
+            collation: *collation,
+        },
+        BoundExpr::Between {
+            negated,
+            operand,
+            low,
+            high,
+            affinity,
+            collation,
+        } => Expr::Between {
+            negated: *negated,
+            operand: Box::new(translate_scan(operand, space, params)?),
+            low: Box::new(translate_scan(low, space, params)?),
+            high: Box::new(translate_scan(high, space, params)?),
+            affinity: *affinity,
+            collation: *collation,
+        },
+        BoundExpr::InList {
+            negated,
+            operand,
+            list,
+            affinity,
+            collation,
+        } => Expr::InList {
+            negated: *negated,
+            operand: Box::new(translate_scan(operand, space, params)?),
+            list: list
+                .iter()
+                .map(|expr| translate_scan(expr, space, params))
+                .collect::<DbResult<Vec<Expr>>>()?,
+            affinity: *affinity,
+            collation: *collation,
+        },
+        BoundExpr::Case {
+            operand,
+            branches,
+            otherwise,
+            collation,
+        } => {
+            let mut translated = Vec::with_capacity(branches.len());
+            for (when, then) in branches {
+                translated.push((
+                    translate_scan(when, space, params)?,
+                    translate_scan(then, space, params)?,
+                ));
+            }
+            Expr::Case {
+                operand: match operand {
+                    Some(operand) => Some(Box::new(translate_scan(operand, space, params)?)),
+                    None => None,
+                },
+                branches: translated,
+                otherwise: match otherwise {
+                    Some(otherwise) => Some(Box::new(translate_scan(otherwise, space, params)?)),
+                    None => None,
+                },
+                collation: *collation,
+            }
+        }
+        BoundExpr::Pattern {
+            negated,
+            op,
+            operand,
+            pattern,
+            escape,
+        } => {
+            let kind = match op {
+                PatternOp::Like => crate::scalar::PatternKind::Like,
+                PatternOp::Glob => crate::scalar::PatternKind::Glob,
+                // `REGEXP` and `MATCH` are not built in: SQLite leaves them to
+                // an application-defined function or a module, and a query that
+                // uses one without registering it is an error rather than a
+                // false.
+                other => return unsupported(&format!("the {other:?} operator")),
+            };
+            Expr::Pattern {
+                negated: *negated,
+                kind,
+                operand: Box::new(translate_scan(operand, space, params)?),
+                pattern: Box::new(translate_scan(pattern, space, params)?),
+                escape: match escape {
+                    Some(escape) => Some(Box::new(translate_scan(escape, space, params)?)),
+                    None => None,
+                },
+            }
+        }
+        BoundExpr::Function {
+            func,
+            arguments,
+            collation,
+        } => {
+            // `length` keeps its specialised node: it reads the leaf's bytes in
+            // place where the general path copies them into a `Value` first,
+            // and `range.lookaside` calls it once per row.
+            let translated = arguments
+                .iter()
+                .map(|expr| translate_scan(expr, space, params))
+                .collect::<DbResult<Vec<Expr>>>()?;
+            if *func == ScalarFunc::Length && translated.len() == 1 {
+                match translated.into_iter().next() {
+                    Some(only) => Expr::Length(Box::new(only)),
+                    None => return unsupported("length with no argument"),
+                }
+            } else {
+                Expr::Call {
+                    func: *func,
+                    arguments: translated,
+                    collation: *collation,
+                }
+            }
+        }
+        BoundExpr::Math { func, arguments } => Expr::Math {
+            func: *func,
+            arguments: arguments
+                .iter()
+                .map(|expr| translate_scan(expr, space, params))
+                .collect::<DbResult<Vec<Expr>>>()?,
+        },
+        BoundExpr::Time { func, arguments } => Expr::Time {
+            func: *func,
+            arguments: arguments
+                .iter()
+                .map(|expr| translate_scan(expr, space, params))
+                .collect::<DbResult<Vec<Expr>>>()?,
+            // Every `now` in one statement is the same instant, which is
+            // SQLite's rule and the reason this is read once here rather than
+            // per row in the node.
+            now: inillucent_scalar::datetime::julian_now(),
+        },
+        other => return unsupported(&format!("the expression {}", name_of(other))),
+    })
+}
+
+/// Translates a bound expression in the space after aggregation.
+///
+/// A result column of an aggregating query reads either a `GROUP BY` key or an
+/// accumulator, and both are columns of the row the aggregate operator emits:
+/// the keys first, then the accumulators.
+///
+/// @param expr - the bound expression
+/// @param select - the bound statement, for the aggregate list
+/// @param space - the joined column space
+/// @param params - the bound parameters
+/// @param group_width - how many `GROUP BY` keys precede the accumulators
+fn translate_post(
+    expr: &BoundExpr,
+    select: &BoundSelect,
+    space: &Space<'_>,
+    params: &Params,
+    group_width: usize,
+) -> DbResult<Expr> {
+    if select.aggregates.is_empty() {
+        return translate_scan(expr, space, params);
+    }
+    if let BoundExpr::Aggregate { slot } = expr {
+        return Ok(Expr::Column(group_width.saturating_add(*slot)));
+    }
+    if let Some(position) = select.group_by.iter().position(|key| key == expr) {
+        return Ok(Expr::Column(position));
+    }
+    match expr {
+        BoundExpr::Null
+        | BoundExpr::Integer(_)
+        | BoundExpr::Real(_)
+        | BoundExpr::Text(_)
+        | BoundExpr::Blob(_)
+        | BoundExpr::Parameter(_) => translate_scan(expr, space, params),
+        BoundExpr::Arithmetic { op, left, right } => Ok(Expr::Arith(
+            arith_op(*op)?,
+            Box::new(translate_post(left, select, space, params, group_width)?),
+            Box::new(translate_post(right, select, space, params, group_width)?),
+        )),
+        BoundExpr::Compare {
+            op,
+            left,
+            right,
+            affinity,
+            collation,
+        } => {
+            let op = compare_op(*op)?;
+            let left = Box::new(translate_post(left, select, space, params, group_width)?);
+            let right = Box::new(translate_post(right, select, space, params, group_width)?);
+            if affinity.is_none() && *collation == inillucent_value::collation::Collation::Binary {
+                Ok(Expr::Compare(op, left, right))
+            } else {
+                Ok(Expr::CompareWith {
+                    op,
+                    affinity: *affinity,
+                    collation: *collation,
+                    left,
+                    right,
+                })
+            }
+        }
+        // Anything else is an expression over the scan's columns, which is
+        // legal only when the statement does not aggregate - and it does, or
+        // this function would have returned at the top. A column read outside
+        // an aggregate in a grouped query is what SQLite calls a "bare column",
+        // and it answers with an arbitrary row of the group. Refusing is the
+        // honest thing to do rather than picking one.
+        other => unsupported(&format!(
+            "the expression {} outside an aggregate",
+            name_of(other)
+        )),
+    }
+}
+
+/// Returns the static type of each column an aggregate operator emits.
+///
+/// @param select - the bound statement
+/// @param space - the joined column space
+/// @param params - the bound parameters
+fn aggregate_output_types(
+    select: &BoundSelect,
+    space: &Space<'_>,
+    params: &Params,
+) -> DbResult<Vec<StaticType>> {
+    let mut types = Vec::with_capacity(
+        select
+            .group_by
+            .len()
+            .saturating_add(select.aggregates.len()),
+    );
+    for key in &select.group_by {
+        let translated = translate_scan(key, space, params)?;
+        types.push(static_type_of(&translated, &space.types));
+    }
+    for call in &select.aggregates {
+        // `count` is always an integer; the rest depend on their input and on
+        // whether a sum overflowed, so nothing is claimed about them.
+        types.push(match call.func {
+            AggregateFunc::Count => StaticType::Int,
+            AggregateFunc::Total | AggregateFunc::Avg => StaticType::Real,
+            _ => StaticType::Unknown,
+        });
+    }
+    Ok(types)
+}
+
+/// Returns the static type an expression produces.
+///
+/// @param expr - the translated expression
+/// @param types - the input columns' types
+fn static_type_of(expr: &Expr, types: &[StaticType]) -> StaticType {
+    match expr {
+        Expr::Column(index) => types.get(*index).copied().unwrap_or(StaticType::Unknown),
+        Expr::Literal(OwnedDatum::Int(_)) => StaticType::Int,
+        Expr::Literal(OwnedDatum::Real(_)) => StaticType::Real,
+        Expr::Literal(OwnedDatum::Text(_)) => StaticType::Text,
+        _ => StaticType::Unknown,
+    }
+}
+
+/// Builds the accumulator specifications for an aggregating query.
+///
+/// @param select - the bound statement
+/// @param space - the joined column space
+/// @param params - the bound parameters
+/// @param types - the scan's column types
+fn aggregate_specs(
+    select: &BoundSelect,
+    space: &Space<'_>,
+    params: &Params,
+    types: &[StaticType],
+) -> DbResult<Vec<AggregateSpec>> {
+    let mut specs = Vec::with_capacity(select.aggregates.len());
+    for call in &select.aggregates {
+        let kind = match call.func {
+            AggregateFunc::Count if call.star => AggregateKind::CountStar,
+            AggregateFunc::Count => AggregateKind::Count,
+            AggregateFunc::Sum => AggregateKind::Sum,
+            AggregateFunc::Total => AggregateKind::Total,
+            AggregateFunc::Avg => AggregateKind::Average,
+            AggregateFunc::Min => AggregateKind::Minimum,
+            AggregateFunc::Max => AggregateKind::Maximum,
+            AggregateFunc::GroupConcat => {
+                let separator = match call.arguments.get(1) {
+                    None => ",".to_string(),
+                    Some(BoundExpr::Text(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+                    Some(_) => return unsupported("group_concat with a computed separator"),
+                };
+                AggregateKind::GroupConcat(separator)
+            }
+            other => return unsupported(&format!("the aggregate {other:?}")),
+        };
+        let argument = match (kind == AggregateKind::CountStar, call.arguments.first()) {
+            (true, _) | (_, None) => None,
+            (false, Some(expr)) => {
+                let translated = translate_scan(expr, space, params)?;
+                Some(compile(&translated, types)?)
+            }
+        };
+        specs.push(AggregateSpec { kind, argument });
+    }
+    Ok(specs)
+}
+
+/// Returns a projection that keeps the first `width` columns.
+///
+/// @param width - how many columns the statement's result has
+/// @param types - the input columns' types
+fn trim(width: usize, types: &[StaticType]) -> DbResult<Vec<Box<dyn crate::expr::Eval>>> {
+    (0..width)
+        .map(|index| compile(&Expr::Column(index), types))
+        .collect()
+}
+
+/// Returns the statement's `LIMIT`, when it is a constant.
+///
+/// @param select - the bound statement
+/// @param params - the bound parameters
+fn constant_limit(select: &BoundSelect, params: &Params) -> DbResult<Option<usize>> {
+    constant_count(select.limit.as_ref(), params)
+}
+
+/// Returns the statement's `OFFSET`, when it is a constant.
+///
+/// @param select - the bound statement
+/// @param params - the bound parameters
+fn constant_offset(select: &BoundSelect, params: &Params) -> DbResult<Option<usize>> {
+    constant_count(select.offset.as_ref(), params)
+}
+
+/// Returns a `LIMIT`/`OFFSET` expression's value.
+///
+/// @param expr - the expression, when there is one
+/// @param params - the bound parameters
+fn constant_count(expr: Option<&BoundExpr>, params: &Params) -> DbResult<Option<usize>> {
+    match expr {
+        None => Ok(None),
+        Some(BoundExpr::Integer(number)) => Ok(Some((*number).max(0) as usize)),
+        Some(BoundExpr::Parameter(index)) => match params.get(*index) {
+            OwnedDatum::Int(number) => Ok(Some(number.max(0) as usize)),
+            OwnedDatum::Null => Ok(None),
+            _ => unsupported("a LIMIT bound to a non-integer"),
+        },
+        Some(_) => unsupported("a LIMIT or OFFSET that is not a constant"),
+    }
+}
+
+/// Reports whether two translated expressions are the same expression.
+///
+/// @param left - one expression
+/// @param right - the other
+fn same_expr(left: &Expr, right: &Expr) -> bool {
+    match (left, right) {
+        (Expr::Column(a), Expr::Column(b)) => a == b,
+        (Expr::Literal(a), Expr::Literal(b)) => {
+            a.borrow().compare(&b.borrow()) == std::cmp::Ordering::Equal
+        }
+        (Expr::Arith(a, al, ar), Expr::Arith(b, bl, br)) => {
+            a == b && same_expr(al, bl) && same_expr(ar, br)
+        }
+        (Expr::Compare(a, al, ar), Expr::Compare(b, bl, br)) => {
+            a == b && same_expr(al, bl) && same_expr(ar, br)
+        }
+        (
+            Expr::CompareWith {
+                op: a,
+                affinity: aa,
+                collation: ac,
+                left: al,
+                right: ar,
+            },
+            Expr::CompareWith {
+                op: b,
+                affinity: ba,
+                collation: bc,
+                left: bl,
+                right: br,
+            },
+        ) => a == b && aa == ba && ac == bc && same_expr(al, bl) && same_expr(ar, br),
+        _ => false,
+    }
+}
+
+/// Maps a bound arithmetic operator onto the compiler's.
+///
+/// @param op - the planner's operator
+fn arith_op(op: BinaryOp) -> DbResult<ArithOp> {
+    match op {
+        BinaryOp::Add => Ok(ArithOp::Add),
+        BinaryOp::Subtract => Ok(ArithOp::Subtract),
+        BinaryOp::Multiply => Ok(ArithOp::Multiply),
+        other => unsupported(&format!("the operator {other:?}")),
+    }
+}
+
+/// Maps a bound comparison onto the compiler's.
+///
+/// @param op - the planner's operator
+fn compare_op(op: BinaryOp) -> DbResult<CompareOp> {
+    match op {
+        BinaryOp::Equal => Ok(CompareOp::Equal),
+        BinaryOp::NotEqual => Ok(CompareOp::NotEqual),
+        BinaryOp::Less => Ok(CompareOp::Less),
+        BinaryOp::LessEqual => Ok(CompareOp::LessOrEqual),
+        BinaryOp::Greater => Ok(CompareOp::Greater),
+        BinaryOp::GreaterEqual => Ok(CompareOp::GreaterOrEqual),
+        other => unsupported(&format!("the comparison {other:?}")),
+    }
+}
+
+/// Returns a bound expression's variant name, for a refusal message.
+///
+/// @param expr - the expression
+fn name_of(expr: &BoundExpr) -> &'static str {
+    match expr {
+        BoundExpr::Null => "NULL",
+        BoundExpr::Integer(_) => "an integer literal",
+        BoundExpr::Real(_) => "a real literal",
+        BoundExpr::Text(_) => "a text literal",
+        BoundExpr::Blob(_) => "a blob literal",
+        BoundExpr::Parameter(_) => "a parameter",
+        BoundExpr::Column { .. } => "a column",
+        BoundExpr::Rowid { .. } => "a rowid",
+        BoundExpr::Unary { .. } => "a unary operator",
+        BoundExpr::Arithmetic { .. } => "an arithmetic operator",
+        BoundExpr::Compare { .. } => "a comparison",
+        BoundExpr::And(_, _) => "AND",
+        BoundExpr::Or(_, _) => "OR",
+        BoundExpr::Not(_) => "NOT",
+        BoundExpr::IsNull { .. } => "IS NULL",
+        BoundExpr::Aggregate { .. } => "an aggregate",
+        BoundExpr::Function { .. } => "a function call",
+        BoundExpr::External { .. } => "an application-defined function",
+        // Everything else answers with its own variant name rather than with
+        // "an expression". A refusal a reader cannot act on is a refusal that
+        // costs a debugging session, and the first run of the Phase 2 gate
+        // spent one on exactly this line.
+        other => {
+            let rendered = format!("{other:?}");
+            let name = rendered
+                .split(|c: char| !c.is_alphanumeric())
+                .next()
+                .unwrap_or("an expression");
+            return Box::leak(format!("a {name} expression").into_boxed_str());
+        }
+    }
+}
+
+/// Returns the flow a sink reports, for the `Flow` re-export.
+///
+/// Kept so that a caller of this module does not have to reach into
+/// [`crate::ops`] for the one type a custom sink needs.
+pub fn continue_flow() -> Flow {
+    Flow::Continue
+}

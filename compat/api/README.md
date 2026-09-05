@@ -19,14 +19,14 @@ covered, and these say what "the family" is.
 Regenerate with:
 
 ```
-cargo run -p rustdb-compat --bin rustdb-obligations
+cargo run -p inillucent-compat --bin inillucent-obligations
 ```
 
-`rustdb-compat`'s `the_registers_match_the_engine` regenerates them and compares,
+`inillucent-compat`'s `the_registers_match_the_engine` regenerates them and compares,
 so a file that has drifted from the engine fails the suite rather than sitting
 there being wrong.
 
 The ABI probes that go with `symbols.toml` are in
-`crates/rustdb-compat/tests/c/capi_probe.c`. They compile against the official
+`crates/inillucent-compat/tests/c/capi_probe.c`. They compile against the official
 `sqlite3.h`, link against each engine in turn, and require the same output from
 both — which is what turns a symbol list into a claim about behaviour.

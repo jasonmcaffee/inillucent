@@ -1,5 +1,5 @@
 /*
-** The SQLite side of the rust-db oracle protocol.
+** The SQLite side of the inillucent oracle protocol.
 **
 ** Invariant: this program observes SQLite through its public C API and reports
 ** exactly what it saw. It never normalises, rounds, or re-encodes a value: an
@@ -9,7 +9,7 @@
 **
 ** It is compiled from the pinned SQLite 3.53.4 amalgamation and run as a
 ** separate child process, which is the only way SQLite is allowed to appear in
-** this workspace. No rust-db crate links against it.
+** this workspace. No inillucent crate links against it.
 **
 ** Protocol: one JSON object per line on stdin, one per line on stdout.
 **

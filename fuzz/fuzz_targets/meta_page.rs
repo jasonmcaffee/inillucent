@@ -8,7 +8,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use rustdb_pool::meta::Meta;
+use inillucent_pool::meta::Meta;
 
 fuzz_target!(|data: &[u8]| {
     let _ = Meta::decode(data);

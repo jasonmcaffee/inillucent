@@ -6,21 +6,21 @@ Scope: research and technical design only; this document changes no runtime beha
 
 ## Decision in one page
 
-rust-db will become a full embedded SQL database by implementing its own relational engine in Rust.
+inillucent will become a full embedded SQL database by implementing its own relational engine in Rust.
 The parser, resolver, catalog, planner, bytecode compiler and VM, value semantics, record codec,
 pager, page cache, B-trees, rollback journal, WAL, recovery, locking, functions, extension boundary,
-public APIs, and conformance harness are rust-db-owned source. SQLite and Turso are specifications,
+public APIs, and conformance harness are inillucent-owned source. SQLite and Turso are specifications,
 behavioral references, test oracles, and sources of ideas only. Neither engine is linked, embedded,
 vendored, translated, forked, or required at runtime.
 
 This is independent implementation, not cosmetic ownership. General-purpose support crates may be
 used for checksums, synchronization, tracing, testing, and operating-system bindings only when they
-do not implement a database subsystem. Every compatibility claim comes from rust-db's
+do not implement a database subsystem. Every compatibility claim comes from inillucent's
 machine-readable parity manifest, differential tests against the exact SQLite reference build,
-deterministic crash and I/O fault testing, and release evidence generated from rust-db code.
+deterministic crash and I/O fault testing, and release evidence generated from inillucent code.
 
-The existing `rustdb-core` remains the proven retrieval implementation. Its document store,
-BM25, HNSW, quantization, hybrid ranking, and filters become a native `rustdb_search` index method
+The existing `inillucent-core` remains the proven retrieval implementation. Its document store,
+BM25, HNSW, quantization, hybrid ranking, and filters become a native `inillucent_search` index method
 and virtual-table surface over ordinary relational tables. Existing callers keep a compatibility
 adapter while new callers use SQL. A future migration copies each generation-based index into a
 SQLite-format database, verifies row counts, content hashes, filter results, and a fixed query set,
@@ -37,18 +37,18 @@ and leaves the source generation untouched.
 
 Performance is a separate gate after correctness. Every benchmark runs the same SQL, data, journal
 mode, synchronous policy, cache state, transaction boundaries, and durability guarantees in both
-engines. A result cannot be called faster if rust-db did less work or provided weaker durability.
+engines. A result cannot be called faster if inillucent did less work or provided weaker durability.
 The headline gate is a lower 95% confidence bound above 1.20x for an operation family and a lower
 bound above 1.50x for the weighted geometric mean of the target workload. No required correctness,
 durability, or compatibility gate may regress to buy that speed.
 
 ## Introduction
 
-rust-db is currently a fast, carefully measured embedded retrieval index. It holds one fixed
+inillucent is currently a fast, carefully measured embedded retrieval index. It holds one fixed
 document/chunk shape, vector and lexical indexes, dictionary-encoded filter fields, append and
 tombstone mutations, and generation-based persistence. The requested destination is much larger:
 a small but full-featured relational database with SQLite-compatible tables, schemas, transactions,
-queries, updates, extensions, files, and application interfaces, while retaining rust-db's search
+queries, updates, extensions, files, and application interfaces, while retaining inillucent's search
 advantage and proving meaningful speedups against SQLite.
 
 SQLite is not a small feature checklist. Its default distribution includes a broad SQL dialect,
@@ -75,10 +75,10 @@ test system as part of the database, not as work added after the engine.
 - Provide an idiomatic Rust API and a separately gated SQLite C API compatibility layer.
 - Support SQLite's extensibility model: scalar, aggregate, and window functions; collations;
   virtual tables; table-valued functions; VFS implementations; authorizer and update hooks.
-- Preserve the current rust-db search quality and expose it as a native, transactional SQL feature.
+- Preserve the current inillucent search quality and expose it as a native, transactional SQL feature.
 - Reuse public upstream test assets where licenses allow and add independent differential,
   property, fault, crash, concurrency, malformed-file, and boundary testing.
-- Measure rust-db and SQLite with the same workload contract and prove practical, statistically
+- Measure inillucent and SQLite with the same workload contract and prove practical, statistically
   supported speedups on selected operation families without hiding regressions.
 - Keep the library embedded, serverless, cross-platform, deterministic, and usable without a
   background process.
@@ -91,7 +91,7 @@ test system as part of the database, not as work added after the engine.
 | SQLLogicTest | 100% pass on the pinned corpus; every exclusion names an SQLite-inapplicable test and reason |
 | SQLite conformance | 100% pass on the public tests adopted for the target profile |
 | Differential corpus | Zero unexplained result, type, column-name, row-count, error-code, or transaction-state differences |
-| File interop | SQLite and rust-db cross-open and mutate every fixture in both directions without `integrity_check` failure |
+| File interop | SQLite and inillucent cross-open and mutate every fixture in both directions without `integrity_check` failure |
 | ACID | Zero torn, lost-acknowledged, dirty, non-repeatable, or forked-history outcomes across the fault matrix |
 | Robustness | No panic, UB, leak, hang, or out-of-bounds access on malformed SQL/files and injected OOM/I/O faults |
 | Search compatibility | Existing fixed query pack stays within its declared quality and latency non-regression margins |
@@ -107,7 +107,7 @@ test system as part of the database, not as work added after the engine.
 - Claim that every SQL operation will beat SQLite. The scorecard reports wins, equivalence,
   inconclusive results, and losses by family. Headline claims follow predeclared gates.
 - Add a network server, distributed consensus, replication protocol, or PostgreSQL wire protocol.
-- Preserve rust-db's current generation-directory format as the relational database file format.
+- Preserve inillucent's current generation-directory format as the relational database file format.
   It remains readable only for migration and compatibility.
 - Change current production users, defaults, or files as part of this research ticket.
 
@@ -122,7 +122,7 @@ checked-in metadata file that records:
 - compile options and enabled extensions;
 - page size, journal mode, `synchronous`, cache size, temp store, mmap, and foreign-key settings;
 - compiler, optimization flags, target, OS, filesystem, CPU, memory, and storage device;
-- rust-db commit, Rust toolchain, feature flags, dependency lockfile hash, and reference-source revisions;
+- inillucent commit, Rust toolchain, feature flags, dependency lockfile hash, and reference-source revisions;
 - corpus generator version and seed.
 
 The reference profile enables the normal SQLite distribution, JSON and math functions, FTS5,
@@ -179,7 +179,7 @@ inventing a second description of the same behavior.
 
 ## Problem statement
 
-### Current rust-db state
+### Current inillucent state
 
 | Area | Current capability | Gap to SQLite parity |
 |---|---|---|
@@ -229,7 +229,7 @@ flowchart TB
     VFS[Platform VFS]
     BTree[SQLite format table and index B trees]
     Ext[Functions collations and virtual tables]
-    Search[rustdb search index method]
+    Search[inillucent search index method]
     Disk[(SQLite database files)]
 
     App --> RustAPI
@@ -261,16 +261,16 @@ or included.
 The repository enforces that boundary:
 
 - `docs/reference-register.toml` records each external reference, version, license, URL, and the
-  rust-db design decision it informed;
+  inillucent design decision it informed;
 - `deny.toml` and a workspace dependency policy reject SQLite/Turso/libSQL/database-engine crates
   from production dependency graphs;
 - a provenance check rejects copied files, upstream copyright banners, and suspiciously identical
   large source regions before merge;
-- oracle binaries run only from `rustdb-compat` test processes and are unavailable to production
+- oracle binaries run only from `inillucent-compat` test processes and are unavailable to production
   crates through feature flags or transitive dependencies;
 - test fixtures derived from public sources retain their licenses and live separately from
-  rust-db-authored tests;
-- every production module has a rust-db design section, owner, invariant list, and independent test
+  inillucent-authored tests;
+- every production module has a inillucent design section, owner, invariant list, and independent test
   plan in this document.
 
 ## Components and interfaces
@@ -279,25 +279,25 @@ The repository enforces that boundary:
 
 | Crate | Responsibility |
 |---|---|
-| `rustdb` | Stable public Rust facade: `Database`, `Connection`, `Statement`, `Rows`, `Transaction` |
-| `rustdb-sql` | First-party lexer, parser, AST, binder, semantic rewrites, logical and physical plans |
-| `rustdb-value` | First-party values, affinities, collations, expression primitives, records, varints |
-| `rustdb-catalog` | First-party schema objects, DDL catalog mutations, statistics, invalidation |
-| `rustdb-vm` | First-party bytecode compiler, verifier, VM, relational operators, statement lifecycle |
-| `rustdb-storage` | SQLite file codec, B-trees, pager, page cache, overflow, freelist |
-| `rustdb-transaction` | Locks, autocommit, savepoints, rollback journal, WAL, checkpoints, recovery |
-| `rustdb-vfs` | Sync/async platform I/O, locks, clocks, randomness, faultable test VFS |
-| `rustdb-ext` | Scalar/aggregate/window functions, collations, virtual tables, loadable extensions |
-| `rustdb-capi` | Versioned SQLite C API compatibility surface and ABI tests |
-| `rustdb-core` | Existing BM25, vector, hybrid ranking, filters, persistence-reader compatibility |
-| `rustdb-search` | SQL virtual table and index-method bridge to `rustdb-core` |
-| `rustdb-compat` | Manifest generator, SQLite oracle driver, SQLLogicTest and upstream-test adapters |
-| `rustdb-bench` | Existing grading framework extended with relational workloads and SQLite baseline |
-| `rustdb-sim` | Deterministic scheduler, in-memory VFS, I/O/OOM faults, crash and concurrency models |
-| `rustdb-cli` | SQLite-like shell needed for compatibility testing and manual diagnosis |
+| `inillucent` | Stable public Rust facade: `Database`, `Connection`, `Statement`, `Rows`, `Transaction` |
+| `inillucent-sql` | First-party lexer, parser, AST, binder, semantic rewrites, logical and physical plans |
+| `inillucent-value` | First-party values, affinities, collations, expression primitives, records, varints |
+| `inillucent-catalog` | First-party schema objects, DDL catalog mutations, statistics, invalidation |
+| `inillucent-vm` | First-party bytecode compiler, verifier, VM, relational operators, statement lifecycle |
+| `inillucent-storage` | SQLite file codec, B-trees, pager, page cache, overflow, freelist |
+| `inillucent-transaction` | Locks, autocommit, savepoints, rollback journal, WAL, checkpoints, recovery |
+| `inillucent-vfs` | Sync/async platform I/O, locks, clocks, randomness, faultable test VFS |
+| `inillucent-ext` | Scalar/aggregate/window functions, collations, virtual tables, loadable extensions |
+| `inillucent-capi` | Versioned SQLite C API compatibility surface and ABI tests |
+| `inillucent-core` | Existing BM25, vector, hybrid ranking, filters, persistence-reader compatibility |
+| `inillucent-search` | SQL virtual table and index-method bridge to `inillucent-core` |
+| `inillucent-compat` | Manifest generator, SQLite oracle driver, SQLLogicTest and upstream-test adapters |
+| `inillucent-bench` | Existing grading framework extended with relational workloads and SQLite baseline |
+| `inillucent-sim` | Deterministic scheduler, in-memory VFS, I/O/OOM faults, crash and concurrency models |
+| `inillucent-cli` | SQLite-like shell needed for compatibility testing and manual diagnosis |
 
 The crate graph below is the implementation boundary. Low-level crates cannot depend on SQL or API
-crates, and production crates cannot depend on `rustdb-compat`, `rustdb-sim`, benchmark code, SQLite,
+crates, and production crates cannot depend on `inillucent-compat`, `inillucent-sim`, benchmark code, SQLite,
 or Turso. Cycles are forbidden and checked in CI.
 
 ### Public Rust interface
@@ -305,7 +305,7 @@ or Turso. Cycles are forbidden and checked in CI.
 The facade should make safe ownership easy without hiding SQLite state:
 
 ```rust
-let database = rustdb::Database::open("app.db").await?;
+let database = inillucent::Database::open("app.db").await?;
 let connection = database.connect().await?;
 
 let mut statement = connection.prepare(
@@ -336,7 +336,7 @@ Required API properties:
 
 ### Parser, resolver, and SQLite semantics
 
-Implement a rust-db-owned SQLite-dialect lexer and parser rather than using Turso, SQLite-generated
+Implement a inillucent-owned SQLite-dialect lexer and parser rather than using Turso, SQLite-generated
 parser output, or `sqlparser-rs`. The latter is a useful multi-dialect syntax parser but explicitly
 does not enforce database-specific semantics and accepts statements a real engine may reject.
 Parity needs SQLite's grammar ambiguities and keyword fallback behavior under our control.
@@ -418,7 +418,7 @@ Planner coverage includes:
 - `EXPLAIN` bytecode and `EXPLAIN QUERY PLAN` diagnostic output.
 
 Planner output is never used as the compatibility oracle because SQLite documents EXPLAIN formats
-as unstable. Result behavior is normative; plan-shape tests protect rust-db performance only.
+as unstable. Result behavior is normative; plan-shape tests protect inillucent performance only.
 
 ### Pager, B-trees, and file format
 
@@ -443,7 +443,7 @@ and io_uring are optimizations gated by the same compatibility suite.
 
 ### Transactions, isolation, and durability
 
-Match SQLite's transaction state machine before adding rust-db extensions:
+Match SQLite's transaction state machine before adding inillucent extensions:
 
 - every read or write occurs inside an implicit or explicit transaction;
 - implicit transactions commit when the last active statement finishes;
@@ -458,7 +458,7 @@ Match SQLite's transaction state machine before adding rust-db extensions:
 - attached-database commit atomicity matches SQLite's mode-specific guarantees;
 - acknowledged FULL-synchronous commits survive process crash and modeled power loss.
 
-An eventual rust-db MVCC or concurrent-writer mode is a separate, opt-in post-parity extension. It
+An eventual inillucent MVCC or concurrent-writer mode is a separate, opt-in post-parity extension. It
 must never silently replace SQLite's default isolation. Files using incompatible extensions carry
 an explicit application/file marker and a documented path back.
 
@@ -494,9 +494,9 @@ error lifetime.
 
 Expose current retrieval through two additive surfaces:
 
-1. `rustdb_search` index method for text/vector columns, planner-visible for MATCH and vector
+1. `inillucent_search` index method for text/vector columns, planner-visible for MATCH and vector
    distance predicates.
-2. `rustdb_hybrid_search(table, query, vector, options)` table-valued function returning rowid,
+2. `inillucent_hybrid_search(table, query, vector, options)` table-valued function returning rowid,
    score, confidence, origin, and explanation.
 
 The SQL transaction owns search-index visibility. Insert/update/delete changes append to a
@@ -582,7 +582,7 @@ operation confirms success.
 
 ### Ownership rule
 
-An implementation agent must be able to build and test rust-db with no SQLite, Turso, libSQL, DuckDB,
+An implementation agent must be able to build and test inillucent with no SQLite, Turso, libSQL, DuckDB,
 or other database engine installed. Production crates may not link to, invoke, translate, vendor, or
 generate code from another database engine. The compatibility harness may launch a pinned SQLite
 binary as a separate child process and compare serialized observations. That binary is a test oracle,
@@ -590,7 +590,7 @@ not a runtime component.
 
 The following are first-party subsystems and cannot be replaced by an external database library:
 
-| Subsystem | rust-db owns |
+| Subsystem | inillucent owns |
 |---|---|
 | SQL front end | tokenizer, parser, AST, spans, diagnostics, statement splitter |
 | Semantic analysis | scope graph, name resolution, affinity/collation derivation, validation, rewrites |
@@ -613,9 +613,9 @@ is:
 | Category | Permitted examples | Restriction |
 |---|---|---|
 | Error and data plumbing | `thiserror`, `bitflags`, `smallvec` | No SQL or storage semantics |
-| Synchronization | `parking_lot`, `crossbeam` | Locks remain wrapped behind rust-db types |
-| OS boundary | `libc`, `windows-sys` | Used only inside `rustdb-vfs`; all calls audited |
-| Hash/checksum | `crc32fast`, `sha2` | Algorithms and on-disk use are specified by rust-db/file format |
+| Synchronization | `parking_lot`, `crossbeam` | Locks remain wrapped behind inillucent types |
+| OS boundary | `libc`, `windows-sys` | Used only inside `inillucent-vfs`; all calls audited |
+| Hash/checksum | `crc32fast`, `sha2` | Algorithms and on-disk use are specified by inillucent/file format |
 | Async adaptation | `futures-core`, optional runtime adapters | Core owns polling and cancellation state machines |
 | Unicode helpers | Unicode tables or normalization data | Must not parse SQL or choose SQL collation semantics |
 | Test-only | `proptest`, `libfuzzer-sys`, `loom`, `criterion` | Cannot enter a production feature graph |
@@ -642,14 +642,14 @@ name = "SQLite database file format"
 kind = "normative-format"
 version = "3.53.4"
 url = "https://sqlite.org/fileformat.html"
-used_by = ["rustdb-storage", "rustdb-transaction"]
+used_by = ["inillucent-storage", "inillucent-transaction"]
 
 [[reference]]
 name = "Turso deterministic simulator"
 kind = "non-normative-design-reference"
 revision = "pinned-for-review-only"
 url = "https://github.com/tursodatabase/turso/tree/main/testing/simulator"
-used_by = ["rustdb-sim test-plan"]
+used_by = ["inillucent-sim test-plan"]
 production_dependency = false
 ```
 
@@ -657,21 +657,21 @@ production_dependency = false
 
 ```mermaid
 flowchart TD
-    API[rustdb and rustdb-capi] --> Session[rustdb-session]
-    Session --> SQL[rustdb-sql]
-    Session --> VM[rustdb-vm]
-    SQL --> Catalog[rustdb-catalog]
-    SQL --> Values[rustdb-value]
+    API[inillucent and inillucent-capi] --> Session[inillucent-session]
+    Session --> SQL[inillucent-sql]
+    Session --> VM[inillucent-vm]
+    SQL --> Catalog[inillucent-catalog]
+    SQL --> Values[inillucent-value]
     VM --> Catalog
     VM --> Values
-    VM --> Tx[rustdb-transaction]
-    VM --> Ext[rustdb-ext]
+    VM --> Tx[inillucent-transaction]
+    VM --> Ext[inillucent-ext]
     Catalog --> Tx
-    Tx --> Storage[rustdb-storage]
-    Storage --> VFS[rustdb-vfs]
-    Search[rustdb-search] --> Ext
-    Compat[rustdb-compat test-only] -. observes .-> API
-    Sim[rustdb-sim test-only] -. substitutes .-> VFS
+    Tx --> Storage[inillucent-storage]
+    Storage --> VFS[inillucent-vfs]
+    Search[inillucent-search] --> Ext
+    Compat[inillucent-compat test-only] -. observes .-> API
+    Sim[inillucent-sim test-only] -. substitutes .-> VFS
 ```
 
 Rules checked with a dependency-graph test:
@@ -690,26 +690,26 @@ Rules checked with a dependency-graph test:
 
 ```text
 crates/
-  rustdb/                    public Rust facade
-  rustdb-value/              values, affinities, collations, records, varints
-  rustdb-sql/                lexer, parser, AST, binder, rewrites, logical and physical plans
-  rustdb-catalog/            sqlite_schema, DDL, schema loading, statistics
-  rustdb-vm/                 bytecode, compiler, VM, relational operators
-  rustdb-storage/            page codec, pager, cache, B-tree, freelist, vacuum, temp storage
-  rustdb-transaction/        locks, journals, WAL, savepoints, recovery, checkpoints
-  rustdb-vfs/                OS and in-memory VFS implementations
-  rustdb-ext/                registries and virtual-table contracts
-  rustdb-capi/               SQLite C compatibility profile
-  rustdb-cli/                interactive shell and dot commands
-  rustdb-search/             transactional adapter to existing BM25/HNSW core
-  rustdb-core/               existing retrieval implementation and legacy reader
-  rustdb-compat/             parity manifest, oracle protocol, public test adapters
-  rustdb-sim/                deterministic executor, model VFS, failure injection
-  rustdb-bench/              correctness-qualified performance harness
+  inillucent/                    public Rust facade
+  inillucent-value/              values, affinities, collations, records, varints
+  inillucent-sql/                lexer, parser, AST, binder, rewrites, logical and physical plans
+  inillucent-catalog/            sqlite_schema, DDL, schema loading, statistics
+  inillucent-vm/                 bytecode, compiler, VM, relational operators
+  inillucent-storage/            page codec, pager, cache, B-tree, freelist, vacuum, temp storage
+  inillucent-transaction/        locks, journals, WAL, savepoints, recovery, checkpoints
+  inillucent-vfs/                OS and in-memory VFS implementations
+  inillucent-ext/                registries and virtual-table contracts
+  inillucent-capi/               SQLite C compatibility profile
+  inillucent-cli/                interactive shell and dot commands
+  inillucent-search/             transactional adapter to existing BM25/HNSW core
+  inillucent-core/               existing retrieval implementation and legacy reader
+  inillucent-compat/             parity manifest, oracle protocol, public test adapters
+  inillucent-sim/                deterministic executor, model VFS, failure injection
+  inillucent-bench/              correctness-qualified performance harness
 compat/
   sqlite-3.53.4.toml         capability denominator and evidence links
   oracle/                    request/response schema and pinned reference metadata
-  fixtures/                  licensed upstream and rust-db-authored fixtures, separated
+  fixtures/                  licensed upstream and inillucent-authored fixtures, separated
   api/                       C symbol/profile manifests and ABI probes
 fuzz/                        SQL, file, WAL, journal, VM, API-sequence fuzz targets
 tests/
@@ -821,7 +821,7 @@ Separate connections share cache state and coordinate through transaction locks.
 
 ### Source text, tokens, and diagnostics
 
-`rustdb-sql/src/lexer.rs` scans UTF-8 SQL bytes once and emits `Token { kind, span }`; token text is
+`inillucent-sql/src/lexer.rs` scans UTF-8 SQL bytes once and emits `Token { kind, span }`; token text is
 always a slice of the original SQL. The lexer does not allocate identifier strings. A `Span` is a
 half-open byte range and every AST node carries one. Line/column conversion is lazy so normal prepare
 does not scan input twice.
@@ -855,7 +855,7 @@ Lexer invariants:
 ### Parser architecture
 
 Implement a hand-written recursive-descent statement parser and Pratt expression parser. Grammar
-productions are transcribed as rust-db design tables from SQLite's published syntax diagrams and
+productions are transcribed as inillucent design tables from SQLite's published syntax diagrams and
 validated with independent fixtures. No generated SQLite grammar or parser source enters the repo.
 
 The entry points are:
@@ -895,7 +895,7 @@ AST rules:
   recursive allocation.
 
 Syntax errors contain the unexpected token, the smallest useful expected-token set, and byte offset.
-Tests compare primary code and offset exactly; message prose is stable within rust-db but only compared
+Tests compare primary code and offset exactly; message prose is stable within inillucent but only compared
 with SQLite where SQLite documents it.
 
 ### AST ownership and memory
@@ -907,7 +907,7 @@ statement requests expanded SQL metadata. A hard `max_ast_bytes` limit is charge
 
 ### Binding and scope graph
 
-`rustdb-sql/src/bind/` converts AST into a bound relational IR. The binder is pure over an immutable
+`inillucent-sql/src/bind/` converts AST into a bound relational IR. The binder is pure over an immutable
 `CatalogSnapshot` and never opens pages itself.
 
 Resolution proceeds in this order:
@@ -951,7 +951,7 @@ integer boundaries, invalid numeric text, embedded NUL text, and collations.
 
 ### Affinity and conversion
 
-`rustdb-value` implements the five storage classes independently of declared types. The affinity
+`inillucent-value` implements the five storage classes independently of declared types. The affinity
 enum is `Blob`, `Text`, `Numeric`, `Integer`, and `Real`; STRICT validation is a separate policy.
 The declaration classifier follows SQLite's documented ordered rules exactly, including surprising
 substrings. It emits both affinity and normalized declared type metadata.
@@ -1016,7 +1016,7 @@ pub enum SchemaObject {
 ```
 
 On open, the catalog reads the page-1 header, scans the `sqlite_schema` table rooted at page 1,
-validates each row, parses stored CREATE SQL with the rust-db parser, and verifies root-page/object
+validates each row, parses stored CREATE SQL with the inillucent parser, and verifies root-page/object
 relationships. Catalog construction occurs in a read transaction so all objects share one snapshot.
 Malformed schema SQL returns `Corrupt` with the object name.
 
@@ -1133,7 +1133,7 @@ The session caches immutable programs by SQL bytes, prepare flags, attached sche
 PRAGMAs, and registry generations. Bound values are never part of a reusable plan unless explicit
 parameter-sensitive planning later stores multiple guarded variants.
 
-`EXPLAIN` renders rust-db bytecode; `EXPLAIN QUERY PLAN` emits stable rust-db detail strings that are
+`EXPLAIN` renders inillucent bytecode; `EXPLAIN QUERY PLAN` emits stable inillucent detail strings that are
 SQLite-shaped where practical but are not a parity promise. Each physical node also has a structured
 debug representation consumed by performance tests.
 
@@ -1183,7 +1183,7 @@ The first-party opcode set is organized by responsibility:
 - schema and extension: parse-schema, pragma, virtual-open/filter/next/column/update;
 - diagnostics: explain marker, progress safe point, trace event.
 
-Opcode numbers are rust-db internal and versioned only for diagnostic artifacts. Programs are not
+Opcode numbers are inillucent internal and versioned only for diagnostic artifacts. Programs are not
 persisted in database files.
 
 ### VM lifecycle
@@ -1237,8 +1237,8 @@ parallel checker.
 
 ### VFS boundary
 
-`rustdb-vfs` is the only crate that calls operating-system file APIs. Its trait is expressed in
-capabilities rust-db needs rather than mirroring a particular async runtime:
+`inillucent-vfs` is the only crate that calls operating-system file APIs. Its trait is expressed in
+capabilities inillucent needs rather than mirroring a particular async runtime:
 
 ```rust
 pub trait Vfs: Send + Sync {
@@ -1674,7 +1674,7 @@ The simulator checks these after every state transition:
 
 ### Rust API
 
-`rustdb` exposes safe sync and runtime-neutral async facades over one session state machine:
+`inillucent` exposes safe sync and runtime-neutral async facades over one session state machine:
 
 ```rust
 pub struct OpenOptions { /* flags, VFS, limits, initial pragmas */ }
@@ -1700,7 +1700,7 @@ interrupt cleanup as the sync API and never relies on dropping a future mid-VFS 
 
 ### C API compatibility
 
-`rustdb-capi` exports an ABI-compatible profile in stages, with the full pinned public function list
+`inillucent-capi` exports an ABI-compatible profile in stages, with the full pinned public function list
 generated from `compat/api/sqlite-3.53.4.toml`. It defines opaque `sqlite3`, `sqlite3_stmt`,
 `sqlite3_value`, `sqlite3_context`, `sqlite3_vfs`, `sqlite3_file`, `sqlite3_backup`, `sqlite3_blob`,
 `sqlite3_snapshot` where supported by the reference profile, and all required callbacks/constants.
@@ -1727,7 +1727,7 @@ TRANSIENT, custom destructors, byte lengths, embedded NULs, UTF-8/UTF-16 convers
 failure.
 
 ABI verification compiles C probes against the official SQLite header, then links them separately to
-SQLite and rust-db. It checks struct layout, numeric constants, symbol presence, calling convention,
+SQLite and inillucent. It checks struct layout, numeric constants, symbol presence, calling convention,
 callback order, destructor lifetime, error/transaction state, and allocation ownership. Platform
 export maps fail the build if a required symbol is missing or an undeclared symbol leaks.
 
@@ -1755,7 +1755,7 @@ ownership flags, mutability, resize limits, and header before installing an in-m
 
 ### CLI
 
-`rustdb-cli` uses only public APIs. It supports SQL input, continuation prompts, parameter binding,
+`inillucent-cli` uses only public APIs. It supports SQL input, continuation prompts, parameter binding,
 output modes, headers, null value, separators, `.open`, `.databases`, `.schema`, `.tables`, `.indexes`,
 `.dump`, `.read`, `.restore`, `.backup`, `.import`, `.mode`, `.headers`, `.parameter`, `.stats`,
 `.timer`, `.eqp`, `.explain`, `.limit`, `.dbconfig`, `.vfsinfo`, `.integrity`, `.quit`, and safe
@@ -1791,7 +1791,7 @@ source document for:
 - math functions for the enabled reference profile;
 - printf/format semantics and allocation limits;
 - JSON text and JSONB scalar, aggregate, mutation, extraction, validation, and table-valued functions;
-- soundex or other optional profile functions only when enabled in both reference and rust-db profiles.
+- soundex or other optional profile functions only when enabled in both reference and inillucent profiles.
 
 The implementation agent adds one manifest row and oracle test per signature before marking a family
 complete. Locale-sensitive host routines are not used for numeric, date, case-folding, or formatting
@@ -1820,12 +1820,12 @@ Deprecated PRAGMAs remain behind profile flags where the pinned reference includ
 
 ### Extension registries
 
-`rustdb-ext` exposes safe Rust traits for scalar/aggregate/window functions, collations, virtual tables,
+`inillucent-ext` exposes safe Rust traits for scalar/aggregate/window functions, collations, virtual tables,
 and VFSes. Registration is per connection or process according to API. Names are normalized using SQL
 identifier rules, and replacement increments a generation that invalidates programs.
 
 Loadable C extensions are disabled by default. When enabled, a canonical-path allow-list and optional
-hash/signature verifier runs before dynamic loading. The initialization API table is rust-db-owned but
+hash/signature verifier runs before dynamic loading. The initialization API table is inillucent-owned but
 ABI-compatible for the declared profile. Extensions never receive internal Rust pointers; all access
 is through stable C handles. Unloading is forbidden while any connection, function, module, statement,
 or value could call into the library.
@@ -1864,7 +1864,7 @@ small independently authored C probe extension.
 
 ### FTS5
 
-FTS5 is implemented as a rust-db virtual-table module, not delegated to existing rust-db BM25 code,
+FTS5 is implemented as a inillucent virtual-table module, not delegated to existing inillucent BM25 code,
 because feature parity includes FTS5's schema, query syntax, tokenization, prefix indexes, content modes,
 highlight/snippet, offsets/column APIs, bm25 behavior, auxiliary functions, special commands, merge,
 optimize, integrity, and extension API.
@@ -1882,12 +1882,12 @@ floating coordinate rounding, dimensional limits, overlap/area enlargement inser
 split/reinsert/delete condensation, MATCH geometry callbacks, query-within callbacks, and transaction
 behavior. Structural integrity walks node ownership and bounding rectangles independently.
 
-## Existing rust-db search as a native extension
+## Existing inillucent search as a native extension
 
 ### Separation from FTS5
 
-The current BM25/HNSW engine remains a differentiated rust-db extension. It does not impersonate FTS5
-or influence parity results. `rustdb_search` declares approximate versus exact behavior, distance
+The current BM25/HNSW engine remains a differentiated inillucent extension. It does not impersonate FTS5
+or influence parity results. `inillucent_search` declares approximate versus exact behavior, distance
 metric, tokenizer/model identity, consistency mode, and score semantics explicitly.
 
 ### Transactional index design
@@ -1916,8 +1916,8 @@ exact operator proves the result. Plans expose recall/oversampling controls sepa
 
 ### Migration tool
 
-`rustdb-migrate` is a resumable copy-and-verify tool that reads current generation directories through
-the existing `rustdb-core` reader and writes a new relational database through public rust-db APIs. It
+`inillucent-migrate` is a resumable copy-and-verify tool that reads current generation directories through
+the existing `inillucent-core` reader and writes a new relational database through public inillucent APIs. It
 never mutates or deletes the source. A manifest records source paths/IDs, source generation hashes,
 target temporary path, target commit sequence, per-table counts and digests, search generation IDs,
 verification results, and final destination.
@@ -1932,7 +1932,7 @@ Process:
 6. Verify row counts, ordered primary-key digests, blob/text hashes, dictionary mappings, tombstones,
    filter packs, exact BM25 cases, HNSW recall pack, hybrid scores, and reopen behavior.
 7. Open the destination with SQLite and run `integrity_check` plus read-only schema/data probes.
-8. Close/reopen with rust-db, rerun verification, and fsync destination/directory.
+8. Close/reopen with inillucent, rerun verification, and fsync destination/directory.
 9. Atomically publish a small application-level pointer or rename the verified destination into place.
 10. Retain the original and manifest for rollback; removal is never automatic.
 
@@ -1941,7 +1941,7 @@ generation mismatch and resume from a new destination. A partially written targe
 
 ### File-format rollout
 
-The default writer begins with SQLite-compatible format only. Any rust-db-only durable extension uses
+The default writer begins with SQLite-compatible format only. Any inillucent-only durable extension uses
 a different application ID and explicit capability table, is opt-in, and is rejected by compatibility
 mode. Performance claims against SQLite use only cross-readable format and matching durability unless
 the chart labels an extension-mode result separately.
@@ -1950,8 +1950,8 @@ the chart labels an extension-mode result separately.
 
 Each release publishes the Rust crates, C library/header, CLI, compatibility report, parity manifest,
 benchmark report/raw data, reference metadata, supported-platform matrix, and migration tool. Files
-record `user_version` only for the application; rust-db does not claim a private SQLite schema-format
-number. Backward compatibility tests open every retained rust-db-produced fixture.
+record `user_version` only for the application; inillucent does not claim a private SQLite schema-format
+number. Backward compatibility tests open every retained inillucent-produced fixture.
 
 ## Security, resource governance, and observability
 
@@ -2039,7 +2039,7 @@ Each result records:
 {
   "capability": "txn.wal.commit.full",
   "reference": "sqlite-3.53.4-profile-default",
-  "rustdb_commit": "...",
+  "inillucent_commit": "...",
   "test_ids": ["wal.commit.basic", "wal.commit.crash-cutpoints"],
   "platform": "windows-x86_64",
   "seed": 184467,
@@ -2053,7 +2053,7 @@ owner, and deadline; its capability returns to partial until resolved.
 
 ### SQLite oracle protocol
 
-`rustdb-compat` communicates with two child processes—official SQLite and rust-db—using newline-delimited
+`inillucent-compat` communicates with two child processes—official SQLite and inillucent—using newline-delimited
 JSON. Both drivers accept the same command sequence and emit normalized observations. Commands cover
 open flags, SQL prepare/tail, bind, step, reset, finalize, execute, transaction state, hooks, backup,
 blob, serialize, checkpoint, close, process crash, file digest, and external lock coordination.
@@ -2128,7 +2128,7 @@ contains every historically failing minimal sequence.
 
 ### Deterministic concurrency explorer
 
-`rustdb-sim` replaces VFS, clock, randomness, task scheduler, process identity, and callback executor.
+`inillucent-sim` replaces VFS, clock, randomness, task scheduler, process identity, and callback executor.
 Every yield point has a stable ID: lock attempts, cache publication, journal writes/syncs, WAL frame and
 index updates, checkpoint steps, hook calls, and VM safe points. The explorer runs bounded exhaustive
 schedules for two actors and partial-order-reduced schedules for three or more. It records a replayable
@@ -2197,8 +2197,8 @@ binary or SQL fixtures with metadata, and linked to the relevant capability row.
 For each page size, encoding, auto-vacuum mode, journal mode, rowid/WITHOUT ROWID/STRICT form, index
 kind, generated column, FTS5/R-Tree configuration, and supported schema format:
 
-1. SQLite creates and populates; rust-db reads, checks, mutates, closes; SQLite reopens/checks/mutates.
-2. rust-db creates and populates; SQLite performs the reciprocal sequence.
+1. SQLite creates and populates; inillucent reads, checks, mutates, closes; SQLite reopens/checks/mutates.
+2. inillucent creates and populates; SQLite performs the reciprocal sequence.
 3. One engine leaves a hot journal or committed/uncommitted WAL tail at controlled cuts; the other
    recovers where the format and lock contract permit interoperability.
 4. Backup and serialize images cross-open in both directions.
@@ -2229,14 +2229,14 @@ Correctness is layered. No single suite establishes parity or ACID.
 |---|---|---|
 | SQLite Tcl tests in the canonical source tree | Pin the 3.53.4 source; run portable public cases through a compatibility runner or translate minimally | Some tests depend on SQLite internals or the Tcl testfixture |
 | SQLLogicTest | Run the full pinned corpus through the Rust `sqllogictest` adapter and SQLite reference | Tests result correctness, not transactions, locks, memory, disk, or performance |
-| SQLite requirements and evidence matrix | Generate manifest rows and trace each imported requirement to rust-db tests | Public evidence may point to proprietary TH3 cases that cannot be copied |
+| SQLite requirements and evidence matrix | Generate manifest rows and trace each imported requirement to inillucent tests | Public evidence may point to proprietary TH3 cases that cannot be copied |
 | `speedtest1.c` and `kvtest.c` | Recreate identical operation families through both C APIs | Representative benchmarks, not correctness suites |
 | `mptest` and `threadtest3` | Port scheduling/workload shapes for process and thread stress | Stress finds bugs but does not prove all schedules |
 | SQLite fuzz regression corpus and OSS-Fuzz entry points | Seed SQL and malformed-file fuzzers | SQLite-specific harness code needs an engine adapter |
-| Turso public compatibility/simulator documentation | Study gap taxonomy and failure-testing ideas; author independent rust-db cases | Non-normative reference only; do not import engine or test implementation code |
+| Turso public compatibility/simulator documentation | Study gap taxonomy and failure-testing ideas; author independent inillucent cases | Non-normative reference only; do not import engine or test implementation code |
 
 TH3 and dbsqlfuzz are proprietary and cannot be dependencies of an open, reproducible gate. Replace
-their relevant assurances with rust-db-owned branch coverage, mutation testing, deterministic
+their relevant assurances with inillucent-owned branch coverage, mutation testing, deterministic
 simulation, structure-aware fuzzing, and fault matrices. Do not describe that replacement as
 equivalent until measurements establish its coverage.
 
@@ -2245,7 +2245,7 @@ equivalent until measurements establish its coverage.
 For each generated or fixed script:
 
 1. create byte-identical starting databases or create once in SQLite and copy;
-2. open isolated SQLite and rust-db copies under identical configuration;
+2. open isolated SQLite and inillucent copies under identical configuration;
 3. execute one statement/step/bind/reset action at a time;
 4. compare outputs and connection state after each action;
 5. checkpoint/close/reopen at generated boundaries;
@@ -2335,11 +2335,11 @@ result and post-run database state under the selected contract. Each result carr
 capabilities it depends on. A correctness regression invalidates, rather than merely annotates, that
 performance sample.
 
-`rustdb-bench` has four layers:
+`inillucent-bench` has four layers:
 
 1. `WorkloadSpec`: deterministic schema, data generator, operation mix, transaction boundaries, and
    result digest.
-2. `EngineAdapter`: identical lifecycle operations for rust-db and official SQLite.
+2. `EngineAdapter`: identical lifecycle operations for inillucent and official SQLite.
 3. `RunController`: cache conditioning, CPU affinity, warmup, randomized pair order, repetition, and
    environment sampling.
 4. `Analyzer`: outlier policy, bootstrap confidence intervals, effect size, regression comparison,
@@ -2349,7 +2349,7 @@ performance sample.
 
 For every paired run, record and match:
 
-- SQLite/rust-db version and optimized build flags;
+- SQLite/inillucent version and optimized build flags;
 - page size, reserved bytes, text encoding, journal mode, synchronous mode, auto-checkpoint, and
   transaction boundaries;
 - foreign keys, recursive triggers, temp store, mmap, cache byte budget, thread mode, and extensions;
@@ -2396,7 +2396,7 @@ has a content hash and is shared rather than regenerated differently per engine.
 | Search | BM25, HNSW, hybrid, filters, transactional delta merge | recall/quality-qualified latency |
 
 Include SQLite `speedtest1` and `kvtest` as named reference workloads, SQLLogicTest timing only as a
-broad regression signal, TPC-C-shaped transactions, TPC-H-shaped analytics, and captured Nikaya/rust-db
+broad regression signal, TPC-C-shaped transactions, TPC-H-shaped analytics, and captured Nikaya/inillucent
 operation traces. Never call shaped workloads audited TPC results.
 
 ### Cold and warm methods
@@ -2487,8 +2487,8 @@ Every arm must use:
 - correctness verification before timing and a post-run logical/file integrity check.
 
 WAL write timing must include checkpoints in either both arms' timed window or an amortized budget.
-It is invalid to time rust-db through commit and SQLite through checkpoint, or to compare FULL
-synchronous SQLite against a weaker rust-db policy.
+It is invalid to time inillucent through commit and SQLite through checkpoint, or to compare FULL
+synchronous SQLite against a weaker inillucent policy.
 
 ### Workload families
 
@@ -2511,12 +2511,12 @@ synchronous SQLite against a weaker rust-db policy.
 
 Use three corpus scales: cache-resident small, memory-pressure medium, and storage-bound large.
 Include SQLite's `speedtest1` workload as an upstream reference, `kvtest` for blob behavior,
-TPC-C-shaped transactional work, TPC-H-shaped analytical queries, and real rust-db/Nikaya data
+TPC-C-shaped transactional work, TPC-H-shaped analytical queries, and real inillucent/Nikaya data
 shapes. Standard-like workloads are reported with any deviations; do not imply audited TPC results.
 
 ### Metrics and verdicts
 
-Extend the existing rust-db scorecard conventions rather than creating a second truth system:
+Extend the existing inillucent scorecard conventions rather than creating a second truth system:
 
 - latency p50/p95/p99 and max;
 - throughput and committed transactions per second;
@@ -2537,7 +2537,7 @@ Initial release thresholds:
 |---|---|
 | Weighted target-workload geomean | at least 1.50x SQLite |
 | Headline operation family called faster | at least 1.20x SQLite |
-| Existing rust-db hybrid search | at least 1.50x configured baseline and no quality regression |
+| Existing inillucent hybrid search | at least 1.50x configured baseline and no quality regression |
 | p99 latency | no required family worse by more than 5% |
 | File/RSS footprint | no more than 10% worse unless an approved speed tradeoff is documented |
 | Correctness/durability | exact pass gate; performance cannot compensate for a failure |
@@ -2590,10 +2590,10 @@ Deliver:
   Linux test environments;
 - build `compat/sqlite-3.53.4.toml`, error/limit/API/built-in/PRAGMA submanifests, report generator,
   and coverage validation;
-- implement the JSON oracle protocol and minimal SQLite/rust-db drivers;
+- implement the JSON oracle protocol and minimal SQLite/inillucent drivers;
 - implement deterministic test artifact naming under the task/test output root;
 - establish license/provenance, dependency-graph, unsafe-code, formatting, and documentation checks;
-- capture an untouched baseline of the current rust-db retrieval scorecard.
+- capture an untouched baseline of the current inillucent retrieval scorecard.
 
 Acceptance:
 
@@ -2602,13 +2602,13 @@ Acceptance:
   release claims;
 - oracle round-trips tagged NULL/integer/real/text/blob values and errors without loss;
 - a generated empty scorecard and reference metadata are reproducible on both target OSes;
-- current `rustdb-core` behavior and artifacts are unchanged.
+- current `inillucent-core` behavior and artifacts are unchanged.
 
 ### Phase 1: VFS, binary primitives, and simulator
 
 Deliver:
 
-- implement `rustdb-vfs` traits plus memory, simulator, Windows, and POSIX files;
+- implement `inillucent-vfs` traits plus memory, simulator, Windows, and POSIX files;
 - implement file identity, read/write/truncate/sync, lock levels, shared memory, randomness, clock,
   temp-file creation, and device characteristics;
 - implement checked big-endian integers, varints, checksums, page-size/offset arithmetic, and buffers;
@@ -2654,7 +2654,7 @@ Deliver:
 
 Acceptance:
 
-- rust-db opens and scans every valid SQLite-created fixture and matches tagged values/order;
+- inillucent opens and scans every valid SQLite-created fixture and matches tagged values/order;
 - point/range/reverse/index seeks match the oracle;
 - corruption corpus returns the expected error family and never exposes unvalidated bytes;
 - cache pressure and interruption release every pin/lock;
@@ -2674,7 +2674,7 @@ Deliver:
 Acceptance:
 
 - random operation sequences match the model at every step for all required page sizes;
-- SQLite reopens and passes `integrity_check` after rust-db mutations, and vice versa;
+- SQLite reopens and passes `integrity_check` after inillucent mutations, and vice versa;
 - failpoints during every allocation/balance/delete restore the exact pre-statement logical tree;
 - no page is leaked, multiply owned, double freed, or left outside catalog/freelist ownership.
 
@@ -2780,7 +2780,7 @@ Deliver:
 
 Acceptance:
 
-- SQLite and rust-db cross-read/write/checkpoint compatible WAL databases where mixed use is supported;
+- SQLite and inillucent cross-read/write/checkpoint compatible WAL databases where mixed use is supported;
 - readers retain stable snapshots while writers commit, and protected frames are never backfilled;
 - every WAL append/index/checkpoint/recovery crash cut satisfies transaction invariants;
 - stress plus schedule exploration finds no deadlock, starvation, forked history, or lost commit.
@@ -2819,7 +2819,7 @@ Acceptance:
 - API sequence fuzzing, OOM, callback reentrancy, close-v2, and destructor tests are green;
 - CLI round-trips dumps/imports and operational workflows against cross-readable files.
 
-### Phase 13: transactional rust-db search and legacy migration
+### Phase 13: transactional inillucent search and legacy migration
 
 Deliver:
 
@@ -2862,7 +2862,7 @@ Acceptance:
 | Implement a first-party relational engine beside current retrieval core | Full ownership, independent Rust architecture, credible optimization, exact control of compatibility and durability | Largest engineering and assurance program; every subsystem must be built and proven | **Selected** |
 | Extend current generation files into the relational format | Preserves existing structures | Generation layout is optimized for immutable search and cannot naturally provide SQLite file interoperability or page transactions | Reject; keep as migration source |
 | Depend on generic `sqlparser-rs` | Mature Rust parser, broad SQL-92 syntax | Explicitly syntax-only and not SQLite-semantic; quirks and grammar gaps become permanent adapter work | Reject for SQLite front end |
-| Embed SQLite through `rusqlite`/FFI | Immediate SQLite behavior and file compatibility | It is SQLite, not a Rust database; cannot credibly attribute relational speedups to rust-db; search integration remains external | Keep only as oracle |
+| Embed SQLite through `rusqlite`/FFI | Immediate SQLite behavior and file compatibility | It is SQLite, not a Rust database; cannot credibly attribute relational speedups to inillucent; search integration remains external | Keep only as oracle |
 | Fork libSQL's C SQLite fork | Mature SQLite base and extensions | C core, harder safety story, architecture does not deliver a Rust engine | Reject for the product core |
 | Pin upstream Turso as an opaque dependency | Low import cost and easy upgrades | Delegates the engine, cannot establish first-party ownership, and inherits incomplete/changing behavior | Reject; reference and oracle ideas only |
 | Fork Turso or libSQL and maintain local changes | Shorter route to broad behavior | Product remains a fork, provenance and merge duty dominate, and architecture is not independently owned | Reject explicitly |
@@ -2894,10 +2894,10 @@ The implementation is not “SQLite compatible” until all of these are true:
 - every acknowledged durable commit survives the modeled failures appropriate to its policy;
 - every benchmark row ran with equal semantics and has raw reproducible evidence;
 - the target-workload performance gate passes and every required regression is visible;
-- SQLite and rust-db cross-open the fixture corpus after mutations from either engine;
-- existing rust-db search users have a verified copy migration and a tested rollback path;
+- SQLite and inillucent cross-open the fixture corpus after mutations from either engine;
+- existing inillucent search users have a verified copy migration and a tested rollback path;
 - compatibility claims name SQLite 3.53.4 and the exact enabled profile;
-- documentation lists SQLite's own omissions and any rust-db opt-in extensions separately;
+- documentation lists SQLite's own omissions and any inillucent opt-in extensions separately;
 - the release archive contains source hashes, build configuration, manifests, raw runs, minimized
   known regressions, and generated scorecards.
 
@@ -2906,14 +2906,14 @@ The implementation is not “SQLite compatible” until all of these are true:
 Approve the first-party architecture and begin with Phase 0's executable compatibility denominator,
 reference/provenance boundary, oracle protocol, simulator foundation, and untouched retrieval
 baseline. Do not import a relational substrate. The ordered phases above turn the build into concrete
-rust-db-owned modules whose capability rows can move to `pass` only with evidence.
+inillucent-owned modules whose capability rows can move to `pass` only with evidence.
 
-Preserve what makes rust-db distinct: its measured search quality, in-process embedding boundary,
+Preserve what makes inillucent distinct: its measured search quality, in-process embedding boundary,
 fast filtered vector paths, BM25 enhancements, transparent scorecard, and existing append/tombstone
 work. Put those capabilities behind a relational transaction boundary instead of replacing them.
 
 The performance objective should remain ambitious but precise: beat SQLite substantially on the
-target application's weighted workload and on rust-db's search strengths, report every family, and
+target application's weighted workload and on inillucent's search strengths, report every family, and
 never trade away SQLite-compatible correctness or durability to produce a larger number.
 
 ## Primary sources

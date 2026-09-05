@@ -1,8 +1,8 @@
-# rust-db stable error table.
+# inillucent stable error table.
 #
-# This file is the source of truth. crates/rustdb-base/src/error/generated.rs is
-# produced from it by "cargo run -p rustdb-compat --bin rustdb-manifest -- codegen"
-# and a test in rustdb-base fails if the checked-in file drifts from these rows.
+# This file is the source of truth. crates/inillucent-base/src/error/generated.rs is
+# produced from it by "cargo run -p inillucent-compat --bin inillucent-manifest -- codegen"
+# and a test in inillucent-base fails if the checked-in file drifts from these rows.
 #
 # The columns past the numeric code record what a caller may do next, which is
 # the part of the contract SQLite documents in prose rather than in a header:

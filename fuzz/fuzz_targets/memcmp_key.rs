@@ -14,9 +14,9 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use rustdb_tree::datum::Datum;
-use rustdb_tree::key;
-use rustdb_tree::leaf::compare_rows;
+use inillucent_tree::datum::Datum;
+use inillucent_tree::key;
+use inillucent_tree::leaf::compare_rows;
 
 /// Builds one value out of a slice of the input.
 fn value(bytes: &[u8]) -> Datum<'_> {

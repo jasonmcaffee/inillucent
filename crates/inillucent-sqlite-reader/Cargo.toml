@@ -1,0 +1,16 @@
+[package]
+name = "inillucent-sqlite-reader"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Read-only reader for SQLite 3 database files, for test fixtures and migration"
+
+[dependencies]
+inillucent-base = { workspace = true }
+inillucent-value = { workspace = true }
+inillucent-vfs = { workspace = true }
+inillucent-storage = { workspace = true }
+inillucent-transaction = { workspace = true }
+inillucent-catalog = { workspace = true }
+inillucent-sql = { workspace = true }
+inillucent-tree = { workspace = true }

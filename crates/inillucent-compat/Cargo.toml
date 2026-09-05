@@ -1,0 +1,149 @@
+[package]
+name = "inillucent-compat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Parity manifest, compatibility report generator, and the SQLite oracle protocol."
+
+[dependencies]
+inillucent-base = { workspace = true }
+inillucent-value = { workspace = true }
+inillucent-storage = { workspace = true }
+inillucent-vfs = { workspace = true }
+inillucent-sim = { workspace = true }
+inillucent-sql = { workspace = true }
+inillucent-catalog = { workspace = true }
+inillucent-vm = { workspace = true }
+inillucent-session = { workspace = true }
+inillucent-transaction = { workspace = true }
+inillucent = { workspace = true }
+# The rearchitected engine (task-1816), measured beside the old one.
+inillucent-pool = { workspace = true }
+inillucent-tree = { workspace = true }
+inillucent-sqlite-reader = { workspace = true }
+inillucent-exec = { workspace = true }
+
+[[bin]]
+name = "inillucent-sqlperf"
+path = "src/bin/sqlperf.rs"
+
+[[bin]]
+name = "inillucent-sizecheck"
+path = "src/bin/sizecheck.rs"
+
+[[bin]]
+name = "inillucent-txnprofile"
+path = "src/bin/txnprofile.rs"
+
+[[bin]]
+name = "inillucent-hotprofile"
+path = "src/bin/hotprofile.rs"
+
+[[bin]]
+name = "inillucent-rawcursor"
+path = "src/bin/rawcursor.rs"
+
+[[bin]]
+name = "inillucent-paxscan"
+path = "src/bin/paxscan.rs"
+
+[[bin]]
+name = "inillucent-analytical"
+path = "src/bin/analytical.rs"
+
+[[bin]]
+name = "inillucent-readgate"
+path = "src/bin/readgate.rs"
+
+[[bin]]
+name = "inillucent-exprperf"
+path = "src/bin/exprperf.rs"
+
+[[bin]]
+name = "inillucent-prepareperf"
+path = "src/bin/prepareperf.rs"
+
+[[bin]]
+name = "inillucent-planperf"
+path = "src/bin/planperf.rs"
+
+[[bin]]
+name = "inillucent-slt"
+path = "src/bin/slt.rs"
+
+[[bin]]
+name = "inillucent-featureperf"
+path = "src/bin/featureperf.rs"
+
+[[bin]]
+name = "inillucent-obligations"
+path = "src/bin/obligations.rs"
+
+[[bin]]
+name = "inillucent-manifest"
+path = "src/bin/manifest.rs"
+
+[[bin]]
+name = "inillucent-oracle"
+path = "src/bin/oracle.rs"
+
+[[bin]]
+name = "inillucent-evidence"
+path = "src/bin/evidence.rs"
+
+[[bin]]
+name = "inillucent-baseline"
+path = "src/bin/baseline.rs"
+
+[[bin]]
+name = "inillucent-perf"
+path = "src/bin/perf.rs"
+
+[[bin]]
+name = "inillucent-fixtures"
+path = "src/bin/fixtures.rs"
+
+[[bin]]
+name = "inillucent-readperf"
+path = "src/bin/readperf.rs"
+
+[[bin]]
+name = "inillucent-writeperf"
+path = "src/bin/writeperf.rs"
+
+[[bin]]
+name = "inillucent-txnperf"
+path = "src/bin/txnperf.rs"
+
+[[bin]]
+name = "inillucent-walperf"
+path = "src/bin/walperf.rs"
+
+[[bin]]
+name = "inillucent-scorecard"
+path = "src/bin/scorecard.rs"
+
+[[bin]]
+name = "inillucent-writeprofile"
+path = "src/bin/writeprofile.rs"
+
+[[bin]]
+name = "inillucent-storageprofile"
+path = "src/bin/storageprofile.rs"
+
+[[bin]]
+name = "inillucent-release"
+path = "src/bin/release.rs"
+
+[[bin]]
+name = "inillucent-checkpointperf"
+path = "src/bin/checkpointperf.rs"
+
+[features]
+# Passed through to the virtual machine so `inillucent-hotprofile` can attribute
+# time and allocations to individual opcodes.
+opcode-probe = [
+    "inillucent-vm/opcode-probe",
+    "inillucent-storage/opcode-probe",
+    "inillucent-session/opcode-probe",
+]

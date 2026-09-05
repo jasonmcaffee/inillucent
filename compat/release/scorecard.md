@@ -1,8 +1,8 @@
-# rust-db performance scorecard
+# inillucent performance scorecard
 
 Label `task-1791-release`, platform `windows-x86_64`, 30 paired rounds per scale, bootstrap seed 17900001. Every optimization is on, which is the shipped engine.
 
-Both engines read the same plan file. The ratio is SQLite over rust-db, so **above one means rust-db is faster**. A workload whose two engines returned different answers is reported as a correctness failure and is not timed.
+Both engines read the same plan file. The ratio is SQLite over inillucent, so **above one means inillucent is faster**. A workload whose two engines returned different answers is reported as a correctness failure and is not timed.
 
 ## Fair configuration
 
@@ -36,7 +36,7 @@ Weighted geometric mean **0.316x**, 95% interval [0.313, 0.321]. The release bou
 
 ### By workload
 
-| workload | family | rust-db median | SQLite median | ratio | 95% interval | samples |
+| workload | family | inillucent median | SQLite median | ratio | 95% interval | samples |
 |---|---|---:|---:|---:|---|---:|
 | `prepare.trivial` | `open.prepare` | 30.81 ms | 1.64 ms | 0.053x | [0.050, 0.056] | 30 |
 | `prepare.point` | `open.prepare` | 61.83 ms | 52.72 ms | 0.844x | [0.834, 0.888] | 30 |
@@ -90,7 +90,7 @@ Weighted geometric mean **0.232x**, 95% interval [0.229, 0.237]. The release bou
 
 ### By workload
 
-| workload | family | rust-db median | SQLite median | ratio | 95% interval | samples |
+| workload | family | inillucent median | SQLite median | ratio | 95% interval | samples |
 |---|---|---:|---:|---:|---|---:|
 | `prepare.trivial` | `open.prepare` | 30.40 ms | 1.90 ms | 0.062x | [0.055, 0.061] | 30 |
 | `prepare.point` | `open.prepare` | 91.64 ms | 66.85 ms | 0.725x | [0.720, 0.796] | 30 |
@@ -144,7 +144,7 @@ Weighted geometric mean **0.260x**, 95% interval [0.257, 0.263]. The release bou
 
 ### By workload
 
-| workload | family | rust-db median | SQLite median | ratio | 95% interval | samples |
+| workload | family | inillucent median | SQLite median | ratio | 95% interval | samples |
 |---|---|---:|---:|---:|---|---:|
 | `prepare.trivial` | `open.prepare` | 15.48 ms | 949.20 us | 0.056x | [0.053, 0.059] | 30 |
 | `prepare.point` | `open.prepare` | 47.57 ms | 35.30 ms | 0.736x | [0.700, 0.786] | 30 |

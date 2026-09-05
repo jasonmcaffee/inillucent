@@ -1,4 +1,4 @@
-# task-1816: Rust DB rearchitecture: a fast engine, not a SQLite-compatible one
+# task-1816: Inillucent rearchitecture: a fast engine, not a SQLite-compatible one
 
 Status: accepted design, implementation starts from this document  
 Supersedes: the performance half and the storage/VM design of `task-1781-sqlite-feature-parity-tdd.md`  
@@ -12,7 +12,7 @@ a promise; the phase gates exist to turn estimates into measurements early.
 
 ## Decision in one page
 
-rust-db stops being a reimplementation of SQLite and becomes a fast embedded relational engine that
+inillucent stops being a reimplementation of SQLite and becomes a fast embedded relational engine that
 speaks SQLite's SQL dialect. The engine is rebuilt from the storage layer up:
 
 - **Storage**: a B+tree with PAX (column-within-page) leaves, pointer swizzling, optimistic
@@ -34,8 +34,8 @@ rules, error messages where tests depend on them, built-ins, PRAGMAs that still 
 The correctness bar does not fall with the format. The differential digest gate against real SQLite
 3.53.4 continues over an **imported fixture** (same SQL, same logical data, different files), a
 **model reference** (`BTreeMap`-backed) replaces SQLite as the oracle for storage and crash
-behaviour, `rustdb-sim`'s failpoints and crash snapshots apply to the new storage layer unchanged
-because it keeps the `rustdb-vfs` trait boundary, and the SQLLogicTest corpus stays as the semantics
+behaviour, `inillucent-sim`'s failpoints and crash snapshots apply to the new storage layer unchanged
+because it keeps the `inillucent-vfs` trait boundary, and the SQLLogicTest corpus stays as the semantics
 oracle.
 
 The performance target moves from "1.50x SQLite" to a design target of a **3.0x weighted geometric
@@ -54,14 +54,14 @@ replacement is green on that gate.
 
 1. A single-process embedded relational database in Rust whose CPU-bound paths are several times
    faster than SQLite 3.53.4 on the ten scorecard families, measured by the existing
-   correctness-gated paired harness (`crates/rustdb-compat/src/bin/scorecard.rs`) with the
+   correctness-gated paired harness (`crates/inillucent-compat/src/bin/scorecard.rs`) with the
    checked-in weights in `compat/perf/contract.toml`.
 2. SQLite's SQL dialect and observable SQL semantics, verified by the same SLT corpus and the same
    differential digests as before.
 3. ACID with the same durability policy vocabulary as SQLite (`synchronous` `OFF`/`NORMAL`/`FULL`)
-   so that paired benchmarks stay fair, verified by `rustdb-sim` crash and fault campaigns and a
+   so that paired benchmarks stay fair, verified by `inillucent-sim` crash and fault campaigns and a
    model reference.
-4. A stable Rust API (`rustdb::Database`, `Connection`, `Statement`) for the hybrid-search engine
+4. A stable Rust API (`inillucent::Database`, `Connection`, `Statement`) for the hybrid-search engine
    and the CLI, and a migration path from every existing on-disk artifact (legacy retrieval index
    generations and the SQLite-format files produced during task-1781).
 5. Every phase shippable: at the end of every phase the repository builds, the surviving tests pass,
@@ -71,18 +71,18 @@ replacement is green on that gate.
 
 - **SQLite file-format compatibility.** SQLite will not open our files and we will not open
   SQLite's, except through a test-only and migration-only reader (see triage).
-- **The C ABI.** `sqlite3.h` does not link against us. `rustdb-capi` is deleted. A C shim can be
+- **The C ABI.** `sqlite3.h` does not link against us. `inillucent-capi` is deleted. A C shim can be
   written later against the Rust API if a consumer appears; it is not part of this ticket.
 - **Multi-process access to one database file.** One process opens a database; inside it, many
   connections. File locks exist only to refuse a second process. Removing this deletes the
-  rollback-mode lock state machine, the WAL-index shared memory, and most of `rustdb-vfs/locks.rs`.
+  rollback-mode lock state machine, the WAL-index shared memory, and most of `inillucent-vfs/locks.rs`.
 - **Multiple concurrent writers.** One writer transaction at a time, readers never block. The
   version-chain design leaves room for optimistic multi-writer later; it is not built now.
 - **A JIT with a code generator.** Expressions are compiled to closures. Cranelift/LLVM are out of
   scope; see "Execution engine" for why.
 - **`ATTACH` across files, `VACUUM`, backup-to-SQLite, `sqlite3_serialize` byte compatibility,
   incremental blob I/O on the SQLite API shape.** `ATTACH` returns later as attaching another
-  rust-db file; the rest is dropped.
+  inillucent file; the rest is dropped.
 - **Async I/O (io_uring/IOCP) in this ticket.** The scorecard is single-connection and
   warm-cache; async I/O buys overlap for checkpointing and cold reads, not single-statement latency.
   Designed for (the I/O boundary is a trait), not delivered.
@@ -103,7 +103,7 @@ frame, or a lock transition. The triage table at the end names each crate.
 | SQL semantics | 100% pass on the pinned SLT corpus through the new engine; exclusions name the SQLite-specific reason |
 | Differential corpus | Zero unexplained result, type, column-name, row-count or error differences against SQLite over the imported fixture |
 | Model reference | Zero divergences between engine and model across the operation-trace corpus, including after every simulated crash |
-| ACID | Zero torn, lost-acknowledged, dirty, non-repeatable or forked-history outcomes across the `rustdb-sim` fault matrix |
+| ACID | Zero torn, lost-acknowledged, dirty, non-repeatable or forked-history outcomes across the `inillucent-sim` fault matrix |
 | Robustness | No panic, UB, leak, hang or out-of-bounds access on malformed SQL, corrupt pages, corrupt WAL, injected OOM and I/O faults |
 | Performance | Weighted geomean lower 95% bound at least 3.0x SQLite; no family below 1.0x; per-family contract met |
 | Search consumer | Hybrid-search scorecard at least 1.50x its configured baseline with no quality regression, on the new engine |
@@ -129,21 +129,21 @@ frame, or a lock transition. The triage table at the end names each crate.
 ## Architectural overview
 
 ```
-rustdb (public API: Database / Connection / Statement)
-  └── rustdb-session      connections, statements, pragmas, plan cache, result sinks
-        ├── rustdb-sql     lexer, parser, binder, planner algebra, physical planning   (survives, extended)
-        ├── rustdb-exec    batches, operators, closure compiler, point probe            (NEW)
-        ├── rustdb-catalog schema objects stored in the engine's own catalog tree       (rewritten)
-        ├── rustdb-txn     MVCC, snapshots, undo buffers, commit, group commit          (NEW; replaces rustdb-transaction)
-        ├── rustdb-tree    B+tree over PAX leaves, swizzling, latches, bulk build       (NEW; replaces rustdb-storage)
-        ├── rustdb-pool    buffer pool, cooling FIFO, writeback, blob extents, free map (NEW)
-        ├── rustdb-wal     WAL segments, record codec, checkpoint, recovery             (NEW)
-        └── rustdb-vfs     file I/O trait, OS backends, memory VFS                      (survives)
-              └── rustdb-sim  failpoints, media model, crash snapshots                  (survives, wired to the new crates)
-rustdb-ext / rustdb-search / rustdb-core   JSON, FTS5, R-Tree, hybrid retrieval          (storage adapters rewritten)
-rustdb-model                               BTreeMap reference engine for traces         (NEW, test-only)
-rustdb-sqlite-reader                       read-only SQLite 3 file reader               (NEW, from rustdb-storage's read path; test + migrate only)
-rustdb-compat / rustdb-bench / rustdb-migrate / rustdb-cli                              (survive, repointed)
+inillucent (public API: Database / Connection / Statement)
+  └── inillucent-session      connections, statements, pragmas, plan cache, result sinks
+        ├── inillucent-sql     lexer, parser, binder, planner algebra, physical planning   (survives, extended)
+        ├── inillucent-exec    batches, operators, closure compiler, point probe            (NEW)
+        ├── inillucent-catalog schema objects stored in the engine's own catalog tree       (rewritten)
+        ├── inillucent-txn     MVCC, snapshots, undo buffers, commit, group commit          (NEW; replaces inillucent-transaction)
+        ├── inillucent-tree    B+tree over PAX leaves, swizzling, latches, bulk build       (NEW; replaces inillucent-storage)
+        ├── inillucent-pool    buffer pool, cooling FIFO, writeback, blob extents, free map (NEW)
+        ├── inillucent-wal     WAL segments, record codec, checkpoint, recovery             (NEW)
+        └── inillucent-vfs     file I/O trait, OS backends, memory VFS                      (survives)
+              └── inillucent-sim  failpoints, media model, crash snapshots                  (survives, wired to the new crates)
+inillucent-ext / inillucent-search / inillucent-core   JSON, FTS5, R-Tree, hybrid retrieval          (storage adapters rewritten)
+inillucent-model                               BTreeMap reference engine for traces         (NEW, test-only)
+inillucent-sqlite-reader                       read-only SQLite 3 file reader               (NEW, from inillucent-storage's read path; test + migrate only)
+inillucent-compat / inillucent-bench / inillucent-migrate / inillucent-cli                              (survive, repointed)
 ```
 
 Dependency direction is strictly downward. `docs/invariants/layering.toml` is updated in Phase 1 to
@@ -335,7 +335,7 @@ Dirty tracking: a per-frame dirty bit plus `first_dirty_lsn`; the checkpointer c
 list in page-id order to write sequentially.
 
 For every scorecard workload the whole database fits in the pool; the eviction path therefore only
-has to be correct in this ticket, not fast. It is exercised by the `rustdb-sim` campaigns with a pool
+has to be correct in this ticket, not fast. It is exercised by the `inillucent-sim` campaigns with a pool
 of 64 frames.
 
 ### Blob extents and large values
@@ -562,7 +562,7 @@ by the physical planner as a chain from a source to a sink; pipeline breakers (`
 | `NestedLoopJoin` | correlated subqueries and the no-index cross product fallback |
 | `Distinct` | hash set on encoded rows |
 | `SetOp` | `UNION`/`UNION ALL`/`EXCEPT`/`INTERSECT` |
-| `Window` | partition + sort + frame evaluation; the frame logic ports from `rustdb-vm/window.rs` |
+| `Window` | partition + sort + frame evaluation; the frame logic ports from `inillucent-vm/window.rs` |
 | `Materialize` | CTEs, subquery results, `IN (SELECT ...)` sets |
 | `ValuesScan` | literal rows |
 | `VtabScan` | virtual table protocol (FTS5, R-Tree, hybrid search) with the batch interface; a vtab may return rows one at a time and the operator batches them |
@@ -593,7 +593,7 @@ machine for `point.rowid`). The same object serves `IndexNestedLoopJoin` as its 
 
 ### Physical planning
 
-The logical planner (`rustdb-sql/plan.rs` and `cost.rs`) keeps its algebra and rewrites (predicate
+The logical planner (`inillucent-sql/plan.rs` and `cost.rs`) keeps its algebra and rewrites (predicate
 pushdown, subquery flattening, `IN` to semi-join, constant folding). A new physical pass chooses:
 
 - `PointProbe` when the shape above matches.
@@ -611,7 +611,7 @@ rebuilt automatically when the row count moves by more than 20% since the last b
 is a DP over up to 8 relations, greedy beyond.
 
 `EXPLAIN` prints the physical operator tree; `EXPLAIN QUERY PLAN` keeps the SQLite-style text that the
-SLT corpus does not assert on. `PRAGMA rustdb.force_plan = '<operator list>'` forces a physical
+SLT corpus does not assert on. `PRAGMA inillucent.force_plan = '<operator list>'` forces a physical
 choice for the metamorphic tests.
 
 ## Catalog and DDL
@@ -627,24 +627,24 @@ default. `ALTER TABLE DROP COLUMN` marks the directory entry dropped and compact
 
 ## Public API and consumer story
 
-`rustdb::Database::open`, `open_with`, `open_with_vfs`, `connect`, `Connection::prepare`,
+`inillucent::Database::open`, `open_with`, `open_with_vfs`, `connect`, `Connection::prepare`,
 `execute_batch`, `query`, `interrupt`, `set_progress_handler`, `Statement::{bind, step, column_*,
-reset, finalize}` keep their signatures (`crates/rustdb/src/lib.rs`). `deserialize`/`serialize`,
+reset, finalize}` keep their signatures (`crates/inillucent/src/lib.rs`). `deserialize`/`serialize`,
 `backup_*` and `blob_open` are removed from the Rust API in Phase 2 and return, if at all, in a later
-ticket with rust-db semantics.
+ticket with inillucent semantics.
 
-The hybrid-search engine (`rustdb-search`, over `rustdb-core`) is a virtual-table module and an index
-method; its contract is the `RetrievalIndex` trait (`crates/rustdb-search/src/adapter.rs`) and the
+The hybrid-search engine (`inillucent-search`, over `inillucent-core`) is a virtual-table module and an index
+method; its contract is the `RetrievalIndex` trait (`crates/inillucent-search/src/adapter.rs`) and the
 shadow-table store (`store.rs`). Under this design its shadow tables become ordinary rowid trees; the
 vector column stores fixed-width `f32` vectors as a `Blob` mini-column, which is a contiguous array
-per leaf and the layout its scan wants. The retrieval scorecard (`rustdb-bench grade`) is re-run on
+per leaf and the layout its scan wants. The retrieval scorecard (`inillucent-bench grade`) is re-run on
 the new engine in Phase 5 and must reach at least 1.50x its configured baseline with no quality
-regression before the old storage is deleted. Until then `rustdb-search` keeps compiling against the
-old `rustdb-storage` behind a cargo feature (`legacy-storage`).
+regression before the old storage is deleted. Until then `inillucent-search` keeps compiling against the
+old `inillucent-storage` behind a cargo feature (`legacy-storage`).
 
-`rustdb-migrate` keeps its resumable, verified copy shape (`copy.rs`, `verify.rs`, `manifest.rs`) and
+`inillucent-migrate` keeps its resumable, verified copy shape (`copy.rs`, `verify.rs`, `manifest.rs`) and
 gains two sources: the legacy generation format it already reads, and SQLite 3 files through
-`rustdb-sqlite-reader`. Verification stays: row counts, per-table content digests, the fixed query
+`inillucent-sqlite-reader`. Verification stays: row counts, per-table content digests, the fixed query
 pack, and the source is never modified or deleted.
 
 ## Correctness architecture
@@ -654,10 +654,10 @@ Four oracles replace the one shared-file oracle.
 
 ### 1. Differential digests against SQLite 3.53.4 over an imported fixture
 
-The scorecard, the `oracle` protocol and the differential SQL harness in `rustdb-compat` already
+The scorecard, the `oracle` protocol and the differential SQL harness in `inillucent-compat` already
 drive both engines from one plan file and compare digests (`scorecard.rs` lines 380-410 prepare and
-step both engines identically). The only change: the rust-db side loads its database by importing the
-SQLite fixture file through `rustdb-sqlite-reader` into a fresh `.rdb` (a `fixtures.rs` step), instead
+step both engines identically). The only change: the inillucent side loads its database by importing the
+SQLite fixture file through `inillucent-sqlite-reader` into a fresh `.rdb` (a `fixtures.rs` step), instead
 of opening the same file. From then on every workload, every SLT case, and every differential corpus
 query is digest-compared row for row: values, types, column names, row counts, error classes. A
 timing counts only when the digests agree, exactly as today. This catches everything the current gate
@@ -665,20 +665,20 @@ catches except file-level interop, which is no longer a goal.
 
 ### 2. The model reference
 
-New test-only crate `rustdb-model`: tables as `BTreeMap<Key, Row>`, indexes derived on demand,
+New test-only crate `inillucent-model`: tables as `BTreeMap<Key, Row>`, indexes derived on demand,
 transactions as a copy-on-write map with a commit log, snapshots as map versions. It implements the
 same `Engine` trait the real engine exposes for traces: `begin`, `insert`, `update`, `delete`,
 `point`, `range`, `scan`, `commit`, `rollback`, `savepoint`, `crash`, `recover`. A trace driver
 (`tests/traces/`, TSV like the existing `tests/crash/*.tsv`) runs each operation against both, compares
-every read result, and after every `crash` restores the engine from the `rustdb-sim` snapshot,
+every read result, and after every `crash` restores the engine from the `inillucent-sim` snapshot,
 recovers, and compares the full content with the model's state at the last acknowledged commit
 (invariant 12). Traces come from three sources: hand-written cases for each invariant, the
-SLT corpus's DML replayed as a trace, and a seeded random generator (`rustdb-sim/schedule.rs` already
+SLT corpus's DML replayed as a trace, and a seeded random generator (`inillucent-sim/schedule.rs` already
 has the scheduler and RNG) that runs nightly with shrinking on failure.
 
-### 3. `rustdb-sim` on the new storage
+### 3. `inillucent-sim` on the new storage
 
-The new crates do all file I/O through `rustdb-vfs::VfsFile` (`read_exact_at`, `write_all_at`,
+The new crates do all file I/O through `inillucent-vfs::VfsFile` (`read_exact_at`, `write_all_at`,
 `file_size`, `truncate`, `sync`), so `SimVfs`, its `Failpoints` (`fail_nth_call`, per-site policies),
 `MediaModel` (torn sectors, lost unsynced writes) and `CrashSnapshot` apply without change. Required
 campaigns, each a test that runs to green in CI:
@@ -693,17 +693,17 @@ campaigns, each a test that runs to green in CI:
 - **corrupt page / corrupt WAL**: flip each byte of a page and of a record; the reader must return a
   corruption error, never panic; the recovery must stop at the torn tail and not before.
 
-`rustdb-sim` becomes a dev-dependency of `rustdb-pool`, `rustdb-tree`, `rustdb-wal` and `rustdb-txn`
-in Phase 2; it currently is a dependency of nothing but `rustdb-compat`.
+`inillucent-sim` becomes a dev-dependency of `inillucent-pool`, `inillucent-tree`, `inillucent-wal` and `inillucent-txn`
+in Phase 2; it currently is a dependency of nothing but `inillucent-compat`.
 
 ### 4. SLT, fuzzing, metamorphic planner tests
 
-- The SLT runner (`rustdb-compat/src/bin/slt.rs`) and corpus run unchanged against the new engine
+- The SLT runner (`inillucent-compat/src/bin/slt.rs`) and corpus run unchanged against the new engine
   from Phase 2 (read-only subset) and Phase 3 (all).
 - The parser fuzz targets in `fuzz/` survive; new targets: leaf decoder, interior decoder, WAL record
   decoder, memcmp key decoder. Corpus coverage is merged into the coverage report.
 - Metamorphic tests: every SLT `SELECT` and every scorecard query is run under each applicable
-  `PRAGMA rustdb.force_plan` alternative (hash join vs index nested loop, `TopN` vs `Sort`, scan vs
+  `PRAGMA inillucent.force_plan` alternative (hash join vs index nested loop, `TopN` vs `Sort`, scan vs
   index) and must produce the same digest; predicate-pushdown and join-order permutations likewise.
 - Property tests: the tree (random insert/delete/lookup against a `BTreeMap`, with compaction and
   split boundaries forced by small pages), the memcmp key encoding (order preserved for random typed
@@ -723,7 +723,7 @@ error paths. Coverage is measured before mutation, per crate, with a fixed seed 
 
 ## Performance contract
 
-Ratio is SQLite time over rust-db time; higher is faster. Weights are the checked-in ones and are not
+Ratio is SQLite time over inillucent time; higher is faster. Weights are the checked-in ones and are not
 changed by this document. Targets are **estimates** unless marked measured.
 
 | family | weight | today (measured, medium) | target | low estimate | why |
@@ -769,7 +769,7 @@ belongs.
 
 Fairness: the existing contract stands. Same SQL, same data, same `synchronous` policy, same
 transaction boundaries, same warm state, interleaved A/B, 30 paired rounds, correctness-gated timings.
-The plan cache is declared in the fairness section of the scorecard report as a rust-db design
+The plan cache is declared in the fairness section of the scorecard report as a inillucent design
 feature; it does the same logical work (the harness prepares identical text each iteration) and SQLite
 has no equivalent inside the library.
 
@@ -777,25 +777,25 @@ has no equivalent inside the library.
 
 | crate / area | verdict | reason |
 |---|---|---|
-| `rustdb-base` | survives as-is | bytes, varint, checksum, ids, limits; engine-agnostic |
-| `rustdb-vfs` | survives, trimmed | the file trait and OS backends stay and are the sim seam; `locks.rs`/`shm_locks.rs` shrink to "refuse a second process" |
-| `rustdb-sim` | survives as-is | failpoints, media model, crash snapshots, scheduler; becomes a dev-dependency of the new storage crates |
-| `rustdb-value` | survives with change | affinity, collation, comparison, tagged encoding stay; SQLite record decoding paths go |
-| `rustdb-sql` | survives with change | lexer, parser, AST, binder, planner algebra stay; arena allocation added; physical planning pass added; `vtab.rs` adapts to batches |
-| `rustdb-catalog` | rewritten | same object model, stored in the engine's own catalog tree instead of `sqlite_schema` pages |
-| `rustdb-storage` | deleted, except a read-only extract | b-tree page/cell/overflow/freelist/ptrmap/vacuum/pager die; the read-only b-tree + record decoder becomes `rustdb-sqlite-reader` (test and migrate only) |
-| `rustdb-transaction` | deleted | rollback journal, super-journal, hot-journal recovery, SQLite WAL format and WAL-index, lock state machines all die; replaced by `rustdb-txn` + `rustdb-wal` |
-| `rustdb-vm` | deleted, with ports | the VM, verifier, compiler, sorter and ephemeral tables die; `builtin.rs`, `datetime.rs`, `mathfn.rs`, `pattern.rs`, `printf.rs`, `aggregate.rs` function bodies and `window.rs` frame logic port into `rustdb-exec` |
-| `rustdb-session` | rewritten | connections, statements, pragmas and result access over the new engine; `backup.rs`, `blob.rs`, `serialize.rs` deleted |
-| `rustdb` | survives with change | public API shapes kept; serialize/backup/blob methods removed |
-| `rustdb-capi` | deleted | the C ABI is a non-goal |
-| `rustdb-cli` | survives with change | shell over the Rust API; `.dump`/`.import` keep working; `.backup` goes |
-| `rustdb-ext` (JSON, vtab, shadow) | rewritten storage adapters | JSON functions get a binary form; shadow tables become ordinary trees; vtab contract moves to batches |
-| FTS5 / R-Tree (in `rustdb-ext`) | rewritten storage adapters | tokenizers, ranking, segment logic and R-Tree node logic survive; the page-level storage code is replaced |
-| `rustdb-search` + `rustdb-core` | survive with change | the retrieval algorithms are untouched; the shadow-table store and adapter are rewritten over the new trees behind the `legacy-storage` feature until Phase 5 |
-| `rustdb-migrate` | survives with change | copy/verify/manifest/resume shape kept; new sources (SQLite files via the reader) and new target format |
-| `rustdb-bench` | survives as-is | the retrieval scorecard; re-run in Phase 5 |
-| `rustdb-compat` | survives with change | scorecard, oracle, SLT, differential harness, perf contract stay; the file-interop, cross-open and SQLite-format bins die; fixtures gain an import step |
+| `inillucent-base` | survives as-is | bytes, varint, checksum, ids, limits; engine-agnostic |
+| `inillucent-vfs` | survives, trimmed | the file trait and OS backends stay and are the sim seam; `locks.rs`/`shm_locks.rs` shrink to "refuse a second process" |
+| `inillucent-sim` | survives as-is | failpoints, media model, crash snapshots, scheduler; becomes a dev-dependency of the new storage crates |
+| `inillucent-value` | survives with change | affinity, collation, comparison, tagged encoding stay; SQLite record decoding paths go |
+| `inillucent-sql` | survives with change | lexer, parser, AST, binder, planner algebra stay; arena allocation added; physical planning pass added; `vtab.rs` adapts to batches |
+| `inillucent-catalog` | rewritten | same object model, stored in the engine's own catalog tree instead of `sqlite_schema` pages |
+| `inillucent-storage` | deleted, except a read-only extract | b-tree page/cell/overflow/freelist/ptrmap/vacuum/pager die; the read-only b-tree + record decoder becomes `inillucent-sqlite-reader` (test and migrate only) |
+| `inillucent-transaction` | deleted | rollback journal, super-journal, hot-journal recovery, SQLite WAL format and WAL-index, lock state machines all die; replaced by `inillucent-txn` + `inillucent-wal` |
+| `inillucent-vm` | deleted, with ports | the VM, verifier, compiler, sorter and ephemeral tables die; `builtin.rs`, `datetime.rs`, `mathfn.rs`, `pattern.rs`, `printf.rs`, `aggregate.rs` function bodies and `window.rs` frame logic port into `inillucent-exec` |
+| `inillucent-session` | rewritten | connections, statements, pragmas and result access over the new engine; `backup.rs`, `blob.rs`, `serialize.rs` deleted |
+| `inillucent` | survives with change | public API shapes kept; serialize/backup/blob methods removed |
+| `inillucent-capi` | deleted | the C ABI is a non-goal |
+| `inillucent-cli` | survives with change | shell over the Rust API; `.dump`/`.import` keep working; `.backup` goes |
+| `inillucent-ext` (JSON, vtab, shadow) | rewritten storage adapters | JSON functions get a binary form; shadow tables become ordinary trees; vtab contract moves to batches |
+| FTS5 / R-Tree (in `inillucent-ext`) | rewritten storage adapters | tokenizers, ranking, segment logic and R-Tree node logic survive; the page-level storage code is replaced |
+| `inillucent-search` + `inillucent-core` | survive with change | the retrieval algorithms are untouched; the shadow-table store and adapter are rewritten over the new trees behind the `legacy-storage` feature until Phase 5 |
+| `inillucent-migrate` | survives with change | copy/verify/manifest/resume shape kept; new sources (SQLite files via the reader) and new target format |
+| `inillucent-bench` | survives as-is | the retrieval scorecard; re-run in Phase 5 |
+| `inillucent-compat` | survives with change | scorecard, oracle, SLT, differential harness, perf contract stay; the file-interop, cross-open and SQLite-format bins die; fixtures gain an import step |
 | `compat/sqlite-3.53.4.toml` manifest | survives, re-profiled | rows for file format, C API, locking, backup, serialize, VACUUM, ATTACH-across-files move to a new `not-a-goal` state; SQL and function rows keep their status |
 | `tests/crash/*` | survives with rewrite | the campaigns are re-expressed as traces over the new engine and the model |
 | `fuzz/` | survives, extended | parser targets stay; codec targets added |
@@ -805,7 +805,7 @@ Tests: of the 1,484 tests, the estimate is that **40-50% die with their modules*
 asserts SQLite page bytes, cell layouts, opcode sequences, program verification, journal/WAL frame
 bytes, lock transitions, cross-open behaviour or the C API. What survives: parser and binder tests,
 SQL semantics and function tests, value/collation/affinity tests, the SLT and differential corpora,
-the retrieval engine's tests, the migration tool's verification tests, `rustdb-sim`'s own tests, and
+the retrieval engine's tests, the migration tool's verification tests, `inillucent-sim`'s own tests, and
 the crash campaigns once re-expressed as traces. Phase 1 counts them precisely by tagging each test
 module in the triage before anything is deleted.
 
@@ -829,7 +829,7 @@ manifest rows moved.
 
 Deliver:
 
-- a bin in `rustdb-compat` shaped like `readperf.rs` (which already drives the pager and b-tree
+- a bin in `inillucent-compat` shaped like `readperf.rs` (which already drives the pager and b-tree
   directly) that computes `count(*), sum(key), max(category)` over `main_table` at medium scale by
   iterating the **existing** leaf cursor with no VM and no `Value` allocation, timed over 30 rounds;
 - the same query timed in SQLite 3.53.4 end to end on the same fixture;
@@ -850,19 +850,19 @@ Acceptance (a measurement, not a gate; it decides emphasis, not whether to proce
 
 Deliver:
 
-- `rustdb-tree` leaf codec (PAX layout above), the class array, the tagged-value heap, compaction,
+- `inillucent-tree` leaf codec (PAX layout above), the class array, the tagged-value heap, compaction,
   and an in-memory tree (no pool, no disk) with insert, point, range and full scan;
-- `rustdb-exec` batches, `TableScan`, `Filter`, `Project`, `SimpleAggregate`, `HashAggregate`, `Sort`,
+- `inillucent-exec` batches, `TableScan`, `Filter`, `Project`, `SimpleAggregate`, `HashAggregate`, `Sort`,
   `TopN`, `Distinct`, `ResultSink`, the closure compiler for arithmetic, comparison, `IS NULL`,
   `AND/OR/NOT`, and the SQLite aggregate semantics for `count/sum/min/max/avg/total`;
-- a load path from the scorecard fixture through `rustdb-sqlite-reader` (extracted from
-  `rustdb-storage`'s read-only path) into the in-memory tree;
+- a load path from the scorecard fixture through `inillucent-sqlite-reader` (extracted from
+  `inillucent-storage`'s read-only path) into the in-memory tree;
 - the existing parser/binder/planner feeding the new physical pass for the four `read.analytical`
   shapes;
 - the scorecard able to run `read.analytical` against the new engine (`--engine new`) with digests
   compared to SQLite;
 - in parallel and independent: the prepare arena and plan cache on the existing front end
-  (`rustdb-sql`, `rustdb-session`), measured on the old engine's `open.prepare`.
+  (`inillucent-sql`, `inillucent-session`), measured on the old engine's `open.prepare`.
 
 Acceptance:
 
@@ -884,16 +884,16 @@ without it.
 
 Deliver:
 
-- `rustdb-pool`: the frame reservation, version latches, swizzling, cooling FIFO, writeback with swip
-  translation, the free map, blob extents, all I/O through `rustdb-vfs`;
-- `rustdb-tree` on the pool: interior pages, memcmp key encoding for every collation, secondary index
+- `inillucent-pool`: the frame reservation, version latches, swizzling, cooling FIFO, writeback with swip
+  translation, the free map, blob extents, all I/O through `inillucent-vfs`;
+- `inillucent-tree` on the pool: interior pages, memcmp key encoding for every collation, secondary index
   trees, optimistic descent with restart, `RowidLookup`, `IndexRangeScan`, reverse scans;
 - `PointProbe`, `HashJoin`, `IndexNestedLoopJoin`, `NestedLoopJoin`, `Materialize`, `SetOp`,
-  `Window`, `ValuesScan`, `Limit/Offset`, the full built-in function set ported from `rustdb-vm`;
-- the physical planner rules and `PRAGMA rustdb.force_plan`;
-- `rustdb-catalog` over the catalog tree (read side), `sqlite_schema` view;
+  `Window`, `ValuesScan`, `Limit/Offset`, the full built-in function set ported from `inillucent-vm`;
+- the physical planner rules and `PRAGMA inillucent.force_plan`;
+- `inillucent-catalog` over the catalog tree (read side), `sqlite_schema` view;
 - the on-disk format written by a bulk loader from the fixture (no WAL yet: load, checkpoint, close);
-- `rustdb-sim` as a dev-dependency; small-pool campaigns for the read path;
+- `inillucent-sim` as a dev-dependency; small-pool campaigns for the read path;
 - the SLT corpus's read-only subset through the new engine; the metamorphic plan tests.
 
 Acceptance:
@@ -911,14 +911,14 @@ If a family bar misses: stop and report.
 
 Deliver:
 
-- `rustdb-wal`: segments, record codec, the log writer thread, group commit, checkpointer, recovery;
-- `rustdb-txn`: snapshots, writer slot, undo buffers, version log and GC, savepoints, commit gate,
+- `inillucent-wal`: segments, record codec, the log writer thread, group commit, checkpointer, recovery;
+- `inillucent-txn`: snapshots, writer slot, undo buffers, version log and GC, savepoints, commit gate,
   `synchronous` policies, `busy_timeout`;
 - tree mutation on the pool: delta inserts, in-place updates, tombstones, compaction, split, merge,
   free-map allocation, all WAL-logged;
 - `Insert`/`Update`/`Delete` sinks with constraints, `ON CONFLICT`, `RETURNING`, triggers, index
   maintenance; `UNIQUE` via `PointProbe`;
-- `rustdb-model` and the trace driver; the fail-the-Nth-call, crash-at-every-sync,
+- `inillucent-model` and the trace driver; the fail-the-Nth-call, crash-at-every-sync,
   crash-at-every-write and corrupt-WAL campaigns; the seeded random trace generator;
 - the full SLT corpus and the full differential corpus through the new engine.
 
@@ -958,11 +958,11 @@ Acceptance:
 
 Deliver:
 
-- `rustdb-search` shadow store over the new trees; the `legacy-storage` feature removed only after the
+- `inillucent-search` shadow store over the new trees; the `legacy-storage` feature removed only after the
   retrieval scorecard passes;
-- `rustdb-migrate` with the SQLite-file source and the new target; migration of every legacy generation
+- `inillucent-migrate` with the SQLite-file source and the new target; migration of every legacy generation
   and every task-1781 fixture, verified;
-- deletion of `rustdb-storage` (except the reader), `rustdb-transaction`, `rustdb-vm`, `rustdb-capi`,
+- deletion of `inillucent-storage` (except the reader), `inillucent-transaction`, `inillucent-vm`, `inillucent-capi`,
   the file-interop bins, and their tests; the manifest re-profiled; `layering.toml` updated;
 - the full performance qualification: 30 rounds, three scales, both OSes, the report with weighted
   and unweighted tables, the fairness section naming the plan cache.
@@ -989,7 +989,7 @@ across leaves for `read.analytical` at large scale.
 | The PAX leaf does not deliver 5x on `read.analytical` at 100k rows | Phase 0 measures the storage floor first; Phase 1 is the go/no-go; page size is measured, not assumed; a miss stops the program before any storage is deleted |
 | `write` lands near parity because delta-area inserts plus compaction cost more than SQLite's memmove | the delta limit is measured at 16/32/64; in-place fixed-width updates and key reuse in index maintenance are cheap wins independent of the leaf; Phase 3 stops on a miss |
 | Dynamic typing exceptions turn out common in real data and defeat the fast path | the class array makes the slow path per-leaf, not per-table; `Any` columns exist for columns with no affinity; the design degrades to row-at-a-time speed, not to wrong answers |
-| Swizzling/latch bugs (use-after-evict, torn optimistic reads) | invariants 5-6 asserted in debug; small-pool campaigns under `rustdb-sim`; readers copy then validate; four restarts then shared latches |
+| Swizzling/latch bugs (use-after-evict, torn optimistic reads) | invariants 5-6 asserted in debug; small-pool campaigns under `inillucent-sim`; readers copy then validate; four restarts then shared latches |
 | Durability-order regressions in a new WAL | invariants 10-12; crash-at-every-sync/write campaigns; mutation gate that blocks on any surviving durability-order mutant; recovery idempotence test |
 | No-steal limits transaction size | documented limit with a clear error; pool grows on demand; steal is the named follow-up |
 | Losing the SQLite oracle silently lowers the bar | the differential gate is kept over the imported fixture and stays the timing precondition; the model reference is stricter than SQLite ever was on durability; the SLT corpus is unchanged |
@@ -1053,4 +1053,4 @@ thing to extend.
   semantics that this engine keeps.
 - This repository: `tasks/task-1781-sqlite-feature-parity-tdd.md` (the superseded design and the
   assurance architecture this document inherits), `compat/perf/contract.toml` (weights),
-  `crates/rustdb-compat/src/bin/scorecard.rs` (the harness), `crates/rustdb-sim` (the simulator).
+  `crates/inillucent-compat/src/bin/scorecard.rs` (the harness), `crates/inillucent-sim` (the simulator).

@@ -1,0 +1,13 @@
+[package]
+name = "inillucent-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SQLite-like shell used for compatibility testing and manual diagnosis."
+
+[[bin]]
+name = "inillucent-shell"
+path = "src/main.rs"
+
+[dependencies]
+inillucent = { workspace = true }

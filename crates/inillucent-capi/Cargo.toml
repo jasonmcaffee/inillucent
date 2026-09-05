@@ -1,0 +1,14 @@
+[package]
+name = "inillucent-capi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Versioned SQLite C API compatibility surface and ABI probes."
+
+[lib]
+# A C caller links the dynamic or the static library; the `lib` form is what
+# the crate's own tests and the probe harness use.
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[dependencies]
+inillucent = { workspace = true }

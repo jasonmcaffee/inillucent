@@ -563,6 +563,268 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
 
 [[package]]
+name = "inillucent"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+ "inillucent-catalog",
+ "inillucent-session",
+ "inillucent-storage",
+ "inillucent-value",
+]
+
+[[package]]
+name = "inillucent-base"
+version = "0.1.0"
+
+[[package]]
+name = "inillucent-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "inillucent-core",
+ "pgvector",
+ "postgres",
+ "rand 0.8.8",
+ "rayon",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "inillucent-capi"
+version = "0.1.0"
+dependencies = [
+ "inillucent",
+]
+
+[[package]]
+name = "inillucent-catalog"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+ "inillucent-pool",
+ "inillucent-sql",
+ "inillucent-storage",
+ "inillucent-tree",
+ "inillucent-value",
+ "inillucent-vfs",
+]
+
+[[package]]
+name = "inillucent-cli"
+version = "0.1.0"
+dependencies = [
+ "inillucent",
+]
+
+[[package]]
+name = "inillucent-compat"
+version = "0.1.0"
+dependencies = [
+ "inillucent",
+ "inillucent-base",
+ "inillucent-catalog",
+ "inillucent-exec",
+ "inillucent-pool",
+ "inillucent-session",
+ "inillucent-sim",
+ "inillucent-sql",
+ "inillucent-sqlite-reader",
+ "inillucent-storage",
+ "inillucent-transaction",
+ "inillucent-tree",
+ "inillucent-value",
+ "inillucent-vfs",
+ "inillucent-vm",
+]
+
+[[package]]
+name = "inillucent-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "ort",
+ "rand 0.8.8",
+ "rayon",
+ "rust-stemmers",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokenizers",
+]
+
+[[package]]
+name = "inillucent-exec"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+ "inillucent-pool",
+ "inillucent-scalar",
+ "inillucent-sql",
+ "inillucent-tree",
+ "inillucent-value",
+ "inillucent-vfs",
+]
+
+[[package]]
+name = "inillucent-ext"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+ "inillucent-catalog",
+ "inillucent-sql",
+ "inillucent-storage",
+ "inillucent-transaction",
+ "inillucent-value",
+]
+
+[[package]]
+name = "inillucent-migrate"
+version = "0.1.0"
+dependencies = [
+ "inillucent",
+ "inillucent-base",
+ "inillucent-core",
+ "inillucent-search",
+ "inillucent-value",
+]
+
+[[package]]
+name = "inillucent-pool"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+ "inillucent-sim",
+ "inillucent-vfs",
+]
+
+[[package]]
+name = "inillucent-scalar"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+ "inillucent-sql",
+ "inillucent-value",
+]
+
+[[package]]
+name = "inillucent-search"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+ "inillucent-core",
+ "inillucent-ext",
+ "inillucent-value",
+]
+
+[[package]]
+name = "inillucent-session"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+ "inillucent-catalog",
+ "inillucent-ext",
+ "inillucent-search",
+ "inillucent-sql",
+ "inillucent-storage",
+ "inillucent-transaction",
+ "inillucent-value",
+ "inillucent-vfs",
+ "inillucent-vm",
+]
+
+[[package]]
+name = "inillucent-sim"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+ "inillucent-vfs",
+]
+
+[[package]]
+name = "inillucent-sql"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+ "inillucent-value",
+]
+
+[[package]]
+name = "inillucent-sqlite-reader"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+ "inillucent-catalog",
+ "inillucent-sql",
+ "inillucent-storage",
+ "inillucent-transaction",
+ "inillucent-tree",
+ "inillucent-value",
+ "inillucent-vfs",
+]
+
+[[package]]
+name = "inillucent-storage"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+ "inillucent-value",
+ "inillucent-vfs",
+ "loom",
+]
+
+[[package]]
+name = "inillucent-transaction"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+ "inillucent-storage",
+ "inillucent-vfs",
+]
+
+[[package]]
+name = "inillucent-tree"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+ "inillucent-pool",
+ "inillucent-value",
+ "inillucent-vfs",
+]
+
+[[package]]
+name = "inillucent-value"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+]
+
+[[package]]
+name = "inillucent-vfs"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+ "libc",
+ "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "inillucent-vm"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+ "inillucent-catalog",
+ "inillucent-ext",
+ "inillucent-scalar",
+ "inillucent-sql",
+ "inillucent-storage",
+ "inillucent-value",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1213,268 +1475,6 @@ checksum = "e46a2036019fdb888131db7a4c847a1063a7493f971ed94ea82c67eada63ca54"
 dependencies = [
  "serde",
  "serde_derive",
-]
-
-[[package]]
-name = "rustdb"
-version = "0.1.0"
-dependencies = [
- "rustdb-base",
- "rustdb-catalog",
- "rustdb-session",
- "rustdb-storage",
- "rustdb-value",
-]
-
-[[package]]
-name = "rustdb-base"
-version = "0.1.0"
-
-[[package]]
-name = "rustdb-bench"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "pgvector",
- "postgres",
- "rand 0.8.8",
- "rayon",
- "rustdb-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "rustdb-capi"
-version = "0.1.0"
-dependencies = [
- "rustdb",
-]
-
-[[package]]
-name = "rustdb-catalog"
-version = "0.1.0"
-dependencies = [
- "rustdb-base",
- "rustdb-pool",
- "rustdb-sql",
- "rustdb-storage",
- "rustdb-tree",
- "rustdb-value",
- "rustdb-vfs",
-]
-
-[[package]]
-name = "rustdb-cli"
-version = "0.1.0"
-dependencies = [
- "rustdb",
-]
-
-[[package]]
-name = "rustdb-compat"
-version = "0.1.0"
-dependencies = [
- "rustdb",
- "rustdb-base",
- "rustdb-catalog",
- "rustdb-exec",
- "rustdb-pool",
- "rustdb-session",
- "rustdb-sim",
- "rustdb-sql",
- "rustdb-sqlite-reader",
- "rustdb-storage",
- "rustdb-transaction",
- "rustdb-tree",
- "rustdb-value",
- "rustdb-vfs",
- "rustdb-vm",
-]
-
-[[package]]
-name = "rustdb-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytemuck",
- "ort",
- "rand 0.8.8",
- "rayon",
- "rust-stemmers",
- "serde",
- "serde_json",
- "thiserror",
- "tokenizers",
-]
-
-[[package]]
-name = "rustdb-exec"
-version = "0.1.0"
-dependencies = [
- "rustdb-base",
- "rustdb-pool",
- "rustdb-scalar",
- "rustdb-sql",
- "rustdb-tree",
- "rustdb-value",
- "rustdb-vfs",
-]
-
-[[package]]
-name = "rustdb-ext"
-version = "0.1.0"
-dependencies = [
- "rustdb-base",
- "rustdb-catalog",
- "rustdb-sql",
- "rustdb-storage",
- "rustdb-transaction",
- "rustdb-value",
-]
-
-[[package]]
-name = "rustdb-migrate"
-version = "0.1.0"
-dependencies = [
- "rustdb",
- "rustdb-base",
- "rustdb-core",
- "rustdb-search",
- "rustdb-value",
-]
-
-[[package]]
-name = "rustdb-pool"
-version = "0.1.0"
-dependencies = [
- "rustdb-base",
- "rustdb-sim",
- "rustdb-vfs",
-]
-
-[[package]]
-name = "rustdb-scalar"
-version = "0.1.0"
-dependencies = [
- "rustdb-base",
- "rustdb-sql",
- "rustdb-value",
-]
-
-[[package]]
-name = "rustdb-search"
-version = "0.1.0"
-dependencies = [
- "rustdb-base",
- "rustdb-core",
- "rustdb-ext",
- "rustdb-value",
-]
-
-[[package]]
-name = "rustdb-session"
-version = "0.1.0"
-dependencies = [
- "rustdb-base",
- "rustdb-catalog",
- "rustdb-ext",
- "rustdb-search",
- "rustdb-sql",
- "rustdb-storage",
- "rustdb-transaction",
- "rustdb-value",
- "rustdb-vfs",
- "rustdb-vm",
-]
-
-[[package]]
-name = "rustdb-sim"
-version = "0.1.0"
-dependencies = [
- "rustdb-base",
- "rustdb-vfs",
-]
-
-[[package]]
-name = "rustdb-sql"
-version = "0.1.0"
-dependencies = [
- "rustdb-base",
- "rustdb-value",
-]
-
-[[package]]
-name = "rustdb-sqlite-reader"
-version = "0.1.0"
-dependencies = [
- "rustdb-base",
- "rustdb-catalog",
- "rustdb-sql",
- "rustdb-storage",
- "rustdb-transaction",
- "rustdb-tree",
- "rustdb-value",
- "rustdb-vfs",
-]
-
-[[package]]
-name = "rustdb-storage"
-version = "0.1.0"
-dependencies = [
- "loom",
- "rustdb-base",
- "rustdb-value",
- "rustdb-vfs",
-]
-
-[[package]]
-name = "rustdb-transaction"
-version = "0.1.0"
-dependencies = [
- "rustdb-base",
- "rustdb-storage",
- "rustdb-vfs",
-]
-
-[[package]]
-name = "rustdb-tree"
-version = "0.1.0"
-dependencies = [
- "rustdb-base",
- "rustdb-pool",
- "rustdb-value",
- "rustdb-vfs",
-]
-
-[[package]]
-name = "rustdb-value"
-version = "0.1.0"
-dependencies = [
- "rustdb-base",
-]
-
-[[package]]
-name = "rustdb-vfs"
-version = "0.1.0"
-dependencies = [
- "libc",
- "rustdb-base",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "rustdb-vm"
-version = "0.1.0"
-dependencies = [
- "rustdb-base",
- "rustdb-catalog",
- "rustdb-ext",
- "rustdb-scalar",
- "rustdb-sql",
- "rustdb-storage",
- "rustdb-value",
 ]
 
 [[package]]

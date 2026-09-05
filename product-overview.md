@@ -1,4 +1,4 @@
-# rust-db
+# inillucent
 
 A vector search engine for retrieval augmented generation, built as a Rust library that runs inside your own process. No database to install, no server to keep alive, no port to configure, and no network hop between your application and its index.
 
@@ -6,32 +6,32 @@ Retrieval augmented generation, usually shortened to RAG, means giving a languag
 
 ## What it is for
 
-rust-db is built for the searches an AI application actually performs, not for the general case of storing vectors.
+inillucent is built for the searches an AI application actually performs, not for the general case of storing vectors.
 
 - **Answering a question over a body of written knowledge.** Find the passages that mean the same thing as the question, even when they share no words with it.
-- **Finding an exact token.** A user who types `PROJ-1932` or `parse_headers` wants that identifier, not passages about vaguely similar ones. Meaning based search is bad at this and word based search is good at it, so rust-db does both and merges the results.
+- **Finding an exact token.** A user who types `PROJ-1932` or `parse_headers` wants that identifier, not passages about vaguely similar ones. Meaning based search is bad at this and word based search is good at it, so inillucent does both and merges the results.
 - **Searching one slice of the corpus.** An agent with a tool per source needs a search restricted to chat messages, or to one repository, or to one author, or to everything updated since June. This is the common case in a real application and it is where general purpose vector storage struggles hardest.
 - **Answering from a process that starts and stops.** Reopening a saved index takes 5.3 seconds against 175 seconds to build it, so a worker, a command line tool or a serverless handler can hold a real index without a build.
 
 ## Why a specialized engine rather than postgres + pgvector + llama.cpp
 
-That combination is the sensible default and it is the baseline rust-db is measured against: PostgreSQL for storage, the pgvector extension for the vector index, and llama.cpp serving the embedding model over HTTP. It works. Four things about it are structural rather than a matter of tuning, and each one is a place a specialized engine wins.
+That combination is the sensible default and it is the baseline inillucent is measured against: PostgreSQL for storage, the pgvector extension for the vector index, and llama.cpp serving the embedding model over HTTP. It works. Four things about it are structural rather than a matter of tuning, and each one is a place a specialized engine wins.
 
 ### Filtering happens after the search, not during it
 
 pgvector evaluates a query's `WHERE` clause after the index scan has already chosen its candidates. A plain HNSW scan produces only `hnsw.ef_search` candidates, so a search restricted to a minority source narrows those candidates down and can be left with almost none. The pgvector answer is `hnsw.iterative_scan`, which makes the scan keep going until enough rows pass the filter. It works, and it costs latency: a filtered search that took a few milliseconds takes tens of milliseconds once the scan has to run long enough to fill the result set.
 
-rust-db applies the filter inside the traversal. A node that fails the filter is still expanded, so the walk can pass through it to reach the region it guards, but it is never admitted to the results. The walk therefore continues until it has collected enough passing chunks, at the cost of a longer walk rather than a repeated scan.
+inillucent applies the filter inside the traversal. A node that fails the filter is still expanded, so the walk can pass through it to reach the region it guards, but it is never admitted to the results. The walk therefore continues until it has collected enough passing chunks, at the cost of a longer walk rather than a repeated scan.
 
 ### An exhaustive scan is often the right plan and pgvector will not choose it
 
-When a filter admits 7,000 chunks out of 186,000, comparing the query against all 7,000 is both exactly correct and faster than walking a graph over the whole corpus. rust-db counts what the filter admits, compares that to a measured crossover point, and picks the exhaustive scan when it wins. The result is that narrow filters are the case where accuracy is perfect rather than the case where it collapses.
+When a filter admits 7,000 chunks out of 186,000, comparing the query against all 7,000 is both exactly correct and faster than walking a graph over the whole corpus. inillucent counts what the filter admits, compares that to a measured crossover point, and picks the exhaustive scan when it wins. The result is that narrow filters are the case where accuracy is perfect rather than the case where it collapses.
 
 ### The embedding model is a separate process reached over a socket
 
 llama.cpp runs the model in its own program. Every query pays process boundary and HTTP costs before any searching happens, the program has to be started and supervised, and a deployment has two things to keep alive instead of one.
 
-rust-db runs the embedding model in the same process, through the ONNX runtime. Nothing to start, nothing to supervise, no socket. It runs `nomic-embed-text-v1.5`, the same model, at full precision.
+inillucent runs the embedding model in the same process, through the ONNX runtime. Nothing to start, nothing to supervise, no socket. It runs `nomic-embed-text-v1.5`, the same model, at full precision.
 
 ### You are paying for durability, transactions, a planner and a wire protocol you are not using
 
@@ -53,7 +53,7 @@ A RAG index is derived data. It is rebuilt from the source documents, so write a
 
 ## Where these numbers come from
 
-Every measurement below was produced by `rustdb-bench`, a second program in this repository that drives rust-db and a PostgreSQL baseline through one shared interface, so no measurement can be taken of only one of them.
+Every measurement below was produced by `inillucent-bench`, a second program in this repository that drives inillucent and a PostgreSQL baseline through one shared interface, so no measurement can be taken of only one of them.
 
 The corpus is **186,781 chunks across 39,366 documents at 768 dimensions**, assembled by this repository from public data: Simple English and English Wikipedia articles and Talk pages from the Wikimedia CirrusSearch dumps, source files from eight open source repositories in eight languages, and real GitHub issue threads from those repositories. Every licence is named in the README. Six sources are represented, in the proportions a real organisation's knowledge tends to take: wiki pages and source files hold three quarters of it, while chat messages, issue threads, design files and boards are each a small minority. That imbalance is the point rather than an accident, because it is what makes filtered search hard.
 
@@ -69,7 +69,7 @@ Both engines read **byte identical vectors**. Every chunk is embedded once and b
 
 Measured inside the calling process over 120 queries after a warm up, reported as the middle value and the slowest 5%.
 
-| Search type | rust-db | postgres + pgvector | pgvector setting used |
+| Search type | inillucent | postgres + pgvector | pgvector setting used |
 |---|---|---|---|
 | Unfiltered, middle | **0.77 ms** | 3.04 ms | iterative scan off |
 | Unfiltered, slowest 5%  | **1.76 ms** | 5.45 ms | iterative scan off |
@@ -78,9 +78,9 @@ Measured inside the calling process over 120 queries after a warm up, reported a
 
 The last column matters, because the correct pgvector setting is not the same for both rows. Iterative scan belongs on for a filtered search, where without it the result set does not fill, and off for an unfiltered one, where it changes neither the results nor the latency enough to be worth paying for. The baseline is given the right setting for each row rather than one setting for both.
 
-The filtered rows are the ones that decide it, because filtered search is what an application with a search tool per source performs all day. The 45 milliseconds is the cost of restarting the scan until enough rows pass the filter. rust-db reaches the same full result set in 1.65 milliseconds because it never restarts: it filters inside a single traversal.
+The filtered rows are the ones that decide it, because filtered search is what an application with a search tool per source performs all day. The 45 milliseconds is the cost of restarting the scan until enough rows pass the filter. inillucent reaches the same full result set in 1.65 milliseconds because it never restarts: it filters inside a single traversal.
 
-One honest note on the unfiltered rows. Part of that gap is that rust-db is a library and pays no network cost while PostgreSQL is reached over a connection. That is a real saving in a deployed system, but it is not a claim about index quality, so read it alongside the accuracy figures rather than instead of them.
+One honest note on the unfiltered rows. Part of that gap is that inillucent is a library and pays no network cost while PostgreSQL is reached over a connection. That is a real saving in a deployed system, but it is not a claim about index quality, so read it alongside the accuracy figures rather than instead of them.
 
 From a saved index, all three search types over the full corpus:
 
@@ -97,7 +97,7 @@ From a saved index, all three search types over the full corpus:
 
 180 queries where the correct answer is known, using a document's own title as the query.
 
-| Measure | rust-db | postgres + pgvector |
+| Measure | inillucent | postgres + pgvector |
 |---|---|---|
 | Correct document ranked first | **0.878** | 0.867 |
 | Correct document in the top ten | **0.978** | 0.950 |
@@ -105,7 +105,7 @@ From a saved index, all three search types over the full corpus:
 
 On 90 harder queries drawn from section headings rather than titles, the gap widens:
 
-| Measure | rust-db | postgres + pgvector |
+| Measure | inillucent | postgres + pgvector |
 |---|---|---|
 | Correct document ranked first | **0.600** | 0.511 |
 | Correct document in the top ten | **0.856** | 0.767 |
@@ -115,7 +115,7 @@ On 90 harder queries drawn from section headings rather than titles, the gap wid
 
 Accuracy here is recall at 10 measured against an exhaustive comparison over exactly the chunks the filter admits, which is the definition of the correct answer. Rows returned is out of 50 requested.
 
-| Filtered to | corpus chunks | rust-db plan | rust-db rows | rust-db recall@10 | pgvector rows | pgvector recall@10 |
+| Filtered to | corpus chunks | inillucent plan | inillucent rows | inillucent recall@10 | pgvector rows | pgvector recall@10 |
 |---|---|---|---|---|---|---|
 | wiki pages | 93,617 | graph | 50 | **0.980** | 50 | 0.952 |
 | source files | 47,533 | graph | 50 | **0.924** | 50 | 0.608 |
@@ -124,13 +124,13 @@ Accuracy here is recall at 10 measured against an exhaustive comparison over exa
 | design files | 9,149 | exhaustive | 50 | **1.000** | 50 | 0.696 |
 | boards | 7,397 | exhaustive | 50 | **1.000** | 50 | 0.852 |
 
-Both engines return all 50 rows here, so the difference is entirely in which rows. The four accuracies of 1.000 are not a rounding artefact: below the crossover rust-db compares the query against every chunk the filter admits, so its answer is the exhaustive answer. pgvector is at its best on the largest source, 0.952 on wiki pages, and loses accuracy as the filter narrows, because a narrower filter makes its scan restart more times before it fills the result set.
+Both engines return all 50 rows here, so the difference is entirely in which rows. The four accuracies of 1.000 are not a rounding artefact: below the crossover inillucent compares the query against every chunk the filter admits, so its answer is the exhaustive answer. pgvector is at its best on the largest source, 0.952 on wiki pages, and loses accuracy as the filter narrows, because a narrower filter makes its scan restart more times before it fills the result set.
 
 This is the table most affected by the baseline settings noted at the end of this page, since raising `hnsw.ef_search` and `hnsw.scan_mem_multiplier` is exactly what raises recall inside a filter. Expect the pgvector column to improve when the corrected run lands.
 
 ### Word based search
 
-| Query type | rust-db | postgres full text search |
+| Query type | inillucent | postgres full text search |
 |---|---|---|
 | Natural questions, answer in the top ten | **0.933** | 0.533 |
 | Natural questions, rank quality | **0.847** | 0.479 |
@@ -192,13 +192,13 @@ Compression is free: a quarter of the memory at identical accuracy. Shortening t
 
 Replacing a separate embedding server with a model running inside the application only holds if the vectors are equivalent, so it was measured rather than assumed.
 
-Over 400 chunks embedded both ways, mean cosine similarity was **0.9860** with none below 0.95. The remaining difference is expected, because llama.cpp was serving the model quantized to Q5_K_M while rust-db runs it at full precision.
+Over 400 chunks embedded both ways, mean cosine similarity was **0.9860** with none below 0.95. The remaining difference is expected, because llama.cpp was serving the model quantized to Q5_K_M while inillucent runs it at full precision.
 
 That comparison was made against the private corpus this engine was first graded on, and it cannot be repeated here: the corpus this repository builds is embedded in process from the start, so there is no second embedder to compare against. What is checked here is that the stored vectors were made from the stored text, which is a different question and a necessary one, because the corpus text and its vectors are produced in separate steps hours apart.
 
 Similarity is not the number that decides it. Retrieval quality is. Running 120 queries through the same index, once with each set of query vectors:
 
-| Measure | embedding server over HTTP | rust-db in the same process |
+| Measure | embedding server over HTTP | inillucent in the same process |
 |---|---|---|
 | Correct answer ranked first | 0.8250 | **0.8250** |
 | Correct answer in the top ten | 0.8917 | **0.8917** |
@@ -222,7 +222,7 @@ The engine has **118 tests** of its own and the measurement program has **62**.
 
 ## The baseline these comparisons are held to
 
-Beating a badly configured PostgreSQL would prove nothing, so the baseline is a correctly configured one. It runs the same SQL shape against the same schema with the same HNSW parameters, `m = 16` and `ef_construction = 64`, and fuses its two result lists with the same Reciprocal Rank Fusion constants. It reads the same vectors rust-db reads.
+Beating a badly configured PostgreSQL would prove nothing, so the baseline is a correctly configured one. It runs the same SQL shape against the same schema with the same HNSW parameters, `m = 16` and `ef_construction = 64`, and fuses its two result lists with the same Reciprocal Rank Fusion constants. It reads the same vectors inillucent reads.
 
 Its scan settings are these, each chosen from a measured sweep against an exhaustive comparison rather than by feel:
 
@@ -236,12 +236,12 @@ Its scan settings are these, each chosen from a measured sweep against an exhaus
 
 `hnsw.scan_mem_multiplier` is the one most easily missed, and missing it produces a baseline that looks tuned and is not.
 
-**Status of the figures above.** The comparison numbers on this page come from the first full graded run. That run's baseline had `hnsw.ef_search` at 100 on filtered searches rather than 400, `hnsw.max_scan_tuples` at 200,000, iterative scan left on for unfiltered searches, and `hnsw.scan_mem_multiplier` never set, so it ran at the pgvector default of 1. Every one of those differences makes the baseline weaker than the settings in the table, so the pgvector columns above understate a correctly configured PostgreSQL, most of all on filtered recall. The run against the settings in the table is in progress and this page will carry its numbers. rust-db's own figures, its latency, memory, disk, compression ladder, `ef_search` sweep and correctness gates, do not depend on the baseline and are unaffected.
+**Status of the figures above.** The comparison numbers on this page come from the first full graded run. That run's baseline had `hnsw.ef_search` at 100 on filtered searches rather than 400, `hnsw.max_scan_tuples` at 200,000, iterative scan left on for unfiltered searches, and `hnsw.scan_mem_multiplier` never set, so it ran at the pgvector default of 1. Every one of those differences makes the baseline weaker than the settings in the table, so the pgvector columns above understate a correctly configured PostgreSQL, most of all on filtered recall. The run against the settings in the table is in progress and this page will carry its numbers. inillucent's own figures, its latency, memory, disk, compression ladder, `ef_search` sweep and correctness gates, do not depend on the baseline and are unaffected.
 
 ## What these numbers do not cover
 
 - One corpus and one embedding model. The measurement program works against any corpus, but these figures describe this one.
 - Where the correct answer is a document's own title, titles share vocabulary with the text beneath them, which flatters word based search. It flatters both engines equally, so the comparison holds, but the absolute figures are optimistic.
-- rust-db holds its index in memory. It suits a corpus that fits in memory, which this one does at under 2 GB. A corpus far larger than available memory needs a different design.
+- inillucent holds its index in memory. It suits a corpus that fits in memory, which this one does at under 2 GB. A corpus far larger than available memory needs a different design.
 - Only searching was measured. Adding content to an existing index requires rebuilding the graph, which takes the 175 seconds above.
 - The PostgreSQL word based search comparison uses AND across query terms, which is what `to_tsquery` does by default. An OR variant would return more rows and has not been measured.

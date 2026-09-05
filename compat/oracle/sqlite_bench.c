@@ -1,7 +1,7 @@
 /*
-** The SQLite side of the rust-db performance scorecard.
+** The SQLite side of the inillucent performance scorecard.
 **
-** Invariant: this program is handed the *same plan file* the rust-db side
+** Invariant: this program is handed the *same plan file* the inillucent side
 ** reads, and every statement it runs is a byte-for-byte copy of what the other
 ** engine runs. The fairness contract is not a promise in a document here; it is
 ** that there is one copy of the SQL, one copy of the parameter generator, and
@@ -9,7 +9,7 @@
 **
 ** It is compiled from the pinned SQLite 3.53.4 amalgamation and run as a
 ** separate child process, which is the only way SQLite appears in this
-** workspace. No rust-db crate links against it.
+** workspace. No inillucent crate links against it.
 **
 ** Usage:
 **   sqlite-bench build <plan> <database>
@@ -56,7 +56,7 @@ static double now_seconds(void) {
 #define MAX_WORKLOADS 64
 #define MAX_SETUP 64
 
-/* The parameter generators, which must match the rust-db side exactly. */
+/* The parameter generators, which must match the inillucent side exactly. */
 enum bind_kind {
   BIND_NONE = 0,
   BIND_ROWID,   /* 1 + (iteration % rows) */
@@ -93,7 +93,7 @@ struct plan {
 };
 
 /* ------------------------------------------------------------------------ */
-/* The digest, which has to agree byte for byte with the rust-db side.       */
+/* The digest, which has to agree byte for byte with the inillucent side.       */
 /* ------------------------------------------------------------------------ */
 
 static uint64_t digest_start(void) { return 0xcbf29ce484222325ULL; }

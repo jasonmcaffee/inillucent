@@ -21,13 +21,13 @@ feedback:
 
 | target | stable counterpart |
 |---|---|
-| `varint` | `rustdb-base::varint::tests::arbitrary_bytes_never_panic` (200k seeded inputs) |
-| `bigendian` | `rustdb-base::bytes::tests::random_offsets_never_panic` (200k seeded offsets) |
-| `page_header` | `rustdb-base::page::tests::page_sizes_follow_the_file_format_rules` |
-| `leaf_page` | `rustdb-tree::leaf::tests::no_single_byte_corruption_panics` and `rustdb-compat`'s `corrupt_pages_never_panic` |
-| `interior_page` | `rustdb-pool::interior::tests::corrupting_any_header_field_is_refused` and `rustdb-compat`'s `corrupt_pages_never_panic` |
-| `meta_page` | `rustdb-pool::meta::tests::corrupting_any_byte_is_detected` |
-| `memcmp_key` | `rustdb-tree::key::tests::encoded_order_matches_value_order_over_random_tuples` |
+| `varint` | `inillucent-base::varint::tests::arbitrary_bytes_never_panic` (200k seeded inputs) |
+| `bigendian` | `inillucent-base::bytes::tests::random_offsets_never_panic` (200k seeded offsets) |
+| `page_header` | `inillucent-base::page::tests::page_sizes_follow_the_file_format_rules` |
+| `leaf_page` | `inillucent-tree::leaf::tests::no_single_byte_corruption_panics` and `inillucent-compat`'s `corrupt_pages_never_panic` |
+| `interior_page` | `inillucent-pool::interior::tests::corrupting_any_header_field_is_refused` and `inillucent-compat`'s `corrupt_pages_never_panic` |
+| `meta_page` | `inillucent-pool::meta::tests::corrupting_any_byte_is_detected` |
+| `memcmp_key` | `inillucent-tree::key::tests::encoded_order_matches_value_order_over_random_tuples` |
 
 The four targets added in task-1817 are the TDD's Phase 2 list: "new targets:
 leaf decoder, interior decoder, WAL record decoder, memcmp key decoder". The WAL

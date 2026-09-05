@@ -1,0 +1,17 @@
+[package]
+name = "inillucent-catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Schema objects, the schema loader, DDL catalog mutation, cookies, invalidation, and statistics."
+
+[dependencies]
+inillucent-base = { workspace = true }
+inillucent-value = { workspace = true }
+inillucent-storage = { workspace = true }
+inillucent-sql = { workspace = true }
+inillucent-pool = { workspace = true }
+inillucent-tree = { workspace = true }
+
+[dev-dependencies]
+inillucent-vfs = { workspace = true }

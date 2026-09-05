@@ -1,0 +1,305 @@
+//! The FTS5 module, compared against the pinned SQLite 3.53.4.
+//!
+//! Invariant: the *answers* are the claim, and the answers include the score.
+//! FTS5's segment format inside `%_data` is not a published format the way the
+//! R-Tree's node format is, so this suite does not hand a file from one engine
+//! to the other - it asks both engines the same questions and requires the same
+//! rows, in the same order, with the same `bm25()` to the last digit. The five
+//! shadow table *names* and the layouts of `%_content`, `%_docsize` and
+//! `%_config` are compared, because an application reads those.
+
+use inillucent_compat::differential::{compare, Step};
+
+/// Where this suite's scratch databases live.
+const AREA: &str = "task-1789/fts5";
+
+/// The schema every scenario starts from.
+const SCHEMA: &[Step] = &[
+    Step::Exec("CREATE VIRTUAL TABLE docs USING fts5(title, body)"),
+    Step::Exec("INSERT INTO docs VALUES ('The quick brown fox', 'jumps over the lazy dog')"),
+    Step::Exec("INSERT INTO docs VALUES ('A slow green turtle', 'walks past the sleepy cat')"),
+    Step::Exec("INSERT INTO docs VALUES ('Quick foxes and quick dogs', 'run quickly')"),
+    Step::Exec("INSERT INTO docs VALUES ('The dog barks', 'and the fox runs away quick')"),
+];
+
+/// Runs the schema and then a list of steps, comparing every answer.
+fn check(name: &str, steps: &[Step]) {
+    let mut all = SCHEMA.to_vec();
+    all.extend_from_slice(steps);
+    let compared = compare(AREA, name, &all);
+    if compared == 0 {
+        return;
+    }
+    assert_eq!(compared, all.len(), "every step was compared");
+}
+
+/// The five shadow tables carry the documented names.
+#[test]
+fn the_shadow_tables_are_the_documented_ones() {
+    check(
+        "shadow",
+        &[Step::Query(
+            "SELECT name, type FROM sqlite_master ORDER BY name",
+        )],
+    );
+}
+
+/// `%_content` holds the rowid and one column per indexed column.
+#[test]
+fn the_content_table_holds_the_rows() {
+    check(
+        "content",
+        &[
+            Step::Query("SELECT * FROM docs_content ORDER BY id"),
+            Step::Query("SELECT k, v FROM docs_config ORDER BY k"),
+        ],
+    );
+}
+
+/// A single term finds the rows it appears in, in rowid order.
+#[test]
+fn a_term_finds_its_rows() {
+    check(
+        "term",
+        &[
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'quick'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'fox'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'nothing'"),
+            Step::Query("SELECT rowid, title FROM docs WHERE docs MATCH 'turtle'"),
+        ],
+    );
+}
+
+/// A quoted phrase requires the words adjacent and in order.
+#[test]
+fn a_phrase_requires_the_words_together() {
+    check(
+        "phrase",
+        &[
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH '\"quick brown\"'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH '\"brown quick\"'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH '\"quick fox\"'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH '\"the lazy dog\"'"),
+        ],
+    );
+}
+
+/// AND, OR and NOT combine matches the way the grammar says.
+#[test]
+fn the_operators_combine_matches() {
+    check(
+        "operators",
+        &[
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'quick AND dog'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'quick OR turtle'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'quick NOT dog'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'fox AND dog OR turtle'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH '(quick OR slow) AND fox'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'quick dog'"),
+        ],
+    );
+}
+
+/// A trailing star matches every term with that prefix.
+#[test]
+fn a_prefix_matches_every_term_that_starts_with_it() {
+    check(
+        "prefix",
+        &[
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'quick*'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'run*'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'z*'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH '\"jump*\"'"),
+        ],
+    );
+}
+
+/// A column filter restricts a match to one column.
+#[test]
+fn a_column_filter_restricts_the_match() {
+    check(
+        "column",
+        &[
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'title:quick'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'body:quick'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'title:fox'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'body:dog AND title:quick'"),
+        ],
+    );
+}
+
+/// NEAR requires the terms within a distance of each other.
+#[test]
+fn near_requires_the_terms_close_together() {
+    check(
+        "near",
+        &[
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'NEAR(quick fox, 2)'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'NEAR(quick fox, 0)'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'NEAR(quick dogs, 3)'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'NEAR(fox dog)'"),
+        ],
+    );
+}
+
+/// `rank` is the bm25 score, and ascending order is best first.
+#[test]
+fn the_rank_is_bm25_and_ascends() {
+    check(
+        "rank",
+        &[
+            Step::Query("SELECT rowid, rank FROM docs WHERE docs MATCH 'quick' ORDER BY rank"),
+            Step::Query("SELECT rowid, rank FROM docs WHERE docs MATCH 'fox' ORDER BY rank"),
+            Step::Query(
+                "SELECT rowid, bm25(docs) FROM docs WHERE docs MATCH 'quick' ORDER BY rowid",
+            ),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'dog' ORDER BY rank"),
+        ],
+    );
+}
+
+/// A row that is deleted stops matching, and one that is updated matches its
+/// new text rather than its old.
+#[test]
+fn the_index_follows_the_rows() {
+    check(
+        "changes",
+        &[
+            Step::Exec("DELETE FROM docs WHERE rowid = 1"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'brown'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'quick'"),
+            Step::Exec("UPDATE docs SET body = 'a purple aardvark' WHERE rowid = 2"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'sleepy'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'aardvark'"),
+            Step::Query("SELECT rowid, body FROM docs ORDER BY rowid"),
+            Step::Exec("INSERT INTO docs(rowid, title, body) VALUES (9, 'nine', 'a quick nine')"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'quick'"),
+            Step::Query("SELECT count(*) FROM docs"),
+        ],
+    );
+}
+
+/// A rowid lookup and a plain scan both work without a match.
+#[test]
+fn a_scan_and_a_rowid_lookup_need_no_match() {
+    check(
+        "scan",
+        &[
+            Step::Query("SELECT rowid, title FROM docs ORDER BY rowid"),
+            Step::Query("SELECT title FROM docs WHERE rowid = 3"),
+            Step::Query("SELECT count(*) FROM docs WHERE rowid > 2"),
+            Step::Query("SELECT rowid FROM docs WHERE rowid = 99"),
+        ],
+    );
+}
+
+/// An unindexed column is stored and returned but never matched.
+#[test]
+fn an_unindexed_column_is_stored_but_not_matched() {
+    check(
+        "unindexed",
+        &[
+            Step::Exec("CREATE VIRTUAL TABLE notes USING fts5(subject, tag UNINDEXED)"),
+            Step::Exec("INSERT INTO notes VALUES ('a rare word', 'rare')"),
+            Step::Exec("INSERT INTO notes VALUES ('an ordinary word', 'common')"),
+            Step::Query("SELECT rowid, tag FROM notes ORDER BY rowid"),
+            Step::Query("SELECT rowid FROM notes WHERE notes MATCH 'rare'"),
+            Step::Query("SELECT rowid FROM notes WHERE notes MATCH 'common'"),
+        ],
+    );
+}
+
+/// The tokenizer folds case and splits on punctuation.
+#[test]
+fn the_tokenizer_folds_case_and_splits_on_punctuation() {
+    check(
+        "tokenizer",
+        &[
+            Step::Exec("CREATE VIRTUAL TABLE t USING fts5(x)"),
+            Step::Exec("INSERT INTO t VALUES ('Hello, WORLD! (again)')"),
+            Step::Exec("INSERT INTO t VALUES ('e-mail user@example.com')"),
+            Step::Query("SELECT rowid FROM t WHERE t MATCH 'hello'"),
+            Step::Query("SELECT rowid FROM t WHERE t MATCH 'WORLD'"),
+            Step::Query("SELECT rowid FROM t WHERE t MATCH 'again'"),
+            Step::Query("SELECT rowid FROM t WHERE t MATCH 'mail'"),
+            Step::Query("SELECT rowid FROM t WHERE t MATCH 'example'"),
+        ],
+    );
+}
+
+/// The special commands are writes to the table's own hidden column.
+#[test]
+fn the_special_commands_are_accepted() {
+    check(
+        "commands",
+        &[
+            Step::Exec("INSERT INTO docs(docs) VALUES('integrity-check')"),
+            Step::Exec("INSERT INTO docs(docs) VALUES('rebuild')"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'quick'"),
+            Step::Query("SELECT rowid, title FROM docs ORDER BY rowid"),
+            Step::Exec("INSERT INTO docs(docs) VALUES('optimize')"),
+            Step::Exec("INSERT INTO docs(docs) VALUES('flush')"),
+            Step::Exec("INSERT INTO docs(docs, rank) VALUES('merge', 16)"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'fox'"),
+            Step::Query("PRAGMA integrity_check"),
+        ],
+    );
+}
+
+/// A rebuild puts back exactly the index the inserts built.
+#[test]
+fn a_rebuild_restores_every_answer() {
+    check(
+        "rebuild",
+        &[
+            Step::Exec("DELETE FROM docs WHERE rowid = 2"),
+            Step::Exec("INSERT INTO docs(rowid, title, body) VALUES (7, 'seven quick', 'foxes')"),
+            Step::Exec("INSERT INTO docs(docs) VALUES('rebuild')"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'quick'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'turtle'"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'foxes'"),
+            Step::Query("SELECT rowid, rank FROM docs WHERE docs MATCH 'quick' ORDER BY rank"),
+            Step::Query("SELECT count(*) FROM docs"),
+        ],
+    );
+}
+
+/// A command nobody defined is refused rather than stored as a row.
+#[test]
+fn an_unknown_command_is_refused() {
+    check(
+        "unknown",
+        &[
+            Step::Exec("INSERT INTO docs(docs) VALUES('nonsense')"),
+            // A setting written without a value is not a command either, and
+            // a value written to a name nobody defined is refused rather than
+            // kept.
+            Step::Exec("INSERT INTO docs(docs) VALUES('pgsz')"),
+            Step::Exec("INSERT INTO docs(docs, rank) VALUES('nonsense', 1)"),
+            Step::Exec("INSERT INTO docs(docs) VALUES('delete-all')"),
+            Step::Query("SELECT count(*) FROM docs"),
+            Step::Query("SELECT k, v FROM docs_config ORDER BY k"),
+        ],
+    );
+}
+
+/// A setting is kept where an application can read it back.
+#[test]
+fn the_settings_are_written_to_the_config_table() {
+    check(
+        "settings",
+        &[
+            Step::Exec("INSERT INTO docs(docs, rank) VALUES('pgsz', 64)"),
+            Step::Exec("INSERT INTO docs(docs, rank) VALUES('automerge', 4)"),
+            Step::Exec("INSERT INTO docs(docs, rank) VALUES('crisismerge', 8)"),
+            Step::Exec("INSERT INTO docs(docs, rank) VALUES('usermerge', 4)"),
+            Step::Exec("INSERT INTO docs(docs, rank) VALUES('deletemerge', 10)"),
+            Step::Exec("INSERT INTO docs(docs, rank) VALUES('secure-delete', 1)"),
+            Step::Exec("INSERT INTO docs(docs, rank) VALUES('rank', 'bm25(10.0,1.0)')"),
+            Step::Query("SELECT k, v FROM docs_config ORDER BY k"),
+            Step::Exec("INSERT INTO docs(docs, rank) VALUES('pgsz', 128)"),
+            Step::Query("SELECT k, v FROM docs_config ORDER BY k"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'quick'"),
+        ],
+    );
+}

@@ -1,0 +1,10 @@
+[package]
+name = "inillucent-sql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "First-party lexer, parser, AST, binder, semantic rewrites, and logical and physical plans."
+
+[dependencies]
+inillucent-base = { workspace = true }
+inillucent-value = { workspace = true }

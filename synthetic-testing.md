@@ -2,15 +2,15 @@
 
 ## What this document is for
 
-This document is everything needed to build the graded corpus and run the full comparison between rust-db and PostgreSQL with the pgvector extension on a machine that has never done it before. It covers what to install, where the data comes from, how to assemble the corpus, how to embed it, how to load it into PostgreSQL, how the grading works, and which results are allowed to differ on a different machine.
+This document is everything needed to build the graded corpus and run the full comparison between inillucent and PostgreSQL with the pgvector extension on a machine that has never done it before. It covers what to install, where the data comes from, how to assemble the corpus, how to embed it, how to load it into PostgreSQL, how the grading works, and which results are allowed to differ on a different machine.
 
 Nothing here depends on private data or on any other project. Every input is public.
 
 ## Why the corpus is built rather than shipped
 
-rust-db was first graded on a live PostgreSQL database holding one organisation's Confluence pages, Slack messages, JIRA issues, GitHub content, Figma files and Miro boards. That content cannot be published, which meant nobody outside that organisation could reproduce a single number on the score card, and the repository could not be made public at all.
+inillucent was first graded on a live PostgreSQL database holding one organisation's Confluence pages, Slack messages, JIRA issues, GitHub content, Figma files and Miro boards. That content cannot be published, which meant nobody outside that organisation could reproduce a single number on the score card, and the repository could not be made public at all.
 
-The corpus described here replaces it. The six sources, the documents, the titles, the authors, the spaces, the labels and the identifiers are all constructed by `crates/rustdb-bench/src/synth.rs`. The sentences inside the chunks are real public text, because a word matching index scored against generated filler measures nothing: term frequencies, sentence length, vocabulary growth and the way rare words cluster together are all properties the BM25 scoring formula depends on, and text produced from a template has none of them.
+The corpus described here replaces it. The six sources, the documents, the titles, the authors, the spaces, the labels and the identifiers are all constructed by `crates/inillucent-bench/src/synth.rs`. The sentences inside the chunks are real public text, because a word matching index scored against generated filler measures nothing: term frequencies, sentence length, vocabulary growth and the way rare words cluster together are all properties the BM25 scoring formula depends on, and text produced from a template has none of them.
 
 The text is not committed to this repository. It is downloaded and rebuilt on demand. That keeps the repository small, and it satisfies the share alike licences of the Wikipedia material by attribution rather than by redistribution.
 
@@ -22,7 +22,7 @@ The text is not committed to this repository. It is downloaded and rebuilt on de
 | **Document** | One page, message, issue or file, as its source system sees it. A long document becomes many chunks. |
 | **Corpus** | The whole body of text being searched. Here, 186,786 chunks across 39,366 documents. |
 | **Embedding**, also **vector** | A list of 768 numbers standing for the meaning of a chunk, produced by a trained model. Two chunks on similar topics get similar lists even when they share no words. |
-| **pgvector** | An extension for PostgreSQL that lets it store embeddings and search them. It is the baseline rust-db is measured against. |
+| **pgvector** | An extension for PostgreSQL that lets it store embeddings and search them. It is the baseline inillucent is measured against. |
 | **HNSW** | Hierarchical Navigable Small World, a method for finding the nearest embeddings quickly without comparing against every one. Both engines use it. |
 | **Exhaustive search** | Comparing the query against every chunk. Always exactly right, and slower when there are many chunks. It is what every accuracy number is measured against. |
 | **Recall** | The share of the genuinely correct answers a search returned. If exhaustive search says the best ten chunks are A to J and a search returns eight of them, recall at 10 is 0.8. |
@@ -63,7 +63,7 @@ The measured shape, which the builder reproduces:
 
 Three properties of that shape matter more than the totals.
 
-**The split between sources decides which retrieval path a filtered query takes.** rust-db chooses between walking the HNSW graph and scanning exactly, and the crossover sits inside the range these six sources span. On this corpus `confluence` and `github` are above it and the other four are below it. Change the sizes and the filtered search scenarios stop measuring what they were written to measure.
+**The split between sources decides which retrieval path a filtered query takes.** inillucent chooses between walking the HNSW graph and scanning exactly, and the crossover sits inside the range these six sources span. On this corpus `confluence` and `github` are above it and the other four are below it. Change the sizes and the filtered search scenarios stop measuring what they were written to measure.
 
 **Chunk order correlates with source.** Chunks are numbered in the order they would have been ingested, so the first tenth of the corpus is `confluence` alone and only the last part interleaves all six. A prefix of this corpus is therefore not a sample of it, which is why the harness samples with a stride and why `--limit N` gives nearly one source.
 
@@ -110,7 +110,7 @@ Three commands need that variable set: `synth-embed`, `embed-check` and `grade`.
 
 ## Step 2: get the embedding model
 
-The model is `nomic-embed-text-v1.5`, in its ONNX export. Five files are needed, in `~/.cache/rust-db-models/nomic-embed-text-v1.5/`:
+The model is `nomic-embed-text-v1.5`, in its ONNX export. Five files are needed, in `~/.cache/inillucent-models/nomic-embed-text-v1.5/`:
 
 ```
 config.json  model.onnx  tokenizer.json  tokenizer_config.json  special_tokens_map.json
@@ -125,7 +125,7 @@ The same directory may also hold `model_quantized.onnx`, an int8 export that run
 One script does both:
 
 ```sh
-cd rust-db
+cd inillucent
 ./scripts/fetch-public-corpus.sh
 ```
 
@@ -136,11 +136,11 @@ That last part deserves an explanation, because the file is 43 GB. It is never d
 Steps 3 and 4 can be run separately if something fails part way. The extraction scripts are safe to rerun and skip work already done:
 
 ```sh
-python3 scripts/extract-wikipedia.py ~/.cache/rust-db-corpus/raw ~/.cache/rust-db-corpus/derived
-python3 scripts/extract-github.py    ~/.cache/rust-db-corpus/raw ~/.cache/rust-db-corpus/derived
+python3 scripts/extract-wikipedia.py ~/.cache/inillucent-corpus/raw ~/.cache/inillucent-corpus/derived
+python3 scripts/extract-github.py    ~/.cache/inillucent-corpus/raw ~/.cache/inillucent-corpus/derived
 ```
 
-What you should have afterwards, in `~/.cache/rust-db-corpus/derived/`:
+What you should have afterwards, in `~/.cache/inillucent-corpus/derived/`:
 
 | File | Records | What it holds |
 |---|---|---|
@@ -158,7 +158,7 @@ Those counts are what a working extraction produces. Being short on `code.jsonl`
 
 ```sh
 cargo build --release
-./target/release/rustdb-bench synth-build --out ~/.cache/rust-db-corpus/corpus.jsonl
+./target/release/inillucent-bench synth-build --out ~/.cache/inillucent-corpus/corpus.jsonl
 ```
 
 This takes a couple of minutes and writes 249 MB. It prints a line per source with the documents and chunks produced against the targets, and it warns if a source ran short of raw material. Document counts should be exact. Chunk counts should be exact or within a few dozen.
@@ -172,7 +172,7 @@ The assembly is deterministic. It uses a fixed seed, so building twice from the 
 Do not skip this. Embedding takes hours, and a corpus that cannot supply a ground truth produces a score card with empty scenarios that no one notices.
 
 ```sh
-./target/release/rustdb-bench synth-check --corpus ~/.cache/rust-db-corpus/corpus.jsonl --per-source 40
+./target/release/inillucent-bench synth-check --corpus ~/.cache/inillucent-corpus/corpus.jsonl --per-source 40
 ```
 
 It runs the three real ground truth generators, the same functions the graded run uses, and refuses the corpus unless every one of them works. It checks that every chunk key is unique, that all six sources supply enough title queries, that natural language heading queries and rare identifier queries exist, that soft deleted documents are present so a filter that forgets to exclude them can be caught, and that the chunk ordering still correlates with source, meaning the first tenth of the corpus covers fewer sources than the whole and the last tenth covers all of them.
@@ -204,9 +204,9 @@ This is the long step. Budget ten hours, and read the two notes below before sta
 
 ```sh
 export ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib
-./target/release/rustdb-bench synth-embed \
-  --corpus ~/.cache/rust-db-corpus/corpus.jsonl \
-  --cache  ~/.cache/rust-db-corpus/corpus.cache
+./target/release/inillucent-bench synth-embed \
+  --corpus ~/.cache/inillucent-corpus/corpus.jsonl \
+  --cache  ~/.cache/inillucent-corpus/corpus.cache
 ```
 
 It prints progress every 2000 chunks with a rate and an estimate. It writes each vector to `corpus.vectors` beside the cache as it goes, in corpus order, and assembles `corpus.cache` at the end.
@@ -220,10 +220,10 @@ Two things that look like they should make this faster and do not. Raising the O
 ## Step 8: create the database and load it
 
 ```sh
-createdb -h 127.0.0.1 -p 5433 rustdb_synth
-./target/release/rustdb-bench synth-load \
-  --corpus ~/.cache/rust-db-corpus/corpus.jsonl \
-  --cache  ~/.cache/rust-db-corpus/corpus.cache
+createdb -h 127.0.0.1 -p 5433 inillucent_synth
+./target/release/inillucent-bench synth-load \
+  --corpus ~/.cache/inillucent-corpus/corpus.jsonl \
+  --cache  ~/.cache/inillucent-corpus/corpus.cache
 ```
 
 This creates the extension and the two tables, inserts 39,366 documents and 186,786 chunks with their vectors, then builds nine indexes. Two of them matter to the comparison: a GIN index over `to_tsvector('english', content)` for word matching, and an HNSW index over the embedding column using `vector_cosine_ops` with `m = 16` and `ef_construction = 64`. The schema is the schema the original stack used, reproduced so the baseline SQL runs against it unchanged.
@@ -239,7 +239,7 @@ Two checks, both cheap, both worth running every time.
 The first asks whether the vectors in the cache were made from the text in the cache:
 
 ```sh
-./target/release/rustdb-bench embed-check --cache ~/.cache/rust-db-corpus/corpus.cache --samples 200
+./target/release/inillucent-bench embed-check --cache ~/.cache/inillucent-corpus/corpus.cache --samples 200
 ```
 
 It re-embeds a sample spread across the whole corpus and compares against what is stored. Because it is the same model over the same text, agreement should be 1.000000 at the minimum, not merely high. It also checks that every vector has the corpus width and is unit length, since cosine distance is computed as a dot product and a vector that is not normalised would score too high. Anything below 0.9995 makes it name the chunks and fail.
@@ -260,7 +260,7 @@ Do not do this by reading the vector back as text and comparing the numbers your
 
 ### The two engines, behind one interface
 
-Both engines sit behind one trait in `crates/rustdb-bench/src/engine.rs`, so no scenario can run against only one of them. The pgvector implementation issues the SQL the original stack issued, against the same schema, and fuses the two result lists with the same Reciprocal Rank Fusion constants, so the baseline is that stack's behaviour rather than a fresh approximation of it.
+Both engines sit behind one trait in `crates/inillucent-bench/src/engine.rs`, so no scenario can run against only one of them. The pgvector implementation issues the SQL the original stack issued, against the same schema, and fuses the two result lists with the same Reciprocal Rank Fusion constants, so the baseline is that stack's behaviour rather than a fresh approximation of it.
 
 pgvector is graded in two configurations, because reporting only one of them would be misleading in one direction or the other.
 
@@ -300,16 +300,16 @@ Two of them are gates rather than scores. Filter correctness checks that every r
 
 ```sh
 export ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib
-./target/release/rustdb-bench grade \
-  --cache ~/.cache/rust-db-corpus/corpus.cache \
+./target/release/inillucent-bench grade \
+  --cache ~/.cache/inillucent-corpus/corpus.cache \
   --per-source 30
 ```
 
-Twenty minutes or so, most of it index builds: one main index plus eleven smaller ones for the quantization ladder. It writes `rust-db-scorecard.md` into the working directory and the same measurements as JSON beside it, so the card can be re-rendered or re-judged without paying for the run again. Run it from the repository root, or pass `--out` with the path you want.
+Twenty minutes or so, most of it index builds: one main index plus eleven smaller ones for the quantization ladder. It writes `inillucent-scorecard.md` into the working directory and the same measurements as JSON beside it, so the card can be re-rendered or re-judged without paying for the run again. Run it from the repository root, or pass `--out` with the path you want.
 
-The default used to be `../rust-db-scorecard.md`, which from the repository root wrote the card to the parent directory, outside the repository entirely. That was found while checking this document against the code and is now fixed, but a card sitting one directory above the repository is what an older build produced.
+The default used to be `../inillucent-scorecard.md`, which from the repository root wrote the card to the parent directory, outside the repository entirely. That was found while checking this document against the code and is now fixed, but a card sitting one directory above the repository is what an older build produced.
 
-`--rustdb-only` skips both pgvector configurations, which is the fast loop when changing rust-db alone. `--per-source` sets how many title queries each source contributes; 30 or 40 are the usual values, and a larger number reduces the noise in every per source figure at the cost of time.
+`--inillucent-only` skips both pgvector configurations, which is the fast loop when changing inillucent alone. `--per-source` sets how many title queries each source contributes; 30 or 40 are the usual values, and a larger number reduces the noise in every per source figure at the cost of time.
 
 The unit tests are separate and take under a minute:
 
@@ -329,7 +329,7 @@ Beneath the headline, every primary comparison is printed with its delta, its in
 
 The provenance table names the run directory. `runs/<id>/per-query.jsonl` holds one line per engine per query — the ranking, each hit’s relevance grade, the component scores, the latency and the metrics that query contributed — so a miss can be looked at rather than guessed at, and a comparison can be recomputed or re-judged without paying for the run again.
 
-Read the filtered vector search table first. It is where the difference between the engines is largest and least ambiguous, and it reports for each source how many chunks the filter admits, which retrieval path rust-db chose, how many rows of the fifty requested came back, and recall within the filter.
+Read the filtered vector search table first. It is where the difference between the engines is largest and least ambiguous, and it reports for each source how many chunks the filter admits, which retrieval path inillucent chose, how many rows of the fifty requested came back, and recall within the filter.
 
 ## What may differ on another machine, and what must not
 
@@ -337,7 +337,7 @@ Latency will differ, and it is the measurement most sensitive to everything else
 
 Absolute retrieval scores may differ between corpora built from different dump dates, because the text differs. Retrieval difficulty is a property of the content as well as of the engine.
 
-What must not differ is the relationship between the engines, and specifically these: filtered vector search must still collapse for pgvector at the extension defaults and still work for rust-db; both correctness gates must pass; and rust-db's approximation of exhaustive cosine with no filter must stay high.
+What must not differ is the relationship between the engines, and specifically these: filtered vector search must still collapse for pgvector at the extension defaults and still work for inillucent; both correctness gates must pass; and inillucent's approximation of exhaustive cosine with no filter must stay high.
 
 If a number moves, explain why rather than adjusting settings until it matches.
 
@@ -371,6 +371,6 @@ The embedding model needs 654 MB on disk. Peak memory is about 2.7 GB while buil
 
 ## Cleaning up
 
-The downloaded material, the corpus, the vectors, the cache and any saved index are all rebuildable and safe to remove. They live in `~/.cache/rust-db-corpus/` and wherever the cache was written. `.gitignore` already excludes the corpus, the vectors, the caches and any saved index, so none of them can be committed by accident.
+The downloaded material, the corpus, the vectors, the cache and any saved index are all rebuildable and safe to remove. They live in `~/.cache/inillucent-corpus/` and wherever the cache was written. `.gitignore` already excludes the corpus, the vectors, the caches and any saved index, so none of them can be committed by accident.
 
 The database can be dropped and recreated from the cache with Step 8 alone, without re-embedding anything, as long as `corpus.jsonl` and `corpus.cache` are still the pair that were made together.

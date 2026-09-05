@@ -1,7 +1,7 @@
 # task-1787 — Advanced SQL, schema features, and the cost optimizer
 
 Phase 8 of the [task-1781 SQLite-parity design](./task-1781-sqlite-feature-parity-tdd.md).
-Repository: `C:\jason\dev\rust-db`. Depends on task-1786 (DML, DDL, rollback, constraints), which
+Repository: `C:\jason\dev\inillucent`. Depends on task-1786 (DML, DDL, rollback, constraints), which
 is `agent_done`.
 
 ## Introduction
@@ -75,22 +75,22 @@ The consequence is not "slower". It is that a query the corpus can express does 
 
 ```mermaid
 flowchart TD
-  SQL["SQL text"] --> P["rustdb-sql: lexer + parser (arena AST)"]
+  SQL["SQL text"] --> P["inillucent-sql: lexer + parser (arena AST)"]
   P --> B["binder"]
   B --> QG["query graph: blocks, sources, correlations"]
   QG --> RW["rewrites: flatten, IN-to-join, view expansion, CTE inlining"]
   RW --> ST["statistics: sqlite_stat1 / stat4 loaded per catalog generation"]
   ST --> OPT["cost optimizer: access paths, join enumeration"]
   OPT --> PP["physical plan tree: scans, loops, sorts, set ops, coroutines"]
-  PP --> C["rustdb-vm: compiler"]
+  PP --> C["inillucent-vm: compiler"]
   C --> BC["bytecode + verifier"]
   BC --> M["machine: cursors, sorters, windows, triggers"]
   M --> R["rows"]
 
-  CAT["rustdb-catalog snapshot: tables, views, triggers, generated cols"] --> B
+  CAT["inillucent-catalog snapshot: tables, views, triggers, generated cols"] --> B
   CAT --> ST
   CAT --> C
-  REF["reference evaluator (test-only, in rustdb-compat)"] -.compared against.-> R
+  REF["reference evaluator (test-only, in inillucent-compat)"] -.compared against.-> R
   ORA["pinned SQLite 3.53.4 oracle"] -.compared against.-> R
 ```
 
@@ -413,7 +413,7 @@ The manifest rows for this phase, with the pinned build's list as the denominato
 Every one is graded by running the same call in both engines over a value matrix that includes NULL,
 each storage class, the integer/real boundary, and the two infinities.
 
-`localtime` needs the machine's zone. The reference build and rust-db must agree, so the
+`localtime` needs the machine's zone. The reference build and inillucent must agree, so the
 date/time tests either pin `TZ` or use only `utc` modifiers, and the fixture records which.
 
 ### 10. Resource governance
@@ -427,7 +427,7 @@ date/time tests either pin `TZ` or use only `utc` modifiers, and the fixture rec
   B-tree boundary; the statement returns `SQLITE_INTERRUPT`, the statement savepoint rolls back, and
   the connection stays usable. A spill in progress is interrupted at a run boundary and its temp file
   removed.
-- **OOM.** Every growable buffer in the new code paths goes through `rustdb-base`'s fallible
+- **OOM.** Every growable buffer in the new code paths goes through `inillucent-base`'s fallible
   allocation, so an allocation failure is `SQLITE_NOMEM` and a rolled-back statement, not a panic.
   The simulator injects it at each allocation site in the new paths.
 - **Limits.** `SQLITE_MAX_COLUMN` (2000), `SQLITE_MAX_EXPR_DEPTH` (1000), `SQLITE_MAX_COMPOUND_SELECT`
@@ -476,13 +476,13 @@ Integration and differential first; unit tests only where a pure function has an
 1. **SQLLogicTest conformance.** `compat/corpus/select/queries.sql` grows from 188 statements to
    cover every family in this phase, and new corpora are added for joins, compounds, subqueries,
    CTEs, windows, and the built-in matrix. Expectations are recorded from the pinned 3.53.4 oracle by
-   `rustdb-slt` and checked in, so the suite grades against SQLite with no oracle present. Public
+   `inillucent-slt` and checked in, so the suite grades against SQLite with no oracle present. Public
    SQLLogicTest files that the parser can read are run unchanged.
 2. **Differential, generated.** A generator produces random-but-legal statements over the fixture
    schema — join shapes to 5 tables, correlated and uncorrelated subqueries, compounds, windows with
    random frames, aggregates with `FILTER` — and both engines answer. Any difference in rows, storage
    classes, error codes or error messages fails, and the seed is printed.
-3. **Plan parity against a reference evaluator.** A test-only evaluator in `rustdb-compat` answers a
+3. **Plan parity against a reference evaluator.** A test-only evaluator in `inillucent-compat` answers a
    bound query the slow, obviously-correct way (nested loops over full scans, sort everything,
    materialise everything). Every generated query is answered by both the real planner and the
    reference; the rows must match. Separately, the *plan choice* — which index, which join order — is
@@ -490,14 +490,14 @@ Integration and differential first; unit tests only where a pure function has an
 4. **Flatten on/off diff**, **spill budget 4 KiB vs unlimited**, **stat1 present vs absent**: three
    switches, each run over the whole generated corpus, each asserting identical rows.
 5. **Schema mutation matrix.** For every new schema form — view, trigger, generated column, STRICT,
-   WITHOUT ROWID, AUTOINCREMENT, every `ALTER` form, TEMP — a fixture is created by rust-db, opened
-   by SQLite, `PRAGMA integrity_check`ed, written to, and read back by rust-db; and the same in the
+   WITHOUT ROWID, AUTOINCREMENT, every `ALTER` form, TEMP — a fixture is created by inillucent, opened
+   by SQLite, `PRAGMA integrity_check`ed, written to, and read back by inillucent; and the same in the
    reverse direction. This is the existing `mutation_interop` / `write_interop` matrix, extended.
 6. **Failure and resource tests.** Interrupt during a sort, a window, a recursive CTE and a trigger
    cascade; OOM injected at each new allocation site; trigger recursion past the depth limit; an
    `ALTER` whose dependent-SQL rewrite fails; a schema change between prepare and step; every limit
    at its boundary and one past it.
-7. **Benchmarks, after correctness.** `rustdb-bench` gains: joins at 2/5/12/32 tables, correlated
+7. **Benchmarks, after correctness.** `inillucent-bench` gains: joins at 2/5/12/32 tables, correlated
    subqueries, aggregates and windows, an in-memory sort and a spilled one, `ANALYZE` and the plan
    selection it changes, DDL and index backfill, and `VACUUM`. Each records the plan chosen and the
    counters (pages read, comparisons, sorter runs) alongside the time, and evidence is retained under
@@ -587,8 +587,8 @@ counts. The ordering is proved to say `Equal` exactly where the equality it repl
 
 `UPDATE OF nosuchcolumn` is accepted by SQLite, and so is a trigger body naming a column the table has
 not got — the latter reported on the first write that fires it. Both were refused here at first.
-Refusing them makes rust-db's language *smaller* than the reference's, which means a schema SQLite
-wrote that rust-db cannot load, and that is a worse failure than a late error.
+Refusing them makes inillucent's language *smaller* than the reference's, which means a schema SQLite
+wrote that inillucent cannot load, and that is a worse failure than a late error.
 
 ### What was deferred, and where the debt is recorded
 

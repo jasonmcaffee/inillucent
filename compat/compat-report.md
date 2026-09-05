@@ -1,4 +1,4 @@
-# rust-db compatibility with SQLite sqlite-3.53.4
+# inillucent compatibility with SQLite sqlite-3.53.4
 
 Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 
@@ -16,7 +16,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | phase 10: WAL and concurrent connection semantics | 12 | 0 | 0 | 0 |
 | phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree | 10 | 0 | 0 | 0 |
 | phase 12: C ABI and CLI completion | 12 | 0 | 0 | 0 |
-| phase 13: transactional rust-db search and legacy migration | 3 | 0 | 0 | 0 |
+| phase 13: transactional inillucent search and legacy migration | 3 | 0 | 0 | 0 |
 | phase 14: performance qualification and release | 3 | 0 | 0 | 0 |
 | phase 15: optional surfaces this release does not implement | 0 | 0 | 7 | 0 |
 | phase 1: VFS, binary primitives, and simulator | 46 | 0 | 0 | 0 |

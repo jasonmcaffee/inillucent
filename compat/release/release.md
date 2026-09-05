@@ -1,4 +1,4 @@
-# rust-db release candidate
+# inillucent release candidate
 
 **This candidate does not pass.** The gates it fails are marked below, with the numbers they were judged against. Nothing here argues that a number is acceptable: the bars were written down before the runs.
 
@@ -27,17 +27,17 @@
 
 | file | bytes | sha256 | what it is |
 |---|---:|---|---|
-| `target/release/rustdb-shell.exe` | 4616192 | `a3131fceec1713e8264e12ea05fa37d0006f686f10a6d87df220c7c29c141f82` | the SQLite-like shell |
-| `target/release/rustdb-migrate.exe` | 4819456 | `d299e13f6b8a514a3b7edb4c575a12de000ea246f54ca2277374e28910dea41c` | the resumable copy-and-verify migration tool |
-| `target/release/rustdb_capi.dll` | 5191168 | `aced63169eec0b21982611fc62001df1230b8ca3602b0877e4a95586bbcb1a13` | the C library, linked against the official sqlite3.h |
+| `target/release/inillucent-shell.exe` | 4616192 | `a3131fceec1713e8264e12ea05fa37d0006f686f10a6d87df220c7c29c141f82` | the SQLite-like shell |
+| `target/release/inillucent-migrate.exe` | 4819456 | `d299e13f6b8a514a3b7edb4c575a12de000ea246f54ca2277374e28910dea41c` | the resumable copy-and-verify migration tool |
+| `target/release/inillucent_capi.dll` | 5191168 | `aced63169eec0b21982611fc62001df1230b8ca3602b0877e4a95586bbcb1a13` | the C library, linked against the official sqlite3.h |
 | `compat/compat-report.md` | 22376 | `370ce58ef099525d672f08f9e61bc8f77ac42d5bdb979417afe2858e4a2af1a8` | the compatibility report |
 | `compat/compat-report.json` | 123900 | `b3e0bb18fb2fd85bddd823fd6ddb475be55053498d2b544b194848805a9cbade` | the same, machine readable |
 | `compat/sqlite-3.53.4.toml` | 118547 | `e29133cdfae4b172740a9902a12a34f0b6e66b0f419cce6e62df505e9ece0f92` | the parity manifest the report is generated from |
 | `compat/perf/contract.toml` | 2297 | `69b283d73d8ec7cc397239c44e57af595310bcb2e2ab8af81fc2104b9389300f` | the performance contract: weights, floors and the headline bound |
 | `docs/reference-register.toml` | 3596 | `9fb2ff1d779daf90894a12f48a005be1867b8159938afd5fd33221d517f6c832` | every external project consulted, and in what capacity |
 | `docs/invariants/layering.toml` | 12285 | `0430e44804bbb77eaeebf0e1f417cfe866909e9045da607c9f0a1d0876930bd6` | the dependency-direction contract |
-| `compat/baseline/rustdb-core-baseline.json` | 4982 | `e133fb06cd28d8108a7e91061016d2fa2baecd881b6bb98b5c286756755ddf2c` | the retrieval engine's frozen baseline |
-| `compat/baseline/rustdb-core-amendments.toml` | 835 | `92f51827b47a4beb252039cc412b0447ab2aa098e4f18de8bac1eea995e395fa` | every declared change to it, with its reason |
+| `compat/baseline/inillucent-core-baseline.json` | 4982 | `e133fb06cd28d8108a7e91061016d2fa2baecd881b6bb98b5c286756755ddf2c` | the retrieval engine's frozen baseline |
+| `compat/baseline/inillucent-core-amendments.toml` | 835 | `92f51827b47a4beb252039cc412b0447ab2aa098e4f18de8bac1eea995e395fa` | every declared change to it, with its reason |
 | `compat/release/migrate-release-corpus.db.migration-report.md` | 3095 | `cff76ffb702cebb35e56c0450eff9a9ad7c2f8a7d73089eac509e57c5a4d224a` | the migration report for an index of the repository's own prose, at release size |
 | `compat/release/migrate-release-corpus.db.migration-manifest` | 3122 | `11bfa5ed5073ed88998033218ae2d36f00a799c634647646eb0a5b1096f5449f` | that migration's append-only manifest, which is what a resume reads |
 | `compat/release/migrate-full-corpus.db.migration-report.md` | 3054 | `678da01cdcbc77b438d7da6144647ebea1b0a6ab067510bfff3a29eafc123a4c` | the migration report for the small corpus that has one of everything |
@@ -54,27 +54,27 @@
 
 ## Reproducing this
 
-A clean machine with a Rust toolchain and a C compiler reproduces every artifact above with these commands, in this order. Nothing needs another database engine installed: the reference is downloaded, checksum-verified against the sums SQLite publishes, and built from source into `.sqlite-ref/`, which no rust-db crate links against.
+A clean machine with a Rust toolchain and a C compiler reproduces every artifact above with these commands, in this order. Nothing needs another database engine installed: the reference is downloaded, checksum-verified against the sums SQLite publishes, and built from source into `.sqlite-ref/`, which no inillucent crate links against.
 
 | artifact | command |
 |---|---|
 | the pinned reference | `tools/sqlite-reference.ps1   # or tools/sqlite-reference.sh on POSIX` |
 | the engine and its tools | `cargo build --release --workspace` |
-| the test evidence | `cargo run --release -p rustdb-compat --bin rustdb-evidence` |
-| the compatibility report | `cargo run --release -p rustdb-compat --bin rustdb-manifest` |
-| the performance scorecard | `cargo run --release -p rustdb-compat --bin rustdb-scorecard -- --scale all --rounds 30 --label <name>` |
-| each optimization's A/B arm | `cargo run --release -p rustdb-compat --bin rustdb-scorecard -- --scale small --rounds 30 --label <name> --disable covering-index   # then --disable indexed-write` |
-| the storage and write profiles | `cargo run --release -p rustdb-compat --bin rustdb-storageprofile && cargo run --release -p rustdb-compat --bin rustdb-writeprofile` |
-| a legacy index migration | `cargo run --release -p rustdb-migrate -- <index-dir> <destination.db> --sqlite .sqlite-ref/3.53.4/shell/sqlite3` |
-| this release candidate | `cargo run --release -p rustdb-compat --bin rustdb-release` |
+| the test evidence | `cargo run --release -p inillucent-compat --bin inillucent-evidence` |
+| the compatibility report | `cargo run --release -p inillucent-compat --bin inillucent-manifest` |
+| the performance scorecard | `cargo run --release -p inillucent-compat --bin inillucent-scorecard -- --scale all --rounds 30 --label <name>` |
+| each optimization's A/B arm | `cargo run --release -p inillucent-compat --bin inillucent-scorecard -- --scale small --rounds 30 --label <name> --disable covering-index   # then --disable indexed-write` |
+| the storage and write profiles | `cargo run --release -p inillucent-compat --bin inillucent-storageprofile && cargo run --release -p inillucent-compat --bin inillucent-writeprofile` |
+| a legacy index migration | `cargo run --release -p inillucent-migrate -- <index-dir> <destination.db> --sqlite .sqlite-ref/3.53.4/shell/sqlite3` |
+| this release candidate | `cargo run --release -p inillucent-compat --bin inillucent-release` |
 
 ## Upgrade and downgrade
 
 The default writer produces the SQLite file format and nothing else, so an upgrade is a binary swap: the file a previous build wrote is the file this one opens, and the file this one writes is one the pinned SQLite opens. That is what the interoperability suites check in both directions, and what the migration tool's own probe checks on the database it just built.
 
-A downgrade is the same swap in reverse, with one condition: a database holding a `rustdb_search` table is read by any build - the index lives in ordinary tables - but it is *queried* only by a build that has the module. An older build opens the file, reads every relational table, and reports `no such module: rustdb_search` for the search table alone.
+A downgrade is the same swap in reverse, with one condition: a database holding a `inillucent_search` table is read by any build - the index lives in ordinary tables - but it is *queried* only by a build that has the module. An older build opens the file, reads every relational table, and reports `no such module: inillucent_search` for the search table alone.
 
-Legacy retrieval indexes migrate with `rustdb-migrate`, which never writes to the source. Going back is not an undo; it is pointing the application at the directory that never changed.
+Legacy retrieval indexes migrate with `inillucent-migrate`, which never writes to the source. Going back is not an undo; it is pointing the application at the directory that never changed.
 
 ## Known limitations
 
@@ -84,7 +84,7 @@ Legacy retrieval indexes migrate with `rustdb-migrate`, which never writes to th
 - **Vectorisation and SIMD are not applicable to this execution model.** The lever's name pairs them with bytecode fusion, which is implemented; the other two need a columnar or batched interpreter, where one instruction works on many rows. This is a row-at-a-time virtual machine, so there is no vector for an instruction to act on, and saying so is more use than a benchmark of nothing.
 - **FTS5's segment format inside `%_data` is first-party.** SQLite's is described only in comments in `fts5_index.c` and is explicitly not a published format, unlike the R-Tree's. What is matched is everything a reader outside the module sees: the five table names, the layouts of `%_content`, `%_docsize` and `%_config`, the rows `MATCH` finds, their order, and `bm25()` to the last digit.
 - **A database opened through a caller-supplied C VFS journals rather than using a write-ahead log.** `xShmMap` is the easiest part of the VFS contract to get subtly wrong, and a log over a broken one corrupts silently.
-- **A `rustdb_search` table has one row per document**, so the per-document cap in the fusion never binds on it. An application that wants documents made of several chunks models them in SQL - a document table and a join - which is what the migration tool writes and what its own grouped check verifies.
+- **A `inillucent_search` table has one row per document**, so the per-document cap in the fusion never binds on it. An application that wants documents made of several chunks models them in SQL - a document table and a join - which is what the migration tool writes and what its own grouped check verifies.
 - **The legacy engine's lexical ranking depends on the `k` it was asked for.** Position-aware rescoring reaches `k * lexical_rescore_depth` hits and only ever scales a score down, so a chunk just outside that window keeps its full BM25 score and competes against rescored ones: ask for ten and ask for fifty, and the tail of the ranking moves. Every path a search table sits behind goes through `search_branches`, which retrieves at `candidates` depth, so the two agree when asked at that depth and can differ when they are not. The migration compares them at one depth for exactly that reason. A corpus of real prose is what exposed it: a small one has fewer chunks than the window, so the window never binds.
 - **A migrated vector index is not the same graph.** The legacy index's graph grew one insert at a time; a migrated one is built in a single pass over every row, which is better connected - that is what makes compaction worth its cost. Two different graphs searched approximately give slightly different answers, sometimes one better and sometimes the other, so the migration compares them with the approximation switched off and reports separately what each finds of the exact answer at its default width. An application that depends on a particular ranking of near-ties should expect it to move.
 - **A tombstone and a delete differ.** The legacy engine keeps a tombstoned chunk in the inverted index and filters it at query time, so its corpus statistics do not move; a search table deletes the row, so they do. Both make the document unreachable immediately; deep orderings can differ until the legacy index is rebuilt.

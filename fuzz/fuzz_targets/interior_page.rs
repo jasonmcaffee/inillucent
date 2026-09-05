@@ -13,7 +13,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use rustdb_pool::interior::{self, InteriorRef};
+use inillucent_pool::interior::{self, InteriorRef};
 
 fuzz_target!(|data: &[u8]| {
     // Writeback runs over raw bytes rather than a parsed page, so it is

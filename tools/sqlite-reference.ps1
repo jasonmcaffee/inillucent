@@ -3,10 +3,10 @@
 # The oracle is a separate child process compiled from the official amalgamation.
 # It is the only form in which SQLite appears in this workspace, and nothing
 # here is a production dependency: the artifacts land in the gitignored
-# .sqlite-ref/ directory and no rust-db crate links against them.
+# .sqlite-ref/ directory and no inillucent crate links against them.
 #
 # Every download is checked against the SHA3-256 sum SQLite publishes, using
-# rust-db's own implementation, so a corrupted or substituted archive cannot
+# inillucent's own implementation, so a corrupted or substituted archive cannot
 # become the thing every parity claim is measured against.
 #
 # Usage: pwsh tools/sqlite-reference.ps1 [-Force]
@@ -34,7 +34,7 @@ function Get-Artifact {
     try {
         # Out-Host keeps the verifier's own output off the pipeline, so this
         # function returns the path and nothing else.
-        & cargo run --quiet -p rustdb-compat --bin rustdb-manifest -- verify-artifact $Name $target | Out-Host
+        & cargo run --quiet -p inillucent-compat --bin inillucent-manifest -- verify-artifact $Name $target | Out-Host
         if ($LASTEXITCODE -ne 0) { throw "$Name failed its pinned checksum" }
     } finally {
         Pop-Location
@@ -78,7 +78,7 @@ Write-Host 'building the oracle driver'
 if ($LASTEXITCODE -ne 0) { throw 'the oracle driver failed to build' }
 
 # The performance scorecard's SQLite arm. It reads the same plan file the
-# rust-db arm reads, so the fairness contract is one copy of the SQL rather than
+# inillucent arm reads, so the fairness contract is one copy of the SQL rather than
 # two that are meant to agree.
 $bench = Join-Path $root 'compat/oracle/sqlite_bench.c'
 $benchOutput = Join-Path $refDir 'sqlite-bench.exe'
@@ -89,4 +89,4 @@ if ($LASTEXITCODE -ne 0) { throw 'the benchmark driver failed to build' }
 
 Write-Host "oracle: $output"
 Write-Host "bench: $benchOutput"
-Write-Host "set RUSTDB_SQLITE_ORACLE=$output to run the differential tests"
+Write-Host "set INILLUCENT_SQLITE_ORACLE=$output to run the differential tests"

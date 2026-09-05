@@ -1,0 +1,11 @@
+[package]
+name = "inillucent-scalar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The dialect's scalar functions, three-valued logic and value coercions, shared by both executors"
+
+[dependencies]
+inillucent-base = { workspace = true }
+inillucent-value = { workspace = true }
+inillucent-sql = { workspace = true }
