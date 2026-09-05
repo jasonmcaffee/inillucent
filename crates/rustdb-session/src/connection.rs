@@ -525,12 +525,61 @@ pub struct Connection {
     /// - and then it is a compatibility obligation rather than an instrument.
     /// Zero, the default, is the shipped engine.
     levers: Cell<u32>,
+    /// Compiled programs kept for reuse across prepares.
+    ///
+    /// Keyed by everything a compilation reads that the connection can change,
+    /// and cleared outright when a function or a collation is registered. See
+    /// `statement::PlanCache`.
+    plans: RefCell<crate::statement::PlanCache>,
 }
 
 impl Connection {
     /// Returns the planner optimizations this connection has switched off.
     pub fn disabled_optimizations(&self) -> u32 {
         self.levers.get()
+    }
+
+    /// Returns a compiled program kept for this key, if there is one.
+    ///
+    /// A borrow failure is a miss rather than an error: the cache is an
+    /// optimization and the caller can always compile.
+    ///
+    /// @param key - what the caller is about to compile
+    pub(crate) fn cached_plan(
+        &self,
+        key: &crate::statement::PlanKey,
+    ) -> Option<crate::statement::CompiledPlan> {
+        self.plans.try_borrow_mut().ok()?.get(key)
+    }
+
+    /// Keeps a compiled program for reuse.
+    ///
+    /// @param key - what it was compiled against
+    /// @param compiled - the program
+    pub(crate) fn cache_plan(
+        &self,
+        key: crate::statement::PlanKey,
+        compiled: crate::statement::CompiledPlan,
+    ) {
+        if let Ok(mut plans) = self.plans.try_borrow_mut() {
+            plans.put(key, compiled);
+        }
+    }
+
+    /// Drops every cached program.
+    ///
+    /// Called wherever something a compilation reads changes that the cache key
+    /// does not carry: a registered function or a collation. A schema change
+    /// does not need this, because the catalog generation is in the key.
+    pub fn invalidate_plan_cache(&self) {
+        if let Ok(mut plans) = self.plans.try_borrow_mut() {
+            plans.clear();
+        }
+    }
+
+    /// Returns how many compiled programs are held, for tests.
+    pub fn cached_plan_count(&self) -> usize {
+        self.plans.try_borrow().map(|plans| plans.len()).unwrap_or(0)
     }
 
     /// Switches planner optimizations off, by mask, for A/B measurement.
@@ -624,6 +673,7 @@ impl Connection {
             options,
             hooks: RefCell::new(Hooks::default()),
             levers: Cell::new(0),
+            plans: RefCell::new(crate::statement::PlanCache::default()),
         })
     }
 
@@ -783,6 +833,12 @@ impl Connection {
         // registration is rare and the registry is small, which is what makes
         // copy-on-write the right shape here.
         std::sync::Arc::make_mut(&mut state.registry).register_function(function);
+        drop(state);
+        // A statement already compiled may have bound to a different function
+        // of this name, or to none. The registered functions are not in the
+        // cache key because comparing them on every prepare would cost more
+        // than the cache saves, so a registration drops everything instead.
+        self.invalidate_plan_cache();
         Ok(())
     }
 
@@ -792,7 +848,10 @@ impl Connection {
             .state
             .try_borrow_mut()
             .map_err(|_| error::misuse("the connection is in use"))?;
-        Ok(std::sync::Arc::make_mut(&mut state.registry).unregister_function(name, arity))
+        let removed = std::sync::Arc::make_mut(&mut state.registry).unregister_function(name, arity);
+        drop(state);
+        self.invalidate_plan_cache();
+        Ok(removed)
     }
 
     /// Returns every function an application registered, for the binder.
@@ -831,6 +890,9 @@ impl Connection {
         let folded = name.to_ascii_uppercase();
         state.collations.retain(|(existing, _)| *existing != folded);
         state.collations.push((folded, collation));
+        drop(state);
+        // A comparison compiled under BINARY would keep comparing under BINARY.
+        self.invalidate_plan_cache();
         Ok(())
     }
 

@@ -601,8 +601,15 @@ fn render_operand(operand: &Operand) -> Vec<u8> {
 }
 
 /// One compiled statement.
+///
+/// Named `CompiledPlan` where it crosses to the connection, because a cache
+/// entry and a statement's own program are the same thing and the connection
+/// should not have to know the private name.
+pub(crate) type CompiledPlan = Compiled;
+
+/// One compiled statement.
 #[derive(Clone)]
-struct Compiled {
+pub(crate) struct Compiled {
     program: Arc<Program>,
     body: Body,
     sql: Vec<u8>,
@@ -611,6 +618,90 @@ struct Compiled {
     used: usize,
     /// Named parameters and the index each was assigned.
     parameters: Vec<(Vec<u8>, u32)>,
+}
+
+/// What a cached program was compiled against.
+///
+/// Everything `compile_sql` reads that could change the program it produces is
+/// in here, so an entry whose key matches was compiled from the same inputs and
+/// is therefore the same program. The two inputs that are *not* in the key -
+/// the registered functions and the collations - invalidate the cache outright
+/// when they change, because they are rare and comparing them per prepare would
+/// cost more than the cache saves.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub(crate) struct PlanKey {
+    /// The SQL as handed to prepare, byte for byte.
+    sql: Vec<u8>,
+    /// The catalog generation, which changes on every schema change.
+    generation: u64,
+    /// The planner optimizations switched off.
+    levers: u32,
+    /// Whether foreign keys are enforced.
+    foreign_keys: bool,
+    /// Whether foreign key checks are deferred.
+    defer_foreign_keys: bool,
+}
+
+/// Compiled programs kept for reuse, most recently used first.
+///
+/// `task-1816-rearchitecture-tdd.md` puts a plan cache in the new engine's
+/// prepare path and asks for the mechanism proved on the existing one first.
+/// This is that: a bounded, invalidating, exactly-keyed cache of `Compiled`,
+/// whose value is an `Arc<Program>` and a little metadata, so a hit is a
+/// refcount bump rather than a parse, a bind, a plan and a compile.
+///
+/// It is a *cache*, not a memo table: it may return nothing at any time and the
+/// caller compiles. Nothing depends on a hit.
+#[derive(Default)]
+pub(crate) struct PlanCache {
+    entries: Vec<(PlanKey, Compiled)>,
+}
+
+/// How many statements one connection keeps.
+///
+/// The TDD's number. Two hundred and fifty-six compiled programs of a few
+/// hundred instructions each is well under a megabyte, and an application with
+/// more distinct statements than that in flight is not the case the cache is
+/// for.
+const PLAN_CACHE_ENTRIES: usize = 256;
+
+impl PlanCache {
+    /// Returns the program compiled for a key, if it is still held.
+    ///
+    /// A hit moves the entry to the front, which is the whole of the eviction
+    /// policy: least recently used falls off the end.
+    ///
+    /// @param key - what the caller is about to compile
+    pub(crate) fn get(&mut self, key: &PlanKey) -> Option<Compiled> {
+        let at = self.entries.iter().position(|(held, _)| held == key)?;
+        let entry = self.entries.remove(at);
+        let compiled = entry.1.clone();
+        self.entries.insert(0, entry);
+        Some(compiled)
+    }
+
+    /// Keeps a compiled program under a key.
+    ///
+    /// @param key - what it was compiled against
+    /// @param compiled - the program
+    pub(crate) fn put(&mut self, key: PlanKey, compiled: Compiled) {
+        self.entries.retain(|(held, _)| *held != key);
+        self.entries.insert(0, (key, compiled));
+        self.entries.truncate(PLAN_CACHE_ENTRIES);
+    }
+
+    /// Drops everything.
+    ///
+    /// Called when a registered function or a collation changes: both can
+    /// change what a statement binds to, and neither is in the key.
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Returns how many programs are held, for tests and for reporting.
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 /// Returns how many bytes of `sql` one statement occupies.
@@ -700,6 +791,45 @@ macro_rules! stage {
 }
 
 fn compile_sql(
+    connection: &Connection,
+    sql: &[u8],
+    authorizer: &dyn Authorizer,
+) -> DbResult<Compiled> {
+    // The cache is consulted only where reusing a program cannot change what
+    // the caller sees. That means the lever is on, and the authorizer allows
+    // everything - an authorizer that can refuse has to be *asked*, and a hit
+    // would not ask it.
+    let cacheable = connection.disabled_optimizations() & rustdb_sql::plan::Levers::PLAN_CACHE == 0
+        && authorizer.allows_everything();
+    let key = if cacheable {
+        let generation = connection.catalog()?.generation;
+        let key = PlanKey {
+            sql: sql.to_vec(),
+            generation,
+            levers: connection.disabled_optimizations(),
+            foreign_keys: connection.foreign_keys(),
+            defer_foreign_keys: connection.defer_foreign_keys(),
+        };
+        if let Some(hit) = connection.cached_plan(&key) {
+            return Ok(hit);
+        }
+        Some(key)
+    } else {
+        None
+    };
+    let compiled = compile_sql_uncached(connection, sql, authorizer)?;
+    if let Some(key) = key {
+        connection.cache_plan(key, compiled.clone());
+    }
+    Ok(compiled)
+}
+
+/// Parses, binds, plans and compiles one statement, with no cache.
+///
+/// @param connection - the connection whose catalog and settings apply
+/// @param sql - the statement text, which may hold more than one statement
+/// @param authorizer - what the binder asks about each action
+fn compile_sql_uncached(
     connection: &Connection,
     sql: &[u8],
     authorizer: &dyn Authorizer,

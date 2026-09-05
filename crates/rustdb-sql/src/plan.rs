@@ -440,8 +440,19 @@ impl Levers {
     /// Fold a value written into a scratch register and immediately copied
     /// into the one instruction that writes it where it was going.
     pub const FUSED_BYTECODE: u32 = 16;
+
+    /// Reusing a compiled program for SQL text already prepared.
+    ///
+    /// `task-1816-rearchitecture-tdd.md` puts a plan cache in the new engine's
+    /// prepare path and asks for it measured on the existing one first, so the
+    /// mechanism is proved independently of the new storage. It is a lever
+    /// rather than a constant because a speedup that cannot be switched off
+    /// cannot be measured, and because "the cache made prepare six times
+    /// faster" needs an arm to be a claim rather than an assertion.
+    pub const PLAN_CACHE: u32 = 32;
     /// Every lever this build has.
-    pub const EVERY: u32 = Levers::COVERING_INDEX
+    pub const EVERY: u32 = Levers::PLAN_CACHE
+        | Levers::COVERING_INDEX
         | Levers::INDEXED_WRITE
         | Levers::ORDERED_WALK
         | Levers::STREAMING_GROUP

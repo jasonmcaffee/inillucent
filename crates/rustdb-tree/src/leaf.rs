@@ -90,6 +90,20 @@ pub const DELTA_LIMIT: usize = 32;
 /// The size of one column directory entry.
 const DIRECTORY_ENTRY: usize = 8;
 
+/// The arm a caller cannot reach, kept because removing it would be a lie.
+///
+/// The coverage gate asks for 100% branch coverage on this codec with the
+/// unreachable branches documented, and the way to document one is to make it
+/// say so in the code rather than in a spreadsheet. Every call site names why
+/// it cannot happen; a test build panics if one ever does, so "unreachable"
+/// stays a claim the test suite checks rather than a comment that rots.
+///
+/// @param why - what the caller has already established
+fn unreachable_branch(why: &str) -> rustdb_base::DbError {
+    debug_assert!(false, "reached a branch documented as unreachable: {why}");
+    corrupt(format!("unreachable: {why}"))
+}
+
 /// How many key columns a [`KeyView`] holds without spilling.
 ///
 /// Four covers every key in the scorecard's schema and every index this engine
@@ -509,7 +523,11 @@ impl<'p> LeafRef<'p> {
             }
             cursor = cursor.saturating_add(used);
         }
-        Err(misuse(format!("column {column} does not exist")))
+        // Unreachable: the loop runs `0..=column` and returns when `position`
+        // reaches `column`, so it can only fall out of the bottom if the range
+        // were empty, which an inclusive range never is. A column past the end
+        // of the row fails earlier, in `decode_tagged`.
+        Err(unreachable_branch("an inclusive range ran to its end"))
     }
 
     /// Returns one value of one sorted-region row.
@@ -718,7 +736,15 @@ impl<'p> MiniColumn<'p> {
                         return false;
                     }
                 }
-                None => return false,
+                // Unreachable: `column` builds `class` as exactly
+                // `class_bytes(rows)`, which is `ceil(rows * 2 / 64) * 8` and
+                // therefore never shorter than the `rows / 32` words this loop
+                // asks for. A page whose class array does not fit fails in
+                // `column` before it gets here.
+                None => {
+                    debug_assert!(false, "a class array shorter than its own row count");
+                    return false;
+                }
             }
         }
         // The tail: only the rows that exist are checked, because the padding
@@ -1003,8 +1029,12 @@ impl LeafBuilder {
                             slot,
                             match value {
                                 Datum::Real(number) => number.to_bits(),
+                                // REAL affinity converts, which is why this is
+                                // a typed value rather than an exception.
                                 Datum::Int(number) => (number as f64).to_bits(),
-                                _ => 0,
+                                // Unreachable: `classify` returns `Typed` for a
+                                // Float64 column only for these two classes.
+                                _ => return Err(unreachable_branch("a typed Float64 slot")),
                             },
                         )?,
                         PhysicalType::Text | PhysicalType::Blob => {
@@ -1108,6 +1138,14 @@ fn classify(physical: PhysicalType, value: &Datum<'_>) -> ValueClass {
         (PhysicalType::Any, _) => ValueClass::Typed,
         (PhysicalType::Int64, Datum::Int(_)) => ValueClass::Typed,
         (PhysicalType::Float64, Datum::Real(_)) => ValueClass::Typed,
+        // An integer in a column whose affinity is REAL is *converted*, not
+        // excepted. That is what REAL affinity means in the dialect - SQLite
+        // stores 7 in a REAL column as 7.0 - and it is also what keeps such a
+        // column on the vectorised path instead of turning every whole-numbered
+        // row into a tagged value in the heap. The encoder's Float64 arm has
+        // always converted; this is the classification agreeing with it, which
+        // it did not before and which left that arm unreachable.
+        (PhysicalType::Float64, Datum::Int(_)) => ValueClass::Typed,
         (PhysicalType::Text, Datum::Text(_)) => ValueClass::Typed,
         (PhysicalType::Blob, Datum::Blob(_)) => ValueClass::Typed,
         _ => ValueClass::Exception,
@@ -1360,6 +1398,554 @@ mod tests {
         let big = vec![0u8; 9000];
         let rows = vec![vec![Datum::Int(1), Datum::Blob(&big)]];
         assert_eq!(builder.pack(&rows, 0.9).unwrap(), Packed::RowTooLarge);
+    }
+
+
+    /// Writes a delta area into an already-built page.
+    ///
+    /// Nothing in Phase 1 *writes* a delta area - the leaf builder always
+    /// leaves it empty and the tree rewrites a leaf rather than appending to
+    /// one, because the delta path is a Phase 3 write-family item measured
+    /// against the 16/32/64 sweep. The reader exists now, though, and a reader
+    /// of bytes that come off a disk is exactly the code that has to be
+    /// exercised before those bytes are hostile. So the tests build the area by
+    /// hand, byte for byte as the layout describes it.
+    ///
+    /// @param page - a page from `LeafBuilder::encode`
+    /// @param rows - the delta rows, each a list of values in column order
+    fn with_delta(page: &[u8], rows: &[Vec<Datum<'_>>]) -> Vec<u8> {
+        let mut out = page.to_vec();
+        let leaf = LeafRef::parse(&out).unwrap();
+        let count = leaf.row_count();
+        let columns = leaf.column_count();
+        // The delta area goes immediately after the last mini-column, which is
+        // where the free space between the columns and the heap begins.
+        let mut end = leaf_header::DIRECTORY + columns * DIRECTORY_ENTRY;
+        for index in 0..columns {
+            let spec = leaf.spec(index).unwrap();
+            end = align8(end);
+            end += class_bytes(count) + count * spec.physical.slot_width();
+        }
+        // Room for a tombstone bitmap between the mini-columns and the delta
+        // area, because that is where the layout puts one and a later
+        // `with_tombstones` has to have somewhere to write it.
+        let delta_start = align8(end + tombstone_bytes(count));
+        let mut bytes = Vec::new();
+        for row in rows {
+            let mut encoded = Vec::new();
+            for value in row {
+                value.encode_tagged(&mut encoded);
+            }
+            bytes.extend_from_slice(&(encoded.len() as u16).to_le_bytes());
+            bytes.extend_from_slice(&encoded);
+        }
+        let heap_start = leaf.heap_start;
+        assert!(
+            delta_start + bytes.len() <= heap_start,
+            "the delta does not fit: {delta_start} + {} > {heap_start}",
+            bytes.len()
+        );
+        out[delta_start..delta_start + bytes.len()].copy_from_slice(&bytes);
+        page::write_u32(&mut out, leaf_header::DELTA_START, delta_start as u32).unwrap();
+        page::write_u16(&mut out, leaf_header::DELTA_COUNT, rows.len() as u16).unwrap();
+        out[header::FLAGS] |= LEAF_HAS_DELTA;
+        out
+    }
+
+    /// Sets a tombstone bit, moving the delta area up to make room for the
+    /// bitmap the way a real delete would.
+    ///
+    /// @param page - a page from `LeafBuilder::encode`
+    /// @param rows - which sorted-region rows to mark deleted
+    fn with_tombstones(page: &[u8], rows: &[usize]) -> Vec<u8> {
+        let mut out = page.to_vec();
+        let leaf = LeafRef::parse(&out).unwrap();
+        let count = leaf.row_count();
+        let delta_start = leaf.delta_start;
+        let bitmap = delta_start - tombstone_bytes(count);
+        for row in rows {
+            out[bitmap + row / 8] |= 1u8 << (row % 8);
+        }
+        out[header::FLAGS] |= LEAF_HAS_TOMBSTONES;
+        out
+    }
+
+    /// A delta area reads back row by row and value by value, and merges into
+    /// the live set in key order.
+    #[test]
+    fn a_delta_area_reads_back_and_merges() {
+        let columns = vec![
+            ColumnSpec::key(PhysicalType::Int64),
+            ColumnSpec::new(PhysicalType::Int64),
+            ColumnSpec::new(PhysicalType::Text),
+        ];
+        let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();
+        let sorted: Vec<Vec<Datum<'static>>> = [10i64, 20, 30]
+            .iter()
+            .map(|key| {
+                vec![
+                    Datum::Int(*key),
+                    Datum::Int(key * 2),
+                    Datum::Text(b"sorted"),
+                ]
+            })
+            .collect();
+        let page = builder.encode(&sorted).unwrap();
+        let delta = vec![
+            vec![Datum::Int(25), Datum::Int(50), Datum::Text(b"delta-a")],
+            vec![Datum::Int(5), Datum::Null, Datum::Text(b"delta-b")],
+        ];
+        let page = with_delta(&page, &delta);
+        let leaf = LeafRef::parse(&page).unwrap();
+
+        assert_eq!(leaf.delta_count(), 2);
+        assert!(!leaf.is_clean(), "a delta area leaves the fast path");
+        assert_eq!(leaf.live_rows().unwrap(), 5);
+        assert_eq!(leaf.delta_value(0, 0).unwrap().as_int(), Some(25));
+        assert_eq!(leaf.delta_value(0, 2).unwrap().as_bytes(), Some(b"delta-a".as_slice()));
+        assert_eq!(leaf.delta_value(1, 0).unwrap().as_int(), Some(5));
+        assert!(leaf.delta_value(1, 1).unwrap().is_null());
+        assert!(!leaf.delta_row(1).unwrap().is_empty());
+
+        // The merge: sorted region and delta together, in key order.
+        let live = leaf.live().unwrap();
+        let keys: Vec<i64> = live
+            .iter()
+            .map(|row| row[0].as_int().unwrap_or(-1))
+            .collect();
+        assert_eq!(keys, vec![5, 10, 20, 25, 30]);
+        leaf.integrity().unwrap();
+    }
+
+    /// Every way a delta area can be malformed is refused, and none of them
+    /// panics.
+    #[test]
+    fn a_malformed_delta_area_is_refused() {
+        let columns = vec![
+            ColumnSpec::key(PhysicalType::Int64),
+            ColumnSpec::new(PhysicalType::Int64),
+        ];
+        let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();
+        let sorted = vec![
+            vec![Datum::Int(1), Datum::Int(1)],
+            vec![Datum::Int(2), Datum::Int(2)],
+        ];
+        let base = builder.encode(&sorted).unwrap();
+        let good = with_delta(&base, &[vec![Datum::Int(7), Datum::Int(7)]]);
+        LeafRef::parse(&good).unwrap();
+
+        // A length that says the row is longer than it is: the values stop
+        // decoding before the declared end.
+        let leaf = LeafRef::parse(&good).unwrap();
+        let at = leaf.delta_start;
+        let mut lying_length = good.clone();
+        page::write_u16(&mut lying_length, at, 40).unwrap();
+        assert!(LeafRef::parse(&lying_length).is_err());
+
+        // A length that reaches past the heap.
+        let mut past_the_heap = good.clone();
+        page::write_u16(&mut past_the_heap, at, 60_000).unwrap();
+        assert!(LeafRef::parse(&past_the_heap).is_err());
+
+        // A tag byte that is not a value.
+        let mut bad_tag = good.clone();
+        bad_tag[at + 2] = 200;
+        assert!(LeafRef::parse(&bad_tag).is_err());
+
+        // A row that decodes to fewer bytes than it declared.
+        let mut short_row = good.clone();
+        page::write_u16(&mut short_row, at, 19).unwrap();
+        assert!(LeafRef::parse(&short_row).is_err());
+
+        // Asking for a delta row and a delta column that do not exist.
+        let leaf = LeafRef::parse(&good).unwrap();
+        assert!(leaf.delta_row(1).is_err());
+        assert!(leaf.delta_value(0, 9).is_err());
+    }
+
+    /// A delta row whose key is already live in the sorted region is an
+    /// integrity failure, because a reader would then see the key twice.
+    #[test]
+    fn a_delta_row_may_not_duplicate_a_live_key() {
+        let columns = vec![
+            ColumnSpec::key(PhysicalType::Int64),
+            ColumnSpec::new(PhysicalType::Int64),
+        ];
+        let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();
+        let sorted = vec![
+            vec![Datum::Int(1), Datum::Int(10)],
+            vec![Datum::Int(2), Datum::Int(20)],
+        ];
+        let base = builder.encode(&sorted).unwrap();
+        let clashing = with_delta(&base, &[vec![Datum::Int(2), Datum::Int(99)]]);
+        let leaf = LeafRef::parse(&clashing).unwrap();
+        assert!(leaf.integrity().is_err());
+
+        // Unless the sorted-region row is tombstoned, in which case the delta
+        // row is the live one and there is no duplicate.
+        let tombstoned = with_tombstones(&clashing, &[1]);
+        let leaf = LeafRef::parse(&tombstoned).unwrap();
+        leaf.integrity().unwrap();
+        assert!(leaf.is_tombstoned(1).unwrap());
+        assert!(!leaf.is_tombstoned(0).unwrap());
+        assert_eq!(leaf.live_rows().unwrap(), 2);
+        let live = leaf.live().unwrap();
+        assert_eq!(live.len(), 2);
+        assert_eq!(live[1][1].as_int(), Some(99));
+    }
+
+    /// The tombstone bitmap is read only when the flag says it is there, and a
+    /// row outside it is refused rather than indexed into.
+    #[test]
+    fn tombstones_are_read_only_when_they_exist() {
+        let columns = vec![ColumnSpec::key(PhysicalType::Int64)];
+        let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();
+        let rows: Vec<Vec<Datum<'static>>> =
+            (0..20).map(|n| vec![Datum::Int(n as i64)]).collect();
+        let page = builder.encode(&rows).unwrap();
+        let leaf = LeafRef::parse(&page).unwrap();
+        assert!(!leaf.has_tombstones());
+        assert!(leaf.tombstones().unwrap().is_empty());
+        assert!(!leaf.is_tombstoned(0).unwrap());
+        assert!(!leaf.is_tombstoned(9999).unwrap(), "no bitmap, no lookup");
+
+        let marked = with_tombstones(&page, &[0, 3, 19]);
+        let leaf = LeafRef::parse(&marked).unwrap();
+        assert!(leaf.has_tombstones());
+        assert!(!leaf.is_clean());
+        assert!(!leaf.tombstones().unwrap().is_empty());
+        assert!(leaf.is_tombstoned(0).unwrap());
+        assert!(!leaf.is_tombstoned(1).unwrap());
+        assert!(leaf.is_tombstoned(19).unwrap());
+        assert!(leaf.is_tombstoned(20_000).is_err(), "past the bitmap");
+        assert_eq!(leaf.live_rows().unwrap(), 17);
+        assert_eq!(leaf.live().unwrap().len(), 17);
+    }
+
+    /// Every way a builder can be asked for an impossible leaf is refused.
+    #[test]
+    fn the_builder_refuses_impossible_leaves() {
+        assert!(LeafBuilder::new(8192, 1, Vec::new(), 1).is_err());
+        assert!(LeafBuilder::new(
+            8192,
+            1,
+            vec![ColumnSpec::key(PhysicalType::Int64)],
+            0
+        )
+        .is_err());
+        assert!(LeafBuilder::new(
+            8192,
+            1,
+            vec![ColumnSpec::key(PhysicalType::Int64)],
+            2
+        )
+        .is_err());
+        assert!(LeafBuilder::new(32, 1, vec![ColumnSpec::key(PhysicalType::Int64)], 1).is_err());
+
+        // More rows than the row count field can hold.
+        let builder =
+            LeafBuilder::new(65_536, 1, vec![ColumnSpec::key(PhysicalType::Int64)], 1).unwrap();
+        let too_many: Vec<Vec<Datum<'static>>> = (0..70_000)
+            .map(|n| vec![Datum::Int(n as i64)])
+            .collect();
+        assert!(builder.encode(&too_many).is_err());
+
+        // Enough rows that the mini-columns alone overflow the page.
+        let narrow =
+            LeafBuilder::new(8_192, 1, vec![ColumnSpec::key(PhysicalType::Int64)], 1).unwrap();
+        let wide: Vec<Vec<Datum<'static>>> =
+            (0..2_000).map(|n| vec![Datum::Int(n as i64)]).collect();
+        assert!(narrow.encode(&wide).is_err());
+
+        // The heap runs into the mini-columns.
+        let heavy = LeafBuilder::new(
+            8_192,
+            1,
+            vec![
+                ColumnSpec::key(PhysicalType::Int64),
+                ColumnSpec::new(PhysicalType::Text),
+            ],
+            1,
+        )
+        .unwrap();
+        let long = vec![b'x'; 900];
+        let rows: Vec<Vec<Datum<'_>>> = (0..20)
+            .map(|n| vec![Datum::Int(n as i64), Datum::Text(&long)])
+            .collect();
+        assert!(heavy.encode(&rows).is_err());
+    }
+
+    /// A `Float64` column given an integer stores it as a double, and an `Any`
+    /// column stores whatever it is given as a tagged value.
+    #[test]
+    fn a_real_column_takes_an_integer_and_an_any_column_takes_anything() {
+        let columns = vec![
+            ColumnSpec::key(PhysicalType::Int64),
+            ColumnSpec::new(PhysicalType::Float64),
+            ColumnSpec::new(PhysicalType::Any),
+        ];
+        let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();
+        let rows = vec![
+            vec![Datum::Int(1), Datum::Int(7), Datum::Int(-3)],
+            vec![Datum::Int(2), Datum::Real(2.5), Datum::Text(b"anything")],
+            vec![Datum::Int(3), Datum::Null, Datum::Null],
+        ];
+        let page = builder.encode(&rows).unwrap();
+        let leaf = LeafRef::parse(&page).unwrap();
+        // An integer in a REAL-affinity column is stored as the double, not as
+        // an exception: that is what affinity means.
+        assert_eq!(leaf.value(0, 1).unwrap().as_f64(), Some(7.0));
+        assert!(matches!(leaf.value(0, 1).unwrap(), Datum::Real(_)));
+        assert_eq!(leaf.value(1, 1).unwrap().as_f64(), Some(2.5));
+        assert!(leaf.value(2, 1).unwrap().is_null());
+        assert_eq!(leaf.value(0, 2).unwrap().as_int(), Some(-3));
+        assert_eq!(leaf.value(1, 2).unwrap().as_bytes(), Some(b"anything".as_slice()));
+        assert!(leaf.value(2, 2).unwrap().is_null());
+        assert!(!leaf.has_exceptions(), "affinity conversion is not an exception");
+        leaf.integrity().unwrap();
+    }
+
+    /// A key wider than the inline key view still compares correctly, through
+    /// the fallback the view documents.
+    #[test]
+    fn a_key_wider_than_the_inline_view_still_compares() {
+        let columns: Vec<ColumnSpec> = (0..6)
+            .map(|_| ColumnSpec::key(PhysicalType::Int64))
+            .collect();
+        let builder = LeafBuilder::new(8192, 1, columns, 6).unwrap();
+        let rows: Vec<Vec<Datum<'static>>> = (0..40)
+            .map(|n| {
+                (0..6)
+                    .map(|column| Datum::Int(if column == 5 { n as i64 } else { 1 }))
+                    .collect()
+            })
+            .collect();
+        let page = builder.encode(&rows).unwrap();
+        let leaf = LeafRef::parse(&page).unwrap();
+        for n in 0..40i64 {
+            let probe: Vec<Datum<'_>> = (0..6)
+                .map(|column| Datum::Int(if column == 5 { n } else { 1 }))
+                .collect();
+            assert_eq!(leaf.search(&probe).unwrap(), Ok(n as usize), "key {n}");
+        }
+        let missing: Vec<Datum<'_>> = (0..6)
+            .map(|column| Datum::Int(if column == 5 { 40 } else { 1 }))
+            .collect();
+        assert_eq!(leaf.search(&missing).unwrap(), Err(40));
+    }
+
+    /// The small accessors answer, including the ones nothing else reaches.
+    #[test]
+    fn the_small_accessors_answer() {
+        let builder = LeafBuilder::new(8192, 7, fixture_columns(), 1).unwrap();
+        let page = builder.encode(&fixture_rows(5)).unwrap();
+        let leaf = LeafRef::parse(&page).unwrap();
+        assert_eq!(leaf.bytes().len(), 8192);
+        assert_eq!(leaf.max_cts(), 0);
+        assert_eq!(leaf.right_sibling(), PageId::NONE);
+        assert_eq!(leaf.column(1).unwrap().inline_bytes().len(), 5 * 8);
+        assert!(leaf.spec(4).is_ok());
+        assert!(leaf.spec(5).is_err(), "a column past the directory");
+        assert!(leaf.column(5).is_err());
+        assert_eq!(
+            compare_rows(&[Datum::Int(1)], &[Datum::Int(1), Datum::Int(2)], 2),
+            std::cmp::Ordering::Equal,
+            "a row shorter than the key compares equal rather than panicking"
+        );
+    }
+
+    /// The extent checks `parse` gave up live in `integrity` and still fire.
+    #[test]
+    fn integrity_catches_a_misplaced_mini_column() {
+        let builder = LeafBuilder::new(8192, 1, fixture_columns(), 1).unwrap();
+        let good = builder.encode(&fixture_rows(10)).unwrap();
+        LeafRef::parse(&good).unwrap().integrity().unwrap();
+
+        // Overlapping the directory.
+        let mut into_the_directory = good.clone();
+        page::write_u32(&mut into_the_directory, leaf_header::DIRECTORY + 4, 8).unwrap();
+        assert!(LeafRef::parse(&into_the_directory)
+            .unwrap()
+            .integrity()
+            .is_err());
+
+        // Not eight-byte aligned.
+        let leaf = LeafRef::parse(&good).unwrap();
+        let where_it_is = page::read_u32(&good, leaf_header::DIRECTORY + 4).unwrap();
+        let _ = leaf;
+        let mut misaligned = good.clone();
+        page::write_u32(
+            &mut misaligned,
+            leaf_header::DIRECTORY + 4,
+            where_it_is.saturating_add(4),
+        )
+        .unwrap();
+        assert!(LeafRef::parse(&misaligned).unwrap().integrity().is_err());
+
+        // Past the delta area.
+        let mut past_the_columns = good.clone();
+        page::write_u32(&mut past_the_columns, leaf_header::DIRECTORY + 4, 8_000).unwrap();
+        assert!(LeafRef::parse(&past_the_columns)
+            .unwrap()
+            .integrity()
+            .is_err());
+    }
+
+    /// A sorted region whose keys do not increase is an integrity failure.
+    #[test]
+    fn integrity_catches_keys_that_do_not_increase() {
+        let columns = vec![ColumnSpec::key(PhysicalType::Int64)];
+        let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();
+        // The builder does not sort, so handing it unsorted rows produces a
+        // page that parses and fails its integrity check - which is exactly the
+        // contract `pack` documents.
+        let rows = vec![
+            vec![Datum::Int(3)],
+            vec![Datum::Int(1)],
+            vec![Datum::Int(2)],
+        ];
+        let page = builder.encode(&rows).unwrap();
+        let leaf = LeafRef::parse(&page).unwrap();
+        assert!(leaf.integrity().is_err());
+
+        let duplicated = vec![vec![Datum::Int(1)], vec![Datum::Int(1)]];
+        let page = builder.encode(&duplicated).unwrap();
+        assert!(LeafRef::parse(&page).unwrap().integrity().is_err());
+    }
+
+
+    /// The paths a corrupt or empty leaf takes through the class array.
+    ///
+    /// `all_typed` has two answers nothing else asked for: an empty column is
+    /// vacuously all-typed, and a class array shorter than the row count claims
+    /// is not - which is a corrupt page rather than a leaf full of NULLs, and
+    /// the fast path must refuse it rather than read past the array.
+    #[test]
+    fn the_class_array_edges_answer() {
+        let columns = vec![
+            ColumnSpec::key(PhysicalType::Int64),
+            ColumnSpec::new(PhysicalType::Int64),
+        ];
+        let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();
+
+        let empty = builder.encode(&[]).unwrap();
+        let leaf = LeafRef::parse(&empty).unwrap();
+        assert_eq!(leaf.row_count(), 0);
+        assert!(leaf.column(0).unwrap().all_typed(), "no rows, nothing untyped");
+        assert!(!leaf.column(0).unwrap().any_exception().unwrap());
+        assert_eq!(leaf.live_rows().unwrap(), 0);
+        assert!(leaf.live().unwrap().is_empty());
+
+        // A row count larger than the page can hold: the column itself is
+        // refused, before anything reads a class bit. That is why `all_typed`'s
+        // short-array arm is documented unreachable rather than tested - a
+        // caller cannot obtain the column it would need.
+        let rows: Vec<Vec<Datum<'static>>> = (0..40)
+            .map(|n| vec![Datum::Int(n as i64), Datum::Int(1)])
+            .collect();
+        let good = builder.encode(&rows).unwrap();
+        let mut lying_count = good.clone();
+        page::write_u16(&mut lying_count, leaf_header::ROW_COUNT, 4_000).unwrap();
+        let leaf = LeafRef::parse(&lying_count).unwrap();
+        assert!(leaf.column(1).is_err());
+        assert!(leaf.integrity().is_err());
+        assert!(leaf.live().is_err());
+    }
+
+    /// `any_exception` finds one, which is what the integrity check asks it.
+    #[test]
+    fn any_exception_finds_an_exception() {
+        let columns = vec![
+            ColumnSpec::key(PhysicalType::Int64),
+            ColumnSpec::new(PhysicalType::Int64),
+        ];
+        let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();
+        let rows = vec![
+            vec![Datum::Int(1), Datum::Int(1)],
+            vec![Datum::Int(2), Datum::Text(b"not an integer")],
+        ];
+        let page = builder.encode(&rows).unwrap();
+        let leaf = LeafRef::parse(&page).unwrap();
+        assert!(leaf.column(1).unwrap().any_exception().unwrap());
+        assert!(!leaf.column(0).unwrap().any_exception().unwrap());
+        leaf.integrity().unwrap();
+    }
+
+    /// `pack` measures the heap correctly for NULLs, exceptions and `Any`.
+    ///
+    /// The sizing path has an arm per class and `pack` binary-searches on it,
+    /// so an arm that measured wrongly would produce a page that does not fit
+    /// rather than a wrong answer - which is a failure at build time and easy
+    /// to miss until a leaf happens to be full.
+    #[test]
+    fn pack_measures_every_value_class() {
+        let columns = vec![
+            ColumnSpec::key(PhysicalType::Int64),
+            ColumnSpec::new(PhysicalType::Int64),
+            ColumnSpec::new(PhysicalType::Any),
+            ColumnSpec::new(PhysicalType::Text),
+        ];
+        let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();
+        let long = vec![b'y'; 40];
+        let rows: Vec<Vec<Datum<'_>>> = (0..400)
+            .map(|n| {
+                vec![
+                    Datum::Int(n as i64),
+                    // Every third row is NULL, every third an exception.
+                    match n % 3 {
+                        0 => Datum::Int(n as i64),
+                        1 => Datum::Null,
+                        _ => Datum::Text(b"an exception in an integer column"),
+                    },
+                    Datum::Blob(&long),
+                    Datum::Text(&long),
+                ]
+            })
+            .collect();
+        match builder.pack(&rows, 0.9).unwrap() {
+            Packed::Filled { page, rows: packed } => {
+                assert!(packed > 0 && packed < 400, "packed {packed}");
+                let leaf = LeafRef::parse(&page).unwrap();
+                assert_eq!(leaf.row_count(), packed);
+                assert!(leaf.has_exceptions());
+                leaf.integrity().unwrap();
+                for row in 0..packed {
+                    let value = leaf.value(row, 1).unwrap();
+                    match row % 3 {
+                        0 => assert_eq!(value.as_int(), Some(row as i64)),
+                        1 => assert!(value.is_null()),
+                        _ => assert_eq!(
+                            value.as_bytes(),
+                            Some(b"an exception in an integer column".as_slice())
+                        ),
+                    }
+                    assert_eq!(leaf.value(row, 2).unwrap().as_bytes(), Some(long.as_slice()));
+                }
+            }
+            Packed::RowTooLarge => panic!("these rows fit"),
+        }
+    }
+
+    /// A heap large enough to reach the mini-columns is refused by name.
+    #[test]
+    fn a_heap_that_reaches_the_columns_is_refused() {
+        let columns = vec![
+            ColumnSpec::key(PhysicalType::Int64),
+            ColumnSpec::new(PhysicalType::Text),
+        ];
+        let builder = LeafBuilder::new(8_192, 1, columns, 1).unwrap();
+        // Sixteen rows of five hundred bytes: the mini-columns are small, so
+        // the heap runs down into them rather than off the end of the page.
+        let long = vec![b'z'; 500];
+        let rows: Vec<Vec<Datum<'_>>> = (0..16)
+            .map(|n| vec![Datum::Int(n as i64), Datum::Text(&long)])
+            .collect();
+        let error = builder.encode(&rows).unwrap_err();
+        let detail = error.detail().unwrap_or("").to_string();
+        assert!(
+            detail.contains("heap") || detail.contains("collided"),
+            "{detail}"
+        );
     }
 
     /// Corrupting any single byte of the leaf header is refused or produces a
