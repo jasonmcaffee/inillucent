@@ -1499,20 +1499,15 @@ impl Compiler {
     }
 
     /// Compiles a plain scan: loops, predicates, and a result row.
+    ///
+    /// The tail is emitted where the row is built rather than as a subroutine
+    /// jumped to. It used to be the latter, and the jump cost two instructions
+    /// per row of every scan in the engine for a body with a single caller.
     fn compile_scan(&mut self, body: &Body<'_>) -> DbResult<()> {
         let width = body.plan.select.columns.len();
         let block = self.register_block(width);
-        let tail_return = self.register();
-        let skip = self.emit_jump(Instruction::new(Opcode::Goto, 0, -1, 0));
-        let tail = self.here();
-        self.compile_tail(body, block, width, true, tail_return)?;
-        self.patch_here(skip);
         self.guard_constant_filter(body)?;
-        let emit = InnerBody::Row {
-            block,
-            tail,
-            tail_return,
-        };
+        let emit = InnerBody::InlineRow { block, width };
         self.compile_level(body, 0, &emit)?;
         self.compile_antijoins(body)?;
         self.drain_sorter(body, width)?;
@@ -3129,19 +3124,9 @@ impl Compiler {
                 }
                 Ok(())
             }
-            InnerBody::Row {
-                block,
-                tail,
-                tail_return,
-            } => {
+            InnerBody::InlineRow { block, width } => {
                 self.build_result_row(body, *block)?;
-                self.emit(Instruction::new(
-                    Opcode::Gosub,
-                    *tail_return as i32,
-                    *tail,
-                    0,
-                ));
-                Ok(())
+                self.compile_tail(body, *block, *width, false, 0)
             }
             InnerBody::AggregateStep => self.step_aggregates(body),
             InnerBody::GroupStream {
@@ -3288,14 +3273,19 @@ enum InnerBody {
         /// This term's statement-wide number.
         source: usize,
     },
-    /// Build a result row and run the tail.
-    Row {
+    /// Build a result row and run the tail where it stands, without a call.
+    ///
+    /// A plain scan reaches its tail from exactly one place in the program - an
+    /// outer join reaches it through a continuation, which is itself emitted
+    /// once - so the call was a `Gosub` and a `Return` around a body with one
+    /// caller. That is two of the five instructions a one-column scan ran per
+    /// row, against the three the pinned SQLite runs: `Column`, `ResultRow`,
+    /// `Next`. Emitting the tail where it is used removes both.
+    InlineRow {
         /// The register block the row is built in.
         block: u32,
-        /// The tail subroutine's address.
-        tail: i32,
-        /// The register holding the tail's return address.
-        tail_return: u32,
+        /// How many columns the row has.
+        width: usize,
     },
     /// Step every aggregate.
     AggregateStep,

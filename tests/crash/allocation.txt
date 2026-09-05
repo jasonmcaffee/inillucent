@@ -1,4 +1,4 @@
-points: 53, refused: 53
+points: 36, refused: 36
 1	refused
 2	refused
 3	refused
@@ -35,20 +35,3 @@ points: 53, refused: 53
 34	refused
 35	refused
 36	refused
-37	refused
-38	refused
-39	refused
-40	refused
-41	refused
-42	refused
-43	refused
-44	refused
-45	refused
-46	refused
-47	refused
-48	refused
-49	refused
-50	refused
-51	refused
-52	refused
-53	refused
