@@ -298,6 +298,7 @@ pub fn describe_journal_mode(mode: JournalMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustdb_storage::journal::Journal;
     use rustdb_vfs::memory::MemoryVfs;
 
     /// Returns an empty memory file system with a database file in it.
@@ -401,6 +402,71 @@ mod tests {
             Some(size),
             "a log of exactly one header is a log, and it declares its page size"
         );
+    }
+
+    /// Leaves a hot journal beside a database: begun, with records, unfinished.
+    ///
+    /// This is what a writer that lost power partway through a transaction
+    /// leaves on disk, and it is what recovery exists to find.
+    fn leave_a_hot_journal(vfs: &Arc<MemoryVfs>, path: &DbPath) {
+        let mut journal = RollbackJournal::new(
+            Arc::clone(vfs) as Arc<dyn Vfs>,
+            path,
+            JournalOptions {
+                mode: JournalMode::Delete,
+                synchronous: Synchronous::Full,
+            },
+        );
+        journal.begin(1024, 4).expect("the journal begins");
+        journal
+            .record(2, &vec![7u8; 1024])
+            .expect("a page image is recorded");
+        // The commit header is what makes a journal hot: it declares the
+        // records that are on disk. A writer that lost power after this point
+        // and before the database was rewritten leaves exactly this.
+        journal
+            .prepare_commit()
+            .expect("the commit header is written");
+        drop(journal);
+    }
+
+    /// A database with a hot journal cannot be opened read-only.
+    ///
+    /// Recovery is a write - it replays page images back into the database -
+    /// so a read-only caller cannot perform it, and it must not be handed a
+    /// database still holding a half-finished transaction either. Refusing is
+    /// the only correct answer, and the branch that does it was never taken.
+    #[test]
+    fn a_hot_journal_cannot_be_opened_read_only() {
+        let path = DbPath::new("/db.sqlite");
+        let vfs = database_at(&path);
+        leave_a_hot_journal(&vfs, &path);
+        assert!(
+            journal_would_be_replayed(vfs.as_ref(), &path).expect("the question is answerable"),
+            "the fixture has to leave a hot journal for this to test anything"
+        );
+
+        let options = DatabaseOptions {
+            writable: false,
+            ..DatabaseOptions::default()
+        };
+        let failure = open_database(Arc::clone(&vfs) as Arc<dyn Vfs>, &path, options)
+            .expect_err("a hot journal cannot be opened read-only");
+        assert_eq!(failure.code(), rustdb_base::error::PrimaryCode::Misuse);
+    }
+
+    /// The default options open a writable database with SQLite's own journal
+    /// defaults.
+    ///
+    /// Every caller that does not say otherwise gets these, so they are worth
+    /// pinning: a default that quietly became read-only, or that changed
+    /// durability level, would change what every unconfigured open means.
+    #[test]
+    fn the_default_options_are_writable_at_sqlites_defaults() {
+        let options = DatabaseOptions::default();
+        assert!(options.writable, "an unconfigured open is a writable one");
+        assert_eq!(options.journal.mode, JournalMode::Delete);
+        assert_eq!(options.journal.synchronous, Synchronous::Full);
     }
 
     /// A database with no journal beside it has nothing to replay.
