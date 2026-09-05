@@ -9,3 +9,8 @@ description = "SQLite file codec, pager, page cache, B-trees, overflow chains, f
 rustdb-base = { workspace = true }
 rustdb-value = { workspace = true }
 rustdb-vfs = { workspace = true }
+
+[features]
+# Brackets the halves of a page edit and records them in `rustdb-base::probe`.
+# Off by default and never on in a shipped build.
+opcode-probe = []

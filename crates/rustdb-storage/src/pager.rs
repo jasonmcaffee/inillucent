@@ -1073,11 +1073,25 @@ impl Pager {
                 self.page_count
             )));
         }
+        #[cfg(feature = "opcode-probe")]
+        let stage = std::time::Instant::now();
         self.record_image(page)?;
+        #[cfg(feature = "opcode-probe")]
+        let stage = {
+            rustdb_base::probe::record_stage(0, stage.elapsed().as_nanos() as u64);
+            std::time::Instant::now()
+        };
         let current = self.get_page(page)?;
         let mut buffer = self.copy_bytes(current.bytes())?;
         drop(current);
+        #[cfg(feature = "opcode-probe")]
+        let stage = {
+            rustdb_base::probe::record_stage(1, stage.elapsed().as_nanos() as u64);
+            std::time::Instant::now()
+        };
         let result = edit(buffer.as_mut_slice())?;
+        #[cfg(feature = "opcode-probe")]
+        rustdb_base::probe::record_stage(2, stage.elapsed().as_nanos() as u64);
         let key = PageKey {
             database: self.database,
             page,
@@ -1088,9 +1102,16 @@ impl Pager {
         // B-tree page at all - the header, a freelist page, an overflow page -
         // has no layout to carry, and gets none.
         let usable = self.usable_size()?;
+        #[cfg(feature = "opcode-probe")]
+        let stage = std::time::Instant::now();
         let layout = crate::btree::PageLayout::parse_edited(buffer.as_slice(), page, usable)
             .ok()
             .map(std::sync::Arc::new);
+        #[cfg(feature = "opcode-probe")]
+        let stage = {
+            rustdb_base::probe::record_stage(3, stage.elapsed().as_nanos() as u64);
+            std::time::Instant::now()
+        };
         self.cache.publish_with(
             key,
             buffer,
@@ -1099,6 +1120,8 @@ impl Pager {
             },
             layout,
         )?;
+        #[cfg(feature = "opcode-probe")]
+        rustdb_base::probe::record_stage(4, stage.elapsed().as_nanos() as u64);
         self.dirty.insert(page.get());
         if self.state == PagerState::WriterLocked {
             self.state = PagerState::WriterCacheMod;

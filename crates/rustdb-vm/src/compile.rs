@@ -75,6 +75,13 @@ pub struct Compiler {
     /// write that is emitting the body, not by the expression, and the labels
     /// collect here until that write patches them.
     pub(crate) ignore_jumps: Vec<Label>,
+    /// Per index of the table being written, whether this statement may leave
+    /// its entries alone.
+    ///
+    /// Empty for every statement but an UPDATE's own delete-and-rewrite, which
+    /// sets it around those two emitters and restores it after. See
+    /// `unaffected_indexes` in `compile_dml`.
+    pub(crate) untouched_indexes: Vec<bool>,
     /// How many trigger bodies enclose the code being emitted.
     ///
     /// Anything written at a depth above zero is a trigger's doing, which
@@ -203,6 +210,7 @@ impl Compiler {
             substitutions: Vec::new(),
             replace_triggers: Vec::new(),
             ignore_jumps: Vec::new(),
+            untouched_indexes: Vec::new(),
             firing_depth: 0,
             source_cursors: Vec::new(),
             covering_slots: std::collections::BTreeMap::new(),
