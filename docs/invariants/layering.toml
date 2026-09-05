@@ -69,6 +69,31 @@ may_depend_on = ["inillucent-base", "inillucent-vfs"]
 # at the pool's own frame table, which only a test inside the crate can do.
 may_test_with = ["inillucent-sim"]
 
+# `inillucent-wal` is the TDD's Phase 3 log: segments, the record codec, group
+# commit and recovery. It sits at layer 2 **beside** `inillucent-pool` and depends
+# on neither it nor anything above it, which is the whole point of the entry.
+#
+# The obvious arrangement - the log above the pool, so a record could carry a
+# `PageId` - is the wrong way round. The log is written *before* any page is, and
+# an edge from the log to the crate that owns pages says the opposite of what the
+# write-ahead rule says. A record therefore carries a page's number as a `u64`,
+# and the rule crosses the gap in the direction that costs nothing: the pool is
+# *told* a durable LSN and refuses to write a page whose LSN is at or above it. A
+# number is not a dependency.
+#
+# Recovery is in this crate and *applying* a record is not: `recover::Redo` is a
+# trait the caller implements, so the scan lives with the format it reads while
+# the crate that owns pages and trees does the applying.
+[[crate]]
+name = "inillucent-wal"
+kind = "production"
+layer = 2
+may_depend_on = ["inillucent-base", "inillucent-vfs"]
+# The TDD names this crate in the same sentence as the pool: a log's durability
+# campaign injects a failure at a write or a sync and then reads the log's own
+# segment state, which only a test inside the crate can do.
+may_test_with = ["inillucent-sim"]
+
 # `inillucent-tree` replaces `inillucent-storage` and sits where it sits: a layer that
 # knows pages and byte records and nothing about what a column is called. Phase
 # 2 added `inillucent-pool` beneath it when the buffer pool arrived, exactly as the
