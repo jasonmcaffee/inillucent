@@ -1,6 +1,6 @@
 # rust-db performance scorecard
 
-Label `release-candidate (no fused-bytecode)`, platform `windows-x86_64`, 30 paired rounds per scale, bootstrap seed 17900001. **Arm: `fused-bytecode` switched off.** This is one side of an A/B pair and not the shipped engine; compare it with the run whose arm is empty.
+Label `no-fused-bytecode (no fused-bytecode)`, platform `windows-x86_64`, 30 paired rounds per scale, bootstrap seed 17900001. **Arm: `fused-bytecode` switched off.** This is one side of an A/B pair and not the shipped engine; compare it with the run whose arm is empty.
 
 Both engines read the same plan file. The ratio is SQLite over rust-db, so **above one means rust-db is faster**. A workload whose two engines returned different answers is reported as a correctness failure and is not timed.
 
@@ -17,55 +17,55 @@ Both engines read the same plan file. The ratio is SQLite over rust-db, so **abo
 
 ## Scale `small` - 5000 rows
 
-Weighted geometric mean **0.244x**, 95% interval [0.240, 0.250]. The release bound is a lower bound of at least 1.50x.
+Weighted geometric mean **0.310x**, 95% interval [0.308, 0.318]. The release bound is a lower bound of at least 1.50x.
 
 ### By family
 
 | family | weight | ratio | 95% interval | verdict | required floor |
 |---|---:|---:|---|---|---|
-| `open.prepare` | 0.08 | 0.216x | [0.149, 0.313] | loss | **below 0.90x** |
-| `read.point` | 0.16 | 0.826x | [0.725, 0.941] | loss | **below 0.90x** |
-| `read.range` | 0.12 | 0.216x | [0.178, 0.268] | loss | **below 0.90x** |
-| `read.analytical` | 0.10 | 0.060x | [0.053, 0.067] | loss | **below 0.90x** |
-| `read.join` | 0.08 | 0.275x | [0.198, 0.378] | loss | **below 0.90x** |
-| `write` | 0.20 | 0.219x | [0.185, 0.259] | loss | **below 0.90x** |
-| `transaction` | 0.10 | 0.298x | [0.216, 0.408] | loss | **below 0.90x** |
-| `schema` | 0.04 | 0.205x | [0.198, 0.212] | loss | **below 0.90x** |
-| `extension` | 0.08 | 0.097x | [0.079, 0.122] | loss | **below 0.90x** |
-| `large.values` | 0.04 | 0.781x | [0.731, 0.835] | loss | **below 0.90x** |
+| `open.prepare` | 0.08 | 0.228x | [0.160, 0.326] | loss | **below 0.90x** |
+| `read.point` | 0.16 | 0.862x | [0.759, 0.981] | loss | **below 0.90x** |
+| `read.range` | 0.12 | 0.299x | [0.246, 0.366] | loss | **below 0.90x** |
+| `read.analytical` | 0.10 | 0.112x | [0.101, 0.123] | loss | **below 0.90x** |
+| `read.join` | 0.08 | 0.329x | [0.237, 0.452] | loss | **below 0.90x** |
+| `write` | 0.20 | 0.265x | [0.233, 0.303] | loss | **below 0.90x** |
+| `transaction` | 0.10 | 0.490x | [0.396, 0.604] | loss | **below 0.90x** |
+| `schema` | 0.04 | 0.246x | [0.238, 0.255] | loss | **below 0.90x** |
+| `extension` | 0.08 | 0.124x | [0.104, 0.149] | loss | **below 0.90x** |
+| `large.values` | 0.04 | 0.827x | [0.772, 0.887] | loss | **below 0.90x** |
 
 ### By workload
 
 | workload | family | rust-db median | SQLite median | ratio | 95% interval | samples |
 |---|---|---:|---:|---:|---|---:|
-| `prepare.trivial` | `open.prepare` | 32.20 ms | 1.89 ms | 0.053x | [0.048, 0.055] | 30 |
-| `prepare.point` | `open.prepare` | 65.30 ms | 59.90 ms | 0.882x | [0.838, 0.981] | 30 |
-| `point.rowid` | `read.point` | 31.19 ms | 50.42 ms | 1.541x | [1.518, 1.818] | 30 |
-| `point.index` | `read.point` | 63.39 ms | 53.35 ms | 0.820x | [0.811, 0.954] | 30 |
-| `point.miss` | `read.point` | 129.68 ms | 47.88 ms | 0.377x | [0.363, 0.418] | 30 |
-| `range.covering` | `read.range` | 110.21 ms | 15.68 ms | 0.144x | [0.146, 0.165] | 30 |
-| `range.lookaside` | `read.range` | 269.04 ms | 20.36 ms | 0.080x | [0.076, 0.084] | 30 |
-| `range.reverse` | `read.range` | 19.39 ms | 14.56 ms | 0.754x | [0.753, 0.906] | 30 |
-| `scan.aggregate` | `read.analytical` | 687.89 ms | 52.24 ms | 0.076x | [0.076, 0.081] | 30 |
-| `scan.group` | `read.analytical` | 484.21 ms | 46.15 ms | 0.097x | [0.097, 0.103] | 30 |
-| `scan.sort` | `read.analytical` | 1.11 s | 92.41 ms | 0.083x | [0.082, 0.088] | 30 |
-| `scan.distinct` | `read.analytical` | 498.45 ms | 8.68 ms | 0.017x | [0.018, 0.020] | 30 |
-| `join.selective` | `read.join` | 26.17 ms | 24.64 ms | 0.927x | [0.884, 1.042] | 30 |
-| `join.range` | `read.join` | 248.44 ms | 18.05 ms | 0.073x | [0.075, 0.084] | 30 |
-| `write.insert.batch` | `write` | 91.59 ms | 6.28 ms | 0.070x | [0.067, 0.102] | 30 |
-| `write.insert.autocommit` | `write` | 131.18 ms | 133.17 ms | 1.038x | [1.007, 1.118] | 30 |
-| `write.update.indexed` | `write` | 75.24 ms | 7.51 ms | 0.098x | [0.094, 0.100] | 30 |
-| `write.delete` | `write` | 46.78 ms | 6.49 ms | 0.134x | [0.129, 0.139] | 30 |
-| `write.upsert` | `write` | 10.09 ms | 4.21 ms | 0.429x | [0.393, 0.576] | 30 |
-| `txn.autocommit` | `transaction` | 41.92 ms | 39.04 ms | 0.899x | [0.876, 0.945] | 30 |
-| `txn.batched` | `transaction` | 319.91 ms | 264.00 ms | 0.829x | [0.773, 0.873] | 30 |
-| `txn.large` | `transaction` | 19.86 ms | 678.00 us | 0.035x | [0.034, 0.037] | 30 |
-| `schema.index` | `schema` | 15.15 ms | 3.07 ms | 0.204x | [0.198, 0.212] | 30 |
-| `extension.json` | `extension` | 25.68 ms | 1.19 ms | 0.045x | [0.039, 0.044] | 30 |
-| `extension.fts.build` | `extension` | 129.59 ms | 2.46 ms | 0.019x | [0.019, 0.020] | 30 |
-| `extension.fts.query` | `extension` | 258.96 ms | 12.20 ms | 0.048x | [0.049, 0.055] | 30 |
-| `extension.rtree.insert` | `extension` | 9.66 ms | 2.36 ms | 0.248x | [0.210, 0.261] | 30 |
-| `extension.rtree.query` | `extension` | 8.40 ms | 6.90 ms | 0.827x | [0.792, 0.976] | 30 |
-| `large.read` | `large.values` | 31.29 ms | 24.11 ms | 0.825x | [0.762, 0.946] | 30 |
-| `large.write` | `large.values` | 3.04 ms | 2.22 ms | 0.711x | [0.670, 0.775] | 30 |
+| `prepare.trivial` | `open.prepare` | 29.84 ms | 1.89 ms | 0.056x | [0.056, 0.060] | 30 |
+| `prepare.point` | `open.prepare` | 61.13 ms | 54.82 ms | 0.891x | [0.872, 0.915] | 30 |
+| `point.rowid` | `read.point` | 28.61 ms | 46.94 ms | 1.634x | [1.586, 1.658] | 30 |
+| `point.index` | `read.point` | 45.88 ms | 47.40 ms | 1.034x | [1.013, 1.067] | 30 |
+| `point.miss` | `read.point` | 120.82 ms | 45.62 ms | 0.376x | [0.372, 0.390] | 30 |
+| `range.covering` | `read.range` | 66.66 ms | 15.21 ms | 0.229x | [0.227, 0.249] | 30 |
+| `range.lookaside` | `read.range` | 191.94 ms | 19.81 ms | 0.103x | [0.102, 0.107] | 30 |
+| `range.reverse` | `read.range` | 13.20 ms | 14.00 ms | 1.069x | [1.063, 1.120] | 30 |
+| `scan.aggregate` | `read.analytical` | 329.77 ms | 49.36 ms | 0.150x | [0.149, 0.154] | 30 |
+| `scan.group` | `read.analytical` | 238.75 ms | 45.16 ms | 0.189x | [0.185, 0.193] | 30 |
+| `scan.sort` | `read.analytical` | 694.65 ms | 86.81 ms | 0.125x | [0.123, 0.128] | 30 |
+| `scan.distinct` | `read.analytical` | 202.03 ms | 8.47 ms | 0.042x | [0.042, 0.046] | 30 |
+| `join.selective` | `read.join` | 21.05 ms | 23.91 ms | 1.127x | [1.078, 1.206] | 30 |
+| `join.range` | `read.join` | 191.29 ms | 17.62 ms | 0.093x | [0.092, 0.099] | 30 |
+| `write.insert.batch` | `write` | 54.47 ms | 5.79 ms | 0.106x | [0.100, 0.132] | 30 |
+| `write.insert.autocommit` | `write` | 129.07 ms | 129.71 ms | 1.003x | [0.982, 1.027] | 30 |
+| `write.update.indexed` | `write` | 47.06 ms | 7.10 ms | 0.150x | [0.147, 0.155] | 30 |
+| `write.delete` | `write` | 31.43 ms | 6.02 ms | 0.189x | [0.179, 0.191] | 30 |
+| `write.upsert` | `write` | 9.49 ms | 3.71 ms | 0.418x | [0.391, 0.448] | 30 |
+| `txn.autocommit` | `transaction` | 37.78 ms | 36.34 ms | 0.961x | [0.952, 1.142] | 30 |
+| `txn.batched` | `transaction` | 274.24 ms | 246.11 ms | 0.894x | [0.883, 1.076] | 30 |
+| `txn.large` | `transaction` | 5.69 ms | 668.85 us | 0.118x | [0.115, 0.125] | 30 |
+| `schema.index` | `schema` | 11.58 ms | 2.85 ms | 0.249x | [0.238, 0.255] | 30 |
+| `extension.json` | `extension` | 24.25 ms | 1.14 ms | 0.047x | [0.043, 0.048] | 30 |
+| `extension.fts.build` | `extension` | 42.96 ms | 2.45 ms | 0.057x | [0.052, 0.059] | 30 |
+| `extension.fts.query` | `extension` | 236.36 ms | 12.09 ms | 0.051x | [0.052, 0.059] | 30 |
+| `extension.rtree.insert` | `extension` | 9.09 ms | 2.19 ms | 0.245x | [0.239, 0.258] | 30 |
+| `extension.rtree.query` | `extension` | 7.65 ms | 6.60 ms | 0.863x | [0.760, 0.940] | 30 |
+| `large.read` | `large.values` | 27.35 ms | 23.51 ms | 0.855x | [0.812, 0.935] | 30 |
+| `large.write` | `large.values` | 3.14 ms | 2.40 ms | 0.812x | [0.703, 0.885] | 30 |
 

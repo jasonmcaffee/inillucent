@@ -99,3 +99,22 @@ pub fn reset_stages() {
         }
     }
 }
+
+/// How many rounds a seeded property loop should run.
+///
+/// Answers `full` on every ordinary build. Under Miri it answers a hundredth of
+/// it, floored at five hundred, because the interpreter executes every
+/// instruction and a two-hundred-thousand-round loop that takes milliseconds
+/// natively takes hours there - so a Miri run either samples or never finishes,
+/// and never finishing is the same as not running it.
+///
+/// The properties these loops check - no input panics, every value round-trips
+/// canonically - are checked against Miri's much stricter memory model at any
+/// sample size, and the full sample still runs everywhere else.
+pub fn sample_rounds(full: usize) -> usize {
+    if cfg!(miri) {
+        (full / 100).max(500).min(full)
+    } else {
+        full
+    }
+}

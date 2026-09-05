@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn random_values_round_trip_canonically() {
         let mut rng = Rng::new(0x1782_0001);
-        for _ in 0..200_000 {
+        for _ in 0..crate::probe::sample_rounds(200_000) {
             let width = rng.below(64) as u32;
             let value = rng.next_u64() >> (63 - width.min(63));
             let mut first = [0u8; MAX_LEN];
@@ -248,8 +248,7 @@ mod tests {
         // is "no input panics", which a smaller sample still exercises against
         // the interpreter's much stricter memory model - and the full sample
         // still runs on every ordinary build.
-        let rounds = if cfg!(miri) { 2_000 } else { 200_000 };
-        for _ in 0..rounds {
+        for _ in 0..crate::probe::sample_rounds(200_000) {
             rng.fill(&mut buffer);
             let len = rng.below(buffer.len() as u64 + 1) as usize;
             let _ = decode(&buffer[..len]);

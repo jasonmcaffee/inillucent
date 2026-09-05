@@ -516,7 +516,7 @@ mod tests {
     #[test]
     fn comparing_arbitrary_bytes_never_panics() {
         let mut state = 0x0123_4567_89ab_cdefu64;
-        for _ in 0..30_000 {
+        for _ in 0..rustdb_base::probe::sample_rounds(30_000) {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;

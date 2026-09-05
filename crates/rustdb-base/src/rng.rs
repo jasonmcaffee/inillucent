@@ -136,7 +136,7 @@ mod tests {
     fn output_covers_its_range() {
         let mut rng = Rng::new(0xdead_beef);
         let mut buckets = [0u32; 16];
-        for _ in 0..160_000 {
+        for _ in 0..crate::probe::sample_rounds(160_000) {
             let index = rng.below(16) as usize;
             buckets[index] += 1;
         }

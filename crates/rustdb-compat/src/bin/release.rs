@@ -15,7 +15,8 @@
 //! - the reference metadata and the supported-platform matrix;
 //! - the exact commands that reproduce every one of them.
 //!
-//! Usage: `cargo run --release -p rustdb-compat --bin rustdb-release -- [--out <dir>]`
+//! Usage: `cargo run --release -p rustdb-compat --bin rustdb-release --
+//! [--out <dir>] [--measurements <scorecard-dir>]`
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -78,7 +79,8 @@ fn main() -> ExitCode {
     let out = flag(&arguments, "--out")
         .map(PathBuf::from)
         .unwrap_or_else(|| workspace_root().join("compat/release"));
-    match run(&out) {
+    let measurements = flag(&arguments, "--measurements").map(PathBuf::from);
+    match run(&out, measurements.as_deref()) {
         Ok(passed) => {
             println!("release candidate written to {}", out.display());
             if passed {
@@ -124,7 +126,7 @@ fn artifact(root: &Path, relative: &str, description: &str) -> Option<Artifact> 
 }
 
 /// Gathers every artifact, writes the report, and returns whether it passes.
-fn run(out: &Path) -> Result<bool, String> {
+fn run(out: &Path, measurements: Option<&Path>) -> Result<bool, String> {
     let root = workspace_root();
     std::fs::create_dir_all(out).map_err(|error| format!("cannot create {out:?}: {error}"))?;
     let suffix = std::env::consts::EXE_SUFFIX;
@@ -200,7 +202,21 @@ fn run(out: &Path) -> Result<bool, String> {
     }
     // The scorecard's own outputs live under the agent-output area rather than
     // in the repository, because they are a measurement of one machine.
-    let scorecard_dir = root.join("_agent_output/task-1790/scorecard");
+    //
+    // Ticket-neutral, and overridable with `--measurements`. This used to name
+    // one ticket's scratch directory, which meant a later ticket's release
+    // candidate was assembled out of an earlier ticket's measurements: the
+    // scorecard it had just published into `compat/release` was copied over
+    // with the older one, mtime and all, and the report then quoted numbers
+    // from a run that was not this build's.
+    let scorecard_dir = measurements
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| root.join("_agent_output/measurements/scorecard"));
+    let scorecard_name = scorecard_dir
+        .strip_prefix(&root)
+        .unwrap_or(&scorecard_dir)
+        .to_string_lossy()
+        .replace('\\', "/");
     for (relative, description) in [
         (
             "../migrate/release/corpus.db.migration-report.md",
@@ -260,10 +276,12 @@ fn run(out: &Path) -> Result<bool, String> {
                     name: format!("compat/release/{}", landing_name(relative)),
                     ..found
                 }),
-                Err(error) => missing.push(format!("{}: {error}", named(relative))),
+                Err(error) => {
+                    missing.push(format!("{}: {error}", named(&scorecard_name, relative)))
+                }
             }
         } else {
-            missing.push(named(relative));
+            missing.push(named(&scorecard_name, relative));
         }
     }
 
@@ -298,10 +316,13 @@ fn landing_name(relative: &str) -> String {
 /// beside it rather than in it, so the path a reader is given is the one that
 /// actually leads to the file rather than the one the loop happened to use.
 /// @param relative - the path as the gathering loop wrote it
-fn named(relative: &str) -> String {
+fn named(base: &str, relative: &str) -> String {
     match relative.strip_prefix("../") {
-        Some(rest) => format!("_agent_output/task-1790/{rest}"),
-        None => format!("_agent_output/task-1790/scorecard/{relative}"),
+        Some(rest) => {
+            let parent = base.rsplit_once('/').map_or("", |(head, _)| head);
+            format!("{parent}/{rest}")
+        }
+        None => format!("{base}/{relative}"),
     }
 }
 
