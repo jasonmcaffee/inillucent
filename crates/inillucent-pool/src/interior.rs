@@ -233,10 +233,45 @@ impl<'p> InteriorRef<'p> {
     ///
     /// @param probe - the memcmp-encoded key being looked for
     pub fn child_for(&self, probe: &[u8]) -> DbResult<(usize, Swip, usize)> {
+        /// How many interpolated midpoints before falling back to bisection.
+        ///
+        /// Four, for the same reason the leaf's search caps at four: a
+        /// distribution that has not converged in four guesses is not one
+        /// interpolation is going to help with, and bounding it is what makes
+        /// the worst case no worse than the bisection it replaces.
+        const GUESSES: u32 = 4;
+
+        /// Below this many children, bisection reads fewer slots than
+        /// interpolation's two end reads cost.
+        const FLOOR: usize = 16;
+
+        // **The midpoint is a guess; the comparison is not.** Everything below
+        // changes only *which* slot is examined next - the test that moves the
+        // window is `self.key(middle) <= probe`, byte for byte what it was. So
+        // a separator distribution that defeats interpolation costs extra
+        // reads and never a wrong child, and a key whose leading eight bytes
+        // say nothing useful (deep text prefixes, say) simply bisects.
+        //
+        // **Why it is worth doing.** `inillucent-probeprofile` measures a
+        // descent of the medium fixture's table tree at about 98 ns, and that
+        // tree is one level deep: the whole of it is this search. A 32 KiB
+        // interior page holds 468 children, so bisection is nine steps, and
+        // each step reads a slot from a 7 KiB directory and then the key bytes
+        // from somewhere else in the page - eighteen scattered accesses across
+        // 512 cache lines. Rowids are handed out in order, so leaf separators
+        // are close to uniform and one interpolation lands on or beside the
+        // right child.
+        let target = leading_u64(probe);
         let mut low = 0usize;
         let mut high = self.count;
+        let mut guesses = 0u32;
         while low < high {
-            let middle = low.saturating_add(high.saturating_sub(low) / 2);
+            let middle = if guesses < GUESSES && high.saturating_sub(low) > FLOOR {
+                guesses = guesses.saturating_add(1);
+                self.interpolate(low, high, target)?
+            } else {
+                low.saturating_add(high.saturating_sub(low) / 2)
+            };
             if self.key(middle)? <= probe {
                 low = middle.saturating_add(1);
             } else {
@@ -244,6 +279,31 @@ impl<'p> InteriorRef<'p> {
             }
         }
         Ok((low, self.swip(low)?, self.swip_offset(low)?))
+    }
+
+    /// Returns a slot in `low..high` to examine next, by proportion.
+    ///
+    /// Always inside the window, so the search that calls it terminates
+    /// whatever the separators look like.
+    ///
+    /// @param low - the first slot still in the window
+    /// @param high - one past the last slot still in the window
+    /// @param target - the probe's leading eight bytes as a number
+    fn interpolate(&self, low: usize, high: usize, target: u64) -> DbResult<usize> {
+        let last = high.saturating_sub(1);
+        let low_value = leading_u64(self.key(low)?);
+        let high_value = leading_u64(self.key(last)?);
+        if high_value <= low_value || target <= low_value {
+            return Ok(low);
+        }
+        if target >= high_value {
+            return Ok(last);
+        }
+        let span = u128::from(high_value.saturating_sub(low_value));
+        let into = u128::from(target.saturating_sub(low_value));
+        let width = u128::try_from(last.saturating_sub(low)).unwrap_or(0);
+        let offset = usize::try_from(into.saturating_mul(width) / span.max(1)).unwrap_or(0);
+        Ok(low.saturating_add(offset.min(last.saturating_sub(low))))
     }
 
     /// Returns every byte offset in this page that holds a swip.
@@ -257,6 +317,23 @@ impl<'p> InteriorRef<'p> {
         }
         Ok(offsets)
     }
+}
+
+/// Returns a memcmp-encoded key's leading eight bytes as a number.
+///
+/// Shorter keys are zero-padded, which makes the map monotone with respect to
+/// the byte ordering the search actually uses everywhere the two can disagree:
+/// a padded key can compare *equal* to a longer one that it is really below,
+/// and the only consequence is a guess that is one slot out.
+///
+/// @param key - the encoded key, of any length
+fn leading_u64(key: &[u8]) -> u64 {
+    let mut raw = [0u8; 8];
+    let taken = key.len().min(8);
+    if let (Some(slot), Some(head)) = (raw.get_mut(..taken), key.get(..taken)) {
+        slot.copy_from_slice(head);
+    }
+    u64::from_be_bytes(raw)
 }
 
 /// Returns every byte offset that holds a swip in an interior page image.
@@ -461,6 +538,81 @@ mod tests {
         assert_eq!(parsed.rightmost().unwrap(), children[3]);
         assert!(parsed.key(3).is_err());
         assert!(parsed.swip(4).is_err());
+    }
+
+    /// The interpolated search answers what a linear scan answers, on
+    /// separators chosen to make interpolation guess badly.
+    ///
+    /// The guess is only a midpoint - the comparison that moves the window is
+    /// unchanged - so a distribution that defeats interpolation must cost extra
+    /// reads and never a wrong child. This asserts that on three shapes: a
+    /// uniform one, where interpolation lands first time; a clustered one,
+    /// where almost every key shares a leading run and the proportional guess
+    /// is far from the answer; and one whose keys are shorter than the eight
+    /// bytes the guess reads, so the padding makes distinct keys look equal.
+    #[test]
+    fn an_interpolated_descent_agrees_with_a_linear_scan() {
+        /// Returns the child a linear scan says a probe belongs to.
+        ///
+        /// @param separators - the page's separator keys
+        /// @param probe - the key being looked for
+        fn scanned(separators: &[Vec<u8>], probe: &[u8]) -> usize {
+            separators
+                .iter()
+                .position(|key| key.as_slice() > probe)
+                .unwrap_or(separators.len())
+        }
+
+        // Uniform: rowids at leaf boundaries, which is what a bulk-built table
+        // tree actually holds.
+        let uniform: Vec<Vec<u8>> = (1..=300u64)
+            .map(|nth| (nth * 214).to_be_bytes().to_vec())
+            .collect();
+        // Clustered: every key shares seven leading bytes, so the leading
+        // eight bytes carry almost no information and every guess is wrong.
+        let clustered: Vec<Vec<u8>> = (1..=300u64)
+            .map(|nth| {
+                let mut key = vec![0xAAu8; 7];
+                key.extend_from_slice(&nth.to_be_bytes());
+                key
+            })
+            .collect();
+        // Shorter than the guess reads: two-byte keys, zero-padded by the map.
+        let short: Vec<Vec<u8>> = (1..=200u16).map(|nth| nth.to_be_bytes().to_vec()).collect();
+
+        for separators in [&uniform, &clustered, &short] {
+            let refs: Vec<&[u8]> = separators.iter().map(Vec::as_slice).collect();
+            let children: Vec<Swip> = (0..=separators.len())
+                .map(|nth| Swip::unswizzled(crate::PageId(nth as u64 + 1)))
+                .collect();
+            let page = InteriorBuilder::new(32_768, 7, 1)
+                .unwrap()
+                .build(&refs, &children)
+                .unwrap();
+            let parsed = InteriorRef::parse(&page).unwrap();
+            parsed.validate().unwrap();
+            // Every separator, one byte below it, one above it, and both ends.
+            let mut probes: Vec<Vec<u8>> = vec![Vec::new(), vec![0xFF; 16]];
+            for key in separators {
+                probes.push(key.clone());
+                let mut below = key.clone();
+                if let Some(last) = below.last_mut() {
+                    *last = last.wrapping_sub(1);
+                }
+                probes.push(below);
+                let mut above = key.clone();
+                above.push(0);
+                probes.push(above);
+            }
+            for probe in &probes {
+                let (child, _, _) = parsed.child_for(probe).unwrap();
+                assert_eq!(
+                    child,
+                    scanned(separators, probe),
+                    "probe {probe:?} landed on the wrong child"
+                );
+            }
+        }
     }
 
     /// The descent picks the child whose range holds the probe, at every

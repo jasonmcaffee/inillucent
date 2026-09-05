@@ -287,9 +287,49 @@ impl Project {
     }
 }
 
+/// How many projected columns a permutation keeps on the stack.
+///
+/// The scorecard's widest projection is five columns and the dialect's own
+/// corpus does not exceed twelve; a wider one takes the general path, which is
+/// what every projection used to take.
+const INLINE_PROJECT: usize = 12;
+
 impl Sink for Project {
     fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
         let live = batch.live();
+        // The permutation fast path. A projection that only reorders the
+        // input's columns produces no values of its own, so the general path
+        // below builds four `Vec`s to arrive at a list of vectors it already
+        // had - once per batch, and a point probe's batch is one row.
+        // `inillucent-probeprofile` measured `SELECT count(*) ... WHERE id = ?1`
+        // at 0.87 us against a bare probe of about 0.24 us, and this is one of
+        // the allocations in between.
+        if batch.is_dense() && self.expressions.len() <= INLINE_PROJECT {
+            let mut inline: [Vector<'_>; INLINE_PROJECT] =
+                [Vector::Const(Datum::Null); INLINE_PROJECT];
+            let mut permutation = true;
+            for (at, expression) in self.expressions.iter().enumerate() {
+                match expression
+                    .column()
+                    .and_then(|column| batch.columns.get(column))
+                {
+                    Some(vector) => {
+                        if let Some(slot) = inline.get_mut(at) {
+                            *slot = *vector;
+                        }
+                    }
+                    None => {
+                        permutation = false;
+                        break;
+                    }
+                }
+            }
+            if permutation {
+                let projected =
+                    Batch::over(live, inline.get(..self.expressions.len()).unwrap_or(&[]));
+                return self.downstream.push(&projected);
+            }
+        }
         // A projection that is a permutation of the input columns rebuilds the
         // batch out of the same borrowed vectors and copies nothing. Anything
         // computed is materialised into a scratch buffer whose lifetime is this
@@ -1007,6 +1047,102 @@ impl TopN {
     }
 }
 
+/// A sort key's column, resolved once for a whole batch.
+///
+/// **The rejection test is the whole of `scan.sort`.** `ORDER BY label LIMIT
+/// 100` over 100,000 rows keeps a hundred of them and rejects the rest, so the
+/// per-row cost of *deciding* to reject is what the workload measures. Reading
+/// that value through `Batch::value` costs a bounds-checked column lookup, a
+/// match on the selection vector and a match on the vector's variant - per row,
+/// for a variant that cannot change inside a batch.
+///
+/// `inillucent-probeprofile` measured `ORDER BY id LIMIT 100` at 468 us and
+/// `ORDER BY label LIMIT 100` at 1,109 us over the same 100,000 rows, against a
+/// bare `count(*)` scan of 119 us. Matching the variant once per batch and
+/// reading the row's bytes directly is what that difference is spent on.
+///
+/// The *ordering* still goes through [`order_under`]. Only the read is
+/// specialised, because a second implementation of SQL ordering is exactly the
+/// kind of duplicate this engine has already been bitten by: the covering rule
+/// and the seek path disagreeing about affinity cost a wrong answer that every
+/// test of either path passed.
+enum KeyColumn<'p> {
+    /// A fully typed integer column: eight bytes per row, no class array.
+    Ints(&'p [u8]),
+    /// A fully typed variable-width column: an offset and a length per row.
+    Bytes {
+        /// `rows * 8` bytes of slots.
+        slots: &'p [u8],
+        /// The page the slots address.
+        page: &'p [u8],
+        /// Whether the bytes are text rather than a blob.
+        text: bool,
+    },
+    /// Anything else, read through the vector's own accessor.
+    General(Vector<'p>),
+}
+
+impl<'p> KeyColumn<'p> {
+    /// Resolves one column of a batch, once.
+    ///
+    /// @param batch - the batch being read
+    /// @param column - which column the sort term names
+    fn of(batch: &Batch<'p>, column: usize) -> KeyColumn<'p> {
+        match batch.columns.get(column) {
+            Some(Vector::Int64 { bytes, class: None }) => KeyColumn::Ints(bytes),
+            Some(Vector::Variable { slots, page, text }) => KeyColumn::Bytes {
+                slots,
+                page,
+                text: *text,
+            },
+            Some(vector) => KeyColumn::General(*vector),
+            None => KeyColumn::General(Vector::Const(Datum::Null)),
+        }
+    }
+
+    /// Returns one row's value in this column.
+    ///
+    /// @param row - the row's position within the batch, after any selection
+    fn at(&self, row: usize) -> DbResult<Datum<'p>> {
+        match self {
+            KeyColumn::Ints(bytes) => {
+                let at = row.saturating_mul(8);
+                Ok(match bytes.get(at..at.saturating_add(8)) {
+                    Some(slice) => {
+                        Datum::Int(i64::from_le_bytes(slice.try_into().unwrap_or([0; 8])))
+                    }
+                    None => Datum::Null,
+                })
+            }
+            KeyColumn::Bytes { slots, page, text } => {
+                let at = row.saturating_mul(8);
+                let Some(slot) = slots.get(at..at.saturating_add(8)) else {
+                    return Ok(Datum::Null);
+                };
+                let offset = u32::from_le_bytes(
+                    slot.get(..4)
+                        .and_then(|half| half.try_into().ok())
+                        .unwrap_or([0; 4]),
+                ) as usize;
+                let length = u32::from_le_bytes(
+                    slot.get(4..)
+                        .and_then(|half| half.try_into().ok())
+                        .unwrap_or([0; 4]),
+                ) as usize;
+                let bytes = page
+                    .get(offset..offset.saturating_add(length))
+                    .unwrap_or(&[]);
+                Ok(if *text {
+                    Datum::Text(bytes)
+                } else {
+                    Datum::Blob(bytes)
+                })
+            }
+            KeyColumn::General(vector) => vector.at(row),
+        }
+    }
+}
+
 impl Sink for TopN {
     fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
         // `LIMIT 0` keeps nothing. Without this the loop below reads
@@ -1016,7 +1152,19 @@ impl Sink for TopN {
         if self.limit == 0 {
             return Ok(Flow::Stop);
         }
+        let TopN {
+            keys,
+            limit,
+            best,
+            downstream: _,
+        } = self;
         let width = batch.columns.len();
+        // One sort term is the shape every `ORDER BY ... LIMIT n` in the
+        // scorecard has, and the shape the fast rejection test needs. A
+        // multi-term sort falls through to the general comparison, which is
+        // what every term used to cost.
+        let single = if keys.len() == 1 { keys.first() } else { None };
+        let reader = single.map(|term| KeyColumn::of(batch, term.column));
         for nth in 0..batch.live() {
             // Compare before materialising. `ORDER BY label LIMIT 100` over
             // 100,000 rows keeps 100 of them, so copying every row into owned
@@ -1024,26 +1172,32 @@ impl Sink for TopN {
             // times the work the answer needs. The comparison reads the sort
             // columns straight out of the batch, which is still borrowing the
             // page, and only a row that earns its place is copied.
-            if self.best.len() >= self.limit {
-                let worse = match self.best.last() {
-                    Some(worst) => {
-                        compare_batch_row(batch, nth, worst, &self.keys)? != Ordering::Less
+            if best.len() >= *limit {
+                let worse = match (best.last(), single, reader.as_ref()) {
+                    (Some(worst), Some(term), Some(reader)) => {
+                        let candidate = reader.at(batch.row_at(nth))?;
+                        let held = worst
+                            .get(term.column)
+                            .map(OwnedDatum::borrow)
+                            .unwrap_or(Datum::Null);
+                        order_under(&candidate, &held, term) != Ordering::Less
                     }
-                    None => false,
+                    (Some(worst), _, _) => {
+                        compare_batch_row(batch, nth, worst, keys)? != Ordering::Less
+                    }
+                    (None, _, _) => false,
                 };
                 if worse {
                     continue;
                 }
-                self.best.pop();
+                best.pop();
             }
             let mut row = Vec::with_capacity(width);
             for column in 0..width {
                 row.push(OwnedDatum::from_datum(&batch.value(nth, column)?));
             }
-            let at = self
-                .best
-                .partition_point(|held| compare_by(held, &row, &self.keys) != Ordering::Greater);
-            self.best.insert(at, row);
+            let at = best.partition_point(|held| compare_by(held, &row, keys) != Ordering::Greater);
+            best.insert(at, row);
         }
         Ok(Flow::Continue)
     }
@@ -1362,7 +1516,8 @@ mod tests {
                 columns: vec![Vector::Int64 {
                     bytes: &bytes,
                     class: None,
-                }],
+                }]
+                .into(),
             };
             for kind in [
                 AggregateKind::Sum,
@@ -1427,7 +1582,8 @@ mod tests {
             columns: vec![Vector::Int64 {
                 bytes: &bytes,
                 class: None,
-            }],
+            }]
+            .into(),
         };
         aggregate.push(&batch).unwrap();
         assert_eq!(
@@ -1599,7 +1755,7 @@ mod tests {
                     Batch {
                         rows: 4_000,
                         selection: Some(&all),
-                        columns,
+                        columns: columns.into(),
                     }
                 }
             };
