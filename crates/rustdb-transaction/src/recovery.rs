@@ -294,3 +294,125 @@ fn sector_size_of(vfs: &dyn Vfs, path: &DbPath) -> u32 {
 pub fn describe_journal_mode(mode: JournalMode) -> &'static str {
     mode.as_str()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustdb_vfs::memory::MemoryVfs;
+
+    /// Returns an empty memory file system with a database file in it.
+    fn database_at(path: &DbPath) -> Arc<MemoryVfs> {
+        let vfs = Arc::new(MemoryVfs::new());
+        let file = vfs
+            .open(
+                path,
+                OpenOptions {
+                    create: true,
+                    ..OpenOptions::of_kind(FileKind::MainDb)
+                },
+            )
+            .expect("the database file is created");
+        drop(file);
+        vfs
+    }
+
+    /// Every journal mode reports the name `PRAGMA journal_mode` answers with.
+    ///
+    /// Asserted against the literal strings the pragma is specified to return,
+    /// not against `mode.as_str()`, so this pins the answer rather than
+    /// restating the implementation. Nothing checked it before: a version
+    /// returning a constant - or an empty string - passed the whole suite.
+    #[test]
+    fn every_journal_mode_reports_its_pragma_name() {
+        assert_eq!(describe_journal_mode(JournalMode::Delete), "delete");
+        assert_eq!(describe_journal_mode(JournalMode::Truncate), "truncate");
+        assert_eq!(describe_journal_mode(JournalMode::Persist), "persist");
+        assert_eq!(describe_journal_mode(JournalMode::Memory), "memory");
+        assert_eq!(describe_journal_mode(JournalMode::Off), "off");
+        assert_eq!(describe_journal_mode(JournalMode::Wal), "wal");
+    }
+
+    /// The sector size comes from the device, and is legal even without one.
+    ///
+    /// A database that cannot be opened still has to yield a sector size a
+    /// journal header can carry, because the header is written before anything
+    /// has established that the file is readable.
+    #[test]
+    fn the_sector_size_is_always_one_the_format_allows() {
+        let path = DbPath::new("/db.sqlite");
+        let vfs = database_at(&path);
+        let present = sector_size_of(vfs.as_ref(), &path);
+        assert!(
+            (crate::journal::MIN_SECTOR_SIZE..=crate::journal::MAX_SECTOR_SIZE).contains(&present),
+            "a sector size of {present} is outside the range the format allows"
+        );
+        assert!(present.is_power_of_two(), "{present} is not a power of two");
+
+        // A file that is not there cannot be interrogated, and the answer is
+        // still a legal sector size rather than zero.
+        let missing = DbPath::new("/nothing.sqlite");
+        let absent = sector_size_of(vfs.as_ref(), &missing);
+        assert_eq!(absent, crate::journal::MIN_SECTOR_SIZE);
+    }
+
+    /// A database with no journal beside it has nothing to replay.
+    #[test]
+    fn a_database_with_no_journal_would_replay_nothing() {
+        let path = DbPath::new("/db.sqlite");
+        let vfs = database_at(&path);
+        assert!(
+            !journal_would_be_replayed(vfs.as_ref(), &path).expect("the question is answerable"),
+            "there is no journal, so there is nothing to replay"
+        );
+    }
+
+    /// A journal whose header is not a journal header is not replayed.
+    ///
+    /// This is the branch that separates "a journal is present" from "a hot
+    /// journal is present": a finalised or truncated journal is a file that
+    /// exists and says nothing, and replaying it would undo a transaction that
+    /// committed.
+    #[test]
+    fn a_journal_without_a_valid_header_would_replay_nothing() {
+        let path = DbPath::new("/db.sqlite");
+        let vfs = database_at(&path);
+        let journal = vfs
+            .open(
+                &path.journal(),
+                OpenOptions {
+                    create: true,
+                    ..OpenOptions::of_kind(FileKind::MainJournal)
+                },
+            )
+            .expect("the journal file is created");
+        journal
+            .write_all_at(0, &[0u8; 64])
+            .expect("the zeroed header is written");
+        drop(journal);
+        assert!(
+            !journal_would_be_replayed(vfs.as_ref(), &path).expect("the question is answerable"),
+            "a zeroed header is not a hot journal"
+        );
+    }
+
+    /// An empty journal file is not a hot journal either.
+    #[test]
+    fn an_empty_journal_would_replay_nothing() {
+        let path = DbPath::new("/db.sqlite");
+        let vfs = database_at(&path);
+        let journal = vfs
+            .open(
+                &path.journal(),
+                OpenOptions {
+                    create: true,
+                    ..OpenOptions::of_kind(FileKind::MainJournal)
+                },
+            )
+            .expect("the journal file is created");
+        drop(journal);
+        assert!(
+            !journal_would_be_replayed(vfs.as_ref(), &path).expect("the question is answerable"),
+            "a journal with no header at all is not hot"
+        );
+    }
+}

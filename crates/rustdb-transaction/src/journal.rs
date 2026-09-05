@@ -917,6 +917,59 @@ mod tests {
         (vfs, path, journal)
     }
 
+    /// The super-journal checksum is the sum of the name's bytes.
+    ///
+    /// Asserted against values worked out by hand rather than against the
+    /// function's own output, so it pins what the format says rather than what
+    /// this build happens to compute. Nothing checked it before: a version
+    /// returning a constant passed the whole suite.
+    #[test]
+    fn the_super_journal_checksum_sums_the_name() {
+        assert_eq!(super_journal_checksum(b""), 0);
+        assert_eq!(super_journal_checksum(b"\x01"), 1);
+        assert_eq!(super_journal_checksum(b"\x01\x02\x03"), 6);
+        // 'a' is 97, 'b' 98, 'c' 99.
+        assert_eq!(super_journal_checksum(b"abc"), 294);
+        // Order does not matter to a sum, which is a property of the format
+        // rather than an accident of the implementation.
+        assert_eq!(super_journal_checksum(b"cba"), 294);
+        // It wraps rather than overflowing: 300 bytes of 255 exceed a u8 sum
+        // many times over and must still land somewhere definite.
+        let long = vec![255u8; 300];
+        assert_eq!(super_journal_checksum(&long), 255 * 300);
+    }
+
+    /// Changing the durability level takes effect.
+    ///
+    /// A setter that quietly did nothing left every commit at whatever level
+    /// the journal was opened with, which is a durability change nothing would
+    /// report.
+    #[test]
+    fn setting_the_durability_level_takes_effect() {
+        let (_vfs, _path, mut journal) = journal_over(JournalMode::Delete, Synchronous::Full);
+        assert_eq!(journal.options().synchronous, Synchronous::Full);
+        journal.set_synchronous(Synchronous::Off);
+        assert_eq!(journal.options().synchronous, Synchronous::Off);
+        journal.set_synchronous(Synchronous::Normal);
+        assert_eq!(journal.options().synchronous, Synchronous::Normal);
+    }
+
+    /// The sector size is recorded, and clamped to the legal range.
+    ///
+    /// The clamp is the part worth pinning: the header has to carry a sector
+    /// size the format allows, and a setter that did nothing would leave it at
+    /// the default however the device was described.
+    #[test]
+    fn setting_the_sector_size_records_it_within_the_legal_range() {
+        let (_vfs, _path, mut journal) = journal_over(JournalMode::Delete, Synchronous::Full);
+        journal.set_sector_size(4096);
+        assert_eq!(journal.sector_size, 4096);
+        journal.set_sector_size(1);
+        assert_eq!(journal.sector_size, MIN_SECTOR_SIZE, "clamped up");
+        journal.set_sector_size(u32::MAX);
+        assert_eq!(journal.sector_size, MAX_SECTOR_SIZE, "clamped down");
+    }
+
     /// Returns a page of a recognisable pattern.
     fn page_of(byte: u8, size: usize) -> Vec<u8> {
         (0..size)
