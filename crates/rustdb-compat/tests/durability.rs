@@ -40,6 +40,108 @@ const WORKLOAD: &str = "BEGIN;
      DELETE FROM t WHERE a = 3;
      COMMIT;";
 
+/// A transaction that makes the file grow, so a rollback has to shrink it.
+///
+/// Wide rows, and enough of them, that committing has to extend the file past
+/// the pages it already had. The test below crashes partway through that
+/// commit, which is the only way to leave a database larger than the page count
+/// its journal will restore.
+const GROWING_WORKLOAD: &str = "BEGIN;
+     INSERT INTO t SELECT 1000 + n, printf('%.400c', 120), n
+       FROM (WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 400)
+             SELECT n FROM c);
+     COMMIT;";
+
+/// Returns the page size and page count a database header declares.
+fn header_shape(bytes: &[u8]) -> Option<(u64, u64)> {
+    let raw = u64::from(u16::from_be_bytes([*bytes.get(16)?, *bytes.get(17)?]));
+    // The one page size the header's two bytes cannot hold is written as one.
+    let page_size = if raw == 1 { 65_536 } else { raw };
+    let count = u64::from(u32::from_be_bytes([
+        *bytes.get(28)?,
+        *bytes.get(29)?,
+        *bytes.get(30)?,
+        *bytes.get(31)?,
+    ]));
+    Some((page_size, count))
+}
+
+/// A recovered database is exactly as long as its header says it is.
+///
+/// A rollback restores the page *count* from the journal, and the file has to
+/// be truncated to match it. If it is not, the database is left carrying pages
+/// the rolled-back transaction allocated: every later read is still correct,
+/// which is why nothing else notices, and the file simply never shrinks again.
+///
+/// The workload grows the file and the crash is armed at every cut point in
+/// turn, so this does not depend on guessing which call leaves the file long -
+/// it asserts the invariant at all of them.
+///
+/// It is worth being exact about what this does and does not pin. Mutation
+/// testing reported `finish_recovery`'s `if database.file_size()? > wanted` as
+/// a surviving mutant, and this test does **not** kill it: with the truncation
+/// disabled the invariant still holds at all thirty-one reopenable cut points,
+/// because none of them leaves a file longer than its header claims. The
+/// branch is not reachable under this crash model - the media the simulator
+/// leaves behind never carries the extension - so no test at this level can
+/// kill that mutant, and it is an equivalent mutant in practice rather than a
+/// missing test.
+///
+/// The invariant is worth asserting on its own account, which is why it stays:
+/// a recovered database that is longer than its own page count is a database
+/// carrying pages nothing will ever reclaim.
+#[test]
+fn a_recovered_database_is_no_longer_than_its_header_says() {
+    let journal = JournalOptions::default();
+    let seed = 90_210;
+    let reach = attempt_with(journal, seed, u64::MAX, Failure::Crash, GROWING_WORKLOAD).reached;
+    assert!(reach > 0, "the workload has to reach some injectable calls");
+
+    let mut checked = 0usize;
+    let mut longest = 0u64;
+    for nth in 1..=reach {
+        let run = attempt_with(journal, seed, nth, Failure::Crash, GROWING_WORKLOAD);
+        let recovered_vfs = Arc::new(SimVfs::recovered(
+            SimConfig {
+                seed,
+                model: MediaModel::default(),
+                ..SimConfig::default()
+            },
+            &run.snapshot,
+        ));
+        // Opening runs recovery; the connection is dropped before the file is
+        // measured so nothing of ours is still holding pages open.
+        let opened = try_connect(Arc::clone(&recovered_vfs) as Arc<dyn Vfs>, journal).is_ok();
+        if !opened {
+            continue;
+        }
+        let Some(bytes) = recovered_vfs.visible_bytes(&path()) else {
+            continue;
+        };
+        let Some((page_size, count)) = header_shape(&bytes) else {
+            continue;
+        };
+        let wanted = count.saturating_mul(page_size);
+        longest = longest.max(bytes.len() as u64);
+        assert!(
+            bytes.len() as u64 <= wanted,
+            "cut {nth}: recovery left {} bytes for a header claiming {count} pages of \
+             {page_size} ({wanted} bytes) - the pages the rolled-back transaction took \
+             were never given back",
+            bytes.len()
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "no cut point produced a database that could be reopened, so nothing was checked"
+    );
+    assert!(
+        longest > 0,
+        "no recovered database had any length, so nothing was measured"
+    );
+}
+
 /// Returns a simulator with the pessimistic device model.
 fn simulator(seed: u64) -> Arc<SimVfs> {
     Arc::new(SimVfs::new(SimConfig {
@@ -154,12 +256,23 @@ struct Attempt {
 /// would report a hundred cut points while causing no failures at all - which
 /// is what it did until the base was subtracted.
 fn attempt(journal: JournalOptions, seed: u64, nth: u64, failure: Failure) -> Attempt {
+    attempt_with(journal, seed, nth, failure, WORKLOAD)
+}
+
+/// As [`attempt`], for a workload other than the standard one.
+fn attempt_with(
+    journal: JournalOptions,
+    seed: u64,
+    nth: u64,
+    failure: Failure,
+    workload: &str,
+) -> Attempt {
     let vfs = built(journal, seed);
     let base = vfs.failpoints().sites_reached();
     vfs.failpoints()
         .fail_nth_call(base.saturating_add(nth), failure);
     let committed = match try_connect(Arc::clone(&vfs) as Arc<dyn Vfs>, journal) {
-        Ok(connection) => run(&connection, WORKLOAD).is_ok(),
+        Ok(connection) => run(&connection, workload).is_ok(),
         Err(_) => false,
     };
     let reached = vfs.failpoints().sites_reached().saturating_sub(base);
