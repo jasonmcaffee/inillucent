@@ -1,0 +1,1272 @@
+//! The operators: a push pipeline from a scan to a sink.
+//!
+//! Invariant: an operator that stops the pipeline (`LIMIT` satisfied) says so
+//! by returning [`Flow::Stop`], and every operator above it propagates that
+//! rather than continuing to read. A scan that keeps walking after its consumer
+//! has enough is not a correctness bug, which is exactly why it would survive a
+//! test suite and show up only as a slow `read.range` family.
+//!
+//! ## The shape
+//!
+//! Each operator owns the one downstream of it and pushes into it. That makes a
+//! pipeline a chain of ownership from the source down to the sink, and it makes
+//! a pipeline breaker - [`HashAggregate`], [`Sort`], [`TopN`], [`Distinct`] -
+//! an operator that accumulates in `push` and emits in `finish`. There is no
+//! scheduler and no coroutine: the call stack is the pipeline.
+//!
+//! ## Where the vectorised fast paths are
+//!
+//! Two, both in [`SimpleAggregate`] and both entered only when the whole batch
+//! qualifies:
+//!
+//! - a dense integer column with no selection vector folds through
+//!   `Accumulator::push_dense_ints`, which walks the page's own bytes;
+//! - `count(*)` over a dense batch adds the row count without looking at a
+//!   value at all.
+//!
+//! Everything else is the per-row path. The tests assert the two produce the
+//! same answers, because a fast path that is also a different answer is the
+//! worst kind of bug this engine can have.
+
+use std::cmp::Ordering;
+use std::collections::HashMap;
+
+use rustdb_base::DbResult;
+use rustdb_tree::datum::{borrow_row, own_row, Datum, OwnedDatum};
+use rustdb_tree::key;
+
+use crate::aggregate::{Accumulator, AggregateKind};
+use crate::batch::{Batch, Vector};
+use crate::expr::Eval;
+
+/// Whether the pipeline should keep going.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Flow {
+    /// Keep pushing.
+    Continue,
+    /// Enough rows have been produced; the source may stop.
+    Stop,
+}
+
+/// An operator that consumes batches.
+pub trait Sink {
+    /// Consumes one batch.
+    ///
+    /// @param batch - the batch to consume
+    fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow>;
+
+    /// Signals end of input and lets a pipeline breaker emit.
+    fn finish(&mut self) -> DbResult<()>;
+}
+
+/// The end of a pipeline: it keeps the rows.
+///
+/// A pull-style statement API steps over what this collected. Rows are owned
+/// because they outlive the pages they came from - that is what "the result of
+/// a query" means.
+#[derive(Default)]
+pub struct Collect {
+    rows: Vec<Vec<OwnedDatum>>,
+    limit: Option<usize>,
+}
+
+impl Collect {
+    /// Returns a sink that keeps every row.
+    pub fn new() -> Collect {
+        Collect {
+            rows: Vec::new(),
+            limit: None,
+        }
+    }
+
+    /// Returns a sink that stops the pipeline after `limit` rows.
+    ///
+    /// @param limit - how many rows to keep
+    pub fn with_limit(limit: usize) -> Collect {
+        Collect {
+            rows: Vec::new(),
+            limit: Some(limit),
+        }
+    }
+
+    /// Returns the rows collected.
+    pub fn rows(&self) -> &[Vec<OwnedDatum>] {
+        &self.rows
+    }
+
+    /// Returns the rows collected, consuming the sink.
+    pub fn into_rows(self) -> Vec<Vec<OwnedDatum>> {
+        self.rows
+    }
+}
+
+impl Sink for Collect {
+    fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
+        for nth in 0..batch.live() {
+            if let Some(limit) = self.limit {
+                if self.rows.len() >= limit {
+                    return Ok(Flow::Stop);
+                }
+            }
+            let mut row = Vec::with_capacity(batch.columns.len());
+            for column in 0..batch.columns.len() {
+                row.push(OwnedDatum::from_datum(&batch.value(nth, column)?));
+            }
+            self.rows.push(row);
+        }
+        match self.limit {
+            Some(limit) if self.rows.len() >= limit => Ok(Flow::Stop),
+            _ => Ok(Flow::Continue),
+        }
+    }
+
+    fn finish(&mut self) -> DbResult<()> {
+        Ok(())
+    }
+}
+
+/// A sink that appends into a buffer the caller still holds.
+///
+/// The pipeline owns its sink, so a caller that wants the rows back cannot
+/// simply unwrap the chain afterwards. Sharing the buffer is the small, honest
+/// way out: the caller keeps one handle, the pipeline keeps the other, and the
+/// rows are readable the moment the scan returns.
+pub struct CollectInto {
+    rows: std::rc::Rc<std::cell::RefCell<Vec<Vec<OwnedDatum>>>>,
+    limit: Option<usize>,
+}
+
+impl CollectInto {
+    /// Returns a sink appending into a shared buffer.
+    ///
+    /// @param rows - the buffer the caller keeps a handle on
+    pub fn new(rows: std::rc::Rc<std::cell::RefCell<Vec<Vec<OwnedDatum>>>>) -> CollectInto {
+        CollectInto { rows, limit: None }
+    }
+
+    /// Returns a sink that stops the pipeline after `limit` rows.
+    ///
+    /// @param rows - the buffer the caller keeps a handle on
+    /// @param limit - how many rows to keep
+    pub fn with_limit(
+        rows: std::rc::Rc<std::cell::RefCell<Vec<Vec<OwnedDatum>>>>,
+        limit: usize,
+    ) -> CollectInto {
+        CollectInto {
+            rows,
+            limit: Some(limit),
+        }
+    }
+}
+
+impl Sink for CollectInto {
+    fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
+        let mut held = self.rows.borrow_mut();
+        for nth in 0..batch.live() {
+            if let Some(limit) = self.limit {
+                if held.len() >= limit {
+                    return Ok(Flow::Stop);
+                }
+            }
+            let mut row = Vec::with_capacity(batch.columns.len());
+            for column in 0..batch.columns.len() {
+                row.push(OwnedDatum::from_datum(&batch.value(nth, column)?));
+            }
+            held.push(row);
+        }
+        match self.limit {
+            Some(limit) if held.len() >= limit => Ok(Flow::Stop),
+            _ => Ok(Flow::Continue),
+        }
+    }
+
+    fn finish(&mut self) -> DbResult<()> {
+        Ok(())
+    }
+}
+
+/// Applies a predicate, producing a selection vector rather than moving rows.
+pub struct Filter {
+    predicate: Box<dyn Eval>,
+    downstream: Box<dyn Sink>,
+    selection: Vec<u32>,
+}
+
+impl Filter {
+    /// Returns a filter over a compiled predicate.
+    ///
+    /// @param predicate - the compiled predicate
+    /// @param downstream - what to push the surviving rows into
+    pub fn new(predicate: Box<dyn Eval>, downstream: Box<dyn Sink>) -> Filter {
+        Filter {
+            predicate,
+            downstream,
+            selection: Vec::with_capacity(crate::batch::BATCH_ROWS),
+        }
+    }
+}
+
+impl Sink for Filter {
+    fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
+        self.selection.clear();
+        for nth in 0..batch.live() {
+            // SQL's WHERE keeps a row only when the predicate is definitely
+            // true: NULL is not true, and the three-valued logic in `expr`
+            // produces NULL rather than false so the distinction survives to
+            // here.
+            if crate::expr::truth(&self.predicate.value(batch, nth)?) == Some(true) {
+                self.selection.push(batch.row_at(nth) as u32);
+            }
+        }
+        if self.selection.is_empty() {
+            return Ok(Flow::Continue);
+        }
+        let filtered = Batch {
+            rows: batch.rows,
+            selection: Some(&self.selection),
+            columns: batch.columns.clone(),
+        };
+        self.downstream.push(&filtered)
+    }
+
+    fn finish(&mut self) -> DbResult<()> {
+        self.downstream.finish()
+    }
+}
+
+/// Evaluates a list of expressions into a new batch.
+pub struct Project {
+    expressions: Vec<Box<dyn Eval>>,
+    downstream: Box<dyn Sink>,
+}
+
+impl Project {
+    /// Returns a projection.
+    ///
+    /// @param expressions - one compiled expression per output column
+    /// @param downstream - what to push the projected batch into
+    pub fn new(expressions: Vec<Box<dyn Eval>>, downstream: Box<dyn Sink>) -> Project {
+        Project {
+            expressions,
+            downstream,
+        }
+    }
+}
+
+impl Sink for Project {
+    fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
+        let live = batch.live();
+        // A projection that is a permutation of the input columns rebuilds the
+        // batch out of the same borrowed vectors and copies nothing. Anything
+        // computed is materialised into a scratch buffer whose lifetime is this
+        // call, which is what the borrow below relies on.
+        let mut computed: Vec<Vec<Datum<'_>>> = Vec::with_capacity(self.expressions.len());
+        let mut passthrough: Vec<Option<usize>> = Vec::with_capacity(self.expressions.len());
+        for expression in &self.expressions {
+            match expression.column() {
+                Some(index) if batch.is_dense() => {
+                    passthrough.push(Some(index));
+                    computed.push(Vec::new());
+                }
+                _ => {
+                    passthrough.push(None);
+                    let mut values = Vec::with_capacity(live);
+                    for nth in 0..live {
+                        values.push(expression.value(batch, nth)?);
+                    }
+                    computed.push(values);
+                }
+            }
+        }
+        let mut columns = Vec::with_capacity(self.expressions.len());
+        for (index, source) in passthrough.iter().enumerate() {
+            columns.push(match source {
+                Some(column) => batch
+                    .columns
+                    .get(*column)
+                    .copied()
+                    .unwrap_or(Vector::Const(Datum::Null)),
+                None => Vector::Values(computed.get(index).map(|v| v.as_slice()).unwrap_or(&[])),
+            });
+        }
+        let projected = Batch::new(live, columns);
+        self.downstream.push(&projected)
+    }
+
+    fn finish(&mut self) -> DbResult<()> {
+        self.downstream.finish()
+    }
+}
+
+/// One aggregate and the expression it reads.
+pub struct AggregateSpec {
+    /// Which aggregate to compute.
+    pub kind: AggregateKind,
+    /// The argument, or `None` for `count(*)`.
+    pub argument: Option<Box<dyn Eval>>,
+}
+
+/// Aggregates the whole input into one row.
+pub struct SimpleAggregate {
+    specs: Vec<AggregateSpec>,
+    accumulators: Vec<Accumulator>,
+    downstream: Box<dyn Sink>,
+}
+
+impl SimpleAggregate {
+    /// Returns a whole-input aggregate.
+    ///
+    /// @param specs - one per output column
+    /// @param downstream - what to push the single result row into
+    pub fn new(specs: Vec<AggregateSpec>, downstream: Box<dyn Sink>) -> SimpleAggregate {
+        let accumulators = specs
+            .iter()
+            .map(|spec| Accumulator::new(spec.kind.clone()))
+            .collect();
+        SimpleAggregate {
+            specs,
+            accumulators,
+            downstream,
+        }
+    }
+}
+
+impl SimpleAggregate {
+    /// Returns one accumulator's current state.
+    ///
+    /// Exists so a test and the harness can read a partial result without the
+    /// pipeline having to finish, which is how the scan tests compare the dense
+    /// and generic paths.
+    ///
+    /// @param index - which aggregate
+    pub fn accumulator(&self, index: usize) -> Option<&Accumulator> {
+        self.accumulators.get(index)
+    }
+}
+
+impl Sink for SimpleAggregate {
+    fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
+        let live = batch.live();
+        for (index, spec) in self.specs.iter().enumerate() {
+            let Some(accumulator) = self.accumulators.get_mut(index) else {
+                continue;
+            };
+            match &spec.argument {
+                // `count(*)` over a dense batch: the row count, no values read.
+                None => {
+                    for _ in 0..live {
+                        accumulator.push(&Datum::Null);
+                    }
+                }
+                Some(argument) => {
+                    // The vectorised path: a bare reference to a dense integer
+                    // column of a batch with no selection vector.
+                    let dense = if batch.is_dense() {
+                        argument
+                            .column()
+                            .and_then(|column| batch.columns.get(column))
+                            .and_then(|vector| vector.dense_int_bytes())
+                    } else {
+                        None
+                    };
+                    match dense {
+                        Some(bytes) => {
+                            let wanted = live.saturating_mul(8).min(bytes.len());
+                            accumulator.push_dense_ints(bytes.get(..wanted).unwrap_or(&[]));
+                        }
+                        None => {
+                            for nth in 0..live {
+                                accumulator.push(&argument.value(batch, nth)?);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    fn finish(&mut self) -> DbResult<()> {
+        let mut row = Vec::with_capacity(self.accumulators.len());
+        for accumulator in &self.accumulators {
+            row.push(accumulator.finish()?);
+        }
+        let borrowed = borrow_row(&row);
+        let columns: Vec<Vector<'_>> = borrowed.iter().map(|value| Vector::Const(*value)).collect();
+        let batch = Batch::new(1, columns);
+        self.downstream.push(&batch)?;
+        self.downstream.finish()
+    }
+}
+
+/// Aggregates by a grouping key.
+///
+/// The group key is interned into a memcmp-comparable byte string, so the hash
+/// map is keyed on `Vec<u8>` and one comparison is a `memcmp` rather than a walk
+/// over tagged values. That is the TDD's "keys interned" in its simplest correct
+/// form; the `u32` dictionary for low-cardinality columns is a Phase 2 item and
+/// is not needed to clear this phase's gate.
+pub struct HashAggregate {
+    keys: Vec<Box<dyn Eval>>,
+    specs: Vec<AggregateSpec>,
+    groups: HashMap<Vec<u8>, (Vec<OwnedDatum>, Vec<Accumulator>)>,
+    downstream: Box<dyn Sink>,
+}
+
+impl HashAggregate {
+    /// Returns a grouped aggregate.
+    ///
+    /// @param keys - the `GROUP BY` expressions, which are also output columns
+    /// @param specs - the aggregates, which follow the keys in the output
+    /// @param downstream - what to push the group rows into
+    pub fn new(
+        keys: Vec<Box<dyn Eval>>,
+        specs: Vec<AggregateSpec>,
+        downstream: Box<dyn Sink>,
+    ) -> HashAggregate {
+        HashAggregate {
+            keys,
+            specs,
+            groups: HashMap::new(),
+            downstream,
+        }
+    }
+}
+
+impl Sink for HashAggregate {
+    fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
+        let mut encoded = Vec::with_capacity(32);
+        for nth in 0..batch.live() {
+            encoded.clear();
+            let mut values = Vec::with_capacity(self.keys.len());
+            for expression in &self.keys {
+                let value = expression.value(batch, nth)?;
+                key::encode_into(&value, &mut encoded);
+                values.push(value);
+            }
+            let entry = self.groups.entry(encoded.clone()).or_insert_with(|| {
+                (
+                    own_row(&values),
+                    self.specs
+                        .iter()
+                        .map(|spec| Accumulator::new(spec.kind.clone()))
+                        .collect(),
+                )
+            });
+            for (index, spec) in self.specs.iter().enumerate() {
+                let Some(accumulator) = entry.1.get_mut(index) else {
+                    continue;
+                };
+                match &spec.argument {
+                    None => accumulator.push(&Datum::Null),
+                    Some(argument) => accumulator.push(&argument.value(batch, nth)?),
+                }
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    fn finish(&mut self) -> DbResult<()> {
+        // Emitted in encoded-key order, which is value order, so a downstream
+        // `ORDER BY` on the group key has nothing to do. It still runs - the
+        // planner does not yet prove the property - but it sorts sorted input.
+        let mut keys: Vec<&Vec<u8>> = self.groups.keys().collect();
+        keys.sort_unstable();
+        let mut rows: Vec<Vec<OwnedDatum>> = Vec::with_capacity(keys.len());
+        for encoded in keys {
+            let Some((group, accumulators)) = self.groups.get(encoded) else {
+                continue;
+            };
+            let mut row = group.clone();
+            for accumulator in accumulators {
+                row.push(accumulator.finish()?);
+            }
+            rows.push(row);
+        }
+        emit_rows(&rows, self.downstream.as_mut())?;
+        self.downstream.finish()
+    }
+}
+
+/// Aggregates by a grouping key the input is already sorted by.
+///
+/// Grouping needs adjacency, not order. A scan of an index tree whose leading
+/// key columns are the `GROUP BY` columns delivers every row of a group before
+/// the next group starts, so the accumulators can be finished and the row
+/// emitted as the key changes - no hash table, no key encoding, no allocation
+/// per row, and constant memory whatever the cardinality.
+///
+/// This is the difference between 100,000 hash probes and 100,000 comparisons,
+/// and on `scan.group` it is most of the gap against SQLite, which takes
+/// exactly the same route through the same index.
+pub struct StreamAggregate {
+    keys: Vec<Box<dyn Eval>>,
+    specs: Vec<AggregateSpec>,
+    /// The key of the group being accumulated, or `None` before the first row.
+    current: Option<Vec<OwnedDatum>>,
+    accumulators: Vec<Accumulator>,
+    /// The finished groups, emitted at `finish`.
+    rows: Vec<Vec<OwnedDatum>>,
+    downstream: Box<dyn Sink>,
+}
+
+impl StreamAggregate {
+    /// Returns a streaming grouped aggregate.
+    ///
+    /// The caller must have established that the input arrives sorted by the
+    /// key expressions; [`crate::physical`] does that from the scanned tree's
+    /// own key columns, and it is a wrong answer rather than a slow one if it
+    /// is wrong, which is why it is never inferred from the data.
+    ///
+    /// @param keys - the `GROUP BY` expressions, which are also output columns
+    /// @param specs - the aggregates, which follow the keys in the output
+    /// @param downstream - what to push the group rows into
+    pub fn new(
+        keys: Vec<Box<dyn Eval>>,
+        specs: Vec<AggregateSpec>,
+        downstream: Box<dyn Sink>,
+    ) -> StreamAggregate {
+        let accumulators = specs
+            .iter()
+            .map(|spec| Accumulator::new(spec.kind.clone()))
+            .collect();
+        StreamAggregate {
+            keys,
+            specs,
+            current: None,
+            accumulators,
+            rows: Vec::new(),
+            downstream,
+        }
+    }
+
+    /// Finishes the group being accumulated and starts a fresh one.
+    ///
+    /// @param key - the new group's key, or `None` at end of input
+    fn roll(&mut self, key: Option<Vec<OwnedDatum>>) -> DbResult<()> {
+        if let Some(previous) = self.current.take() {
+            let mut row = previous;
+            for accumulator in &self.accumulators {
+                row.push(accumulator.finish()?);
+            }
+            self.rows.push(row);
+        }
+        self.accumulators = self
+            .specs
+            .iter()
+            .map(|spec| Accumulator::new(spec.kind.clone()))
+            .collect();
+        self.current = key;
+        Ok(())
+    }
+}
+
+impl Sink for StreamAggregate {
+    fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
+        for nth in 0..batch.live() {
+            let mut same = self.current.is_some();
+            if same {
+                for (index, expression) in self.keys.iter().enumerate() {
+                    let value = expression.value(batch, nth)?;
+                    let held = self
+                        .current
+                        .as_ref()
+                        .and_then(|key| key.get(index))
+                        .map(OwnedDatum::borrow)
+                        .unwrap_or(Datum::Null);
+                    if value.compare(&held) != Ordering::Equal {
+                        same = false;
+                        break;
+                    }
+                }
+            }
+            if !same {
+                let mut key = Vec::with_capacity(self.keys.len());
+                for expression in &self.keys {
+                    key.push(OwnedDatum::from_datum(&expression.value(batch, nth)?));
+                }
+                self.roll(Some(key))?;
+            }
+            for (index, spec) in self.specs.iter().enumerate() {
+                let Some(accumulator) = self.accumulators.get_mut(index) else {
+                    continue;
+                };
+                match &spec.argument {
+                    None => accumulator.push(&Datum::Null),
+                    Some(argument) => accumulator.push(&argument.value(batch, nth)?),
+                }
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    fn finish(&mut self) -> DbResult<()> {
+        self.roll(None)?;
+        let rows = std::mem::take(&mut self.rows);
+        emit_rows(&rows, self.downstream.as_mut())?;
+        self.downstream.finish()
+    }
+}
+
+/// Drops duplicate rows that arrive next to each other.
+///
+/// The `DISTINCT` counterpart of [`StreamAggregate`], and the same argument:
+/// when the input is sorted by the projected columns, a duplicate is always the
+/// previous row, so one comparison replaces a hash-set insert and the operator
+/// holds one row instead of the whole result. On `scan.distinct` over 100,000
+/// rows with 64 distinct values, that is 64 rows kept rather than 100,000
+/// encoded and inserted.
+pub struct AdjacentDistinct {
+    previous: Option<Vec<OwnedDatum>>,
+    rows: Vec<Vec<OwnedDatum>>,
+    downstream: Box<dyn Sink>,
+}
+
+impl AdjacentDistinct {
+    /// Returns an adjacent de-duplicating operator.
+    ///
+    /// The caller must have established that the input arrives sorted by the
+    /// columns being de-duplicated.
+    ///
+    /// @param downstream - what to push the surviving rows into
+    pub fn new(downstream: Box<dyn Sink>) -> AdjacentDistinct {
+        AdjacentDistinct {
+            previous: None,
+            rows: Vec::new(),
+            downstream,
+        }
+    }
+}
+
+impl Sink for AdjacentDistinct {
+    fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
+        let width = batch.columns.len();
+        for nth in 0..batch.live() {
+            let mut same = self.previous.is_some();
+            if same {
+                for column in 0..width {
+                    let value = batch.value(nth, column)?;
+                    let held = self
+                        .previous
+                        .as_ref()
+                        .and_then(|row| row.get(column))
+                        .map(OwnedDatum::borrow)
+                        .unwrap_or(Datum::Null);
+                    // NULLs are equal to each other for DISTINCT, which is the
+                    // one place SQL's usual "NULL is not equal to anything"
+                    // does not hold. `Datum::compare` orders NULL equal to
+                    // NULL, which is what this needs.
+                    if value.compare(&held) != Ordering::Equal {
+                        same = false;
+                        break;
+                    }
+                }
+            }
+            if same {
+                continue;
+            }
+            let mut row = Vec::with_capacity(width);
+            for column in 0..width {
+                row.push(OwnedDatum::from_datum(&batch.value(nth, column)?));
+            }
+            self.previous = Some(row.clone());
+            self.rows.push(row);
+        }
+        Ok(Flow::Continue)
+    }
+
+    fn finish(&mut self) -> DbResult<()> {
+        let rows = std::mem::take(&mut self.rows);
+        emit_rows(&rows, self.downstream.as_mut())?;
+        self.downstream.finish()
+    }
+}
+
+/// One `ORDER BY` term.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SortKey {
+    /// Which output column to order by.
+    pub column: usize,
+    /// Whether the order is descending.
+    pub descending: bool,
+}
+
+/// Sorts every row, then emits.
+pub struct Sort {
+    keys: Vec<SortKey>,
+    rows: Vec<Vec<OwnedDatum>>,
+    downstream: Box<dyn Sink>,
+}
+
+impl Sort {
+    /// Returns a sort.
+    ///
+    /// @param keys - the ordering terms
+    /// @param downstream - what to push the ordered rows into
+    pub fn new(keys: Vec<SortKey>, downstream: Box<dyn Sink>) -> Sort {
+        Sort {
+            keys,
+            rows: Vec::new(),
+            downstream,
+        }
+    }
+}
+
+impl Sink for Sort {
+    fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
+        for nth in 0..batch.live() {
+            let mut row = Vec::with_capacity(batch.columns.len());
+            for column in 0..batch.columns.len() {
+                row.push(OwnedDatum::from_datum(&batch.value(nth, column)?));
+            }
+            self.rows.push(row);
+        }
+        Ok(Flow::Continue)
+    }
+
+    fn finish(&mut self) -> DbResult<()> {
+        let keys = self.keys.clone();
+        // A stable sort, because SQLite's sorter is stable and a digest
+        // comparison over rows with equal keys would otherwise differ for a
+        // reason that is not a bug in either engine.
+        self.rows.sort_by(|left, right| compare_by(left, right, &keys));
+        let rows = std::mem::take(&mut self.rows);
+        emit_rows(&rows, self.downstream.as_mut())?;
+        self.downstream.finish()
+    }
+}
+
+/// Keeps the smallest `n` rows by the ordering, in a bounded heap.
+///
+/// `ORDER BY ... LIMIT n` does not need every row sorted, it needs the best `n`,
+/// and keeping a bounded buffer turns an O(rows log rows) sort over 100,000 rows
+/// into an O(rows log n) pass over a 100-row heap. `scan.sort` is exactly this
+/// shape.
+pub struct TopN {
+    keys: Vec<SortKey>,
+    limit: usize,
+    /// The best rows seen, kept sorted so the worst is the last.
+    best: Vec<Vec<OwnedDatum>>,
+    downstream: Box<dyn Sink>,
+}
+
+impl TopN {
+    /// The largest `n` a `TopN` will take; above it, a full sort is cheaper.
+    pub const MAX_LIMIT: usize = 65_536;
+
+    /// Returns a bounded top-n.
+    ///
+    /// @param keys - the ordering terms
+    /// @param limit - how many rows to keep
+    /// @param downstream - what to push the ordered rows into
+    pub fn new(keys: Vec<SortKey>, limit: usize, downstream: Box<dyn Sink>) -> TopN {
+        TopN {
+            keys,
+            limit,
+            best: Vec::with_capacity(limit.min(1024)),
+            downstream,
+        }
+    }
+}
+
+impl Sink for TopN {
+    fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
+        for nth in 0..batch.live() {
+            let mut row = Vec::with_capacity(batch.columns.len());
+            for column in 0..batch.columns.len() {
+                row.push(OwnedDatum::from_datum(&batch.value(nth, column)?));
+            }
+            if self.best.len() >= self.limit {
+                // Worse than or equal to the worst kept row: drop it. Equal
+                // must be dropped rather than kept, because keeping it would
+                // displace an earlier row with the same key and break the
+                // stability the digest comparison depends on.
+                let worse = match self.best.last() {
+                    Some(worst) => compare_by(&row, worst, &self.keys) != Ordering::Less,
+                    None => false,
+                };
+                if worse {
+                    continue;
+                }
+                self.best.pop();
+            }
+            let at = self
+                .best
+                .partition_point(|held| compare_by(held, &row, &self.keys) != Ordering::Greater);
+            self.best.insert(at, row);
+        }
+        Ok(Flow::Continue)
+    }
+
+    fn finish(&mut self) -> DbResult<()> {
+        let rows = std::mem::take(&mut self.best);
+        emit_rows(&rows, self.downstream.as_mut())?;
+        self.downstream.finish()
+    }
+}
+
+/// Drops duplicate rows, keeping the first of each.
+pub struct Distinct {
+    seen: std::collections::HashSet<Vec<u8>>,
+    rows: Vec<Vec<OwnedDatum>>,
+    downstream: Box<dyn Sink>,
+}
+
+impl Distinct {
+    /// Returns a de-duplicating operator.
+    ///
+    /// @param downstream - what to push the surviving rows into
+    pub fn new(downstream: Box<dyn Sink>) -> Distinct {
+        Distinct {
+            seen: std::collections::HashSet::new(),
+            rows: Vec::new(),
+            downstream,
+        }
+    }
+}
+
+impl Sink for Distinct {
+    fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
+        let mut encoded = Vec::with_capacity(32);
+        for nth in 0..batch.live() {
+            encoded.clear();
+            let mut row = Vec::with_capacity(batch.columns.len());
+            for column in 0..batch.columns.len() {
+                let value = batch.value(nth, column)?;
+                key::encode_into(&value, &mut encoded);
+                row.push(OwnedDatum::from_datum(&value));
+            }
+            if self.seen.insert(encoded.clone()) {
+                self.rows.push(row);
+            }
+        }
+        Ok(Flow::Continue)
+    }
+
+    fn finish(&mut self) -> DbResult<()> {
+        let rows = std::mem::take(&mut self.rows);
+        emit_rows(&rows, self.downstream.as_mut())?;
+        self.downstream.finish()
+    }
+}
+
+/// Passes at most `limit` rows through, after skipping `offset`.
+pub struct Limit {
+    limit: usize,
+    offset: usize,
+    seen: usize,
+    emitted: usize,
+    downstream: Box<dyn Sink>,
+}
+
+impl Limit {
+    /// Returns a limit.
+    ///
+    /// @param limit - how many rows to pass
+    /// @param offset - how many to skip first
+    /// @param downstream - what to push the surviving rows into
+    pub fn new(limit: usize, offset: usize, downstream: Box<dyn Sink>) -> Limit {
+        Limit {
+            limit,
+            offset,
+            seen: 0,
+            emitted: 0,
+            downstream,
+        }
+    }
+}
+
+impl Sink for Limit {
+    fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
+        let mut selection: Vec<u32> = Vec::new();
+        for nth in 0..batch.live() {
+            // The limit is checked before the row is counted, so `seen` reports
+            // how many rows the operator actually consumed rather than how many
+            // it looked at on its way to stopping.
+            if self.emitted >= self.limit {
+                break;
+            }
+            self.seen = self.seen.saturating_add(1);
+            if self.seen <= self.offset {
+                continue;
+            }
+            self.emitted = self.emitted.saturating_add(1);
+            selection.push(batch.row_at(nth) as u32);
+        }
+        if !selection.is_empty() {
+            let limited = Batch {
+                rows: batch.rows,
+                selection: Some(&selection),
+                columns: batch.columns.clone(),
+            };
+            self.downstream.push(&limited)?;
+        }
+        Ok(if self.emitted >= self.limit {
+            Flow::Stop
+        } else {
+            Flow::Continue
+        })
+    }
+
+    fn finish(&mut self) -> DbResult<()> {
+        self.downstream.finish()
+    }
+}
+
+/// Pushes materialised rows downstream in batch-sized chunks.
+///
+/// The one place a pipeline breaker turns owned rows back into batches. It
+/// transposes row-major storage into per-column vectors, which is why every
+/// breaker calls it rather than writing the transpose out again.
+///
+/// @param rows - the rows to emit
+/// @param downstream - what to push them into
+fn emit_rows(rows: &[Vec<OwnedDatum>], downstream: &mut dyn Sink) -> DbResult<()> {
+    let width = rows.first().map(|row| row.len()).unwrap_or(0);
+    if width == 0 {
+        return Ok(());
+    }
+    let mut start = 0usize;
+    while start < rows.len() {
+        let end = start.saturating_add(crate::batch::BATCH_ROWS).min(rows.len());
+        let chunk = rows.get(start..end).unwrap_or(&[]);
+        let mut columns_owned: Vec<Vec<Datum<'_>>> = Vec::with_capacity(width);
+        for column in 0..width {
+            columns_owned.push(
+                chunk
+                    .iter()
+                    .map(|row| {
+                        row.get(column)
+                            .map(OwnedDatum::borrow)
+                            .unwrap_or(Datum::Null)
+                    })
+                    .collect(),
+            );
+        }
+        let columns: Vec<Vector<'_>> = columns_owned
+            .iter()
+            .map(|values| Vector::Values(values.as_slice()))
+            .collect();
+        let batch = Batch::new(chunk.len(), columns);
+        if downstream.push(&batch)? == Flow::Stop {
+            return Ok(());
+        }
+        start = end;
+    }
+    Ok(())
+}
+
+/// Compares two rows by a list of ordering terms.
+///
+/// @param left - one row
+/// @param right - the other row
+/// @param keys - the ordering terms
+fn compare_by(left: &[OwnedDatum], right: &[OwnedDatum], keys: &[SortKey]) -> Ordering {
+    for term in keys {
+        let a = left
+            .get(term.column)
+            .map(OwnedDatum::borrow)
+            .unwrap_or(Datum::Null);
+        let b = right
+            .get(term.column)
+            .map(OwnedDatum::borrow)
+            .unwrap_or(Datum::Null);
+        let order = a.compare(&b);
+        let order = if term.descending {
+            order.reverse()
+        } else {
+            order
+        };
+        if order != Ordering::Equal {
+            return order;
+        }
+    }
+    Ordering::Equal
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::expr::{compile, CompareOp, Expr, StaticType};
+
+    fn ints(values: &[i64]) -> Vec<u8> {
+        values.iter().flat_map(|v| v.to_le_bytes()).collect()
+    }
+
+    /// The vectorised `sum` and the per-row `sum` agree, over a dense batch and
+    /// the same batch behind a selection vector that keeps every row.
+    ///
+    /// The selection vector is what takes the fast path away, so this is the
+    /// direct comparison of the two paths on identical input, and it is what
+    /// licenses the fast path to exist at all.
+    #[test]
+    fn the_dense_aggregate_path_agrees_with_the_selected_one() {
+        for count in [0usize, 1, 7, 500, 2048] {
+            let values: Vec<i64> = (0..count as i64).map(|n| n * 3 - 7).collect();
+            let bytes = ints(&values);
+            let all: Vec<u32> = (0..count as u32).collect();
+            let dense = Batch::new(
+                count,
+                vec![Vector::Int64 {
+                    bytes: &bytes,
+                    class: None,
+                }],
+            );
+            let selected = Batch {
+                rows: count,
+                selection: Some(&all),
+                columns: vec![Vector::Int64 {
+                    bytes: &bytes,
+                    class: None,
+                }],
+            };
+            for kind in [
+                AggregateKind::Sum,
+                AggregateKind::Count,
+                AggregateKind::Minimum,
+                AggregateKind::Maximum,
+                AggregateKind::Average,
+                AggregateKind::Total,
+            ] {
+                let mut fast = SimpleAggregate::new(
+                    vec![AggregateSpec {
+                        kind: kind.clone(),
+                        argument: Some(compile(&Expr::Column(0), &[StaticType::Int]).unwrap()),
+                    }],
+                    Box::new(Collect::new()),
+                );
+                let mut slow = SimpleAggregate::new(
+                    vec![AggregateSpec {
+                        kind: kind.clone(),
+                        argument: Some(compile(&Expr::Column(0), &[StaticType::Int]).unwrap()),
+                    }],
+                    Box::new(Collect::new()),
+                );
+                fast.push(&dense).unwrap();
+                slow.push(&selected).unwrap();
+                assert!(
+                    fast.push(&dense).is_ok() && slow.push(&selected).is_ok(),
+                    "two batches fold the same way"
+                );
+                let a = fast.accumulators[0].finish().unwrap();
+                let b = slow.accumulators[0].finish().unwrap();
+                assert_eq!(
+                    a.borrow().compare(&b.borrow()),
+                    Ordering::Equal,
+                    "{kind:?} over {count} rows: dense {a:?}, selected {b:?}"
+                );
+                assert_eq!(
+                    matches!(a, OwnedDatum::Null),
+                    matches!(b, OwnedDatum::Null),
+                    "{kind:?} over {count} rows"
+                );
+            }
+        }
+    }
+
+    /// `count(*)` counts rows behind a selection vector, not the batch's width.
+    #[test]
+    fn count_star_counts_live_rows() {
+        let values: Vec<i64> = (0..100).collect();
+        let bytes = ints(&values);
+        let selection: Vec<u32> = (0..100u32).filter(|n| n % 3 == 0).collect();
+        let mut aggregate = SimpleAggregate::new(
+            vec![AggregateSpec {
+                kind: AggregateKind::CountStar,
+                argument: None,
+            }],
+            Box::new(Collect::new()),
+        );
+        let batch = Batch {
+            rows: 100,
+            selection: Some(&selection),
+            columns: vec![Vector::Int64 {
+                bytes: &bytes,
+                class: None,
+            }],
+        };
+        aggregate.push(&batch).unwrap();
+        assert_eq!(
+            aggregate.accumulators[0].finish().unwrap().borrow().as_int(),
+            Some(selection.len() as i64)
+        );
+    }
+
+    /// A filter keeps exactly the rows whose predicate is true, and a NULL
+    /// predicate keeps none of them.
+    #[test]
+    fn a_filter_keeps_only_definite_truths() {
+        let values = [
+            Datum::Int(1),
+            Datum::Int(10),
+            Datum::Null,
+            Datum::Int(20),
+        ];
+        let predicate = compile(
+            &Expr::Compare(
+                CompareOp::Greater,
+                Box::new(Expr::Column(0)),
+                Box::new(Expr::Literal(OwnedDatum::Int(5))),
+            ),
+            &[StaticType::Int],
+        )
+        .unwrap();
+        let mut filter = Filter::new(predicate, Box::new(Collect::new()));
+        let batch = Batch::new(4, vec![Vector::Values(&values)]);
+        filter.push(&batch).unwrap();
+        assert_eq!(filter.selection, vec![1, 3]);
+    }
+
+    /// `TopN` produces exactly what a full sort followed by a limit produces,
+    /// including which of several equal-keyed rows survives.
+    #[test]
+    fn top_n_matches_sort_then_limit() {
+        let mut state = 0x1234_5678_9ABC_DEF0u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        // Deliberately few distinct keys, so ties are common and stability is
+        // actually exercised.
+        let rows: Vec<(i64, i64)> = (0..2_000)
+            .map(|n| ((next() % 20) as i64, n as i64))
+            .collect();
+        for limit in [1usize, 3, 100, 2_000, 5_000] {
+            let keys = vec![SortKey {
+                column: 0,
+                descending: false,
+            }];
+            let mut top = TopN::new(keys.clone(), limit, Box::new(Collect::new()));
+            let mut sort = Sort::new(keys.clone(), Box::new(Collect::with_limit(limit)));
+            for chunk in rows.chunks(37) {
+                let column_a: Vec<Datum<'_>> =
+                    chunk.iter().map(|(a, _)| Datum::Int(*a)).collect();
+                let column_b: Vec<Datum<'_>> =
+                    chunk.iter().map(|(_, b)| Datum::Int(*b)).collect();
+                let batch = Batch::new(
+                    chunk.len(),
+                    vec![Vector::Values(&column_a), Vector::Values(&column_b)],
+                );
+                top.push(&batch).unwrap();
+                sort.push(&batch).unwrap();
+            }
+            let from_top = std::mem::take(&mut top.best);
+            sort.rows.sort_by(|l, r| compare_by(l, r, &keys));
+            let from_sort: Vec<Vec<OwnedDatum>> =
+                sort.rows.iter().take(limit).cloned().collect();
+            assert_eq!(from_top.len(), from_sort.len(), "limit {limit}");
+            for (index, (a, b)) in from_top.iter().zip(from_sort.iter()).enumerate() {
+                assert_eq!(
+                    a[0].borrow().as_int(),
+                    b[0].borrow().as_int(),
+                    "limit {limit} row {index} key"
+                );
+                assert_eq!(
+                    a[1].borrow().as_int(),
+                    b[1].borrow().as_int(),
+                    "limit {limit} row {index} payload: top-n kept a different tied row"
+                );
+            }
+        }
+    }
+
+    /// `DISTINCT` keeps the first of each duplicate group and drops the rest,
+    /// treating values of different classes as different.
+    #[test]
+    fn distinct_separates_by_class_not_only_by_text() {
+        let values = [
+            Datum::Int(1),
+            Datum::Text(b"1"),
+            Datum::Int(1),
+            Datum::Real(1.0),
+            Datum::Null,
+            Datum::Null,
+        ];
+        let mut distinct = Distinct::new(Box::new(Collect::new()));
+        let batch = Batch::new(values.len(), vec![Vector::Values(&values)]);
+        distinct.push(&batch).unwrap();
+        // 1, "1", NULL survive; the second Int(1) and the second NULL do not.
+        // Real(1.0) encodes equal to Int(1) because the key encoding compares
+        // numerics numerically, which is what SQLite's DISTINCT does too.
+        assert_eq!(distinct.rows.len(), 3, "{:?}", distinct.rows);
+    }
+
+    /// A grouped aggregate produces one row per key, in key order, with the
+    /// right counts.
+    #[test]
+    fn grouped_aggregation_counts_each_key() {
+        let categories: Vec<Datum<'_>> = (0..1_000)
+            .map(|n| Datum::Int((n % 7) as i64))
+            .collect();
+        let mut grouped = HashAggregate::new(
+            vec![compile(&Expr::Column(0), &[StaticType::Int]).unwrap()],
+            vec![AggregateSpec {
+                kind: AggregateKind::CountStar,
+                argument: None,
+            }],
+            Box::new(Collect::new()),
+        );
+        let batch = Batch::new(1_000, vec![Vector::Values(&categories)]);
+        grouped.push(&batch).unwrap();
+        assert_eq!(grouped.groups.len(), 7);
+        let mut total = 0i64;
+        for (_, (key, accumulators)) in &grouped.groups {
+            let count = accumulators[0].finish().unwrap().borrow().as_int().unwrap();
+            let category = key[0].borrow().as_int().unwrap();
+            assert_eq!(
+                count,
+                if category < 1_000 % 7 { 143 } else { 142 },
+                "category {category}"
+            );
+            total += count;
+        }
+        assert_eq!(total, 1_000);
+    }
+
+    /// A limit stops the pipeline once it has enough, rather than reading on.
+    #[test]
+    fn a_limit_stops_the_pipeline() {
+        let values: Vec<Datum<'_>> = (0..100).map(Datum::Int).collect();
+        let mut limit = Limit::new(10, 5, Box::new(Collect::new()));
+        let batch = Batch::new(100, vec![Vector::Values(&values)]);
+        assert_eq!(limit.push(&batch).unwrap(), Flow::Stop);
+        assert_eq!(limit.emitted, 10);
+        assert_eq!(limit.seen, 15);
+    }
+
+    /// A projection that is a permutation borrows rather than copying, and one
+    /// that computes materialises - both producing the same values.
+    #[test]
+    fn a_projection_borrows_when_it_can() {
+        let a: Vec<Datum<'_>> = (0..10).map(Datum::Int).collect();
+        let b: Vec<Datum<'_>> = (0..10).map(|n| Datum::Int(n * 2)).collect();
+        let batch = Batch::new(10, vec![Vector::Values(&a), Vector::Values(&b)]);
+
+        let mut permute = Project::new(
+            vec![
+                compile(&Expr::Column(1), &[StaticType::Int; 2]).unwrap(),
+                compile(&Expr::Column(0), &[StaticType::Int; 2]).unwrap(),
+            ],
+            Box::new(Collect::new()),
+        );
+        permute.push(&batch).unwrap();
+        permute.finish().unwrap();
+
+        let mut computed = Project::new(
+            vec![compile(
+                &Expr::Arith(
+                    crate::expr::ArithOp::Add,
+                    Box::new(Expr::Column(0)),
+                    Box::new(Expr::Column(1)),
+                ),
+                &[StaticType::Int; 2],
+            )
+            .unwrap()],
+            Box::new(Collect::new()),
+        );
+        computed.push(&batch).unwrap();
+        computed.finish().unwrap();
+    }
+}

@@ -193,6 +193,20 @@ impl SqliteFile {
         self.pager.page_count()
     }
 
+    /// Returns the file's catalog, with indexes attached to their tables.
+    ///
+    /// This goes through `rustdb-catalog`'s own loader rather than parsing the
+    /// schema again here. There is one schema reader in the workspace and this
+    /// is not a second one: an index's key columns, its collations and its
+    /// descending flags all come from parsing `CREATE INDEX` against the
+    /// table it indexes, and a fixture import that got any of them wrong would
+    /// build a tree in an order the executor then assumes wrongly.
+    ///
+    /// @param name - the name to attach the database under, normally `main`
+    pub fn catalog(&mut self, name: &[u8]) -> DbResult<rustdb_catalog::snapshot::DatabaseCatalog> {
+        rustdb_catalog::load::load_database_catalog(&mut self.pager, name, 0)
+    }
+
     /// Returns every row of `sqlite_schema`.
     pub fn schema(&mut self) -> DbResult<Vec<SchemaObject>> {
         let root = PageId::from_persisted(1)?;

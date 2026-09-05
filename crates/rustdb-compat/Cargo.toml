@@ -20,6 +20,7 @@ rustdb = { workspace = true }
 # The rearchitected engine (task-1816), measured beside the old one.
 rustdb-tree = { workspace = true }
 rustdb-sqlite-reader = { workspace = true }
+rustdb-exec = { workspace = true }
 
 [[bin]]
 name = "rustdb-sqlperf"
@@ -44,6 +45,10 @@ path = "src/bin/rawcursor.rs"
 [[bin]]
 name = "rustdb-paxscan"
 path = "src/bin/paxscan.rs"
+
+[[bin]]
+name = "rustdb-analytical"
+path = "src/bin/analytical.rs"
 
 [[bin]]
 name = "rustdb-planperf"
