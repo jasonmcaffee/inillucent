@@ -7,6 +7,9 @@ members = [
     "crates/rustdb-sim",
     # Engine layers, filled in by later phases.
     "crates/rustdb-value",
+    # The rearchitected engine (task-1816).
+    "crates/rustdb-tree",
+    "crates/rustdb-sqlite-reader",
     "crates/rustdb-storage",
     "crates/rustdb-transaction",
     "crates/rustdb-catalog",
@@ -55,6 +58,8 @@ rustdb-base = { path = "crates/rustdb-base" }
 rustdb-vfs = { path = "crates/rustdb-vfs" }
 rustdb-sim = { path = "crates/rustdb-sim" }
 rustdb-value = { path = "crates/rustdb-value" }
+rustdb-tree = { path = "crates/rustdb-tree" }
+rustdb-sqlite-reader = { path = "crates/rustdb-sqlite-reader" }
 rustdb-storage = { path = "crates/rustdb-storage" }
 rustdb-transaction = { path = "crates/rustdb-transaction" }
 rustdb-catalog = { path = "crates/rustdb-catalog" }

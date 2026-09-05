@@ -1279,8 +1279,10 @@ dependencies = [
  "rustdb-session",
  "rustdb-sim",
  "rustdb-sql",
+ "rustdb-sqlite-reader",
  "rustdb-storage",
  "rustdb-transaction",
+ "rustdb-tree",
  "rustdb-value",
  "rustdb-vfs",
  "rustdb-vm",
@@ -1368,6 +1370,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rustdb-sqlite-reader"
+version = "0.1.0"
+dependencies = [
+ "rustdb-base",
+ "rustdb-storage",
+ "rustdb-transaction",
+ "rustdb-tree",
+ "rustdb-value",
+ "rustdb-vfs",
+]
+
+[[package]]
 name = "rustdb-storage"
 version = "0.1.0"
 dependencies = [
@@ -1384,6 +1398,13 @@ dependencies = [
  "rustdb-base",
  "rustdb-storage",
  "rustdb-vfs",
+]
+
+[[package]]
+name = "rustdb-tree"
+version = "0.1.0"
+dependencies = [
+ "rustdb-base",
 ]
 
 [[package]]

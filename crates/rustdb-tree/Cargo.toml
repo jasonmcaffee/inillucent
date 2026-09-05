@@ -1,0 +1,9 @@
+[package]
+name = "rustdb-tree"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "B+tree over PAX leaves: the storage layer of the rearchitected engine"
+
+[dependencies]
+rustdb-base = { workspace = true }
