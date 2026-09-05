@@ -32,8 +32,10 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 
 use rustdb_base::DbResult;
-use rustdb_tree::datum::{borrow_row, own_row, Datum, OwnedDatum};
+use rustdb_tree::datum::{borrow_row, Datum, OwnedDatum};
 use rustdb_tree::key;
+use rustdb_tree::types::compare_under;
+use rustdb_value::collation::Collation;
 
 use crate::aggregate::{Accumulator, AggregateKind};
 use crate::batch::{Batch, Vector};
@@ -214,7 +216,8 @@ impl Sink for Filter {
             // true: NULL is not true, and the three-valued logic in `expr`
             // produces NULL rather than false so the distinction survives to
             // here.
-            if crate::expr::truth(&self.predicate.value(batch, nth)?) == Some(true) {
+            let verdict = self.predicate.value(batch, nth)?;
+            if crate::expr::truth(&verdict.get()) == Some(true) {
                 self.selection.push(batch.row_at(nth) as u32);
             }
         }
@@ -260,7 +263,13 @@ impl Sink for Project {
         // batch out of the same borrowed vectors and copies nothing. Anything
         // computed is materialised into a scratch buffer whose lifetime is this
         // call, which is what the borrow below relies on.
-        let mut computed: Vec<Vec<Datum<'_>>> = Vec::with_capacity(self.expressions.len());
+        // An expression may *build* its answer - a scalar function returning
+        // text owns bytes that were not in the page - so the computed columns
+        // are held as `Computed` and borrowed in a second pass. The two passes
+        // are not a cost: the first would have had to exist anyway, and the
+        // second is a pointer per value over storage that does not move.
+        let mut computed: Vec<Vec<crate::expr::Computed<'_>>> =
+            Vec::with_capacity(self.expressions.len());
         let mut passthrough: Vec<Option<usize>> = Vec::with_capacity(self.expressions.len());
         for expression in &self.expressions {
             match expression.column() {
@@ -278,6 +287,10 @@ impl Sink for Project {
                 }
             }
         }
+        let borrowed: Vec<Vec<Datum<'_>>> = computed
+            .iter()
+            .map(|column| column.iter().map(crate::expr::Computed::get).collect())
+            .collect();
         let mut columns = Vec::with_capacity(self.expressions.len());
         for (index, source) in passthrough.iter().enumerate() {
             columns.push(match source {
@@ -286,7 +299,7 @@ impl Sink for Project {
                     .get(*column)
                     .copied()
                     .unwrap_or(Vector::Const(Datum::Null)),
-                None => Vector::Values(computed.get(index).map(|v| v.as_slice()).unwrap_or(&[])),
+                None => Vector::Values(borrowed.get(index).map(|v| v.as_slice()).unwrap_or(&[])),
             });
         }
         let projected = Batch::new(live, columns);
@@ -376,7 +389,7 @@ impl Sink for SimpleAggregate {
                         }
                         None => {
                             for nth in 0..live {
-                                accumulator.push(&argument.value(batch, nth)?);
+                                accumulator.push(&argument.value(batch, nth)?.get());
                             }
                         }
                     }
@@ -408,6 +421,7 @@ impl Sink for SimpleAggregate {
 /// is not needed to clear this phase's gate.
 pub struct HashAggregate {
     keys: Vec<Box<dyn Eval>>,
+    collations: Vec<Collation>,
     specs: Vec<AggregateSpec>,
     groups: HashMap<Vec<u8>, (Vec<OwnedDatum>, Vec<Accumulator>)>,
     downstream: Box<dyn Sink>,
@@ -417,15 +431,18 @@ impl HashAggregate {
     /// Returns a grouped aggregate.
     ///
     /// @param keys - the `GROUP BY` expressions, which are also output columns
+    /// @param collations - the collation of each key, for the grouping
     /// @param specs - the aggregates, which follow the keys in the output
     /// @param downstream - what to push the group rows into
     pub fn new(
         keys: Vec<Box<dyn Eval>>,
+        collations: Vec<Collation>,
         specs: Vec<AggregateSpec>,
         downstream: Box<dyn Sink>,
     ) -> HashAggregate {
         HashAggregate {
             keys,
+            collations,
             specs,
             groups: HashMap::new(),
             downstream,
@@ -441,12 +458,25 @@ impl Sink for HashAggregate {
             let mut values = Vec::with_capacity(self.keys.len());
             for expression in &self.keys {
                 let value = expression.value(batch, nth)?;
-                key::encode_into(&value, &mut encoded);
+                key::encode_into_with(
+                    &value.get(),
+                    self.collations
+                        .get(values.len())
+                        .copied()
+                        .unwrap_or(Collation::Binary),
+                    &mut encoded,
+                );
                 values.push(value);
             }
             let entry = self.groups.entry(encoded.clone()).or_insert_with(|| {
                 (
-                    own_row(&values),
+                    values
+                        .iter()
+                        .map(crate::expr::Computed::get)
+                        .collect::<Vec<_>>()
+                        .iter()
+                        .map(OwnedDatum::from_datum)
+                        .collect(),
                     self.specs
                         .iter()
                         .map(|spec| Accumulator::new(spec.kind.clone()))
@@ -459,7 +489,7 @@ impl Sink for HashAggregate {
                 };
                 match &spec.argument {
                     None => accumulator.push(&Datum::Null),
-                    Some(argument) => accumulator.push(&argument.value(batch, nth)?),
+                    Some(argument) => accumulator.push(&argument.value(batch, nth)?.get()),
                 }
             }
         }
@@ -500,6 +530,8 @@ impl Sink for HashAggregate {
 /// and on `scan.group` it is most of the gap against SQLite, which takes
 /// exactly the same route through the same index.
 pub struct StreamAggregate {
+    /// The collation of each group key.
+    collations: Vec<Collation>,
     keys: Vec<Box<dyn Eval>>,
     specs: Vec<AggregateSpec>,
     /// The key of the group being accumulated, or `None` before the first row.
@@ -519,10 +551,12 @@ impl StreamAggregate {
     /// is wrong, which is why it is never inferred from the data.
     ///
     /// @param keys - the `GROUP BY` expressions, which are also output columns
+    /// @param collations - the collation of each key, for the grouping
     /// @param specs - the aggregates, which follow the keys in the output
     /// @param downstream - what to push the group rows into
     pub fn new(
         keys: Vec<Box<dyn Eval>>,
+        collations: Vec<Collation>,
         specs: Vec<AggregateSpec>,
         downstream: Box<dyn Sink>,
     ) -> StreamAggregate {
@@ -531,6 +565,7 @@ impl StreamAggregate {
             .map(|spec| Accumulator::new(spec.kind.clone()))
             .collect();
         StreamAggregate {
+            collations,
             keys,
             specs,
             current: None,
@@ -592,7 +627,7 @@ impl StreamAggregate {
                         }
                         None => {
                             for nth in start..start.saturating_add(len) {
-                                accumulator.push(&argument.value(batch, nth)?);
+                                accumulator.push(&argument.value(batch, nth)?.get());
                             }
                         }
                     }
@@ -653,7 +688,15 @@ impl Sink for StreamAggregate {
                         .and_then(|key| key.get(index))
                         .map(OwnedDatum::borrow)
                         .unwrap_or(Datum::Null);
-                    if value.compare(&held) != Ordering::Equal {
+                    if compare_under(
+                        &value.get(),
+                        &held,
+                        self.collations
+                            .get(index)
+                            .copied()
+                            .unwrap_or(Collation::Binary),
+                    ) != Ordering::Equal
+                    {
                         same = false;
                         break;
                     }
@@ -662,7 +705,7 @@ impl Sink for StreamAggregate {
             if !same {
                 let mut key = Vec::with_capacity(self.keys.len());
                 for expression in &self.keys {
-                    key.push(OwnedDatum::from_datum(&expression.value(batch, nth)?));
+                    key.push(expression.value(batch, nth)?.into_owned());
                 }
                 self.roll(Some(key))?;
             }
@@ -672,7 +715,7 @@ impl Sink for StreamAggregate {
                 };
                 match &spec.argument {
                     None => accumulator.push(&Datum::Null),
-                    Some(argument) => accumulator.push(&argument.value(batch, nth)?),
+                    Some(argument) => accumulator.push(&argument.value(batch, nth)?.get()),
                 }
             }
         }
@@ -708,6 +751,8 @@ fn read_int(bytes: &[u8], row: usize) -> i64 {
 /// rows with 64 distinct values, that is 64 rows kept rather than 100,000
 /// encoded and inserted.
 pub struct AdjacentDistinct {
+    /// The collation of each compared column.
+    collations: Vec<Collation>,
     previous: Option<Vec<OwnedDatum>>,
     rows: Vec<Vec<OwnedDatum>>,
     downstream: Box<dyn Sink>,
@@ -719,9 +764,11 @@ impl AdjacentDistinct {
     /// The caller must have established that the input arrives sorted by the
     /// columns being de-duplicated.
     ///
+    /// @param collations - the collation of each compared column
     /// @param downstream - what to push the surviving rows into
-    pub fn new(downstream: Box<dyn Sink>) -> AdjacentDistinct {
+    pub fn new(collations: Vec<Collation>, downstream: Box<dyn Sink>) -> AdjacentDistinct {
         AdjacentDistinct {
+            collations,
             previous: None,
             rows: Vec::new(),
             downstream,
@@ -747,7 +794,15 @@ impl Sink for AdjacentDistinct {
                     // one place SQL's usual "NULL is not equal to anything"
                     // does not hold. `Datum::compare` orders NULL equal to
                     // NULL, which is what this needs.
-                    if value.compare(&held) != Ordering::Equal {
+                    if compare_under(
+                        &value,
+                        &held,
+                        self.collations
+                            .get(column)
+                            .copied()
+                            .unwrap_or(Collation::Binary),
+                    ) != Ordering::Equal
+                    {
                         same = false;
                         break;
                     }
@@ -780,6 +835,20 @@ pub struct SortKey {
     pub column: usize,
     /// Whether the order is descending.
     pub descending: bool,
+    /// The collation the term's text is ordered under.
+    ///
+    /// A column's own collation unless the term named one. `ORDER BY team`
+    /// on a `COLLATE NOCASE` column orders case-insensitively and
+    /// `ORDER BY team COLLATE BINARY` does not, and the two are different
+    /// answers rather than different speeds.
+    pub collation: Collation,
+    /// Whether NULLs sort before everything rather than after.
+    ///
+    /// SQLite's default is first ascending and last descending, which falls out
+    /// of reversing an ordering that puts NULL lowest. An explicit
+    /// `NULLS FIRST` on a descending term, or `NULLS LAST` on an ascending one,
+    /// does not - it has to be carried, and the SLT corpus asks for both.
+    pub nulls_first: bool,
 }
 
 /// Sorts every row, then emits.
@@ -863,6 +932,13 @@ impl TopN {
 
 impl Sink for TopN {
     fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
+        // `LIMIT 0` keeps nothing. Without this the loop below reads
+        // `best.len() >= limit` as `0 >= 0`, finds no worst row to compare
+        // against, and keeps the row anyway - so `ORDER BY id LIMIT 0`
+        // returned one row. The SLT corpus asked the question directly.
+        if self.limit == 0 {
+            return Ok(Flow::Stop);
+        }
         let width = batch.columns.len();
         for nth in 0..batch.live() {
             // Compare before materialising. `ORDER BY label LIMIT 100` over
@@ -922,12 +998,7 @@ fn compare_batch_row(
             .get(term.column)
             .map(OwnedDatum::borrow)
             .unwrap_or(Datum::Null);
-        let order = a.compare(&b);
-        let order = if term.descending {
-            order.reverse()
-        } else {
-            order
-        };
+        let order = order_under(&a, &b, term);
         if order != Ordering::Equal {
             return Ok(order);
         }
@@ -937,6 +1008,7 @@ fn compare_batch_row(
 
 /// Drops duplicate rows, keeping the first of each.
 pub struct Distinct {
+    collations: Vec<Collation>,
     seen: std::collections::HashSet<Vec<u8>>,
     rows: Vec<Vec<OwnedDatum>>,
     downstream: Box<dyn Sink>,
@@ -945,9 +1017,11 @@ pub struct Distinct {
 impl Distinct {
     /// Returns a de-duplicating operator.
     ///
+    /// @param collations - the collation of each compared column
     /// @param downstream - what to push the surviving rows into
-    pub fn new(downstream: Box<dyn Sink>) -> Distinct {
+    pub fn new(collations: Vec<Collation>, downstream: Box<dyn Sink>) -> Distinct {
         Distinct {
+            collations,
             seen: std::collections::HashSet::new(),
             rows: Vec::new(),
             downstream,
@@ -963,7 +1037,14 @@ impl Sink for Distinct {
             let mut row = Vec::with_capacity(batch.columns.len());
             for column in 0..batch.columns.len() {
                 let value = batch.value(nth, column)?;
-                key::encode_into(&value, &mut encoded);
+                key::encode_into_with(
+                    &value,
+                    self.collations
+                        .get(column)
+                        .copied()
+                        .unwrap_or(Collation::Binary),
+                    &mut encoded,
+                );
                 row.push(OwnedDatum::from_datum(&value));
             }
             if self.seen.insert(encoded.clone()) {
@@ -1051,10 +1132,10 @@ impl Sink for Limit {
 ///
 /// @param rows - the rows to emit
 /// @param downstream - what to push them into
-fn emit_rows(rows: &[Vec<OwnedDatum>], downstream: &mut dyn Sink) -> DbResult<()> {
+pub(crate) fn emit_rows(rows: &[Vec<OwnedDatum>], downstream: &mut dyn Sink) -> DbResult<Flow> {
     let width = rows.first().map(|row| row.len()).unwrap_or(0);
     if width == 0 {
-        return Ok(());
+        return Ok(Flow::Continue);
     }
     let mut start = 0usize;
     while start < rows.len() {
@@ -1081,11 +1162,50 @@ fn emit_rows(rows: &[Vec<OwnedDatum>], downstream: &mut dyn Sink) -> DbResult<()
             .collect();
         let batch = Batch::new(chunk.len(), columns);
         if downstream.push(&batch)? == Flow::Stop {
-            return Ok(());
+            return Ok(Flow::Stop);
         }
         start = end;
     }
-    Ok(())
+    Ok(Flow::Continue)
+}
+
+/// Orders two values under one term, with its direction and NULL placement.
+///
+/// The direction reverses the comparison; the NULL placement does *not* - a
+/// NULL is not "the smallest value", it is outside the order, and reversing it
+/// with everything else is only right when the requested placement happens to
+/// be the default. Handling it separately is what makes `ORDER BY x NULLS LAST`
+/// and `ORDER BY x DESC NULLS FIRST` mean what they say.
+///
+/// @param left - one value
+/// @param right - the other
+/// @param term - the ordering term
+fn order_under(left: &Datum<'_>, right: &Datum<'_>, term: &SortKey) -> Ordering {
+    match (left.is_null(), right.is_null()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => {
+            if term.nulls_first {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            }
+        }
+        (false, true) => {
+            if term.nulls_first {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            }
+        }
+        (false, false) => {
+            let order = compare_under(left, right, term.collation);
+            if term.descending {
+                order.reverse()
+            } else {
+                order
+            }
+        }
+    }
 }
 
 /// Compares two rows by a list of ordering terms.
@@ -1103,12 +1223,7 @@ fn compare_by(left: &[OwnedDatum], right: &[OwnedDatum], keys: &[SortKey]) -> Or
             .get(term.column)
             .map(OwnedDatum::borrow)
             .unwrap_or(Datum::Null);
-        let order = a.compare(&b);
-        let order = if term.descending {
-            order.reverse()
-        } else {
-            order
-        };
+        let order = order_under(&a, &b, term);
         if order != Ordering::Equal {
             return order;
         }
@@ -1268,6 +1383,8 @@ mod tests {
             let keys = vec![SortKey {
                 column: 0,
                 descending: false,
+                collation: Collation::Binary,
+                nulls_first: true,
             }];
             let mut top = TopN::new(keys.clone(), limit, Box::new(Collect::new()));
             let mut sort = Sort::new(keys.clone(), Box::new(Collect::with_limit(limit)));
@@ -1312,7 +1429,7 @@ mod tests {
             Datum::Null,
             Datum::Null,
         ];
-        let mut distinct = Distinct::new(Box::new(Collect::new()));
+        let mut distinct = Distinct::new(Vec::new(), Box::new(Collect::new()));
         let batch = Batch::new(values.len(), vec![Vector::Values(&values)]);
         distinct.push(&batch).unwrap();
         // 1, "1", NULL survive; the second Int(1) and the second NULL do not.
@@ -1328,6 +1445,7 @@ mod tests {
         let categories: Vec<Datum<'_>> = (0..1_000).map(|n| Datum::Int((n % 7) as i64)).collect();
         let mut grouped = HashAggregate::new(
             vec![compile(&Expr::Column(0), &[StaticType::Int]).unwrap()],
+            Vec::new(),
             vec![AggregateSpec {
                 kind: AggregateKind::CountStar,
                 argument: None,
@@ -1394,6 +1512,7 @@ mod tests {
                 let rows = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
                 let mut aggregate = StreamAggregate::new(
                     vec![compile(&Expr::Column(0), &[StaticType::Int; 2]).unwrap()],
+                    Vec::new(),
                     vec![
                         AggregateSpec {
                             kind: AggregateKind::CountStar,

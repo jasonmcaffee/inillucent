@@ -28,15 +28,94 @@
 //! a literal. Everything else compiles to the generic node, which is the same
 //! code the old VM ran, and correctness never depends on which was chosen.
 
-use rustdb_base::error::misuse;
 use rustdb_base::DbResult;
+use rustdb_sql::ast::{BinaryOp, UnaryOp};
+use rustdb_sql::function::{MathFunc, ScalarFunc, TimeFunc};
 use rustdb_tree::datum::{Datum, OwnedDatum};
+use rustdb_value::affinity::{self, Affinity};
+use rustdb_value::collation::Collation;
+use rustdb_value::compare::compare_sql;
+use rustdb_value::encoding::TextEncoding;
+use rustdb_value::value::{BlobValue, TextValue, Value};
 
 use crate::batch::Batch;
 
 /// A compiled expression node.
 ///
 /// Object-safe despite the lifetime parameter on `value`, because a lifetime
+/// One expression's answer for one row: a borrow of a page, or a new value.
+///
+/// A scan hands the executor values that *live in a leaf*, and everything the
+/// design is about depends on not copying them. But a scalar function
+/// **constructs** its answer - `substr(label, 1, 4)` is bytes that were not in
+/// the page and `printf` is bytes that were nowhere - so the return type has to
+/// admit both. Making it one or the other would pick a wrong side: forcing
+/// every answer to be owned puts an allocation on the scan's hot path, and
+/// forcing every answer to be borrowed makes the built-in function set
+/// unexpressible.
+///
+/// The cost of the enum is one discriminant on a value that was going to be
+/// matched on anyway. The cost of *not* having it is measured in the shape of
+/// the alternative, which is why the borrowed variant carries `Datum<'p>` and
+/// not `&'p Datum`: a borrowed answer is still one word plus a tag and copies
+/// like one.
+#[derive(Clone, Debug)]
+pub enum Computed<'p> {
+    /// A value borrowed from a pinned page, or a scalar that owns nothing.
+    Borrowed(Datum<'p>),
+    /// A value this expression built.
+    Owned(OwnedDatum),
+}
+
+impl<'p> Computed<'p> {
+    /// Returns the value, borrowing whichever half holds it.
+    ///
+    /// The lifetime is the *borrow of self* rather than `'p`, because an owned
+    /// answer lives in this object. A caller that needs the value to outlive
+    /// the `Computed` keeps the `Computed`, which is what every operator that
+    /// builds a batch out of computed columns does.
+    pub fn get(&self) -> Datum<'_> {
+        match self {
+            Computed::Borrowed(value) => *value,
+            Computed::Owned(value) => value.borrow(),
+        }
+    }
+
+    /// Returns the value as an owned one, copying only when it has to.
+    pub fn into_owned(self) -> OwnedDatum {
+        match self {
+            Computed::Borrowed(value) => OwnedDatum::from_datum(&value),
+            Computed::Owned(value) => value,
+        }
+    }
+
+    /// Reports whether the answer is NULL.
+    pub fn is_null(&self) -> bool {
+        match self {
+            Computed::Borrowed(value) => value.is_null(),
+            Computed::Owned(OwnedDatum::Null) => true,
+            Computed::Owned(_) => false,
+        }
+    }
+
+    /// Returns the answer as an integer, when it is one.
+    pub fn as_int(&self) -> Option<i64> {
+        self.get().as_int()
+    }
+}
+
+impl<'p> From<Datum<'p>> for Computed<'p> {
+    fn from(value: Datum<'p>) -> Computed<'p> {
+        Computed::Borrowed(value)
+    }
+}
+
+impl From<OwnedDatum> for Computed<'_> {
+    fn from(value: OwnedDatum) -> Computed<'static> {
+        Computed::Owned(value)
+    }
+}
+
 /// parameter on a method is allowed on a trait object where a type parameter is
 /// not. That is what lets a node hand back a value borrowing the page.
 pub trait Eval: Send + Sync {
@@ -44,7 +123,7 @@ pub trait Eval: Send + Sync {
     ///
     /// @param batch - the batch being evaluated
     /// @param nth - the position among the batch's live rows
-    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Datum<'p>>;
+    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>>;
 
     /// Returns the column this reads, when it is a bare column reference.
     ///
@@ -65,8 +144,30 @@ pub enum Expr {
     Literal(OwnedDatum),
     /// Addition, subtraction, multiplication.
     Arith(ArithOp, Box<Expr>, Box<Expr>),
-    /// A comparison.
+    /// A comparison with no affinity conversion and BINARY collation.
     Compare(CompareOp, Box<Expr>, Box<Expr>),
+    /// A comparison that applies an affinity, a collation, or both.
+    ///
+    /// SQLite converts both operands to a common affinity before comparing -
+    /// `WHERE id = ?1` against an `INTEGER PRIMARY KEY` gives the parameter
+    /// integer affinity, so binding `'42'` finds row 42 - and compares text
+    /// under the column's collation. An executor that ignored either would be
+    /// *quietly wrong* rather than incomplete, which is why this is a distinct
+    /// variant rather than a flag on the one above: the plain comparison stays
+    /// a two-branch fast path, and anything with a conversion in it goes
+    /// through `rustdb-value`'s own rules rather than a second copy of them.
+    CompareWith {
+        /// Which comparison.
+        op: CompareOp,
+        /// The affinity applied to both sides first, if any.
+        affinity: Option<Affinity>,
+        /// The collation text is compared under.
+        collation: Collation,
+        /// The left operand.
+        left: Box<Expr>,
+        /// The right operand.
+        right: Box<Expr>,
+    },
     /// `AND`, with SQL's three-valued logic.
     And(Box<Expr>, Box<Expr>),
     /// `OR`, with SQL's three-valued logic.
@@ -78,7 +179,125 @@ pub enum Expr {
     /// `IS NOT NULL`.
     IsNotNull(Box<Expr>),
     /// `length(x)`, needed by `range.lookaside` and the fixture's shapes.
+    ///
+    /// It has a node of its own rather than going through [`Expr::Call`]
+    /// because it reads the leaf's bytes in place where the general path copies
+    /// them into a `Value` first, and `range.lookaside` calls it once per row
+    /// over a hundred thousand rows.
     Length(Box<Expr>),
+    /// A call to one of the dialect's scalar functions.
+    Call {
+        /// Which function.
+        func: ScalarFunc,
+        /// The arguments.
+        arguments: Vec<Expr>,
+        /// The collation the function's comparisons use.
+        collation: Collation,
+    },
+    /// A call to one of the math functions.
+    Math {
+        /// Which function.
+        func: MathFunc,
+        /// The arguments.
+        arguments: Vec<Expr>,
+    },
+    /// A call to one of the date and time functions.
+    Time {
+        /// Which function.
+        func: TimeFunc,
+        /// The arguments.
+        arguments: Vec<Expr>,
+        /// The julian day the statement calls "now", fixed for the statement.
+        now: f64,
+    },
+    /// An arithmetic, bitwise or concatenation operator of any kind.
+    General {
+        /// Which operator.
+        op: BinaryOp,
+        /// The left operand.
+        left: Box<Expr>,
+        /// The right operand.
+        right: Box<Expr>,
+    },
+    /// A unary operator.
+    Unary {
+        /// Which operator.
+        op: UnaryOp,
+        /// The operand.
+        operand: Box<Expr>,
+    },
+    /// `CAST(x AS type)`.
+    Cast {
+        /// The operand.
+        operand: Box<Expr>,
+        /// The affinity the declared type maps to.
+        affinity: Affinity,
+    },
+    /// `IS` / `IS NOT`.
+    Is {
+        /// Whether `NOT` was written.
+        negated: bool,
+        /// The left operand.
+        left: Box<Expr>,
+        /// The right operand.
+        right: Box<Expr>,
+        /// The affinity applied before comparing.
+        affinity: Option<Affinity>,
+        /// The collation the comparison uses.
+        collation: Collation,
+    },
+    /// `BETWEEN`.
+    Between {
+        /// Whether `NOT` was written.
+        negated: bool,
+        /// The value being tested.
+        operand: Box<Expr>,
+        /// The lower bound.
+        low: Box<Expr>,
+        /// The upper bound.
+        high: Box<Expr>,
+        /// The affinity applied to the comparisons.
+        affinity: Option<Affinity>,
+        /// The collation the comparisons use.
+        collation: Collation,
+    },
+    /// `IN` over a value list.
+    InList {
+        /// Whether `NOT` was written.
+        negated: bool,
+        /// The value being tested.
+        operand: Box<Expr>,
+        /// The list.
+        list: Vec<Expr>,
+        /// The affinity applied before comparing.
+        affinity: Option<Affinity>,
+        /// The collation the comparison uses.
+        collation: Collation,
+    },
+    /// `CASE`, in both its forms.
+    Case {
+        /// The base operand, when the form has one.
+        operand: Option<Box<Expr>>,
+        /// The `WHEN`/`THEN` pairs.
+        branches: Vec<(Expr, Expr)>,
+        /// The `ELSE` arm.
+        otherwise: Option<Box<Expr>>,
+        /// The collation comparisons in the base form use.
+        collation: Collation,
+    },
+    /// `LIKE` or `GLOB`.
+    Pattern {
+        /// Whether `NOT` was written.
+        negated: bool,
+        /// Which operator.
+        kind: crate::scalar::PatternKind,
+        /// The value being matched.
+        operand: Box<Expr>,
+        /// The pattern.
+        pattern: Box<Expr>,
+        /// The `ESCAPE` argument.
+        escape: Option<Box<Expr>>,
+    },
 }
 
 /// The arithmetic operators Phase 1 compiles.
@@ -151,6 +370,19 @@ pub fn compile(expr: &Expr, types: &[StaticType]) -> DbResult<Box<dyn Eval>> {
         Expr::Column(index) => Box::new(ColumnRef { index: *index }),
         Expr::Literal(value) => Box::new(Literal {
             value: value.clone(),
+        }),
+        Expr::CompareWith {
+            op,
+            affinity,
+            collation,
+            left,
+            right,
+        } => Box::new(AffinityCompare {
+            op: *op,
+            affinity: *affinity,
+            collation: *collation,
+            left: compile(left, types)?,
+            right: compile(right, types)?,
         }),
         Expr::Arith(op, left, right) => {
             let compiled_left = compile(left, types)?;
@@ -225,7 +457,130 @@ pub fn compile(expr: &Expr, types: &[StaticType]) -> DbResult<Box<dyn Eval>> {
         Expr::Length(inner) => Box::new(Length {
             inner: compile(inner, types)?,
         }),
+        Expr::Call {
+            func,
+            arguments,
+            collation,
+        } => Box::new(crate::scalar::ScalarCall {
+            func: *func,
+            arguments: compile_all(arguments, types)?,
+            collation: *collation,
+        }),
+        Expr::Math { func, arguments } => Box::new(crate::scalar::MathCall {
+            func: *func,
+            arguments: compile_all(arguments, types)?,
+        }),
+        Expr::Time {
+            func,
+            arguments,
+            now,
+        } => Box::new(crate::scalar::TimeCall {
+            func: *func,
+            arguments: compile_all(arguments, types)?,
+            now: *now,
+        }),
+        Expr::General { op, left, right } => Box::new(crate::scalar::GeneralArith {
+            op: *op,
+            left: compile(left, types)?,
+            right: compile(right, types)?,
+        }),
+        Expr::Unary { op, operand } => Box::new(crate::scalar::Unary {
+            op: *op,
+            operand: compile(operand, types)?,
+        }),
+        Expr::Cast { operand, affinity } => Box::new(crate::scalar::Cast {
+            operand: compile(operand, types)?,
+            affinity: *affinity,
+        }),
+        Expr::Is {
+            negated,
+            left,
+            right,
+            affinity,
+            collation,
+        } => Box::new(crate::scalar::IsTest {
+            negated: *negated,
+            left: compile(left, types)?,
+            right: compile(right, types)?,
+            affinity: *affinity,
+            collation: *collation,
+        }),
+        Expr::Between {
+            negated,
+            operand,
+            low,
+            high,
+            affinity,
+            collation,
+        } => Box::new(crate::scalar::Between {
+            negated: *negated,
+            operand: compile(operand, types)?,
+            low: compile(low, types)?,
+            high: compile(high, types)?,
+            affinity: *affinity,
+            collation: *collation,
+        }),
+        Expr::InList {
+            negated,
+            operand,
+            list,
+            affinity,
+            collation,
+        } => Box::new(crate::scalar::InList {
+            negated: *negated,
+            operand: compile(operand, types)?,
+            list: compile_all(list, types)?,
+            affinity: *affinity,
+            collation: *collation,
+        }),
+        Expr::Case {
+            operand,
+            branches,
+            otherwise,
+            collation,
+        } => {
+            let mut compiled = Vec::with_capacity(branches.len());
+            for (when, then) in branches {
+                compiled.push((compile(when, types)?, compile(then, types)?));
+            }
+            Box::new(crate::scalar::Case {
+                operand: match operand {
+                    Some(operand) => Some(compile(operand, types)?),
+                    None => None,
+                },
+                branches: compiled,
+                otherwise: match otherwise {
+                    Some(otherwise) => Some(compile(otherwise, types)?),
+                    None => None,
+                },
+                collation: *collation,
+            })
+        }
+        Expr::Pattern {
+            negated,
+            kind,
+            operand,
+            pattern,
+            escape,
+        } => Box::new(crate::scalar::Pattern {
+            negated: *negated,
+            kind: *kind,
+            operand: compile(operand, types)?,
+            pattern: compile(pattern, types)?,
+            escape: match escape {
+                Some(escape) => Some(compile(escape, types)?),
+                None => None,
+            },
+        }),
     })
+}
+
+/// Compiles a list of expressions.
+///
+/// @param exprs - the expressions to compile
+/// @param types - the static type of each input column
+fn compile_all(exprs: &[Expr], types: &[StaticType]) -> DbResult<Vec<Box<dyn Eval>>> {
+    exprs.iter().map(|expr| compile(expr, types)).collect()
 }
 
 /// Returns what the compiler can prove about an expression's type.
@@ -249,12 +604,28 @@ pub fn static_type(expr: &Expr, types: &[StaticType]) -> StaticType {
             }
         }
         Expr::Compare(..)
+        | Expr::CompareWith { .. }
         | Expr::And(..)
         | Expr::Or(..)
         | Expr::Not(..)
         | Expr::IsNull(..)
         | Expr::IsNotNull(..)
-        | Expr::Length(..) => StaticType::Int,
+        | Expr::Length(..)
+        | Expr::Is { .. }
+        | Expr::Between { .. }
+        | Expr::InList { .. }
+        | Expr::Pattern { .. } => StaticType::Int,
+        // A function's result type is a question about the function and its
+        // arguments, and claiming an answer here would be claiming one the
+        // compiler cannot check. `Unknown` costs a generic node; a wrong claim
+        // costs a wrong answer.
+        Expr::Call { .. }
+        | Expr::Math { .. }
+        | Expr::Time { .. }
+        | Expr::General { .. }
+        | Expr::Unary { .. }
+        | Expr::Cast { .. }
+        | Expr::Case { .. } => StaticType::Unknown,
     }
 }
 
@@ -272,8 +643,8 @@ struct ColumnRef {
 }
 
 impl Eval for ColumnRef {
-    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Datum<'p>> {
-        batch.value(nth, self.index)
+    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
+        Ok(Computed::Borrowed(batch.value(nth, self.index)?))
     }
 
     fn column(&self) -> Option<usize> {
@@ -287,23 +658,17 @@ struct Literal {
 }
 
 impl Eval for Literal {
-    fn value<'p>(&self, _batch: &Batch<'p>, _nth: usize) -> DbResult<Datum<'p>> {
-        // The value is owned by the node, which outlives every batch it is
-        // evaluated against, but the signature promises `'p`. Copying the
-        // scalar variants is free; the borrowed ones cannot be handed out with
-        // a longer lifetime than they have, so text and blob literals are
-        // compared through `compare_owned` in the specialised nodes and are
-        // never returned from here. Phase 2's arena removes the restriction by
-        // giving literals the statement's lifetime.
+    fn value<'p>(&self, _batch: &Batch<'p>, _nth: usize) -> DbResult<Computed<'p>> {
+        // Phase 1 could not return a text literal at all: the node owns the
+        // bytes and the signature promised `'p`, so a text literal was compared
+        // in place and refused anywhere else. `Computed` is what removes the
+        // restriction - an owned answer is one of the two things the type
+        // admits - and a text literal in a select list now works.
         Ok(match &self.value {
-            OwnedDatum::Null => Datum::Null,
-            OwnedDatum::Int(number) => Datum::Int(*number),
-            OwnedDatum::Real(number) => Datum::Real(*number),
-            OwnedDatum::Text(_) | OwnedDatum::Blob(_) => {
-                return Err(misuse(
-                    "a text or blob literal is compared in place, not returned",
-                ))
-            }
+            OwnedDatum::Null => Computed::Borrowed(Datum::Null),
+            OwnedDatum::Int(number) => Computed::Borrowed(Datum::Int(*number)),
+            OwnedDatum::Real(number) => Computed::Borrowed(Datum::Real(*number)),
+            owned => Computed::Owned(owned.clone()),
         })
     }
 }
@@ -316,11 +681,11 @@ struct IntArith {
 }
 
 impl Eval for IntArith {
-    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Datum<'p>> {
+    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
         let left = self.left.value(batch, nth)?;
         let right = self.right.value(batch, nth)?;
         if left.is_null() || right.is_null() {
-            return Ok(Datum::Null);
+            return Ok(Computed::Borrowed(Datum::Null));
         }
         // The static type is a claim the binder derived from column *affinity*,
         // and a dynamically typed engine can hold a row that violates it - a
@@ -328,14 +693,10 @@ impl Eval for IntArith {
         // as an exception. Producing NULL for those rows would make the
         // specialisation faster and wrong, which is the one thing it may not be,
         // so it falls back to the generic arithmetic instead.
-        let (Some(left), Some(right)) = (left.as_int(), right.as_int()) else {
-            return generic_arith(
-                self.op,
-                &self.left.value(batch, nth)?,
-                &self.right.value(batch, nth)?,
-            );
+        let (Some(a), Some(b)) = (left.as_int(), right.as_int()) else {
+            return generic_arith(self.op, &left.get(), &right.get());
         };
-        Ok(integer_arith(self.op, left, right))
+        Ok(Computed::Borrowed(integer_arith(self.op, a, b)))
     }
 }
 
@@ -372,19 +733,19 @@ fn integer_arith<'p>(op: ArithOp, left: i64, right: i64) -> Datum<'p> {
 /// @param op - the operator
 /// @param left - the left operand
 /// @param right - the right operand
-fn generic_arith<'p>(op: ArithOp, left: &Datum<'_>, right: &Datum<'_>) -> DbResult<Datum<'p>> {
+fn generic_arith<'p>(op: ArithOp, left: &Datum<'_>, right: &Datum<'_>) -> DbResult<Computed<'p>> {
     if left.is_null() || right.is_null() {
-        return Ok(Datum::Null);
+        return Ok(Computed::Borrowed(Datum::Null));
     }
     if let (Some(a), Some(b)) = (left.as_int(), right.as_int()) {
-        return Ok(integer_arith(op, a, b));
+        return Ok(Computed::Borrowed(integer_arith(op, a, b)));
     }
     let (a, b) = (numeric(left), numeric(right));
-    Ok(Datum::Real(match op {
+    Ok(Computed::Borrowed(Datum::Real(match op {
         ArithOp::Add => a + b,
         ArithOp::Subtract => a - b,
         ArithOp::Multiply => a * b,
-    }))
+    })))
 }
 
 /// Arithmetic over anything.
@@ -395,12 +756,10 @@ struct GenericArith {
 }
 
 impl Eval for GenericArith {
-    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Datum<'p>> {
-        generic_arith(
-            self.op,
-            &self.left.value(batch, nth)?,
-            &self.right.value(batch, nth)?,
-        )
+    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
+        let left = self.left.value(batch, nth)?;
+        let right = self.right.value(batch, nth)?;
+        generic_arith(self.op, &left.get(), &right.get())
     }
 }
 
@@ -415,9 +774,9 @@ struct IntColumnAgainstConstant {
 }
 
 impl Eval for IntColumnAgainstConstant {
-    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Datum<'p>> {
+    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
         let value = batch.value(nth, self.column)?;
-        Ok(match value.as_int() {
+        Ok(Computed::Borrowed(match value.as_int() {
             Some(number) => Datum::Int(i64::from(self.op.holds(number.cmp(&self.constant)))),
             None if value.is_null() => Datum::Null,
             // The column's affinity said integer and the row holds something
@@ -426,7 +785,7 @@ impl Eval for IntColumnAgainstConstant {
             None => Datum::Int(i64::from(
                 self.op.holds(value.compare(&Datum::Int(self.constant))),
             )),
-        })
+        }))
     }
 }
 
@@ -438,13 +797,15 @@ struct IntCompare {
 }
 
 impl Eval for IntCompare {
-    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Datum<'p>> {
+    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
         let left = self.left.value(batch, nth)?;
         let right = self.right.value(batch, nth)?;
         if left.is_null() || right.is_null() {
-            return Ok(Datum::Null);
+            return Ok(Computed::Borrowed(Datum::Null));
         }
-        Ok(Datum::Int(i64::from(self.op.holds(left.compare(&right)))))
+        Ok(Computed::Borrowed(Datum::Int(i64::from(
+            self.op.holds(left.get().compare(&right.get())),
+        ))))
     }
 }
 
@@ -456,13 +817,74 @@ struct GenericCompare {
 }
 
 impl Eval for GenericCompare {
-    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Datum<'p>> {
+    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
         let left = self.left.value(batch, nth)?;
         let right = self.right.value(batch, nth)?;
         if left.is_null() || right.is_null() {
-            return Ok(Datum::Null);
+            return Ok(Computed::Borrowed(Datum::Null));
         }
-        Ok(Datum::Int(i64::from(self.op.holds(left.compare(&right)))))
+        Ok(Computed::Borrowed(Datum::Int(i64::from(
+            self.op.holds(left.get().compare(&right.get())),
+        ))))
+    }
+}
+
+/// A comparison that applies an affinity and a collation.
+///
+/// The conversion and the comparison are `rustdb-value`'s, not a second
+/// implementation of them: `apply_affinity` and `compare_sql` are the functions
+/// the old engine used and the ones the affinity tests are written against. The
+/// only thing here is the bridge from a borrowed page value to a `Value` and
+/// back to a truth.
+struct AffinityCompare {
+    op: CompareOp,
+    affinity: Option<Affinity>,
+    collation: Collation,
+    left: Box<dyn Eval>,
+    right: Box<dyn Eval>,
+}
+
+impl Eval for AffinityCompare {
+    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
+        let left = self.left.value(batch, nth)?;
+        let right = self.right.value(batch, nth)?;
+        if left.is_null() || right.is_null() {
+            return Ok(Computed::Borrowed(Datum::Null));
+        }
+        let (left, right) = (left.get(), right.get());
+        let (left, right) = (as_value(&left), as_value(&right));
+        let (left, right) = match self.affinity {
+            None => (left, right),
+            Some(affinity) => (
+                affinity::apply_affinity(left, affinity, TextEncoding::Utf8).unwrap_or(Value::Null),
+                affinity::apply_affinity(right, affinity, TextEncoding::Utf8)
+                    .unwrap_or(Value::Null),
+            ),
+        };
+        let order = compare_sql(&left, &right, self.collation);
+        match order.ordering() {
+            Some(order) => Ok(Computed::Borrowed(Datum::Int(i64::from(
+                self.op.holds(order),
+            )))),
+            None => Ok(Computed::Borrowed(Datum::Null)),
+        }
+    }
+}
+
+/// Returns a borrowed page value as a `rustdb-value` value.
+///
+/// The database encoding is UTF-8 and only UTF-8 - the TDD says so in the leaf
+/// layout - so the encoding argument is a constant rather than a parameter
+/// nobody could vary.
+///
+/// @param datum - the value read out of a batch
+fn as_value<'p>(datum: &Datum<'p>) -> Value<'p> {
+    match datum {
+        Datum::Null => Value::Null,
+        Datum::Int(number) => Value::Integer(*number),
+        Datum::Real(number) => Value::Real(*number),
+        Datum::Text(bytes) => Value::Text(TextValue::utf8(bytes)),
+        Datum::Blob(bytes) => Value::Blob(BlobValue::borrowed(bytes)),
     }
 }
 
@@ -473,19 +895,21 @@ struct Conjunction {
 }
 
 impl Eval for Conjunction {
-    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Datum<'p>> {
+    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
         let left = self.left.value(batch, nth)?;
         // FALSE AND anything is FALSE, even when the other side is NULL, so a
         // definite false short-circuits.
-        if truth(&left) == Some(false) {
-            return Ok(Datum::Int(0));
+        if truth(&left.get()) == Some(false) {
+            return Ok(Computed::Borrowed(Datum::Int(0)));
         }
         let right = self.right.value(batch, nth)?;
-        Ok(match (truth(&left), truth(&right)) {
-            (_, Some(false)) => Datum::Int(0),
-            (Some(true), Some(true)) => Datum::Int(1),
-            _ => Datum::Null,
-        })
+        Ok(Computed::Borrowed(
+            match (truth(&left.get()), truth(&right.get())) {
+                (_, Some(false)) => Datum::Int(0),
+                (Some(true), Some(true)) => Datum::Int(1),
+                _ => Datum::Null,
+            },
+        ))
     }
 }
 
@@ -496,17 +920,19 @@ struct Disjunction {
 }
 
 impl Eval for Disjunction {
-    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Datum<'p>> {
+    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
         let left = self.left.value(batch, nth)?;
-        if truth(&left) == Some(true) {
-            return Ok(Datum::Int(1));
+        if truth(&left.get()) == Some(true) {
+            return Ok(Computed::Borrowed(Datum::Int(1)));
         }
         let right = self.right.value(batch, nth)?;
-        Ok(match (truth(&left), truth(&right)) {
-            (_, Some(true)) => Datum::Int(1),
-            (Some(false), Some(false)) => Datum::Int(0),
-            _ => Datum::Null,
-        })
+        Ok(Computed::Borrowed(
+            match (truth(&left.get()), truth(&right.get())) {
+                (_, Some(true)) => Datum::Int(1),
+                (Some(false), Some(false)) => Datum::Int(0),
+                _ => Datum::Null,
+            },
+        ))
     }
 }
 
@@ -516,12 +942,13 @@ struct Negation {
 }
 
 impl Eval for Negation {
-    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Datum<'p>> {
-        Ok(match truth(&self.inner.value(batch, nth)?) {
+    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
+        let inner = self.inner.value(batch, nth)?;
+        Ok(Computed::Borrowed(match truth(&inner.get()) {
             Some(true) => Datum::Int(0),
             Some(false) => Datum::Int(1),
             None => Datum::Null,
-        })
+        }))
     }
 }
 
@@ -532,9 +959,11 @@ struct NullTest {
 }
 
 impl Eval for NullTest {
-    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Datum<'p>> {
+    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
         let is_null = self.inner.value(batch, nth)?.is_null();
-        Ok(Datum::Int(i64::from(is_null == self.wanted)))
+        Ok(Computed::Borrowed(Datum::Int(i64::from(
+            is_null == self.wanted,
+        ))))
     }
 }
 
@@ -544,19 +973,20 @@ struct Length {
 }
 
 impl Eval for Length {
-    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Datum<'p>> {
-        Ok(match self.inner.value(batch, nth)? {
+    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
+        let inner = self.inner.value(batch, nth)?;
+        Ok(Computed::Borrowed(match inner.get() {
             Datum::Null => Datum::Null,
             // SQLite counts characters in text and bytes in a blob. The
             // database encoding is UTF-8, so a character is a non-continuation
             // byte.
             Datum::Text(bytes) => {
-                Datum::Int(bytes.iter().filter(|byte| (**byte & 0xC0) != 0x80).count() as i64)
+                Datum::Int(bytes.iter().filter(|byte| (*byte & 0xC0) != 0x80).count() as i64)
             }
             Datum::Blob(bytes) => Datum::Int(bytes.len() as i64),
             Datum::Int(number) => Datum::Int(number.to_string().len() as i64),
             Datum::Real(number) => Datum::Int(format_real(number).len() as i64),
-        })
+        }))
     }
 }
 
@@ -635,13 +1065,26 @@ fn prefix_number(bytes: &[u8]) -> f64 {
 
 /// Renders a double the way the dialect's text conversion does.
 ///
+/// One line, delegating, and it stays that way. What was here before was a
+/// hand-rolled approximation - `{:.1}` for whole numbers under 1e15 and Rust's
+/// `Display` for everything else - sitting a crate away from
+/// [`rustdb_value::numeric::real_to_text`], which is a transcription of
+/// SQLite's `%!.17g` down to the double rounding and the round-trip
+/// shortening.
+///
+/// The two agreed on every value anybody had thought to test and disagreed on
+/// the ones nobody had. Rust's `Display` renders `1e300` as three hundred and
+/// one digits where SQLite renders `1.0e+300`, so `length(score)` came back as
+/// 302 instead of 9 and `group_concat` produced a line of zeros; and `{:.1}`
+/// renders `-0.0` as `-0.0` where SQLite deliberately drops the sign, because
+/// it decides with `r < 0.0` and `-0.0 < 0.0` is false.
+///
+/// A generated differential sweep found both in its first run. Neither would
+/// ever have been found by reading the code, because the code looked right.
+///
 /// @param number - the value to render
 pub fn format_real(number: f64) -> String {
-    if number == number.trunc() && number.abs() < 1e15 {
-        format!("{number:.1}")
-    } else {
-        format!("{number}")
-    }
+    String::from_utf8_lossy(&rustdb_value::numeric::real_to_text(number)).into_owned()
 }
 
 #[cfg(test)]
@@ -699,7 +1142,7 @@ mod tests {
                     let a = fast.value(&batch, 0).unwrap();
                     let b = slow.value(&batch, 0).unwrap();
                     assert_eq!(
-                        a.compare(&b),
+                        a.get().compare(&b.get()),
                         std::cmp::Ordering::Equal,
                         "{op:?} {value:?} vs {constant}: {a:?} against {b:?}"
                     );
@@ -718,7 +1161,7 @@ mod tests {
                     let a = fast.value(&batch, 0).unwrap();
                     let b = slow.value(&batch, 0).unwrap();
                     assert_eq!(
-                        a.compare(&b),
+                        a.get().compare(&b.get()),
                         std::cmp::Ordering::Equal,
                         "{op:?} {left:?} {right:?}: {a:?} against {b:?}"
                     );
@@ -745,8 +1188,8 @@ mod tests {
             ],
         );
         let value = fast.value(&batch, 0).unwrap();
-        assert!(matches!(value, Datum::Real(_)), "{value:?}");
-        assert_eq!(value.as_f64().unwrap(), i64::MAX as f64 + 1.0);
+        assert!(matches!(value.get(), Datum::Real(_)), "{value:?}");
+        assert_eq!(value.get().as_f64().unwrap(), i64::MAX as f64 + 1.0);
     }
 
     /// Three-valued logic follows SQL: `FALSE AND NULL` is FALSE, and
