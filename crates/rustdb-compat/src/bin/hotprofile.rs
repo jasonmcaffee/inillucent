@@ -162,6 +162,97 @@ fn run(root: &Path) -> Result<(), String> {
     }
 
     report(&profiles);
+    report_prepares(&connection)?;
+    report_prepare_stages();
+    Ok(())
+}
+
+/// Prints what each bracketed stage of preparing a statement cost.
+fn report_prepare_stages() {
+    const NAMES: [(usize, &str); 6] = [
+        (10, "parse"),
+        (11, "catalog snapshot"),
+        (12, "functions+collations"),
+        (13, "bind"),
+        (14, "compile"),
+        (15, "verify"),
+    ];
+    let mut any = false;
+    for (slot, name) in NAMES {
+        let runs = match rustdb_base::probe::STAGE_RUNS.get(slot) {
+            Some(counter) => counter.load(Ordering::Relaxed),
+            None => 0,
+        };
+        if runs == 0 {
+            continue;
+        }
+        if !any {
+            println!();
+            println!("--- preparing a statement, by stage ---");
+            println!(
+                "  {:<24} {:>10} {:>12} {:>12} {:>12}",
+                "stage", "runs", "ns/run", "allocs", "alloc/run"
+            );
+            any = true;
+        }
+        let nanos = match rustdb_base::probe::STAGE_NANOS.get(slot) {
+            Some(counter) => counter.load(Ordering::Relaxed),
+            None => 0,
+        };
+        let allocations = match rustdb_base::probe::STAGE_ALLOCATIONS.get(slot) {
+            Some(counter) => counter.load(Ordering::Relaxed),
+            None => 0,
+        };
+        println!(
+            "  {:<24} {:>10} {:>12.1} {:>12} {:>12.2}",
+            name,
+            runs,
+            nanos as f64 / runs.max(1) as f64,
+            allocations,
+            allocations as f64 / runs.max(1) as f64
+        );
+    }
+}
+
+/// Measures preparing a statement, which is where parsing and planning happen.
+///
+/// Reported apart from the running workloads because it is a different
+/// question: `SELECT 1` touches no table, so whatever it costs is what a
+/// prepare costs before any row is read.
+fn report_prepares(connection: &Connection) -> Result<(), String> {
+    const ROUNDS: u64 = 4_000;
+    println!();
+    println!(
+        "{:<52} {:>12} {:>12} {:>12}",
+        "prepared statement", "ns each", "allocs", "alloc each"
+    );
+    for sql in [
+        "SELECT 1",
+        "SELECT label FROM main_table WHERE id = ?1",
+        "SELECT count(*), sum(key), max(category) FROM main_table",
+    ] {
+        connection
+            .prepare(sql)
+            .map_err(|failure| format!("{sql}: {failure}"))?;
+        rustdb_base::probe::reset_stages();
+        let before = ALLOCATIONS.load(Ordering::Relaxed);
+        let started = Instant::now();
+        for _ in 0..ROUNDS {
+            let statement = connection
+                .prepare(sql)
+                .map_err(|failure| format!("{sql}: {failure}"))?;
+            drop(statement);
+        }
+        let elapsed = started.elapsed().as_nanos() as f64;
+        let allocations = ALLOCATIONS.load(Ordering::Relaxed).saturating_sub(before);
+        println!(
+            "{:<52} {:>12.1} {:>12} {:>12.1}",
+            sql,
+            elapsed / ROUNDS as f64,
+            allocations,
+            allocations as f64 / ROUNDS as f64
+        );
+    }
     Ok(())
 }
 

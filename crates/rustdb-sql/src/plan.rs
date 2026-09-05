@@ -576,24 +576,9 @@ pub fn plan_select_with(select: BoundSelect, levers: Levers) -> PhysicalPlan {
     // so whatever order the walk delivered is not the order the result comes
     // out in - which is why `windows` disqualifies a statement here even though
     // it has nothing to do with the access path.
-    let single = levers.has(Levers::ORDERED_WALK)
-        && sources.len() == 1
-        && aggregation == AggregationMode::None
-        && !select.distinct
-        && select.windows.is_empty()
-        && select.compounds.is_empty();
-    let provided = if single {
-        sources
-            .first()
-            .and_then(|outer| ordering_provided(&select, outer.id, &outer.table, &outer.path))
-    } else {
-        None
-    };
-    let needs_sort = !select.order_by.is_empty() && provided.is_none();
-    let reverse = provided.unwrap_or(false);
-    // Adjacency is a weaker property than order, so it is asked separately and
-    // for a wider set of statements: a grouped aggregate is disqualified from
-    // the ORDER BY analysis above and can still be streamed.
+    // Adjacency is a weaker property than order, so it is asked first and for a
+    // wider set of statements: a grouped aggregate can be streamed whether or
+    // not it also answers an ORDER BY.
     let adjacent = levers.has(Levers::STREAMING_GROUP)
         && sources.len() == 1
         && select.windows.is_empty()
@@ -603,6 +588,39 @@ pub fn plan_select_with(select: BoundSelect, levers: Levers) -> PhysicalPlan {
         && aggregation == AggregationMode::Grouped
         && outer.is_some_and(|outer| grouped_by_walk(&select, outer));
     let distinct_walk = adjacent && outer.is_some_and(|outer| distinct_by_walk(&select, outer));
+    // A statement that streams its grouping or its de-duplication still comes
+    // out in the order the walk delivered: the rows of a key arrive together,
+    // one output row is emitted per key, and the keys arrive in key order. So
+    // the walk answers the ORDER BY for these too.
+    //
+    // It did not used to. `SELECT DISTINCT category FROM main_table ORDER BY
+    // category` walked the covering index on `(category, key)` - which is
+    // already in `category` order - de-duplicated as the rows arrived, and then
+    // sorted the thirty-two answers through a temporary B-tree anyway. SQLite
+    // reads the same index and does not sort, which is the whole of a 26x
+    // difference on that workload. The same applied to every
+    // `GROUP BY x ORDER BY x`.
+    //
+    // The two are kept apart rather than merged: a statement that is both
+    // grouped and DISTINCT is left to sort, because the de-duplication then
+    // runs on the aggregate output rather than on the walk and the walk's order
+    // is no longer the result's.
+    let streamed_in_order = (grouped_walk && !select.distinct)
+        || (distinct_walk && aggregation == AggregationMode::None);
+    let single = levers.has(Levers::ORDERED_WALK)
+        && sources.len() == 1
+        && select.windows.is_empty()
+        && select.compounds.is_empty()
+        && ((aggregation == AggregationMode::None && !select.distinct) || streamed_in_order);
+    let provided = if single {
+        sources
+            .first()
+            .and_then(|outer| ordering_provided(&select, outer.id, &outer.table, &outer.path))
+    } else {
+        None
+    };
+    let needs_sort = !select.order_by.is_empty() && provided.is_none();
+    let reverse = provided.unwrap_or(false);
     let compounds = compound_arms
         .into_iter()
         .map(|(op, arm)| (op, plan_select_with(arm, levers)))
@@ -1330,15 +1348,21 @@ fn sort_penalty(
     source: &BoundSource,
     levers: Levers,
 ) -> f64 {
+    // A grouped or DISTINCT statement that streams over the walk answers its
+    // ORDER BY the same way an ungrouped one does, so it is priced the same
+    // way. Charging it the sort regardless would hide the saving that makes the
+    // index path worth taking.
+    let streams = levers.has(Levers::STREAMING_GROUP)
+        && ((!select.group_by.is_empty() && !select.distinct)
+            || (select.distinct && select.group_by.is_empty() && select.aggregates.is_empty()));
     let answerable = levers.has(Levers::ORDERED_WALK)
         && position == 0
         && select.sources.len() == 1
-        && select.group_by.is_empty()
-        && select.aggregates.is_empty()
         && select.windows.is_empty()
         && select.compounds.is_empty()
-        && !select.distinct
-        && !select.order_by.is_empty();
+        && !select.order_by.is_empty()
+        && ((select.group_by.is_empty() && select.aggregates.is_empty() && !select.distinct)
+            || streams);
     if !answerable {
         return 0.0;
     }

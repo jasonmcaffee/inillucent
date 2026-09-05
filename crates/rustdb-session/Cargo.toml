@@ -16,3 +16,8 @@ rustdb-storage = { workspace = true }
 rustdb-transaction = { workspace = true }
 rustdb-ext = { workspace = true }
 rustdb-search = { workspace = true }
+
+[features]
+# Brackets the stages of preparing a statement and records them in
+# `rustdb-base::probe`. Off by default and never on in a shipped build.
+opcode-probe = []

@@ -670,16 +670,45 @@ fn databases_written(program: &rustdb_vm::program::Program) -> Vec<usize> {
 }
 
 /// Lexes, parses, binds, plans, compiles and verifies one statement.
+
+/// Records one bracketed stage of `compile_sql`, in a profiling build.
+///
+/// A no-op unless the `opcode-probe` feature is on, which it never is in a
+/// shipped build: it reads a clock and an allocation counter twice per stage.
+#[cfg(feature = "opcode-probe")]
+macro_rules! stage {
+    ($slot:expr, $body:expr) => {{
+        let started = std::time::Instant::now();
+        let allocated = rustdb_base::probe::ALLOCATIONS.load(core::sync::atomic::Ordering::Relaxed);
+        let outcome = $body;
+        rustdb_base::probe::record_stage_allocating(
+            $slot,
+            started.elapsed().as_nanos() as u64,
+            rustdb_base::probe::ALLOCATIONS
+                .load(core::sync::atomic::Ordering::Relaxed)
+                .saturating_sub(allocated),
+        );
+        outcome
+    }};
+}
+
+#[cfg(not(feature = "opcode-probe"))]
+macro_rules! stage {
+    ($slot:expr, $body:expr) => {
+        $body
+    };
+}
+
 fn compile_sql(
     connection: &Connection,
     sql: &[u8],
     authorizer: &dyn Authorizer,
 ) -> DbResult<Compiled> {
     let limits = connection.limits().clone();
-    let parsed = parse_next_statement(sql, 0, &limits)?;
-    let catalog = connection.catalog()?;
-    let functions = connection.external_functions();
-    let collations = connection.collations();
+    let parsed = stage!(10, parse_next_statement(sql, 0, &limits))?;
+    let catalog = stage!(11, connection.catalog())?;
+    let functions = stage!(12, connection.external_functions());
+    let collations = stage!(12, connection.collations());
     let mut binder = Binder::new(catalog.as_ref(), &parsed.ast, authorizer)
         .with_source(sql)
         .with_functions(&functions)
@@ -696,7 +725,7 @@ fn compile_sql(
             authorizer,
         );
     }
-    let bound = binder.bind_statement(&parsed.statement)?;
+    let bound = stage!(13, binder.bind_statement(&parsed.statement))?;
     let dependencies = ProgramDependencies {
         schemas: binder.dependencies().schemas.clone(),
         generation: binder.dependencies().generation,
@@ -704,49 +733,52 @@ fn compile_sql(
     };
     let statement_sql = parsed.span.slice(sql).to_vec();
     let parameters = parsed.parameters.count;
-    let (program, body) = match bound {
-        BoundStatement::Select(select) => {
-            let (program, _) = compile::compile_select_with(
-                *select,
-                dependencies,
-                parameters,
-                Some(virtual_planner(connection)?),
-            )?;
-            (program, Body::Program)
+    let (program, body) = stage!(
+        14,
+        match bound {
+            BoundStatement::Select(select) => {
+                let (program, _) = compile::compile_select_with(
+                    *select,
+                    dependencies,
+                    parameters,
+                    Some(virtual_planner(connection)?),
+                )?;
+                (program, Body::Program)
+            }
+            BoundStatement::Insert(insert) => (
+                compile_dml::compile_insert_with(
+                    &insert,
+                    dependencies,
+                    parameters,
+                    Some(virtual_planner(connection)?),
+                )?,
+                Body::Program,
+            ),
+            BoundStatement::Update(update) => (
+                compile_dml::compile_update_with(
+                    &update,
+                    dependencies,
+                    parameters,
+                    Some(virtual_planner(connection)?),
+                )?,
+                Body::Program,
+            ),
+            BoundStatement::Delete(delete) => (
+                compile_dml::compile_delete_with(
+                    &delete,
+                    dependencies,
+                    parameters,
+                    Some(virtual_planner(connection)?),
+                )?,
+                Body::Program,
+            ),
+            BoundStatement::Directive(directive) => {
+                let program = directive_program(dependencies, &directive);
+                (program, Body::Directive(directive))
+            }
+            BoundStatement::Empty => (empty_program(dependencies), Body::Program),
         }
-        BoundStatement::Insert(insert) => (
-            compile_dml::compile_insert_with(
-                &insert,
-                dependencies,
-                parameters,
-                Some(virtual_planner(connection)?),
-            )?,
-            Body::Program,
-        ),
-        BoundStatement::Update(update) => (
-            compile_dml::compile_update_with(
-                &update,
-                dependencies,
-                parameters,
-                Some(virtual_planner(connection)?),
-            )?,
-            Body::Program,
-        ),
-        BoundStatement::Delete(delete) => (
-            compile_dml::compile_delete_with(
-                &delete,
-                dependencies,
-                parameters,
-                Some(virtual_planner(connection)?),
-            )?,
-            Body::Program,
-        ),
-        BoundStatement::Directive(directive) => {
-            let program = directive_program(dependencies, &directive);
-            (program, Body::Directive(directive))
-        }
-        BoundStatement::Empty => (empty_program(dependencies), Body::Program),
-    };
+    );
     // The peephole pass runs before the verifier, never after it. A rewrite of
     // the compiler's output is exactly the kind of code that is right until one
     // opcode nobody thought about, so the program it produces is proved the
@@ -758,7 +790,7 @@ fn compile_sql(
     {
         program.optimizations_used |= rustdb_sql::plan::Levers::FUSED_BYTECODE;
     }
-    let problems = verify(&program);
+    let problems = stage!(15, verify(&program));
     if !problems.is_empty() {
         return Err(error::misuse(format!(
             "the compiler produced a program the verifier rejected: {problems:?}"
