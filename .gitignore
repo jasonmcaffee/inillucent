@@ -30,3 +30,7 @@ corpus.jsonl
 /compat/release/small/
 /compat/release/medium/
 /compat/release/large/
+
+# cargo-mutants writes its run directory here when --output is not given.
+/mutants.out/
+/mutants.out.old/
