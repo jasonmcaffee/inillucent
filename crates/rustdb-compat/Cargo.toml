@@ -35,6 +35,10 @@ name = "rustdb-hotprofile"
 path = "src/bin/hotprofile.rs"
 
 [[bin]]
+name = "rustdb-rawcursor"
+path = "src/bin/rawcursor.rs"
+
+[[bin]]
 name = "rustdb-planperf"
 path = "src/bin/planperf.rs"
 
