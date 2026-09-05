@@ -24,3 +24,13 @@ loom = "0.7"
 # `loom` is set by the operator, not by a Cargo feature, because it has to
 # replace the atomics in every crate in the build at once.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
+[dev-dependencies]
+# The deterministic simulator, for fault injection. A dev-dependency, so it
+# cannot reach the production graph the dependency-direction check walks - and
+# it depends only on rustdb-base and rustdb-vfs, so there is no cycle back into
+# this crate. Without it the two crates whose error paths matter most could not
+# see an injected fault at all: every failpoint campaign in the repository ran
+# from rustdb-compat, which is the wrong side of the layering to reach a
+# pager or a journal directly.
+rustdb-sim = { workspace = true }
