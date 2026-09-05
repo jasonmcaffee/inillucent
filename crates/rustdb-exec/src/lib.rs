@@ -55,4 +55,4 @@ pub use ops::{
     Limit, Project, Sink, SimpleAggregate, Sort, SortKey, StreamAggregate, TopN,
 };
 pub use physical::{SourceLayout, TreeCatalog};
-pub use scan::{Projection, TableScan};
+pub use scan::{Projection, SkipScan, TableScan};

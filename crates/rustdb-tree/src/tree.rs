@@ -48,6 +48,20 @@ pub struct Tree {
     page_size: usize,
     /// The leaf pages, in key order.
     pages: Vec<Vec<u8>>,
+    /// Each leaf's first key, so a descent compares without reading a page.
+    ///
+    /// This is what an interior page *is*, held as an array because Phase 1 has
+    /// no buffer pool to put one in. It is not an optimisation bolted on: a
+    /// descent that parses a leaf per comparison reads log(leaves) pages to
+    /// find out something the separators already say, and on a skip scan -
+    /// which descends once per distinct value - that was the entire cost of the
+    /// query. Phase 2 replaces the array with real interior pages carrying
+    /// swizzled child pointers, and the comparison code does not change.
+    ///
+    /// Rebuilt by [`Tree::relink`] after every structural change, so it cannot
+    /// drift from the pages: there is no path that alters `pages` without going
+    /// through it.
+    fences: Vec<Vec<OwnedDatum>>,
 }
 
 impl Tree {
@@ -70,6 +84,7 @@ impl Tree {
             key_columns,
             page_size,
             pages: Vec::new(),
+            fences: Vec::new(),
         })
     }
 
@@ -107,7 +122,7 @@ impl Tree {
                 }
             }
         }
-        built.link_siblings()?;
+        built.relink()?;
         Ok(built)
     }
 
@@ -159,7 +174,7 @@ impl Tree {
     /// The sibling chain is what a scan follows once the pool exists; in Phase 1
     /// the scan walks the `Vec`, but the pointers are written and checked now so
     /// the Phase 2 move does not discover them missing.
-    fn link_siblings(&mut self) -> DbResult<()> {
+    fn relink(&mut self) -> DbResult<()> {
         let count = self.pages.len();
         for index in 0..count {
             let right = if index.saturating_add(1) < count {
@@ -173,7 +188,46 @@ impl Tree {
                 .ok_or_else(|| corrupt("leaf vanished while linking"))?;
             crate::page::write_u64(page, crate::page::header::RIGHT, right.0)?;
         }
+        self.fences = Vec::with_capacity(count);
+        for index in 0..count {
+            let leaf = self.leaf(index)?;
+            let mut key = Vec::with_capacity(self.key_columns);
+            if leaf.row_count() > 0 {
+                for column in 0..self.key_columns {
+                    key.push(OwnedDatum::from_datum(&leaf.value(0, column)?));
+                }
+            }
+            self.fences.push(key);
+        }
         Ok(())
+    }
+
+    /// Compares one leaf's first key against a probe.
+    ///
+    /// Reads the fence array, not the page. An empty leaf has no first key and
+    /// is treated as sorting after everything, so a run of empty leaves cannot
+    /// make a descent walk past a leaf that holds the key.
+    ///
+    /// @param index - the leaf's position
+    /// @param probe - the key to compare against
+    fn fence_compare(&self, index: usize, probe: &[Datum<'_>]) -> std::cmp::Ordering {
+        let Some(key) = self.fences.get(index) else {
+            return std::cmp::Ordering::Greater;
+        };
+        if key.is_empty() {
+            return std::cmp::Ordering::Greater;
+        }
+        // Compared in place. Building a `Vec<Datum>` to borrow the fence with
+        // was one heap allocation per comparison, and a descent makes several -
+        // which on a skip scan, one descent per distinct value, was most of the
+        // per-seek cost.
+        for (held, wanted) in key.iter().zip(probe.iter()) {
+            let order = held.borrow().compare(wanted);
+            if order != std::cmp::Ordering::Equal {
+                return order;
+            }
+        }
+        std::cmp::Ordering::Equal
     }
 
     /// Finds the leaf whose key range contains a key.
@@ -190,13 +244,7 @@ impl Tree {
         let mut high = self.pages.len();
         while low.saturating_add(1) < high {
             let middle = low.saturating_add(high.saturating_sub(low) / 2);
-            let leaf = self.leaf(middle)?;
-            let order = if leaf.row_count() > 0 {
-                leaf.compare_key(0, probe)?
-            } else {
-                std::cmp::Ordering::Greater
-            };
-            match order {
+            match self.fence_compare(middle, probe) {
                 std::cmp::Ordering::Greater => high = middle,
                 _ => low = middle,
             }
@@ -262,7 +310,7 @@ impl Tree {
         if self.pages.is_empty() {
             let page = self.builder.encode(&[row.to_vec()])?;
             self.pages.push(page);
-            self.link_siblings()?;
+            self.relink()?;
             return Ok(());
         }
         let probe: Vec<Datum<'_>> = row.iter().copied().take(self.key_columns).collect();
@@ -343,7 +391,7 @@ impl Tree {
                     *slot = page;
                 }
             }
-            self.link_siblings()?;
+            self.relink()?;
             return Ok(());
         }
         let borrowed: Vec<Vec<Datum<'_>>> = rows.iter().map(|row| borrow_row(row)).collect();
@@ -374,8 +422,166 @@ impl Tree {
             }
             Packed::RowTooLarge => return Err(misuse("a row is larger than a page")),
         }
-        self.link_siblings()?;
+        self.relink()?;
         Ok(())
+    }
+
+    /// Returns the first position whose key is strictly greater than a prefix.
+    ///
+    /// The seek an index skip scan is built on. `SELECT DISTINCT category` over
+    /// an index led by `category` does not need to read the rows: it needs to
+    /// visit one row per distinct value, and this is how it gets from one to
+    /// the next. Over 100,000 rows with 64 distinct categories that is 64
+    /// descents instead of 100,000 row reads - which is the algorithm SQLite
+    /// uses for the same query, so it is also what makes the comparison a
+    /// comparison of engines rather than of algorithms.
+    ///
+    /// The probe may be shorter than the tree's key: comparison stops at the
+    /// probe's length, so a one-column probe against a three-column key skips
+    /// every row sharing that first column.
+    ///
+    /// @param prefix - the key prefix to skip past
+    /// @param from - the position to start looking from, as a `(leaf, row)` pair
+    pub fn seek_after(
+        &self,
+        prefix: &[Datum<'_>],
+        from: (usize, usize),
+    ) -> DbResult<Option<(usize, usize)>> {
+        if self.pages.is_empty() || prefix.is_empty() {
+            return Ok(None);
+        }
+        // Which leaf the prefix's last row is in.
+        //
+        // A skip scan walks forward, so the answer is almost always the leaf it
+        // is already on or the next one, and a binary search over every leaf
+        // parses log(leaves) pages to rediscover that. Galloping from the
+        // current position instead - 1, 2, 4, 8 leaves ahead until one starts
+        // past the prefix, then a binary search inside that bracket - parses
+        // one or two pages in the common case and never more than the plain
+        // search would. On the fixture it took `scan.distinct` from a seek that
+        // cost more than the scan it replaced to one that cost a twentieth of
+        // it.
+        let landed = self.gallop(prefix, from.0);
+        let leaf = self.leaf(landed)?;
+        let view = leaf.key_view()?;
+        // The upper bound inside that leaf: the first row whose key is greater.
+        let mut low = if landed == from.0 { from.1 } else { 0 };
+        let mut high = leaf.row_count();
+        while low < high {
+            let middle = low.saturating_add(high.saturating_sub(low) / 2);
+            match leaf.compare_key_with(&view, middle, prefix)? {
+                std::cmp::Ordering::Greater => high = middle,
+                _ => low = middle.saturating_add(1),
+            }
+        }
+        if low < leaf.row_count() {
+            return Ok(Some((landed, low)));
+        }
+        // Past the end of that leaf: the next leaf's first row is greater,
+        // because keys increase across leaf boundaries.
+        let next = landed.saturating_add(1);
+        if next < self.pages.len() && self.leaf(next)?.row_count() > 0 {
+            return Ok(Some((next, 0)));
+        }
+        Ok(None)
+    }
+
+    /// Returns the last leaf at or after `from` whose first key is not greater
+    /// than the probe.
+    ///
+    /// Doubling the step until the bracket is found, then bisecting it. The
+    /// same answer `find_leaf` gives, reached in a number of page reads
+    /// proportional to the distance moved rather than to the size of the tree.
+    ///
+    /// @param prefix - the key prefix being sought past
+    /// @param from - the leaf to start from
+    fn gallop(&self, prefix: &[Datum<'_>], from: usize) -> usize {
+        let count = self.pages.len();
+        if from >= count.saturating_sub(1) {
+            return count.saturating_sub(1);
+        }
+        // Find the first leaf after `from` that starts past the prefix. Every
+        // leaf strictly before it can hold the prefix; the one before it is the
+        // answer.
+        let mut step = 1usize;
+        let mut lower = from;
+        let mut upper = count;
+        loop {
+            let probe = from.saturating_add(step);
+            if probe >= count {
+                break;
+            }
+            if self.leaf_starts_after(probe, prefix) {
+                upper = probe;
+                break;
+            }
+            lower = probe;
+            step = step.saturating_mul(2);
+        }
+        while lower.saturating_add(1) < upper {
+            let middle = lower.saturating_add(upper.saturating_sub(lower) / 2);
+            if self.leaf_starts_after(middle, prefix) {
+                upper = middle;
+            } else {
+                lower = middle;
+            }
+        }
+        lower
+    }
+
+    /// Reports whether a leaf's first key sorts after a probe.
+    ///
+    /// An empty leaf counts as starting after everything, so a run of empty
+    /// leaves cannot make the search walk past a leaf that holds the key.
+    ///
+    /// @param index - the leaf's position
+    /// @param prefix - the probe
+    fn leaf_starts_after(&self, index: usize, prefix: &[Datum<'_>]) -> bool {
+        self.fence_compare(index, prefix) == std::cmp::Ordering::Greater
+    }
+
+    /// Returns one row's leading key values.
+    ///
+    /// @param at - the position, as a `(leaf, row)` pair
+    /// @param width - how many leading columns to read
+    pub fn key_at(&self, at: (usize, usize), width: usize) -> DbResult<Vec<OwnedDatum>> {
+        let mut key = Vec::with_capacity(width);
+        self.key_at_into(at, width, &mut key)?;
+        Ok(key)
+    }
+
+    /// Reads one row's leading key values into a buffer the caller reuses.
+    ///
+    /// A skip scan does this once per distinct value and has no use for the
+    /// allocation, so the buffer is handed in.
+    ///
+    /// @param at - the position, as a `(leaf, row)` pair
+    /// @param width - how many leading columns to read
+    /// @param into - the buffer to fill, cleared first
+    pub fn key_at_into(
+        &self,
+        at: (usize, usize),
+        width: usize,
+        into: &mut Vec<OwnedDatum>,
+    ) -> DbResult<()> {
+        let leaf = self.leaf(at.0)?;
+        into.clear();
+        for column in 0..width {
+            into.push(OwnedDatum::from_datum(&leaf.value(at.1, column)?));
+        }
+        Ok(())
+    }
+
+    /// Returns the first position holding a live row.
+    ///
+    /// The starting point for a skip scan, and `None` for an empty tree.
+    pub fn first_position(&self) -> DbResult<Option<(usize, usize)>> {
+        for index in 0..self.pages.len() {
+            if self.leaf(index)?.row_count() > 0 {
+                return Ok(Some((index, 0)));
+            }
+        }
+        Ok(None)
     }
 
     /// Returns a cursor over every live row, in key order.
@@ -400,13 +606,14 @@ impl Tree {
 
     /// Checks the tree's structural invariants.
     ///
-    /// 1. Every leaf parses.
+    /// 1. Every leaf parses and passes its own row-level integrity check.
     /// 2. Keys strictly increase within a leaf and across leaf boundaries.
     /// 3. The sibling chain matches the leaf order.
     pub fn check(&self) -> DbResult<()> {
         let mut previous: Option<Vec<OwnedDatum>> = None;
         for index in 0..self.pages.len() {
             let leaf = self.leaf(index)?;
+            leaf.integrity()?;
             for row in leaf.live()? {
                 let key: Vec<Datum<'_>> = row.iter().copied().take(self.key_columns).collect();
                 if let Some(last) = &previous {
@@ -419,6 +626,23 @@ impl Tree {
                     }
                 }
                 previous = Some(own_row(&key));
+            }
+            let leaf_now = self.leaf(index)?;
+            let fence = self.fences.get(index).map(Vec::as_slice).unwrap_or(&[]);
+            if leaf_now.row_count() > 0 {
+                let mut first = Vec::with_capacity(self.key_columns);
+                for column in 0..self.key_columns {
+                    first.push(leaf_now.value(0, column)?);
+                }
+                if compare_rows(&borrow_row(fence), &first, self.key_columns)
+                    != std::cmp::Ordering::Equal
+                {
+                    return Err(corrupt(format!(
+                        "leaf {index}'s fence does not match its first key"
+                    )));
+                }
+            } else if !fence.is_empty() {
+                return Err(corrupt(format!("leaf {index} is empty but has a fence")));
             }
             let expected = if index.saturating_add(1) < self.pages.len() {
                 PageId(index as u64 + 2)
@@ -475,7 +699,7 @@ mod tests {
     fn columns() -> Vec<ColumnSpec> {
         vec![
             ColumnSpec::key(PhysicalType::Int64),
-            ColumnSpec::new(PhysicalType::Int64),
+            ColumnSpec::key(PhysicalType::Int64),
             ColumnSpec::new(PhysicalType::Text),
         ]
     }
@@ -569,6 +793,49 @@ mod tests {
         }
         for key in model.keys() {
             assert!(tree.point(&[Datum::Int(*key)]).unwrap().is_some(), "{key}");
+        }
+    }
+
+    /// A skip scan visits one position per distinct prefix, in order, and
+    /// agrees with what a full scan would have produced.
+    ///
+    /// The property that matters is not that it is fast, it is that it does not
+    /// miss a value and does not repeat one - and the boundaries where it could
+    /// are leaf boundaries, so the page size is small enough that the prefixes
+    /// span many leaves.
+    #[test]
+    fn a_skip_scan_visits_every_distinct_prefix_once() {
+        for distinct in [1usize, 2, 7, 64, 999] {
+            let owned: Vec<Vec<OwnedDatum>> = (0..3_000)
+                .map(|n| {
+                    vec![
+                        OwnedDatum::Int((n % distinct) as i64),
+                        OwnedDatum::Int(n as i64),
+                        OwnedDatum::Text(b"a reasonably long label so leaves fill up".to_vec()),
+                    ]
+                })
+                .collect();
+            let mut sorted = owned;
+            sorted.sort_by_key(|row| match (&row[0], &row[1]) {
+                (OwnedDatum::Int(a), OwnedDatum::Int(b)) => (*a, *b),
+                _ => (0, 0),
+            });
+            let borrowed: Vec<Vec<Datum<'_>>> = sorted
+                .iter()
+                .map(|row| row.iter().map(OwnedDatum::borrow).collect())
+                .collect();
+            let tree = Tree::bulk_build(8192, 1, columns(), 2, &borrowed).unwrap();
+
+            let mut seen: Vec<i64> = Vec::new();
+            let mut at = tree.first_position().unwrap();
+            while let Some(position) = at {
+                let key = tree.key_at(position, 1).unwrap();
+                seen.push(key[0].borrow().as_int().unwrap());
+                let probe: Vec<Datum<'_>> = key.iter().map(OwnedDatum::borrow).collect();
+                at = tree.seek_after(&probe, position).unwrap();
+            }
+            let wanted: Vec<i64> = (0..distinct as i64).collect();
+            assert_eq!(seen, wanted, "{distinct} distinct values");
         }
     }
 

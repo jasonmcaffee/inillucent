@@ -29,6 +29,101 @@ use rustdb_tree::{LeafRef, Tree};
 use crate::batch::{Batch, Vector, BATCH_ROWS};
 use crate::ops::{Flow, Sink};
 
+/// Visits one row per distinct value of a key prefix, by seeking.
+///
+/// `SELECT DISTINCT category FROM main_table` over an index led by `category`
+/// does not need to read a hundred thousand rows to learn there are sixty-four
+/// answers. It needs to visit one row per distinct value, and a B+tree can seek
+/// from one to the next: descend, read the value, seek past every row that
+/// shares it, repeat. The cost is one descent per distinct value rather than one
+/// read per row.
+///
+/// This is the same algorithm SQLite uses for the same query, which is why it
+/// is here rather than in a list of possible optimisations: without it the
+/// comparison on `scan.distinct` is between two different algorithms, and the
+/// ratio measures the choice rather than the engine.
+///
+/// The rows it produces are already distinct and already in key order, so the
+/// operator above it needs neither a set nor a sorter.
+pub struct SkipScan<'t> {
+    tree: &'t Tree,
+    prefix: usize,
+}
+
+impl<'t> SkipScan<'t> {
+    /// Returns a skip scan over a tree's leading key columns.
+    ///
+    /// The caller must have established that the tree is ordered by these
+    /// columns; [`crate::physical`] does that from the layout the import wrote.
+    ///
+    /// @param tree - the tree to walk
+    /// @param prefix - how many leading key columns to produce
+    pub fn new(tree: &'t Tree, prefix: usize) -> SkipScan<'t> {
+        SkipScan { tree, prefix }
+    }
+
+    /// Drives the whole scan, then finishes the pipeline.
+    ///
+    /// The positions are collected first and the values read afterwards,
+    /// because the seek needs an owned key to probe with while the values it
+    /// produces should not be copied at all. A position is two `usize`; a key
+    /// is a heap allocation per distinct value, and on a query whose whole
+    /// answer is sixty-four rows that allocation is most of the cost.
+    ///
+    /// @param downstream - the head of the pipeline
+    pub fn run(&self, downstream: &mut dyn Sink) -> DbResult<()> {
+        let mut positions: Vec<(usize, usize)> = Vec::new();
+        let mut key: Vec<OwnedDatum> = Vec::with_capacity(self.prefix);
+        // The probe borrows the key, so it cannot outlive one iteration; a
+        // fixed array keeps it off the heap anyway. Four covers every key this
+        // engine builds an index on, and a wider prefix falls back to a vector
+        // rather than being refused.
+        let mut at = self.tree.first_position()?;
+        while let Some(position) = at {
+            self.tree.key_at_into(position, self.prefix, &mut key)?;
+            at = if self.prefix <= 4 {
+                let mut probe = [Datum::Null; 4];
+                for (slot, value) in probe.iter_mut().zip(key.iter()) {
+                    *slot = value.borrow();
+                }
+                self.tree
+                    .seek_after(probe.get(..self.prefix).unwrap_or(&[]), position)?
+            } else {
+                let probe: Vec<Datum<'_>> = key.iter().map(OwnedDatum::borrow).collect();
+                self.tree.seek_after(&probe, position)?
+            };
+            positions.push(position);
+        }
+        let mut start = 0usize;
+        'batches: while start < positions.len() {
+            let end = start.saturating_add(BATCH_ROWS).min(positions.len());
+            let chunk = positions.get(start..end).unwrap_or(&[]);
+            // The values borrow the tree's own pages. A `Tree` does not move
+            // its leaves while it is being read, and the borrow says so, so
+            // nothing here is copied.
+            let mut per_column: Vec<Vec<Datum<'t>>> = Vec::with_capacity(self.prefix);
+            for column in 0..self.prefix {
+                let mut values = Vec::with_capacity(chunk.len());
+                for position in chunk {
+                    let leaf = self.tree.leaf(position.0)?;
+                    values.push(leaf.value(position.1, column)?);
+                }
+                per_column.push(values);
+            }
+            let columns: Vec<Vector<'_>> = per_column
+                .iter()
+                .map(|held| Vector::Values(held.as_slice()))
+                .collect();
+            let batch = Batch::new(chunk.len(), columns);
+            if downstream.push(&batch)? == Flow::Stop {
+                break 'batches;
+            }
+            start = end;
+        }
+        downstream.finish()
+    }
+}
+
 /// Which columns a scan produces, in output order.
 #[derive(Clone, Debug)]
 pub struct Projection(pub Vec<usize>);
@@ -228,6 +323,50 @@ mod tests {
             .map(|row| row.iter().map(OwnedDatum::borrow).collect())
             .collect();
         Tree::bulk_build(page_size, 1, columns(), 1, &borrowed).unwrap()
+    }
+
+    /// A skip scan produces exactly the distinct leading values, in order, and
+    /// agrees with what a full scan followed by a de-duplication produces.
+    #[test]
+    fn the_skip_scan_agrees_with_scan_then_distinct() {
+        for distinct in [1usize, 5, 64, 1_000] {
+            let mut owned: Vec<Vec<OwnedDatum>> = (0..4_000)
+                .map(|n| {
+                    vec![
+                        OwnedDatum::Int((n % distinct) as i64),
+                        OwnedDatum::Int(n as i64),
+                        OwnedDatum::Text(b"a label of some length".to_vec()),
+                    ]
+                })
+                .collect();
+            owned.sort_by_key(|row| match (&row[0], &row[1]) {
+                (OwnedDatum::Int(a), OwnedDatum::Int(b)) => (*a, *b),
+                _ => (0, 0),
+            });
+            let borrowed: Vec<Vec<Datum<'_>>> = owned
+                .iter()
+                .map(|row| row.iter().map(OwnedDatum::borrow).collect())
+                .collect();
+            let key_columns = vec![
+                ColumnSpec::key(PhysicalType::Int64),
+                ColumnSpec::key(PhysicalType::Int64),
+                ColumnSpec::new(PhysicalType::Text),
+            ];
+            let tree = Tree::bulk_build(8_192, 1, key_columns, 2, &borrowed).unwrap();
+
+            let mut skipped = Collect::new();
+            SkipScan::new(&tree, 1).run(&mut skipped).unwrap();
+
+            let mut scanned = crate::ops::AdjacentDistinct::new(Box::new(Collect::new()));
+            TableScan::new(&tree, Projection(vec![0]))
+                .run(&mut scanned)
+                .unwrap();
+
+            assert_eq!(skipped.rows().len(), distinct, "{distinct} distinct");
+            for (index, row) in skipped.rows().iter().enumerate() {
+                assert_eq!(row[0].borrow().as_int(), Some(index as i64));
+            }
+        }
     }
 
     /// A scan produces every row exactly once, in key order, at page sizes that

@@ -47,7 +47,7 @@ use crate::ops::{
     AdjacentDistinct, AggregateSpec, CollectInto, Distinct, Filter, HashAggregate, Limit, Project,
     SimpleAggregate, Sink, Sort, SortKey, StreamAggregate, TopN,
 };
-use crate::scan::{Projection, TableScan};
+use crate::scan::{Projection, SkipScan, TableScan};
 
 /// How one imported table's record slots map onto a tree's columns.
 #[derive(Clone, Debug)]
@@ -111,10 +111,38 @@ pub trait TreeCatalog {
     }
 }
 
+/// What drives a pipeline.
+pub enum Source<'t> {
+    /// Every row of a tree, in key order.
+    Scan(TableScan<'t>),
+    /// One row per distinct value of a key prefix, by seeking.
+    Skip(SkipScan<'t>),
+}
+
+impl Source<'_> {
+    /// Drives the source until the pipeline is done.
+    ///
+    /// @param downstream - the head of the operator chain
+    pub fn run(&self, downstream: &mut dyn Sink) -> DbResult<()> {
+        match self {
+            Source::Scan(scan) => scan.run(downstream),
+            Source::Skip(skip) => skip.run(downstream),
+        }
+    }
+
+    /// Names the source, for a plan description.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Source::Scan(_) => "SCAN",
+            Source::Skip(_) => "SKIP SCAN",
+        }
+    }
+}
+
 /// A built pipeline, ready to run.
 pub struct Pipeline<'t> {
     /// The source.
-    pub scan: TableScan<'t>,
+    pub scan: Source<'t>,
     /// The head of the operator chain.
     pub head: Box<dyn Sink>,
 }
@@ -139,22 +167,47 @@ pub fn build<'t>(
     catalog: &'t dyn TreeCatalog,
     sink: Box<dyn Sink>,
 ) -> DbResult<(Pipeline<'t>, Shape)> {
+    let prepared = prepare(plan, catalog)?;
+    build_prepared(plan, catalog, &prepared, sink)
+}
+
+/// What a statement's physical choices are, decided once.
+///
+/// The structural decisions - which tree to scan, and therefore whether a sort,
+/// a hash table or a set is needed at all - depend on the statement and the
+/// schema and not on the data, so they belong to prepare rather than to
+/// execution. Keeping them here is not only tidiness: the covering rule tries
+/// candidate trees by *building* a pipeline over each, and doing that on every
+/// execution made a 64-row query spend more time choosing than answering.
+#[derive(Clone, Copy, Debug)]
+pub struct Prepared {
+    /// The tree the scan reads.
+    pub root: u32,
+}
+
+/// Chooses a statement's physical plan.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees and layouts come from
+pub fn prepare(plan: &PhysicalPlan, catalog: &dyn TreeCatalog) -> DbResult<Prepared> {
     let (chosen, table_root) = scan_root(plan)?;
     // The covering rule. A plain scan of a table is replaced by a scan of the
     // smallest index tree that carries every column the query reads, because
-    // reading 1.4 MB instead of 14 MB is the single largest lever available on
-    // an analytical query and it is the structure SQLite itself chooses. The
-    // test for "carries every column" is not a heuristic: the whole pipeline is
-    // built against the candidate's layout, and translation fails by name on a
-    // column the tree does not hold. A candidate that builds, covers.
+    // reading 2.66 MiB instead of 14.6 MiB is the single largest lever
+    // available on an analytical query and it is the structure SQLite itself
+    // chooses. The test for "carries every column" is not a heuristic: the
+    // whole pipeline is built against the candidate's layout, and translation
+    // fails by name on a column the tree does not hold. A candidate that
+    // builds, covers.
     if chosen == table_root {
         for candidate in catalog.covering_candidates(table_root) {
-            if build_over(plan, catalog, candidate, dummy_sink()).is_ok() {
-                return build_over(plan, catalog, candidate, sink);
+            let trial = Prepared { root: candidate };
+            if build_prepared(plan, catalog, &trial, dummy_sink()).is_ok() {
+                return Ok(trial);
             }
         }
     }
-    build_over(plan, catalog, chosen, sink)
+    Ok(Prepared { root: chosen })
 }
 
 /// Returns a sink that discards everything, for the covering-rule trial build.
@@ -169,18 +222,19 @@ fn dummy_sink() -> Box<dyn Sink> {
     ))))
 }
 
-/// Builds a pipeline over one chosen tree.
+/// Builds a pipeline over an already-chosen tree.
 ///
 /// @param plan - the planner's output
 /// @param catalog - where the trees and layouts come from
-/// @param root - the tree to scan
+/// @param prepared - the structural choices [`prepare`] made
 /// @param sink - the end of the pipeline
-fn build_over<'t>(
+pub fn build_prepared<'t>(
     plan: &PhysicalPlan,
     catalog: &'t dyn TreeCatalog,
-    root: u32,
+    prepared: &Prepared,
     sink: Box<dyn Sink>,
 ) -> DbResult<(Pipeline<'t>, Shape)> {
+    let root = prepared.root;
     let select = &plan.select;
     let tree = catalog
         .tree(root)
@@ -195,7 +249,6 @@ fn build_over<'t>(
     // reads - is a Phase 2 item: it saves building vectors that are never read,
     // which costs one pointer each, and it would complicate the index mapping
     // before there is a measurement asking for it.
-    let scan = TableScan::new(tree, Projection::all(layout.width));
     let scan_types = layout.types.clone();
 
     // Result columns and ORDER BY terms, in the space that exists after any
@@ -248,6 +301,10 @@ fn build_over<'t>(
     let sorted_already = !sort_keys.is_empty()
         && sort_keys.iter().all(|term| !term.descending)
         && output_is_sorted_by(&sort_keys, &projected, plan, scan_order, grouped_walk);
+    // A skip scan produces distinct keys in key order, so an ascending ORDER BY
+    // over those columns is already satisfied by the source.
+    let sorted_already = sorted_already
+        || (skip_scan_applies(plan, &projected, scan_order, &sort_keys) && !sort_keys.is_empty());
 
     // Built bottom-up, because each operator owns the one below it.
     let mut chain: Box<dyn Sink> = sink;
@@ -283,7 +340,8 @@ fn build_over<'t>(
         chain = Box::new(Sort::new(sort_keys.clone(), chain));
     }
 
-    if select.distinct {
+    let skipping = skip_scan_applies(plan, &projected, scan_order, &sort_keys);
+    if select.distinct && !skipping {
         // The same adjacency argument as grouping: if the projected columns are
         // a prefix of the scan order, duplicates arrive together and can be
         // dropped by comparing each row with the one before it.
@@ -298,6 +356,13 @@ fn build_over<'t>(
         scan_types.clone()
     } else {
         aggregate_output_types(select, layout)?
+    };
+    // A skip scan hands up exactly the projected key columns, already in
+    // output order, so the projection over it reads column i for column i.
+    let projected = if skipping {
+        (0..projected.len()).map(Expr::Column).collect()
+    } else {
+        projected
     };
     let compiled_projection = projected
         .iter()
@@ -344,7 +409,60 @@ fn build_over<'t>(
         .iter()
         .map(|column| column.name.clone())
         .collect();
-    Ok((Pipeline { scan, head: chain }, Shape { names }))
+
+    // The skip-scan rule. `SELECT DISTINCT <prefix of the key>` with no
+    // predicate and no aggregation does not need to read every row: it needs
+    // one row per distinct value, and the tree can seek from one to the next.
+    // The condition is deliberately narrow, because a seek per distinct value
+    // is a loss when almost every value is distinct - it is a win at 64 values
+    // in 100,000 rows and a loss at 100,000 in 100,000. Phase 2's statistics
+    // give the planner the distinct count to decide on; until then the rule
+    // applies only where SQLite applies it, which is the shape that made the
+    // comparison unequal.
+    let source = if skip_scan_applies(plan, &projected, scan_order, &sort_keys) {
+        Source::Skip(SkipScan::new(tree, projected.len()))
+    } else {
+        Source::Scan(TableScan::new(tree, Projection::all(layout.width)))
+    };
+    Ok((
+        Pipeline {
+            scan: source,
+            head: chain,
+        },
+        Shape { names },
+    ))
+}
+
+/// Reports whether the skip-scan rule applies to a query.
+///
+/// Every condition is load bearing:
+///
+/// - `DISTINCT` with no aggregation, because a skip scan produces one row per
+///   distinct prefix and nothing else;
+/// - no `WHERE`, because a skipped row might have been the one that passed it;
+/// - the projected columns are exactly a prefix of the scan order, because that
+///   is what makes "one row per distinct value" the same set as the query's;
+/// - every ordering term ascending and already satisfied, so the rows the seek
+///   produces are the answer in the order asked for.
+///
+/// @param plan - the planner's output
+/// @param projected - the output expressions
+/// @param scan_order - the tree columns the leaves are ordered by
+/// @param sort_keys - the ordering terms
+fn skip_scan_applies(
+    plan: &PhysicalPlan,
+    projected: &[Expr],
+    scan_order: &[usize],
+    sort_keys: &[SortKey],
+) -> bool {
+    plan.select.distinct
+        && plan.aggregation == AggregationMode::None
+        && plan.select.filter.is_none()
+        && plan.constant_filter.is_none()
+        && plan.residuals.iter().all(Option::is_none)
+        && plan.select.limit.is_none()
+        && is_scan_prefix(projected, scan_order)
+        && sort_keys.iter().all(|term| !term.descending)
 }
 
 /// Reports whether a list of expressions is a prefix of the scan's key order.
@@ -408,9 +526,23 @@ pub fn run(
     plan: &PhysicalPlan,
     catalog: &dyn TreeCatalog,
 ) -> DbResult<(Vec<Vec<OwnedDatum>>, Shape)> {
+    let prepared = prepare(plan, catalog)?;
+    run_prepared(plan, catalog, &prepared)
+}
+
+/// Runs an already-prepared statement and returns the rows.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees and layouts come from
+/// @param prepared - the structural choices [`prepare`] made
+pub fn run_prepared(
+    plan: &PhysicalPlan,
+    catalog: &dyn TreeCatalog,
+    prepared: &Prepared,
+) -> DbResult<(Vec<Vec<OwnedDatum>>, Shape)> {
     let rows = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let sink = Box::new(CollectInto::new(std::rc::Rc::clone(&rows)));
-    let (mut pipeline, shape) = build(plan, catalog, sink)?;
+    let (mut pipeline, shape) = build_prepared(plan, catalog, prepared, sink)?;
     pipeline.scan.run(pipeline.head.as_mut())?;
     let collected = rows.borrow().clone();
     Ok((collected, shape))
