@@ -408,6 +408,10 @@ impl inillucent_exec::Sink for DigestRows {
     fn finish(&mut self) -> inillucent_base::DbResult<()> {
         Ok(())
     }
+    /// Returns the sink to its pre-input state; it keeps no rows to forget.
+    fn reset(&mut self) -> inillucent_base::DbResult<()> {
+        Ok(())
+    }
 }
 
 /// Adds one borrowed value to the digest, tagged the way the reference tags it.
@@ -504,6 +508,10 @@ impl inillucent_exec::Sink for CountRows {
     }
 
     fn finish(&mut self) -> inillucent_base::DbResult<()> {
+        Ok(())
+    }
+    /// Returns the sink to its pre-input state; it keeps no rows to forget.
+    fn reset(&mut self) -> inillucent_base::DbResult<()> {
         Ok(())
     }
 }

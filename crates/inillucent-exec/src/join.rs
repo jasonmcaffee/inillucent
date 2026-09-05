@@ -110,6 +110,11 @@ impl RowStore {
         self.rows.push(row);
     }
 
+    /// Forgets every row, so the operator holding this can run again.
+    pub fn clear(&mut self) {
+        self.rows.clear();
+    }
+
     /// Copies every live row of a batch into the store.
     ///
     /// @param batch - the batch to absorb
@@ -169,6 +174,12 @@ impl Sink for Materialize<'_> {
         self.store.drain_into(self.downstream.as_mut())?;
         self.downstream.finish()
     }
+
+    /// Returns this operator and everything below it to its pre-input state.
+    fn reset(&mut self) -> DbResult<()> {
+        self.store.clear();
+        self.downstream.reset()
+    }
 }
 
 /// Literal rows, as `VALUES (...), (...)` produces them.
@@ -217,6 +228,13 @@ impl HashTable {
             rows: Vec::new(),
             matched: Vec::new(),
         }
+    }
+
+    /// Forgets every build row, so the join can be run again.
+    fn clear(&mut self) {
+        self.index.clear();
+        self.rows.clear();
+        self.matched.clear();
     }
 
     /// Adds one build row under an encoded key.
@@ -388,6 +406,13 @@ impl Sink for HashJoin<'_> {
 
     fn finish(&mut self) -> DbResult<()> {
         self.downstream.finish()
+    }
+
+    /// Returns this operator and everything below it to its pre-input state.
+    fn reset(&mut self) -> DbResult<()> {
+        self.table.clear();
+        self.scratch.clear();
+        self.downstream.reset()
     }
 }
 
@@ -603,6 +628,12 @@ impl Sink for IndexNestedLoopJoin<'_> {
     fn finish(&mut self) -> DbResult<()> {
         self.downstream.finish()
     }
+
+    /// Returns this operator and everything below it to its pre-input state.
+    fn reset(&mut self) -> DbResult<()> {
+        self.selection.clear();
+        self.downstream.reset()
+    }
 }
 
 /// Pushes one outer row, null-extended by `pad` columns.
@@ -710,6 +741,11 @@ impl Sink for NestedLoopJoin<'_> {
 
     fn finish(&mut self) -> DbResult<()> {
         self.downstream.finish()
+    }
+
+    /// Returns this operator and everything below it to its pre-input state.
+    fn reset(&mut self) -> DbResult<()> {
+        self.downstream.reset()
     }
 }
 
@@ -824,6 +860,10 @@ mod tests {
             fn finish(&mut self) -> DbResult<()> {
                 Ok(())
             }
+            /// The test sinks hold no state that survives an execution.
+            fn reset(&mut self) -> DbResult<()> {
+                Ok(())
+            }
         }
         {
             let mut builder = Builder(&mut join);
@@ -865,6 +905,10 @@ mod tests {
                     Ok(Flow::Continue)
                 }
                 fn finish(&mut self) -> DbResult<()> {
+                    Ok(())
+                }
+                /// The test sinks hold no state that survives an execution.
+                fn reset(&mut self) -> DbResult<()> {
                     Ok(())
                 }
             }
@@ -909,6 +953,10 @@ mod tests {
                 Ok(Flow::Continue)
             }
             fn finish(&mut self) -> DbResult<()> {
+                Ok(())
+            }
+            /// The test sinks hold no state that survives an execution.
+            fn reset(&mut self) -> DbResult<()> {
                 Ok(())
             }
         }
@@ -1084,6 +1132,10 @@ mod tests {
                 Ok(Flow::Continue)
             }
             fn finish(&mut self) -> DbResult<()> {
+                Ok(())
+            }
+            /// The test sinks hold no state that survives an execution.
+            fn reset(&mut self) -> DbResult<()> {
                 Ok(())
             }
         }

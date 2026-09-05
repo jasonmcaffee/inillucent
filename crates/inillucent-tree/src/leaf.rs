@@ -716,6 +716,70 @@ impl<'p> LeafRef<'p> {
         Ok(std::cmp::Ordering::Equal)
     }
 
+    /// Returns the run of sorted rows whose key begins with a prefix.
+    ///
+    /// The half-open range `begin..end`, empty when the prefix is not present.
+    ///
+    /// An index nested loop asks this once per outer row, so the shape matters:
+    /// the lower bound is a search, and the *upper* bound is a short forward
+    /// walk rather than a second search, because the run a join probe finds is
+    /// usually one entry long. Past `scan_cap` matching rows it stops walking
+    /// and bisects, so a prefix that matches a whole leaf still costs a search.
+    ///
+    /// The integer fast path reads the leading key column's raw values, which
+    /// is what [`LeafRef::lower_bound`] already does for the search; doing it
+    /// for the walk as well is what removes the key view and the two
+    /// `Datum` comparisons that a probe finding one entry was paying.
+    ///
+    /// @param prefix - the prefix to match, one value per compared column
+    /// @param scan_cap - how far the run is walked before the end is bisected
+    pub fn equal_run(&self, prefix: &[Datum<'_>], scan_cap: usize) -> DbResult<(usize, usize)> {
+        // The guide is built once and used for both ends. Asking for it again
+        // is not free: `all_typed` walks the column's class array, which on a
+        // leaf holding 1,667 index entries is 417 bytes, and a probe that
+        // called `lower_bound` and then re-derived the guide walked it twice.
+        if let [Datum::Int(target)] = prefix {
+            if let Some(guide) = self.integer_guide(prefix)? {
+                let begin = self.partition_integer(&guide, *target, false)?;
+                if begin >= self.row_count || guide.read(begin)? != *target {
+                    return Ok((begin, begin));
+                }
+                let mut end = begin.saturating_add(1);
+                while end < self.row_count
+                    && end.saturating_sub(begin) < scan_cap
+                    && guide.read(end)? == *target
+                {
+                    end = end.saturating_add(1);
+                }
+                if end.saturating_sub(begin) >= scan_cap {
+                    end = self
+                        .partition_integer(&guide, *target, true)?
+                        .min(self.row_count);
+                }
+                return Ok((begin, end));
+            }
+        }
+        let begin = self.lower_bound(prefix)?;
+        if begin >= self.row_count {
+            return Ok((begin, begin));
+        }
+        let view = self.key_view()?;
+        if self.compare_key_with(&view, begin, prefix)? != std::cmp::Ordering::Equal {
+            return Ok((begin, begin));
+        }
+        let mut end = begin.saturating_add(1);
+        while end < self.row_count
+            && end.saturating_sub(begin) < scan_cap
+            && self.compare_key_with(&view, end, prefix)? == std::cmp::Ordering::Equal
+        {
+            end = end.saturating_add(1);
+        }
+        if end.saturating_sub(begin) >= scan_cap {
+            end = self.upper_bound(prefix)?.min(self.row_count);
+        }
+        Ok((begin, end))
+    }
+
     /// Finds the position of a key in the sorted region.
     ///
     /// Returns `Ok(row)` when the key is present and `Err(insertion point)` when
@@ -918,6 +982,27 @@ impl<'p> LeafRef<'p> {
         /// How many interpolated midpoints before falling back to bisection.
         const GUESSES: u32 = 4;
 
+        // The integer fast path, and it is a measurement rather than a
+        // preference. A bound over one integer column is what a skip scan seeks
+        // with and what an index nested loop probes with, and the generic
+        // search reads a `Datum` out of the mini-column and compares it under a
+        // collation at every step. `inillucent-probeprofile` measured a prefix
+        // probe into `side_owner` - two integer key columns, 25,000 entries -
+        // at 209 ns for the descent plus this search, of which the descent was
+        // 62 ns. `join.range` pays it 201 times per execution.
+        //
+        // When the probe is one integer and the leading key column is a fully
+        // typed `Int64` mini-column, the same partition point is found over a
+        // contiguous run of eight-byte values, with the interpolation guide
+        // still choosing the midpoints. Comparing only column zero is exactly
+        // what the generic path does for a one-column probe, so this is the
+        // same answer by a shorter route rather than a different one.
+        if let [Datum::Int(target)] = probe {
+            if let Some(guide) = self.integer_guide(probe)? {
+                return self.partition_integer(&guide, *target, past_equal);
+            }
+        }
+
         let view = self.key_view()?;
         let guide = self.integer_guide(probe)?;
         let mut low = 0usize;
@@ -936,6 +1021,45 @@ impl<'p> LeafRef<'p> {
                 std::cmp::Ordering::Less => true,
                 std::cmp::Ordering::Equal => past_equal,
                 std::cmp::Ordering::Greater => false,
+            };
+            if below {
+                low = middle.saturating_add(1);
+            } else {
+                high = middle;
+            }
+        }
+        Ok(low)
+    }
+
+    /// Returns the partition point of an integer bound over column zero.
+    ///
+    /// @param guide - the interpolation guide over the leading key column
+    /// @param target - the integer being bounded
+    /// @param past_equal - whether a row equal to the target is below the bound
+    fn partition_integer(
+        &self,
+        guide: &IntegerGuide<'p>,
+        target: i64,
+        past_equal: bool,
+    ) -> DbResult<usize> {
+        /// How many interpolated midpoints before falling back to bisection.
+        const GUESSES: u32 = 4;
+
+        let mut low = 0usize;
+        let mut high = self.row_count;
+        let mut guesses = 0u32;
+        while low < high {
+            let middle = if guesses < GUESSES {
+                guesses = guesses.saturating_add(1);
+                guide.between(low, high)?
+            } else {
+                low.saturating_add(high.saturating_sub(low) / 2)
+            };
+            let held = guide.read(middle)?;
+            let below = if past_equal {
+                held <= target
+            } else {
+                held < target
             };
             if below {
                 low = middle.saturating_add(1);

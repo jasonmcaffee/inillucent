@@ -166,6 +166,12 @@ impl Sink for Window {
         emit_rows(&widened, self.downstream.as_mut())?;
         self.downstream.finish()
     }
+
+    /// Returns this operator and everything below it to its pre-input state.
+    fn reset(&mut self) -> DbResult<()> {
+        self.store.clear();
+        self.downstream.reset()
+    }
 }
 
 /// Computes every window value for every row and appends them.

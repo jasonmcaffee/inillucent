@@ -229,19 +229,60 @@ impl ForcePlan {
 #[derive(Clone, Debug, Default)]
 pub struct Params {
     values: Vec<OwnedDatum>,
+    /// How many times a parameter has been read out of this set.
+    ///
+    /// The counter is what makes [`Statement`] safe. A statement may only be
+    /// re-run against new parameters if nothing but its *source* looked at the
+    /// old ones - a `LIMIT ?1`, a projected `?2` or a residual filter over a
+    /// parameter is baked into the operator chain when the chain is built, and
+    /// re-running that chain against different values would answer the previous
+    /// question with the new question's parameters.
+    ///
+    /// Deciding that by inspecting the plan means a second, separate opinion
+    /// about which constructs can carry a parameter, which is exactly the kind
+    /// of duplicated judgement that goes stale when a construct is added.
+    /// Counting the reads asks the builder instead: every path that consumes a
+    /// parameter goes through [`Params::get`], so if the count does not move
+    /// while everything except the source is built, nothing except the source
+    /// read one.
+    reads: std::cell::Cell<u64>,
 }
 
 impl Params {
     /// Returns an empty parameter set.
     pub fn new() -> Params {
-        Params { values: Vec::new() }
+        Params {
+            values: Vec::new(),
+            reads: std::cell::Cell::new(0),
+        }
     }
 
     /// Returns a parameter set over a list of values, `?1` first.
     ///
     /// @param values - the values, in parameter order
     pub fn from_values(values: Vec<OwnedDatum>) -> Params {
-        Params { values }
+        Params {
+            values,
+            reads: std::cell::Cell::new(0),
+        }
+    }
+
+    /// Returns how many parameter reads this set has answered.
+    pub fn reads(&self) -> u64 {
+        self.reads.get()
+    }
+
+    /// Replaces every bound value, reusing the buffer.
+    ///
+    /// A benchmark that re-binds a prepared statement per iteration should not
+    /// allocate to do it - `sqlite3_bind_int64` does not - and building a fresh
+    /// `Params` per execution was one `Vec` per execution on the arm being
+    /// timed.
+    ///
+    /// @param values - the new values, `?1` first
+    pub fn refill(&mut self, values: impl IntoIterator<Item = OwnedDatum>) {
+        self.values.clear();
+        self.values.extend(values);
     }
 
     /// Returns the value bound to a parameter.
@@ -250,6 +291,7 @@ impl Params {
     ///
     /// @param index - the one-based parameter number
     pub fn get(&self, index: u32) -> OwnedDatum {
+        self.reads.set(self.reads.get().saturating_add(1));
         self.values
             .get(index.saturating_sub(1) as usize)
             .cloned()
@@ -804,15 +846,22 @@ fn refuse_unhandled(select: &BoundSelect) -> DbResult<()> {
 }
 
 /// The column space one statement's stages define.
+///
+/// Every field is a borrow rather than an owned buffer. That is what lets a
+/// [`Statement`] rebuild only its *source* on each execution: the space is
+/// derived from the prepared stages and the catalog's layouts, neither of which
+/// depends on the bound parameters, so it is computed once and viewed again
+/// rather than rebuilt. When it owned its `types` and `layouts`, re-deriving it
+/// per execution was three allocations that a re-run does not need.
 struct Space<'c> {
     /// The stages, in order.
     stages: &'c [PreparedStage],
     /// Each stage's layout.
-    layouts: Vec<&'c SourceLayout>,
+    layouts: &'c [&'c SourceLayout],
     /// The static type of every column of the joined row.
-    types: Vec<StaticType>,
+    types: &'c [StaticType],
     /// The tree columns the *joined* rows arrive sorted by, when they do.
-    order: Vec<usize>,
+    order: &'c [usize],
 }
 
 impl Space<'_> {
@@ -891,9 +940,68 @@ pub fn build_prepared<'t>(
     params: &Params,
     sink: Box<dyn Sink>,
 ) -> DbResult<(Pipeline<'t>, Shape)> {
-    let select = &plan.select;
-    refuse_unhandled(select)?;
+    let held = space_of(catalog, prepared)?;
+    let space = held.view(&prepared.stages);
+    let chain = build_chain(plan, catalog, prepared, &space, params, sink)?;
+    let head_stage = prepared
+        .stages
+        .first()
+        .ok_or_else(|| misuse("a plan with no stages"))?;
+    let source = build_source(plan, catalog, &space, params, head_stage, chain.limit)?;
+    let mut operators = chain.operators;
+    operators.push(format!(
+        "{} tree {}",
+        head_stage.kind.describe(),
+        head_stage.root
+    ));
+    operators.reverse();
+    Ok((
+        Pipeline {
+            source,
+            head: chain.head,
+            pool: catalog.pool(),
+        },
+        Shape {
+            names: chain.names,
+            operators,
+        },
+    ))
+}
 
+/// The layouts, types and key order a statement's stages define.
+///
+/// Held apart from [`Space`] because a [`Statement`] computes it once and takes
+/// a view of it on every execution: none of it depends on the bound parameters,
+/// so re-deriving it per execution would be three allocations spent to arrive
+/// at the same answer.
+struct HeldSpace<'c> {
+    /// Each stage's layout.
+    layouts: Vec<&'c SourceLayout>,
+    /// The static type of every column of the joined row.
+    types: Vec<StaticType>,
+    /// The tree columns the joined rows arrive sorted by, when they do.
+    order: Vec<usize>,
+}
+
+impl<'c> HeldSpace<'c> {
+    /// Returns a view of this space over a statement's stages.
+    ///
+    /// @param stages - the prepared stages, outermost first
+    fn view<'a>(&'a self, stages: &'a [PreparedStage]) -> Space<'a> {
+        Space {
+            stages,
+            layouts: &self.layouts,
+            types: &self.types,
+            order: &self.order,
+        }
+    }
+}
+
+/// Returns the column space a statement's stages define.
+///
+/// @param catalog - where the layouts come from
+/// @param prepared - the structural choices [`prepare`] made
+fn space_of<'c>(catalog: &'c dyn TreeCatalog, prepared: &Prepared) -> DbResult<HeldSpace<'c>> {
     let mut layouts = Vec::with_capacity(prepared.stages.len());
     let mut types: Vec<StaticType> = Vec::new();
     for stage in &prepared.stages {
@@ -916,14 +1024,57 @@ pub fn build_prepared<'t>(
         }
         _ => Vec::new(),
     };
-    let space = Space {
-        stages: &prepared.stages,
+    Ok(HeldSpace {
         layouts,
-        types: types.clone(),
+        types,
         order,
+    })
+}
+
+/// Everything a built operator chain is, short of the source that drives it.
+struct Chain<'t> {
+    /// The head of the chain: what the source pushes into.
+    head: Box<dyn Sink + 't>,
+    /// The operator descriptions, sink first; the source is appended last.
+    operators: Vec<String>,
+    /// The output column names.
+    names: Vec<Vec<u8>>,
+    /// The statement's constant `LIMIT`, which the source may use.
+    limit: Option<usize>,
+}
+
+/// Builds every operator above the source.
+///
+/// Separated from [`build_prepared`] because a [`Statement`] builds this once
+/// and rebuilds only the source per execution. The split is also what makes the
+/// rebinding test possible: the parameter reads this function makes are the
+/// ones that would be baked into the chain, and a statement is only re-runnable
+/// when there are none.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees and layouts come from
+/// @param prepared - the structural choices [`prepare`] made
+/// @param space - the joined column space
+/// @param params - the values bound to `?1`, `?2`, ...
+/// @param sink - the end of the pipeline
+fn build_chain<'t>(
+    plan: &PhysicalPlan,
+    catalog: &'t dyn TreeCatalog,
+    prepared: &Prepared,
+    space: &Space<'_>,
+    params: &Params,
+    sink: Box<dyn Sink>,
+) -> DbResult<Chain<'t>> {
+    let select = &plan.select;
+    refuse_unhandled(select)?;
+    let space = &Space {
+        stages: space.stages,
+        layouts: space.layouts,
+        types: space.types,
+        order: space.order,
     };
 
-    let scan_types = space.types.clone();
+    let scan_types = space.types.to_vec();
     let group_width = select.group_by.len();
     let skipping = prepared
         .stages
@@ -1192,25 +1343,142 @@ pub fn build_prepared<'t>(
         .map(|column| column.name.clone())
         .collect();
 
+    Ok(Chain {
+        head: chain,
+        operators,
+        names,
+        limit,
+    })
+}
+
+/// A prepared statement: an operator chain built once and run many times.
+///
+/// **This is the difference between preparing a plan and preparing a
+/// statement, and the gate was measuring the first while calling it the
+/// second.** A scorecard workload with `prepare_each: false` binds new
+/// parameters and runs again; SQLite's arm answers that with
+/// `sqlite3_reset`, `sqlite3_bind_*` and `sqlite3_step` over a VDBE program it
+/// compiled once. Ours re-translated every projected expression, re-boxed every
+/// operator and re-formatted the plan description on each execution, and
+/// `inillucent-probeprofile` measured that at 0.52 us against a 0.70 us
+/// `point.rowid` - 42% of the workload, and 71% of `point.miss`.
+///
+/// So a `Statement` holds the chain and rebuilds only the *source*, whose key
+/// or bounds are the one part of a plan that the parameters decide. Between
+/// executions the chain is [`Sink::reset`]: every accumulator, sorter,
+/// hash table and limit counter returns to its pre-input state.
+///
+/// ## Why a statement can refuse to be re-run
+///
+/// A parameter that reaches anything *other* than the source - `LIMIT ?1`, a
+/// projected `?2`, a residual filter - is folded into the chain when the chain
+/// is built, and re-running that chain against new values would answer the old
+/// question. [`Statement::rebindable`] says whether that happened, and it is
+/// decided by counting the parameter reads the chain's construction made rather
+/// than by a second opinion about which constructs may carry one.
+pub struct Statement<'t> {
+    /// The planner's output, which the source is rebuilt from.
+    plan: &'t PhysicalPlan,
+    /// Where the trees and layouts come from.
+    catalog: &'t dyn TreeCatalog,
+    /// The structural choices, owned so the statement is self-contained.
+    prepared: Prepared,
+    /// The layouts and types, computed once.
+    held: HeldSpace<'t>,
+    /// The operator chain, built once.
+    head: Box<dyn Sink + 't>,
+    /// The pool the source's pages live in.
+    pool: &'t Pool,
+    /// The statement's constant `LIMIT`, which the source may use.
+    limit: Option<usize>,
+    /// What the statement produces.
+    shape: Shape,
+    /// Whether anything but the source read a parameter while building.
+    rebindable: bool,
+}
+
+impl<'t> Statement<'t> {
+    /// Reports whether this statement may be run again with new parameters.
+    pub fn rebindable(&self) -> bool {
+        self.rebindable
+    }
+
+    /// Returns what the statement produces.
+    pub fn shape(&self) -> &Shape {
+        &self.shape
+    }
+
+    /// Runs the statement against one parameter set.
+    ///
+    /// @param params - the values bound to `?1`, `?2`, ...
+    pub fn run(&mut self, params: &Params) -> DbResult<()> {
+        if !self.rebindable {
+            return Err(misuse(
+                "this statement folded a parameter into its operator chain and cannot be re-run                  against different values",
+            ));
+        }
+        let source = {
+            let space = self.held.view(&self.prepared.stages);
+            let stage = self
+                .prepared
+                .stages
+                .first()
+                .ok_or_else(|| misuse("a plan with no stages"))?;
+            build_source(self.plan, self.catalog, &space, params, stage, self.limit)?
+        };
+        self.head.reset()?;
+        source.run(self.pool, self.head.as_mut())
+    }
+}
+
+/// Builds a statement that can be run many times.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees and layouts come from
+/// @param prepared - the structural choices [`prepare`] made
+/// @param params - the values the first execution binds
+/// @param sink - the end of the pipeline, which the statement keeps
+pub fn build_statement<'t>(
+    plan: &'t PhysicalPlan,
+    catalog: &'t dyn TreeCatalog,
+    prepared: &Prepared,
+    params: &Params,
+    sink: Box<dyn Sink>,
+) -> DbResult<Statement<'t>> {
+    let prepared = prepared.clone();
+    let held = space_of(catalog, &prepared)?;
+    // The reads the chain makes are the parameters it bakes in. The source's
+    // are made after this window closes and are recomputed on every execution,
+    // so they do not count against re-running.
+    let before = params.reads();
+    let chain = {
+        let space = held.view(&prepared.stages);
+        build_chain(plan, catalog, &prepared, &space, params, sink)?
+    };
+    let rebindable = params.reads() == before;
+    let mut operators = chain.operators;
     let head_stage = prepared
         .stages
         .first()
         .ok_or_else(|| misuse("a plan with no stages"))?;
-    let source = build_source(plan, catalog, &space, params, head_stage, limit)?;
     operators.push(format!(
         "{} tree {}",
         head_stage.kind.describe(),
         head_stage.root
     ));
     operators.reverse();
-    Ok((
-        Pipeline {
-            source,
-            head: chain,
-            pool: catalog.pool(),
-        },
-        Shape { names, operators },
-    ))
+    let names = chain.names;
+    Ok(Statement {
+        plan,
+        catalog,
+        prepared,
+        held,
+        head: chain.head,
+        pool: catalog.pool(),
+        limit: chain.limit,
+        shape: Shape { names, operators },
+        rebindable,
+    })
 }
 
 /// Builds the driving source for the outermost stage.
