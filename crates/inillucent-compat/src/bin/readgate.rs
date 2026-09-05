@@ -387,6 +387,31 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         })
         .collect();
 
+    // The fifth fairness question, and the one task-1819 found open: both arms
+    // must reuse the program they prepared. SQLite's has always done - it
+    // resets, re-binds and steps a VDBE program compiled once - and ours
+    // rebuilt its operator chain on every execution, which `probeprofile`
+    // measured at 42% of `point.rowid`. A workload that cannot be re-run is
+    // named here rather than quietly rebuilt.
+    let mut arms = build_arms(&database, &prepared, plan.rows)?;
+    let rebuilt: Vec<&str> = prepared
+        .iter()
+        .zip(arms.iter())
+        .filter(|(_, arm)| arm.statement.is_none())
+        .map(|(entry, _)| entry.name.as_str())
+        .collect();
+    println!();
+    println!(
+        "  statements  : {} of {} reuse their prepared operator chain{}",
+        prepared.len().saturating_sub(rebuilt.len()),
+        prepared.len(),
+        if rebuilt.is_empty() {
+            String::new()
+        } else {
+            format!(" (rebuilt per execution: {})", rebuilt.join(", "))
+        }
+    );
+
     println!();
     println!("## {} paired rounds, interleaved", settings.rounds);
     for round in 0..settings.rounds {
@@ -394,12 +419,12 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         // machine does not systematically favour whichever went first.
         let ours_first = round % 2 == 0;
         let (ours, theirs) = if ours_first {
-            let ours = time_new_engine(&database, &prepared, plan.rows)?;
+            let ours = time_new_engine(&mut arms, &database, &prepared, plan.rows)?;
             let theirs = run_sqlite(&bench, &plan_path, fixture)?;
             (ours, theirs)
         } else {
             let theirs = run_sqlite(&bench, &plan_path, fixture)?;
-            let ours = time_new_engine(&database, &prepared, plan.rows)?;
+            let ours = time_new_engine(&mut arms, &database, &prepared, plan.rows)?;
             (ours, theirs)
         };
         for (index, entry) in prepared.iter().enumerate() {
@@ -637,6 +662,10 @@ impl inillucent_exec::Sink for DigestRows {
     fn finish(&mut self) -> inillucent_base::DbResult<()> {
         Ok(())
     }
+    /// Returns the sink to its pre-input state; it keeps no rows to forget.
+    fn reset(&mut self) -> inillucent_base::DbResult<()> {
+        Ok(())
+    }
 }
 
 /// A sink that counts rows and reads no values, for the breakdown.
@@ -654,6 +683,10 @@ impl inillucent_exec::Sink for CountRows {
     }
 
     fn finish(&mut self) -> inillucent_base::DbResult<()> {
+        Ok(())
+    }
+    /// Returns the sink to its pre-input state; it keeps no rows to forget.
+    fn reset(&mut self) -> inillucent_base::DbResult<()> {
         Ok(())
     }
 }
@@ -693,31 +726,50 @@ fn eat_borrowed(digest: &mut Digest, value: &inillucent_tree::datum::Datum<'_>) 
 /// @param prepared - the planned workloads
 /// @param rows - how many rows the base table holds, for the bind formulas
 fn time_new_engine(
+    arms: &mut [Arm<'_>],
     database: &ImportedDatabase,
     prepared: &[Prepared_],
     rows: u32,
 ) -> Result<Vec<Sample>, String> {
     let mut samples = Vec::with_capacity(prepared.len());
-    for entry in prepared {
-        let folded = Rc::new(RefCell::new(Folded::default()));
+    for (index, entry) in prepared.iter().enumerate() {
+        let Some(arm) = arms.get_mut(index) else {
+            return Err(format!("{}: no arm was built", entry.name));
+        };
+        let folded = Rc::clone(&arm.folded);
+        folded.replace(Folded::default());
+        let mut params = Params::from_values(Vec::new());
         let started = Instant::now();
         for iteration in 0..entry.repeat {
-            let params = Params::from_values(
+            params.refill(
                 entry
                     .binds
                     .iter()
-                    .map(|bind| bind_value(*bind, iteration, rows))
-                    .collect(),
+                    .map(|bind| bind_value(*bind, iteration, rows)),
             );
-            let sink = Box::new(DigestRows {
-                folded: Rc::clone(&folded),
-            });
-            let (mut pipeline, _) = database
-                .pipeline(&entry.plan, &entry.choice, &params, sink)
-                .map_err(|error| format!("{}: {}", entry.name, why(&error)))?;
-            pipeline
-                .run()
-                .map_err(|error| format!("{}: {}", entry.name, why(&error)))?;
+            match arm.statement.as_mut() {
+                // The reused arm: bind, run, and the operator chain resets
+                // itself between executions. This is the shape SQLite's arm has
+                // always had - `sqlite3_reset`, `sqlite3_bind_*`, `sqlite3_step`
+                // over a program compiled once - and the shape ours did not.
+                Some(statement) => statement
+                    .run(&params)
+                    .map_err(|error| format!("{}: {}", entry.name, why(&error)))?,
+                // The fallback: a statement that folded a parameter into its
+                // chain has to be rebuilt, which is what every workload used to
+                // do. The output names any workload that lands here.
+                None => {
+                    let sink = Box::new(DigestRows {
+                        folded: Rc::clone(&folded),
+                    });
+                    let (mut pipeline, _) = database
+                        .pipeline(&entry.plan, &entry.choice, &params, sink)
+                        .map_err(|error| format!("{}: {}", entry.name, why(&error)))?;
+                    pipeline
+                        .run()
+                        .map_err(|error| format!("{}: {}", entry.name, why(&error)))?;
+                }
+            }
         }
         let elapsed = started.elapsed();
         let held = folded.replace(Folded::default());
@@ -729,6 +781,49 @@ fn time_new_engine(
         });
     }
     Ok(samples)
+}
+
+/// One workload's reusable execution arm.
+///
+/// `statement` is `None` for a workload whose operator chain folded a bound
+/// parameter in - a `LIMIT ?1`, a projected parameter, a residual over one -
+/// because re-running that chain against different values would answer the
+/// previous question. Nothing in the scorecard plan does that, and the harness
+/// says so in its output rather than assuming it.
+struct Arm<'a> {
+    /// The statement, when the chain can be re-run.
+    statement: Option<inillucent_exec::physical::Statement<'a>>,
+    /// Where the digest of every execution accumulates.
+    folded: Rc<RefCell<Folded>>,
+}
+
+/// Builds one reusable arm per workload.
+///
+/// @param database - the imported trees
+/// @param prepared - the planned workloads
+/// @param rows - how many rows the base table holds, for the first bind
+fn build_arms<'a>(
+    database: &'a ImportedDatabase,
+    prepared: &'a [Prepared_],
+    rows: u32,
+) -> Result<Vec<Arm<'a>>, String> {
+    let mut arms = Vec::with_capacity(prepared.len());
+    for entry in prepared {
+        let folded = Rc::new(RefCell::new(Folded::default()));
+        let sink = Box::new(DigestRows {
+            folded: Rc::clone(&folded),
+        });
+        let statement = database
+            .statement(&entry.plan, &entry.choice, &entry.params_for(1, rows), sink)
+            .map_err(|error| format!("{}: {}", entry.name, why(&error)))?;
+        let statement = if statement.rebindable() {
+            Some(statement)
+        } else {
+            None
+        };
+        arms.push(Arm { statement, folded });
+    }
+    Ok(arms)
 }
 
 /// Measures a bare `PointProbe` on the table tree, warm.

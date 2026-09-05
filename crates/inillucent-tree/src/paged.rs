@@ -42,6 +42,8 @@
 //! and every eviction, so a descent that raced one really would restart, and
 //! [`crate::paged::tests`] forces exactly that race.
 
+use std::cell::RefCell;
+
 use inillucent_base::error::{corrupt, misuse};
 use inillucent_base::DbResult;
 use inillucent_pool::interior::{InteriorBuilder, InteriorRef};
@@ -232,7 +234,30 @@ pub struct PagedTree {
     leaf_count: u64,
     /// How many rows the tree holds.
     row_count: u64,
+    /// The buffer the general key encoding writes into.
+    ///
+    /// A tree whose key is not a bare rowid encodes through
+    /// `key::encode_with`, which builds a `Vec`. That allocation is per
+    /// *probe*, and an index nested loop probes once per outer row:
+    /// `inillucent-probeprofile` measured `encode_key_small` on `side_owner` at
+    /// 61.4 ns against a 62.1 ns descent of the same tree, so half of a probe's
+    /// pre-descent cost was a malloc and a free of twenty bytes.
+    ///
+    /// The buffer is per tree and reused, which is sound because the encoding
+    /// borrows nothing: the bytes are copied into a [`KeyBytes`] before the
+    /// borrow ends, and no encode can re-enter another. It is a `RefCell`
+    /// rather than a `&mut` parameter because every caller of
+    /// [`PagedTree::encode_key_small`] holds the tree by shared reference, as
+    /// the buffer pool's own state does.
+    scratch: RefCell<Vec<u8>>,
 }
+
+/// How many key-prefix columns a skip scan borrows on the stack.
+///
+/// Four covers every index in the scorecard fixture and in the dialect's own
+/// corpus; a wider prefix spills to the heap, which costs what every prefix
+/// used to cost.
+const SKIP_PREFIX_INLINE: usize = 4;
 
 impl PagedTree {
     /// Builds a tree bottom-up from rows already sorted by key.
@@ -374,6 +399,7 @@ impl PagedTree {
             first_leaf: *leaves.first().unwrap_or(&PageId::NONE),
             leaf_count: leaves.len() as u64,
             row_count,
+            scratch: RefCell::new(Vec::new()),
         })
     }
 
@@ -423,6 +449,7 @@ impl PagedTree {
             first_leaf,
             leaf_count,
             row_count,
+            scratch: RefCell::new(Vec::new()),
         })
     }
 
@@ -502,6 +529,15 @@ impl PagedTree {
                 slot.copy_from_slice(&key::order_preserving_int(*number));
             }
             return KeyBytes::Inline(inline, 8);
+        }
+        if self.encoding == KeyEncoding::General {
+            let mut scratch = self.scratch.borrow_mut();
+            scratch.clear();
+            for (index, value) in values.iter().enumerate() {
+                let collation = self.collations.get(index).copied().unwrap_or_default();
+                key::encode_into_with(value, collation, &mut scratch);
+            }
+            return KeyBytes::from_slice(&scratch);
         }
         KeyBytes::from_slice(&self.encoding.encode_under(values, &self.collations))
     }
@@ -701,26 +737,37 @@ impl PagedTree {
             }
             // A swizzled swip names the frame directly, which is the whole
             // point of swizzling: no page-table lookup, no page id to resolve.
-            let (child_guard, target) = match swip.frame() {
+            //
+            // `already` is why the write below is conditional. A slot that
+            // already names this frame is a slot the swizzle would rewrite with
+            // the bytes it already holds, and paying for that on every descent
+            // is not free: it is a page-table lookup to re-check the parent, an
+            // exclusive borrow of the parent's buffer, and a store into an
+            // interior page that every later descent then has to re-read. The
+            // first descent through a slot does the work; the millionth does
+            // not need to repeat it.
+            let (child_guard, target, already) = match swip.frame() {
                 Some(child_frame) => {
                     let child_guard = pool.fetch_frame(child_frame)?;
                     let target = pool
                         .page_in_frame(child_frame)
                         .filter(|page| !page.is_none())
                         .ok_or_else(|| corrupt("a swizzled swip names an empty frame"))?;
-                    (child_guard, target)
+                    (child_guard, target, true)
                 }
                 None => {
                     let target = pool.page_of_swip(swip)?;
                     let child_guard = pool.fetch(target)?;
                     pool.note_parent(child_guard.frame(), frame, page, at);
-                    (child_guard, target)
+                    (child_guard, target, false)
                 }
             };
             let child_frame = child_guard.frame();
             let parent_page = page;
             drop(guard);
-            pool.swizzle_into(frame, parent_page, at, Swip::swizzled(child_frame))?;
+            if !already {
+                pool.swizzle_into(frame, parent_page, at, Swip::swizzled(child_frame))?;
+            }
             guard = child_guard;
             page = target;
         }
@@ -1061,40 +1108,74 @@ impl PagedTree {
         /// How far the run is walked before the upper bound is bisected.
         const RUN_SCAN: usize = 8;
 
-        let start_page = {
-            let encoded = self.encode_key_small(key);
-            let (guard, page) = self.descend_guard(pool, encoded.as_slice())?;
-            drop(guard);
-            page
+        // The landed leaf is read through the guard the descent already holds.
+        // Dropping it and calling `visit_from` re-fetched and re-parsed the
+        // page a probe had just finished descending to, once per outer row.
+        let encoded = self.encode_key_small(key);
+        let (guard, page) = self.descend_guard(pool, encoded.as_slice())?;
+        let mut next = {
+            let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
+            match Self::equal_span(&leaf, key, RUN_SCAN, visit)? {
+                Some(right) => right,
+                None => return Ok(()),
+            }
         };
-        self.visit_from(pool, start_page, &mut |leaf| {
-            let rows = leaf.row_count();
-            let begin = lower_bound(leaf, key)?;
-            if begin >= rows {
-                // The key sorts after everything in this leaf, so the run - if
-                // there is one - starts in the next.
-                return Ok(true);
+        drop(guard);
+        let _ = page;
+        let mut seen = 0u64;
+        while !next.is_none() {
+            let guard = pool.fetch(next)?;
+            let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
+            match Self::equal_span(&leaf, key, RUN_SCAN, visit)? {
+                Some(right) => next = right,
+                None => return Ok(()),
             }
-            let view = leaf.key_view()?;
-            if leaf.compare_key_with(&view, begin, key)? != std::cmp::Ordering::Equal {
-                // The key is not here and everything after it is greater.
-                return Ok(false);
+            seen = seen.saturating_add(1);
+            if seen > self.leaf_count.saturating_add(1) {
+                return Err(corrupt(
+                    "an equality walk visited more leaves than the tree holds",
+                ));
             }
-            let mut end = begin.saturating_add(1);
-            while end < rows
-                && end.saturating_sub(begin) < RUN_SCAN
-                && leaf.compare_key_with(&view, end, key)? == std::cmp::Ordering::Equal
-            {
-                end = end.saturating_add(1);
-            }
-            if end.saturating_sub(begin) >= RUN_SCAN {
-                end = upper_bound(leaf, key)?.min(rows);
-            }
-            if !visit(leaf, begin, end)? {
-                return Ok(false);
-            }
-            // Only a run that reached the end of its leaf can continue.
-            Ok(end == rows)
+        }
+        Ok(())
+    }
+
+    /// Visits one leaf's share of an equality run.
+    ///
+    /// Returns the next leaf to look in, or `None` when the walk is over -
+    /// either because the run ended inside this leaf or because the visitor
+    /// asked to stop.
+    ///
+    /// @param leaf - the leaf to read
+    /// @param key - the exact prefix
+    /// @param scan_cap - how far a run is walked before its end is bisected
+    /// @param visit - what to do with the matching span
+    fn equal_span(
+        leaf: &LeafRef<'_>,
+        key: &[Datum<'_>],
+        scan_cap: usize,
+        visit: &mut dyn FnMut(&LeafRef<'_>, usize, usize) -> DbResult<bool>,
+    ) -> DbResult<Option<PageId>> {
+        let rows = leaf.row_count();
+        let (begin, end) = leaf.equal_run(key, scan_cap)?;
+        if begin >= end {
+            // Either the key sorts after everything here - so the run, if there
+            // is one, starts in the next leaf - or it is simply not present and
+            // everything after it is greater.
+            return Ok(if begin >= rows {
+                Some(leaf.right_sibling())
+            } else {
+                None
+            });
+        }
+        if !visit(leaf, begin, end)? {
+            return Ok(None);
+        }
+        // Only a run that reached the end of its leaf can continue.
+        Ok(if end == rows {
+            Some(leaf.right_sibling())
+        } else {
+            None
         })
     }
 
@@ -1201,25 +1282,34 @@ impl PagedTree {
             if visited > self.row_count.saturating_add(1) {
                 return Err(corrupt("a skip scan visited more rows than the tree holds"));
             }
-            let borrowed: Vec<Datum<'_>> = held.iter().map(OwnedDatum::borrow).collect();
-            let seek = self.after_prefix(&borrowed);
+            // The borrows of the prefix live on the stack when the prefix is
+            // narrow, which every index in the fixture and in the dialect's own
+            // corpus is. Collecting them was one allocation per distinct value
+            // on a path whose whole argument is that it makes as few reads as
+            // there are distinct values.
+            let mut inline: [Datum<'_>; SKIP_PREFIX_INLINE] = [Datum::Null; SKIP_PREFIX_INLINE];
+            let spilled: Vec<Datum<'_>>;
+            let borrowed: &[Datum<'_>] = if prefix <= SKIP_PREFIX_INLINE {
+                for (index, value) in held.iter().enumerate().take(prefix) {
+                    if let Some(slot) = inline.get_mut(index) {
+                        *slot = value.borrow();
+                    }
+                }
+                inline.get(..prefix).unwrap_or(&[])
+            } else {
+                spilled = held.iter().map(OwnedDatum::borrow).collect();
+                spilled.as_slice()
+            };
+            let seek = self.after_prefix(borrowed);
             let (guard, landed) = self.descend_guard(pool, seek.as_slice())?;
             let next = {
                 let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
                 // The first row in that leaf whose key is above the prefix. The
                 // descent put us on the leaf that *could* hold it; which row it
                 // is still has to be found, and a prefix comparison is what
-                // finds it.
-                let view = leaf.key_view()?;
-                let mut low = 0usize;
-                let mut high = leaf.row_count();
-                while low < high {
-                    let middle = low.saturating_add(high.saturating_sub(low) / 2);
-                    match leaf.compare_key_with(&view, middle, &borrowed)? {
-                        std::cmp::Ordering::Greater => high = middle,
-                        _ => low = middle.saturating_add(1),
-                    }
-                }
+                // finds it - through the leaf's own partition point, which
+                // takes an integer fast path when the leading key column is one.
+                let low = leaf.upper_bound(borrowed)?;
                 if low < leaf.row_count() {
                     Some((landed, low))
                 } else {

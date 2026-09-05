@@ -401,6 +401,10 @@ mod tests {
             fn finish(&mut self) -> DbResult<()> {
                 Ok(())
             }
+            /// The test sinks hold no state that survives an execution.
+            fn reset(&mut self) -> DbResult<()> {
+                Ok(())
+            }
         }
         TableScan::new(&tree, Projection::all(3))
             .run(&mut Widths(&mut widths))

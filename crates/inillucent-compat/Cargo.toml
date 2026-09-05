@@ -56,6 +56,10 @@ name = "inillucent-readgate"
 path = "src/bin/readgate.rs"
 
 [[bin]]
+name = "inillucent-probeprofile"
+path = "src/bin/probeprofile.rs"
+
+[[bin]]
 name = "inillucent-exprperf"
 path = "src/bin/exprperf.rs"
 

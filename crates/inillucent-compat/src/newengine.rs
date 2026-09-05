@@ -597,6 +597,30 @@ impl ImportedDatabase {
         physical::build_prepared(plan, self, prepared, params, sink)
     }
 
+    /// Builds a statement whose operator chain is reused across executions.
+    ///
+    /// The difference from [`ImportedDatabase::pipeline`] is the difference
+    /// between preparing a *plan* and preparing a *statement*. A workload that
+    /// binds new parameters and runs again is answered by SQLite from a VDBE
+    /// program compiled once; `pipeline` rebuilt the operator chain each time,
+    /// which `inillucent-probeprofile` measured at 42% of `point.rowid` and 71%
+    /// of `point.miss`. This builds the chain once and rebuilds only the source
+    /// whose key the parameters decide.
+    ///
+    /// @param plan - the planner's output
+    /// @param prepared - the structural choices `prepare` made
+    /// @param params - the values the first execution binds
+    /// @param sink - the end of the pipeline, which the statement keeps
+    pub fn statement<'a>(
+        &'a self,
+        plan: &'a PhysicalPlan,
+        prepared: &physical::Prepared,
+        params: &Params,
+        sink: Box<dyn inillucent_exec::Sink>,
+    ) -> DbResult<physical::Statement<'a>> {
+        physical::build_statement(plan, self, prepared, params, sink)
+    }
+
     /// Parses, plans and runs one statement.
     ///
     /// @param sql - the statement text

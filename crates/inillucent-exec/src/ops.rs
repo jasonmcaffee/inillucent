@@ -59,6 +59,19 @@ pub trait Sink {
 
     /// Signals end of input and lets a pipeline breaker emit.
     fn finish(&mut self) -> DbResult<()>;
+
+    /// Returns the operator, and everything below it, to its pre-input state.
+    ///
+    /// This is what makes an operator chain a *prepared statement* rather than
+    /// a single-use object, and it has to be implemented rather than defaulted:
+    /// an operator that forgot to clear an accumulator would answer the second
+    /// execution with the first one's rows folded in, which is a wrong answer
+    /// that no test of a single execution can see. The compiler asking every
+    /// implementor the question is the point.
+    ///
+    /// An operator with no state of its own still forwards the call, because
+    /// the operator below it may have some.
+    fn reset(&mut self) -> DbResult<()>;
 }
 
 /// The end of a pipeline: it keeps the rows.
@@ -125,6 +138,12 @@ impl Sink for Collect {
     fn finish(&mut self) -> DbResult<()> {
         Ok(())
     }
+
+    /// Returns this operator and everything below it to its pre-input state.
+    fn reset(&mut self) -> DbResult<()> {
+        self.rows.clear();
+        Ok(())
+    }
 }
 
 /// A sink that appends into a buffer the caller still holds.
@@ -185,6 +204,12 @@ impl Sink for CollectInto {
     fn finish(&mut self) -> DbResult<()> {
         Ok(())
     }
+
+    /// Returns this operator and everything below it to its pre-input state.
+    fn reset(&mut self) -> DbResult<()> {
+        self.rows.borrow_mut().clear();
+        Ok(())
+    }
 }
 
 /// Applies a predicate, producing a selection vector rather than moving rows.
@@ -234,6 +259,12 @@ impl Sink for Filter {
 
     fn finish(&mut self) -> DbResult<()> {
         self.downstream.finish()
+    }
+
+    /// Returns this operator and everything below it to its pre-input state.
+    fn reset(&mut self) -> DbResult<()> {
+        self.selection.clear();
+        self.downstream.reset()
     }
 }
 
@@ -308,6 +339,11 @@ impl Sink for Project {
 
     fn finish(&mut self) -> DbResult<()> {
         self.downstream.finish()
+    }
+
+    /// Returns this operator and everything below it to its pre-input state.
+    fn reset(&mut self) -> DbResult<()> {
+        self.downstream.reset()
     }
 }
 
@@ -409,6 +445,16 @@ impl Sink for SimpleAggregate {
         let batch = Batch::new(1, columns);
         self.downstream.push(&batch)?;
         self.downstream.finish()
+    }
+
+    /// Returns this operator and everything below it to its pre-input state.
+    fn reset(&mut self) -> DbResult<()> {
+        for (index, spec) in self.specs.iter().enumerate() {
+            if let Some(slot) = self.accumulators.get_mut(index) {
+                *slot = Accumulator::new(spec.kind.clone());
+            }
+        }
+        self.downstream.reset()
     }
 }
 
@@ -515,6 +561,12 @@ impl Sink for HashAggregate {
         }
         emit_rows(&rows, self.downstream.as_mut())?;
         self.downstream.finish()
+    }
+
+    /// Returns this operator and everything below it to its pre-input state.
+    fn reset(&mut self) -> DbResult<()> {
+        self.groups.clear();
+        self.downstream.reset()
     }
 }
 
@@ -728,6 +780,18 @@ impl Sink for StreamAggregate {
         emit_rows(&rows, self.downstream.as_mut())?;
         self.downstream.finish()
     }
+
+    /// Returns this operator and everything below it to its pre-input state.
+    fn reset(&mut self) -> DbResult<()> {
+        self.current = None;
+        self.rows.clear();
+        for (index, spec) in self.specs.iter().enumerate() {
+            if let Some(slot) = self.accumulators.get_mut(index) {
+                *slot = Accumulator::new(spec.kind.clone());
+            }
+        }
+        self.downstream.reset()
+    }
 }
 
 /// Reads one 8-byte slot of a dense integer vector.
@@ -826,6 +890,13 @@ impl Sink for AdjacentDistinct {
         emit_rows(&rows, self.downstream.as_mut())?;
         self.downstream.finish()
     }
+
+    /// Returns this operator and everything below it to its pre-input state.
+    fn reset(&mut self) -> DbResult<()> {
+        self.previous = None;
+        self.rows.clear();
+        self.downstream.reset()
+    }
 }
 
 /// One `ORDER BY` term.
@@ -894,6 +965,12 @@ impl Sink for Sort {
         let rows = std::mem::take(&mut self.rows);
         emit_rows(&rows, self.downstream.as_mut())?;
         self.downstream.finish()
+    }
+
+    /// Returns this operator and everything below it to its pre-input state.
+    fn reset(&mut self) -> DbResult<()> {
+        self.rows.clear();
+        self.downstream.reset()
     }
 }
 
@@ -975,6 +1052,12 @@ impl Sink for TopN {
         let rows = std::mem::take(&mut self.best);
         emit_rows(&rows, self.downstream.as_mut())?;
         self.downstream.finish()
+    }
+
+    /// Returns this operator and everything below it to its pre-input state.
+    fn reset(&mut self) -> DbResult<()> {
+        self.best.clear();
+        self.downstream.reset()
     }
 }
 
@@ -1059,6 +1142,13 @@ impl Sink for Distinct {
         emit_rows(&rows, self.downstream.as_mut())?;
         self.downstream.finish()
     }
+
+    /// Returns this operator and everything below it to its pre-input state.
+    fn reset(&mut self) -> DbResult<()> {
+        self.seen.clear();
+        self.rows.clear();
+        self.downstream.reset()
+    }
 }
 
 /// Passes at most `limit` rows through, after skipping `offset`.
@@ -1121,6 +1211,13 @@ impl Sink for Limit {
 
     fn finish(&mut self) -> DbResult<()> {
         self.downstream.finish()
+    }
+
+    /// Returns this operator and everything below it to its pre-input state.
+    fn reset(&mut self) -> DbResult<()> {
+        self.seen = 0;
+        self.emitted = 0;
+        self.downstream.reset()
     }
 }
 

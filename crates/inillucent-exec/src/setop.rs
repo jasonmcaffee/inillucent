@@ -131,6 +131,11 @@ impl Sink for SetKeys {
     fn finish(&mut self) -> DbResult<()> {
         Ok(())
     }
+    /// Returns this operator and everything below it to its pre-input state.
+    fn reset(&mut self) -> DbResult<()> {
+        self.counts.clear();
+        Ok(())
+    }
 }
 
 /// Filters and forwards the left branch of a set operation.
@@ -216,6 +221,12 @@ impl Sink for SetOp {
 
     fn finish(&mut self) -> DbResult<()> {
         self.downstream.finish()
+    }
+
+    /// Returns this operator and everything below it to its pre-input state.
+    fn reset(&mut self) -> DbResult<()> {
+        self.seen.clear();
+        self.downstream.reset()
     }
 }
 

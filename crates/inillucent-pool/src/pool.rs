@@ -145,12 +145,69 @@ impl FrameMeta {
     }
 }
 
+/// The page table's hasher: one multiply, no keying.
+///
+/// **This is a measurement.** The page table is keyed by a `u64` page number
+/// and was hashed with the standard library's default, which is SipHash-1-3
+/// with a per-process key. That is the right default for a map whose keys come
+/// from outside the process and the wrong one for this map: every fetch that is
+/// not already holding a frame number pays it, and `inillucent-probeprofile`
+/// measured a resident fetch at 19.0 ns against a descent of 97.6 ns - a fifth
+/// of a descent spent hashing eight bytes nobody is attacking.
+///
+/// Page numbers are dense and sequential, so multiplying by an odd constant and
+/// keeping the high bits is enough to spread them across the buckets. A tree's
+/// pages are allocated consecutively, which is the case a weak hash would fail
+/// on, and the multiply moves the entropy into the top bits precisely so that
+/// consecutive keys land in different buckets rather than adjacent ones.
+#[derive(Default)]
+struct PageHasher {
+    /// The hash so far.
+    state: u64,
+}
+
+impl std::hash::Hasher for PageHasher {
+    fn finish(&self) -> u64 {
+        self.state
+    }
+
+    /// Hashes bytes, which a `PageId` never produces.
+    ///
+    /// `PageId` derives `Hash` over its single `u64`, so this is only reached
+    /// if the key type changes. Mixing them one at a time is slow and correct,
+    /// which is the right trade for a path nothing takes.
+    ///
+    /// @param bytes - the bytes to fold in
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.state = self
+                .state
+                .rotate_left(8)
+                .wrapping_add(u64::from(*byte))
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+
+    /// Hashes one page number.
+    ///
+    /// @param value - the page number
+    fn write_u64(&mut self, value: u64) {
+        self.state = value
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .rotate_left(31)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+
+/// The page table's hasher factory.
+type PageHashing = std::hash::BuildHasherDefault<PageHasher>;
+
 /// Everything about the pool that a fetch may have to change.
 struct State {
     /// One entry per frame.
     frames: Vec<FrameMeta>,
     /// Which frame holds which page.
-    table: HashMap<PageId, u32>,
+    table: HashMap<PageId, u32, PageHashing>,
     /// Frames holding nothing.
     free: Vec<u32>,
     /// Frames queued for eviction, coldest first.
@@ -269,7 +326,7 @@ impl Pool {
             latches,
             state: RefCell::new(State {
                 frames: vec![FrameMeta::empty(); frames],
-                table: HashMap::with_capacity(frames),
+                table: HashMap::with_capacity_and_hasher(frames, PageHashing::default()),
                 free: (0..frames as u32).rev().collect(),
                 cooling: VecDeque::new(),
                 clock: Rng::new(0x5EED_0B0F_C0FF_EE01),
