@@ -1426,6 +1426,19 @@ fn find_rowid(pager: &mut Pager, tree: &Tree, rowid: i64) -> DbResult<(Vec<Step>
 fn find_key(pager: &mut Pager, tree: &Tree, probe: &[u8]) -> DbResult<(Vec<Step>, bool)> {
     let encoding = pager.text_encoding();
     let limits = Limits::default();
+    // The probe is parsed once for the whole descent rather than once per
+    // comparison. It used to be re-parsed inside the comparison, so a binary
+    // search over three levels of a twenty-thousand-entry index parsed the same
+    // record fifteen times and allocated a span vector for each - and
+    // `Limits::default()` was rebuilt beside it, which copies the whole limit
+    // table behind an `Arc`. Neither depends on which cell is being compared.
+    let mut probe_fields = Vec::new();
+    let probe_header = RecordRef::parse_into(probe, &limits, &mut probe_fields)?;
+    let probe_record = RecordRef::with_fields(probe, &probe_fields, probe_header, encoding);
+    // Reused across every comparison of the descent: the spans of the cell being
+    // compared, and a buffer that is only touched when a cell overflows.
+    let mut cell_fields = Vec::new();
+    let mut overflowed = Vec::new();
     let mut path = Vec::new();
     let mut page = tree.root;
     loop {
@@ -1437,7 +1450,17 @@ fn find_key(pager: &mut Pager, tree: &Tree, probe: &[u8]) -> DbResult<(Vec<Step>
         let mut high = layout.cell_count;
         while low < high {
             let middle = low.saturating_add(high.saturating_sub(low) / 2);
-            let ordering = compare_cell(pager, page, middle, probe, &tree.key, encoding, &limits)?;
+            let ordering = compare_cell_to(
+                pager,
+                page,
+                middle,
+                &probe_record,
+                &tree.key,
+                encoding,
+                &limits,
+                &mut cell_fields,
+                &mut overflowed,
+            )?;
             if ordering == std::cmp::Ordering::Less {
                 low = middle.saturating_add(1);
             } else {
@@ -1445,8 +1468,17 @@ fn find_key(pager: &mut Pager, tree: &Tree, probe: &[u8]) -> DbResult<(Vec<Step>
             }
         }
         let equal = low < layout.cell_count
-            && compare_cell(pager, page, low, probe, &tree.key, encoding, &limits)?
-                == std::cmp::Ordering::Equal;
+            && compare_cell_to(
+                pager,
+                page,
+                low,
+                &probe_record,
+                &tree.key,
+                encoding,
+                &limits,
+                &mut cell_fields,
+                &mut overflowed,
+            )? == std::cmp::Ordering::Equal;
         if equal {
             path.push(Step { page, slot: low });
             return Ok((path, true));
@@ -1466,21 +1498,61 @@ fn find_key(pager: &mut Pager, tree: &Tree, probe: &[u8]) -> DbResult<(Vec<Step>
     }
 }
 
-/// Compares one cell's key against a probe record.
+/// Compares one cell's key against an already-parsed probe record.
+///
+/// The cell's payload is borrowed straight out of the pinned page whenever the
+/// whole of it is on that page, which is the ordinary case: an index entry
+/// overflows only when it is bigger than about a quarter of a page. The owning
+/// form below is what the overflow case falls back to, because following a
+/// chain needs the pager mutably and the pin has to be dropped first.
+///
+/// This is the hot path of every index write. Copying the payload and parsing
+/// both records per comparison made one index insert cost about five heap
+/// allocations per comparison, and a binary search does a dozen or more of them.
+/// @param probe - the record being searched for, parsed once by the caller
+/// @param cell_fields - a span buffer reused across the whole descent
+/// @param overflowed - a payload buffer only the overflow case fills
 #[allow(clippy::too_many_arguments)]
-fn compare_cell(
+fn compare_cell_to(
     pager: &mut Pager,
     page: PageId,
     index: usize,
-    probe: &[u8],
+    probe: &RecordRef<'_>,
     key: &KeyInfo,
     encoding: TextEncoding,
     limits: &Limits,
+    cell_fields: &mut Vec<rustdb_value::record::FieldSpan>,
+    overflowed: &mut Vec<u8>,
 ) -> DbResult<std::cmp::Ordering> {
-    let payload = cell_payload(pager, page, index)?;
-    let left = RecordRef::parse_with_limits(&payload, encoding, limits)?;
-    let right = RecordRef::parse_with_limits(probe, encoding, limits)?;
-    record::compare_records(&left, &right, key)
+    let layout = read_layout(pager, page)?;
+    let (total, head, local_offset, local_len) = {
+        let pin = pager.get_page(page)?;
+        let view = BTreePage::new(pin.bytes(), &layout);
+        let cell = view.cell(index)?;
+        if cell.overflow.is_none() {
+            cell_fields.clear();
+            let header = RecordRef::parse_into(cell.local_payload, limits, cell_fields)?;
+            let left = RecordRef::with_fields(cell.local_payload, cell_fields, header, encoding);
+            return record::compare_records(&left, probe, key);
+        }
+        (
+            cell.split.total,
+            cell.overflow,
+            cell.local_offset,
+            cell.local_payload.len(),
+        )
+    };
+    // The chain has to be followed, which needs the pager mutably, so the local
+    // part is copied out first and the pin is gone by the time this runs.
+    let local = {
+        let pin = pager.get_page(page)?;
+        bytes::window(pin.bytes(), local_offset, local_len)?.to_vec()
+    };
+    overflow::read_payload_into(pager, &local, total, head, limits, overflowed)?;
+    cell_fields.clear();
+    let header = RecordRef::parse_into(overflowed, limits, cell_fields)?;
+    let left = RecordRef::with_fields(overflowed, cell_fields, header, encoding);
+    record::compare_records(&left, probe, key)
 }
 
 #[cfg(test)]

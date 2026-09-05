@@ -365,6 +365,59 @@ impl Compiler {
         Ok(record)
     }
 
+    /// Returns, per index, whether this UPDATE can leave its entries alone.
+    ///
+    /// An index entry is keyed by the index's own columns with the rowid behind
+    /// them, so an UPDATE that assigns none of those columns and does not move
+    /// the row produces exactly the entry that is already there. Deleting it and
+    /// inserting it back is then a descent, a balance and two page edits to
+    /// arrive at the same bytes - and it was the whole cost of the statement:
+    /// `UPDATE side_table SET note = ?2 WHERE id = ?1`, whose only index is on
+    /// `owner`, measured 6.9 microseconds in `IdxDelete` and 12.7 in `IdxInsert`
+    /// out of 22 for the statement. SQLite decides the same thing from `aXRef`.
+    ///
+    /// Everything that is not plainly safe is refused rather than reasoned
+    /// about, because being wrong here leaves an index disagreeing with its
+    /// table and nothing reads wrong until much later:
+    ///
+    /// - a partial index is never skipped: its predicate can name any column,
+    ///   so any assignment may move the row into or out of the index;
+    /// - an index with an expression key is never skipped, for the same reason;
+    /// - a WITHOUT ROWID table is never skipped, because its index entries
+    ///   carry the primary key rather than a rowid;
+    /// - an assignment to the rowid alias moves every entry, so nothing is
+    ///   skipped.
+    ///
+    /// @param table - the table being updated
+    /// @param update - the statement, for the columns it assigns
+    fn unaffected_indexes(&self, table: &TableInfo, update: &BoundUpdate) -> Vec<bool> {
+        let definitions = &table.indexes;
+        if table.without_rowid {
+            return vec![false; definitions.len()];
+        }
+        let assigns = |column: u16| {
+            update
+                .assignments
+                .iter()
+                .any(|assignment| assignment.column == column)
+        };
+        if table.rowid_alias.is_some_and(assigns) {
+            return vec![false; definitions.len()];
+        }
+        definitions
+            .iter()
+            .map(|index| {
+                if index.partial_sql.is_some() {
+                    return false;
+                }
+                index.columns.iter().all(|key| match key.column {
+                    Some(column) if key.expr_sql.is_none() => !assigns(column),
+                    _ => false,
+                })
+            })
+            .collect()
+    }
+
     /// Emits the deletion of the row a table cursor is sitting on, index
     /// entries first.
     ///
@@ -393,6 +446,14 @@ impl Compiler {
             let Some(cursor) = writer.indexes.get(position).copied() else {
                 continue;
             };
+            if self
+                .untouched_indexes
+                .get(position)
+                .copied()
+                .unwrap_or(false)
+            {
+                continue;
+            }
             let record = self.emit_index_record(index, &values, rowid, table)?;
             self.emit(Instruction::new(
                 Opcode::IdxDelete,
@@ -1132,6 +1193,14 @@ impl Compiler {
             let Some(cursor) = writer.indexes.get(position).copied() else {
                 continue;
             };
+            if self
+                .untouched_indexes
+                .get(position)
+                .copied()
+                .unwrap_or(false)
+            {
+                continue;
+            }
             let entry = self.emit_index_record(index, values, rowid, table)?;
             self.emit(Instruction::new(
                 Opcode::IdxInsert,
@@ -3251,9 +3320,16 @@ impl Compiler {
             -1,
             old_rowid as i32,
         ));
-        self.emit_delete_current(writer, table)?;
+        // Only the row's own delete-and-rewrite may skip an index; every other
+        // caller of these two emitters - DELETE, INSERT, upsert, a trigger body -
+        // leaves the flags empty and rebuilds everything.
+        let unaffected = self.unaffected_indexes(table, update);
+        let untouched = core::mem::replace(&mut self.untouched_indexes, unaffected);
+        let deleted = self.emit_delete_current(writer, table);
         self.patch_here(gone);
-        self.emit_write_row(writer, table, &values, new_rowid)?;
+        let written = deleted.and_then(|()| self.emit_write_row(writer, table, &values, new_rowid));
+        self.untouched_indexes = untouched;
+        written?;
         self.emit_count_change(table, new_rowid, RowChangeKind::Update, false);
         self.emit_triggers(
             &update.triggers,
