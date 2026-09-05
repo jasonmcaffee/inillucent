@@ -917,6 +917,45 @@ mod tests {
         (vfs, path, journal)
     }
 
+    /// The journal mode may change between transactions and not inside one.
+    ///
+    /// Changing it mid-transaction would leave records written under one set of
+    /// rules and a commit point applied under another - a journal deleted when
+    /// the pages it holds were written expecting it to be zeroed, say. The
+    /// refusal is the invariant; nothing asserted either half of it.
+    #[test]
+    fn the_journal_mode_changes_between_transactions_and_not_inside_one() {
+        let (_vfs, _path, mut journal) = journal_over(JournalMode::Delete, Synchronous::Full);
+        journal
+            .set_mode(JournalMode::Truncate)
+            .expect("changing mode between transactions is allowed");
+        assert_eq!(journal.options().mode, JournalMode::Truncate);
+
+        journal.begin(1024, 4).expect("the journal begins");
+        journal
+            .record(2, &page_of(2, 1024))
+            .expect("a page image is recorded");
+        let refused = journal
+            .set_mode(JournalMode::Persist)
+            .expect_err("changing mode inside a transaction is refused");
+        assert_eq!(refused.code(), rustdb_base::error::PrimaryCode::Misuse);
+        assert_eq!(
+            journal.options().mode,
+            JournalMode::Truncate,
+            "the refused change left the mode alone"
+        );
+    }
+
+    /// The journal reports the path it writes to.
+    ///
+    /// It is what a super-journal records for each database in a multi-database
+    /// commit, so a wrong answer would name a file recovery cannot find.
+    #[test]
+    fn the_journal_reports_the_path_it_writes_to() {
+        let (_vfs, path, journal) = journal_over(JournalMode::Delete, Synchronous::Full);
+        assert_eq!(journal.path(), &path.journal());
+    }
+
     /// The super-journal checksum is the sum of the name's bytes.
     ///
     /// Asserted against values worked out by hand rather than against the
