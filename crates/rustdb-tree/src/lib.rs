@@ -55,11 +55,13 @@ pub mod datum;
 pub mod key;
 pub mod leaf;
 pub mod page;
+pub mod paged;
 pub mod tree;
 pub mod types;
 
 pub use datum::Datum;
 pub use leaf::{LeafBuilder, LeafRef};
 pub use page::{PageId, PageSize};
+pub use paged::{Descent, KeyBytes, KeyEncoding, PagedTree};
 pub use tree::{ScanCursor, Tree};
 pub use types::{ColumnSpec, PhysicalType};
