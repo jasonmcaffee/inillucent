@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn decoding_arbitrary_bytes_never_reads_past_the_end() {
         let mut state = 0x9e37_79b9_7f4a_7c15u64;
-        for _ in 0..20_000 {
+        for _ in 0..rustdb_base::probe::sample_rounds(20_000) {
             state = state
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1_442_695_040_888_963_407);

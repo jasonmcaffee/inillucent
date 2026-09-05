@@ -1,9 +1,9 @@
 # Migration report
 
-- source: `/mnt/c/jason/dev/rust-db/_agent_output/task-1790/migrate/full/index`
+- source: `C:/jason/dev/rust-db/_agent_output/task-1790/migrate/full/index`
 - source generation: `g000000000001`
-- staging destination: `/mnt/c/jason/dev/rust-db/_agent_output/task-1790/migrate/full/corpus.db.migrating`
-- published to: `/mnt/c/jason/dev/rust-db/_agent_output/task-1790/migrate/full/corpus.db`
+- staging destination: `C:/jason/dev/rust-db/_agent_output/measurements/migrate/full\corpus.db.migrating`
+- published to: `C:/jason/dev/rust-db/_agent_output/measurements/migrate/full/corpus.db`
 - target commit sequence: `1`
 
 ## Source sections
@@ -14,7 +14,7 @@
 | `graph.bin` | 9905 | `488d2631bb201ddc6b3659dff4240cf19ba66063937f31eeb3727d8ff7f3063e` |
 | `lexical.bin` | 10144 | `4bf2950f555903462a9203ba51fa3917bbf4f795b4d7b420e8421801cf173ed0` |
 | `store.bin` | 13427 | `61c8561156d070120dac95e28aa8e514dca10d791d2c56069f25acf5196c396d` |
-| `vectors.bin` | 2325 | `c3301a2357d841489400ea2267111716b72a3b99d32ec483ecd87185f241980e` |
+| `vectors.bin` | 2325 | `7ec20e5e35b2b0c3d50bd27e7427778e05c6e4539265b2e841e91f04cf882544` |
 
 ## Target tables
 

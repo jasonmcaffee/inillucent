@@ -4,15 +4,15 @@ Platform `windows-x86_64`, 6000 single-row transactions per run, 3 runs per arm,
 
 | statistic | spread over commits | all on one commit |
 |---|---:|---:|
-| median commit | 550.9 | 556.0 |
-| 90th percentile | 817.5 | 830.7 |
-| 99th percentile | 1457.6 | 1472.8 |
-| 99.9th percentile | 2089.0 | 2088.5 |
-| **worst commit** | **3200.3** | **22936.0** |
+| median commit | 534.7 | 524.4 |
+| 90th percentile | 798.6 | 794.1 |
+| 99th percentile | 1513.6 | 1419.4 |
+| 99.9th percentile | 2084.2 | 1991.5 |
+| **worst commit** | **13045.7** | **5300.7** |
 | frames appended | 19808 | 19808 |
 | checkpoints run | 5698 | 5698 |
 | frames checkpointed | 13198 | 13172 |
-| total, all commits | 3668551 | 3658054 |
+| total, all commits | 3587910 | 3484210 |
 
 The total and the frame counters are the controls: both arms copy the same pages into the same file, so a difference there would mean the arm had changed the work rather than its distribution.
 

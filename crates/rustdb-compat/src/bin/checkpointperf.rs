@@ -35,7 +35,10 @@ const REPEATS: usize = 3;
 
 /// Measures both arms and writes the report.
 fn main() -> ExitCode {
-    let out = workspace_root().join("_agent_output/task-1790/checkpoint");
+    // Ticket-neutral, and beside the scorecard the release gathers from, for
+    // the same reason the scorecard's own default is: a measurement of this
+    // build does not belong in an earlier ticket's folder.
+    let out = workspace_root().join("_agent_output/measurements/checkpoint");
     if let Err(error) = std::fs::create_dir_all(&out) {
         eprintln!("cannot create {out:?}: {error}");
         return ExitCode::FAILURE;

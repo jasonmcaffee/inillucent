@@ -476,7 +476,7 @@ mod tests {
     #[test]
     fn classifying_arbitrary_bytes_never_panics() {
         let mut state = 0x1234_5678_9abc_def0u64;
-        for _ in 0..20_000 {
+        for _ in 0..rustdb_base::probe::sample_rounds(20_000) {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;

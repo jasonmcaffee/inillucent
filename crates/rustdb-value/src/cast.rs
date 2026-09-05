@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn casting_arbitrary_bytes_never_panics() {
         let mut state = 0xdead_beef_cafe_babeu64;
-        for _ in 0..20_000 {
+        for _ in 0..rustdb_base::probe::sample_rounds(20_000) {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;

@@ -1020,7 +1020,7 @@ mod tests {
     #[test]
     fn rendering_a_real_round_trips_to_the_same_bits() {
         let mut state = 0x243f_6a88_85a3_08d3u64;
-        for _ in 0..200_000 {
+        for _ in 0..rustdb_base::probe::sample_rounds(200_000) {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
@@ -1050,7 +1050,7 @@ mod tests {
     #[test]
     fn scanning_arbitrary_bytes_never_panics() {
         let mut state = 0x2545_f491_4f6c_dd1du64;
-        for _ in 0..50_000 {
+        for _ in 0..rustdb_base::probe::sample_rounds(50_000) {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
