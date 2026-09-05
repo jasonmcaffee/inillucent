@@ -289,10 +289,11 @@ impl Project {
 
 /// How many projected columns a permutation keeps on the stack.
 ///
-/// The scorecard's widest projection is five columns and the dialect's own
-/// corpus does not exceed twelve; a wider one takes the general path, which is
-/// what every projection used to take.
-const INLINE_PROJECT: usize = 12;
+/// The scorecard's widest projection is five columns. The array is filled in
+/// whether the projection needs every slot or not, so the size is a cost as well
+/// as a ceiling; a wider one takes the general path, which is what every
+/// projection used to take.
+const INLINE_PROJECT: usize = 8;
 
 impl Sink for Project {
     fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
@@ -304,7 +305,7 @@ impl Sink for Project {
         // `inillucent-probeprofile` measured `SELECT count(*) ... WHERE id = ?1`
         // at 0.87 us against a bare probe of about 0.24 us, and this is one of
         // the allocations in between.
-        if batch.is_dense() && self.expressions.len() <= INLINE_PROJECT {
+        if self.expressions.len() <= INLINE_PROJECT {
             let mut inline: [Vector<'_>; INLINE_PROJECT] =
                 [Vector::Const(Datum::Null); INLINE_PROJECT];
             let mut permutation = true;
@@ -325,8 +326,17 @@ impl Sink for Project {
                 }
             }
             if permutation {
-                let projected =
-                    Batch::over(live, inline.get(..self.expressions.len()).unwrap_or(&[]));
+                // The selection is carried through rather than applied: the
+                // vectors are indexed by the input's row numbers, so a batch
+                // that arrives selected has to leave selected. The first
+                // version required a dense batch for exactly this reason, and
+                // then a point probe handing one row of a leaf downstream could
+                // not use it.
+                let mut projected = Batch::over(
+                    batch.rows,
+                    inline.get(..self.expressions.len()).unwrap_or(&[]),
+                );
+                projected.selection = batch.selection;
                 return self.downstream.push(&projected);
             }
         }

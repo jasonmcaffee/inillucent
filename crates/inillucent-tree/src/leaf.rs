@@ -49,7 +49,7 @@ use inillucent_base::DbResult;
 
 use crate::datum::Datum;
 use crate::page::{self, header, PageId, PageKind};
-use crate::types::{ColumnSpec, PhysicalType, ValueClass, COLUMN_KEY};
+use crate::types::{ColumnSpec, PhysicalType, ValueClass, COLUMN_ALL_TYPED, COLUMN_KEY};
 
 /// Byte offsets inside the leaf header, after the common header.
 pub mod leaf_header {
@@ -1214,6 +1214,14 @@ impl<'p> MiniColumn<'p> {
         if self.rows == 0 {
             return true;
         }
+        // The directory says so, because the builder walked these values once
+        // and wrote down what it found. A page whose bit is clear falls through
+        // to the walk below, which is the right answer either way and only
+        // slower - so nothing has to have been written by this version of the
+        // builder for this to be correct.
+        if self.flags & COLUMN_ALL_TYPED != 0 {
+            return true;
+        }
         let full_words = self.rows / 32;
         let mut words = self.class.chunks_exact(8);
         for _ in 0..full_words {
@@ -1504,6 +1512,10 @@ impl LeafBuilder {
         // every exception is appended to it as the columns are written.
         let mut heap_end = self.page_size;
         let mut has_exceptions = false;
+        // Which columns turned out to hold nothing but present, correctly typed
+        // values. The builder is walking every value anyway, so recording the
+        // answer costs a branch and saves every later reader the walk.
+        let mut all_typed: Vec<bool> = vec![true; self.columns.len()];
 
         for (index, column) in self.columns.iter().enumerate() {
             let base = offsets.get(index).copied().unwrap_or(0);
@@ -1513,6 +1525,11 @@ impl LeafBuilder {
                 let class = classify(column.physical, &value);
                 if class == ValueClass::Exception {
                     has_exceptions = true;
+                }
+                if class != ValueClass::Typed {
+                    if let Some(slot) = all_typed.get_mut(index) {
+                        *slot = false;
+                    }
                 }
                 set_class(&mut page, base, row, class)?;
                 let slot =
@@ -1595,10 +1612,15 @@ impl LeafBuilder {
             let flag_slot = page
                 .get_mut(entry.saturating_add(1))
                 .ok_or_else(|| misuse("the directory does not fit"))?;
-            *flag_slot = if index < self.key_columns {
+            let key_bit = if index < self.key_columns {
                 column.flags | COLUMN_KEY
             } else {
                 column.flags & !COLUMN_KEY
+            };
+            *flag_slot = if all_typed.get(index).copied().unwrap_or(false) {
+                key_bit | COLUMN_ALL_TYPED
+            } else {
+                key_bit & !COLUMN_ALL_TYPED
             };
             page::write_u16(
                 &mut page,
@@ -1706,6 +1728,211 @@ fn write_tagged(page: &mut [u8], heap_end: usize, value: &Datum<'_>) -> DbResult
 mod tests {
     use super::*;
     use crate::types::COLUMN_NULLABLE;
+
+    /// `equal_run` finds the same span by every route it has.
+    ///
+    /// It is the hot path of every index probe - an index nested loop asks for
+    /// one run per outer row - and it has three routes to the same answer: an
+    /// integer fast path over the leading key column, a forward walk capped at
+    /// `scan_cap`, and a bisection when the run is longer than the cap. A
+    /// generic prefix that is not a single integer takes a fourth. This checks
+    /// all four against a count of the rows that actually match.
+    #[test]
+    fn an_equal_run_is_the_rows_that_match_by_every_route() {
+        /// Counts the rows whose leading column equals a value.
+        ///
+        /// @param rows - the rows the leaf was built from
+        /// @param wanted - the value to match
+        fn matching(rows: &[Vec<Datum<'_>>], wanted: &Datum<'_>) -> usize {
+            rows.iter()
+                .filter(|row| {
+                    row.first()
+                        .map(|value| value.compare(wanted) == std::cmp::Ordering::Equal)
+                        .unwrap_or(false)
+                })
+                .count()
+        }
+
+        // An integer leading key column: runs of one, of three, and of
+        // twenty - the last well past any sensible scan cap.
+        let columns = vec![
+            ColumnSpec::key(PhysicalType::Int64),
+            ColumnSpec::key(PhysicalType::Int64),
+        ];
+        let mut rows: Vec<Vec<Datum<'_>>> = Vec::new();
+        for (group, run) in [(10i64, 1usize), (20, 3), (30, 20), (40, 1)] {
+            for nth in 0..run {
+                rows.push(vec![Datum::Int(group), Datum::Int(nth as i64)]);
+            }
+        }
+        let page = LeafBuilder::new(4096, 1, columns, 2)
+            .unwrap()
+            .encode(&rows)
+            .unwrap();
+        let leaf = LeafRef::parse(&page).unwrap();
+        for (wanted, cap) in [
+            (10i64, 8usize),
+            (20, 8),
+            (30, 8),
+            (30, 64),
+            (40, 8),
+            (25, 8),
+            (99, 8),
+        ] {
+            let probe = [Datum::Int(wanted)];
+            let (begin, end) = leaf.equal_run(&probe, cap).unwrap();
+            assert_eq!(
+                end.saturating_sub(begin),
+                matching(&rows, &probe[0]),
+                "integer run for {wanted} at cap {cap}"
+            );
+            assert_eq!(
+                begin,
+                leaf.lower_bound(&probe).unwrap(),
+                "the run starts at the lower bound for {wanted}"
+            );
+        }
+
+        // A text leading key column takes the generic route, including the
+        // bisection when the run is longer than the cap.
+        let columns = vec![
+            ColumnSpec::key(PhysicalType::Text),
+            ColumnSpec::key(PhysicalType::Int64),
+        ];
+        let mut rows: Vec<Vec<Datum<'_>>> = Vec::new();
+        for (group, run) in [(&b"aa"[..], 1usize), (b"bb", 3), (b"cc", 20)] {
+            for nth in 0..run {
+                rows.push(vec![Datum::Text(group), Datum::Int(nth as i64)]);
+            }
+        }
+        let page = LeafBuilder::new(4096, 1, columns, 2)
+            .unwrap()
+            .encode(&rows)
+            .unwrap();
+        let leaf = LeafRef::parse(&page).unwrap();
+        for (wanted, cap) in [
+            (&b"aa"[..], 8usize),
+            (b"bb", 8),
+            (b"cc", 8),
+            (b"cc", 64),
+            (b"zz", 8),
+        ] {
+            let probe = [Datum::Text(wanted)];
+            let (begin, end) = leaf.equal_run(&probe, cap).unwrap();
+            assert_eq!(
+                end.saturating_sub(begin),
+                matching(&rows, &probe[0]),
+                "text run for {wanted:?} at cap {cap}"
+            );
+        }
+    }
+
+    /// A collation that could reorder numbers turns the interpolation guide
+    /// off rather than letting it guess under an order it does not know.
+    ///
+    /// The guard is unreachable for the collations the dialect actually has -
+    /// none of them reorders an integer - so it exists to make a future one
+    /// safe. A bound taken under it still has to be the right bound.
+    #[test]
+    fn a_non_binary_collation_declines_the_integer_guide() {
+        let columns = vec![
+            ColumnSpec::key(PhysicalType::Int64),
+            ColumnSpec::new(PhysicalType::Int64),
+        ];
+        let rows: Vec<Vec<Datum<'_>>> = (0..64i64)
+            .map(|n| vec![Datum::Int(n * 2), Datum::Int(n)])
+            .collect();
+        let page = LeafBuilder::new(4096, 1, columns, 1)
+            .unwrap()
+            .encode(&rows)
+            .unwrap();
+        let collations = [inillucent_value::collation::Collation::NoCase];
+        let guided = LeafRef::parse(&page).unwrap();
+        let unguided = LeafRef::parse(&page).unwrap().with_collations(&collations);
+        for wanted in [-1i64, 0, 1, 62, 63, 126, 127, 1_000] {
+            let probe = [Datum::Int(wanted)];
+            assert_eq!(
+                unguided.lower_bound(&probe).unwrap(),
+                guided.lower_bound(&probe).unwrap(),
+                "the lower bound for {wanted} moved with the collation"
+            );
+            assert_eq!(
+                unguided.upper_bound(&probe).unwrap(),
+                guided.upper_bound(&probe).unwrap(),
+                "the upper bound for {wanted} moved with the collation"
+            );
+        }
+    }
+
+    /// The directory's all-typed bit says exactly what a walk of the class
+    /// array says, on a column of each shape.
+    ///
+    /// The bit is a cache of that walk, and a cache that can disagree with what
+    /// it caches is the worst kind of fast path - it is a different answer, not
+    /// a faster one. So this asserts the two agree, and it asserts it on the
+    /// three shapes that decide it: every value present and typed, a NULL, and
+    /// a value of the wrong class for its column.
+    #[test]
+    fn the_all_typed_bit_agrees_with_the_class_array() {
+        /// Walks the class array the way `all_typed` did before the bit
+        /// existed, so the two answers can be compared.
+        ///
+        /// @param column - the mini-column to inspect
+        fn walked(column: &MiniColumn<'_>) -> bool {
+            (0..column.rows).all(|row| matches!(column.class_at(row), Ok(ValueClass::Typed)))
+        }
+
+        let columns = vec![
+            ColumnSpec::key(PhysicalType::Int64),
+            ColumnSpec::new(PhysicalType::Int64),
+            ColumnSpec::new(PhysicalType::Text),
+        ];
+        let shapes: [(&str, Datum<'_>); 3] = [
+            ("typed", Datum::Int(7)),
+            ("null", Datum::Null),
+            ("exception", Datum::Text(b"not an integer")),
+        ];
+        for (name, odd) in shapes {
+            let mut rows: Vec<Vec<Datum<'_>>> = (0..40i64)
+                .map(|n| vec![Datum::Int(n), Datum::Int(n * 3), Datum::Text(b"label")])
+                .collect();
+            if let Some(row) = rows.get_mut(17) {
+                if let Some(slot) = row.get_mut(1) {
+                    *slot = odd;
+                }
+            }
+            let page = LeafBuilder::new(4096, 1, columns.clone(), 1)
+                .unwrap()
+                .encode(&rows)
+                .unwrap();
+            let leaf = LeafRef::parse(&page).unwrap();
+            for index in 0..3 {
+                let column = leaf.column(index).unwrap();
+                let by_walk = walked(&column);
+                assert_eq!(
+                    column.all_typed(),
+                    by_walk,
+                    "{name}: column {index} disagrees with its class array"
+                );
+                assert_eq!(
+                    column.flags & COLUMN_ALL_TYPED != 0,
+                    by_walk,
+                    "{name}: column {index}'s directory bit disagrees"
+                );
+            }
+            // The odd value is in column 1 and only column 1.
+            let typed_column = matches!(odd, Datum::Int(_));
+            assert_eq!(
+                leaf.column(1).unwrap().all_typed(),
+                typed_column,
+                "{name}: the column holding the odd value"
+            );
+            assert!(
+                leaf.column(0).unwrap().all_typed(),
+                "{name}: the key column"
+            );
+        }
+    }
 
     /// The scorecard fixture's shape: rowid key, two integers, text, blob.
     fn fixture_columns() -> Vec<ColumnSpec> {

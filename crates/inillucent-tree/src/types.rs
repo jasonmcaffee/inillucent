@@ -99,6 +99,29 @@ pub const COLUMN_NULLABLE: u8 = 0b0000_0001;
 /// Bit 1 of a directory entry's flag byte: the column is part of the leaf key.
 pub const COLUMN_KEY: u8 = 0b0000_0010;
 
+/// Bit 2 of a leaf's column directory entry: every value of this column, in
+/// this leaf, is present and of the column's own type.
+///
+/// **This is a fact about the page, not about the schema**, which is what makes
+/// it worth writing down. `COLUMN_NULLABLE` says what the catalog declared;
+/// this says what the builder actually put on the page, and a reader that wants
+/// to take a typed fast path needs the second question answered rather than the
+/// first.
+///
+/// It is a cache of a walk over the column's class array. A leaf holding 1,782
+/// index entries has a 446-byte class array, and `inillucent-probeprofile`
+/// measured walking it at **22.2 ns** - paid once by every bound over an
+/// integer column, which is once per index probe and twice per skip-scan seek.
+///
+/// A page whose bit is *clear* is read exactly as before: the walk still
+/// happens and still gives the right answer, so a page written by anything that
+/// does not set the bit is correct and only slower. A corrupted page whose bit
+/// is wrongly *set* yields a wrong value rather than an unsafe read - every
+/// accessor still bounds-checks its slice - which is the same class of damage
+/// as a corrupted separator sending a descent to the wrong child, and is what
+/// the checksum and the integrity checker are for.
+pub const COLUMN_ALL_TYPED: u8 = 0b0000_0100;
+
 /// One column of a leaf, as the column directory describes it.
 ///
 /// The collation is part of the *column* rather than of a comparison, because

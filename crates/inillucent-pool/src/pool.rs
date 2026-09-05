@@ -113,8 +113,6 @@ struct FrameMeta {
     page: PageId,
     /// What the frame is doing.
     state: FrameState,
-    /// How many guards are outstanding.
-    pins: u32,
     /// Whether the frame differs from the file.
     dirty: bool,
     /// The parent frame, the *page* that frame held, and the byte offset of
@@ -138,7 +136,6 @@ impl FrameMeta {
         FrameMeta {
             page: PageId::NONE,
             state: FrameState::Free,
-            pins: 0,
             dirty: false,
             parent: None,
         }
@@ -275,6 +272,17 @@ pub struct Pool {
     /// a frame's contents change - which is what makes the descent's validation
     /// a real check rather than a formality that would pass regardless.
     latches: Vec<VersionLatch>,
+    /// How many guards are outstanding on each frame.
+    ///
+    /// **Held apart from [`State`], which is a measurement.** A pin and an
+    /// unpin happen on every fetch, and both went through the one `RefCell`
+    /// that also holds the page table, the free list and the cooling queue - so
+    /// a two-level descent took six borrows of it to move four counters.
+    /// `inillucent-probeprofile` measures a descent of a fifteen-leaf index at
+    /// 74 ns, where the search inside it is four comparisons; most of the rest
+    /// was this. A `Cell` per frame is the same single-threaded discipline with
+    /// none of the sharing.
+    pins: Vec<Cell<u32>>,
     /// The bookkeeping.
     state: RefCell<State>,
     /// Where pages come from and go.
@@ -282,7 +290,42 @@ pub struct Pool {
     /// How many pages the file holds.
     page_count: Cell<u64>,
     /// What has happened, for the report.
-    stats: Cell<PoolStats>,
+    ///
+    /// One `Cell` per counter rather than one `Cell<PoolStats>`, because
+    /// reading and writing the whole struct to increment `hits` copied
+    /// seventy-two bytes in each direction on every fetch.
+    counters: Counters,
+}
+
+/// The pool's counters, one cell each.
+#[derive(Default)]
+struct Counters {
+    /// Fetches answered from a resident frame.
+    hits: Cell<u64>,
+    /// Fetches that had to read the file.
+    misses: Cell<u64>,
+    /// Fetches answered by a frame in the cooling FIFO.
+    rewarms: Cell<u64>,
+    /// Frames moved into the cooling FIFO.
+    cooled: Cell<u64>,
+    /// Frames evicted.
+    evicted: Cell<u64>,
+    /// Pages read from the file.
+    reads: Cell<u64>,
+    /// Pages written to the file.
+    writes: Cell<u64>,
+    /// Swips translated back to page ids on writeback.
+    translated: Cell<u64>,
+}
+
+impl Counters {
+    /// Adds one to a counter.
+    ///
+    /// @param counter - the cell to bump
+    /// @param by - how much to add
+    fn add(counter: &Cell<u64>, by: u64) {
+        counter.set(counter.get().saturating_add(by));
+    }
 }
 
 impl Pool {
@@ -316,14 +359,19 @@ impl Pool {
         latches
             .try_reserve(frames)
             .map_err(|_| no_mem(format!("{frames} frame latches")))?;
+        let mut pins = Vec::new();
+        pins.try_reserve(frames)
+            .map_err(|_| no_mem(format!("{frames} pin counters")))?;
         for _ in 0..frames {
             buffers.push(RefCell::new(vec![0u8; page_size]));
             latches.push(VersionLatch::new());
+            pins.push(Cell::new(0));
         }
         Ok(Pool {
             page_size,
             buffers,
             latches,
+            pins,
             state: RefCell::new(State {
                 frames: vec![FrameMeta::empty(); frames],
                 table: HashMap::with_capacity_and_hasher(frames, PageHashing::default()),
@@ -333,7 +381,7 @@ impl Pool {
             }),
             file,
             page_count: Cell::new(page_count),
-            stats: Cell::new(PoolStats::default()),
+            counters: Counters::default(),
         })
     }
 
@@ -359,12 +407,35 @@ impl Pool {
 
     /// Returns what the pool has done.
     pub fn stats(&self) -> PoolStats {
-        self.stats.get()
+        PoolStats {
+            hits: self.counters.hits.get(),
+            misses: self.counters.misses.get(),
+            rewarms: self.counters.rewarms.get(),
+            cooled: self.counters.cooled.get(),
+            evicted: self.counters.evicted.get(),
+            reads: self.counters.reads.get(),
+            writes: self.counters.writes.get(),
+            translated: self.counters.translated.get(),
+        }
+    }
+
+    /// Returns how many guards are outstanding on a frame.
+    ///
+    /// @param frame - the frame's index
+    fn pins_of(&self, frame: u32) -> u32 {
+        self.pins.get(frame as usize).map(Cell::get).unwrap_or(0)
     }
 
     /// Forgets the counters, so a measurement can start from zero.
     pub fn reset_stats(&self) {
-        self.stats.set(PoolStats::default());
+        self.counters.hits.set(0);
+        self.counters.misses.set(0);
+        self.counters.rewarms.set(0);
+        self.counters.cooled.set(0);
+        self.counters.evicted.set(0);
+        self.counters.reads.set(0);
+        self.counters.writes.set(0);
+        self.counters.translated.set(0);
     }
 
     /// Returns how many frames hold a page right now.
@@ -518,7 +589,6 @@ impl Pool {
             .get(frame as usize)
             .map(|meta| meta.state == FrameState::Cooling)
             .unwrap_or(false);
-        let mut stats = self.stats.get();
         if cooling {
             // A descent that reaches a cooling page takes it back out of the
             // FIFO. That is the whole point of the FIFO: the page is still
@@ -528,10 +598,9 @@ impl Pool {
             if let Some(meta) = state.frames.get_mut(frame as usize) {
                 meta.state = FrameState::Hot;
             }
-            stats.rewarms = stats.rewarms.saturating_add(1);
+            Counters::add(&self.counters.rewarms, 1);
         }
-        stats.hits = stats.hits.saturating_add(1);
-        self.stats.set(stats);
+        Counters::add(&self.counters.hits, 1);
         Some(frame)
     }
 
@@ -563,9 +632,11 @@ impl Pool {
         if let Some(meta) = state.frames.get_mut(frame as usize) {
             meta.page = page;
             meta.state = FrameState::Hot;
-            meta.pins = 0;
             meta.dirty = false;
             meta.parent = None;
+        }
+        if let Some(slot) = self.pins.get(frame as usize) {
+            slot.set(0);
         }
         state.table.insert(page, frame);
         drop(state);
@@ -574,10 +645,8 @@ impl Pool {
                 latch.release_exclusive();
             }
         }
-        let mut stats = self.stats.get();
-        stats.misses = stats.misses.saturating_add(1);
-        stats.reads = stats.reads.saturating_add(1);
-        self.stats.set(stats);
+        Counters::add(&self.counters.misses, 1);
+        Counters::add(&self.counters.reads, 1);
         Ok(frame)
     }
 
@@ -621,8 +690,8 @@ impl Pool {
                 match state.frames.get(pick) {
                     Some(meta)
                         if meta.state == FrameState::Hot
-                            && meta.pins == 0
-                            && !parent_is_pinned(&state, meta.parent) =>
+                            && self.pins_of(pick as u32) == 0
+                            && !self.parent_is_pinned(meta.parent) =>
                     {
                         Some(pick as u32)
                     }
@@ -659,8 +728,8 @@ impl Pool {
                     match state.frames.get(frame) {
                         Some(meta)
                             if meta.state == FrameState::Hot
-                                && meta.pins == 0
-                                && !parent_is_pinned(&state, meta.parent) =>
+                                && self.pins_of(frame as u32) == 0
+                                && !self.parent_is_pinned(meta.parent) =>
                         {
                             Some(frame as u32)
                         }
@@ -682,9 +751,7 @@ impl Pool {
                 }
             }
         }
-        let mut stats = self.stats.get();
-        stats.cooled = stats.cooled.saturating_add(moved as u64);
-        self.stats.set(stats);
+        Counters::add(&self.counters.cooled, moved as u64);
         Ok(moved)
     }
 
@@ -738,7 +805,7 @@ impl Pool {
             let (page, dirty, pins) = {
                 let state = self.state.borrow();
                 match state.frames.get(frame as usize) {
-                    Some(meta) => (meta.page, meta.dirty, meta.pins),
+                    Some(meta) => (meta.page, meta.dirty, self.pins_of(frame)),
                     None => continue,
                 }
             };
@@ -778,9 +845,7 @@ impl Pool {
                     latch.release_exclusive();
                 }
             }
-            let mut stats = self.stats.get();
-            stats.evicted = stats.evicted.saturating_add(1);
-            self.stats.set(stats);
+            Counters::add(&self.counters.evicted, 1);
             return Ok(Some(frame));
         }
     }
@@ -813,10 +878,8 @@ impl Pool {
             meta.dirty = false;
         }
         drop(state);
-        let mut stats = self.stats.get();
-        stats.writes = stats.writes.saturating_add(1);
-        stats.translated = stats.translated.saturating_add(translated as u64);
-        self.stats.set(stats);
+        Counters::add(&self.counters.writes, 1);
+        Counters::add(&self.counters.translated, translated as u64);
         Ok(())
     }
 
@@ -831,13 +894,18 @@ impl Pool {
         let bytes = cell
             .try_borrow()
             .map_err(|_| misuse(format!("frame {frame} is being written")))?;
-        let mut state = self.state.borrow_mut();
-        if let Some(meta) = state.frames.get_mut(frame as usize) {
-            meta.pins = meta.pins.saturating_add(1);
-            if meta.state == FrameState::Cooling {
+        // The pin is a `Cell`, so the ordinary fetch - a resident, hot frame -
+        // never borrows the pool's bookkeeping at all. Only a frame that was
+        // cooling has to, to take itself out of the queue.
+        if let Some(slot) = self.pins.get(frame as usize) {
+            slot.set(slot.get().saturating_add(1));
+        }
+        if self.frame_is_cooling(frame) {
+            let mut state = self.state.borrow_mut();
+            if let Some(meta) = state.frames.get_mut(frame as usize) {
                 meta.state = FrameState::Hot;
-                state.cooling.retain(|held| *held != frame);
             }
+            state.cooling.retain(|held| *held != frame);
         }
         Ok(PageGuard {
             pool: self,
@@ -850,9 +918,31 @@ impl Pool {
     ///
     /// @param frame - the frame the guard held
     fn unpin(&self, frame: u32) {
-        let mut state = self.state.borrow_mut();
-        if let Some(meta) = state.frames.get_mut(frame as usize) {
-            meta.pins = meta.pins.saturating_sub(1);
+        if let Some(slot) = self.pins.get(frame as usize) {
+            slot.set(slot.get().saturating_sub(1));
+        }
+    }
+
+    /// Reports whether a frame is queued for eviction.
+    ///
+    /// @param frame - the frame's index
+    fn frame_is_cooling(&self, frame: u32) -> bool {
+        self.state
+            .borrow()
+            .frames
+            .get(frame as usize)
+            .map(|meta| meta.state == FrameState::Cooling)
+            .unwrap_or(false)
+    }
+
+    /// Reports whether a frame's parent is pinned, so its swip cannot be
+    /// rewritten.
+    ///
+    /// @param parent - the parent reference, if any
+    fn parent_is_pinned(&self, parent: Option<(u32, PageId, usize)>) -> bool {
+        match parent {
+            Some((frame, _, _)) => self.pins_of(frame) > 0,
+            None => false,
         }
     }
 
@@ -880,8 +970,10 @@ impl Pool {
                 if let Some(meta) = state.frames.get_mut(frame as usize) {
                     meta.page = page;
                     meta.state = FrameState::Hot;
-                    meta.pins = 0;
                     meta.parent = None;
+                }
+                if let Some(slot) = self.pins.get(frame as usize) {
+                    slot.set(0);
                 }
                 state.table.insert(page, frame);
                 frame
@@ -978,9 +1070,7 @@ impl Pool {
         self.file
             .sync(SyncMode::Normal)
             .map_err(|error| error.into_db_error())?;
-        let mut stats = self.stats.get();
-        stats.writes = stats.writes.saturating_add(2);
-        self.stats.set(stats);
+        Counters::add(&self.counters.writes, 2);
         Ok(())
     }
 
@@ -1070,9 +1160,7 @@ impl Pool {
         self.file
             .write_all_at(page.0.saturating_mul(self.page_size as u64), image)
             .map_err(|error| error.into_db_error())?;
-        let mut stats = self.stats.get();
-        stats.writes = stats.writes.saturating_add(1);
-        self.stats.set(stats);
+        Counters::add(&self.counters.writes, 1);
         Ok(())
     }
 
@@ -1109,21 +1197,6 @@ impl Pool {
         let free = state.free.len().saturating_add(state.cooling.len());
         (free as f64) < (self.buffers.len() as f64) * FREE_WATERMARK
     }
-}
-
-/// Reports whether a frame's parent is pinned, so its swip cannot be rewritten.
-///
-/// @param state - the pool's bookkeeping
-/// @param parent - the parent reference, if any
-fn parent_is_pinned(state: &State, parent: Option<(u32, PageId, usize)>) -> bool {
-    let Some((frame, _, _)) = parent else {
-        return false;
-    };
-    state
-        .frames
-        .get(frame as usize)
-        .map(|meta| meta.pins > 0)
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -1173,7 +1246,7 @@ mod tests {
         drop(first);
         drop(second);
         let frame = pool.state.borrow().table[&PageId(4)];
-        assert_eq!(pool.state.borrow().frames[frame as usize].pins, 0);
+        assert_eq!(pool.pins_of(frame), 0);
     }
 
     /// A pool smaller than the working set evicts, and every page still reads
