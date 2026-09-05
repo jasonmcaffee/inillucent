@@ -46,6 +46,14 @@ pub const WAL_FORMAT_VERSION: u32 = 3_007_000;
 ///
 /// SQLite stamps the building machine's endianness into the magic, so a log
 /// written here has to declare the same thing to be the same bytes.
+///
+/// Coverage note: exactly one arm of this is reachable on any given build, and
+/// the other is dead code the compiler keeps for the platform it is not. On the
+/// little-endian targets this engine is qualified on - `windows-x86_64` and
+/// `linux-x86_64` - the `Big` arm is unreachable and no test can take it. That
+/// is a documented unreachable branch rather than a missing test; the branch it
+/// guards is exercised from the other direction by the decoder, which reads
+/// both magics and is tested against each.
 pub fn host_byte_order() -> WalByteOrder {
     if cfg!(target_endian = "big") {
         WalByteOrder::Big
@@ -453,5 +461,57 @@ mod tests {
         assert_eq!(restarted.checkpoint_sequence, 3);
         assert_eq!(restarted.salt, [0, 0, 0, 6, 1, 2, 3, 4]);
         assert_ne!(restarted.checksum, header.checksum);
+    }
+    /// A buffer shorter than a header is not a header.
+    ///
+    /// The error path of the log's own decoder: a truncated log is the ordinary
+    /// result of a crash while the header was being written, and it has to be
+    /// reported as corruption rather than read out of whatever bytes are there.
+    /// The branch was never taken by any test.
+    #[test]
+    fn a_log_header_shorter_than_a_header_is_corrupt() {
+        for len in 0..WAL_HEADER_SIZE {
+            let raw = vec![0u8; len];
+            let failure = WalHeader::decode(&raw).expect_err("a short header cannot decode");
+            assert_eq!(
+                failure.code(),
+                rustdb_base::error::PrimaryCode::Corrupt,
+                "a {len}-byte log header is corrupt, not some other failure"
+            );
+        }
+    }
+
+    /// A buffer shorter than a frame header is not a frame header.
+    ///
+    /// The same for the frame decoder, and the same reason: a log whose last
+    /// frame was half-written ends in exactly this.
+    #[test]
+    fn a_frame_header_shorter_than_a_frame_header_is_corrupt() {
+        for len in 0..WAL_FRAME_HEADER_SIZE {
+            let raw = vec![0u8; len];
+            let failure = FrameHeader::decode(&raw).expect_err("a short frame cannot decode");
+            assert_eq!(
+                failure.code(),
+                rustdb_base::error::PrimaryCode::Corrupt,
+                "a {len}-byte frame header is corrupt, not some other failure"
+            );
+        }
+    }
+
+    /// The salt a header carries is the salt its frames must repeat.
+    ///
+    /// The accessor is what every frame is checked against, so a version
+    /// returning something else would make a valid log look like one whose
+    /// frames belong to a previous incarnation.
+    #[test]
+    fn the_header_reports_the_salt_its_frames_repeat() {
+        let size = rustdb_base::page::PageSize::new(4096).expect("4096 is a page size");
+        let salt = [9, 8, 7, 6, 5, 4, 3, 2];
+        let header = WalHeader::new(size, 3, salt, WalByteOrder::Big).expect("the header is built");
+        assert_eq!(header.salt(), salt);
+        // And it survives the round trip, which is what a reader depends on.
+        let raw = header.encode().expect("the header encodes");
+        let read = WalHeader::decode(&raw).expect("the header decodes");
+        assert_eq!(read.salt(), salt);
     }
 }
