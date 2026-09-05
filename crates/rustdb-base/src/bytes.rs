@@ -349,7 +349,13 @@ mod tests {
         for byte in buffer.iter_mut() {
             *byte = rng.next_u32() as u8;
         }
-        for _ in 0..200_000 {
+        // Miri interprets every instruction, so two hundred thousand rounds of
+        // this take hours rather than milliseconds. The property being checked
+        // is "no input panics", which a smaller sample still exercises against
+        // the interpreter's much stricter memory model - and the full sample
+        // still runs on every ordinary build.
+        let rounds = if cfg!(miri) { 2_000 } else { 200_000 };
+        for _ in 0..rounds {
             let offset = rng.next_u32() as usize % 600;
             let _ = read_u8(&buffer, offset);
             let _ = read_u16(&buffer, offset);

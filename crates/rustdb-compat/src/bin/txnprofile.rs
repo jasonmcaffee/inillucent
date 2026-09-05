@@ -54,6 +54,8 @@ fn run(root: &Path) -> Result<(), String> {
         );
     }
     println!();
+    measure_fts(root)?;
+    println!();
     let per_insert = measure_inserts(root)?;
     println!("insert into a two-index table: {per_insert:.1} ns each");
     report_opcodes();
@@ -157,6 +159,68 @@ fn report_opcodes() {
             *allocations as f64 / (*runs).max(1) as f64,
         );
     }
+}
+
+/// Measures the cost of an FTS5 insert as the index grows.
+///
+/// The module keeps one doclist per term, so a document's terms each have their
+/// whole posting list rewritten when it is inserted. If that is what is
+/// happening, the cost of one insert rises with the number of documents already
+/// there and the total is quadratic - which is what a flat column here would
+/// disprove and a rising one confirms. The documents share a vocabulary on
+/// purpose: a corpus where every term is unique would grow no doclist.
+fn measure_fts(root: &Path) -> Result<(), String> {
+    println!(
+        "{:>10} {:>14} {:>16} {:>14}",
+        "documents", "total", "ns/insert", "vs first"
+    );
+    let mut first: Option<f64> = None;
+    for count in [100u32, 200, 400, 800, 1_600] {
+        let path = root.join(format!("fts-{count}.db"));
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|failure| failure.to_string())?;
+        }
+        let database = Database::open(&path).map_err(|failure| failure.to_string())?;
+        let connection = database.connect().map_err(|failure| failure.to_string())?;
+        connection
+            .execute_batch("CREATE VIRTUAL TABLE documents USING fts5(title, body)")
+            .map_err(|failure| failure.to_string())?;
+        let mut insert = connection
+            .prepare("INSERT INTO documents(title, body) VALUES (?1, ?2)")
+            .map_err(|failure| failure.to_string())?;
+        connection
+            .execute_batch("BEGIN")
+            .map_err(|failure| failure.to_string())?;
+        let started = Instant::now();
+        for index in 0..count {
+            insert.reset().map_err(|failure| failure.to_string())?;
+            insert
+                .bind_text(1, "lorem ipsum dolor sit amet")
+                .map_err(|failure| failure.to_string())?;
+            let body = format!(
+                "lorem ipsum dolor sit amet consectetur adipiscing elit sed do \
+                 eiusmod tempor incididunt ut labore document number {index}"
+            );
+            insert
+                .bind_text(2, &body)
+                .map_err(|failure| failure.to_string())?;
+            while insert.step().map_err(|failure| failure.to_string())? {}
+        }
+        let elapsed = started.elapsed().as_nanos() as f64;
+        connection
+            .execute_batch("COMMIT")
+            .map_err(|failure| failure.to_string())?;
+        let per = elapsed / f64::from(count.max(1));
+        let reference = *first.get_or_insert(per);
+        println!(
+            "{:>10} {:>13.2}ms {:>16.1} {:>13.2}x",
+            count,
+            elapsed / 1_000_000.0,
+            per,
+            per / reference.max(1.0)
+        );
+    }
+    Ok(())
 }
 
 /// Measures inserts into the scorecard's own two-index table, in one

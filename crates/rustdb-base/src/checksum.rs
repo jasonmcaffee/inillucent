@@ -170,7 +170,13 @@ mod tests {
         let mut data = vec![0u8; 512];
         rng.fill(&mut data);
         let baseline = crc32(&data);
-        for index in 0..data.len() {
+        // Every byte on an ordinary build; every sixteenth under Miri, which
+        // interprets each of the four thousand checksums this otherwise takes
+        // and turns a millisecond into many minutes. The property - a single
+        // bit flip anywhere is visible - is what is being checked, and a
+        // stride still checks it across the whole buffer.
+        let stride = if cfg!(miri) { 16 } else { 1 };
+        for index in (0..data.len()).step_by(stride) {
             for bit in 0..8 {
                 data[index] ^= 1 << bit;
                 assert_ne!(

@@ -228,6 +228,13 @@ mod tests {
 
     /// An allocation far larger than any machine has must return NOMEM rather
     /// than aborting, which is the whole reason the module exists.
+    ///
+    /// Not under Miri. The interpreter models the allocator itself, and asking
+    /// it for half the address space is a resource exhaustion it reports as an
+    /// error of its own rather than a failed allocation the caller gets to
+    /// handle - so the test would be checking Miri's limit and not this
+    /// module's. Every other test in the crate runs there.
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn an_impossible_allocation_returns_nomem() {
         let error = try_zeroed(usize::MAX / 2).expect_err("this cannot be allocated");

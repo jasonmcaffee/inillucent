@@ -48,7 +48,12 @@ fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let out = flag(&arguments, "--out")
         .map(PathBuf::from)
-        .unwrap_or_else(|| workspace_root().join("_agent_output/task-1790/scorecard"));
+        // Ticket-neutral. The default used to name one ticket's output folder,
+        // so a later ticket that forgot `--out` regenerated that ticket's
+        // scorecard and dashboard in place and appended to its history. The
+        // published copies live in `compat/release/` and were never at risk,
+        // but a run should not write into another run's evidence by default.
+        .unwrap_or_else(|| workspace_root().join("_agent_output/scorecard"));
     let rounds = flag(&arguments, "--rounds")
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(DEFAULT_ROUNDS);
