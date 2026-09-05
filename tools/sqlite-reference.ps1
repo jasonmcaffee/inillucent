@@ -51,7 +51,10 @@ if (-not (Test-Path $srcDir) -or $Force) {
     Move-Item -Path (Join-Path $refDir "sqlite-amalgamation-$release") -Destination $srcDir -Force
 }
 $shellDir = Join-Path $refDir 'shell'
-if (-not (Test-Path $shellDir) -or $Force) {
+# Keyed on this platform's own binary rather than on the directory, for the
+# reason the POSIX script gives: the two share `shell/`, and testing the
+# directory made whichever ran second skip its own extraction.
+if (-not (Test-Path (Join-Path $shellDir 'sqlite3.exe')) -or $Force) {
     Expand-Archive -Path $tools -DestinationPath $shellDir -Force
 }
 
