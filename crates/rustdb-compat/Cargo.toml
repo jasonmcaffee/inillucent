@@ -51,6 +51,14 @@ name = "rustdb-analytical"
 path = "src/bin/analytical.rs"
 
 [[bin]]
+name = "rustdb-exprperf"
+path = "src/bin/exprperf.rs"
+
+[[bin]]
+name = "rustdb-prepareperf"
+path = "src/bin/prepareperf.rs"
+
+[[bin]]
 name = "rustdb-planperf"
 path = "src/bin/planperf.rs"
 

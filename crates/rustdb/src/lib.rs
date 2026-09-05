@@ -338,6 +338,23 @@ impl Connection {
     }
 
     /// Returns which planner optimizations this connection has switched off.
+    /// Returns how many compiled programs this connection is holding.
+    ///
+    /// The plan cache is an implementation detail with one externally visible
+    /// property - it must never change an answer - and the tests that assert
+    /// that need to see whether a program was actually kept. Exposing the count
+    /// and nothing else keeps the cache an implementation detail while making
+    /// the property testable.
+    pub fn cached_plan_count(&self) -> usize {
+        self.inner.cached_plan_count()
+    }
+
+    /// Drops every compiled program this connection is holding.
+    pub fn invalidate_plan_cache(&self) {
+        self.inner.invalidate_plan_cache();
+    }
+
+    /// Returns the planner optimizations this connection has switched off.
     pub fn disabled_optimizations(&self) -> u32 {
         self.inner.disabled_optimizations()
     }

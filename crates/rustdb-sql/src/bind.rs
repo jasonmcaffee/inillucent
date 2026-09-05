@@ -60,6 +60,18 @@ pub enum AuthAction<'a> {
 pub trait Authorizer {
     /// Returns what to do about one action.
     fn authorize(&self, action: AuthAction<'_>) -> Authorization;
+
+    /// Reports whether this authorizer allows every action unconditionally.
+    ///
+    /// A plan cache may only reuse a compiled program when re-running the
+    /// authorizer could not have changed the outcome, and the only authorizer
+    /// that is true of is one that allows everything. Defaulting to `false`
+    /// means an application's authorizer opts out by doing nothing, which is
+    /// the safe direction: a new authorizer that forgot to answer this question
+    /// gets its callbacks, it does not get silently skipped.
+    fn allows_everything(&self) -> bool {
+        false
+    }
 }
 
 /// An authorizer that allows everything, which is the default.
@@ -67,6 +79,11 @@ pub trait Authorizer {
 pub struct AllowAll;
 
 impl Authorizer for AllowAll {
+    /// Reports that nothing this authorizer is asked can be refused.
+    fn allows_everything(&self) -> bool {
+        true
+    }
+
     /// Allows every action.
     fn authorize(&self, _action: AuthAction<'_>) -> Authorization {
         Authorization::Allow

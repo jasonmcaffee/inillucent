@@ -76,15 +76,22 @@ fn main() -> ExitCode {
     let page_size = flag(&arguments, "--page-size")
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(32_768);
-    // Forty is `repeats_for("medium").1` in `scorecard.rs`: how many times the
-    // scorecard runs a `read.analytical` workload inside one timed round at
-    // this scale. A harness that used a different number would be measuring a
+    // The scale decides the row count and the repeat count, and both are read
+    // from `scorecard.rs` rather than chosen here: `rows_for` gives 5,000 /
+    // 100,000 / 600,000 and `repeats_for(...).1` gives 400 / 40 / 4 for the
+    // scan family. A harness that used a different repeat would be measuring a
     // different amount of amortisation of each engine's per-statement setup,
-    // and SQLite's is large enough for that to move the answer by 5x.
+    // and SQLite's is large enough for that to move `scan.distinct` by 5x.
+    let scale = flag(&arguments, "--scale").unwrap_or_else(|| "medium".to_string());
+    let (rows, default_repeat) = match scale.as_str() {
+        "small" => (5_000u32, 400u32),
+        "large" => (600_000, 4),
+        _ => (100_000, 40),
+    };
     let repeat = flag(&arguments, "--repeat")
         .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(40);
-    match run(&PathBuf::from(fixture), rounds, page_size, repeat) {
+        .unwrap_or(default_repeat);
+    match run(&PathBuf::from(fixture), rounds, page_size, repeat, &scale, rows) {
         Ok(passed) => {
             if passed {
                 ExitCode::SUCCESS
@@ -117,7 +124,16 @@ fn flag(arguments: &[String], name: &str) -> Option<String> {
 /// @param rounds - how many paired rounds
 /// @param page_size - the page size the new engine's trees are built at
 /// @param repeat - how many times each workload runs inside one timed round
-fn run(fixture: &Path, rounds: u32, page_size: usize, repeat: u32) -> Result<bool, String> {
+/// @param scale - the scale name, which fixes the repeat count
+/// @param rows - how many rows the base table holds
+fn run(
+    fixture: &Path,
+    rounds: u32,
+    page_size: usize,
+    repeat: u32,
+    scale: &str,
+    rows: u32,
+) -> Result<bool, String> {
     let bench = sqlite_bench().ok_or_else(|| {
         "sqlite-bench is not built; run tools/sqlite-reference.ps1 first".to_string()
     })?;
@@ -136,7 +152,7 @@ fn run(fixture: &Path, rounds: u32, page_size: usize, repeat: u32) -> Result<boo
         "rustdb-analytical-{}.plan",
         std::process::id()
     ));
-    std::fs::write(&plan_path, plan_file(repeat))
+    std::fs::write(&plan_path, plan_file(repeat, scale, rows))
         .map_err(|error| format!("could not write the plan: {error}"))?;
 
     println!();
@@ -324,7 +340,7 @@ fn run(fixture: &Path, rounds: u32, page_size: usize, repeat: u32) -> Result<boo
             high.exp(),
             all_ratios.len()
         );
-        println!("  Phase 1 gate: lower bound at least 5.00x");
+        println!("  Phase 1 gate: lower bound at least 5.00x at medium scale");
         if low.exp() < 5.0 {
             println!("  VERDICT: MISSED");
             passed = false;
@@ -541,12 +557,16 @@ fn explain(database: &Path, sql: &str) -> Result<Vec<String>, String> {
 /// build it. The workloads are the four the new engine ran, in the same order.
 ///
 /// @param repeat - how many times each workload runs inside one timed round
-fn plan_file(repeat: u32) -> String {
+/// @param scale - the scale name the plan records
+/// @param rows - how many rows the base table holds
+fn plan_file(repeat: u32, scale: &str, rows: u32) -> String {
     let mut out = String::new();
     out.push_str("# read.analytical, Phase 1 gate. Both engines read this file.\n");
     out.push_str("version\t1\n");
-    out.push_str("scale\tmedium\n");
-    out.push_str("rows\t100000\n");
+    out.push_str(&format!("scale	{scale}
+"));
+    out.push_str(&format!("rows	{rows}
+"));
     out.push_str("journal\tdelete\n");
     out.push_str("synchronous\tfull\n");
     out.push_str("page_size\t4096\n");
