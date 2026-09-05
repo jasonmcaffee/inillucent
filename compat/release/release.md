@@ -28,8 +28,8 @@
 | file | bytes | sha256 | what it is |
 |---|---:|---|---|
 | `target/release/rustdb-shell.exe` | 4616192 | `a3131fceec1713e8264e12ea05fa37d0006f686f10a6d87df220c7c29c141f82` | the SQLite-like shell |
-| `target/release/rustdb-migrate.exe` | 4819456 | `2748dd776124cfe5473a556b46faf7c15a81b533aeeaad11df4bee2be41f4c41` | the resumable copy-and-verify migration tool |
-| `target/release/rustdb_capi.dll` | 5191168 | `8e279be50b045e2a7b22c42b193c3b837c551fb37636dd8d0e3cc9a3b9f99098` | the C library, linked against the official sqlite3.h |
+| `target/release/rustdb-migrate.exe` | 4819456 | `d299e13f6b8a514a3b7edb4c575a12de000ea246f54ca2277374e28910dea41c` | the resumable copy-and-verify migration tool |
+| `target/release/rustdb_capi.dll` | 5191168 | `aced63169eec0b21982611fc62001df1230b8ca3602b0877e4a95586bbcb1a13` | the C library, linked against the official sqlite3.h |
 | `compat/compat-report.md` | 22376 | `370ce58ef099525d672f08f9e61bc8f77ac42d5bdb979417afe2858e4a2af1a8` | the compatibility report |
 | `compat/compat-report.json` | 123900 | `b3e0bb18fb2fd85bddd823fd6ddb475be55053498d2b544b194848805a9cbade` | the same, machine readable |
 | `compat/sqlite-3.53.4.toml` | 118547 | `e29133cdfae4b172740a9902a12a34f0b6e66b0f419cce6e62df505e9ece0f92` | the parity manifest the report is generated from |
