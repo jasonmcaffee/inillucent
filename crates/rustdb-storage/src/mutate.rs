@@ -473,7 +473,11 @@ pub fn insert_entry(
     payload: &[u8],
 ) -> DbResult<bool> {
     let tree = Tree::index(root, key.clone());
+    #[cfg(feature = "opcode-probe")]
+    let stage = std::time::Instant::now();
     let (path, found) = find_key(pager, &tree, payload)?;
+    #[cfg(feature = "opcode-probe")]
+    rustdb_base::probe::record_stage(5, stage.elapsed().as_nanos() as u64);
     if found {
         // The entry is where the search stopped, which for an index may be an
         // interior page; replacing it in place would need the same balancing as
@@ -484,8 +488,17 @@ pub fn insert_entry(
         place_cell(pager, &tree, path, cell)?;
         return Ok(true);
     }
+    #[cfg(feature = "opcode-probe")]
+    let stage = std::time::Instant::now();
     let cell = build_cell(pager, PageKind::LeafIndex, None, None, payload)?;
+    #[cfg(feature = "opcode-probe")]
+    let stage = {
+        rustdb_base::probe::record_stage(6, stage.elapsed().as_nanos() as u64);
+        std::time::Instant::now()
+    };
     place_cell(pager, &tree, path, cell)?;
+    #[cfg(feature = "opcode-probe")]
+    rustdb_base::probe::record_stage(7, stage.elapsed().as_nanos() as u64);
     Ok(false)
 }
 
@@ -718,8 +731,13 @@ fn place_cell(pager: &mut Pager, tree: &Tree, path: Vec<Step>, cell: Vec<u8>) ->
         .ok_or_else(|| corrupt("a descent that reached no page"))?;
     if try_insert_in_place(pager, leaf.page, leaf.slot, &cell)? {
         ptrmap::refresh_btree_page(pager, leaf.page)?;
+        #[cfg(feature = "opcode-probe")]
+        rustdb_base::probe::record_stage(8, 0);
         return Ok(());
     }
+    // Reached only when the cell does not fit, which is the balancing path.
+    #[cfg(feature = "opcode-probe")]
+    let stage = std::time::Instant::now();
     let mut content = gather_page(pager, leaf.page)?;
     let entry = decode_entry(&cell, content.kind)?;
     if leaf.slot > content.entries.len() {
@@ -727,7 +745,10 @@ fn place_cell(pager: &mut Pager, tree: &Tree, path: Vec<Step>, cell: Vec<u8>) ->
     }
     content.entries.insert(leaf.slot, entry);
     let depth = path.len().saturating_sub(1);
-    balance(pager, tree, &path, depth, content)
+    let outcome = balance(pager, tree, &path, depth, content);
+    #[cfg(feature = "opcode-probe")]
+    rustdb_base::probe::record_stage(9, stage.elapsed().as_nanos() as u64);
+    outcome
 }
 
 /// Tries to put a cell on a page without moving anything between pages.
@@ -1053,21 +1074,35 @@ fn balance(
         window.push(page);
     }
 
-    let children_are_leaves = content.kind.is_leaf();
+    let content_kind = content.kind;
+    let children_are_leaves = content_kind.is_leaf();
     let promote = promotes_dividers(tree, children_are_leaves);
+    // Every entry in the window is moved into this run exactly once.
+    //
+    // It used to be copied into it, on top of the copy `gather_page` already
+    // makes and the copy each output page took back out again - three owned
+    // vectors per cell, and a balance spans three pages of a hundred and twenty
+    // or more. One balance measured 131 microseconds, and 2,992 of them
+    // accounted for 394 of the 451 milliseconds a twenty-thousand-row index
+    // build spent placing cells. Nothing here needs a second copy: the run is
+    // consumed by the partition below and the pages it came from are about to
+    // be rewritten.
+    let mut changed = Some(content);
     let mut entries: Vec<Entry> = Vec::new();
     let mut trailing: Option<PageId> = None;
     for (offset, page) in window.iter().copied().enumerate() {
         let slot = first.saturating_add(offset);
-        let piece = if page == step.page {
-            content.clone()
+        let mut piece = if page == step.page {
+            changed
+                .take()
+                .ok_or_else(|| corrupt("a balance window naming the changed page twice"))?
         } else {
             gather_page(pager, page)?
         };
-        if piece.kind != content.kind {
+        if piece.kind != content_kind {
             return Err(corrupt("a balance across pages of different kinds"));
         }
-        entries.extend(piece.entries.iter().cloned());
+        entries.append(&mut piece.entries);
         if slot < end {
             let divider = parent
                 .entries
@@ -1088,7 +1123,7 @@ fn balance(
     let capacity = capacity_of(
         pager,
         window.first().copied().unwrap_or(step.page),
-        content.kind,
+        content_kind,
     )?;
     // At the right-hand edge of the tree, fill greedily rather than evenly.
     //
@@ -1104,7 +1139,7 @@ fn balance(
     // machinery here already goes: `partition` computes the greedy fill anyway
     // and then discards it, so the change is which of two answers is kept.
     let rightmost = end == last;
-    let ranges = partition(&entries, content.kind, capacity, promote, rightmost)?;
+    let ranges = partition(&entries, content_kind, capacity, promote, rightmost)?;
     let wanted = ranges.len();
 
     // Reuse the window's pages first, then allocate, then free the surplus.
@@ -1120,18 +1155,33 @@ fn balance(
         .map(<[PageId]>::to_vec)
         .unwrap_or_default();
 
+    // The run is consumed rather than copied out of. Each entry belongs to
+    // exactly one output page, or is the divider between two of them, and the
+    // ranges walk it in order - so every entry can be moved into the page that
+    // is about to hold it. Holding the run as slots makes that a `take` rather
+    // than a copy while still allowing the divider at `range.1` to be read for
+    // its child before it is moved.
+    let mut slots: Vec<Option<Entry>> = entries.into_iter().map(Some).collect();
     let mut dividers: Vec<Entry> = Vec::with_capacity(wanted.saturating_sub(1));
     for (slot, range) in ranges.iter().enumerate() {
         let page = pages
             .get(slot)
             .copied()
             .ok_or_else(|| corrupt("a partition without a page"))?;
+        let taken = slots
+            .get_mut(range.0..range.1)
+            .ok_or_else(|| corrupt("a partition outside its entries"))?;
+        let mut moved = Vec::with_capacity(taken.len());
+        for entry in taken.iter_mut() {
+            moved.push(
+                entry
+                    .take()
+                    .ok_or_else(|| corrupt("a partition claiming an entry twice"))?,
+            );
+        }
         let mut piece = PageContent {
-            kind: content.kind,
-            entries: entries
-                .get(range.0..range.1)
-                .ok_or_else(|| corrupt("a partition outside its entries"))?
-                .to_vec(),
+            kind: content_kind,
+            entries: moved,
             right: None,
         };
         let is_last = slot.saturating_add(1) == wanted;
@@ -1139,8 +1189,9 @@ fn balance(
             piece.right = if is_last {
                 trailing
             } else if promote {
-                entries
+                slots
                     .get(range.1)
+                    .and_then(|entry| entry.as_ref())
                     .and_then(|entry| entry.child)
                     .ok_or_else(|| corrupt("a divider with no child"))
                     .map(Some)?
@@ -1150,11 +1201,12 @@ fn balance(
         }
         if !is_last {
             let divider = if promote {
-                let entry = entries
-                    .get(range.1)
+                let entry = slots
+                    .get_mut(range.1)
+                    .and_then(|entry| entry.take())
                     .ok_or_else(|| corrupt("a partition with no divider entry"))?;
                 Entry {
-                    body: entry.body.clone(),
+                    body: entry.body,
                     child: Some(page),
                     rowid: entry.rowid,
                 }
