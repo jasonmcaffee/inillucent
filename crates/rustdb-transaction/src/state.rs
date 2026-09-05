@@ -545,6 +545,57 @@ impl Transaction {
 mod tests {
     use super::*;
 
+    /// Rolling back to a savepoint makes a failed transaction usable again.
+    ///
+    /// A statement that fails inside a savepoint has already been undone, so a
+    /// transaction failed only by that statement can be written to again once
+    /// the savepoint it failed inside is rolled back. The comment on
+    /// `rollback_to_savepoint` has always said so; nothing asserted it, and a
+    /// version that promoted every *other* state instead - leaving a failed
+    /// transaction failed - passed the whole suite.
+    #[test]
+    fn rolling_back_to_a_savepoint_revives_a_failed_transaction() {
+        let mut transaction = Transaction::new();
+        transaction.begin(BeginMode::Deferred).expect("begins");
+        transaction
+            .open_savepoint("s")
+            .expect("the savepoint opens");
+        transaction.fail();
+        assert_eq!(transaction.state(), TransactionState::Failed);
+
+        transaction
+            .rollback_to_savepoint("s")
+            .expect("the savepoint rolls back");
+        assert_eq!(
+            transaction.state(),
+            TransactionState::Write,
+            "the transaction is usable again once what failed it has been undone"
+        );
+    }
+
+    /// Rolling back to a savepoint does not promote a transaction that had not
+    /// failed.
+    ///
+    /// The other half of the same branch: only a failed transaction is revived,
+    /// and a rollback is not a reason to call a transaction a writer.
+    #[test]
+    fn rolling_back_to_a_savepoint_does_not_promote_an_unfailed_transaction() {
+        let mut transaction = Transaction::new();
+        transaction.begin(BeginMode::Deferred).expect("begins");
+        let before = transaction.state();
+        transaction
+            .open_savepoint("s")
+            .expect("the savepoint opens");
+        transaction
+            .rollback_to_savepoint("s")
+            .expect("the savepoint rolls back");
+        assert_eq!(
+            transaction.state(),
+            before,
+            "a transaction that had not failed is left exactly as it was"
+        );
+    }
+
     /// A fresh connection is in autocommit with no levels.
     #[test]
     fn a_new_connection_is_in_autocommit() {

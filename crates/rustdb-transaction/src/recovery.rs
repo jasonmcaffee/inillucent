@@ -355,6 +355,54 @@ mod tests {
         assert_eq!(absent, crate::journal::MIN_SECTOR_SIZE);
     }
 
+    /// A log holding exactly a header and no frames still declares its page
+    /// size.
+    ///
+    /// This is what a freshly created write-ahead log is, and the length check
+    /// guarding the read has to admit it: a log of exactly `WAL_HEADER_SIZE`
+    /// bytes is complete, not short. Requiring *more* than a header - or
+    /// rejecting a file of exactly that length - would make every fresh log
+    /// look like a file that is not a log at all, and the database would open
+    /// without it.
+    #[test]
+    fn a_log_that_is_exactly_a_header_declares_its_page_size() {
+        let path = DbPath::new("/db.sqlite");
+        let vfs = database_at(&path);
+        let size = rustdb_base::page::PageSize::new(4096).expect("4096 is a page size");
+        let header = crate::wal::format::WalHeader::new(
+            size,
+            0,
+            [1, 2, 3, 4, 5, 6, 7, 8],
+            rustdb_base::checksum::WalByteOrder::Big,
+        )
+        .expect("the header is built");
+        let raw = header.encode().expect("the header encodes");
+        assert_eq!(
+            raw.len(),
+            crate::wal::format::WAL_HEADER_SIZE,
+            "the fixture has to be exactly a header for this to test anything"
+        );
+
+        let log = vfs
+            .open(
+                &path.wal(),
+                OpenOptions {
+                    create: true,
+                    ..OpenOptions::of_kind(FileKind::Wal)
+                },
+            )
+            .expect("the log file is created");
+        log.write_all_at(0, &raw).expect("the header is written");
+        drop(log);
+
+        let declared = log_page_size(vfs.as_ref(), &path).expect("the log is readable");
+        assert_eq!(
+            declared,
+            Some(size),
+            "a log of exactly one header is a log, and it declares its page size"
+        );
+    }
+
     /// A database with no journal beside it has nothing to replay.
     #[test]
     fn a_database_with_no_journal_would_replay_nothing() {
