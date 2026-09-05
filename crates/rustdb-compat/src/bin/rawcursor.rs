@@ -1,5 +1,11 @@
 //! What a full scan costs with no VM and no `Value` in the way.
 //!
+//! Invariant: the aggregate this loop computes equals the one SQLite computes
+//! over the same file, on every page size and both b-tree structures. A timing
+//! is only worth reading if both sides did the same work and got the same
+//! answer, so the aggregate is printed rather than discarded and every round is
+//! checked against the warm-up round before its time is kept.
+//!
 //! Fable 5.1's rearchitecture proposal rests on a claim that can be falsified
 //! in an hour: that a batched scan over a storage layer can beat SQLite by 3x
 //! or more on a full table scan, and its stage-1 go/no-go bar is 5x on
