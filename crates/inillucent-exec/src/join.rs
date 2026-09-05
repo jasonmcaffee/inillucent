@@ -66,12 +66,13 @@ const INLINE_KEYS: usize = 4;
 
 /// How many joined columns a probe's column list keeps on the stack.
 ///
-/// The scorecard's widest joined row is nine vectors - five table columns and
-/// four index ones - and a `Vector` is about sixty-four bytes, so twelve slots
-/// is under a kilobyte of stack and covers every shape the fixture and the
-/// dialect's own corpus produce. A wider row spills to the heap, which costs
-/// what every row used to cost.
-const INLINE_COLUMNS: usize = 12;
+/// The scorecard's widest joined row is seven vectors - five table columns and
+/// two index ones - and the array is filled in whether the row needs every slot
+/// or not, so the size is a cost rather than a ceiling: a `Vector` is about
+/// seventy bytes, and twelve slots was most of a kilobyte of stack stores per
+/// probed row. A wider row spills to the heap, which costs what every row used
+/// to cost.
+const INLINE_COLUMNS: usize = 8;
 
 /// A buffer of materialised rows, emitted as batches.
 ///
@@ -548,10 +549,22 @@ impl Sink for IndexNestedLoopJoin<'_> {
                 if *full_key {
                     let found = inner.probe(pool, probe, |leaf, row| {
                         // The joined row's column list lives on the stack when
-                        // it fits. A rowid lookup measures 236 ns bare and was
-                        // measuring about 320 ns inside this join; a `Vec` of
-                        // nine 64-byte vectors, allocated and freed once per
-                        // probed row, was most of the difference.
+                        // it fits, and the *inner* columns are the leaf's own
+                        // mini-columns under a one-row selection rather than
+                        // values read out of them.
+                        //
+                        // **That second half is where a rowid lookup's time
+                        // was going.** A stage is projected in full, so a probe
+                        // into `main_table` read all five of its columns to
+                        // answer a query that reads one - and a PAX leaf keeps
+                        // each column's values in its own region, so five reads
+                        // are five scattered cache lines where the directory
+                        // entries that describe them are two contiguous ones.
+                        // A column vector costs the directory entry; the value
+                        // is read only if something downstream asks for it,
+                        // which for `count(category)` and `sum(length(label))`
+                        // is exactly one column. It is the same shape the
+                        // prefix branch below already had.
                         let total = width.saturating_add(inner_width);
                         let mut inline: [Vector<'_>; INLINE_COLUMNS] =
                             [Vector::Const(Datum::Null); INLINE_COLUMNS];
@@ -572,7 +585,7 @@ impl Sink for IndexNestedLoopJoin<'_> {
                         }
                         if *kind != JoinKind::Semi {
                             for column in &inner_projection.0 {
-                                let vector = Vector::Const(leaf.value(row, *column)?);
+                                let vector = Vector::Column(leaf.column(*column)?);
                                 if heap {
                                     spilled.push(vector);
                                 } else if let Some(slot) = inline.get_mut(at) {
@@ -586,7 +599,10 @@ impl Sink for IndexNestedLoopJoin<'_> {
                         } else {
                             inline.get(..at).unwrap_or(&[])
                         };
-                        let one = Batch::over(1, columns);
+                        selection.clear();
+                        selection.push(row as u32);
+                        let mut one = Batch::over(leaf.row_count(), columns);
+                        one.selection = Some(selection.as_slice());
                         downstream.push(&one)
                     })?;
                     if let Some(reported) = found {

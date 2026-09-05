@@ -17,6 +17,14 @@
 //! two added together, and a build cost that is half of a point lookup is not
 //! a thing to discover after optimising the half that was already cheap.
 //!
+//! Invariant: every rung of every ladder here binds a fresh value on each
+//! execution, the way the gate does. An instrument that repeats one parameter
+//! measures a working set that stays in cache rather than the workload, and
+//! this one did: its first version probed the same two hundred rowids two
+//! thousand times and read twenty per cent faster than the gate for that
+//! reason, which is also how it produced the 2.7x sorted-order figure that a
+//! built implementation then failed to reproduce.
+//!
 //! Usage:
 //!   inillucent-probeprofile <sqlite fixture> [--scale S] [--page-size N] [--frames N]
 
@@ -157,6 +165,34 @@ fn index_probe_stages(database: &ImportedDatabase) -> Result<(), String> {
         Ok(())
     })?;
     println!("  {:<38} {descend:>10.1}", "descend_guard");
+
+    // The class-array walk that `all_typed` does, on its own. Every bound over
+    // an integer column asks for it, so it is paid once per probe and twice per
+    // skip-scan seek.
+    let (guard, _) = tree
+        .descend_guard(pool, encoded.first().map(Vec::as_slice).unwrap_or(&[]))
+        .map_err(|error| why(&error))?;
+    let leaf = LeafRef::parse(guard.bytes()).map_err(|error| why(&error))?;
+    let column = leaf.column(0).map_err(|error| why(&error))?;
+    let directory = per_over(2_000, 16, || {
+        for _ in 0..16 {
+            std::hint::black_box(leaf.column(0).map_err(|error| why(&error))?);
+        }
+        Ok(())
+    })?;
+    println!("  {:<38} {directory:>10.1}", "leaf.column(0)");
+    let typed = per_over(2_000, 16, || {
+        for _ in 0..16 {
+            std::hint::black_box(column.all_typed());
+        }
+        Ok(())
+    })?;
+    println!(
+        "  {:<38} {typed:>10.1}   ({} rows)",
+        "+ all_typed",
+        leaf.row_count()
+    );
+    drop(guard);
 
     let bounded = per_over(8, encoded.len(), || {
         for (index, key) in encoded.iter().enumerate() {

@@ -292,25 +292,39 @@ impl<'t> SkipScan<'t> {
     /// @param downstream - the head of the operator chain
     pub fn run(&self, pool: &Pool, downstream: &mut dyn Sink) -> DbResult<()> {
         let prefix = self.prefix;
+        // The row buffers are kept and cleared rather than allocated and
+        // dropped. A skip scan's whole argument is that it does one read per
+        // distinct value, so a `Vec` per distinct value is the one allocation
+        // it should not be making: `scan.distinct` is 65 of them at every
+        // scale, which is why the workload's per-seek constant is the whole of
+        // its cost.
         let mut buffered: Vec<Vec<OwnedDatum>> = Vec::new();
+        let mut used = 0usize;
         let mut stop = false;
         self.tree.skip_scan(pool, prefix, &mut |leaf, row| {
-            let mut out = Vec::with_capacity(prefix);
-            for column in 0..prefix {
-                out.push(OwnedDatum::from_datum(&leaf.value(row, column)?));
+            if used >= buffered.len() {
+                buffered.push(Vec::with_capacity(prefix));
             }
-            buffered.push(out);
-            if buffered.len() >= crate::batch::BATCH_ROWS {
-                let rows = std::mem::take(&mut buffered);
-                if crate::ops::emit_rows(&rows, downstream)? == Flow::Stop {
+            if let Some(out) = buffered.get_mut(used) {
+                out.clear();
+                for column in 0..prefix {
+                    out.push(OwnedDatum::from_datum(&leaf.value(row, column)?));
+                }
+            }
+            used = used.saturating_add(1);
+            if used >= crate::batch::BATCH_ROWS {
+                let rows = buffered.get(..used).unwrap_or(&[]);
+                let flow = crate::ops::emit_rows(rows, downstream)?;
+                used = 0;
+                if flow == Flow::Stop {
                     stop = true;
                     return Ok(false);
                 }
             }
             Ok(true)
         })?;
-        if !stop && !buffered.is_empty() {
-            crate::ops::emit_rows(&buffered, downstream)?;
+        if !stop && used > 0 {
+            crate::ops::emit_rows(buffered.get(..used).unwrap_or(&[]), downstream)?;
         }
         downstream.finish()
     }
@@ -318,10 +332,11 @@ impl<'t> SkipScan<'t> {
 
 /// How many projected columns a point probe keeps on the stack.
 ///
-/// Twelve covers every table in the scorecard fixture and in the dialect's own
-/// corpus; a wider projection takes the owned path, which is what every probe
-/// used to take.
-const PROBE_INLINE_COLUMNS: usize = 12;
+/// Eight covers every table in the scorecard fixture and in the dialect's own
+/// corpus. The array is filled in whether the projection needs every slot or
+/// not, so the size is a cost as well as a ceiling; a wider projection takes the
+/// owned path, which is what every probe used to take.
+const PROBE_INLINE_COLUMNS: usize = 8;
 
 /// One row by key: the compiled point-probe path.
 ///
@@ -394,14 +409,23 @@ impl<'t> PointProbe<'t> {
         let width = self.projection.0.len();
         if width <= PROBE_INLINE_COLUMNS {
             self.tree.probe(pool, key, |leaf, row| {
+                // The leaf's own mini-columns under a one-row selection, not
+                // values read out of them. A stage is projected in full, so a
+                // probe into a five-column table read five columns to answer a
+                // query that reads one - and a PAX leaf keeps each column's
+                // values in its own region, so those are five scattered cache
+                // lines where the directory entries describing them are two
+                // contiguous ones.
                 let mut inline: [Vector<'_>; PROBE_INLINE_COLUMNS] =
                     [Vector::Const(Datum::Null); PROBE_INLINE_COLUMNS];
                 for (at, column) in self.projection.0.iter().enumerate() {
                     if let Some(slot) = inline.get_mut(at) {
-                        *slot = Vector::Const(leaf.value(row, *column)?);
+                        *slot = Vector::Column(leaf.column(*column)?);
                     }
                 }
-                let batch = Batch::over(1, inline.get(..width).unwrap_or(&[]));
+                let selection = [row as u32];
+                let mut batch = Batch::over(leaf.row_count(), inline.get(..width).unwrap_or(&[]));
+                batch.selection = Some(&selection);
                 downstream.push(&batch)?;
                 Ok(())
             })?;

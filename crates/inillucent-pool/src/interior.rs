@@ -329,9 +329,12 @@ impl<'p> InteriorRef<'p> {
 /// @param key - the encoded key, of any length
 fn leading_u64(key: &[u8]) -> u64 {
     let mut raw = [0u8; 8];
-    let taken = key.len().min(8);
-    if let (Some(slot), Some(head)) = (raw.get_mut(..taken), key.get(..taken)) {
-        slot.copy_from_slice(head);
+    // Zipped rather than sliced, because a slice needs a length and a length
+    // needs a bound that no input can violate - and a branch no input can take
+    // is one the coverage gate can only ever be lied to about. `zip` stops at
+    // whichever runs out first, which is exactly the padding rule.
+    for (slot, byte) in raw.iter_mut().zip(key) {
+        *slot = *byte;
     }
     u64::from_be_bytes(raw)
 }
@@ -595,10 +598,11 @@ mod tests {
             let mut probes: Vec<Vec<u8>> = vec![Vec::new(), vec![0xFF; 16]];
             for key in separators {
                 probes.push(key.clone());
+                // A strict prefix sorts below the key it is a prefix of, so
+                // dropping the last byte is "just below" without a branch on
+                // whether there was a last byte to drop.
                 let mut below = key.clone();
-                if let Some(last) = below.last_mut() {
-                    *last = last.wrapping_sub(1);
-                }
+                let _ = below.pop();
                 probes.push(below);
                 let mut above = key.clone();
                 above.push(0);
