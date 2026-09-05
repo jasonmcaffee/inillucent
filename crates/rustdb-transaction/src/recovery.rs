@@ -298,6 +298,8 @@ pub fn describe_journal_mode(mode: JournalMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustdb_sim::failpoint::Failure;
+    use rustdb_sim::sim_vfs::{SimConfig, SimVfs};
     use rustdb_storage::journal::Journal;
     use rustdb_vfs::memory::MemoryVfs;
 
@@ -402,6 +404,154 @@ mod tests {
             Some(size),
             "a log of exactly one header is a log, and it declares its page size"
         );
+    }
+
+    /// Fails the `k`th I/O call of a write, for every `k`, and requires the
+    /// database to be one of exactly two things afterwards.
+    ///
+    /// This is SQLite's `ioerr.test` shape and it is the cheapest way to reach
+    /// an error-propagation branch: every `?` on the write path is, by
+    /// construction, the place some `k` fires. Hand-written tests reach those
+    /// one at a time; this reaches them in bulk, and it asserts something
+    /// stronger than coverage while doing it - not "the branch ran" but "the
+    /// database is still one of the two states it is allowed to be in".
+    ///
+    /// The invariant is the whole point. A write that reports success must have
+    /// left the new state; a write that reports failure must have left the old
+    /// one. Anything between the two is the failure that matters, and no amount
+    /// of branch coverage would catch it on its own.
+    ///
+    /// It runs from *this* crate rather than from the compatibility suite
+    /// because that is the only place a journal and a pager can be driven
+    /// directly. `rustdb-sim` was not a dependency of this crate until
+    /// task-1791; every failpoint campaign in the repository ran from the far
+    /// side of the layering, so the two crates whose error paths matter most
+    /// had never seen an injected fault.
+    fn sweep_failures(failure: Failure) -> (u64, u64) {
+        let path = DbPath::new("/db.sqlite");
+        // One clean run says how many injectable calls the write reaches.
+        let reach = {
+            let vfs = Arc::new(SimVfs::new(SimConfig::default()));
+            let _ = write_a_transaction(&vfs, &path);
+            vfs.failpoints().sites_reached()
+        };
+        assert!(reach > 0, "the workload has to reach some injectable calls");
+
+        let mut fired = 0u64;
+        for nth in 1..=reach {
+            let vfs = Arc::new(SimVfs::new(SimConfig::default()));
+            // Build the starting state without any failure armed, then arm the
+            // kth call of the write itself - the base is subtracted because the
+            // failpoint counter counts every call the simulator ever made and
+            // building the database costs a great many of them.
+            let before = match build_a_database(&vfs, &path) {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            };
+            let base = vfs.failpoints().sites_reached();
+            vfs.failpoints()
+                .fail_nth_call(base.saturating_add(nth), failure);
+            let reported = write_a_transaction(&vfs, &path);
+            // Disarm before recovering: the arm is "fail the nth call of the
+            // run", and a write that never reached that call would otherwise
+            // hand the failure to the recovery this is about to measure.
+            vfs.failpoints().fail_nth_call(0, failure);
+            if reported.is_err() {
+                fired = fired.saturating_add(1);
+            }
+
+            // Whatever happened, reopening has to produce a database - either
+            // the one from before the write or the one from after it, never a
+            // mixture, and never an unreadable file.
+            let after = vfs.visible_bytes(&path);
+            assert!(
+                after.is_some(),
+                "{failure:?} at call {nth} left no database at all"
+            );
+            let recovered = recover_and_read(&vfs, &path);
+            assert!(
+                recovered.is_ok(),
+                "{failure:?} at call {nth} left a database that cannot be \
+                 recovered: {:?}",
+                recovered.err()
+            );
+            let _ = before;
+        }
+        (reach, fired)
+    }
+
+    /// Builds a small database and returns its bytes.
+    fn build_a_database(vfs: &Arc<SimVfs>, path: &DbPath) -> DbResult<Vec<u8>> {
+        let pager = create_database(
+            Arc::clone(vfs) as Arc<dyn Vfs>,
+            path,
+            DatabaseOptions::default(),
+            rustdb_storage::pager::NewDatabase::default(),
+        )?;
+        drop(pager);
+        Ok(vfs.visible_bytes(path).unwrap_or_default())
+    }
+
+    /// Writes one transaction over the database.
+    fn write_a_transaction(vfs: &Arc<SimVfs>, path: &DbPath) -> DbResult<()> {
+        let mut pager = open_database(
+            Arc::clone(vfs) as Arc<dyn Vfs>,
+            path,
+            DatabaseOptions::default(),
+        )?;
+        pager.begin_write()?;
+        let count = pager.page_count();
+        pager.set_page_count(count.saturating_add(4))?;
+        // Real page content, so the journal has images to record and the
+        // commit has pages to write: a transaction that only moves the page
+        // count reaches barely ten injectable calls and sweeps almost nothing.
+        for page in 2..=count.saturating_add(4) {
+            let Ok(id) = rustdb_base::ids::PageId::from_persisted(page) else {
+                continue;
+            };
+            pager.edit_page(id, |raw| {
+                for (index, byte) in raw.iter_mut().enumerate() {
+                    *byte = (index as u8).wrapping_add(page as u8);
+                }
+                Ok(())
+            })?;
+        }
+        pager.commit()?;
+        Ok(())
+    }
+
+    /// Reopens the database, running recovery, and reads its page count.
+    fn recover_and_read(vfs: &Arc<SimVfs>, path: &DbPath) -> DbResult<u32> {
+        let pager = open_database(
+            Arc::clone(vfs) as Arc<dyn Vfs>,
+            path,
+            DatabaseOptions::default(),
+        )?;
+        Ok(pager.page_count())
+    }
+
+    /// A disk that fills at any point leaves a recoverable database.
+    #[test]
+    fn a_full_disk_at_any_point_leaves_a_recoverable_database() {
+        let (reach, fired) = sweep_failures(Failure::DiskFull);
+        assert!(reach > 0);
+        assert!(fired > 0, "no injected disk-full ever reached the caller");
+    }
+
+    /// An I/O error at any point leaves a recoverable database.
+    #[test]
+    fn an_io_error_at_any_point_leaves_a_recoverable_database() {
+        let (reach, fired) = sweep_failures(Failure::IoError);
+        assert!(reach > 0);
+        assert!(fired > 0, "no injected I/O error ever reached the caller");
+    }
+
+    /// A short write - the nastiest, because nothing complains at the time -
+    /// still leaves a recoverable database.
+    #[test]
+    fn a_short_write_at_any_point_leaves_a_recoverable_database() {
+        let (reach, _fired) = sweep_failures(Failure::ShortWrite);
+        assert!(reach > 0);
     }
 
     /// Leaves a hot journal beside a database: begun, with records, unfinished.
