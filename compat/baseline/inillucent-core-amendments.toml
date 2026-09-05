@@ -1,0 +1,116 @@
+# Deliberate, reviewed changes to the retrieval engine.
+#
+# `inillucent-baseline verify` accepts a tracked file that differs from the
+# capture only when it is named here at exactly the digest it now has, so a
+# second, undeclared change to the same file still fails the guard.
+#
+# Written by `inillucent-baseline amend`; edit through that rather than by hand.
+
+[[amendment]]
+path = "crates/inillucent-bench/Cargo.toml"
+ticket = "task-1807"
+reason = "task-1807 renamed the product from its working name to inillucent. Every change in these files is that substitution plus the crate and directory renames it implies: no logic, no format, no default and no measured number moved. persist.rs additionally accepts the pre-rename eight-byte file magic on read, so indexes already on disk still open."
+sha256 = "f0a3f57b8c0913fa4c5b75fc037a011e90e61f847820aceecd370e57c0b630b0"
+
+[[amendment]]
+path = "crates/inillucent-bench/src/corpus.rs"
+ticket = "task-1807"
+reason = "task-1807 renamed the product from its working name to inillucent. Every change in these files is that substitution plus the crate and directory renames it implies: no logic, no format, no default and no measured number moved. persist.rs additionally accepts the pre-rename eight-byte file magic on read, so indexes already on disk still open."
+sha256 = "e83d3d159ddac48dd40b828dd84f2bf5a17da92ab5d4437041f9a46fa2f59713"
+
+[[amendment]]
+path = "crates/inillucent-bench/src/embedcheck.rs"
+ticket = "task-1807"
+reason = "task-1807 renamed the product from its working name to inillucent. Every change in these files is that substitution plus the crate and directory renames it implies: no logic, no format, no default and no measured number moved. persist.rs additionally accepts the pre-rename eight-byte file magic on read, so indexes already on disk still open."
+sha256 = "2a5938f07f2341f5abd11b8d91e601f928739afe420eadb1369f78a4087c36a3"
+
+[[amendment]]
+path = "crates/inillucent-bench/src/engine.rs"
+ticket = "task-1807"
+reason = "task-1807 renamed the product from its working name to inillucent. Every change in these files is that substitution plus the crate and directory renames it implies: no logic, no format, no default and no measured number moved. persist.rs additionally accepts the pre-rename eight-byte file magic on read, so indexes already on disk still open."
+sha256 = "42145d6fae6611621d43ff0a53e99389fbd8bf5bfaf0da8e9b21577db00f3cd9"
+
+[[amendment]]
+path = "crates/inillucent-bench/src/main.rs"
+ticket = "task-1807"
+reason = "task-1807 renamed the product from its working name to inillucent. Every change in these files is that substitution plus the crate and directory renames it implies: no logic, no format, no default and no measured number moved. persist.rs additionally accepts the pre-rename eight-byte file magic on read, so indexes already on disk still open."
+sha256 = "dca249261e246eeb6215591594667aa6b6103b5e39d007455680cc99046cfa91"
+
+[[amendment]]
+path = "crates/inillucent-bench/src/queryset.rs"
+ticket = "task-1807"
+reason = "task-1807 renamed the product from its working name to inillucent. Every change in these files is that substitution plus the crate and directory renames it implies: no logic, no format, no default and no measured number moved. persist.rs additionally accepts the pre-rename eight-byte file magic on read, so indexes already on disk still open."
+sha256 = "b0adbb6d968e21c149369163364c6114c18cb9467c82bf54a6a6917119353deb"
+
+[[amendment]]
+path = "crates/inillucent-bench/src/report.rs"
+ticket = "task-1807"
+reason = "task-1807 renamed the product from its working name to inillucent. Every change in these files is that substitution plus the crate and directory renames it implies: no logic, no format, no default and no measured number moved. persist.rs additionally accepts the pre-rename eight-byte file magic on read, so indexes already on disk still open."
+sha256 = "917a2a78587ca6b826baaea68a3e1fefbfef609a2fc71008a8012328ce6e8e70"
+
+[[amendment]]
+path = "crates/inillucent-bench/src/runs.rs"
+ticket = "task-1807"
+reason = "task-1807 renamed the product from its working name to inillucent. Every change in these files is that substitution plus the crate and directory renames it implies: no logic, no format, no default and no measured number moved. persist.rs additionally accepts the pre-rename eight-byte file magic on read, so indexes already on disk still open."
+sha256 = "35e5ad878cd63a6db69c8839e9ee09c22a1c1dfb70410b635694d3eab0aa92bc"
+
+[[amendment]]
+path = "crates/inillucent-bench/src/scenarios.rs"
+ticket = "task-1807"
+reason = "task-1807 renamed the product from its working name to inillucent. Every change in these files is that substitution plus the crate and directory renames it implies: no logic, no format, no default and no measured number moved. persist.rs additionally accepts the pre-rename eight-byte file magic on read, so indexes already on disk still open."
+sha256 = "6b0c28abef339112230ad17ee0a49c26e65b0cbf08f793c45b3359d544d9d607"
+
+[[amendment]]
+path = "crates/inillucent-bench/src/synth.rs"
+ticket = "task-1807"
+reason = "task-1807 renamed the product from its working name to inillucent. Every change in these files is that substitution plus the crate and directory renames it implies: no logic, no format, no default and no measured number moved. persist.rs additionally accepts the pre-rename eight-byte file magic on read, so indexes already on disk still open."
+sha256 = "b77530e990408c229aca16001b88fcfcdfff18c9eca33ea6d60c78d6de65483c"
+
+[[amendment]]
+path = "crates/inillucent-bench/src/tune.rs"
+ticket = "task-1807"
+reason = "task-1807 renamed the product from its working name to inillucent. Every change in these files is that substitution plus the crate and directory renames it implies: no logic, no format, no default and no measured number moved. persist.rs additionally accepts the pre-rename eight-byte file magic on read, so indexes already on disk still open."
+sha256 = "856d04c723fd52d8298ae61444294ffd550f905e0f6cbc0ea4864bb77e8f0a77"
+
+[[amendment]]
+path = "crates/inillucent-core/Cargo.toml"
+ticket = "task-1807"
+reason = "task-1807 renamed the product from its working name to inillucent. Every change in these files is that substitution plus the crate and directory renames it implies: no logic, no format, no default and no measured number moved. persist.rs additionally accepts the pre-rename eight-byte file magic on read, so indexes already on disk still open."
+sha256 = "eba4b8ecea88ebb6f04d3b601a41e608e497c4e2a7b5d0b2a1accc9b2427cfac"
+
+[[amendment]]
+path = "crates/inillucent-core/src/bm25.rs"
+ticket = "task-1807"
+reason = "task-1807 renamed the product from its working name to inillucent. Every change in these files is that substitution plus the crate and directory renames it implies: no logic, no format, no default and no measured number moved. persist.rs additionally accepts the pre-rename eight-byte file magic on read, so indexes already on disk still open."
+sha256 = "3ff5060ec3a6c985fc3f9dad0f91b7fa165f2d39a789e75952596e7ca6dd1023"
+
+[[amendment]]
+path = "crates/inillucent-core/src/embed_onnx.rs"
+ticket = "task-1807"
+reason = "task-1807 renamed the product from its working name to inillucent. Every change in these files is that substitution plus the crate and directory renames it implies: no logic, no format, no default and no measured number moved. persist.rs additionally accepts the pre-rename eight-byte file magic on read, so indexes already on disk still open."
+sha256 = "721145239f9741c6e2a61bf0b69162f209b0218e9e6469901a7de8ce8dba4666"
+
+[[amendment]]
+path = "crates/inillucent-core/src/index.rs"
+ticket = "task-1807"
+reason = "task-1807 renamed the product from its working name to inillucent. Every change in these files is that substitution plus the crate and directory renames it implies: no logic, no format, no default and no measured number moved. persist.rs additionally accepts the pre-rename eight-byte file magic on read, so indexes already on disk still open."
+sha256 = "70da065b55f6ea01c0574b8a5f0c95befafa306b6df4c35e0b92ed9e58b633cd"
+
+[[amendment]]
+path = "crates/inillucent-core/src/persist.rs"
+ticket = "task-1807"
+reason = "task-1807 renamed the product from its working name to inillucent. Every change in these files is that substitution plus the crate and directory renames it implies: no logic, no format, no default and no measured number moved. persist.rs additionally accepts the pre-rename eight-byte file magic on read, so indexes already on disk still open."
+sha256 = "a914e17196b70a51dda877ce44c40bef95dedb7611cf49bade92809399b45fe4"
+
+[[amendment]]
+path = "inillucent-scorecard.json"
+ticket = "task-1807"
+reason = "task-1807 renamed the product from its working name to inillucent. Every change in these files is that substitution plus the crate and directory renames it implies: no logic, no format, no default and no measured number moved. persist.rs additionally accepts the pre-rename eight-byte file magic on read, so indexes already on disk still open."
+sha256 = "e77e6a18a49b3c57ab0cbc5c35d832f4989f044cda01782eaf509a1c9ff8a763"
+
+[[amendment]]
+path = "inillucent-scorecard.md"
+ticket = "task-1807"
+reason = "task-1807 renamed the product from its working name to inillucent. Every change in these files is that substitution plus the crate and directory renames it implies: no logic, no format, no default and no measured number moved. persist.rs additionally accepts the pre-rename eight-byte file magic on read, so indexes already on disk still open."
+sha256 = "8173dba95093a77edb3e5df261365f3fa29781a8953bdcc81bd23c1d6846b615"
+

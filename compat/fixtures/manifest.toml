@@ -2,8 +2,8 @@
 #
 # Every valid fixture was written by the pinned SQLite 3.53.4 binary; every
 # malformed one is a single named edit to a valid fixture, applied by
-# crates/rustdb-compat/src/fixtures.rs. Regenerate with:
-#   cargo run -p rustdb-compat --bin rustdb-fixtures
+# crates/inillucent-compat/src/fixtures.rs. Regenerate with:
+#   cargo run -p inillucent-compat --bin inillucent-fixtures
 # and verify the checked-in copies with `-- --verify`.
 #
 # This file is generated. Editing a digest here rather than regenerating the

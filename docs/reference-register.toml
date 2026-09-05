@@ -1,7 +1,7 @@
-# Every external project consulted while building rust-db.
+# Every external project consulted while building inillucent.
 #
 # The register exists so that "where did this behaviour come from?" has a
-# recorded answer. A normative-format entry is a specification rust-db must
+# recorded answer. A normative-format entry is a specification inillucent must
 # match byte for byte. A black-box-oracle entry is a program the harness runs as
 # a child process and compares against. A non-normative-design-reference entry
 # answered "what is worth building" and nothing else - no source was read for
@@ -17,7 +17,7 @@ name = "SQLite database file format"
 kind = "normative-format"
 version = "3.53.4"
 url = "https://sqlite.org/fileformat2.html"
-used_by = ["rustdb-storage", "rustdb-transaction", "rustdb-base"]
+used_by = ["inillucent-storage", "inillucent-transaction", "inillucent-base"]
 production_dependency = false
 
 [[reference]]
@@ -25,7 +25,7 @@ name = "SQLite file locking and concurrency"
 kind = "normative-behaviour"
 version = "3.53.4"
 url = "https://sqlite.org/lockingv3.html"
-used_by = ["rustdb-vfs", "rustdb-transaction"]
+used_by = ["inillucent-vfs", "inillucent-transaction"]
 production_dependency = false
 
 [[reference]]
@@ -33,7 +33,7 @@ name = "SQLite atomic commit"
 kind = "normative-behaviour"
 version = "3.53.4"
 url = "https://sqlite.org/atomiccommit.html"
-used_by = ["rustdb-transaction", "rustdb-sim"]
+used_by = ["inillucent-transaction", "inillucent-sim"]
 production_dependency = false
 
 [[reference]]
@@ -41,7 +41,7 @@ name = "SQLite write-ahead logging"
 kind = "normative-behaviour"
 version = "3.53.4"
 url = "https://sqlite.org/wal.html"
-used_by = ["rustdb-transaction", "rustdb-vfs"]
+used_by = ["inillucent-transaction", "inillucent-vfs"]
 production_dependency = false
 
 [[reference]]
@@ -49,7 +49,7 @@ name = "SQLite result and error codes"
 kind = "normative-behaviour"
 version = "3.53.4"
 url = "https://sqlite.org/rescode.html"
-used_by = ["rustdb-base"]
+used_by = ["inillucent-base"]
 production_dependency = false
 
 [[reference]]
@@ -57,7 +57,7 @@ name = "SQLite implementation limits"
 kind = "normative-behaviour"
 version = "3.53.4"
 url = "https://sqlite.org/limits.html"
-used_by = ["rustdb-base"]
+used_by = ["inillucent-base"]
 production_dependency = false
 
 [[reference]]
@@ -65,7 +65,7 @@ name = "SQLite VFS"
 kind = "normative-behaviour"
 version = "3.53.4"
 url = "https://sqlite.org/vfs.html"
-used_by = ["rustdb-vfs"]
+used_by = ["inillucent-vfs"]
 production_dependency = false
 
 [[reference]]
@@ -73,7 +73,7 @@ name = "SQLite datatypes"
 kind = "normative-behaviour"
 version = "3.53.4"
 url = "https://sqlite.org/datatype3.html"
-used_by = ["rustdb-value"]
+used_by = ["inillucent-value"]
 production_dependency = false
 
 [[reference]]
@@ -81,7 +81,7 @@ name = "Official SQLite amalgamation and shell"
 kind = "black-box-oracle"
 version = "3.53.4"
 url = "https://sqlite.org/download.html"
-used_by = ["rustdb-compat"]
+used_by = ["inillucent-compat"]
 production_dependency = false
 notes = "compiled into compat/oracle/sqlite_driver.c and run as a child process; checksums pinned in compat/reference/sqlite-3.53.4.toml"
 
@@ -90,7 +90,7 @@ name = "Turso deterministic simulator"
 kind = "non-normative-design-reference"
 revision = "pinned-for-review-only"
 url = "https://github.com/tursodatabase/turso/tree/main/testing/simulator"
-used_by = ["rustdb-sim test-plan"]
+used_by = ["inillucent-sim test-plan"]
 production_dependency = false
 notes = "answered which failure modes are worth modelling; no source was read for transplant"
 
@@ -99,7 +99,7 @@ name = "NIST FIPS 202 (SHA-3)"
 kind = "normative-format"
 version = "FIPS 202"
 url = "https://csrc.nist.gov/pubs/fips/202/final"
-used_by = ["rustdb-compat"]
+used_by = ["inillucent-compat"]
 production_dependency = false
 notes = "SQLite publishes SHA3-256 sums for its release artifacts, so the harness needs the same function"
 
@@ -108,6 +108,6 @@ name = "NIST FIPS 180-4 (SHA-2)"
 kind = "normative-format"
 version = "FIPS 180-4"
 url = "https://csrc.nist.gov/pubs/fips/180-4/upd1/final"
-used_by = ["rustdb-compat"]
+used_by = ["inillucent-compat"]
 production_dependency = false
 notes = "artifact digests in the evidence model"

@@ -1,7 +1,7 @@
 # The dependency-direction contract.
 #
 # This file is checked, not documented: `deps.layering-is-acyclic` and its
-# siblings in rustdb-compat read it, walk the workspace manifests, and fail on
+# siblings in inillucent-compat read it, walk the workspace manifests, and fail on
 # any edge that is not declared here. An architecture rule that is only written
 # down is a rule that has already been broken somewhere.
 #
@@ -12,32 +12,32 @@
 # `may_test_with` - which only the storage crates do, and only for the
 # simulator, because the TDD's fault campaigns run inside them.
 #
-# The TDD's crate table names `rustdb-value` and `rustdb-vfs` as the two leaves.
-# `rustdb-base` is a refinement made in task-1782: phase 1 needs checked
+# The TDD's crate table names `inillucent-value` and `inillucent-vfs` as the two leaves.
+# `inillucent-base` is a refinement made in task-1782: phase 1 needs checked
 # integers, varints, checksums, page arithmetic and the error table before
-# values exist, and `rustdb-vfs` needs the same error table, so they live in a
+# values exist, and `inillucent-vfs` needs the same error table, so they live in a
 # leaf below both rather than being duplicated or forced into a crate whose own
 # contents do not land until phase 2.
 
 schema_version = 1
 
 [[crate]]
-name = "rustdb-base"
+name = "inillucent-base"
 kind = "production"
 layer = 0
 may_depend_on = []
 
 [[crate]]
-name = "rustdb-vfs"
+name = "inillucent-vfs"
 kind = "production"
 layer = 1
-may_depend_on = ["rustdb-base"]
+may_depend_on = ["inillucent-base"]
 
 [[crate]]
-name = "rustdb-value"
+name = "inillucent-value"
 kind = "production"
 layer = 1
-may_depend_on = ["rustdb-base"]
+may_depend_on = ["inillucent-base"]
 
 # ---------------------------------------------------------------------------
 # The rearchitected engine (task-1816). These sit beside the crates they
@@ -47,125 +47,125 @@ may_depend_on = ["rustdb-base"]
 # green on the scorecard and the crash campaigns.
 # ---------------------------------------------------------------------------
 
-# `rustdb-pool` is the buffer pool the TDD's Phase 2 delivers: frames, version
+# `inillucent-pool` is the buffer pool the TDD's Phase 2 delivers: frames, version
 # latches, pointer swizzling, the cooling FIFO, writeback, the free map and blob
-# extents. It sits above `rustdb-vfs`, which is the only thing in the workspace
-# that touches a file, and below `rustdb-tree`, which names pages and children
+# extents. It sits above `inillucent-vfs`, which is the only thing in the workspace
+# that touches a file, and below `inillucent-tree`, which names pages and children
 # and never an offset.
 #
-# The page header moved down here with it, from `rustdb-tree::page`. A page
+# The page header moved down here with it, from `inillucent-tree::page`. A page
 # header is a property of the file format rather than of the B+tree - the pool
 # has to read one before it knows whether the page is a leaf at all - and
-# `rustdb_tree::page` is now a re-export, so every caller written against Phase
+# `inillucent_tree::page` is now a re-export, so every caller written against Phase
 # 1 still names the same path.
 [[crate]]
-name = "rustdb-pool"
+name = "inillucent-pool"
 kind = "production"
 layer = 2
-may_depend_on = ["rustdb-base", "rustdb-vfs"]
-# The TDD's Phase 2: "`rustdb-sim` becomes a dev-dependency of `rustdb-pool`,
-# `rustdb-tree`, `rustdb-wal` and `rustdb-txn`". A buffer pool's fault campaign
+may_depend_on = ["inillucent-base", "inillucent-vfs"]
+# The TDD's Phase 2: "`inillucent-sim` becomes a dev-dependency of `inillucent-pool`,
+# `inillucent-tree`, `inillucent-wal` and `inillucent-txn`". A buffer pool's fault campaign
 # has to inject a failure at a *site* - a read, a write, a sync - and then look
 # at the pool's own frame table, which only a test inside the crate can do.
-may_test_with = ["rustdb-sim"]
+may_test_with = ["inillucent-sim"]
 
-# `rustdb-tree` replaces `rustdb-storage` and sits where it sits: a layer that
+# `inillucent-tree` replaces `inillucent-storage` and sits where it sits: a layer that
 # knows pages and byte records and nothing about what a column is called. Phase
-# 2 added `rustdb-pool` beneath it when the buffer pool arrived, exactly as the
+# 2 added `inillucent-pool` beneath it when the buffer pool arrived, exactly as the
 # Phase 1 note here predicted.
 #
-# It reaches `rustdb-value` for one thing only: `Collation`. The PAX leaf keeps
+# It reaches `inillucent-value` for one thing only: `Collation`. The PAX leaf keeps
 # its own borrowed value type, because the executor's values borrow a pinned
-# page and `rustdb_value::Value`'s owned form is reference counted - that is the
+# page and `inillucent_value::Value`'s owned form is reference counted - that is the
 # allocation the design exists to avoid, and the edge does not change it. But a
 # tree is *stored* in its collation's order: an index on a `COLLATE NOCASE`
 # column holds `Blue` between two `blue`s, and a descent that compared them with
 # `memcmp` walks past the row it wants. The collation is therefore a property of
 # the column directory, and there is one definition of it in the workspace.
 [[crate]]
-name = "rustdb-tree"
+name = "inillucent-tree"
 kind = "production"
 layer = 3
-may_depend_on = ["rustdb-base", "rustdb-pool", "rustdb-value"]
+may_depend_on = ["inillucent-base", "inillucent-pool", "inillucent-value"]
 
-# `rustdb-exec` replaces `rustdb-vm`, and it reaches *down* to `rustdb-sql` for
+# `inillucent-exec` replaces `inillucent-vm`, and it reaches *down* to `inillucent-sql` for
 # the same reason the VM did: the planner's output is its input. It does not
 # reach the catalog - a pipeline is built against a `TreeCatalog` the caller
 # supplies, so the executor never resolves a name.
 [[crate]]
-name = "rustdb-exec"
+name = "inillucent-exec"
 kind = "production"
 layer = 6
 may_depend_on = [
-  "rustdb-base",
-  "rustdb-value",
-  "rustdb-sql",
-  "rustdb-scalar",
-  "rustdb-pool",
-  "rustdb-tree",
+  "inillucent-base",
+  "inillucent-value",
+  "inillucent-sql",
+  "inillucent-scalar",
+  "inillucent-pool",
+  "inillucent-tree",
 ]
 
-# `rustdb-scalar` holds the dialect's scalar layer: SQLite's arithmetic and
+# `inillucent-scalar` holds the dialect's scalar layer: SQLite's arithmetic and
 # three-valued logic, the value coercions, and the whole built-in function set -
 # `substr`, `strftime`, `LIKE`, `printf` and the rest.
 #
 # The TDD's component triage says those function bodies "port into
-# `rustdb-exec`". The obvious reading is to copy them out of `rustdb-vm`, and
+# `inillucent-exec`". The obvious reading is to copy them out of `inillucent-vm`, and
 # the rearchitecture makes that the wrong reading: both executors are in the
 # tree at once until Phase 5 deletes one, and two copies of `substr` agree until
 # the next fix. So the port was done as a *move*, into a crate both depend on,
-# with `rustdb_vm::builtin` and its five siblings left as re-exports.
+# with `inillucent_vm::builtin` and its five siblings left as re-exports.
 #
-# It sits above `rustdb-sql` because a built-in is identified by
-# `rustdb_sql::function::ScalarFunc` and the binder is what resolves a name to
+# It sits above `inillucent-sql` because a built-in is identified by
+# `inillucent_sql::function::ScalarFunc` and the binder is what resolves a name to
 # one. That is the only edge; nothing here parses, binds, plans or reads a page.
 [[crate]]
-name = "rustdb-scalar"
+name = "inillucent-scalar"
 kind = "production"
 layer = 5
-may_depend_on = ["rustdb-base", "rustdb-value", "rustdb-sql"]
+may_depend_on = ["inillucent-base", "inillucent-value", "inillucent-sql"]
 
-# `rustdb-sqlite-reader` is the read half of `rustdb-storage` behind a narrow
+# `inillucent-sqlite-reader` is the read half of `inillucent-storage` behind a narrow
 # interface, kept when the rest of that crate goes. It is a tool rather than a
 # library the engine uses: the differential gate imports a fixture through it
-# and `rustdb-migrate` reads a legacy file through it, and nothing in the engine
-# depends on it. It reaches `rustdb-catalog` so that there is one schema reader
+# and `inillucent-migrate` reads a legacy file through it, and nothing in the engine
+# depends on it. It reaches `inillucent-catalog` so that there is one schema reader
 # in the workspace rather than a second one that could disagree with the binder.
 [[crate]]
-name = "rustdb-sqlite-reader"
+name = "inillucent-sqlite-reader"
 kind = "production"
 layer = 7
 may_depend_on = [
-  "rustdb-base",
-  "rustdb-value",
-  "rustdb-vfs",
-  "rustdb-storage",
-  "rustdb-transaction",
-  "rustdb-catalog",
-  "rustdb-sql",
-  "rustdb-tree",
+  "inillucent-base",
+  "inillucent-value",
+  "inillucent-vfs",
+  "inillucent-storage",
+  "inillucent-transaction",
+  "inillucent-catalog",
+  "inillucent-sql",
+  "inillucent-tree",
 ]
 
-# `rustdb-storage` reaching into `rustdb-value` is a refinement made in
+# `inillucent-storage` reaching into `inillucent-value` is a refinement made in
 # task-1783, and it is the layering rule "storage knows pages and byte records"
 # taken literally: an index cursor cannot decide which child to descend into
 # without decoding the two records it is comparing, and `sqlite_schema` cannot
-# be read for root pages without decoding a record. `rustdb-value` is a leaf
+# be read for root pages without decoding a record. `inillucent-value` is a leaf
 # below storage in the TDD's own graph, so the edge is downward and adds no
 # cycle. What storage still may not reach is anything that knows what a column
 # is called: no catalog, no SQL, no expressions.
 [[crate]]
-name = "rustdb-storage"
+name = "inillucent-storage"
 kind = "production"
 layer = 2
-may_depend_on = ["rustdb-base", "rustdb-value", "rustdb-vfs"]
+may_depend_on = ["inillucent-base", "inillucent-value", "inillucent-vfs"]
 
-# The edge from `rustdb-transaction` down to `rustdb-storage` is the one the
+# The edge from `inillucent-transaction` down to `inillucent-storage` is the one the
 # TDD draws, and phase 7 had to decide which side of it the rollback journal
 # falls on. The crate table puts "locks, journals, WAL, savepoints, recovery"
 # here; the pager section puts the writer state machine and "journal the before
 # image inside `get_page_mut`" in storage. Both are true, so the split is by
-# knowledge rather than by code: `rustdb_storage::journal::Journal` is a trait
+# knowledge rather than by code: `inillucent_storage::journal::Journal` is a trait
 # declaring the *moments* a journal is needed - which only the pager knows -
 # and this crate owns the format, the five modes, the four durability levels
 # and recovery. Moving the whole commit up would have dragged the dirty set,
@@ -173,55 +173,55 @@ may_depend_on = ["rustdb-base", "rustdb-value", "rustdb-vfs"]
 # byte-shuffling helper with no state machine, which is the opposite of what
 # the TDD describes.
 [[crate]]
-name = "rustdb-transaction"
+name = "inillucent-transaction"
 kind = "production"
 layer = 3
-may_depend_on = ["rustdb-base", "rustdb-vfs", "rustdb-storage"]
+may_depend_on = ["inillucent-base", "inillucent-vfs", "inillucent-storage"]
 
-# `rustdb-sql` sitting *below* `rustdb-catalog` is a refinement made in
-# task-1785. The TDD places the binder in `rustdb-sql` and says it is pure over
+# `inillucent-sql` sitting *below* `inillucent-catalog` is a refinement made in
+# task-1785. The TDD places the binder in `inillucent-sql` and says it is pure over
 # an immutable catalog snapshot, and it also says the catalog parses the CREATE
 # SQL stored in `sqlite_schema` with the first-party parser. Both cannot be true
 # of two crates in the same direction. The parser is the more fundamental of the
 # two - a catalog cannot be built without it, but a parse does not need a
 # catalog - so the parser, the AST and the binder live below, and the binder is
-# written against `rustdb_sql::catalog_view::CatalogView` rather than against
-# the concrete snapshot. `rustdb-catalog` implements that view over what it
+# written against `inillucent_sql::catalog_view::CatalogView` rather than against
+# the concrete snapshot. `inillucent-catalog` implements that view over what it
 # reads from the file. The binder is still pure and still performs no I/O; it
 # now says so in its types.
 [[crate]]
-name = "rustdb-sql"
+name = "inillucent-sql"
 kind = "production"
 layer = 4
-may_depend_on = ["rustdb-base", "rustdb-value"]
+may_depend_on = ["inillucent-base", "inillucent-value"]
 
 # The catalog reads `sqlite_schema` through the pager. Phase 7 introduces
-# `rustdb-transaction` between them; until it exists, a read transaction is a
+# `inillucent-transaction` between them; until it exists, a read transaction is a
 # pager read transaction, and the edge to storage is the same downward edge the
 # transaction crate will later carry.
 [[crate]]
-name = "rustdb-catalog"
+name = "inillucent-catalog"
 kind = "production"
 layer = 5
 may_depend_on = [
-  "rustdb-base",
-  "rustdb-value",
-  "rustdb-storage",
-  "rustdb-transaction",
-  "rustdb-sql",
-  "rustdb-pool",
-  "rustdb-tree",
+  "inillucent-base",
+  "inillucent-value",
+  "inillucent-storage",
+  "inillucent-transaction",
+  "inillucent-sql",
+  "inillucent-pool",
+  "inillucent-tree",
 ]
-may_test_with = ["rustdb-vfs"]
+may_test_with = ["inillucent-vfs"]
 
-# The two new edges are `paged`, which is the TDD's "rustdb-catalog over the
+# The two new edges are `paged`, which is the TDD's "inillucent-catalog over the
 # catalog tree". The schema the new engine reads is a tree in its own file, so
 # the loader has to reach the tree layer and the pool that pages it. Both are
 # below this crate, so the direction is unchanged; what is new is that one
 # catalog crate now serves two storage stacks, which is the point - a schema
 # read two ways by two derivations is a schema that can disagree with itself.
 
-# `rustdb-ext` sitting *above* `rustdb-sql` and `rustdb-storage` is a
+# `inillucent-ext` sitting *above* `inillucent-sql` and `inillucent-storage` is a
 # refinement made in task-1789, and it is what a virtual table actually is. A
 # module has to answer three questions the old position could not express: what
 # schema does `CREATE VIRTUAL TABLE ... USING fts5(a, b)` declare, which needs
@@ -231,62 +231,62 @@ may_test_with = ["rustdb-vfs"]
 # tables and are read and written a page at a time - so an extension crate that
 # may not name a pager can only be a table of pure functions.
 #
-# The direction is still downward and still acyclic: `rustdb-ext` reads the
-# front end and the storage engine, and `rustdb-vm` reads `rustdb-ext`. What it
+# The direction is still downward and still acyclic: `inillucent-ext` reads the
+# front end and the storage engine, and `inillucent-vm` reads `inillucent-ext`. What it
 # still may not reach is the catalog or the session; a module never resolves a
 # name or opens a transaction of its own, and is handed the roots of its shadow
 # tables by the host that already resolved them.
 [[crate]]
-name = "rustdb-ext"
+name = "inillucent-ext"
 kind = "production"
 layer = 6
 may_depend_on = [
-  "rustdb-base",
-  "rustdb-value",
-  "rustdb-storage",
-  "rustdb-transaction",
-  "rustdb-sql",
-  "rustdb-catalog",
+  "inillucent-base",
+  "inillucent-value",
+  "inillucent-storage",
+  "inillucent-transaction",
+  "inillucent-sql",
+  "inillucent-catalog",
 ]
 
 [[crate]]
-name = "rustdb-vm"
+name = "inillucent-vm"
 kind = "production"
 layer = 7
 may_depend_on = [
-  "rustdb-base",
-  "rustdb-value",
-  "rustdb-scalar",
-  "rustdb-sql",
-  "rustdb-catalog",
-  "rustdb-storage",
-  "rustdb-transaction",
-  "rustdb-ext",
+  "inillucent-base",
+  "inillucent-value",
+  "inillucent-scalar",
+  "inillucent-sql",
+  "inillucent-catalog",
+  "inillucent-storage",
+  "inillucent-transaction",
+  "inillucent-ext",
 ]
 
-# The edge from `rustdb-session` down to `rustdb-search` is where the retrieval
+# The edge from `inillucent-session` down to `inillucent-search` is where the retrieval
 # engine becomes a first-party module, and task-1790 put it here rather than one
 # layer up for a concrete reason. `Registry::with_builtins` lives in
-# `rustdb-ext`, two layers below the retrieval engine, so the module cannot be
+# `inillucent-ext`, two layers below the retrieval engine, so the module cannot be
 # registered there without dragging a vector index into every database that only
 # wanted SQL. The connection is the first place that both builds a registry and
 # is allowed to know the engine exists, which is exactly what the TDD's crate
-# table says `rustdb-search` is for.
+# table says `inillucent-search` is for.
 [[crate]]
-name = "rustdb-session"
+name = "inillucent-session"
 kind = "production"
 layer = 8
 may_depend_on = [
-  "rustdb-base",
-  "rustdb-value",
-  "rustdb-vfs",
-  "rustdb-storage",
-  "rustdb-catalog",
-  "rustdb-transaction",
-  "rustdb-sql",
-  "rustdb-ext",
-  "rustdb-search",
-  "rustdb-vm",
+  "inillucent-base",
+  "inillucent-value",
+  "inillucent-vfs",
+  "inillucent-storage",
+  "inillucent-catalog",
+  "inillucent-transaction",
+  "inillucent-sql",
+  "inillucent-ext",
+  "inillucent-search",
+  "inillucent-vm",
 ]
 
 # The facade names `CatalogSnapshot` in one accessor and `JournalStats` and
@@ -296,96 +296,96 @@ may_depend_on = [
 # wants to know what a commit cost should not have to reach past the facade to
 # find out.
 [[crate]]
-name = "rustdb"
+name = "inillucent"
 kind = "production"
 layer = 9
 may_depend_on = [
-  "rustdb-base",
-  "rustdb-value",
-  "rustdb-storage",
-  "rustdb-catalog",
-  "rustdb-session",
+  "inillucent-base",
+  "inillucent-value",
+  "inillucent-storage",
+  "inillucent-catalog",
+  "inillucent-session",
 ]
 
-# `rustdb-migrate` is the one production crate that names both engines, and it
-# has to: it reads a legacy generation directory through `rustdb-core`'s own
+# `inillucent-migrate` is the one production crate that names both engines, and it
+# has to: it reads a legacy generation directory through `inillucent-core`'s own
 # reader and writes a database through the public facade. Both edges are
 # downward. It is a tool rather than a library the engine uses, so nothing
 # depends on it.
 [[crate]]
-name = "rustdb-migrate"
+name = "inillucent-migrate"
 kind = "production"
 layer = 10
 may_depend_on = [
-  "rustdb-base",
-  "rustdb-value",
-  "rustdb-core",
-  "rustdb-search",
-  "rustdb",
+  "inillucent-base",
+  "inillucent-value",
+  "inillucent-core",
+  "inillucent-search",
+  "inillucent",
 ]
 
 [[crate]]
-name = "rustdb-capi"
+name = "inillucent-capi"
 kind = "production"
 layer = 10
-may_depend_on = ["rustdb"]
+may_depend_on = ["inillucent"]
 
 [[crate]]
-name = "rustdb-cli"
+name = "inillucent-cli"
 kind = "production"
 layer = 10
-may_depend_on = ["rustdb"]
+may_depend_on = ["inillucent"]
 
 [[crate]]
-name = "rustdb-core"
+name = "inillucent-core"
 kind = "production"
 layer = 0
 may_depend_on = []
 
-# `rustdb-search` reaching `rustdb-value` is the same refinement `rustdb-ext`
+# `inillucent-search` reaching `inillucent-value` is the same refinement `inillucent-ext`
 # made in task-1789 and for the same reason: a virtual-table module is handed
 # `Value`s and hands them back, so it cannot be written without naming the type.
 # The edge is downward to a leaf and adds no cycle.
 [[crate]]
-name = "rustdb-search"
+name = "inillucent-search"
 kind = "production"
 layer = 7
-may_depend_on = ["rustdb-base", "rustdb-value", "rustdb-ext", "rustdb-core"]
+may_depend_on = ["inillucent-base", "inillucent-value", "inillucent-ext", "inillucent-core"]
 
 [[crate]]
-name = "rustdb-sim"
+name = "inillucent-sim"
 kind = "test-only"
 layer = 11
-may_depend_on = ["rustdb-base", "rustdb-vfs"]
+may_depend_on = ["inillucent-base", "inillucent-vfs"]
 
 [[crate]]
-name = "rustdb-compat"
+name = "inillucent-compat"
 kind = "test-only"
 layer = 12
 may_depend_on = [
-  "rustdb-base",
-  "rustdb-value",
-  "rustdb-storage",
-  "rustdb-vfs",
-  "rustdb-sim",
-  "rustdb-sql",
-  "rustdb-catalog",
-  "rustdb-transaction",
-  "rustdb-vm",
-  "rustdb-session",
-  "rustdb",
-  "rustdb-pool",
-  "rustdb-tree",
-  "rustdb-scalar",
-  "rustdb-exec",
-  "rustdb-sqlite-reader",
+  "inillucent-base",
+  "inillucent-value",
+  "inillucent-storage",
+  "inillucent-vfs",
+  "inillucent-sim",
+  "inillucent-sql",
+  "inillucent-catalog",
+  "inillucent-transaction",
+  "inillucent-vm",
+  "inillucent-session",
+  "inillucent",
+  "inillucent-pool",
+  "inillucent-tree",
+  "inillucent-scalar",
+  "inillucent-exec",
+  "inillucent-sqlite-reader",
 ]
 
 [[crate]]
-name = "rustdb-bench"
+name = "inillucent-bench"
 kind = "test-only"
 layer = 12
-may_depend_on = ["rustdb-core"]
+may_depend_on = ["inillucent-core"]
 
 # ---------------------------------------------------------------------------
 # Third-party crates a production crate may depend on, and where.
@@ -398,82 +398,82 @@ may_depend_on = ["rustdb-core"]
 [[external]]
 name = "libc"
 category = "os-boundary"
-allowed_in = ["rustdb-vfs"]
+allowed_in = ["inillucent-vfs"]
 
 [[external]]
 name = "windows-sys"
 category = "os-boundary"
-allowed_in = ["rustdb-vfs"]
+allowed_in = ["inillucent-vfs"]
 
 [[external]]
 name = "anyhow"
 category = "error-plumbing"
-allowed_in = ["rustdb-core", "rustdb-bench"]
+allowed_in = ["inillucent-core", "inillucent-bench"]
 
 [[external]]
 name = "thiserror"
 category = "error-plumbing"
-allowed_in = ["rustdb-core", "rustdb-bench"]
+allowed_in = ["inillucent-core", "inillucent-bench"]
 
 [[external]]
 name = "serde"
 category = "data-plumbing"
-allowed_in = ["rustdb-core", "rustdb-bench"]
+allowed_in = ["inillucent-core", "inillucent-bench"]
 
 [[external]]
 name = "serde_json"
 category = "data-plumbing"
-allowed_in = ["rustdb-core", "rustdb-bench"]
+allowed_in = ["inillucent-core", "inillucent-bench"]
 
 [[external]]
 name = "rayon"
 category = "numeric-kernel"
-allowed_in = ["rustdb-core", "rustdb-bench"]
+allowed_in = ["inillucent-core", "inillucent-bench"]
 
 [[external]]
 name = "rust-stemmers"
 category = "numeric-kernel"
-allowed_in = ["rustdb-core"]
+allowed_in = ["inillucent-core"]
 
 [[external]]
 name = "bytemuck"
 category = "numeric-kernel"
-allowed_in = ["rustdb-core"]
+allowed_in = ["inillucent-core"]
 
 [[external]]
 name = "memmap2"
 category = "os-boundary"
-allowed_in = ["rustdb-core"]
+allowed_in = ["inillucent-core"]
 
 [[external]]
 name = "rand"
 category = "numeric-kernel"
-allowed_in = ["rustdb-core", "rustdb-bench"]
+allowed_in = ["inillucent-core", "inillucent-bench"]
 
 [[external]]
 name = "clap"
 category = "cli"
-allowed_in = ["rustdb-bench"]
+allowed_in = ["inillucent-bench"]
 
 [[external]]
 name = "postgres"
 category = "benchmark-baseline"
-allowed_in = ["rustdb-bench"]
+allowed_in = ["inillucent-bench"]
 
 [[external]]
 name = "pgvector"
 category = "benchmark-baseline"
-allowed_in = ["rustdb-bench"]
+allowed_in = ["inillucent-bench"]
 
 [[external]]
 name = "ort"
 category = "numeric-kernel"
-allowed_in = ["rustdb-core", "rustdb-bench"]
+allowed_in = ["inillucent-core", "inillucent-bench"]
 
 [[external]]
 name = "tokenizers"
 category = "numeric-kernel"
-allowed_in = ["rustdb-core"]
+allowed_in = ["inillucent-core"]
 
 # ---------------------------------------------------------------------------
 # Crates that may never appear in a production dependency graph. These are the
@@ -503,7 +503,7 @@ reason = "another database engine"
 
 [[forbidden]]
 pattern = "sqlparser"
-reason = "rust-db owns its SQL front end"
+reason = "inillucent owns its SQL front end"
 
 [[forbidden]]
 pattern = "sqlx"

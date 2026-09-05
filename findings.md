@@ -25,7 +25,7 @@ oversized queries, and `k = 0`.
 
 ### Where the wins are
 
-| family | measurement | rust-db | best pgvector |
+| family | measurement | inillucent | best pgvector |
 |---|---|---|---|
 | Lexical | natural language headings, success@10 | **0.9222** | 0.7778 |
 | Lexical | natural language headings, MRR | **0.7153** | 0.6245 |
@@ -47,7 +47,7 @@ oversized queries, and `k = 0`.
 ## 2. What was actually wrong, and what fixed it
 
 The seven losses were one hair-thin row count and, six times over, **natural-language queries**. The
-whole diagnosis is in a pair of numbers that was not on the losing list: on heading queries rust-db's
+whole diagnosis is in a pair of numbers that was not on the losing list: on heading queries inillucent's
 lexical side returned **49.5 rows of 50** and PostgreSQL returned **6.7** — and PostgreSQL scored
 higher.
 
@@ -59,7 +59,7 @@ PostgreSQL's full text search does two things BM25 does not:
 - **`ts_rank_cd` is cover density ranking.** A chunk whose query terms sit close together outranks
   one that mentions the same words in different paragraphs.
 
-rust-db was finding more of the right chunks and putting them lower.
+inillucent was finding more of the right chunks and putting them lower.
 
 ### The four changes
 
@@ -80,17 +80,17 @@ the best `k` per thread as candidates are produced. `source = slack` p50 **1.558
 p95 **2.728 → 0.947**.
 
 **Search budget parity on filtered queries.** pgvector's well-configured mode uses
-`hnsw.ef_search = 400` on a filtered query and 100 on an unfiltered one; rust-db used 128 for
+`hnsw.ef_search = 400` on a filtered query and 100 on an unfiltered one; inillucent used 128 for
 everything, so on the one family that is entirely about filtered search it was walking a quarter as
 wide. It now takes the same asymmetry, decided by the *same* predicate test both engines use. That
-also moves rust-db's own cost model — exhaustive search is chosen below
+also moves inillucent's own cost model — exhaustive search is chosen below
 `sqrt(ef_search x 32 x chunks)`, which at 400 is 48,672 chunks — so `github`'s 47,497 is scanned
 exactly rather than walked approximately: **34.800 rows → 50.000, recall@10 0.408 → 1.000.**
 
 ### Fairness
 
 Fusion is a ranking policy, not a retrieval capability, so **both engines are now fused the same
-way**: the harness sets one method on rust-db and on both pgvector configurations together, and the
+way**: the harness sets one method on inillucent and on both pgvector configurations together, and the
 PostgreSQL engine fuses through the same arithmetic over its keys. pgvector's scores went *up* as a
 result — its natural-language nDCG rose from 0.557 to 0.644 — and the hybrid family stayed a
 measurement of retrieval.
@@ -102,7 +102,7 @@ Coverage and proximity are one-sided, and only because PostgreSQL already has wh
 - **Prefix matching** (`town` also matching `township`, what `:*` does). On a 494,000 term dictionary
   it mostly credits a chunk with holding a query term it does not hold — the exact judgement coverage
   weighting depends on. Off is better on heading MRR and across the hybrid family; it costs a
-  thousandth of identifier MRR in a scenario rust-db wins better than four to one.
+  thousandth of identifier MRR in a scenario inillucent wins better than four to one.
 - **Tiering** (rank by how many query terms a chunk holds, then by score — the ordering `&` gives
   PostgreSQL). Kept, defaulted off. It is what rescues a caller who sets the coverage exponent to 0,
   lifting heading success@10 from 0.778 to 0.889; but at coverage 3 the two orderings agree, and
@@ -128,7 +128,7 @@ letter never matches itself.
 
 | stage | corpus | wall clock | what it is for |
 |---|---|---|---|
-| `cargo test --release -p rustdb-core` | fixtures | **1.8 s**, 121 tests | every ranking property, in isolation |
+| `cargo test --release -p inillucent-core` | fixtures | **1.8 s**, 121 tests | every ranking property, in isolation |
 | `synth-build` | either | **17 s** | assemble the corpus from the derived files |
 | `synth-check` | 185,078 chunks | **2.7 s** | every gate, before paying to embed |
 | `synth-embed` | 18,685 chunks | **38 s** | two GPU sessions |
@@ -199,7 +199,7 @@ small corpus. That is the difference between choosing a default in a coffee brea
 over a day.
 
 ```sh
-./target/release/rustdb-bench tune --cache corpus-small.cache \
+./target/release/inillucent-bench tune --cache corpus-small.cache \
   --coverages 0,1,2,3 --proximities 0,0.5,1 --weights 0.2,0.35,0.5 \
   --prefixes true,false --tiers true,false --seed-offset 100
 ```
@@ -265,10 +265,10 @@ maintenance workers, JIT off per pgvector's own guidance — because a compariso
 that was not given what it needs proves nothing.
 
 ```sh
-pg_ctl -D J:/rust-db-embeddings/pgdata -l J:/rust-db-embeddings/logs/pg.log start
+pg_ctl -D J:/inillucent-embeddings/pgdata -l J:/inillucent-embeddings/logs/pg.log start
 ```
 
-It holds `rustdb_synth` (185,078 chunks, 1.7 GB with its indexes) and `rustdb_synth_small` (18,685),
+It holds `inillucent_synth` (185,078 chunks, 1.7 GB with its indexes) and `inillucent_synth_small` (18,685),
 so the fast loop and the full loop each have a loaded baseline waiting.
 
 ---
@@ -281,7 +281,7 @@ so the fast loop and the full loop each have a loaded baseline waiting.
   retrieval. It flatters both engines equally, so the comparison holds even though the absolute
   figure is optimistic. It is the reason field weighting on the title was **not** implemented: on
   this corpus it would encode the answer rather than measure retrieval.
-- Latency is measured inside the calling process. rust-db pays no network cost because it is a
+- Latency is measured inside the calling process. inillucent pays no network cost because it is a
   library; pgvector pays a loopback round trip. That is a real difference in the deployed system
   rather than a measurement artefact, but it is not a difference in index quality.
 - The `jira` source is 1,448 documents against a target of 1,967, because GitHub caps issue
@@ -314,7 +314,7 @@ wins. Each family now declares one metric that is judged; the rest are printed a
 
 **`rows returned` was higher-is-better.** Fifty irrelevant chunks outscored ten useful ones. It is
 now a diagnostic and a gate: an engine that comes back with thirty rows where fifty exist fails the
-gate, and an engine that returns fifty useless ones wins nothing. The gate is on rust-db, because
+gate, and an engine that returns fifty useless ones wins nothing. The gate is on inillucent, because
 the baseline's short results are the finding this family exists to report and not a failure of the
 card.
 
@@ -330,7 +330,7 @@ can do better has not failed to decide anything.
 
 Latency is the one family judged on a point estimate rather than a paired test, and deliberately.
 A mean is not robust: a run that caught a few scheduler stalls from something else on this machine
-reported rust-db's filtered mean at 2.013 ms against a median of 0.838 ms, and the paired machinery
+reported inillucent's filtered mean at 2.013 ms against a median of 0.838 ms, and the paired machinery
 faithfully called that inconclusive — the right answer to the wrong question. The median is the
 primary measurement, the mean and the 95th percentile sit beside it as diagnostics, and every
 per-query timing is still in the run file for anyone who wants to reanalyse it.
@@ -379,7 +379,7 @@ That is correct behaviour for a confidence and wrong behaviour for an order. So 
 carries both: a `score` from whichever fusion ranks best, and a `confidence` always computed on
 absolute bounds whatever fusion ordered the list. The threshold is set on confidence, the ranking is
 decided by score, and each engine is calibrated on its own scale against answerable queries the
-report never scores — so the comparison assumes nothing about a rust-db score and a `ts_rank_cd`
+report never scores — so the comparison assumes nothing about a inillucent score and a `ts_rank_cd`
 score meaning the same thing.
 
 ### The two ranking changes, and the evidence for them

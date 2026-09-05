@@ -7,7 +7,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use rustdb_base::varint;
+use inillucent_base::varint;
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(decoded) = varint::decode(data) {

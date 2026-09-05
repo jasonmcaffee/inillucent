@@ -4,10 +4,10 @@
 # The oracle is a separate child process compiled from the official amalgamation.
 # It is the only form in which SQLite appears in this workspace, and nothing here
 # is a production dependency: the artifacts land in the gitignored .sqlite-ref/
-# directory and no rust-db crate links against them.
+# directory and no inillucent crate links against them.
 #
 # Every download is checked against the SHA3-256 sum SQLite publishes, using
-# rust-db's own implementation, so a corrupted or substituted archive cannot
+# inillucent's own implementation, so a corrupted or substituted archive cannot
 # become the thing every parity claim is measured against.
 #
 # Usage: tools/sqlite-reference.sh [--force]
@@ -31,7 +31,7 @@ fetch() {
     echo "downloading $name"
     curl -fsSL "$url" -o "$target"
   fi
-  ( cd "$root" && cargo run --quiet -p rustdb-compat --bin rustdb-manifest -- verify-artifact "$name" "$target" )
+  ( cd "$root" && cargo run --quiet -p inillucent-compat --bin inillucent-manifest -- verify-artifact "$name" "$target" )
 }
 
 fetch "sqlite-amalgamation-$release.zip" "https://sqlite.org/2026/sqlite-amalgamation-$release.zip"
@@ -100,4 +100,4 @@ cc -O2 -o "$ref_dir/sqlite-bench" \
 
 echo "oracle: $ref_dir/sqlite-oracle"
 echo "bench: $ref_dir/sqlite-bench"
-echo "set RUSTDB_SQLITE_ORACLE=$ref_dir/sqlite-oracle to run the differential tests"
+echo "set INILLUCENT_SQLITE_ORACLE=$ref_dir/sqlite-oracle to run the differential tests"

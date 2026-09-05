@@ -1,6 +1,6 @@
-# rust-db performance dashboard
+# inillucent performance dashboard
 
-Platform `windows-x86_64`. Every number is the paired speed ratio, SQLite over rust-db, so above one is faster than the reference. Columns are runs in the order they were taken.
+Platform `windows-x86_64`. Every number is the paired speed ratio, SQLite over inillucent, so above one is faster than the reference. Columns are runs in the order they were taken.
 
 ## Scale `small`
 

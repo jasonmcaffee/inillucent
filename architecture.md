@@ -1,12 +1,12 @@
-# How rust-db works
+# How inillucent works
 
-This explains rust-db from the beginning, assuming no background in databases or in machine learning. Read it top to bottom; each section only uses ideas the earlier ones introduced.
+This explains inillucent from the beginning, assuming no background in databases or in machine learning. Read it top to bottom; each section only uses ideas the earlier ones introduced.
 
 ## 1. The problem it solves
 
 An organisation writes things down in six places: wiki pages, chat messages, issue threads, source files, design files and boards. Someone asks "how does the release process work?" and the answer is in there somewhere, in a page nobody remembers the title of.
 
-Ordinary search matches words. If the page says "shipping a new version" and you searched for "release process", word matching finds nothing, because the two share no words. rust-db is built to find that page anyway, and to also find pages that do share the exact words, because both kinds of matching are useful and they fail in different situations.
+Ordinary search matches words. If the page says "shipping a new version" and you searched for "release process", word matching finds nothing, because the two share no words. inillucent is built to find that page anyway, and to also find pages that do share the exact words, because both kinds of matching are useful and they fail in different situations.
 
 ## 2. Words to know
 
@@ -19,7 +19,7 @@ Every term in this table appears later in the document. Nothing else is assumed.
 | **Chunk** | A document cut into a searchable piece, roughly a paragraph or a section. Long pages become many chunks so a search can point at the relevant part rather than the whole page. Chunks are what searches actually return. |
 | **Embedding** (also **vector**) | A list of 768 numbers that stands for the meaning of a chunk. Produced by a trained model. The useful property: two chunks about similar topics get similar lists of numbers, even when they share no words. |
 | **Dimension** | One position in that list of 768 numbers. "768 dimensional" just means the list is 768 long. |
-| **Embedding model** | The trained program that turns text into an embedding. rust-db uses `nomic-embed-text-v1.5`. rust-db does not train it, and does not modify it. |
+| **Embedding model** | The trained program that turns text into an embedding. inillucent uses `nomic-embed-text-v1.5`. inillucent does not train it, and does not modify it. |
 | **Cosine similarity** | A way of measuring how alike two embeddings are, giving 1.0 for identical direction and 0.0 for unrelated. It compares direction only and ignores overall size, which is what you want when comparing meanings. |
 | **Cosine distance** | `1 minus cosine similarity`. Small means alike. Used because searching means finding the *smallest* distance. |
 | **Semantic search** | Finding chunks whose embedding is near the query's embedding. This is the kind that matches meaning rather than words. |
@@ -28,7 +28,7 @@ Every term in this table appears later in the document. Nothing else is assumed.
 | **Exhaustive search** | Compare the query against every single chunk. Always gives the exactly correct answer. Slow when there are many chunks. |
 | **Approximate nearest neighbour search** | Compare the query against a clever subset instead of everything. Much faster, occasionally misses a correct answer. |
 | **Recall** | The fraction of the genuinely correct answers that a search actually returned. If exhaustive search says the ten best chunks are A through J, and an approximate search returns eight of them, its recall is 0.8. This is how approximation quality is measured. |
-| **HNSW** | Hierarchical Navigable Small World, the specific method rust-db uses for approximate nearest neighbour search. Section 5 explains it. |
+| **HNSW** | Hierarchical Navigable Small World, the specific method inillucent uses for approximate nearest neighbour search. Section 5 explains it. |
 | **Inverted index** | A lookup table from each word to the list of chunks containing it. The thing that makes lexical search fast. |
 | **BM25** | A formula for scoring how well a chunk matches a set of query words. Section 6 explains it. |
 | **Stemming** | Reducing words to a common root so that `deployment`, `deploying` and `deployed` all become `deploy` and therefore match each other. |
@@ -38,9 +38,9 @@ Every term in this table appears later in the document. Nothing else is assumed.
 | **Selectivity** | How much a filter lets through. "Only chat messages" allows 17,641 of 186,781 chunks, so it is fairly selective. |
 | **Fusion** | Combining the semantic result list and the lexical result list into one ranked list. |
 | **Quantisation** | Storing each number less precisely to use less memory. Section 8 explains it. |
-| **pgvector** | An add on for the PostgreSQL database that gives it the ability to store embeddings and search them. PostgreSQL with pgvector is the alternative rust-db is measured against. |
+| **pgvector** | An add on for the PostgreSQL database that gives it the ability to store embeddings and search them. PostgreSQL with pgvector is the alternative inillucent is measured against. |
 | **PostgreSQL** | A general purpose database. Combined with pgvector it is the usual way to hold chunks and their embeddings, and it is the baseline here. |
-| **Embedding server** | A separate program that runs the embedding model and answers requests over a network connection. `llama.cpp` serving the model over HTTP is the usual arrangement, and it is what the baseline here uses. rust-db runs the model inside its own process instead. |
+| **Embedding server** | A separate program that runs the embedding model and answers requests over a network connection. `llama.cpp` serving the model over HTTP is the usual arrangement, and it is what the baseline here uses. inillucent runs the model inside its own process instead. |
 
 ## 3. What this replaces
 
@@ -52,12 +52,12 @@ flowchart LR
     App -->|"network request"| LS["embedding server<br/>runs the<br/>embedding model"]
 ```
 
-rust-db is a library, meaning code that runs inside the application rather than as its own program. There is no separate process, no network connection, and no port to configure:
+inillucent is a library, meaning code that runs inside the application rather than as its own program. There is no separate process, no network connection, and no port to configure:
 
 ```mermaid
 flowchart LR
     subgraph One["One process"]
-        App["Application"] --> RDB["rust-db<br/>chunks, embeddings,<br/>word index, ranking"]
+        App["Application"] --> RDB["inillucent<br/>chunks, embeddings,<br/>word index, ranking"]
         RDB --> ONNX["embedding model<br/>run in place"]
     end
 ```
@@ -107,7 +107,7 @@ The code is organised to match:
 
 You have 186,829 embeddings. A query arrives as an embedding. Compare it against all of them, keep the ten closest. This is exhaustive search. It is exactly correct, and on this corpus it takes a few milliseconds.
 
-rust-db keeps exhaustive search as a real feature rather than only a test, for two reasons. It defines the correct answer that every faster method is graded against. And when a filter is narrow enough, it is genuinely the faster choice, as section 7 explains.
+inillucent keeps exhaustive search as a real feature rather than only a test, for two reasons. It defines the correct answer that every faster method is graded against. And when a filter is narrow enough, it is genuinely the faster choice, as section 7 explains.
 
 ### The fast approximate way
 
@@ -145,7 +145,7 @@ On this corpus the network came out with 4 layers and 6,177,312 connections.
 
 ## 6. Lexical search, and why BM25
 
-Semantic search cannot reliably find an exact string. If you search for the issue key `PROJ-1932`, you do not want chunks about vaguely similar tickets, you want that ticket. Word matching handles this, so rust-db does both.
+Semantic search cannot reliably find an exact string. If you search for the issue key `PROJ-1932`, you do not want chunks about vaguely similar tickets, you want that ticket. Word matching handles this, so inillucent does both.
 
 ### Preparing the text
 
@@ -157,9 +157,9 @@ offer   -> chunk 7,  chunk 41,  chunk 88,   ...
 redeem  -> chunk 88, chunk 1102, ...
 ```
 
-A query is prepared identically, so `eligibility` in a query finds `eligible` in a chunk. rust-db deliberately uses the same stemming algorithm PostgreSQL uses, which was verified against the live database: both turn `eligibility` and `eligible` into `elig`, and `offers` and `offering` into `offer`. Matching PostgreSQL on this step is what makes the comparison of the *scoring* meaningful.
+A query is prepared identically, so `eligibility` in a query finds `eligible` in a chunk. inillucent deliberately uses the same stemming algorithm PostgreSQL uses, which was verified against the live database: both turn `eligibility` and `eligible` into `elig`, and `offers` and `offering` into `offer`. Matching PostgreSQL on this step is what makes the comparison of the *scoring* meaningful.
 
-**One deliberate difference.** PostgreSQL breaks `PROJ-1932` into `proj` and `-1932`, so the issue identifier stops existing as a searchable term. This corpus is full of issue keys, function names and file paths, so rust-db additionally keeps the whole identifier as its own term when a word looks like a name rather than prose. `PROJ-1932`, `author_id`, `v1.5.2` and `src/search/vector` are kept whole as well as split apart. Ordinary hyphenated English such as `well-known` is not, because that would fill the table with terms nobody searches for. Measured effect: finding a rare identifier improved from 0.156 to 0.233. Measured cost: the term table grew from 179,234 entries to 411,698.
+**One deliberate difference.** PostgreSQL breaks `PROJ-1932` into `proj` and `-1932`, so the issue identifier stops existing as a searchable term. This corpus is full of issue keys, function names and file paths, so inillucent additionally keeps the whole identifier as its own term when a word looks like a name rather than prose. `PROJ-1932`, `author_id`, `v1.5.2` and `src/search/vector` are kept whole as well as split apart. Ordinary hyphenated English such as `well-known` is not, because that would fill the table with terms nobody searches for. Measured effect: finding a rare identifier improved from 0.156 to 0.233. Measured cost: the term table grew from 179,234 entries to 411,698.
 
 ### Scoring with BM25
 
@@ -169,7 +169,7 @@ Once you know which chunks contain the query's words, you have to rank them. BM2
 2. **Repetition helps, with diminishing returns.** A chunk mentioning `offer` ten times is more relevant than one mentioning it once, but not ten times more.
 3. **Length is accounted for.** A long chunk naturally contains more words, so it should not outrank a short precise chunk merely by being long. This matters here because design file chunks average 2,222 characters while issue thread chunks average 509.
 
-PostgreSQL full text search handles the first idea only. It ranks with `ts_rank_cd`, a coverage density score that does not account for how rare a term is across the corpus or for how long the chunk is. It also joins query terms with AND by default, through `to_tsquery`, so a chunk has to contain every word of the query. That is why long natural questions often return nothing there: requiring all of "how does the release process work" matches a tiny fraction of the chunks that contain `release` or `process`. Joining the terms with OR instead returns more rows, and that variant has not been measured. rust-db scores any matching word and relies on rare words counting for more to keep the results focused.
+PostgreSQL full text search handles the first idea only. It ranks with `ts_rank_cd`, a coverage density score that does not account for how rare a term is across the corpus or for how long the chunk is. It also joins query terms with AND by default, through `to_tsquery`, so a chunk has to contain every word of the query. That is why long natural questions often return nothing there: requiring all of "how does the release process work" matches a tiny fraction of the chunks that contain `release` or `process`. Joining the terms with OR instead returns more rows, and that variant has not been measured. inillucent scores any matching word and relies on rare words counting for more to keep the results focused.
 
 ## 7. Filters, and why they are the hard part
 
@@ -183,7 +183,7 @@ pgvector's plain scan resolves this by applying the filter *after* the search. I
 
 pgvector's own answer to this is `hnsw.iterative_scan`, which keeps restarting the scan with a wider candidate list until enough rows pass the filter. It works: with it enabled, and with `hnsw.scan_mem_multiplier` raised so the scan does not exhaust its memory budget and stop early, a filtered search returns its full 50 rows. What it costs is time. Filling the result set that way took **45 milliseconds** against 1.6 for an unfiltered search, because the work is repeated rather than avoided.
 
-### What rust-db does instead
+### What inillucent does instead
 
 The filter is applied *during* the walk, with two rules:
 
@@ -197,7 +197,7 @@ flowchart LR
     subgraph Old["Filter after the search — a plain pgvector scan"]
         S1["scan collects the<br/>40 nearest overall"] --> F1["then keep only<br/>chat messages"] --> R1["usually nothing"]
     end
-    subgraph New["Filter during the walk — rust-db"]
+    subgraph New["Filter during the walk — inillucent"]
         S2["walk continues until it has<br/>collected 50 chat message chunks,<br/>stepping through others freely"] --> R2["50 chat message chunks,<br/>the right ones"]
     end
 ```
@@ -206,7 +206,7 @@ flowchart LR
 
 When a filter is narrow, walking the network stops being worthwhile: if only 11,160 chunks qualify, comparing the query against all 11,160 is both exactly correct and quick.
 
-rust-db decides with a calculation rather than a fixed cutoff. Exhaustive search costs one comparison per qualifying chunk. A filtered walk has to examine roughly `ef_search divided by selectivity` chunks before it collects enough that qualify. Setting those two costs equal gives the crossover point:
+inillucent decides with a calculation rather than a fixed cutoff. Exhaustive search costs one comparison per qualifying chunk. A filtered walk has to examine roughly `ef_search divided by selectivity` chunks before it collects enough that qualify. Setting those two costs equal gives the crossover point:
 
 ```text
 check everything when   qualifying chunks < square root of (ef_search × 32 × total chunks)
@@ -229,7 +229,7 @@ Counting the qualifying chunks therefore happens on every search, so it cannot b
 
 An embedding of 768 numbers, each taking 4 bytes, is 3,072 bytes. Multiplied across 186,829 chunks that is 574 megabytes. Two independent methods reduce it.
 
-**Quantisation** stores each number in 1 byte instead of 4, by recording the largest value in each embedding and expressing the rest as fractions of it. Some precision is lost. rust-db uses the compressed form for the walk and then rechecks the finalists against the full precision embeddings, which recovers the accuracy. Measured on this corpus: **no detectable accuracy loss at a quarter of the memory.**
+**Quantisation** stores each number in 1 byte instead of 4, by recording the largest value in each embedding and expressing the rest as fractions of it. Some precision is lost. inillucent uses the compressed form for the walk and then rechecks the finalists against the full precision embeddings, which recovers the accuracy. Measured on this corpus: **no detectable accuracy loss at a quarter of the memory.**
 
 **Truncation** keeps only the first part of each embedding. This model was trained so that a prefix of an embedding is itself a usable embedding. It is not free here:
 
@@ -241,27 +241,27 @@ An embedding of 768 numbers, each taking 4 bytes, is 3,072 bytes. Multiplied acr
 | 256 numbers, 1 byte each | 260 | 0.635 |
 | 64 numbers, 1 byte each | 68 | 0.345 |
 
-Reading down that table: compression to 1 byte costs nothing, and shortening the embedding costs a great deal. So rust-db compresses and does not shorten.
+Reading down that table: compression to 1 byte costs nothing, and shortening the embedding costs a great deal. So inillucent compresses and does not shorten.
 
 ## 9. Fusion: combining the two result lists
 
 Semantic search and lexical search each produce a ranked list of 50 chunks. They have to become one list of 10.
 
-The scores cannot be added, because they are not the same kind of number: a cosine similarity of 0.83 and a BM25 score of 14.2 have no common scale. rust-db's default therefore ignores the scores and uses only the positions, giving each chunk `1 divided by (60 plus its position)` from each list and adding those. A chunk both methods rank highly beats a chunk only one of them found. This is called Reciprocal Rank Fusion, and the baseline is given the same method and the same constant, so the comparison measures retrieval rather than a change of ranking policy.
+The scores cannot be added, because they are not the same kind of number: a cosine similarity of 0.83 and a BM25 score of 14.2 have no common scale. inillucent's default therefore ignores the scores and uses only the positions, giving each chunk `1 divided by (60 plus its position)` from each list and adding those. A chunk both methods rank highly beats a chunk only one of them found. This is called Reciprocal Rank Fusion, and the baseline is given the same method and the same constant, so the comparison measures retrieval rather than a change of ranking policy.
 
-rust-db also implements a second method that rescales each list's scores onto a common range and takes a weighted sum, keeping the score magnitudes that the first method discards. Both are graded, and on this corpus they finish close together.
+inillucent also implements a second method that rescales each list's scores onto a common range and takes a weighted sum, keeping the score magnitudes that the first method discards. Both are graded, and on this corpus they finish close together.
 
 Finally, at most two chunks from any one document are kept, so a single long page cannot fill the results.
 
 ## 10. Where the embeddings come from
 
-rust-db does not train an embedding model, and the model is not part of the engine. The engine takes embeddings and stores them. That is what lets both engines in the comparison be loaded with byte identical vectors, so a difference in scores can only come from indexing and ranking rather than from the embedding model.
+inillucent does not train an embedding model, and the model is not part of the engine. The engine takes embeddings and stores them. That is what lets both engines in the comparison be loaded with byte identical vectors, so a difference in scores can only come from indexing and ranking rather than from the embedding model.
 
-In use rust-db runs `nomic-embed-text-v1.5` itself, in the same process, so no embedding server is needed. The model expects text to be labelled by purpose, so a stored chunk is prefixed with `search_document: ` and a query with `search_query: `, which is the labelling the model was trained with.
+In use inillucent runs `nomic-embed-text-v1.5` itself, in the same process, so no embedding server is needed. The model expects text to be labelled by purpose, so a stored chunk is prefixed with `search_document: ` and a query with `search_query: `, which is the labelling the model was trained with.
 
-The model outputs one embedding per *word piece* rather than one per chunk, so rust-db averages them, ignoring padding, and then scales the result to a standard length.
+The model outputs one embedding per *word piece* rather than one per chunk, so inillucent averages them, ignoring padding, and then scales the result to a standard length.
 
-**Whether running the model in the same process is a faithful replacement for a server was measured, not assumed.** 400 chunks were embedded both ways, by `llama.cpp` over HTTP and by rust-db in its own process, giving an average cosine similarity of **0.9860** with none below 0.95. The remaining difference is expected, because `llama.cpp` was serving the model quantized to Q5_K_M while rust-db runs it at full precision.
+**Whether running the model in the same process is a faithful replacement for a server was measured, not assumed.** 400 chunks were embedded both ways, by `llama.cpp` over HTTP and by inillucent in its own process, giving an average cosine similarity of **0.9860** with none below 0.95. The remaining difference is expected, because `llama.cpp` was serving the model quantized to Q5_K_M while inillucent runs it at full precision.
 
 That measurement was taken when the engine was first graded, against the private corpus whose stored vectors `llama.cpp` had produced. It cannot be rerun from this repository, because the corpus here is embedded in process to begin with and there is no second embedder to disagree with. What this repository checks instead is that the vectors in its cache were produced from the text in its cache, by re-embedding a sample and comparing: agreement is 1.000000 at the minimum over 200 chunks, and the check fails below 0.9995.
 
@@ -269,7 +269,7 @@ These two measurements were taken when the engine was first built, against a cor
 
 The number that decides whether the replacement is safe is not the similarity but the retrieval quality. Running 120 queries through the same index, once with each embedder's vectors:
 
-| Measure | `llama.cpp` over HTTP | rust-db running the model |
+| Measure | `llama.cpp` over HTTP | inillucent running the model |
 |---|---|---|
 | Correct answer ranked first | 0.8250 | **0.8250** |
 | Correct answer in the top ten | 0.8917 | **0.8917** |
@@ -294,7 +294,7 @@ Measured: saving takes 0.3 seconds, and reopening a saved index takes **5.3 seco
 
 ## 12. How any of this is known to work
 
-Every number in this document was measured by a test suite built alongside the engine, in a second program called `rustdb-bench`. It drives rust-db and PostgreSQL through one shared interface, so no measurement can accidentally be taken of only one of them.
+Every number in this document was measured by a test suite built alongside the engine, in a second program called `inillucent-bench`. It drives inillucent and PostgreSQL through one shared interface, so no measurement can accidentally be taken of only one of them.
 
 Correct answers come from three sources, none of which requires a person to judge results:
 
@@ -322,6 +322,6 @@ When the iterative scan is off, `hnsw.max_scan_tuples` and `hnsw.scan_mem_multip
 
 A second PostgreSQL configuration is graded alongside it, running pgvector's extension defaults with no iterative scan. It is reported to show what the extension does before it is configured, and no comparison is scored against it.
 
-**Status of the numbers in this document.** They come from the first full graded run, whose baseline had `hnsw.ef_search` at 100 on filtered searches rather than 400, `hnsw.max_scan_tuples` at 200,000, iterative scan left on for unfiltered searches, and `hnsw.scan_mem_multiplier` never set, so it ran at the pgvector default of 1. Each of those makes the baseline weaker than the settings in the table above, so the PostgreSQL figures quoted here understate a correctly configured one, most of all on filtered recall. The run against the settings in the table is in progress and this document will carry its numbers. Measurements of rust-db alone, its latency, memory, disk, quantisation ladder, `ef_search` sweep and correctness gates, do not depend on the baseline.
+**Status of the numbers in this document.** They come from the first full graded run, whose baseline had `hnsw.ef_search` at 100 on filtered searches rather than 400, `hnsw.max_scan_tuples` at 200,000, iterative scan left on for unfiltered searches, and `hnsw.scan_mem_multiplier` never set, so it ran at the pgvector default of 1. Each of those makes the baseline weaker than the settings in the table above, so the PostgreSQL figures quoted here understate a correctly configured one, most of all on filtered recall. The run against the settings in the table is in progress and this document will carry its numbers. Measurements of inillucent alone, its latency, memory, disk, quantisation ladder, `ef_search` sweep and correctness gates, do not depend on the baseline.
 
-The engine has 118 tests of its own and the measurement program has 62. Nine of the engine's tests cover the embedding model running in process, so they need the `onnx` feature; `cargo test -p rustdb-core` alone runs the other 109.
+The engine has 118 tests of its own and the measurement program has 62. Nine of the engine's tests cover the embedding model running in process, so they need the `onnx` feature; `cargo test -p inillucent-core` alone runs the other 109.

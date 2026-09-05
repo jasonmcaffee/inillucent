@@ -1,8 +1,8 @@
-# rust-db performance scorecard
+# inillucent performance scorecard
 
 Label `no-ordered-walk (no ordered-walk)`, platform `windows-x86_64`, 30 paired rounds per scale, bootstrap seed 17900001. **Arm: `ordered-walk` switched off.** This is one side of an A/B pair and not the shipped engine; compare it with the run whose arm is empty.
 
-Both engines read the same plan file. The ratio is SQLite over rust-db, so **above one means rust-db is faster**. A workload whose two engines returned different answers is reported as a correctness failure and is not timed.
+Both engines read the same plan file. The ratio is SQLite over inillucent, so **above one means inillucent is faster**. A workload whose two engines returned different answers is reported as a correctness failure and is not timed.
 
 ## Fair configuration
 
@@ -36,7 +36,7 @@ Weighted geometric mean **0.266x**, 95% interval [0.261, 0.270]. The release bou
 
 ### By workload
 
-| workload | family | rust-db median | SQLite median | ratio | 95% interval | samples |
+| workload | family | inillucent median | SQLite median | ratio | 95% interval | samples |
 |---|---|---:|---:|---:|---|---:|
 | `prepare.trivial` | `open.prepare` | 30.56 ms | 1.75 ms | 0.056x | [0.053, 0.058] | 30 |
 | `prepare.point` | `open.prepare` | 62.18 ms | 53.78 ms | 0.856x | [0.812, 0.905] | 30 |

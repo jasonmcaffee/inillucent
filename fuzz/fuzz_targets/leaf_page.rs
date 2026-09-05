@@ -14,8 +14,8 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use rustdb_tree::datum::Datum;
-use rustdb_tree::leaf::LeafRef;
+use inillucent_tree::datum::Datum;
+use inillucent_tree::leaf::LeafRef;
 
 fuzz_target!(|data: &[u8]| {
     let Ok(leaf) = LeafRef::parse(data) else {

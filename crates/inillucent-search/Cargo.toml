@@ -1,0 +1,12 @@
+[package]
+name = "inillucent-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SQL virtual table and index-method bridge to the existing BM25, vector, and hybrid ranking core."
+
+[dependencies]
+inillucent-base = { workspace = true }
+inillucent-value = { workspace = true }
+inillucent-ext = { workspace = true }
+inillucent-core = { workspace = true }

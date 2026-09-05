@@ -1,4 +1,4 @@
-# The SQLite parity manifest: one row per capability rust-db owes.
+# The SQLite parity manifest: one row per capability inillucent owes.
 #
 # Allowed statuses are missing, partial, pass, and intentional-deviation.
 # Only pass is releasable in the default profile. A row may not claim pass
@@ -20,7 +20,7 @@ source = "https://sqlite.org/rescode.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-compat::toml_lite::tests::the_manifest_subset_parses", "rustdb-compat::toml_lite::tests::anything_outside_the_subset_is_refused", "rustdb-compat::manifest::tests::a_capability_row_parses"]
+tests = ["inillucent-compat::toml_lite::tests::the_manifest_subset_parses", "inillucent-compat::toml_lite::tests::anything_outside_the_subset_is_refused", "inillucent-compat::manifest::tests::a_capability_row_parses"]
 
 [[capability]]
 id = "harness.manifest.duplicate-ids"
@@ -28,7 +28,7 @@ source = "https://sqlite.org/rescode.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-compat::report::tests::duplicate_ids_are_detected"]
+tests = ["inillucent-compat::report::tests::duplicate_ids_are_detected"]
 
 [[capability]]
 id = "harness.manifest.missing-tests"
@@ -36,7 +36,7 @@ source = "https://sqlite.org/rescode.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-compat::report::tests::missing_tests_are_detected", "rustdb-compat::manifest::tests::a_missing_tests_list_is_refused"]
+tests = ["inillucent-compat::report::tests::missing_tests_are_detected", "inillucent-compat::manifest::tests::a_missing_tests_list_is_refused"]
 
 [[capability]]
 id = "harness.manifest.dead-source-links"
@@ -44,7 +44,7 @@ source = "https://sqlite.org/rescode.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-compat::report::tests::dead_source_links_are_detected"]
+tests = ["inillucent-compat::report::tests::dead_source_links_are_detected"]
 
 [[capability]]
 id = "harness.manifest.unsupported-release-claims"
@@ -52,7 +52,7 @@ source = "https://sqlite.org/rescode.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-compat::report::tests::unsupported_release_claims_are_detected_and_downgraded", "rustdb-compat::report::tests::a_recorded_failure_demotes_a_claim"]
+tests = ["inillucent-compat::report::tests::unsupported_release_claims_are_detected_and_downgraded", "inillucent-compat::report::tests::a_recorded_failure_demotes_a_claim"]
 
 [[capability]]
 id = "harness.report.reproducible"
@@ -60,7 +60,7 @@ source = "https://sqlite.org/rescode.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-compat::report::tests::the_report_is_reproducible", "rustdb-compat::the_shipped_report_is_reproducible"]
+tests = ["inillucent-compat::report::tests::the_report_is_reproducible", "inillucent-compat::the_shipped_report_is_reproducible"]
 
 [[capability]]
 id = "harness.report.shipped-manifest-is-sound"
@@ -68,7 +68,7 @@ source = "https://sqlite.org/rescode.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-compat::the_shipped_manifest_is_structurally_sound"]
+tests = ["inillucent-compat::the_shipped_manifest_is_structurally_sound"]
 
 [[capability]]
 id = "harness.reference.pinned-metadata"
@@ -76,7 +76,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-compat::the_reference_metadata_is_pinned", "rustdb-compat::hash::tests::sha3_256_matches_its_published_vectors"]
+tests = ["inillucent-compat::the_reference_metadata_is_pinned", "inillucent-compat::hash::tests::sha3_256_matches_its_published_vectors"]
 
 [[capability]]
 id = "harness.reference.checksums-verify"
@@ -84,7 +84,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-compat::the_reference_artifacts_match_their_pinned_checksums"]
+tests = ["inillucent-compat::the_reference_artifacts_match_their_pinned_checksums"]
 
 [[capability]]
 id = "harness.oracle.protocol"
@@ -92,7 +92,7 @@ source = "https://sqlite.org/c3ref/funclist.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-compat::oracle::tests::an_observation_parses", "rustdb-compat::oracle::tests::an_error_observation_parses", "rustdb-compat::oracle::tests::the_comparator_names_every_difference"]
+tests = ["inillucent-compat::oracle::tests::an_observation_parses", "inillucent-compat::oracle::tests::an_error_observation_parses", "inillucent-compat::oracle::tests::the_comparator_names_every_difference"]
 
 [[capability]]
 id = "harness.oracle.value-tagging"
@@ -100,7 +100,7 @@ source = "https://sqlite.org/datatype3.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-compat::oracle::tests::every_storage_class_round_trips_through_the_protocol", "rustdb-compat::oracle::tests::doubles_are_compared_by_their_bits", "rustdb-compat::the_oracle_round_trips_every_storage_class_against_sqlite"]
+tests = ["inillucent-compat::oracle::tests::every_storage_class_round_trips_through_the_protocol", "inillucent-compat::oracle::tests::doubles_are_compared_by_their_bits", "inillucent-compat::the_oracle_round_trips_every_storage_class_against_sqlite"]
 
 [[capability]]
 id = "harness.oracle.error-tagging"
@@ -108,7 +108,7 @@ source = "https://sqlite.org/rescode.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-compat::the_oracle_reports_the_same_error_as_sqlite"]
+tests = ["inillucent-compat::the_oracle_reports_the_same_error_as_sqlite"]
 
 [[capability]]
 id = "harness.dependency.no-engine"
@@ -116,7 +116,7 @@ source = "https://sqlite.org/omitted.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-compat::layering::tests::another_engine_is_refused", "rustdb-compat::layering::tests::an_unapproved_dependency_is_refused", "rustdb-compat::the_workspace_obeys_the_dependency_contract", "rustdb-compat::the_production_dependency_tree_holds_no_engine"]
+tests = ["inillucent-compat::layering::tests::another_engine_is_refused", "inillucent-compat::layering::tests::an_unapproved_dependency_is_refused", "inillucent-compat::the_workspace_obeys_the_dependency_contract", "inillucent-compat::the_production_dependency_tree_holds_no_engine"]
 
 [[capability]]
 id = "harness.dependency.layering"
@@ -124,7 +124,7 @@ source = "https://sqlite.org/omitted.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-compat::layering::tests::an_upward_edge_is_refused", "rustdb-compat::layering::tests::a_production_crate_may_not_use_the_harness", "rustdb-compat::layering::tests::a_cycle_is_reported", "rustdb-compat::the_workspace_obeys_the_dependency_contract"]
+tests = ["inillucent-compat::layering::tests::an_upward_edge_is_refused", "inillucent-compat::layering::tests::a_production_crate_may_not_use_the_harness", "inillucent-compat::layering::tests::a_cycle_is_reported", "inillucent-compat::the_workspace_obeys_the_dependency_contract"]
 
 [[capability]]
 id = "harness.evidence.results-model"
@@ -132,7 +132,7 @@ source = "https://sqlite.org/rescode.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-compat::results::tests::a_result_round_trips", "rustdb-compat::results::tests::coverage_is_the_intersection_across_tests", "rustdb-compat::results::tests::an_incomplete_line_is_refused", "rustdb-compat::results::tests::a_failure_is_visible"]
+tests = ["inillucent-compat::results::tests::a_result_round_trips", "inillucent-compat::results::tests::coverage_is_the_intersection_across_tests", "inillucent-compat::results::tests::an_incomplete_line_is_refused", "inillucent-compat::results::tests::a_failure_is_visible"]
 
 [[capability]]
 id = "harness.policy.unsafe-code"
@@ -140,7 +140,7 @@ source = "https://sqlite.org/omitted.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-compat::unsafe_code_is_confined_and_justified"]
+tests = ["inillucent-compat::unsafe_code_is_confined_and_justified"]
 
 [[capability]]
 id = "harness.policy.documentation"
@@ -148,7 +148,7 @@ source = "https://sqlite.org/omitted.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-compat::every_governed_crate_denies_undocumented_items", "rustdb-compat::every_module_states_its_invariant"]
+tests = ["inillucent-compat::every_governed_crate_denies_undocumented_items", "inillucent-compat::every_module_states_its_invariant"]
 
 [[capability]]
 id = "harness.policy.formatting"
@@ -156,7 +156,7 @@ source = "https://sqlite.org/omitted.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-compat::the_governed_crates_are_formatted"]
+tests = ["inillucent-compat::the_governed_crates_are_formatted"]
 
 [[capability]]
 id = "harness.policy.provenance"
@@ -164,7 +164,7 @@ source = "https://sqlite.org/omitted.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-compat::no_reference_is_a_production_dependency", "rustdb-compat::the_dependency_policy_covers_what_the_contract_allows"]
+tests = ["inillucent-compat::no_reference_is_a_production_dependency", "inillucent-compat::the_dependency_policy_covers_what_the_contract_allows"]
 
 [[capability]]
 id = "harness.baseline.retrieval-unchanged"
@@ -172,7 +172,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-compat::the_retrieval_baseline_is_unchanged"]
+tests = ["inillucent-compat::the_retrieval_baseline_is_unchanged"]
 
 [[capability]]
 id = "errors.table.primary-codes"
@@ -180,7 +180,7 @@ source = "https://sqlite.org/rescode.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-base::error::tests::primary_codes_round_trip_through_their_numeric_value", "rustdb-base::error::tests::numeric_values_are_unique"]
+tests = ["inillucent-base::error::tests::primary_codes_round_trip_through_their_numeric_value", "inillucent-base::error::tests::numeric_values_are_unique"]
 
 [[capability]]
 id = "errors.table.extended-codes"
@@ -188,7 +188,7 @@ source = "https://sqlite.org/rescode.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-base::error::tests::extended_codes_agree_with_their_primary_code", "rustdb-base::error::tests::unknown_extended_codes_fall_back_to_their_low_byte"]
+tests = ["inillucent-base::error::tests::extended_codes_agree_with_their_primary_code", "inillucent-base::error::tests::unknown_extended_codes_fall_back_to_their_low_byte"]
 
 [[capability]]
 id = "errors.table.recovery-contract"
@@ -196,7 +196,7 @@ source = "https://sqlite.org/rescode.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-base::error::tests::recovery_contract_matches_the_manifest", "rustdb-base::error::tests::display_hides_internal_detail"]
+tests = ["inillucent-base::error::tests::recovery_contract_matches_the_manifest", "inillucent-base::error::tests::display_hides_internal_detail"]
 
 [[capability]]
 id = "limits.defaults"
@@ -204,7 +204,7 @@ source = "https://sqlite.org/limits.html"
 profile = "default"
 phase = "phase 0: contract, provenance, and harness foundation"
 status = "pass"
-tests = ["rustdb-base::limits::tests::defaults_match_the_reference_build", "rustdb-base::limits::tests::setting_returns_the_previous_value_and_clamps", "rustdb-base::limits::tests::a_negative_request_only_queries", "rustdb-base::limits::tests::every_row_has_a_coherent_range"]
+tests = ["inillucent-base::limits::tests::defaults_match_the_reference_build", "inillucent-base::limits::tests::setting_returns_the_previous_value_and_clamps", "inillucent-base::limits::tests::a_negative_request_only_queries", "inillucent-base::limits::tests::every_row_has_a_coherent_range"]
 
 [[capability]]
 id = "binary.bigendian.widths"
@@ -212,7 +212,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-base::bytes::tests::widths_round_trip_at_their_boundaries", "rustdb-base::bytes::tests::narrow_widths_reject_values_that_do_not_fit", "rustdb-base::bytes::tests::doubles_keep_their_exact_bits"]
+tests = ["inillucent-base::bytes::tests::widths_round_trip_at_their_boundaries", "inillucent-base::bytes::tests::narrow_widths_reject_values_that_do_not_fit", "inillucent-base::bytes::tests::doubles_keep_their_exact_bits"]
 
 [[capability]]
 id = "binary.bigendian.bounds"
@@ -220,7 +220,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-base::bytes::tests::reads_past_the_end_are_errors", "rustdb-base::bytes::tests::random_offsets_never_panic", "rustdb-base::bytes::tests::reader_tracks_its_offset_and_stops_at_the_end"]
+tests = ["inillucent-base::bytes::tests::reads_past_the_end_are_errors", "inillucent-base::bytes::tests::random_offsets_never_panic", "inillucent-base::bytes::tests::reader_tracks_its_offset_and_stops_at_the_end"]
 
 [[capability]]
 id = "binary.varint.codec"
@@ -228,7 +228,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-base::varint::tests::width_boundaries_use_the_documented_number_of_bytes", "rustdb-base::varint::tests::the_nine_byte_form_carries_a_full_last_byte", "rustdb-base::varint::tests::signed_values_round_trip", "rustdb-base::varint::tests::random_values_round_trip_canonically"]
+tests = ["inillucent-base::varint::tests::width_boundaries_use_the_documented_number_of_bytes", "inillucent-base::varint::tests::the_nine_byte_form_carries_a_full_last_byte", "inillucent-base::varint::tests::signed_values_round_trip", "inillucent-base::varint::tests::random_values_round_trip_canonically"]
 
 [[capability]]
 id = "binary.varint.robustness"
@@ -236,7 +236,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-base::varint::tests::truncated_input_is_an_error_at_every_width", "rustdb-base::varint::tests::arbitrary_bytes_never_panic", "rustdb-base::varint::tests::encoding_refuses_a_buffer_that_is_too_small"]
+tests = ["inillucent-base::varint::tests::truncated_input_is_an_error_at_every_width", "inillucent-base::varint::tests::arbitrary_bytes_never_panic", "inillucent-base::varint::tests::encoding_refuses_a_buffer_that_is_too_small"]
 
 [[capability]]
 id = "binary.checksum.wal"
@@ -244,7 +244,7 @@ source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-base::checksum::tests::wal_checksum_depends_on_the_declared_byte_order", "rustdb-base::checksum::tests::wal_checksum_chains_across_calls", "rustdb-base::checksum::tests::wal_checksum_refuses_a_partial_block"]
+tests = ["inillucent-base::checksum::tests::wal_checksum_depends_on_the_declared_byte_order", "inillucent-base::checksum::tests::wal_checksum_chains_across_calls", "inillucent-base::checksum::tests::wal_checksum_refuses_a_partial_block"]
 
 [[capability]]
 id = "binary.checksum.crc32"
@@ -252,7 +252,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-base::checksum::tests::crc32_matches_the_published_check_value", "rustdb-base::checksum::tests::crc32_detects_single_bit_flips", "rustdb-base::checksum::tests::crc32_is_the_same_whether_it_arrives_whole_or_in_pieces"]
+tests = ["inillucent-base::checksum::tests::crc32_matches_the_published_check_value", "inillucent-base::checksum::tests::crc32_detects_single_bit_flips", "inillucent-base::checksum::tests::crc32_is_the_same_whether_it_arrives_whole_or_in_pieces"]
 
 [[capability]]
 id = "binary.page.size-rules"
@@ -260,7 +260,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-base::page::tests::page_sizes_follow_the_file_format_rules", "rustdb-base::page::tests::the_largest_page_size_round_trips_through_its_encoded_form", "rustdb-base::page::tests::usable_size_respects_the_reserved_region_and_its_floor"]
+tests = ["inillucent-base::page::tests::page_sizes_follow_the_file_format_rules", "inillucent-base::page::tests::the_largest_page_size_round_trips_through_its_encoded_form", "inillucent-base::page::tests::usable_size_respects_the_reserved_region_and_its_floor"]
 
 [[capability]]
 id = "binary.page.offsets"
@@ -268,7 +268,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-base::page::tests::page_offsets_are_one_based", "rustdb-base::page::tests::the_largest_addressable_page_does_not_overflow", "rustdb-base::page::tests::page_count_ignores_a_trailing_partial_page", "rustdb-base::ids::tests::page_zero_is_rejected", "rustdb-base::ids::tests::page_numbering_is_one_based"]
+tests = ["inillucent-base::page::tests::page_offsets_are_one_based", "inillucent-base::page::tests::the_largest_addressable_page_does_not_overflow", "inillucent-base::page::tests::page_count_ignores_a_trailing_partial_page", "inillucent-base::ids::tests::page_zero_is_rejected", "inillucent-base::ids::tests::page_numbering_is_one_based"]
 
 [[capability]]
 id = "binary.buffers.fallible"
@@ -276,7 +276,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-base::buffer::tests::an_impossible_allocation_returns_nomem", "rustdb-base::buffer::tests::allocation_counters_track_what_was_allocated", "rustdb-base::buffer::tests::field_accessors_are_bounds_checked", "rustdb-base::buffer::tests::wrapping_the_wrong_length_is_refused"]
+tests = ["inillucent-base::buffer::tests::an_impossible_allocation_returns_nomem", "inillucent-base::buffer::tests::allocation_counters_track_what_was_allocated", "inillucent-base::buffer::tests::field_accessors_are_bounds_checked", "inillucent-base::buffer::tests::wrapping_the_wrong_length_is_refused"]
 
 [[capability]]
 id = "binary.determinism.rng"
@@ -284,7 +284,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-base::rng::tests::the_same_seed_replays_the_same_stream", "rustdb-base::rng::tests::adjacent_seeds_produce_unrelated_streams", "rustdb-base::rng::tests::output_covers_its_range", "rustdb-base::rng::tests::bounded_selection_stays_in_range"]
+tests = ["inillucent-base::rng::tests::the_same_seed_replays_the_same_stream", "inillucent-base::rng::tests::adjacent_seeds_produce_unrelated_streams", "inillucent-base::rng::tests::output_covers_its_range", "inillucent-base::rng::tests::bounded_selection_stays_in_range"]
 
 [[capability]]
 id = "vfs.contract.open"
@@ -396,7 +396,7 @@ source = "https://sqlite.org/vfs.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["vfs.device.claims-are-true", "rustdb-vfs::contract::tests::the_conservative_device_grants_nothing"]
+tests = ["vfs.device.claims-are-true", "inillucent-vfs::contract::tests::the_conservative_device_grants_nothing"]
 
 [[capability]]
 id = "vfs.lock.shared"
@@ -404,7 +404,7 @@ source = "https://sqlite.org/lockingv3.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["vfs.lock.shared-is-shared", "rustdb-vfs::locks::tests::readers_share"]
+tests = ["vfs.lock.shared-is-shared", "inillucent-vfs::locks::tests::readers_share"]
 
 [[capability]]
 id = "vfs.lock.reserved"
@@ -412,7 +412,7 @@ source = "https://sqlite.org/lockingv3.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["vfs.lock.reserved-is-exclusive", "vfs.lock.reserved-is-visible", "rustdb-vfs::locks::tests::reserved_excludes_other_writers_but_not_readers"]
+tests = ["vfs.lock.reserved-is-exclusive", "vfs.lock.reserved-is-visible", "inillucent-vfs::locks::tests::reserved_excludes_other_writers_but_not_readers"]
 
 [[capability]]
 id = "vfs.lock.pending"
@@ -420,7 +420,7 @@ source = "https://sqlite.org/lockingv3.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["vfs.lock.pending-blocks-new-readers", "rustdb-vfs::locks::tests::pending_stops_new_readers"]
+tests = ["vfs.lock.pending-blocks-new-readers", "inillucent-vfs::locks::tests::pending_stops_new_readers"]
 
 [[capability]]
 id = "vfs.lock.exclusive"
@@ -428,7 +428,7 @@ source = "https://sqlite.org/lockingv3.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["vfs.lock.exclusive-waits-for-readers", "vfs.lock.downgrade-restores-reader", "rustdb-vfs::locks::tests::exclusive_waits_for_readers_to_leave", "rustdb-vfs::locks::tests::dropping_from_exclusive_to_shared_restores_the_read_lock"]
+tests = ["vfs.lock.exclusive-waits-for-readers", "vfs.lock.downgrade-restores-reader", "inillucent-vfs::locks::tests::exclusive_waits_for_readers_to_leave", "inillucent-vfs::locks::tests::dropping_from_exclusive_to_shared_restores_the_read_lock"]
 
 [[capability]]
 id = "vfs.lock.protocol-errors"
@@ -436,7 +436,7 @@ source = "https://sqlite.org/lockingv3.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-vfs::locks::tests::illegal_transitions_are_protocol_errors", "rustdb-vfs::contract::tests::lock_levels_are_ordered_by_strength"]
+tests = ["inillucent-vfs::locks::tests::illegal_transitions_are_protocol_errors", "inillucent-vfs::contract::tests::lock_levels_are_ordered_by_strength"]
 
 [[capability]]
 id = "vfs.lock.release-on-close"
@@ -444,7 +444,7 @@ source = "https://sqlite.org/lockingv3.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["vfs.lock.close-releases", "rustdb-vfs::locks::tests::releasing_everything_leaves_the_table_unlocked", "rustdb-vfs::a_dead_process_releases_its_locks"]
+tests = ["vfs.lock.close-releases", "inillucent-vfs::locks::tests::releasing_everything_leaves_the_table_unlocked", "inillucent-vfs::a_dead_process_releases_its_locks"]
 
 [[capability]]
 id = "vfs.lock.cross-process"
@@ -452,7 +452,7 @@ source = "https://sqlite.org/lockingv3.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-vfs::locks_conflict_across_processes"]
+tests = ["inillucent-vfs::locks_conflict_across_processes"]
 
 [[capability]]
 id = "vfs.paths.companion-files"
@@ -460,7 +460,7 @@ source = "https://sqlite.org/tempfiles.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-vfs::path::tests::companion_files_append_to_the_whole_name", "rustdb-vfs::path::tests::a_name_without_an_extension_still_gets_companions", "rustdb-vfs::path::tests::the_special_names_are_recognised"]
+tests = ["inillucent-vfs::path::tests::companion_files_append_to_the_whole_name", "inillucent-vfs::path::tests::a_name_without_an_extension_still_gets_companions", "inillucent-vfs::path::tests::the_special_names_are_recognised"]
 
 [[capability]]
 id = "vfs.shm.mapping"
@@ -476,7 +476,7 @@ source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["vfs.shm.locks-exclude", "rustdb-vfs::shm_locks::tests::readers_share_and_writers_exclude", "rustdb-vfs::shm_locks::tests::a_blocked_range_changes_nothing", "rustdb-vfs::shm_locks::tests::out_of_range_requests_are_refused"]
+tests = ["vfs.shm.locks-exclude", "inillucent-vfs::shm_locks::tests::readers_share_and_writers_exclude", "inillucent-vfs::shm_locks::tests::a_blocked_range_changes_nothing", "inillucent-vfs::shm_locks::tests::out_of_range_requests_are_refused"]
 
 [[capability]]
 id = "vfs.conformance.memory"
@@ -484,7 +484,7 @@ source = "https://sqlite.org/vfs.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-vfs::memory_vfs_passes_the_conformance_suite"]
+tests = ["inillucent-vfs::memory_vfs_passes_the_conformance_suite"]
 
 [[capability]]
 id = "vfs.conformance.os"
@@ -492,7 +492,7 @@ source = "https://sqlite.org/vfs.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-vfs::os_vfs_passes_the_conformance_suite"]
+tests = ["inillucent-vfs::os_vfs_passes_the_conformance_suite"]
 
 [[capability]]
 id = "sim.determinism.trace"
@@ -500,7 +500,7 @@ source = "https://sqlite.org/atomiccommit.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-sim::the_same_seed_replays_an_identical_trace", "rustdb-sim::the_seed_drives_the_simulated_randomness", "rustdb-sim::trace::tests::the_digest_follows_the_events", "rustdb-sim::trace::tests::events_serialise_in_a_fixed_shape"]
+tests = ["inillucent-sim::the_same_seed_replays_an_identical_trace", "inillucent-sim::the_seed_drives_the_simulated_randomness", "inillucent-sim::trace::tests::the_digest_follows_the_events", "inillucent-sim::trace::tests::events_serialise_in_a_fixed_shape"]
 
 [[capability]]
 id = "sim.determinism.schedule"
@@ -508,7 +508,7 @@ source = "https://sqlite.org/isolation.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-sim::a_recorded_schedule_replays_an_identical_event_trace", "rustdb-sim::schedule::tests::the_same_seed_replays_the_same_interleaving", "rustdb-sim::schedule::tests::exploration_enumerates_every_schedule", "rustdb-sim::schedule::tests::a_recorded_schedule_replays_its_run"]
+tests = ["inillucent-sim::a_recorded_schedule_replays_an_identical_event_trace", "inillucent-sim::schedule::tests::the_same_seed_replays_the_same_interleaving", "inillucent-sim::schedule::tests::exploration_enumerates_every_schedule", "inillucent-sim::schedule::tests::a_recorded_schedule_replays_its_run"]
 
 [[capability]]
 id = "sim.crash.synced-writes-survive"
@@ -516,7 +516,7 @@ source = "https://sqlite.org/atomiccommit.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-sim::a_synced_write_survives_every_simulated_power_loss", "rustdb-sim::media::tests::a_synced_write_always_survives"]
+tests = ["inillucent-sim::a_synced_write_survives_every_simulated_power_loss", "inillucent-sim::media::tests::a_synced_write_always_survives"]
 
 [[capability]]
 id = "sim.crash.unsynced-writes-may-be-lost"
@@ -524,7 +524,7 @@ source = "https://sqlite.org/atomiccommit.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-sim::an_unsynced_write_is_sometimes_lost_across_seeds", "rustdb-sim::media::tests::an_unsynced_write_is_sometimes_lost"]
+tests = ["inillucent-sim::an_unsynced_write_is_sometimes_lost_across_seeds", "inillucent-sim::media::tests::an_unsynced_write_is_sometimes_lost"]
 
 [[capability]]
 id = "sim.crash.torn-sectors"
@@ -532,7 +532,7 @@ source = "https://sqlite.org/atomiccommit.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-sim::media::tests::a_torn_sector_mixes_only_old_and_new", "rustdb-sim::media::tests::powersafe_overwrite_changes_what_a_crash_can_produce", "rustdb-sim::the_media_model_follows_its_declaration", "rustdb-sim::media::tests::truncation_drops_cached_sectors_past_the_end"]
+tests = ["inillucent-sim::media::tests::a_torn_sector_mixes_only_old_and_new", "inillucent-sim::media::tests::powersafe_overwrite_changes_what_a_crash_can_produce", "inillucent-sim::the_media_model_follows_its_declaration", "inillucent-sim::media::tests::truncation_drops_cached_sectors_past_the_end"]
 
 [[capability]]
 id = "sim.crash.artifacts"
@@ -540,7 +540,7 @@ source = "https://sqlite.org/atomiccommit.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-sim::crash_artifacts_are_written_to_disk"]
+tests = ["inillucent-sim::crash_artifacts_are_written_to_disk"]
 
 [[capability]]
 id = "sim.failpoints.campaign"
@@ -548,7 +548,7 @@ source = "https://sqlite.org/rescode.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-sim::the_failpoint_campaign_terminates_with_every_failure_reported", "rustdb-sim::failpoint::tests::the_nth_call_campaign_fires_once_at_the_right_call", "rustdb-sim::failpoint::tests::a_per_site_policy_counts_its_own_site", "rustdb-sim::failpoint::tests::injected_failures_carry_the_sites_code"]
+tests = ["inillucent-sim::the_failpoint_campaign_terminates_with_every_failure_reported", "inillucent-sim::failpoint::tests::the_nth_call_campaign_fires_once_at_the_right_call", "inillucent-sim::failpoint::tests::a_per_site_policy_counts_its_own_site", "inillucent-sim::failpoint::tests::injected_failures_carry_the_sites_code"]
 
 [[capability]]
 id = "sim.failpoints.error-codes"
@@ -556,7 +556,7 @@ source = "https://sqlite.org/rescode.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-sim::injected_failures_arrive_as_the_right_code", "rustdb-sim::an_injected_short_read_matches_a_truncated_one"]
+tests = ["inillucent-sim::injected_failures_arrive_as_the_right_code", "inillucent-sim::an_injected_short_read_matches_a_truncated_one"]
 
 [[capability]]
 id = "sim.failpoints.short-write"
@@ -564,7 +564,7 @@ source = "https://sqlite.org/rescode.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-sim::a_short_write_reports_success_and_stores_half"]
+tests = ["inillucent-sim::a_short_write_reports_success_and_stores_half"]
 
 [[capability]]
 id = "sim.vfs.conformance"
@@ -572,7 +572,7 @@ source = "https://sqlite.org/vfs.html"
 profile = "default"
 phase = "phase 1: VFS, binary primitives, and simulator"
 status = "pass"
-tests = ["rustdb-sim::the_simulator_passes_the_vfs_conformance_suite"]
+tests = ["inillucent-sim::the_simulator_passes_the_vfs_conformance_suite"]
 
 [[capability]]
 id = "values.storage-classes"
@@ -580,7 +580,7 @@ source = "https://sqlite.org/datatype3.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
 status = "pass"
-tests = ["rustdb-value::value::tests::storage_classes_rank_the_way_comparisons_need", "rustdb-value::value::tests::typeof_names_match_sqlite", "rustdb-value::value::tests::accessors_never_convert_between_classes", "rustdb-value::value::tests::identity_compares_the_bits_of_a_real", "rustdb-value::value::tests::empty_payloads_are_values_rather_than_nulls", "rustdb-compat::every_value_survives_a_round_trip_through_a_file"]
+tests = ["inillucent-value::value::tests::storage_classes_rank_the_way_comparisons_need", "inillucent-value::value::tests::typeof_names_match_sqlite", "inillucent-value::value::tests::accessors_never_convert_between_classes", "inillucent-value::value::tests::identity_compares_the_bits_of_a_real", "inillucent-value::value::tests::empty_payloads_are_values_rather_than_nulls", "inillucent-compat::every_value_survives_a_round_trip_through_a_file"]
 
 [[capability]]
 id = "values.affinity"
@@ -588,7 +588,7 @@ source = "https://sqlite.org/datatype3.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
 status = "pass"
-tests = ["rustdb-value::affinity::tests::the_documented_declared_types_classify_as_documented", "rustdb-value::affinity::tests::the_surprising_substring_cases_follow_the_rules", "rustdb-value::affinity::tests::numeric_affinity_converts_only_well_formed_numbers", "rustdb-value::affinity::tests::a_real_narrows_to_an_integer_only_when_it_is_one", "rustdb-value::affinity::tests::text_affinity_renders_numbers_and_ignores_blobs", "rustdb-value::affinity::tests::blob_affinity_converts_nothing", "rustdb-value::affinity::tests::a_large_integer_keeps_every_bit", "rustdb-value::compare::tests::the_comparison_affinity_table_matches_the_documentation", "rustdb-value::compare::tests::comparison_affinity_converts_the_operand_that_has_none", "rustdb-compat::affinity_on_store_matches_sqlite"]
+tests = ["inillucent-value::affinity::tests::the_documented_declared_types_classify_as_documented", "inillucent-value::affinity::tests::the_surprising_substring_cases_follow_the_rules", "inillucent-value::affinity::tests::numeric_affinity_converts_only_well_formed_numbers", "inillucent-value::affinity::tests::a_real_narrows_to_an_integer_only_when_it_is_one", "inillucent-value::affinity::tests::text_affinity_renders_numbers_and_ignores_blobs", "inillucent-value::affinity::tests::blob_affinity_converts_nothing", "inillucent-value::affinity::tests::a_large_integer_keeps_every_bit", "inillucent-value::compare::tests::the_comparison_affinity_table_matches_the_documentation", "inillucent-value::compare::tests::comparison_affinity_converts_the_operand_that_has_none", "inillucent-compat::affinity_on_store_matches_sqlite"]
 
 [[capability]]
 id = "values.comparison"
@@ -596,7 +596,7 @@ source = "https://sqlite.org/datatype3.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
 status = "pass"
-tests = ["rustdb-value::compare::tests::classes_order_null_numbers_text_blobs", "rustdb-value::compare::tests::an_integer_and_a_real_compare_exactly", "rustdb-value::compare::tests::a_double_past_the_integer_range_compares_by_its_sign", "rustdb-value::compare::tests::the_two_zeroes_compare_equal", "rustdb-value::compare::tests::null_is_unknown_to_an_operator_and_first_in_an_order", "rustdb-value::compare::tests::three_valued_logic_short_circuits_the_way_sql_says", "rustdb-value::compare::tests::ordering_over_mixed_classes_is_a_total_order", "rustdb-value::compare::tests::blobs_compare_by_bytes_then_by_length", "rustdb-compat::comparison_matches_sqlite"]
+tests = ["inillucent-value::compare::tests::classes_order_null_numbers_text_blobs", "inillucent-value::compare::tests::an_integer_and_a_real_compare_exactly", "inillucent-value::compare::tests::a_double_past_the_integer_range_compares_by_its_sign", "inillucent-value::compare::tests::the_two_zeroes_compare_equal", "inillucent-value::compare::tests::null_is_unknown_to_an_operator_and_first_in_an_order", "inillucent-value::compare::tests::three_valued_logic_short_circuits_the_way_sql_says", "inillucent-value::compare::tests::ordering_over_mixed_classes_is_a_total_order", "inillucent-value::compare::tests::blobs_compare_by_bytes_then_by_length", "inillucent-compat::comparison_matches_sqlite"]
 
 [[capability]]
 id = "values.collation.binary"
@@ -604,7 +604,7 @@ source = "https://sqlite.org/datatype3.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
 status = "pass"
-tests = ["rustdb-value::collation::tests::binary_compares_bytes_then_length", "rustdb-value::collation::tests::every_collation_is_a_total_order", "rustdb-value::collation::tests::text_compares_by_its_utf8_form_whatever_it_was_stored_as", "rustdb-value::collation::tests::utf16_text_orders_by_code_point_not_by_code_unit", "rustdb-compat::collations_match_sqlite", "rustdb-compat::each_collation_index_is_sorted_under_its_own_collation"]
+tests = ["inillucent-value::collation::tests::binary_compares_bytes_then_length", "inillucent-value::collation::tests::every_collation_is_a_total_order", "inillucent-value::collation::tests::text_compares_by_its_utf8_form_whatever_it_was_stored_as", "inillucent-value::collation::tests::utf16_text_orders_by_code_point_not_by_code_unit", "inillucent-compat::collations_match_sqlite", "inillucent-compat::each_collation_index_is_sorted_under_its_own_collation"]
 
 [[capability]]
 id = "values.collation.nocase"
@@ -612,7 +612,7 @@ source = "https://sqlite.org/datatype3.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
 status = "pass"
-tests = ["rustdb-value::collation::tests::nocase_folds_ascii_only", "rustdb-value::collation::tests::every_collation_is_a_total_order", "rustdb-compat::collations_match_sqlite", "rustdb-compat::each_collation_index_is_sorted_under_its_own_collation"]
+tests = ["inillucent-value::collation::tests::nocase_folds_ascii_only", "inillucent-value::collation::tests::every_collation_is_a_total_order", "inillucent-compat::collations_match_sqlite", "inillucent-compat::each_collation_index_is_sorted_under_its_own_collation"]
 
 [[capability]]
 id = "values.collation.rtrim"
@@ -620,7 +620,7 @@ source = "https://sqlite.org/datatype3.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
 status = "pass"
-tests = ["rustdb-value::collation::tests::rtrim_ignores_only_trailing_spaces", "rustdb-value::collation::tests::every_collation_is_a_total_order", "rustdb-compat::collations_match_sqlite", "rustdb-compat::each_collation_index_is_sorted_under_its_own_collation"]
+tests = ["inillucent-value::collation::tests::rtrim_ignores_only_trailing_spaces", "inillucent-value::collation::tests::every_collation_is_a_total_order", "inillucent-compat::collations_match_sqlite", "inillucent-compat::each_collation_index_is_sorted_under_its_own_collation"]
 
 [[capability]]
 id = "values.cast"
@@ -628,7 +628,7 @@ source = "https://sqlite.org/lang_expr.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
 status = "pass"
-tests = ["rustdb-value::cast::tests::casting_null_always_gives_null", "rustdb-value::cast::tests::a_cast_always_produces_the_requested_class", "rustdb-value::cast::tests::a_numeric_cast_reads_the_leading_number", "rustdb-value::cast::tests::a_numeric_cast_leaves_numbers_alone_and_chooses_for_text", "rustdb-value::cast::tests::casting_a_real_to_an_integer_truncates", "rustdb-value::cast::tests::a_blob_casts_to_text_in_the_database_encoding", "rustdb-value::cast::tests::text_casts_to_a_blob_in_the_database_encoding", "rustdb-value::cast::tests::a_number_casts_to_a_blob_through_its_text", "rustdb-value::cast::tests::a_blob_casts_numerically_through_its_bytes", "rustdb-compat::cast_matches_sqlite"]
+tests = ["inillucent-value::cast::tests::casting_null_always_gives_null", "inillucent-value::cast::tests::a_cast_always_produces_the_requested_class", "inillucent-value::cast::tests::a_numeric_cast_reads_the_leading_number", "inillucent-value::cast::tests::a_numeric_cast_leaves_numbers_alone_and_chooses_for_text", "inillucent-value::cast::tests::casting_a_real_to_an_integer_truncates", "inillucent-value::cast::tests::a_blob_casts_to_text_in_the_database_encoding", "inillucent-value::cast::tests::text_casts_to_a_blob_in_the_database_encoding", "inillucent-value::cast::tests::a_number_casts_to_a_blob_through_its_text", "inillucent-value::cast::tests::a_blob_casts_numerically_through_its_bytes", "inillucent-compat::cast_matches_sqlite"]
 
 [[capability]]
 id = "values.numeric-parsing"
@@ -636,7 +636,7 @@ source = "https://sqlite.org/datatype3.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
 status = "pass"
-tests = ["rustdb-value::numeric::tests::a_plain_integer_is_read_exactly", "rustdb-value::numeric::tests::the_two_pow_63_boundary_is_handled_on_both_signs", "rustdb-value::numeric::tests::trailing_bytes_and_missing_digits_are_reported", "rustdb-value::numeric::tests::leading_zeros_do_not_count_toward_the_digit_limit", "rustdb-value::numeric::tests::the_real_scanner_matches_sqlites_grammar", "rustdb-value::numeric::tests::a_signed_zero_keeps_its_sign", "rustdb-value::numeric::tests::an_enormous_exponent_becomes_infinity", "rustdb-value::numeric::tests::the_significand_is_truncated_the_way_sqlite_truncates_it", "rustdb-value::numeric::tests::the_scanner_reports_sqlites_own_return_code", "rustdb-value::numeric::tests::converting_a_real_to_an_integer_truncates_and_saturates", "rustdb-value::numeric::tests::a_real_equals_an_integer_only_inside_the_documented_bound", "rustdb-compat::cast_matches_sqlite"]
+tests = ["inillucent-value::numeric::tests::a_plain_integer_is_read_exactly", "inillucent-value::numeric::tests::the_two_pow_63_boundary_is_handled_on_both_signs", "inillucent-value::numeric::tests::trailing_bytes_and_missing_digits_are_reported", "inillucent-value::numeric::tests::leading_zeros_do_not_count_toward_the_digit_limit", "inillucent-value::numeric::tests::the_real_scanner_matches_sqlites_grammar", "inillucent-value::numeric::tests::a_signed_zero_keeps_its_sign", "inillucent-value::numeric::tests::an_enormous_exponent_becomes_infinity", "inillucent-value::numeric::tests::the_significand_is_truncated_the_way_sqlite_truncates_it", "inillucent-value::numeric::tests::the_scanner_reports_sqlites_own_return_code", "inillucent-value::numeric::tests::converting_a_real_to_an_integer_truncates_and_saturates", "inillucent-value::numeric::tests::a_real_equals_an_integer_only_inside_the_documented_bound", "inillucent-compat::cast_matches_sqlite"]
 
 [[capability]]
 id = "values.record-format"
@@ -644,7 +644,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
 status = "pass"
-tests = ["rustdb-value::record::tests::the_serial_type_table_matches_the_file_format", "rustdb-value::record::tests::the_reserved_serial_types_are_refused", "rustdb-value::record::tests::integers_take_the_narrowest_serial_type", "rustdb-value::record::tests::every_value_round_trips_through_a_record", "rustdb-value::record::tests::an_empty_record_is_legal", "rustdb-value::record::tests::a_long_record_widens_its_header_size_varint", "rustdb-value::record::tests::a_missing_trailing_field_reads_as_null", "rustdb-compat::every_record_re_encodes_to_the_bytes_sqlite_wrote", "rustdb-compat::every_value_survives_a_round_trip_through_a_file"]
+tests = ["inillucent-value::record::tests::the_serial_type_table_matches_the_file_format", "inillucent-value::record::tests::the_reserved_serial_types_are_refused", "inillucent-value::record::tests::integers_take_the_narrowest_serial_type", "inillucent-value::record::tests::every_value_round_trips_through_a_record", "inillucent-value::record::tests::an_empty_record_is_legal", "inillucent-value::record::tests::a_long_record_widens_its_header_size_varint", "inillucent-value::record::tests::a_missing_trailing_field_reads_as_null", "inillucent-compat::every_record_re_encodes_to_the_bytes_sqlite_wrote", "inillucent-compat::every_value_survives_a_round_trip_through_a_file"]
 
 [[capability]]
 id = "values.index-key-order"
@@ -652,7 +652,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
 status = "pass"
-tests = ["rustdb-value::record::tests::key_comparison_honours_collation_and_direction", "rustdb-value::record::tests::record_order_agrees_with_value_order", "rustdb-value::record::tests::a_short_probe_matches_a_prefix", "rustdb-compat::index_order_matches_sqlites_own_order_by", "rustdb-compat::scans_come_back_in_key_order"]
+tests = ["inillucent-value::record::tests::key_comparison_honours_collation_and_direction", "inillucent-value::record::tests::record_order_agrees_with_value_order", "inillucent-value::record::tests::a_short_probe_matches_a_prefix", "inillucent-compat::index_order_matches_sqlites_own_order_by", "inillucent-compat::scans_come_back_in_key_order"]
 
 [[capability]]
 id = "storage.header.codec"
@@ -660,7 +660,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
 status = "pass"
-tests = ["rustdb-storage::header::tests::every_header_field_round_trips", "rustdb-storage::header::tests::the_field_offsets_match_the_file_format", "rustdb-storage::header::tests::the_largest_page_size_is_encoded_as_one", "rustdb-storage::header::tests::the_vacuum_mode_is_read_from_both_of_its_fields", "rustdb-compat::each_fixture_has_the_page_size_and_encoding_its_name_declares"]
+tests = ["inillucent-storage::header::tests::every_header_field_round_trips", "inillucent-storage::header::tests::the_field_offsets_match_the_file_format", "inillucent-storage::header::tests::the_largest_page_size_is_encoded_as_one", "inillucent-storage::header::tests::the_vacuum_mode_is_read_from_both_of_its_fields", "inillucent-compat::each_fixture_has_the_page_size_and_encoding_its_name_declares"]
 
 [[capability]]
 id = "storage.header.validation"
@@ -668,7 +668,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
 status = "pass"
-tests = ["rustdb-storage::header::tests::a_spoiled_header_field_is_refused", "rustdb-storage::header::tests::the_page_count_follows_the_version_valid_for_rule", "rustdb-storage::header::tests::out_of_range_page_numbers_are_refused_against_the_file", "rustdb-storage::header::tests::decoding_arbitrary_bytes_never_panics", "rustdb-storage::pager::tests::a_file_with_a_bad_header_does_not_open", "rustdb-compat::every_malformed_fixture_is_refused", "rustdb-compat::sqlite_and_rustdb_both_refuse_the_malformed_corpus"]
+tests = ["inillucent-storage::header::tests::a_spoiled_header_field_is_refused", "inillucent-storage::header::tests::the_page_count_follows_the_version_valid_for_rule", "inillucent-storage::header::tests::out_of_range_page_numbers_are_refused_against_the_file", "inillucent-storage::header::tests::decoding_arbitrary_bytes_never_panics", "inillucent-storage::pager::tests::a_file_with_a_bad_header_does_not_open", "inillucent-compat::every_malformed_fixture_is_refused", "inillucent-compat::sqlite_and_inillucent_both_refuse_the_malformed_corpus"]
 
 [[capability]]
 id = "storage.pager.read-path"
@@ -676,7 +676,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
 status = "pass"
-tests = ["rustdb-storage::pager::tests::opening_reads_the_header_and_takes_no_lock", "rustdb-storage::pager::tests::a_reader_takes_a_shared_lock_and_no_more", "rustdb-storage::pager::tests::a_second_read_of_a_page_comes_from_the_cache", "rustdb-storage::pager::tests::a_page_outside_the_database_is_refused", "rustdb-storage::pager::tests::the_read_only_state_machine_allows_exactly_four_states", "rustdb-storage::pager::tests::two_readers_share_the_file", "rustdb-compat::every_valid_fixture_opens_and_scans", "rustdb-compat::two_readers_see_the_same_database", "rustdb-compat::a_page_past_the_end_is_never_readable"]
+tests = ["inillucent-storage::pager::tests::opening_reads_the_header_and_takes_no_lock", "inillucent-storage::pager::tests::a_reader_takes_a_shared_lock_and_no_more", "inillucent-storage::pager::tests::a_second_read_of_a_page_comes_from_the_cache", "inillucent-storage::pager::tests::a_page_outside_the_database_is_refused", "inillucent-storage::pager::tests::the_read_only_state_machine_allows_exactly_four_states", "inillucent-storage::pager::tests::two_readers_share_the_file", "inillucent-compat::every_valid_fixture_opens_and_scans", "inillucent-compat::two_readers_see_the_same_database", "inillucent-compat::a_page_past_the_end_is_never_readable"]
 
 [[capability]]
 id = "storage.page-cache"
@@ -684,7 +684,7 @@ source = "https://sqlite.org/pragma.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
 status = "pass"
-tests = ["rustdb-storage::cache::tests::a_resident_page_is_returned_and_a_missing_one_is_not", "rustdb-storage::cache::tests::pins_are_counted_and_released_on_drop", "rustdb-storage::cache::tests::the_budget_evicts_unpinned_pages", "rustdb-storage::cache::tests::a_pinned_page_survives_cache_pressure", "rustdb-storage::cache::tests::releasing_unpinned_frames_leaves_only_the_pinned_ones", "rustdb-storage::cache::tests::inserting_a_page_twice_keeps_one_frame", "rustdb-storage::cache::tests::every_frame_gets_its_own_version", "rustdb-storage::cache::tests::keys_spread_across_shards", "rustdb-storage::cache::tests::a_fully_pinned_cache_reports_that_it_cannot_evict", "rustdb-compat::a_tiny_cache_returns_the_same_rows_as_a_large_one", "rustdb-compat::abandoning_a_cursor_releases_its_pins"]
+tests = ["inillucent-storage::cache::tests::a_resident_page_is_returned_and_a_missing_one_is_not", "inillucent-storage::cache::tests::pins_are_counted_and_released_on_drop", "inillucent-storage::cache::tests::the_budget_evicts_unpinned_pages", "inillucent-storage::cache::tests::a_pinned_page_survives_cache_pressure", "inillucent-storage::cache::tests::releasing_unpinned_frames_leaves_only_the_pinned_ones", "inillucent-storage::cache::tests::inserting_a_page_twice_keeps_one_frame", "inillucent-storage::cache::tests::every_frame_gets_its_own_version", "inillucent-storage::cache::tests::keys_spread_across_shards", "inillucent-storage::cache::tests::a_fully_pinned_cache_reports_that_it_cannot_evict", "inillucent-compat::a_tiny_cache_returns_the_same_rows_as_a_large_one", "inillucent-compat::abandoning_a_cursor_releases_its_pins"]
 
 [[capability]]
 id = "storage.btree.table-leaf"
@@ -692,7 +692,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
 status = "pass"
-tests = ["rustdb-storage::btree::tests::a_leaf_table_page_decodes_its_cells", "rustdb-storage::btree::tests::a_spoiled_page_is_refused", "rustdb-storage::btree::tests::page_one_starts_after_the_database_header", "rustdb-storage::btree::tests::a_bad_freeblock_chain_is_refused", "rustdb-compat::every_valid_fixture_opens_and_scans", "rustdb-compat::sqlite_and_rustdb_agree_on_every_row_of_every_fixture"]
+tests = ["inillucent-storage::btree::tests::a_leaf_table_page_decodes_its_cells", "inillucent-storage::btree::tests::a_spoiled_page_is_refused", "inillucent-storage::btree::tests::page_one_starts_after_the_database_header", "inillucent-storage::btree::tests::a_bad_freeblock_chain_is_refused", "inillucent-compat::every_valid_fixture_opens_and_scans", "inillucent-compat::sqlite_and_inillucent_agree_on_every_row_of_every_fixture"]
 
 [[capability]]
 id = "storage.btree.table-interior"
@@ -700,7 +700,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
 status = "pass"
-tests = ["rustdb-storage::btree::tests::an_interior_table_cell_has_no_payload", "rustdb-storage::btree::tests::an_interior_page_with_a_zero_child_is_refused", "rustdb-compat::a_point_seek_agrees_with_a_scan", "rustdb-compat::sqlite_and_rustdb_agree_on_every_row_of_every_fixture"]
+tests = ["inillucent-storage::btree::tests::an_interior_table_cell_has_no_payload", "inillucent-storage::btree::tests::an_interior_page_with_a_zero_child_is_refused", "inillucent-compat::a_point_seek_agrees_with_a_scan", "inillucent-compat::sqlite_and_inillucent_agree_on_every_row_of_every_fixture"]
 
 [[capability]]
 id = "storage.btree.index-leaf"
@@ -708,7 +708,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
 status = "pass"
-tests = ["rustdb-storage::btree::tests::the_payload_thresholds_match_the_file_format", "rustdb-compat::an_index_seek_finds_its_keys_and_bounds_a_range", "rustdb-compat::index_order_matches_sqlites_own_order_by", "rustdb-compat::a_without_rowid_table_scans_as_an_index_tree"]
+tests = ["inillucent-storage::btree::tests::the_payload_thresholds_match_the_file_format", "inillucent-compat::an_index_seek_finds_its_keys_and_bounds_a_range", "inillucent-compat::index_order_matches_sqlites_own_order_by", "inillucent-compat::a_without_rowid_table_scans_as_an_index_tree"]
 
 [[capability]]
 id = "storage.btree.index-interior"
@@ -716,7 +716,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
 status = "pass"
-tests = ["rustdb-storage::btree::tests::the_local_payload_stays_between_the_minimum_and_the_maximum", "rustdb-compat::a_backward_scan_is_a_forward_scan_reversed", "rustdb-compat::scans_come_back_in_key_order"]
+tests = ["inillucent-storage::btree::tests::the_local_payload_stays_between_the_minimum_and_the_maximum", "inillucent-compat::a_backward_scan_is_a_forward_scan_reversed", "inillucent-compat::scans_come_back_in_key_order"]
 
 [[capability]]
 id = "storage.overflow-chains"
@@ -724,7 +724,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
 status = "pass"
-tests = ["rustdb-storage::btree::tests::the_payload_thresholds_match_the_file_format", "rustdb-storage::btree::tests::the_local_payload_stays_between_the_minimum_and_the_maximum", "rustdb-storage::overflow::tests::an_overflow_page_holds_the_usable_size_less_its_pointer", "rustdb-compat::overflow_payloads_are_reassembled_exactly"]
+tests = ["inillucent-storage::btree::tests::the_payload_thresholds_match_the_file_format", "inillucent-storage::btree::tests::the_local_payload_stays_between_the_minimum_and_the_maximum", "inillucent-storage::overflow::tests::an_overflow_page_holds_the_usable_size_less_its_pointer", "inillucent-compat::overflow_payloads_are_reassembled_exactly"]
 
 [[capability]]
 id = "storage.cursor.seek"
@@ -732,7 +732,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
 status = "pass"
-tests = ["rustdb-compat::a_point_seek_agrees_with_a_scan", "rustdb-compat::a_missed_seek_lands_where_the_bias_asks", "rustdb-compat::an_index_seek_finds_its_keys_and_bounds_a_range", "rustdb-compat::a_backward_scan_is_a_forward_scan_reversed", "rustdb-compat::scans_come_back_in_key_order"]
+tests = ["inillucent-compat::a_point_seek_agrees_with_a_scan", "inillucent-compat::a_missed_seek_lands_where_the_bias_asks", "inillucent-compat::an_index_seek_finds_its_keys_and_bounds_a_range", "inillucent-compat::a_backward_scan_is_a_forward_scan_reversed", "inillucent-compat::scans_come_back_in_key_order"]
 
 [[capability]]
 id = "storage.btree.insert"
@@ -740,7 +740,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
 status = "pass"
-tests = ["rustdb-storage::mutate::tests::ascending_rows_read_back_in_order", "rustdb-storage::mutate::tests::rows_inserted_out_of_order_read_back_sorted", "rustdb-storage::mutate::tests::inserting_the_same_rowid_replaces_the_row", "rustdb-storage::mutate::tests::payloads_across_the_overflow_threshold_round_trip", "rustdb-compat::generated_table_sequences_match_the_model", "rustdb-compat::generated_index_sequences_match_the_model"]
+tests = ["inillucent-storage::mutate::tests::ascending_rows_read_back_in_order", "inillucent-storage::mutate::tests::rows_inserted_out_of_order_read_back_sorted", "inillucent-storage::mutate::tests::inserting_the_same_rowid_replaces_the_row", "inillucent-storage::mutate::tests::payloads_across_the_overflow_threshold_round_trip", "inillucent-compat::generated_table_sequences_match_the_model", "inillucent-compat::generated_index_sequences_match_the_model"]
 
 [[capability]]
 id = "storage.btree.delete"
@@ -748,7 +748,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
 status = "pass"
-tests = ["rustdb-storage::mutate::tests::deleting_every_row_returns_its_pages_to_the_freelist", "rustdb-storage::mutate::tests::deleting_out_of_order_keeps_the_tree_valid", "rustdb-storage::mutate::tests::index_entries_can_be_deleted_in_any_order", "rustdb-storage::mutate::tests::dropping_a_tree_frees_every_page_it_owned", "rustdb-compat::generated_table_sequences_match_the_model"]
+tests = ["inillucent-storage::mutate::tests::deleting_every_row_returns_its_pages_to_the_freelist", "inillucent-storage::mutate::tests::deleting_out_of_order_keeps_the_tree_valid", "inillucent-storage::mutate::tests::index_entries_can_be_deleted_in_any_order", "inillucent-storage::mutate::tests::dropping_a_tree_frees_every_page_it_owned", "inillucent-compat::generated_table_sequences_match_the_model"]
 
 [[capability]]
 id = "storage.btree.balance"
@@ -756,7 +756,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
 status = "pass"
-tests = ["rustdb-storage::mutate::tests::partitioning_conserves_every_entry", "rustdb-storage::mutate::tests::index_entries_stay_in_key_order", "rustdb-compat::payloads_at_the_local_boundary_match_the_model", "rustdb-compat::generated_index_sequences_match_the_model"]
+tests = ["inillucent-storage::mutate::tests::partitioning_conserves_every_entry", "inillucent-storage::mutate::tests::index_entries_stay_in_key_order", "inillucent-compat::payloads_at_the_local_boundary_match_the_model", "inillucent-compat::generated_index_sequences_match_the_model"]
 
 [[capability]]
 id = "storage.freelist"
@@ -764,7 +764,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
 status = "pass"
-tests = ["rustdb-storage::mutate::tests::deleting_every_row_returns_its_pages_to_the_freelist", "rustdb-storage::mutate::tests::dropping_a_tree_frees_every_page_it_owned", "rustdb-compat::the_leak_detector_reports_a_page_that_belongs_to_nothing"]
+tests = ["inillucent-storage::mutate::tests::deleting_every_row_returns_its_pages_to_the_freelist", "inillucent-storage::mutate::tests::dropping_a_tree_frees_every_page_it_owned", "inillucent-compat::the_leak_detector_reports_a_page_that_belongs_to_nothing"]
 
 [[capability]]
 id = "storage.pointer-maps"
@@ -772,7 +772,7 @@ source = "https://sqlite.org/pragma.html#pragma_auto_vacuum"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
 status = "pass"
-tests = ["rustdb-storage::mutate::tests::an_auto_vacuum_database_keeps_its_pointer_maps_correct", "rustdb-storage::vacuum::tests::relocation_moves_every_reference_to_a_page", "rustdb-compat::generated_sequences_match_the_model_under_a_vacuum"]
+tests = ["inillucent-storage::mutate::tests::an_auto_vacuum_database_keeps_its_pointer_maps_correct", "inillucent-storage::vacuum::tests::relocation_moves_every_reference_to_a_page", "inillucent-compat::generated_sequences_match_the_model_under_a_vacuum"]
 
 [[capability]]
 id = "storage.auto-vacuum"
@@ -780,7 +780,7 @@ source = "https://sqlite.org/pragma.html#pragma_auto_vacuum"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
 status = "pass"
-tests = ["rustdb-storage::vacuum::tests::an_incremental_vacuum_shrinks_the_file_and_keeps_every_row", "rustdb-storage::vacuum::tests::a_full_auto_vacuum_leaves_no_free_pages", "rustdb-compat::generated_sequences_match_the_model_under_a_vacuum"]
+tests = ["inillucent-storage::vacuum::tests::an_incremental_vacuum_shrinks_the_file_and_keeps_every_row", "inillucent-storage::vacuum::tests::a_full_auto_vacuum_leaves_no_free_pages", "inillucent-compat::generated_sequences_match_the_model_under_a_vacuum"]
 
 [[capability]]
 id = "storage.pager.write-transaction"
@@ -788,7 +788,7 @@ source = "https://sqlite.org/lockingv3.html"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
 status = "pass"
-tests = ["rustdb-storage::mutate::tests::a_rollback_restores_every_byte", "rustdb-compat::a_failed_transaction_rolls_all_the_way_back", "rustdb-compat::a_write_that_fails_at_the_file_system_is_reported_and_sticks"]
+tests = ["inillucent-storage::mutate::tests::a_rollback_restores_every_byte", "inillucent-compat::a_failed_transaction_rolls_all_the_way_back", "inillucent-compat::a_write_that_fails_at_the_file_system_is_reported_and_sticks"]
 
 [[capability]]
 id = "storage.pager.statement-undo"
@@ -796,7 +796,7 @@ source = "https://sqlite.org/atomiccommit.html"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
 status = "pass"
-tests = ["rustdb-storage::mutate::tests::a_statement_rollback_restores_the_pre_statement_tree", "rustdb-compat::a_failed_insert_leaves_the_tree_untouched", "rustdb-compat::a_failed_delete_leaves_the_tree_untouched", "rustdb-compat::a_failed_replace_leaves_the_tree_untouched", "rustdb-compat::a_failed_clear_leaves_the_tree_untouched"]
+tests = ["inillucent-storage::mutate::tests::a_statement_rollback_restores_the_pre_statement_tree", "inillucent-compat::a_failed_insert_leaves_the_tree_untouched", "inillucent-compat::a_failed_delete_leaves_the_tree_untouched", "inillucent-compat::a_failed_replace_leaves_the_tree_untouched", "inillucent-compat::a_failed_clear_leaves_the_tree_untouched"]
 
 [[capability]]
 id = "storage.pager.savepoints"
@@ -804,7 +804,7 @@ source = "https://sqlite.org/lang_savepoint.html"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
 status = "pass"
-tests = ["rustdb-compat::generated_table_sequences_match_the_model", "rustdb-compat::generated_index_sequences_match_the_model", "rustdb-compat::model::tests::savepoints_snapshot_and_restore"]
+tests = ["inillucent-compat::generated_table_sequences_match_the_model", "inillucent-compat::generated_index_sequences_match_the_model", "inillucent-compat::model::tests::savepoints_snapshot_and_restore"]
 
 [[capability]]
 id = "storage.page.cell-edit"
@@ -812,7 +812,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
 status = "pass"
-tests = ["rustdb-storage::edit::tests::inserted_cells_come_back_in_order", "rustdb-storage::edit::tests::removing_every_cell_leaves_a_valid_empty_page", "rustdb-storage::edit::tests::a_freed_block_is_reused", "rustdb-storage::edit::tests::defragmenting_keeps_every_cell", "rustdb-storage::edit::tests::a_full_page_refuses_a_cell", "rustdb-storage::edit::tests::an_initialised_page_of_every_kind_parses"]
+tests = ["inillucent-storage::edit::tests::inserted_cells_come_back_in_order", "inillucent-storage::edit::tests::removing_every_cell_leaves_a_valid_empty_page", "inillucent-storage::edit::tests::a_freed_block_is_reused", "inillucent-storage::edit::tests::defragmenting_keeps_every_cell", "inillucent-storage::edit::tests::a_full_page_refuses_a_cell", "inillucent-storage::edit::tests::an_initialised_page_of_every_kind_parses"]
 
 [[capability]]
 id = "storage.overflow.write"
@@ -820,7 +820,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
 status = "pass"
-tests = ["rustdb-storage::mutate::tests::payloads_across_the_overflow_threshold_round_trip", "rustdb-storage::edit::tests::an_overflowing_cell_carries_its_pointer", "rustdb-compat::payloads_at_the_local_boundary_match_the_model"]
+tests = ["inillucent-storage::mutate::tests::payloads_across_the_overflow_threshold_round_trip", "inillucent-storage::edit::tests::an_overflowing_cell_carries_its_pointer", "inillucent-compat::payloads_at_the_local_boundary_match_the_model"]
 
 [[capability]]
 id = "storage.cursor.restore"
@@ -828,7 +828,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
 status = "pass"
-tests = ["rustdb-storage::mutate::tests::a_cursor_is_restored_across_a_write_that_moves_its_page", "rustdb-storage::mutate::tests::a_cursor_whose_row_was_deleted_lands_on_the_next_one"]
+tests = ["inillucent-storage::mutate::tests::a_cursor_is_restored_across_a_write_that_moves_its_page", "inillucent-storage::mutate::tests::a_cursor_whose_row_was_deleted_lands_on_the_next_one"]
 
 [[capability]]
 id = "storage.vacuum.incremental"
@@ -836,7 +836,7 @@ source = "https://sqlite.org/pragma.html#pragma_auto_vacuum"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
 status = "pass"
-tests = ["rustdb-storage::vacuum::tests::an_incremental_vacuum_shrinks_the_file_and_keeps_every_row", "rustdb-compat::a_failed_vacuum_leaves_the_tree_untouched"]
+tests = ["inillucent-storage::vacuum::tests::an_incremental_vacuum_shrinks_the_file_and_keeps_every_row", "inillucent-compat::a_failed_vacuum_leaves_the_tree_untouched"]
 
 [[capability]]
 id = "storage.vacuum.copy"
@@ -844,7 +844,7 @@ source = "https://sqlite.org/lang_vacuum.html"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
 status = "pass"
-tests = ["rustdb-storage::vacuum::tests::copying_a_database_reproduces_it"]
+tests = ["inillucent-storage::vacuum::tests::copying_a_database_reproduces_it"]
 
 [[capability]]
 id = "storage.interop.cross-mutation"
@@ -852,7 +852,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
 status = "pass"
-tests = ["rustdb-compat::rustdb_mutates_a_sqlite_file_and_sqlite_accepts_it", "rustdb-compat::sqlite_mutates_a_rustdb_file_and_rustdb_accepts_it", "rustdb-compat::the_two_engines_take_turns_writing_the_same_file"]
+tests = ["inillucent-compat::inillucent_mutates_a_sqlite_file_and_sqlite_accepts_it", "inillucent-compat::sqlite_mutates_a_inillucent_file_and_inillucent_accepts_it", "inillucent-compat::the_two_engines_take_turns_writing_the_same_file"]
 
 [[capability]]
 id = "storage.failure.statement-atomicity"
@@ -860,7 +860,7 @@ source = "https://sqlite.org/atomiccommit.html"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
 status = "pass"
-tests = ["rustdb-compat::a_failed_insert_leaves_the_tree_untouched", "rustdb-compat::a_failed_insert_at_a_larger_page_size_leaves_the_tree_untouched", "rustdb-compat::a_failed_delete_leaves_the_tree_untouched", "rustdb-compat::a_failed_replace_leaves_the_tree_untouched", "rustdb-compat::a_failed_vacuum_leaves_the_tree_untouched", "rustdb-compat::a_failed_clear_leaves_the_tree_untouched", "rustdb-compat::every_site_kind_is_reached_by_some_operation"]
+tests = ["inillucent-compat::a_failed_insert_leaves_the_tree_untouched", "inillucent-compat::a_failed_insert_at_a_larger_page_size_leaves_the_tree_untouched", "inillucent-compat::a_failed_delete_leaves_the_tree_untouched", "inillucent-compat::a_failed_replace_leaves_the_tree_untouched", "inillucent-compat::a_failed_vacuum_leaves_the_tree_untouched", "inillucent-compat::a_failed_clear_leaves_the_tree_untouched", "inillucent-compat::every_site_kind_is_reached_by_some_operation"]
 
 [[capability]]
 id = "harness.model.btree"
@@ -868,7 +868,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 4: B-tree mutation, allocation, and rollback pages"
 status = "pass"
-tests = ["rustdb-compat::model::tests::the_model_keeps_its_entries_sorted_and_unique", "rustdb-compat::model::tests::a_rollback_returns_to_the_last_commit", "rustdb-compat::model::tests::every_operation_round_trips_through_json", "rustdb-compat::model::tests::generation_is_deterministic", "rustdb-compat::every_retained_sequence_still_passes"]
+tests = ["inillucent-compat::model::tests::the_model_keeps_its_entries_sorted_and_unique", "inillucent-compat::model::tests::a_rollback_returns_to_the_last_commit", "inillucent-compat::model::tests::every_operation_round_trips_through_json", "inillucent-compat::model::tests::generation_is_deterministic", "inillucent-compat::every_retained_sequence_still_passes"]
 
 [[capability]]
 id = "storage.integrity-check"
@@ -876,7 +876,7 @@ source = "https://sqlite.org/pragma.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
 status = "pass"
-tests = ["rustdb-compat::every_valid_fixture_passes_the_integrity_check", "rustdb-compat::the_freelist_fixture_has_a_freelist_the_check_agrees_with", "rustdb-compat::the_vacuum_fixtures_have_pointer_maps_that_the_check_accounts_for", "rustdb-compat::sqlite_and_rustdb_both_refuse_the_malformed_corpus"]
+tests = ["inillucent-compat::every_valid_fixture_passes_the_integrity_check", "inillucent-compat::the_freelist_fixture_has_a_freelist_the_check_agrees_with", "inillucent-compat::the_vacuum_fixtures_have_pointer_maps_that_the_check_accounts_for", "inillucent-compat::sqlite_and_inillucent_both_refuse_the_malformed_corpus"]
 
 [[capability]]
 id = "sql.lexer.tokens"
@@ -884,7 +884,7 @@ source = "https://sqlite.org/lang.html"
 profile = "default"
 phase = "phase 5: lexer, parser, AST, and syntax parity"
 status = "pass"
-tests = ["rustdb-sql::lexer::tests::spans_are_ordered_disjoint_and_inside_the_source", "rustdb-sql::lexer::tests::operators_lex_longest_first", "rustdb-sql::lexer::tests::comments_are_trivia", "rustdb-sql::lexer::tests::every_parameter_form_lexes", "rustdb-compat::every_published_production_has_evidence"]
+tests = ["inillucent-sql::lexer::tests::spans_are_ordered_disjoint_and_inside_the_source", "inillucent-sql::lexer::tests::operators_lex_longest_first", "inillucent-sql::lexer::tests::comments_are_trivia", "inillucent-sql::lexer::tests::every_parameter_form_lexes", "inillucent-compat::every_published_production_has_evidence"]
 
 [[capability]]
 id = "sql.lexer.string-literals"
@@ -892,7 +892,7 @@ source = "https://sqlite.org/lang_expr.html"
 profile = "default"
 phase = "phase 5: lexer, parser, AST, and syntax parity"
 status = "pass"
-tests = ["rustdb-sql::lexer::tests::doubled_quotes_are_undoubled", "rustdb-sql::lexer::tests::blob_literals_decode", "rustdb-sql::lexer::tests::an_unterminated_quote_reports_its_opening_byte", "rustdb-sql::lexer::tests::every_numeric_form_lexes"]
+tests = ["inillucent-sql::lexer::tests::doubled_quotes_are_undoubled", "inillucent-sql::lexer::tests::blob_literals_decode", "inillucent-sql::lexer::tests::an_unterminated_quote_reports_its_opening_byte", "inillucent-sql::lexer::tests::every_numeric_form_lexes"]
 
 [[capability]]
 id = "sql.lexer.identifiers"
@@ -900,7 +900,7 @@ source = "https://sqlite.org/lang.html"
 profile = "default"
 phase = "phase 5: lexer, parser, AST, and syntax parity"
 status = "pass"
-tests = ["rustdb-sql::lexer::tests::the_four_identifier_quote_forms_are_distinguished", "rustdb-sql::lexer::tests::high_bytes_are_identifier_characters", "rustdb-sql::lexer::tests::a_keyword_is_an_identifier_carrying_a_keyword"]
+tests = ["inillucent-sql::lexer::tests::the_four_identifier_quote_forms_are_distinguished", "inillucent-sql::lexer::tests::high_bytes_are_identifier_characters", "inillucent-sql::lexer::tests::a_keyword_is_an_identifier_carrying_a_keyword"]
 
 [[capability]]
 id = "sql.parser.statement-splitting"
@@ -908,7 +908,7 @@ source = "https://sqlite.org/lang.html"
 profile = "default"
 phase = "phase 5: lexer, parser, AST, and syntax parity"
 status = "pass"
-tests = ["rustdb-compat::one_prepare_compiles_one_statement_and_reports_the_tail", "rustdb-compat::classification_reads_the_leading_keywords", "rustdb-compat::prepare_reports_the_tail"]
+tests = ["inillucent-compat::one_prepare_compiles_one_statement_and_reports_the_tail", "inillucent-compat::classification_reads_the_leading_keywords", "inillucent-compat::prepare_reports_the_tail"]
 
 [[capability]]
 id = "sql.parser.error-offsets"
@@ -916,7 +916,7 @@ source = "https://sqlite.org/lang.html"
 profile = "default"
 phase = "phase 5: lexer, parser, AST, and syntax parity"
 status = "pass"
-tests = ["rustdb-compat::syntax_errors_point_at_the_offending_byte", "rustdb-compat::adversarial_depth_is_refused_rather_than_crashing", "rustdb-compat::an_overlong_statement_is_refused", "rustdb-sql::diagnostic::tests::the_offset_reaches_the_engine_error"]
+tests = ["inillucent-compat::syntax_errors_point_at_the_offending_byte", "inillucent-compat::adversarial_depth_is_refused_rather_than_crashing", "inillucent-compat::an_overlong_statement_is_refused", "inillucent-sql::diagnostic::tests::the_offset_reaches_the_engine_error"]
 
 [[capability]]
 id = "sql.parser.keyword-set"
@@ -924,7 +924,7 @@ source = "https://sqlite.org/lang.html"
 profile = "default"
 phase = "phase 5: lexer, parser, AST, and syntax parity"
 status = "pass"
-tests = ["rustdb-sql::keyword::tests::the_table_holds_every_documented_keyword", "rustdb-sql::keyword::tests::every_keyword_round_trips", "rustdb-sql::keyword::tests::the_fallback_set_matches_the_grammar", "rustdb-compat::the_register_agrees_with_the_pinned_release"]
+tests = ["inillucent-sql::keyword::tests::the_table_holds_every_documented_keyword", "inillucent-sql::keyword::tests::every_keyword_round_trips", "inillucent-sql::keyword::tests::the_fallback_set_matches_the_grammar", "inillucent-compat::the_register_agrees_with_the_pinned_release"]
 
 [[capability]]
 id = "sql.select.basic"
@@ -932,7 +932,7 @@ source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-compat::a_full_scan_returns_every_row_the_plan_produces", "rustdb-compat::every_storage_class_reads_back", "rustdb-compat::values_runs_without_a_table"]
+tests = ["inillucent-compat::the_foundational_select_suite_is_green", "inillucent-compat::a_full_scan_returns_every_row_the_plan_produces", "inillucent-compat::every_storage_class_reads_back", "inillucent-compat::values_runs_without_a_table"]
 
 [[capability]]
 id = "sql.select.where"
@@ -940,7 +940,7 @@ source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-compat::a_rowid_equality_becomes_a_seek", "rustdb-compat::a_rowid_range_stops_at_its_bound", "rustdb-compat::an_index_seek_returns_what_a_scan_returns"]
+tests = ["inillucent-compat::the_foundational_select_suite_is_green", "inillucent-compat::a_rowid_equality_becomes_a_seek", "inillucent-compat::a_rowid_range_stops_at_its_bound", "inillucent-compat::an_index_seek_returns_what_a_scan_returns"]
 
 [[capability]]
 id = "sql.select.order-by"
@@ -949,12 +949,12 @@ profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
 tests = [
-  "rustdb-compat::the_foundational_select_suite_is_green",
-  "rustdb-compat::order_limit_and_offset_work_together",
-  "rustdb-compat::nulls_sort_where_sqlite_sorts_them",
-  "rustdb-vm::sorter::tests::null_ordering_is_independent_of_direction",
-  "rustdb-compat::ordered_statements_match_the_oracle",
-  "rustdb-compat::the_sort_is_skipped_exactly_where_the_walk_answers_the_order",
+  "inillucent-compat::the_foundational_select_suite_is_green",
+  "inillucent-compat::order_limit_and_offset_work_together",
+  "inillucent-compat::nulls_sort_where_sqlite_sorts_them",
+  "inillucent-vm::sorter::tests::null_ordering_is_independent_of_direction",
+  "inillucent-compat::ordered_statements_match_the_oracle",
+  "inillucent-compat::the_sort_is_skipped_exactly_where_the_walk_answers_the_order",
 ]
 
 [[capability]]
@@ -963,7 +963,7 @@ source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-compat::order_limit_and_offset_work_together", "rustdb-vm::machine::tests::limit_and_offset_normalise_the_way_sqlite_reads_them"]
+tests = ["inillucent-compat::the_foundational_select_suite_is_green", "inillucent-compat::order_limit_and_offset_work_together", "inillucent-vm::machine::tests::limit_and_offset_normalise_the_way_sqlite_reads_them"]
 
 [[capability]]
 id = "sql.expr.operators"
@@ -971,7 +971,7 @@ source = "https://sqlite.org/lang_expr.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-vm::eval::tests::arithmetic_follows_sqlite_rather_than_rust", "rustdb-vm::eval::tests::division_keeps_the_class_sqlite_keeps", "rustdb-vm::eval::tests::shifts_saturate_and_reverse", "rustdb-vm::eval::tests::three_valued_logic_is_three_valued", "rustdb-vm::eval::tests::null_propagates_where_sqlite_says_it_does", "rustdb-vm::eval::tests::comparison_applies_its_affinity_to_both_sides"]
+tests = ["inillucent-compat::the_foundational_select_suite_is_green", "inillucent-vm::eval::tests::arithmetic_follows_sqlite_rather_than_rust", "inillucent-vm::eval::tests::division_keeps_the_class_sqlite_keeps", "inillucent-vm::eval::tests::shifts_saturate_and_reverse", "inillucent-vm::eval::tests::three_valued_logic_is_three_valued", "inillucent-vm::eval::tests::null_propagates_where_sqlite_says_it_does", "inillucent-vm::eval::tests::comparison_applies_its_affinity_to_both_sides"]
 
 [[capability]]
 id = "sql.expr.case"
@@ -979,7 +979,7 @@ source = "https://sqlite.org/lang_expr.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-compat::every_published_production_has_evidence"]
+tests = ["inillucent-compat::the_foundational_select_suite_is_green", "inillucent-compat::every_published_production_has_evidence"]
 
 [[capability]]
 id = "sql.expr.like-glob"
@@ -987,7 +987,7 @@ source = "https://sqlite.org/lang_expr.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-vm::pattern::tests::like_matches_the_documented_cases", "rustdb-vm::pattern::tests::like_honours_an_escape_character", "rustdb-vm::pattern::tests::glob_is_case_sensitive_and_has_classes", "rustdb-vm::pattern::tests::a_pathological_pattern_terminates", "rustdb-vm::pattern::tests::one_character_wildcards_consume_a_whole_character"]
+tests = ["inillucent-compat::the_foundational_select_suite_is_green", "inillucent-vm::pattern::tests::like_matches_the_documented_cases", "inillucent-vm::pattern::tests::like_honours_an_escape_character", "inillucent-vm::pattern::tests::glob_is_case_sensitive_and_has_classes", "inillucent-vm::pattern::tests::a_pathological_pattern_terminates", "inillucent-vm::pattern::tests::one_character_wildcards_consume_a_whole_character"]
 
 [[capability]]
 id = "sql.expr.in-subquery"
@@ -995,7 +995,7 @@ source = "https://sqlite.org/lang_expr.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::subqueries_match_the_oracle"]
+tests = ["inillucent-compat::subqueries_match_the_oracle"]
 
 [[capability]]
 id = "catalog.sqlite-schema"
@@ -1003,7 +1003,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::the_catalog_reads_a_real_schema", "rustdb-compat::an_automatic_index_gets_its_root_page", "rustdb-compat::unparseable_schema_sql_is_corruption", "rustdb-compat::a_corrupt_schema_row_names_its_object", "rustdb-catalog::load::tests::affinity_is_derived_from_the_declared_type", "rustdb-catalog::load::tests::only_integer_primary_key_aliases_the_rowid", "rustdb-catalog::load::tests::automatic_indexes_are_numbered_in_declaration_order", "rustdb-catalog::load::tests::without_rowid_primary_keys_are_not_null"]
+tests = ["inillucent-compat::the_catalog_reads_a_real_schema", "inillucent-compat::an_automatic_index_gets_its_root_page", "inillucent-compat::unparseable_schema_sql_is_corruption", "inillucent-compat::a_corrupt_schema_row_names_its_object", "inillucent-catalog::load::tests::affinity_is_derived_from_the_declared_type", "inillucent-catalog::load::tests::only_integer_primary_key_aliases_the_rowid", "inillucent-catalog::load::tests::automatic_indexes_are_numbered_in_declaration_order", "inillucent-catalog::load::tests::without_rowid_primary_keys_are_not_null"]
 
 [[capability]]
 id = "catalog.schema-cookie"
@@ -1011,7 +1011,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::a_schema_change_recompiles_a_prepared_statement", "rustdb-compat::an_unchanged_schema_does_not_recompile", "rustdb-catalog::snapshot::tests::temp_shadows_main_unless_the_name_is_qualified"]
+tests = ["inillucent-compat::a_schema_change_recompiles_a_prepared_statement", "inillucent-compat::an_unchanged_schema_does_not_recompile", "inillucent-catalog::snapshot::tests::temp_shadows_main_unless_the_name_is_qualified"]
 
 [[capability]]
 id = "catalog.prepared-statement-invalidation"
@@ -1019,7 +1019,7 @@ source = "https://sqlite.org/c3ref/funclist.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::a_schema_change_recompiles_a_prepared_statement", "rustdb-compat::a_dropped_table_is_reported_rather_than_read", "rustdb-compat::an_unchanged_schema_does_not_recompile"]
+tests = ["inillucent-compat::a_schema_change_recompiles_a_prepared_statement", "inillucent-compat::a_dropped_table_is_reported_rather_than_read", "inillucent-compat::an_unchanged_schema_does_not_recompile"]
 
 [[capability]]
 id = "sql.insert"
@@ -1027,7 +1027,7 @@ source = "https://sqlite.org/lang_insert.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::crud_matches_sqlite", "rustdb-compat::rowid_allocation_matches_sqlite", "rustdb-compat::stored_affinity_matches_sqlite", "rustdb-compat::a_table_round_trips_through_the_public_api", "rustdb-compat::sqlite_reads_what_rustdb_wrote"]
+tests = ["inillucent-compat::crud_matches_sqlite", "inillucent-compat::rowid_allocation_matches_sqlite", "inillucent-compat::stored_affinity_matches_sqlite", "inillucent-compat::a_table_round_trips_through_the_public_api", "inillucent-compat::sqlite_reads_what_inillucent_wrote"]
 
 [[capability]]
 id = "sql.update"
@@ -1035,7 +1035,7 @@ source = "https://sqlite.org/lang_update.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::crud_matches_sqlite", "rustdb-compat::the_counters_report_what_a_statement_changed", "rustdb-compat::index_maintenance_matches_sqlite", "rustdb-compat::sqlite_writes_on_top_of_rustdb_and_rustdb_reads_it_back"]
+tests = ["inillucent-compat::crud_matches_sqlite", "inillucent-compat::the_counters_report_what_a_statement_changed", "inillucent-compat::index_maintenance_matches_sqlite", "inillucent-compat::sqlite_writes_on_top_of_inillucent_and_inillucent_reads_it_back"]
 
 [[capability]]
 id = "sql.delete"
@@ -1043,7 +1043,7 @@ source = "https://sqlite.org/lang_delete.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::crud_matches_sqlite", "rustdb-compat::the_counters_report_what_a_statement_changed", "rustdb-compat::index_maintenance_matches_sqlite", "rustdb-compat::rustdb_writes_into_a_database_sqlite_built"]
+tests = ["inillucent-compat::crud_matches_sqlite", "inillucent-compat::the_counters_report_what_a_statement_changed", "inillucent-compat::index_maintenance_matches_sqlite", "inillucent-compat::inillucent_writes_into_a_database_sqlite_built"]
 
 [[capability]]
 id = "sql.create-table"
@@ -1051,7 +1051,7 @@ source = "https://sqlite.org/lang_createtable.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::the_schema_table_matches_sqlite", "rustdb-compat::a_table_round_trips_through_the_public_api", "rustdb-compat::sqlite_reads_what_rustdb_wrote"]
+tests = ["inillucent-compat::the_schema_table_matches_sqlite", "inillucent-compat::a_table_round_trips_through_the_public_api", "inillucent-compat::sqlite_reads_what_inillucent_wrote"]
 
 [[capability]]
 id = "sql.drop-table"
@@ -1059,7 +1059,7 @@ source = "https://sqlite.org/lang_droptable.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::a_dropped_table_is_gone", "rustdb-compat::dropping_a_table_leaves_a_database_sqlite_accepts", "rustdb-compat::the_schema_table_matches_sqlite"]
+tests = ["inillucent-compat::a_dropped_table_is_gone", "inillucent-compat::dropping_a_table_leaves_a_database_sqlite_accepts", "inillucent-compat::the_schema_table_matches_sqlite"]
 
 [[capability]]
 id = "sql.create-index"
@@ -1068,12 +1068,12 @@ profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
 tests = [
-  "rustdb-compat::an_index_is_backfilled_and_maintained",
-  "rustdb-compat::index_maintenance_matches_sqlite",
-  "rustdb-compat::sqlite_reads_what_rustdb_wrote",
-  "rustdb-storage::mutate::tests::a_batched_append_places_every_entry_in_order",
-  "rustdb-storage::mutate::tests::a_batched_append_builds_the_same_tree_as_one_at_a_time",
-  "rustdb-storage::mutate::tests::an_ascending_build_fills_its_pages",
+  "inillucent-compat::an_index_is_backfilled_and_maintained",
+  "inillucent-compat::index_maintenance_matches_sqlite",
+  "inillucent-compat::sqlite_reads_what_inillucent_wrote",
+  "inillucent-storage::mutate::tests::a_batched_append_places_every_entry_in_order",
+  "inillucent-storage::mutate::tests::a_batched_append_builds_the_same_tree_as_one_at_a_time",
+  "inillucent-storage::mutate::tests::an_ascending_build_fills_its_pages",
 ]
 
 [[capability]]
@@ -1082,7 +1082,7 @@ source = "https://sqlite.org/lang_conflict.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::conflict_algorithms_match_sqlite", "rustdb-compat::constraint_codes_match_sqlite", "rustdb-compat::every_conflict_algorithm_undoes_what_it_says", "rustdb-compat::a_unique_constraint_refuses_a_duplicate", "rustdb-compat::not_null_and_check_are_enforced"]
+tests = ["inillucent-compat::conflict_algorithms_match_sqlite", "inillucent-compat::constraint_codes_match_sqlite", "inillucent-compat::every_conflict_algorithm_undoes_what_it_says", "inillucent-compat::a_unique_constraint_refuses_a_duplicate", "inillucent-compat::not_null_and_check_are_enforced"]
 
 [[capability]]
 id = "txn.begin-commit-rollback"
@@ -1090,7 +1090,7 @@ source = "https://sqlite.org/lang_transaction.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::transactions_match_sqlite", "rustdb-compat::a_rolled_back_transaction_changes_nothing", "rustdb-compat::a_rolled_back_transaction_is_invisible_to_sqlite", "rustdb-transaction::state::tests::begin_within_begin_is_refused", "rustdb-transaction::state::tests::immediate_begins_as_a_writer_and_deferred_does_not"]
+tests = ["inillucent-compat::transactions_match_sqlite", "inillucent-compat::a_rolled_back_transaction_changes_nothing", "inillucent-compat::a_rolled_back_transaction_is_invisible_to_sqlite", "inillucent-transaction::state::tests::begin_within_begin_is_refused", "inillucent-transaction::state::tests::immediate_begins_as_a_writer_and_deferred_does_not"]
 
 [[capability]]
 id = "txn.rollback-journal"
@@ -1098,7 +1098,7 @@ source = "https://sqlite.org/atomiccommit.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::power_loss_at_every_cut_point_of_a_full_commit", "rustdb-compat::power_loss_at_every_cut_point_of_a_truncate_commit", "rustdb-compat::power_loss_at_every_cut_point_of_a_persist_commit", "rustdb-transaction::journal::tests::a_journal_mid_transaction_is_not_hot", "rustdb-transaction::journal::tests::preparing_the_commit_makes_the_journal_hot", "rustdb-transaction::journal::tests::the_checksum_samples_every_two_hundredth_byte", "rustdb-transaction::journal::tests::a_page_is_journalled_once_per_transaction"]
+tests = ["inillucent-compat::power_loss_at_every_cut_point_of_a_full_commit", "inillucent-compat::power_loss_at_every_cut_point_of_a_truncate_commit", "inillucent-compat::power_loss_at_every_cut_point_of_a_persist_commit", "inillucent-transaction::journal::tests::a_journal_mid_transaction_is_not_hot", "inillucent-transaction::journal::tests::preparing_the_commit_makes_the_journal_hot", "inillucent-transaction::journal::tests::the_checksum_samples_every_two_hundredth_byte", "inillucent-transaction::journal::tests::a_page_is_journalled_once_per_transaction"]
 
 [[capability]]
 id = "txn.hot-journal-recovery"
@@ -1106,7 +1106,7 @@ source = "https://sqlite.org/atomiccommit.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::a_crash_during_recovery_is_idempotent", "rustdb-transaction::journal::tests::recovery_restores_the_pages_and_removes_the_journal", "rustdb-transaction::journal::tests::recovery_run_twice_produces_the_same_database", "rustdb-transaction::journal::tests::a_corrupt_record_is_reported_rather_than_half_applied", "rustdb-transaction::journal::tests::a_record_beyond_the_original_size_is_refused", "rustdb-transaction::journal::tests::an_implausible_header_is_not_hot"]
+tests = ["inillucent-compat::a_crash_during_recovery_is_idempotent", "inillucent-transaction::journal::tests::recovery_restores_the_pages_and_removes_the_journal", "inillucent-transaction::journal::tests::recovery_run_twice_produces_the_same_database", "inillucent-transaction::journal::tests::a_corrupt_record_is_reported_rather_than_half_applied", "inillucent-transaction::journal::tests::a_record_beyond_the_original_size_is_refused", "inillucent-transaction::journal::tests::an_implausible_header_is_not_hot"]
 
 [[capability]]
 id = "txn.savepoints"
@@ -1114,7 +1114,7 @@ source = "https://sqlite.org/lang_savepoint.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::a_savepoint_undoes_only_what_it_covers", "rustdb-compat::a_savepoint_restores_rows_and_counters_together", "rustdb-compat::nested_savepoints_unwind_innermost_first", "rustdb-compat::a_savepoint_outside_a_transaction_commits_on_release", "rustdb-transaction::state::tests::duplicate_savepoints_resolve_from_the_inside_out", "rustdb-transaction::state::tests::rollback_to_keeps_the_savepoint_and_does_not_restore_the_rowid"]
+tests = ["inillucent-compat::a_savepoint_undoes_only_what_it_covers", "inillucent-compat::a_savepoint_restores_rows_and_counters_together", "inillucent-compat::nested_savepoints_unwind_innermost_first", "inillucent-compat::a_savepoint_outside_a_transaction_commits_on_release", "inillucent-transaction::state::tests::duplicate_savepoints_resolve_from_the_inside_out", "inillucent-transaction::state::tests::rollback_to_keeps_the_savepoint_and_does_not_restore_the_rowid"]
 
 [[capability]]
 id = "txn.statement-journal"
@@ -1122,7 +1122,7 @@ source = "https://sqlite.org/atomiccommit.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::a_failed_statement_undoes_only_itself", "rustdb-compat::every_conflict_algorithm_undoes_what_it_says", "rustdb-transaction::state::tests::a_rolled_back_statement_does_not_publish_its_count", "rustdb-transaction::state::tests::fail_keeps_the_rows_written_before_the_conflict"]
+tests = ["inillucent-compat::a_failed_statement_undoes_only_itself", "inillucent-compat::every_conflict_algorithm_undoes_what_it_says", "inillucent-transaction::state::tests::a_rolled_back_statement_does_not_publish_its_count", "inillucent-transaction::state::tests::fail_keeps_the_rows_written_before_the_conflict"]
 
 [[capability]]
 id = "txn.synchronous-modes"
@@ -1130,7 +1130,7 @@ source = "https://sqlite.org/pragma.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-transaction::journal::tests::synchronous_levels_round_trip_and_off_syncs_nothing", "rustdb-compat::power_loss_at_every_cut_point_of_a_full_commit", "rustdb-compat::an_io_error_at_every_cut_point_is_recoverable"]
+tests = ["inillucent-transaction::journal::tests::synchronous_levels_round_trip_and_off_syncs_nothing", "inillucent-compat::power_loss_at_every_cut_point_of_a_full_commit", "inillucent-compat::an_io_error_at_every_cut_point_is_recoverable"]
 
 [[capability]]
 id = "sql.select.joins"
@@ -1138,7 +1138,7 @@ source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::joins_match_the_oracle", "rustdb-compat::refusals_match_the_oracle"]
+tests = ["inillucent-compat::joins_match_the_oracle", "inillucent-compat::refusals_match_the_oracle"]
 
 [[capability]]
 id = "sql.select.compound"
@@ -1146,7 +1146,7 @@ source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::compounds_match_the_oracle"]
+tests = ["inillucent-compat::compounds_match_the_oracle"]
 
 [[capability]]
 id = "sql.select.group-by-having"
@@ -1155,10 +1155,10 @@ profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
 tests = [
-  "rustdb-compat::windows_match_the_oracle",
-  "rustdb-compat::the_foundational_select_suite_is_green",
-  "rustdb-compat::ordered_statements_match_the_oracle",
-  "rustdb-compat::the_sort_is_skipped_exactly_where_the_walk_answers_the_order",
+  "inillucent-compat::windows_match_the_oracle",
+  "inillucent-compat::the_foundational_select_suite_is_green",
+  "inillucent-compat::ordered_statements_match_the_oracle",
+  "inillucent-compat::the_sort_is_skipped_exactly_where_the_walk_answers_the_order",
 ]
 
 [[capability]]
@@ -1168,10 +1168,10 @@ profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
 tests = [
-  "rustdb-compat::compounds_match_the_oracle",
-  "rustdb-compat::windows_match_the_oracle",
-  "rustdb-compat::ordered_statements_match_the_oracle",
-  "rustdb-compat::the_sort_is_skipped_exactly_where_the_walk_answers_the_order",
+  "inillucent-compat::compounds_match_the_oracle",
+  "inillucent-compat::windows_match_the_oracle",
+  "inillucent-compat::ordered_statements_match_the_oracle",
+  "inillucent-compat::the_sort_is_skipped_exactly_where_the_walk_answers_the_order",
 ]
 
 [[capability]]
@@ -1180,7 +1180,7 @@ source = "https://sqlite.org/lang_with.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::ctes_match_the_oracle"]
+tests = ["inillucent-compat::ctes_match_the_oracle"]
 
 [[capability]]
 id = "sql.with.recursive"
@@ -1188,7 +1188,7 @@ source = "https://sqlite.org/lang_with.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::ctes_match_the_oracle"]
+tests = ["inillucent-compat::ctes_match_the_oracle"]
 
 [[capability]]
 id = "sql.select.window"
@@ -1196,7 +1196,7 @@ source = "https://sqlite.org/windowfunctions.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::windows_match_the_oracle"]
+tests = ["inillucent-compat::windows_match_the_oracle"]
 
 [[capability]]
 id = "sql.upsert"
@@ -1204,7 +1204,7 @@ source = "https://sqlite.org/lang_upsert.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::upsert_matches_sqlite"]
+tests = ["inillucent-compat::upsert_matches_sqlite"]
 
 [[capability]]
 id = "sql.returning"
@@ -1212,7 +1212,7 @@ source = "https://sqlite.org/lang_returning.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::returning_matches_sqlite", "rustdb-compat::returning_reports_the_written_row"]
+tests = ["inillucent-compat::returning_matches_sqlite", "inillucent-compat::returning_reports_the_written_row"]
 
 [[capability]]
 id = "sql.create-view"
@@ -1220,7 +1220,7 @@ source = "https://sqlite.org/lang_createview.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::views_match_the_oracle", "rustdb-compat::a_view_round_trips_through_sqlite", "rustdb-compat::dropping_a_view_leaves_the_table"]
+tests = ["inillucent-compat::views_match_the_oracle", "inillucent-compat::a_view_round_trips_through_sqlite", "inillucent-compat::dropping_a_view_leaves_the_table"]
 
 [[capability]]
 id = "sql.create-trigger"
@@ -1228,7 +1228,7 @@ source = "https://sqlite.org/lang_createtrigger.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::row_triggers_match_sqlite", "rustdb-compat::trigger_raise_matches_sqlite", "rustdb-compat::trigger_chains_match_sqlite", "rustdb-compat::instead_of_triggers_match_sqlite", "rustdb-compat::triggers_round_trip_through_sqlite", "rustdb-compat::instead_of_triggers_round_trip_through_sqlite"]
+tests = ["inillucent-compat::row_triggers_match_sqlite", "inillucent-compat::trigger_raise_matches_sqlite", "inillucent-compat::trigger_chains_match_sqlite", "inillucent-compat::instead_of_triggers_match_sqlite", "inillucent-compat::triggers_round_trip_through_sqlite", "inillucent-compat::instead_of_triggers_round_trip_through_sqlite"]
 
 [[capability]]
 id = "sql.alter-table"
@@ -1236,7 +1236,7 @@ source = "https://sqlite.org/lang_altertable.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::alter_table_rewrites_the_schema", "rustdb-catalog::rename::tests::a_rename_replaces_tokens_rather_than_bytes", "rustdb-catalog::rename::tests::an_index_follows_its_table", "rustdb-catalog::rename::tests::a_column_is_added_inside_the_list", "rustdb-catalog::rename::tests::a_dropped_column_takes_its_comma", "rustdb-catalog::rename::tests::the_tables_a_statement_reads_are_listed", "rustdb-catalog::rename::tests::an_unparseable_rewrite_is_refused", "rustdb-compat::a_schema_change_recompiles_a_prepared_statement"]
+tests = ["inillucent-compat::alter_table_rewrites_the_schema", "inillucent-catalog::rename::tests::a_rename_replaces_tokens_rather_than_bytes", "inillucent-catalog::rename::tests::an_index_follows_its_table", "inillucent-catalog::rename::tests::a_column_is_added_inside_the_list", "inillucent-catalog::rename::tests::a_dropped_column_takes_its_comma", "inillucent-catalog::rename::tests::the_tables_a_statement_reads_are_listed", "inillucent-catalog::rename::tests::an_unparseable_rewrite_is_refused", "inillucent-compat::a_schema_change_recompiles_a_prepared_statement"]
 
 [[capability]]
 id = "sql.generated-columns"
@@ -1244,7 +1244,7 @@ source = "https://sqlite.org/lang_createtable.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::generated_columns_round_trip_through_sqlite"]
+tests = ["inillucent-compat::generated_columns_round_trip_through_sqlite"]
 
 [[capability]]
 id = "sql.autoincrement"
@@ -1252,7 +1252,7 @@ source = "https://sqlite.org/autoinc.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::autoincrement_matches_sqlite"]
+tests = ["inillucent-compat::autoincrement_matches_sqlite"]
 
 [[capability]]
 id = "sql.negative.autoincrement-placement"
@@ -1261,7 +1261,7 @@ profile = "negative-parity"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
 expected = "syntax-error"
-tests = ["rustdb-compat::autoincrement_matches_sqlite"]
+tests = ["inillucent-compat::autoincrement_matches_sqlite"]
 
 [[capability]]
 id = "sql.without-rowid"
@@ -1269,7 +1269,7 @@ source = "https://sqlite.org/lang_createtable.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::without_rowid_matches_sqlite", "rustdb-compat::without_rowid_round_trips_through_sqlite"]
+tests = ["inillucent-compat::without_rowid_matches_sqlite", "inillucent-compat::without_rowid_round_trips_through_sqlite"]
 
 [[capability]]
 id = "sql.strict-tables"
@@ -1277,7 +1277,7 @@ source = "https://sqlite.org/lang_createtable.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::strict_tables_refuse_the_wrong_class", "rustdb-compat::strict_is_enforced_on_a_file_sqlite_wrote"]
+tests = ["inillucent-compat::strict_tables_refuse_the_wrong_class", "inillucent-compat::strict_is_enforced_on_a_file_sqlite_wrote"]
 
 [[capability]]
 id = "sql.explain"
@@ -1285,7 +1285,7 @@ source = "https://sqlite.org/lang_explain.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::explain_reports_without_running"]
+tests = ["inillucent-compat::explain_reports_without_running"]
 
 [[capability]]
 id = "sql.analyze"
@@ -1293,7 +1293,7 @@ source = "https://sqlite.org/lang_analyze.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::analyze_writes_statistics_sqlite_reads", "rustdb-compat::statistics_sqlite_wrote_are_read_back"]
+tests = ["inillucent-compat::analyze_writes_statistics_sqlite_reads", "inillucent-compat::statistics_sqlite_wrote_are_read_back"]
 
 [[capability]]
 id = "sql.reindex"
@@ -1301,7 +1301,7 @@ source = "https://sqlite.org/lang_reindex.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::reindex_rebuilds_an_index"]
+tests = ["inillucent-compat::reindex_rebuilds_an_index"]
 
 [[capability]]
 id = "sql.vacuum"
@@ -1309,7 +1309,7 @@ source = "https://sqlite.org/lang_vacuum.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::vacuum_matches_sqlite", "rustdb-compat::vacuum_rebuilds_a_database_sqlite_still_reads", "rustdb-compat::vacuum_into_writes_a_copy_sqlite_reads"]
+tests = ["inillucent-compat::vacuum_matches_sqlite", "inillucent-compat::vacuum_rebuilds_a_database_sqlite_still_reads", "inillucent-compat::vacuum_into_writes_a_copy_sqlite_reads"]
 
 [[capability]]
 id = "planner.access-paths"
@@ -1317,7 +1317,7 @@ source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::the_more_selective_index_wins", "rustdb-compat::the_foundational_select_suite_is_green"]
+tests = ["inillucent-compat::the_more_selective_index_wins", "inillucent-compat::the_foundational_select_suite_is_green"]
 
 [[capability]]
 id = "planner.join-order"
@@ -1325,7 +1325,7 @@ source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::statistics_reorder_the_join", "rustdb-compat::cross_join_pins_the_order"]
+tests = ["inillucent-compat::statistics_reorder_the_join", "inillucent-compat::cross_join_pins_the_order"]
 
 [[capability]]
 id = "planner.statistics"
@@ -1333,7 +1333,7 @@ source = "https://sqlite.org/lang_analyze.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::statistics_reorder_the_join", "rustdb-compat::statistics_sqlite_wrote_are_read_back"]
+tests = ["inillucent-compat::statistics_reorder_the_join", "inillucent-compat::statistics_sqlite_wrote_are_read_back"]
 
 [[capability]]
 id = "sql.foreign-keys.immediate"
@@ -1341,7 +1341,7 @@ source = "https://sqlite.org/foreignkeys.html"
 profile = "default"
 phase = "phase 9: foreign keys, ATTACH, and multi-database commit"
 status = "pass"
-tests = ["rustdb-compat::a_child_needs_its_parent", "rustdb-compat::enforcement_is_off_until_it_is_asked_for", "rustdb-compat::an_update_checks_the_new_key", "rustdb-compat::a_parent_with_children_cannot_be_deleted", "rustdb-compat::a_composite_key_matches_on_every_column", "rustdb-compat::a_missing_parent_fails_at_the_write", "rustdb-compat::a_parent_without_a_unique_key_is_a_mismatch", "rustdb-compat::a_unique_index_makes_a_parent_key", "rustdb-compat::the_key_list_reports_the_schema", "rustdb-compat::the_key_check_finds_what_enforcement_would_have_refused"]
+tests = ["inillucent-compat::a_child_needs_its_parent", "inillucent-compat::enforcement_is_off_until_it_is_asked_for", "inillucent-compat::an_update_checks_the_new_key", "inillucent-compat::a_parent_with_children_cannot_be_deleted", "inillucent-compat::a_composite_key_matches_on_every_column", "inillucent-compat::a_missing_parent_fails_at_the_write", "inillucent-compat::a_parent_without_a_unique_key_is_a_mismatch", "inillucent-compat::a_unique_index_makes_a_parent_key", "inillucent-compat::the_key_list_reports_the_schema", "inillucent-compat::the_key_check_finds_what_enforcement_would_have_refused"]
 
 [[capability]]
 id = "sql.foreign-keys.deferred"
@@ -1349,7 +1349,7 @@ source = "https://sqlite.org/foreignkeys.html"
 profile = "default"
 phase = "phase 9: foreign keys, ATTACH, and multi-database commit"
 status = "pass"
-tests = ["rustdb-compat::a_deferred_key_is_checked_at_the_commit", "rustdb-compat::a_deferred_key_refuses_a_commit_it_cannot_satisfy"]
+tests = ["inillucent-compat::a_deferred_key_is_checked_at_the_commit", "inillucent-compat::a_deferred_key_refuses_a_commit_it_cannot_satisfy"]
 
 [[capability]]
 id = "sql.foreign-keys.actions"
@@ -1357,7 +1357,7 @@ source = "https://sqlite.org/foreignkeys.html"
 profile = "default"
 phase = "phase 9: foreign keys, ATTACH, and multi-database commit"
 status = "pass"
-tests = ["rustdb-compat::a_cascade_takes_the_children", "rustdb-compat::a_cascade_moves_the_children", "rustdb-compat::set_null_and_set_default_keep_the_children", "rustdb-compat::restrict_refuses_where_no_action_would_not", "rustdb-compat::a_self_referencing_cascade_reaches_the_leaves", "rustdb-compat::triggers_and_keys_run_in_the_documented_order", "rustdb-compat::replace_fires_the_action_on_the_row_it_removes"]
+tests = ["inillucent-compat::a_cascade_takes_the_children", "inillucent-compat::a_cascade_moves_the_children", "inillucent-compat::set_null_and_set_default_keep_the_children", "inillucent-compat::restrict_refuses_where_no_action_would_not", "inillucent-compat::a_self_referencing_cascade_reaches_the_leaves", "inillucent-compat::triggers_and_keys_run_in_the_documented_order", "inillucent-compat::replace_fires_the_action_on_the_row_it_removes"]
 
 [[capability]]
 # TEMP objects live in the `temp` database, so they need a connection that can
@@ -1370,7 +1370,7 @@ source = "https://sqlite.org/lang_createtable.html"
 profile = "default"
 phase = "phase 9: foreign keys, ATTACH, and multi-database commit"
 status = "pass"
-tests = ["rustdb-compat::a_temporary_table_holds_rows", "rustdb-compat::temporary_is_the_same_as_temp", "rustdb-compat::a_temporary_table_shadows_a_permanent_one", "rustdb-compat::a_temporary_table_is_not_in_the_file", "rustdb-compat::a_temporary_table_does_not_survive_the_connection", "rustdb-compat::each_connection_has_its_own_temporary_database", "rustdb-compat::a_temporary_name_may_not_be_qualified", "rustdb-compat::a_temporary_index_works", "rustdb-compat::a_temporary_view_works", "rustdb-compat::a_temporary_trigger_fires", "rustdb-compat::a_transaction_covers_the_temporary_database_too", "rustdb-compat::dropping_a_temporary_table_uncovers_the_permanent_one"]
+tests = ["inillucent-compat::a_temporary_table_holds_rows", "inillucent-compat::temporary_is_the_same_as_temp", "inillucent-compat::a_temporary_table_shadows_a_permanent_one", "inillucent-compat::a_temporary_table_is_not_in_the_file", "inillucent-compat::a_temporary_table_does_not_survive_the_connection", "inillucent-compat::each_connection_has_its_own_temporary_database", "inillucent-compat::a_temporary_name_may_not_be_qualified", "inillucent-compat::a_temporary_index_works", "inillucent-compat::a_temporary_view_works", "inillucent-compat::a_temporary_trigger_fires", "inillucent-compat::a_transaction_covers_the_temporary_database_too", "inillucent-compat::dropping_a_temporary_table_uncovers_the_permanent_one"]
 
 [[capability]]
 id = "sql.attach-detach"
@@ -1378,7 +1378,7 @@ source = "https://sqlite.org/lang_attach.html"
 profile = "default"
 phase = "phase 9: foreign keys, ATTACH, and multi-database commit"
 status = "pass"
-tests = ["rustdb-compat::an_attached_database_is_reachable", "rustdb-compat::main_wins_an_unqualified_name", "rustdb-compat::an_unqualified_name_finds_the_only_database_that_has_it", "rustdb-compat::a_join_spans_two_databases", "rustdb-compat::main_cannot_be_attached_over", "rustdb-compat::temp_cannot_be_attached_over", "rustdb-compat::a_name_can_only_be_attached_once", "rustdb-compat::main_cannot_be_detached", "rustdb-compat::an_unattached_name_cannot_be_detached", "rustdb-compat::detaching_twice_fails_the_second_time", "rustdb-compat::detaching_takes_the_names_with_it", "rustdb-compat::attaching_inside_a_transaction_is_allowed", "rustdb-compat::the_same_page_number_in_two_databases_is_two_pages"]
+tests = ["inillucent-compat::an_attached_database_is_reachable", "inillucent-compat::main_wins_an_unqualified_name", "inillucent-compat::an_unqualified_name_finds_the_only_database_that_has_it", "inillucent-compat::a_join_spans_two_databases", "inillucent-compat::main_cannot_be_attached_over", "inillucent-compat::temp_cannot_be_attached_over", "inillucent-compat::a_name_can_only_be_attached_once", "inillucent-compat::main_cannot_be_detached", "inillucent-compat::an_unattached_name_cannot_be_detached", "inillucent-compat::detaching_twice_fails_the_second_time", "inillucent-compat::detaching_takes_the_names_with_it", "inillucent-compat::attaching_inside_a_transaction_is_allowed", "inillucent-compat::the_same_page_number_in_two_databases_is_two_pages"]
 
 [[capability]]
 id = "txn.multi-database-commit"
@@ -1386,7 +1386,7 @@ source = "https://sqlite.org/atomiccommit.html"
 profile = "default"
 phase = "phase 9: foreign keys, ATTACH, and multi-database commit"
 status = "pass"
-tests = ["rustdb-compat::a_transaction_spans_two_databases", "rustdb-compat::a_rollback_spans_two_databases", "rustdb-compat::a_savepoint_spans_two_databases", "rustdb-compat::every_cut_of_a_two_database_commit_leaves_one_state_or_the_other", "rustdb-compat::every_short_write_of_a_two_database_commit_leaves_one_state_or_the_other"]
+tests = ["inillucent-compat::a_transaction_spans_two_databases", "inillucent-compat::a_rollback_spans_two_databases", "inillucent-compat::a_savepoint_spans_two_databases", "inillucent-compat::every_cut_of_a_two_database_commit_leaves_one_state_or_the_other", "inillucent-compat::every_short_write_of_a_two_database_commit_leaves_one_state_or_the_other"]
 
 [[capability]]
 id = "txn.master-journal"
@@ -1394,7 +1394,7 @@ source = "https://sqlite.org/atomiccommit.html"
 profile = "default"
 phase = "phase 9: foreign keys, ATTACH, and multi-database commit"
 status = "pass"
-tests = ["rustdb-compat::a_two_database_commit_cleans_up_after_itself", "rustdb-compat::every_cut_of_a_two_database_commit_leaves_one_state_or_the_other", "rustdb-transaction::super_journal::tests::the_list_round_trips", "rustdb-transaction::super_journal::tests::committing_removes_the_file", "rustdb-transaction::super_journal::tests::it_is_removed_only_when_nobody_needs_it"]
+tests = ["inillucent-compat::a_two_database_commit_cleans_up_after_itself", "inillucent-compat::every_cut_of_a_two_database_commit_leaves_one_state_or_the_other", "inillucent-transaction::super_journal::tests::the_list_round_trips", "inillucent-transaction::super_journal::tests::committing_removes_the_file", "inillucent-transaction::super_journal::tests::it_is_removed_only_when_nobody_needs_it"]
 
 [[capability]]
 id = "wal.mode-switch"
@@ -1402,7 +1402,7 @@ source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
 status = "pass"
-tests = ["rustdb-compat::switching_to_wal_stamps_the_file_and_creates_the_log", "rustdb-compat::a_wal_database_reopens_in_wal_mode", "rustdb-compat::switching_out_of_wal_mode_leaves_a_rollback_database"]
+tests = ["inillucent-compat::switching_to_wal_stamps_the_file_and_creates_the_log", "inillucent-compat::a_wal_database_reopens_in_wal_mode", "inillucent-compat::switching_out_of_wal_mode_leaves_a_rollback_database"]
 
 [[capability]]
 id = "wal.frame-format"
@@ -1410,7 +1410,7 @@ source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
 status = "pass"
-tests = ["rustdb-compat::sqlite_reads_a_log_rustdb_wrote", "rustdb-compat::rustdb_extends_a_wal_database_sqlite_wrote", "rustdb-compat::sqlite_and_rustdb_share_one_log_at_the_same_time", "rustdb-transaction::wal::format::tests::a_header_round_trips_and_checks_itself", "rustdb-transaction::wal::format::tests::a_damaged_header_is_refused", "rustdb-transaction::wal::format::tests::the_magic_declares_the_byte_order", "rustdb-transaction::wal::format::tests::a_frame_only_verifies_in_its_own_place", "rustdb-transaction::wal::format::tests::a_commit_frame_carries_the_new_page_count", "rustdb-transaction::wal::format::tests::frame_offsets_follow_the_format", "rustdb-transaction::wal::format::tests::a_restart_changes_both_salts"]
+tests = ["inillucent-compat::sqlite_reads_a_log_inillucent_wrote", "inillucent-compat::inillucent_extends_a_wal_database_sqlite_wrote", "inillucent-compat::sqlite_and_inillucent_share_one_log_at_the_same_time", "inillucent-transaction::wal::format::tests::a_header_round_trips_and_checks_itself", "inillucent-transaction::wal::format::tests::a_damaged_header_is_refused", "inillucent-transaction::wal::format::tests::the_magic_declares_the_byte_order", "inillucent-transaction::wal::format::tests::a_frame_only_verifies_in_its_own_place", "inillucent-transaction::wal::format::tests::a_commit_frame_carries_the_new_page_count", "inillucent-transaction::wal::format::tests::frame_offsets_follow_the_format", "inillucent-transaction::wal::format::tests::a_restart_changes_both_salts"]
 
 [[capability]]
 id = "wal.index"
@@ -1418,7 +1418,7 @@ source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
 status = "pass"
-tests = ["rustdb-compat::a_wal_index_left_by_a_crash_is_rebuilt", "rustdb-compat::sqlite_and_rustdb_share_one_log_at_the_same_time", "rustdb-vfs::an_abandoned_wal_index_is_discarded", "rustdb-transaction::wal::index::tests::the_layout_is_the_one_the_format_specifies", "rustdb-transaction::wal::index::tests::frames_map_to_their_regions", "rustdb-transaction::wal::index::tests::a_header_round_trips_and_both_copies_must_agree", "rustdb-transaction::wal::index::tests::entries_are_found_by_page_and_bounded_by_the_snapshot", "rustdb-transaction::wal::index::tests::truncating_drops_the_entries_above_the_limit", "rustdb-transaction::wal::index::tests::reader_marks_round_trip_and_reset", "rustdb-transaction::wal::index::tests::the_second_region_holds_the_frames_past_the_first", "rustdb-transaction::wal::tests::the_index_is_rebuilt_from_the_log"]
+tests = ["inillucent-compat::a_wal_index_left_by_a_crash_is_rebuilt", "inillucent-compat::sqlite_and_inillucent_share_one_log_at_the_same_time", "inillucent-vfs::an_abandoned_wal_index_is_discarded", "inillucent-transaction::wal::index::tests::the_layout_is_the_one_the_format_specifies", "inillucent-transaction::wal::index::tests::frames_map_to_their_regions", "inillucent-transaction::wal::index::tests::a_header_round_trips_and_both_copies_must_agree", "inillucent-transaction::wal::index::tests::entries_are_found_by_page_and_bounded_by_the_snapshot", "inillucent-transaction::wal::index::tests::truncating_drops_the_entries_above_the_limit", "inillucent-transaction::wal::index::tests::reader_marks_round_trip_and_reset", "inillucent-transaction::wal::index::tests::the_second_region_holds_the_frames_past_the_first", "inillucent-transaction::wal::tests::the_index_is_rebuilt_from_the_log"]
 
 [[capability]]
 id = "wal.read-transactions"
@@ -1426,7 +1426,7 @@ source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
 status = "pass"
-tests = ["rustdb-compat::a_reader_keeps_its_snapshot_while_a_writer_commits", "rustdb-compat::a_second_connection_sees_the_commit", "rustdb-transaction::wal::tests::a_reader_keeps_its_snapshot_across_a_commit", "rustdb-transaction::wal::tests::a_committed_frame_is_visible_to_the_next_reader"]
+tests = ["inillucent-compat::a_reader_keeps_its_snapshot_while_a_writer_commits", "inillucent-compat::a_second_connection_sees_the_commit", "inillucent-transaction::wal::tests::a_reader_keeps_its_snapshot_across_a_commit", "inillucent-transaction::wal::tests::a_committed_frame_is_visible_to_the_next_reader"]
 
 [[capability]]
 id = "wal.write-transactions"
@@ -1434,7 +1434,7 @@ source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
 status = "pass"
-tests = ["rustdb-compat::a_committed_transaction_survives_reopening", "rustdb-compat::a_rolled_back_transaction_leaves_nothing", "rustdb-compat::every_explored_schedule_of_two_writers_is_serialisable", "rustdb-transaction::wal::tests::an_unpublished_append_is_not_a_commit", "rustdb-transaction::wal::tests::only_one_connection_writes", "rustdb-transaction::wal::tests::a_stale_writer_is_refused_with_busy_snapshot"]
+tests = ["inillucent-compat::a_committed_transaction_survives_reopening", "inillucent-compat::a_rolled_back_transaction_leaves_nothing", "inillucent-compat::every_explored_schedule_of_two_writers_is_serialisable", "inillucent-transaction::wal::tests::an_unpublished_append_is_not_a_commit", "inillucent-transaction::wal::tests::only_one_connection_writes", "inillucent-transaction::wal::tests::a_stale_writer_is_refused_with_busy_snapshot"]
 
 [[capability]]
 id = "wal.checkpoint.passive"
@@ -1442,7 +1442,7 @@ source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
 status = "pass"
-tests = ["rustdb-compat::a_checkpoint_moves_the_data_into_the_database", "rustdb-compat::a_checkpoint_does_not_pass_a_reader", "rustdb-compat::every_checkpoint_mode_does_what_it_says", "rustdb-transaction::wal::checkpoint::tests::a_checkpoint_moves_pages_into_the_database", "rustdb-transaction::wal::checkpoint::tests::a_reader_holds_the_checkpoint_back", "rustdb-transaction::wal::checkpoint::tests::a_second_checkpoint_has_nothing_to_do", "rustdb-transaction::wal::checkpoint::tests::a_checkpoint_shortens_a_database_that_shrank"]
+tests = ["inillucent-compat::a_checkpoint_moves_the_data_into_the_database", "inillucent-compat::a_checkpoint_does_not_pass_a_reader", "inillucent-compat::every_checkpoint_mode_does_what_it_says", "inillucent-transaction::wal::checkpoint::tests::a_checkpoint_moves_pages_into_the_database", "inillucent-transaction::wal::checkpoint::tests::a_reader_holds_the_checkpoint_back", "inillucent-transaction::wal::checkpoint::tests::a_second_checkpoint_has_nothing_to_do", "inillucent-transaction::wal::checkpoint::tests::a_checkpoint_shortens_a_database_that_shrank"]
 
 [[capability]]
 id = "wal.checkpoint.full"
@@ -1450,7 +1450,7 @@ source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
 status = "pass"
-tests = ["rustdb-compat::every_checkpoint_mode_does_what_it_says", "rustdb-compat::a_full_checkpoint_reports_a_reader_it_cannot_wait_out"]
+tests = ["inillucent-compat::every_checkpoint_mode_does_what_it_says", "inillucent-compat::a_full_checkpoint_reports_a_reader_it_cannot_wait_out"]
 
 [[capability]]
 id = "wal.checkpoint.restart"
@@ -1458,7 +1458,7 @@ source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
 status = "pass"
-tests = ["rustdb-compat::every_checkpoint_mode_does_what_it_says", "rustdb-compat::a_full_checkpoint_reports_a_reader_it_cannot_wait_out"]
+tests = ["inillucent-compat::every_checkpoint_mode_does_what_it_says", "inillucent-compat::a_full_checkpoint_reports_a_reader_it_cannot_wait_out"]
 
 [[capability]]
 id = "wal.checkpoint.truncate"
@@ -1466,7 +1466,7 @@ source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
 status = "pass"
-tests = ["rustdb-compat::every_checkpoint_mode_does_what_it_says", "rustdb-transaction::wal::checkpoint::tests::a_truncating_checkpoint_empties_the_log"]
+tests = ["inillucent-compat::every_checkpoint_mode_does_what_it_says", "inillucent-transaction::wal::checkpoint::tests::a_truncating_checkpoint_empties_the_log"]
 
 [[capability]]
 id = "wal.recovery"
@@ -1474,7 +1474,7 @@ source = "https://sqlite.org/wal.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
 status = "pass"
-tests = ["rustdb-compat::rustdb_recovers_a_log_a_killed_sqlite_left", "rustdb-compat::every_cut_of_a_wal_commit_is_recoverable", "rustdb-compat::every_cut_of_a_wal_checkpoint_is_recoverable", "rustdb-compat::every_short_write_of_a_wal_commit_is_recoverable", "rustdb-compat::every_io_error_of_a_wal_commit_is_recoverable", "rustdb-compat::a_crash_during_wal_recovery_is_idempotent", "rustdb-transaction::wal::tests::a_torn_tail_is_discarded"]
+tests = ["inillucent-compat::inillucent_recovers_a_log_a_killed_sqlite_left", "inillucent-compat::every_cut_of_a_wal_commit_is_recoverable", "inillucent-compat::every_cut_of_a_wal_checkpoint_is_recoverable", "inillucent-compat::every_short_write_of_a_wal_commit_is_recoverable", "inillucent-compat::every_io_error_of_a_wal_commit_is_recoverable", "inillucent-compat::a_crash_during_wal_recovery_is_idempotent", "inillucent-transaction::wal::tests::a_torn_tail_is_discarded"]
 
 [[capability]]
 id = "txn.busy-handler"
@@ -1482,7 +1482,7 @@ source = "https://sqlite.org/c3ref/funclist.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
 status = "pass"
-tests = ["rustdb-compat::a_busy_timeout_waits_for_the_writer", "rustdb-compat::a_second_writer_in_this_process_is_refused", "rustdb-compat::a_progress_handler_stops_a_long_statement", "rustdb-compat::an_interrupt_from_another_thread_stops_a_statement"]
+tests = ["inillucent-compat::a_busy_timeout_waits_for_the_writer", "inillucent-compat::a_second_writer_in_this_process_is_refused", "inillucent-compat::a_progress_handler_stops_a_long_statement", "inillucent-compat::an_interrupt_from_another_thread_stops_a_statement"]
 
 [[capability]]
 id = "txn.isolation"
@@ -1490,7 +1490,7 @@ source = "https://sqlite.org/isolation.html"
 profile = "default"
 phase = "phase 10: WAL and concurrent connection semantics"
 status = "pass"
-tests = ["rustdb-compat::a_reader_keeps_its_snapshot_while_a_writer_commits", "rustdb-compat::every_explored_schedule_of_two_writers_is_serialisable", "rustdb-compat::a_recorded_schedule_reproduces_its_run"]
+tests = ["inillucent-compat::a_reader_keeps_its_snapshot_while_a_writer_commits", "inillucent-compat::every_explored_schedule_of_two_writers_is_serialisable", "inillucent-compat::a_recorded_schedule_reproduces_its_run"]
 
 [[capability]]
 id = "functions.core"
@@ -1498,7 +1498,7 @@ source = "https://sqlite.org/lang_corefunc.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::core_functions_match_the_oracle"]
+tests = ["inillucent-compat::core_functions_match_the_oracle"]
 
 [[capability]]
 id = "functions.aggregate"
@@ -1506,7 +1506,7 @@ source = "https://sqlite.org/lang_aggfunc.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::windows_match_the_oracle", "rustdb-compat::core_functions_match_the_oracle"]
+tests = ["inillucent-compat::windows_match_the_oracle", "inillucent-compat::core_functions_match_the_oracle"]
 
 [[capability]]
 id = "functions.date-time"
@@ -1514,7 +1514,7 @@ source = "https://sqlite.org/lang_datefunc.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::date_and_time_functions_match_the_oracle"]
+tests = ["inillucent-compat::date_and_time_functions_match_the_oracle"]
 
 [[capability]]
 id = "functions.math"
@@ -1522,7 +1522,7 @@ source = "https://sqlite.org/lang_mathfunc.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::math_functions_match_the_oracle"]
+tests = ["inillucent-compat::math_functions_match_the_oracle"]
 
 [[capability]]
 id = "functions.json"
@@ -1530,7 +1530,7 @@ source = "https://sqlite.org/json1.html"
 profile = "default"
 phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
 status = "pass"
-tests = ["rustdb-compat::json_text_round_trips", "rustdb-compat::json5_input_is_accepted_and_converted", "rustdb-compat::jsonb_blobs_are_byte_identical", "rustdb-compat::construction_follows_the_json_mark", "rustdb-compat::paths_resolve_the_way_the_pinned_release_resolves_them", "rustdb-compat::a_bad_path_is_an_error", "rustdb-compat::editing_follows_presence", "rustdb-compat::documents_survive_a_round_trip_through_a_table"]
+tests = ["inillucent-compat::json_text_round_trips", "inillucent-compat::json5_input_is_accepted_and_converted", "inillucent-compat::jsonb_blobs_are_byte_identical", "inillucent-compat::construction_follows_the_json_mark", "inillucent-compat::paths_resolve_the_way_the_pinned_release_resolves_them", "inillucent-compat::a_bad_path_is_an_error", "inillucent-compat::editing_follows_presence", "inillucent-compat::documents_survive_a_round_trip_through_a_table"]
 
 [[capability]]
 id = "functions.window"
@@ -1538,7 +1538,7 @@ source = "https://sqlite.org/windowfunctions.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
-tests = ["rustdb-compat::windows_match_the_oracle"]
+tests = ["inillucent-compat::windows_match_the_oracle"]
 
 [[capability]]
 id = "pragma.schema"
@@ -1546,7 +1546,7 @@ source = "https://sqlite.org/pragma.html"
 profile = "default"
 phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
 status = "pass"
-tests = ["rustdb-compat::the_schema_pragmas_describe_the_schema", "rustdb-compat::table_list_reports_every_table", "rustdb-compat::the_connection_lists_are_a_subset_of_the_reference", "rustdb-compat::the_registers_match_the_engine"]
+tests = ["inillucent-compat::the_schema_pragmas_describe_the_schema", "inillucent-compat::table_list_reports_every_table", "inillucent-compat::the_connection_lists_are_a_subset_of_the_reference", "inillucent-compat::the_registers_match_the_engine"]
 
 [[capability]]
 id = "pragma.pager"
@@ -1554,7 +1554,7 @@ source = "https://sqlite.org/pragma.html"
 profile = "default"
 phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
 status = "pass"
-tests = ["rustdb-compat::the_pager_pragmas_describe_the_file", "rustdb-compat::an_unknown_pragma_is_silent"]
+tests = ["inillucent-compat::the_pager_pragmas_describe_the_file", "inillucent-compat::an_unknown_pragma_is_silent"]
 
 [[capability]]
 id = "pragma.integrity"
@@ -1562,7 +1562,7 @@ source = "https://sqlite.org/pragma.html"
 profile = "default"
 phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
 status = "pass"
-tests = ["rustdb-compat::the_integrity_checks_agree_on_a_healthy_file"]
+tests = ["inillucent-compat::the_integrity_checks_agree_on_a_healthy_file"]
 
 [[capability]]
 id = "pragma.query-only"
@@ -1570,7 +1570,7 @@ source = "https://sqlite.org/pragma.html"
 profile = "default"
 phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
 status = "pass"
-tests = ["rustdb-compat::the_policy_pragmas_are_flags"]
+tests = ["inillucent-compat::the_policy_pragmas_are_flags"]
 
 [[capability]]
 id = "vtab.contract"
@@ -1578,7 +1578,7 @@ source = "https://sqlite.org/vtab.html"
 profile = "default"
 phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
 status = "pass"
-tests = ["rustdb-compat::an_argument_and_a_where_are_the_same_thing", "rustdb-compat::an_unconsumed_predicate_is_still_tested", "rustdb-compat::a_module_can_satisfy_the_ordering", "rustdb-compat::a_virtual_table_joins", "rustdb-compat::hidden_columns_stay_hidden", "rustdb-compat::an_unknown_module_is_refused", "rustdb-compat::writes_reach_the_module"]
+tests = ["inillucent-compat::an_argument_and_a_where_are_the_same_thing", "inillucent-compat::an_unconsumed_predicate_is_still_tested", "inillucent-compat::a_module_can_satisfy_the_ordering", "inillucent-compat::a_virtual_table_joins", "inillucent-compat::hidden_columns_stay_hidden", "inillucent-compat::an_unknown_module_is_refused", "inillucent-compat::writes_reach_the_module"]
 
 [[capability]]
 id = "vtab.eponymous"
@@ -1586,7 +1586,7 @@ source = "https://sqlite.org/vtab.html"
 profile = "default"
 phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
 status = "pass"
-tests = ["rustdb-compat::a_table_valued_function_takes_its_arguments", "rustdb-compat::the_json_walkers_match_the_pinned_release", "rustdb-compat::a_walker_joins_a_real_table", "rustdb-compat::an_eponymous_only_module_cannot_be_created"]
+tests = ["inillucent-compat::a_table_valued_function_takes_its_arguments", "inillucent-compat::the_json_walkers_match_the_pinned_release", "inillucent-compat::a_walker_joins_a_real_table", "inillucent-compat::an_eponymous_only_module_cannot_be_created"]
 
 [[capability]]
 id = "ext.fts5.queries"
@@ -1594,7 +1594,7 @@ source = "https://sqlite.org/fts5.html"
 profile = "default"
 phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
 status = "pass"
-tests = ["rustdb-compat::the_shadow_tables_are_the_documented_ones", "rustdb-compat::the_content_table_holds_the_rows", "rustdb-compat::a_term_finds_its_rows", "rustdb-compat::a_phrase_requires_the_words_together", "rustdb-compat::the_operators_combine_matches", "rustdb-compat::a_prefix_matches_every_term_that_starts_with_it", "rustdb-compat::a_column_filter_restricts_the_match", "rustdb-compat::near_requires_the_terms_close_together", "rustdb-compat::the_index_follows_the_rows", "rustdb-compat::a_scan_and_a_rowid_lookup_need_no_match", "rustdb-compat::an_unindexed_column_is_stored_but_not_matched", "rustdb-compat::the_tokenizer_folds_case_and_splits_on_punctuation", "rustdb-compat::the_special_commands_are_accepted", "rustdb-compat::a_rebuild_restores_every_answer", "rustdb-compat::an_unknown_command_is_refused", "rustdb-compat::the_settings_are_written_to_the_config_table"]
+tests = ["inillucent-compat::the_shadow_tables_are_the_documented_ones", "inillucent-compat::the_content_table_holds_the_rows", "inillucent-compat::a_term_finds_its_rows", "inillucent-compat::a_phrase_requires_the_words_together", "inillucent-compat::the_operators_combine_matches", "inillucent-compat::a_prefix_matches_every_term_that_starts_with_it", "inillucent-compat::a_column_filter_restricts_the_match", "inillucent-compat::near_requires_the_terms_close_together", "inillucent-compat::the_index_follows_the_rows", "inillucent-compat::a_scan_and_a_rowid_lookup_need_no_match", "inillucent-compat::an_unindexed_column_is_stored_but_not_matched", "inillucent-compat::the_tokenizer_folds_case_and_splits_on_punctuation", "inillucent-compat::the_special_commands_are_accepted", "inillucent-compat::a_rebuild_restores_every_answer", "inillucent-compat::an_unknown_command_is_refused", "inillucent-compat::the_settings_are_written_to_the_config_table"]
 
 [[capability]]
 id = "ext.fts5.ranking"
@@ -1602,7 +1602,7 @@ source = "https://sqlite.org/fts5.html"
 profile = "default"
 phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
 status = "pass"
-tests = ["rustdb-compat::the_rank_is_bm25_and_ascends", "rustdb-ext::vtab::fts5::bm25::tests::the_score_is_negative", "rustdb-ext::vtab::fts5::bm25::tests::more_occurrences_score_better", "rustdb-ext::vtab::fts5::bm25::tests::a_shorter_row_scores_better", "rustdb-ext::vtab::fts5::bm25::tests::an_unmatched_row_scores_nothing"]
+tests = ["inillucent-compat::the_rank_is_bm25_and_ascends", "inillucent-ext::vtab::fts5::bm25::tests::the_score_is_negative", "inillucent-ext::vtab::fts5::bm25::tests::more_occurrences_score_better", "inillucent-ext::vtab::fts5::bm25::tests::a_shorter_row_scores_better", "inillucent-ext::vtab::fts5::bm25::tests::an_unmatched_row_scores_nothing"]
 
 [[capability]]
 id = "ext.rtree"
@@ -1610,7 +1610,7 @@ source = "https://sqlite.org/rtree.html"
 profile = "default"
 phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
 status = "pass"
-tests = ["rustdb-compat::every_row_round_trips", "rustdb-compat::a_bounded_query_answers_the_box", "rustdb-compat::a_split_tree_answers_every_query", "rustdb-compat::the_pinned_release_reads_what_rust_db_wrote", "rustdb-compat::rust_db_reads_what_the_pinned_release_wrote"]
+tests = ["inillucent-compat::every_row_round_trips", "inillucent-compat::a_bounded_query_answers_the_box", "inillucent-compat::a_split_tree_answers_every_query", "inillucent-compat::the_pinned_release_reads_what_inillucent_wrote", "inillucent-compat::inillucent_reads_what_the_pinned_release_wrote"]
 
 [[capability]]
 id = "capi.open-close"
@@ -1618,7 +1618,7 @@ source = "https://sqlite.org/c3ref/funclist.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
 status = "pass"
-tests = ["rustdb-compat::the_c_probe_agrees_with_the_pinned_engine", "rustdb-compat::every_exported_c_function_documents_itself", "rustdb-compat::the_registers_match_the_engine"]
+tests = ["inillucent-compat::the_c_probe_agrees_with_the_pinned_engine", "inillucent-compat::every_exported_c_function_documents_itself", "inillucent-compat::the_registers_match_the_engine"]
 
 [[capability]]
 id = "capi.prepare-step-finalize"
@@ -1626,7 +1626,7 @@ source = "https://sqlite.org/c3ref/funclist.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
 status = "pass"
-tests = ["rustdb-compat::the_c_probe_agrees_with_the_pinned_engine", "rustdb-compat::every_exported_c_function_documents_itself", "rustdb-compat::the_registers_match_the_engine"]
+tests = ["inillucent-compat::the_c_probe_agrees_with_the_pinned_engine", "inillucent-compat::every_exported_c_function_documents_itself", "inillucent-compat::the_registers_match_the_engine"]
 
 [[capability]]
 id = "capi.bind"
@@ -1634,7 +1634,7 @@ source = "https://sqlite.org/c3ref/funclist.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
 status = "pass"
-tests = ["rustdb-compat::the_c_probe_agrees_with_the_pinned_engine", "rustdb-compat::every_exported_c_function_documents_itself", "rustdb-compat::the_registers_match_the_engine"]
+tests = ["inillucent-compat::the_c_probe_agrees_with_the_pinned_engine", "inillucent-compat::every_exported_c_function_documents_itself", "inillucent-compat::the_registers_match_the_engine"]
 
 [[capability]]
 id = "capi.column-metadata"
@@ -1642,7 +1642,7 @@ source = "https://sqlite.org/c3ref/funclist.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
 status = "pass"
-tests = ["rustdb-compat::the_c_probe_agrees_with_the_pinned_engine", "rustdb-compat::every_exported_c_function_documents_itself", "rustdb-compat::the_registers_match_the_engine"]
+tests = ["inillucent-compat::the_c_probe_agrees_with_the_pinned_engine", "inillucent-compat::every_exported_c_function_documents_itself", "inillucent-compat::the_registers_match_the_engine"]
 
 [[capability]]
 id = "capi.hooks"
@@ -1650,7 +1650,7 @@ source = "https://sqlite.org/c3ref/funclist.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
 status = "pass"
-tests = ["rustdb-compat::the_c_probe_agrees_with_the_pinned_engine", "rustdb-compat::every_exported_c_function_documents_itself", "rustdb-compat::the_registers_match_the_engine"]
+tests = ["inillucent-compat::the_c_probe_agrees_with_the_pinned_engine", "inillucent-compat::every_exported_c_function_documents_itself", "inillucent-compat::the_registers_match_the_engine"]
 
 [[capability]]
 id = "capi.backup"
@@ -1658,7 +1658,7 @@ source = "https://sqlite.org/backup.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
 status = "pass"
-tests = ["rustdb-compat::the_c_probe_agrees_with_the_pinned_engine", "rustdb-compat::every_exported_c_function_documents_itself", "rustdb-compat::the_registers_match_the_engine"]
+tests = ["inillucent-compat::the_c_probe_agrees_with_the_pinned_engine", "inillucent-compat::every_exported_c_function_documents_itself", "inillucent-compat::the_registers_match_the_engine"]
 
 [[capability]]
 id = "capi.blob-io"
@@ -1666,7 +1666,7 @@ source = "https://sqlite.org/c3ref/blob_open.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
 status = "pass"
-tests = ["rustdb-compat::the_c_probe_agrees_with_the_pinned_engine", "rustdb-compat::every_exported_c_function_documents_itself", "rustdb-compat::the_registers_match_the_engine"]
+tests = ["inillucent-compat::the_c_probe_agrees_with_the_pinned_engine", "inillucent-compat::every_exported_c_function_documents_itself", "inillucent-compat::the_registers_match_the_engine"]
 
 [[capability]]
 id = "capi.serialize-deserialize"
@@ -1674,7 +1674,7 @@ source = "https://sqlite.org/c3ref/serialize.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
 status = "pass"
-tests = ["rustdb-compat::the_c_probe_agrees_with_the_pinned_engine", "rustdb-compat::every_exported_c_function_documents_itself", "rustdb-compat::the_registers_match_the_engine"]
+tests = ["inillucent-compat::the_c_probe_agrees_with_the_pinned_engine", "inillucent-compat::every_exported_c_function_documents_itself", "inillucent-compat::the_registers_match_the_engine"]
 
 [[capability]]
 id = "capi.custom-functions"
@@ -1682,7 +1682,7 @@ source = "https://sqlite.org/c3ref/funclist.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
 status = "pass"
-tests = ["rustdb-compat::the_c_probe_agrees_with_the_pinned_engine", "rustdb-compat::every_exported_c_function_documents_itself", "rustdb-compat::a_registered_scalar_is_callable", "rustdb-compat::a_registration_overrides_a_builtin", "rustdb-compat::a_registered_aggregate_reduces_a_group", "rustdb-compat::a_registered_collation_orders_rows", "rustdb-compat::a_declared_collation_reaches_the_column", "rustdb-compat::a_removed_function_is_unknown_again"]
+tests = ["inillucent-compat::the_c_probe_agrees_with_the_pinned_engine", "inillucent-compat::every_exported_c_function_documents_itself", "inillucent-compat::a_registered_scalar_is_callable", "inillucent-compat::a_registration_overrides_a_builtin", "inillucent-compat::a_registered_aggregate_reduces_a_group", "inillucent-compat::a_registered_collation_orders_rows", "inillucent-compat::a_declared_collation_reaches_the_column", "inillucent-compat::a_removed_function_is_unknown_again"]
 
 [[capability]]
 id = "capi.vfs-registration"
@@ -1690,7 +1690,7 @@ source = "https://sqlite.org/vfs.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
 status = "pass"
-tests = ["rustdb-compat::the_c_probe_agrees_with_the_pinned_engine", "rustdb-compat::every_exported_c_function_documents_itself", "rustdb-capi::vfs::tests::the_method_table_has_the_header_s_shape"]
+tests = ["inillucent-compat::the_c_probe_agrees_with_the_pinned_engine", "inillucent-compat::every_exported_c_function_documents_itself", "inillucent-capi::vfs::tests::the_method_table_has_the_header_s_shape"]
 
 [[capability]]
 id = "cli.dot-commands"
@@ -1698,7 +1698,7 @@ source = "https://sqlite.org/cli.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
 status = "pass"
-tests = ["rustdb-compat::the_catalog_commands_match", "rustdb-compat::a_dump_matches", "rustdb-compat::a_dump_round_trips", "rustdb-compat::an_import_matches", "rustdb-compat::output_redirection_matches", "rustdb-compat::errors_and_bail_match", "rustdb-compat::print_and_echo_match", "rustdb-compat::the_database_list_matches", "rustdb-compat::a_multi_line_statement_matches", "rustdb-compat::a_trigger_body_is_one_statement"]
+tests = ["inillucent-compat::the_catalog_commands_match", "inillucent-compat::a_dump_matches", "inillucent-compat::a_dump_round_trips", "inillucent-compat::an_import_matches", "inillucent-compat::output_redirection_matches", "inillucent-compat::errors_and_bail_match", "inillucent-compat::print_and_echo_match", "inillucent-compat::the_database_list_matches", "inillucent-compat::a_multi_line_statement_matches", "inillucent-compat::a_trigger_body_is_one_statement"]
 
 [[capability]]
 id = "cli.output-modes"
@@ -1706,70 +1706,70 @@ source = "https://sqlite.org/cli.html"
 profile = "default"
 phase = "phase 12: C ABI and CLI completion"
 status = "pass"
-tests = ["rustdb-compat::the_default_mode_matches", "rustdb-compat::headers_match", "rustdb-compat::every_output_mode_matches", "rustdb-compat::the_separator_and_null_value_match", "rustdb-compat::widths_match", "rustdb-cli::render::tests::the_default_is_a_pipe_separated_line", "rustdb-cli::render::tests::control_characters_are_escaped", "rustdb-cli::render::tests::quote_mode_writes_literals", "rustdb-cli::render::tests::every_mode_name_round_trips"]
+tests = ["inillucent-compat::the_default_mode_matches", "inillucent-compat::headers_match", "inillucent-compat::every_output_mode_matches", "inillucent-compat::the_separator_and_null_value_match", "inillucent-compat::widths_match", "inillucent-cli::render::tests::the_default_is_a_pipe_separated_line", "inillucent-cli::render::tests::control_characters_are_escaped", "inillucent-cli::render::tests::quote_mode_writes_literals", "inillucent-cli::render::tests::every_mode_name_round_trips"]
 
 [[capability]]
 id = "search.virtual-table"
 source = "https://sqlite.org/vtab.html"
 profile = "default"
-phase = "phase 13: transactional rust-db search and legacy migration"
+phase = "phase 13: transactional inillucent search and legacy migration"
 status = "pass"
 tests = [
-  "rustdb-compat::a_search_table_answers_a_match",
-  "rustdb-compat::the_two_spellings_agree",
-  "rustdb-compat::the_hit_count_is_the_modules_own_control",
-  "rustdb-compat::rank_orders_best_first",
-  "rustdb-compat::a_search_table_joins",
-  "rustdb-compat::the_auxiliary_functions_describe_the_hit",
-  "rustdb-compat::the_declaration_is_stored_and_read_back",
-  "rustdb-compat::an_unimplemented_metric_is_refused_at_create",
-  "rustdb-compat::a_vector_table_finds_the_nearest_row",
-  "rustdb-compat::a_vector_of_the_wrong_width_is_refused",
-  "rustdb-compat::a_lexical_table_refuses_a_vector",
-  "rustdb-compat::the_integrity_check_notices_an_edited_shadow_table",
-  "rustdb-compat::an_unknown_command_is_refused",
+  "inillucent-compat::a_search_table_answers_a_match",
+  "inillucent-compat::the_two_spellings_agree",
+  "inillucent-compat::the_hit_count_is_the_modules_own_control",
+  "inillucent-compat::rank_orders_best_first",
+  "inillucent-compat::a_search_table_joins",
+  "inillucent-compat::the_auxiliary_functions_describe_the_hit",
+  "inillucent-compat::the_declaration_is_stored_and_read_back",
+  "inillucent-compat::an_unimplemented_metric_is_refused_at_create",
+  "inillucent-compat::a_vector_table_finds_the_nearest_row",
+  "inillucent-compat::a_vector_of_the_wrong_width_is_refused",
+  "inillucent-compat::a_lexical_table_refuses_a_vector",
+  "inillucent-compat::the_integrity_check_notices_an_edited_shadow_table",
+  "inillucent-compat::an_unknown_command_is_refused",
 ]
 
 [[capability]]
 id = "search.transactional-visibility"
 source = "https://sqlite.org/isolation.html"
 profile = "default"
-phase = "phase 13: transactional rust-db search and legacy migration"
+phase = "phase 13: transactional inillucent search and legacy migration"
 status = "pass"
 tests = [
-  "rustdb-compat::a_rolled_back_write_is_invisible_to_the_search",
-  "rustdb-compat::a_committed_write_survives_reopening",
-  "rustdb-compat::a_savepoint_takes_back_what_it_covered",
-  "rustdb-compat::a_delete_removes_the_row_from_the_ranking",
-  "rustdb-compat::an_update_reindexes_the_row",
-  "rustdb-compat::one_transaction_publishes_one_commit_sequence",
-  "rustdb-compat::compaction_publishes_a_generation_and_changes_no_answer",
-  "rustdb-compat::an_old_generation_survives_until_it_is_dropped",
-  "rustdb-compat::a_rebuild_reproduces_the_index_from_the_rows",
-  "rustdb-compat::a_rollback_journal_commit_is_atomic_across_both",
-  "rustdb-compat::a_wal_commit_is_atomic_across_both",
-  "rustdb-compat::a_reported_write_failure_never_produces_a_mixture",
-  "rustdb-compat::a_crash_during_compaction_leaves_the_index_it_started_from",
+  "inillucent-compat::a_rolled_back_write_is_invisible_to_the_search",
+  "inillucent-compat::a_committed_write_survives_reopening",
+  "inillucent-compat::a_savepoint_takes_back_what_it_covered",
+  "inillucent-compat::a_delete_removes_the_row_from_the_ranking",
+  "inillucent-compat::an_update_reindexes_the_row",
+  "inillucent-compat::one_transaction_publishes_one_commit_sequence",
+  "inillucent-compat::compaction_publishes_a_generation_and_changes_no_answer",
+  "inillucent-compat::an_old_generation_survives_until_it_is_dropped",
+  "inillucent-compat::a_rebuild_reproduces_the_index_from_the_rows",
+  "inillucent-compat::a_rollback_journal_commit_is_atomic_across_both",
+  "inillucent-compat::a_wal_commit_is_atomic_across_both",
+  "inillucent-compat::a_reported_write_failure_never_produces_a_mixture",
+  "inillucent-compat::a_crash_during_compaction_leaves_the_index_it_started_from",
 ]
 
 [[capability]]
 id = "search.legacy-migration"
 source = "https://sqlite.org/fileformat2.html"
 profile = "default"
-phase = "phase 13: transactional rust-db search and legacy migration"
+phase = "phase 13: transactional inillucent search and legacy migration"
 status = "pass"
 tests = [
-  "rustdb-migrate::a_legacy_index_migrates_and_every_check_passes",
-  "rustdb-migrate::a_release_sized_index_migrates_and_every_check_passes",
-  "rustdb-migrate::the_manifest_is_the_rollback_record",
-  "rustdb-migrate::an_interrupted_migration_resumes",
-  "rustdb-migrate::a_source_that_moved_is_refused_rather_than_half_copied",
-  "rustdb-migrate::an_existing_destination_is_never_overwritten",
-  "rustdb-migrate::rolling_back_is_opening_the_source",
-  "rustdb-migrate::a_lexical_only_source_migrates",
-  "rustdb-migrate::the_two_implementations_answer_identically",
-  "rustdb-migrate::a_tombstone_removes_the_same_row_from_both",
-  "rustdb-migrate::a_replace_reindexes_on_both_sides",
+  "inillucent-migrate::a_legacy_index_migrates_and_every_check_passes",
+  "inillucent-migrate::a_release_sized_index_migrates_and_every_check_passes",
+  "inillucent-migrate::the_manifest_is_the_rollback_record",
+  "inillucent-migrate::an_interrupted_migration_resumes",
+  "inillucent-migrate::a_source_that_moved_is_refused_rather_than_half_copied",
+  "inillucent-migrate::an_existing_destination_is_never_overwritten",
+  "inillucent-migrate::rolling_back_is_opening_the_source",
+  "inillucent-migrate::a_lexical_only_source_migrates",
+  "inillucent-migrate::the_two_implementations_answer_identically",
+  "inillucent-migrate::a_tombstone_removes_the_same_row_from_both",
+  "inillucent-migrate::a_replace_reindexes_on_both_sides",
 ]
 
 [[capability]]
@@ -1779,17 +1779,17 @@ profile = "default"
 phase = "phase 14: performance qualification and release"
 status = "pass"
 tests = [
-  "rustdb-compat::perf::tests::the_digest_notices_a_different_answer",
-  "rustdb-compat::perf::tests::the_digest_is_the_published_function",
-  "rustdb-compat::perf::tests::one_integer_row_matches_the_reference_driver",
-  "rustdb-compat::perf::tests::a_disagreeing_workload_is_not_timed",
-  "rustdb-compat::perf::tests::one_failure_does_not_report_parity",
-  "rustdb-compat::perf::tests::a_zero_duration_is_not_a_ratio",
-  "rustdb-compat::perf::tests::the_bootstrap_brackets_the_centre",
-  "rustdb-compat::perf::tests::the_verdicts_are_the_declared_thresholds",
-  "rustdb-compat::perf::tests::a_win_and_a_loss_cancel",
-  "rustdb-compat::perf::tests::the_headline_weights_families",
-  "rustdb-compat::perf::tests::a_contract_must_sum_to_one",
+  "inillucent-compat::perf::tests::the_digest_notices_a_different_answer",
+  "inillucent-compat::perf::tests::the_digest_is_the_published_function",
+  "inillucent-compat::perf::tests::one_integer_row_matches_the_reference_driver",
+  "inillucent-compat::perf::tests::a_disagreeing_workload_is_not_timed",
+  "inillucent-compat::perf::tests::one_failure_does_not_report_parity",
+  "inillucent-compat::perf::tests::a_zero_duration_is_not_a_ratio",
+  "inillucent-compat::perf::tests::the_bootstrap_brackets_the_centre",
+  "inillucent-compat::perf::tests::the_verdicts_are_the_declared_thresholds",
+  "inillucent-compat::perf::tests::a_win_and_a_loss_cancel",
+  "inillucent-compat::perf::tests::the_headline_weights_families",
+  "inillucent-compat::perf::tests::a_contract_must_sum_to_one",
 ]
 
 [[capability]]
@@ -1799,21 +1799,21 @@ profile = "default"
 phase = "phase 14: performance qualification and release"
 status = "pass"
 tests = [
-  "rustdb-compat::the_covering_index_arm_changes_the_plan_and_not_the_answer",
-  "rustdb-compat::the_indexed_write_arm_changes_the_plan_and_not_the_outcome",
-  "rustdb-compat::the_ordered_walk_arm_changes_the_plan_and_not_the_answer",
-  "rustdb-compat::the_streaming_group_arm_changes_the_plan_and_not_the_answer",
-  "rustdb-compat::the_fused_bytecode_arm_changes_the_program_and_not_the_answer",
-  "rustdb-compat::the_checkpoint_arm_moves_the_same_pages",
-  "rustdb-vm::fuse::tests::a_scratch_copy_folds",
-  "rustdb-vm::fuse::tests::a_chain_of_copies_folds_once",
-  "rustdb-vm::fuse::tests::a_normalising_copy_is_not_folded",
-  "rustdb-vm::fuse::tests::a_register_read_twice_is_not_folded",
-  "rustdb-vm::fuse::tests::a_copy_that_is_a_jump_target_is_not_folded",
-  "rustdb-vm::fuse::tests::an_opcode_with_another_effect_is_not_folded",
-  "rustdb-vm::fuse::tests::jumps_are_retargeted",
-  "rustdb-compat::a_prepared_statement_keeps_the_arm_it_was_compiled_under",
-  "rustdb-compat::an_unknown_lever_is_ignored_rather_than_stored",
+  "inillucent-compat::the_covering_index_arm_changes_the_plan_and_not_the_answer",
+  "inillucent-compat::the_indexed_write_arm_changes_the_plan_and_not_the_outcome",
+  "inillucent-compat::the_ordered_walk_arm_changes_the_plan_and_not_the_answer",
+  "inillucent-compat::the_streaming_group_arm_changes_the_plan_and_not_the_answer",
+  "inillucent-compat::the_fused_bytecode_arm_changes_the_program_and_not_the_answer",
+  "inillucent-compat::the_checkpoint_arm_moves_the_same_pages",
+  "inillucent-vm::fuse::tests::a_scratch_copy_folds",
+  "inillucent-vm::fuse::tests::a_chain_of_copies_folds_once",
+  "inillucent-vm::fuse::tests::a_normalising_copy_is_not_folded",
+  "inillucent-vm::fuse::tests::a_register_read_twice_is_not_folded",
+  "inillucent-vm::fuse::tests::a_copy_that_is_a_jump_target_is_not_folded",
+  "inillucent-vm::fuse::tests::an_opcode_with_another_effect_is_not_folded",
+  "inillucent-vm::fuse::tests::jumps_are_retargeted",
+  "inillucent-compat::a_prepared_statement_keeps_the_arm_it_was_compiled_under",
+  "inillucent-compat::an_unknown_lever_is_ignored_rather_than_stored",
 ]
 
 [[capability]]
@@ -1823,12 +1823,12 @@ profile = "default"
 phase = "phase 14: performance qualification and release"
 status = "pass"
 tests = [
-  "rustdb-compat::history::tests::an_entry_round_trips",
-  "rustdb-compat::history::tests::a_regression_needs_two_runs",
-  "rustdb-compat::history::tests::a_small_movement_is_not_a_regression",
-  "rustdb-compat::history::tests::platforms_are_compared_separately",
-  "rustdb-compat::history::tests::the_dashboard_lists_every_run",
-  "rustdb-compat::history::tests::an_arm_is_its_own_series",
+  "inillucent-compat::history::tests::an_entry_round_trips",
+  "inillucent-compat::history::tests::a_regression_needs_two_runs",
+  "inillucent-compat::history::tests::a_small_movement_is_not_a_regression",
+  "inillucent-compat::history::tests::platforms_are_compared_separately",
+  "inillucent-compat::history::tests::the_dashboard_lists_every_run",
+  "inillucent-compat::history::tests::an_arm_is_its_own_series",
 ]
 
 [[capability]]
@@ -1894,7 +1894,7 @@ profile = "negative-parity"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
 expected = "syntax-error"
-tests = ["rustdb-compat::refusals_match_the_oracle", "rustdb-compat::joins_match_the_oracle"]
+tests = ["inillucent-compat::refusals_match_the_oracle", "inillucent-compat::joins_match_the_oracle"]
 
 [[capability]]
 id = "sql.negative.grant-revoke"
@@ -1903,7 +1903,7 @@ profile = "negative-parity"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
 expected = "syntax-error"
-tests = ["rustdb-compat::refusals_match_the_oracle"]
+tests = ["inillucent-compat::refusals_match_the_oracle"]
 
 [[capability]]
 id = "sql.negative.full-alter-table"
@@ -1912,7 +1912,7 @@ profile = "negative-parity"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
 expected = "syntax-error"
-tests = ["rustdb-compat::alter_table_rewrites_the_schema"]
+tests = ["inillucent-compat::alter_table_rewrites_the_schema"]
 
 [[capability]]
 id = "sql.negative.trigger-for-each-statement"
@@ -1921,7 +1921,7 @@ profile = "negative-parity"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
 expected = "syntax-error"
-tests = ["rustdb-compat::the_trigger_forms_sqlite_omits_are_refused"]
+tests = ["inillucent-compat::the_trigger_forms_sqlite_omits_are_refused"]
 
 [[capability]]
 id = "sql.negative.writable-views"
@@ -1930,7 +1930,7 @@ profile = "negative-parity"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
 status = "pass"
 expected = "syntax-error"
-tests = ["rustdb-compat::refusals_match_the_oracle", "rustdb-compat::views_match_the_oracle"]
+tests = ["inillucent-compat::refusals_match_the_oracle", "inillucent-compat::views_match_the_oracle"]
 
 [[capability]]
 id = "values.collation.registry"
@@ -1938,7 +1938,7 @@ source = "https://sqlite.org/datatype3.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
 status = "pass"
-tests = ["rustdb-value::collation::tests::the_registry_starts_with_the_built_ins", "rustdb-value::collation::tests::collation_names_resolve_case_insensitively", "rustdb-value::collation::tests::replacing_a_collation_invalidates_the_recorded_generation"]
+tests = ["inillucent-value::collation::tests::the_registry_starts_with_the_built_ins", "inillucent-value::collation::tests::collation_names_resolve_case_insensitively", "inillucent-value::collation::tests::replacing_a_collation_invalidates_the_recorded_generation"]
 
 [[capability]]
 id = "values.real-to-text"
@@ -1946,7 +1946,7 @@ source = "https://sqlite.org/datatype3.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
 status = "pass"
-tests = ["rustdb-value::numeric::tests::reals_render_the_way_sqlite_prints_them", "rustdb-value::numeric::tests::a_negative_zero_renders_without_its_sign", "rustdb-value::numeric::tests::rendering_and_rereading_a_real_is_stable", "rustdb-value::numeric::tests::rendering_a_real_round_trips_to_the_same_bits", "rustdb-value::numeric::tests::integers_render_and_scan_back_unchanged", "rustdb-compat::cast_matches_sqlite"]
+tests = ["inillucent-value::numeric::tests::reals_render_the_way_sqlite_prints_them", "inillucent-value::numeric::tests::a_negative_zero_renders_without_its_sign", "inillucent-value::numeric::tests::rendering_and_rereading_a_real_is_stable", "inillucent-value::numeric::tests::rendering_a_real_round_trips_to_the_same_bits", "inillucent-value::numeric::tests::integers_render_and_scan_back_unchanged", "inillucent-compat::cast_matches_sqlite"]
 
 [[capability]]
 id = "values.text-encodings"
@@ -1954,7 +1954,7 @@ source = "https://sqlite.org/pragma.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
 status = "pass"
-tests = ["rustdb-value::encoding::tests::header_codes_match_the_file_format", "rustdb-value::encoding::tests::an_unset_encoding_is_utf8_and_an_unknown_one_is_masked", "rustdb-value::encoding::tests::text_round_trips_through_both_utf16_forms", "rustdb-value::encoding::tests::the_two_utf16_forms_convert_into_each_other", "rustdb-value::encoding::tests::an_unpaired_surrogate_survives_conversion", "rustdb-value::encoding::tests::an_odd_trailing_byte_is_dropped", "rustdb-value::encoding::tests::malformed_utf8_decodes_to_the_replacement_character", "rustdb-value::numeric::tests::utf16_text_scans_as_ascii_and_refuses_wide_characters", "rustdb-value::record::tests::text_is_stored_in_the_database_encoding", "rustdb-compat::each_fixture_has_the_page_size_and_encoding_its_name_declares", "rustdb-compat::every_value_survives_a_round_trip_through_a_file"]
+tests = ["inillucent-value::encoding::tests::header_codes_match_the_file_format", "inillucent-value::encoding::tests::an_unset_encoding_is_utf8_and_an_unknown_one_is_masked", "inillucent-value::encoding::tests::text_round_trips_through_both_utf16_forms", "inillucent-value::encoding::tests::the_two_utf16_forms_convert_into_each_other", "inillucent-value::encoding::tests::an_unpaired_surrogate_survives_conversion", "inillucent-value::encoding::tests::an_odd_trailing_byte_is_dropped", "inillucent-value::encoding::tests::malformed_utf8_decodes_to_the_replacement_character", "inillucent-value::numeric::tests::utf16_text_scans_as_ascii_and_refuses_wide_characters", "inillucent-value::record::tests::text_is_stored_in_the_database_encoding", "inillucent-compat::each_fixture_has_the_page_size_and_encoding_its_name_declares", "inillucent-compat::every_value_survives_a_round_trip_through_a_file"]
 
 [[capability]]
 id = "values.subtype"
@@ -1962,7 +1962,7 @@ source = "https://sqlite.org/c3ref/funclist.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
 status = "pass"
-tests = ["rustdb-value::value::tests::a_subtype_is_present_only_when_it_was_set", "rustdb-value::value::tests::flags_union_and_difference_behave_as_a_set", "rustdb-value::value::tests::owning_a_value_drops_the_static_flag"]
+tests = ["inillucent-value::value::tests::a_subtype_is_present_only_when_it_was_set", "inillucent-value::value::tests::flags_union_and_difference_behave_as_a_set", "inillucent-value::value::tests::owning_a_value_drops_the_static_flag"]
 
 [[capability]]
 id = "values.record-validation"
@@ -1970,7 +1970,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
 status = "pass"
-tests = ["rustdb-value::record::tests::hostile_records_are_refused_rather_than_read", "rustdb-value::record::tests::a_record_that_is_one_byte_short_is_refused", "rustdb-value::record::tests::an_oversized_field_reports_too_big_rather_than_corruption", "rustdb-value::record::tests::parsing_arbitrary_bytes_never_panics"]
+tests = ["inillucent-value::record::tests::hostile_records_are_refused_rather_than_read", "inillucent-value::record::tests::a_record_that_is_one_byte_short_is_refused", "inillucent-value::record::tests::an_oversized_field_reports_too_big_rather_than_corruption", "inillucent-value::record::tests::parsing_arbitrary_bytes_never_panics"]
 
 [[capability]]
 id = "values.limits"
@@ -1978,7 +1978,7 @@ source = "https://sqlite.org/limits.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
 status = "pass"
-tests = ["rustdb-value::record::tests::an_oversized_field_reports_too_big_rather_than_corruption", "rustdb-compat::every_limit_matches_sqlites_default"]
+tests = ["inillucent-value::record::tests::an_oversized_field_reports_too_big_rather_than_corruption", "inillucent-compat::every_limit_matches_sqlites_default"]
 
 [[capability]]
 id = "values.no-panic-on-hostile-input"
@@ -1986,7 +1986,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 2: values, affinities, collations, and records"
 status = "pass"
-tests = ["rustdb-value::numeric::tests::scanning_arbitrary_bytes_never_panics", "rustdb-value::affinity::tests::classifying_arbitrary_bytes_never_panics", "rustdb-value::cast::tests::casting_arbitrary_bytes_never_panics", "rustdb-value::collation::tests::comparing_arbitrary_bytes_never_panics", "rustdb-value::encoding::tests::decoding_arbitrary_bytes_never_reads_past_the_end", "rustdb-value::record::tests::parsing_arbitrary_bytes_never_panics"]
+tests = ["inillucent-value::numeric::tests::scanning_arbitrary_bytes_never_panics", "inillucent-value::affinity::tests::classifying_arbitrary_bytes_never_panics", "inillucent-value::cast::tests::casting_arbitrary_bytes_never_panics", "inillucent-value::collation::tests::comparing_arbitrary_bytes_never_panics", "inillucent-value::encoding::tests::decoding_arbitrary_bytes_never_reads_past_the_end", "inillucent-value::record::tests::parsing_arbitrary_bytes_never_panics"]
 
 [[capability]]
 id = "storage.pager.sticky-errors"
@@ -1994,7 +1994,7 @@ source = "https://sqlite.org/rescode.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
 status = "pass"
-tests = ["rustdb-storage::pager::tests::an_io_failure_is_sticky", "rustdb-storage::pager::tests::dropping_a_pager_releases_its_lock", "rustdb-storage::pager::tests::ending_a_read_releases_every_unpinned_page", "rustdb-compat::a_damaged_database_is_refused_without_leaking_a_pin_or_a_lock", "rustdb-compat::a_corrupt_page_stops_a_scan_rather_than_being_skipped"]
+tests = ["inillucent-storage::pager::tests::an_io_failure_is_sticky", "inillucent-storage::pager::tests::dropping_a_pager_releases_its_lock", "inillucent-storage::pager::tests::ending_a_read_releases_every_unpinned_page", "inillucent-compat::a_damaged_database_is_refused_without_leaking_a_pin_or_a_lock", "inillucent-compat::a_corrupt_page_stops_a_scan_rather_than_being_skipped"]
 
 [[capability]]
 id = "storage.pager.read-only"
@@ -2002,7 +2002,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
 status = "pass"
-tests = ["rustdb-compat::reading_changes_nothing_on_disk", "rustdb-compat::a_traversal_returns_every_pin_and_lock"]
+tests = ["inillucent-compat::reading_changes_nothing_on_disk", "inillucent-compat::a_traversal_returns_every_pin_and_lock"]
 
 [[capability]]
 id = "storage.btree.page-validation"
@@ -2010,7 +2010,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
 status = "pass"
-tests = ["rustdb-storage::btree::tests::a_spoiled_page_is_refused", "rustdb-storage::btree::tests::a_bad_freeblock_chain_is_refused", "rustdb-storage::btree::tests::parsing_arbitrary_pages_never_panics", "rustdb-compat::a_damaged_database_is_refused_without_leaking_a_pin_or_a_lock"]
+tests = ["inillucent-storage::btree::tests::a_spoiled_page_is_refused", "inillucent-storage::btree::tests::a_bad_freeblock_chain_is_refused", "inillucent-storage::btree::tests::parsing_arbitrary_pages_never_panics", "inillucent-compat::a_damaged_database_is_refused_without_leaking_a_pin_or_a_lock"]
 
 [[capability]]
 id = "storage.schema.scan"
@@ -2018,7 +2018,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
 status = "pass"
-tests = ["rustdb-compat::every_valid_fixture_opens_and_scans", "rustdb-compat::a_without_rowid_table_scans_as_an_index_tree", "rustdb-compat::sqlite_and_rustdb_agree_on_every_row_of_every_fixture"]
+tests = ["inillucent-compat::every_valid_fixture_opens_and_scans", "inillucent-compat::a_without_rowid_table_scans_as_an_index_tree", "inillucent-compat::sqlite_and_inillucent_agree_on_every_row_of_every_fixture"]
 
 [[capability]]
 id = "storage.freelist.read"
@@ -2026,7 +2026,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
 status = "pass"
-tests = ["rustdb-compat::the_freelist_fixture_has_a_freelist_the_check_agrees_with"]
+tests = ["inillucent-compat::the_freelist_fixture_has_a_freelist_the_check_agrees_with"]
 
 [[capability]]
 id = "storage.pointer-map.read"
@@ -2034,7 +2034,7 @@ source = "https://sqlite.org/pragma.html#pragma_auto_vacuum"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
 status = "pass"
-tests = ["rustdb-storage::header::tests::pointer_map_pages_land_where_the_format_says", "rustdb-compat::the_vacuum_fixtures_have_pointer_maps_that_the_check_accounts_for"]
+tests = ["inillucent-storage::header::tests::pointer_map_pages_land_where_the_format_says", "inillucent-compat::the_vacuum_fixtures_have_pointer_maps_that_the_check_accounts_for"]
 
 [[capability]]
 id = "storage.without-rowid.read"
@@ -2042,7 +2042,7 @@ source = "https://sqlite.org/withoutrowid.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
 status = "pass"
-tests = ["rustdb-compat::a_without_rowid_table_scans_as_an_index_tree", "rustdb-compat::sqlite_and_rustdb_agree_on_every_row_of_every_fixture"]
+tests = ["inillucent-compat::a_without_rowid_table_scans_as_an_index_tree", "inillucent-compat::sqlite_and_inillucent_agree_on_every_row_of_every_fixture"]
 
 [[capability]]
 id = "harness.fixtures.corpus"
@@ -2050,7 +2050,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 3: read-only header, pager, page cache, and B-tree"
 status = "pass"
-tests = ["rustdb-compat::the_corpus_matches_its_manifest", "rustdb-compat::fixtures::tests::fixture_names_are_unique", "rustdb-compat::fixtures::tests::every_malformed_fixture_has_a_base", "rustdb-compat::fixtures::tests::page_sizes_are_readable_from_fixture_names", "rustdb-compat::fixtures::tests::damage_never_writes_past_the_end"]
+tests = ["inillucent-compat::the_corpus_matches_its_manifest", "inillucent-compat::fixtures::tests::fixture_names_are_unique", "inillucent-compat::fixtures::tests::every_malformed_fixture_has_a_base", "inillucent-compat::fixtures::tests::page_sizes_are_readable_from_fixture_names", "inillucent-compat::fixtures::tests::damage_never_writes_past_the_end"]
 
 [[capability]]
 id = "sql.parser.syntax-obligations"
@@ -2058,7 +2058,7 @@ source = "https://sqlite.org/lang.html"
 profile = "default"
 phase = "phase 5: lexer, parser, AST, and syntax parity"
 status = "pass"
-tests = ["rustdb-compat::the_register_is_structurally_sound", "rustdb-compat::every_published_production_has_evidence", "rustdb-compat::the_report_regenerates"]
+tests = ["inillucent-compat::the_register_is_structurally_sound", "inillucent-compat::every_published_production_has_evidence", "inillucent-compat::the_report_regenerates"]
 
 [[capability]]
 id = "sql.parser.differential-fuzzing"
@@ -2066,7 +2066,7 @@ source = "https://sqlite.org/lang.html"
 profile = "default"
 phase = "phase 5: lexer, parser, AST, and syntax parity"
 status = "pass"
-tests = ["rustdb-compat::differential_parser_fuzzing_finds_no_divergence", "rustdb-compat::the_register_agrees_with_the_pinned_release"]
+tests = ["inillucent-compat::differential_parser_fuzzing_finds_no_divergence", "inillucent-compat::the_register_agrees_with_the_pinned_release"]
 
 [[capability]]
 id = "sql.parser.limits"
@@ -2074,7 +2074,7 @@ source = "https://sqlite.org/limits.html"
 profile = "default"
 phase = "phase 5: lexer, parser, AST, and syntax parity"
 status = "pass"
-tests = ["rustdb-compat::adversarial_depth_is_refused_rather_than_crashing", "rustdb-compat::an_overlong_statement_is_refused", "rustdb-compat::parameters_are_numbered_the_way_sqlite_numbers_them"]
+tests = ["inillucent-compat::adversarial_depth_is_refused_rather_than_crashing", "inillucent-compat::an_overlong_statement_is_refused", "inillucent-compat::parameters_are_numbered_the_way_sqlite_numbers_them"]
 
 [[capability]]
 id = "sql.parser.purity"
@@ -2082,7 +2082,7 @@ source = "https://sqlite.org/c3ref/prepare.html"
 profile = "default"
 phase = "phase 5: lexer, parser, AST, and syntax parity"
 status = "pass"
-tests = ["rustdb-compat::the_parser_performs_no_io"]
+tests = ["inillucent-compat::the_parser_performs_no_io"]
 
 [[capability]]
 id = "sql.binder.name-resolution"
@@ -2090,7 +2090,7 @@ source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::an_unknown_name_fails_at_prepare_with_an_offset", "rustdb-compat::result_metadata_names_the_column_and_its_origin", "rustdb-sql::catalog_view::tests::the_rowid_spellings_resolve_unless_shadowed", "rustdb-compat::the_foundational_select_suite_is_green"]
+tests = ["inillucent-compat::an_unknown_name_fails_at_prepare_with_an_offset", "inillucent-compat::result_metadata_names_the_column_and_its_origin", "inillucent-sql::catalog_view::tests::the_rowid_spellings_resolve_unless_shadowed", "inillucent-compat::the_foundational_select_suite_is_green"]
 
 [[capability]]
 id = "sql.binder.collation-precedence"
@@ -2098,7 +2098,7 @@ source = "https://sqlite.org/datatype3.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-vm::sorter::tests::the_distinct_set_uses_each_columns_collation"]
+tests = ["inillucent-compat::the_foundational_select_suite_is_green", "inillucent-vm::sorter::tests::the_distinct_set_uses_each_columns_collation"]
 
 [[capability]]
 id = "sql.select.distinct-basic"
@@ -2106,7 +2106,7 @@ source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-compat::distinct_emits_each_row_once", "rustdb-vm::sorter::tests::the_distinct_set_folds_nulls_together"]
+tests = ["inillucent-compat::the_foundational_select_suite_is_green", "inillucent-compat::distinct_emits_each_row_once", "inillucent-vm::sorter::tests::the_distinct_set_folds_nulls_together"]
 
 [[capability]]
 id = "sql.select.aggregates-basic"
@@ -2114,7 +2114,7 @@ source = "https://sqlite.org/lang_aggfunc.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-compat::aggregates_answer_over_the_whole_table", "rustdb-vm::aggregate::tests::an_empty_group_gives_five_different_answers", "rustdb-vm::aggregate::tests::sum_stays_integral_until_it_cannot", "rustdb-vm::aggregate::tests::summation_is_compensated", "rustdb-vm::aggregate::tests::distinct_counts_nulls_once"]
+tests = ["inillucent-compat::the_foundational_select_suite_is_green", "inillucent-compat::aggregates_answer_over_the_whole_table", "inillucent-vm::aggregate::tests::an_empty_group_gives_five_different_answers", "inillucent-vm::aggregate::tests::sum_stays_integral_until_it_cannot", "inillucent-vm::aggregate::tests::summation_is_compensated", "inillucent-vm::aggregate::tests::distinct_counts_nulls_once"]
 
 [[capability]]
 id = "sql.select.group-by-basic"
@@ -2122,7 +2122,7 @@ source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-compat::group_by_groups_and_having_filters"]
+tests = ["inillucent-compat::the_foundational_select_suite_is_green", "inillucent-compat::group_by_groups_and_having_filters"]
 
 [[capability]]
 id = "sql.select.inner-join-basic"
@@ -2130,7 +2130,7 @@ source = "https://sqlite.org/lang_select.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::the_foundational_select_suite_is_green"]
+tests = ["inillucent-compat::the_foundational_select_suite_is_green"]
 
 [[capability]]
 id = "sql.functions.scalar-core"
@@ -2138,7 +2138,7 @@ source = "https://sqlite.org/lang_corefunc.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::the_foundational_select_suite_is_green", "rustdb-vm::builtin::tests::length_counts_characters_in_text_and_bytes_in_a_blob", "rustdb-vm::builtin::tests::substr_counts_from_one_and_accepts_negatives", "rustdb-vm::builtin::tests::scalar_max_is_null_if_any_argument_is_null", "rustdb-vm::builtin::tests::round_rounds_half_away_from_zero", "rustdb-vm::builtin::tests::quote_renders_sql_literals", "rustdb-vm::builtin::tests::the_reflective_builtins_do_not_propagate_null"]
+tests = ["inillucent-compat::the_foundational_select_suite_is_green", "inillucent-vm::builtin::tests::length_counts_characters_in_text_and_bytes_in_a_blob", "inillucent-vm::builtin::tests::substr_counts_from_one_and_accepts_negatives", "inillucent-vm::builtin::tests::scalar_max_is_null_if_any_argument_is_null", "inillucent-vm::builtin::tests::round_rounds_half_away_from_zero", "inillucent-vm::builtin::tests::quote_renders_sql_literals", "inillucent-vm::builtin::tests::the_reflective_builtins_do_not_propagate_null"]
 
 [[capability]]
 id = "vm.bytecode.verifier"
@@ -2146,7 +2146,7 @@ source = "https://sqlite.org/opcode.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::the_verifier_rejects_generated_invalid_programs", "rustdb-compat::the_verifier_rejects_mismatched_operands", "rustdb-vm::verify::tests::a_jump_outside_the_program_is_rejected", "rustdb-vm::verify::tests::reading_an_unwritten_register_is_rejected", "rustdb-vm::verify::tests::a_cursor_kind_mismatch_is_rejected", "rustdb-vm::verify::tests::an_unopened_cursor_is_rejected"]
+tests = ["inillucent-compat::the_verifier_rejects_generated_invalid_programs", "inillucent-compat::the_verifier_rejects_mismatched_operands", "inillucent-vm::verify::tests::a_jump_outside_the_program_is_rejected", "inillucent-vm::verify::tests::reading_an_unwritten_register_is_rejected", "inillucent-vm::verify::tests::a_cursor_kind_mismatch_is_rejected", "inillucent-vm::verify::tests::an_unopened_cursor_is_rejected"]
 
 [[capability]]
 id = "vm.statement.lifecycle"
@@ -2154,7 +2154,7 @@ source = "https://sqlite.org/c3ref/step.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::a_statement_steps_to_done_and_stays_there", "rustdb-compat::reset_runs_again_and_keeps_bindings", "rustdb-compat::two_statements_interleave_on_one_connection", "rustdb-compat::lifecycle_and_metadata_match_the_oracle"]
+tests = ["inillucent-compat::a_statement_steps_to_done_and_stays_there", "inillucent-compat::reset_runs_again_and_keeps_bindings", "inillucent-compat::two_statements_interleave_on_one_connection", "inillucent-compat::lifecycle_and_metadata_match_the_oracle"]
 
 [[capability]]
 id = "vm.statement.interrupt"
@@ -2162,7 +2162,7 @@ source = "https://sqlite.org/c3ref/interrupt.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::an_interrupt_stops_a_running_statement"]
+tests = ["inillucent-compat::an_interrupt_stops_a_running_statement"]
 
 [[capability]]
 id = "api.rust.bind-step-reset"
@@ -2170,7 +2170,7 @@ source = "https://sqlite.org/c3ref/bind_blob.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::every_class_binds_and_returns", "rustdb-compat::an_unknown_parameter_is_a_misuse", "rustdb-compat::parameters_bind_and_rebind"]
+tests = ["inillucent-compat::every_class_binds_and_returns", "inillucent-compat::an_unknown_parameter_is_a_misuse", "inillucent-compat::parameters_bind_and_rebind"]
 
 [[capability]]
 id = "api.rust.read-only-open"
@@ -2178,7 +2178,7 @@ source = "https://sqlite.org/c3ref/open.html"
 profile = "default"
 phase = "phase 6: catalog, binder, expression VM, and read-only SELECT"
 status = "pass"
-tests = ["rustdb-compat::reading_changes_no_byte_of_the_file", "rustdb-compat::a_long_session_changes_no_byte", "rustdb-compat::every_page_size_and_encoding_reads_the_same_rows"]
+tests = ["inillucent-compat::reading_changes_no_byte_of_the_file", "inillucent-compat::a_long_session_changes_no_byte", "inillucent-compat::every_page_size_and_encoding_reads_the_same_rows"]
 
 [[capability]]
 id = "txn.journal-modes"
@@ -2186,7 +2186,7 @@ source = "https://sqlite.org/pragma.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-transaction::journal::tests::journal_modes_round_trip_and_declare_their_crash_contract", "rustdb-transaction::journal::tests::every_disk_mode_leaves_a_journal_that_is_not_hot", "rustdb-transaction::journal::tests::journal_mode_off_writes_nothing", "rustdb-transaction::journal::tests::journal_mode_memory_can_still_roll_back_in_process", "rustdb-compat::power_loss_at_every_cut_point_of_a_truncate_commit", "rustdb-compat::power_loss_at_every_cut_point_of_a_persist_commit"]
+tests = ["inillucent-transaction::journal::tests::journal_modes_round_trip_and_declare_their_crash_contract", "inillucent-transaction::journal::tests::every_disk_mode_leaves_a_journal_that_is_not_hot", "inillucent-transaction::journal::tests::journal_mode_off_writes_nothing", "inillucent-transaction::journal::tests::journal_mode_memory_can_still_roll_back_in_process", "inillucent-compat::power_loss_at_every_cut_point_of_a_truncate_commit", "inillucent-compat::power_loss_at_every_cut_point_of_a_persist_commit"]
 
 [[capability]]
 id = "txn.crash-matrix"
@@ -2194,7 +2194,7 @@ source = "https://sqlite.org/atomiccommit.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::power_loss_at_every_cut_point_of_a_full_commit", "rustdb-compat::power_loss_at_every_cut_point_of_a_truncate_commit", "rustdb-compat::power_loss_at_every_cut_point_of_a_persist_commit", "rustdb-compat::a_short_write_at_every_cut_point_is_recoverable", "rustdb-compat::a_full_disk_at_every_cut_point_is_recoverable", "rustdb-compat::an_io_error_at_every_cut_point_is_recoverable"]
+tests = ["inillucent-compat::power_loss_at_every_cut_point_of_a_full_commit", "inillucent-compat::power_loss_at_every_cut_point_of_a_truncate_commit", "inillucent-compat::power_loss_at_every_cut_point_of_a_persist_commit", "inillucent-compat::a_short_write_at_every_cut_point_is_recoverable", "inillucent-compat::a_full_disk_at_every_cut_point_is_recoverable", "inillucent-compat::an_io_error_at_every_cut_point_is_recoverable"]
 
 [[capability]]
 id = "txn.change-counters"
@@ -2202,7 +2202,7 @@ source = "https://sqlite.org/c3ref/changes.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::crud_matches_sqlite", "rustdb-compat::conflict_algorithms_match_sqlite", "rustdb-compat::the_counters_report_what_a_statement_changed", "rustdb-transaction::state::tests::a_rolled_back_statement_does_not_publish_its_count"]
+tests = ["inillucent-compat::crud_matches_sqlite", "inillucent-compat::conflict_algorithms_match_sqlite", "inillucent-compat::the_counters_report_what_a_statement_changed", "inillucent-transaction::state::tests::a_rolled_back_statement_does_not_publish_its_count"]
 
 [[capability]]
 id = "txn.autocommit"
@@ -2210,7 +2210,7 @@ source = "https://sqlite.org/c3ref/get_autocommit.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::transactions_match_sqlite", "rustdb-compat::a_rolled_back_transaction_changes_nothing", "rustdb-transaction::state::tests::a_new_connection_is_in_autocommit", "rustdb-transaction::state::tests::a_savepoint_outside_a_transaction_starts_a_transaction"]
+tests = ["inillucent-compat::transactions_match_sqlite", "inillucent-compat::a_rolled_back_transaction_changes_nothing", "inillucent-transaction::state::tests::a_new_connection_is_in_autocommit", "inillucent-transaction::state::tests::a_savepoint_outside_a_transaction_starts_a_transaction"]
 
 [[capability]]
 id = "txn.resource-failures"
@@ -2218,7 +2218,7 @@ source = "https://sqlite.org/rescode.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::an_allocation_failure_at_every_point_leaves_the_database_alone", "rustdb-compat::a_full_disk_at_every_cut_point_is_recoverable", "rustdb-compat::an_io_error_at_every_cut_point_is_recoverable"]
+tests = ["inillucent-compat::an_allocation_failure_at_every_point_leaves_the_database_alone", "inillucent-compat::a_full_disk_at_every_cut_point_is_recoverable", "inillucent-compat::an_io_error_at_every_cut_point_is_recoverable"]
 
 [[capability]]
 id = "txn.writer-contention"
@@ -2226,7 +2226,7 @@ source = "https://sqlite.org/lockingv3.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::a_second_writer_is_refused_while_the_first_holds_the_reservation"]
+tests = ["inillucent-compat::a_second_writer_is_refused_while_the_first_holds_the_reservation"]
 
 [[capability]]
 id = "sql.constraints.not-null"
@@ -2234,7 +2234,7 @@ source = "https://sqlite.org/lang_createtable.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::not_null_and_check_are_enforced", "rustdb-compat::constraint_codes_match_sqlite"]
+tests = ["inillucent-compat::not_null_and_check_are_enforced", "inillucent-compat::constraint_codes_match_sqlite"]
 
 [[capability]]
 id = "sql.constraints.check"
@@ -2242,7 +2242,7 @@ source = "https://sqlite.org/lang_createtable.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::not_null_and_check_are_enforced", "rustdb-compat::constraint_codes_match_sqlite"]
+tests = ["inillucent-compat::not_null_and_check_are_enforced", "inillucent-compat::constraint_codes_match_sqlite"]
 
 [[capability]]
 id = "sql.constraints.unique"
@@ -2250,7 +2250,7 @@ source = "https://sqlite.org/lang_createtable.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::a_unique_constraint_refuses_a_duplicate", "rustdb-compat::constraint_codes_match_sqlite", "rustdb-compat::conflict_algorithms_match_sqlite"]
+tests = ["inillucent-compat::a_unique_constraint_refuses_a_duplicate", "inillucent-compat::constraint_codes_match_sqlite", "inillucent-compat::conflict_algorithms_match_sqlite"]
 
 [[capability]]
 id = "sql.drop-index"
@@ -2258,7 +2258,7 @@ source = "https://sqlite.org/lang_dropindex.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::index_maintenance_matches_sqlite"]
+tests = ["inillucent-compat::index_maintenance_matches_sqlite"]
 
 [[capability]]
 id = "sql.rowid-allocation"
@@ -2266,7 +2266,7 @@ source = "https://sqlite.org/lang_createtable.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::rowid_allocation_matches_sqlite"]
+tests = ["inillucent-compat::rowid_allocation_matches_sqlite"]
 
 [[capability]]
 id = "catalog.schema-table-query"
@@ -2274,7 +2274,7 @@ source = "https://sqlite.org/schematab.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::the_schema_table_matches_sqlite"]
+tests = ["inillucent-compat::the_schema_table_matches_sqlite"]
 
 [[capability]]
 id = "interop.cross-write"
@@ -2282,7 +2282,7 @@ source = "https://sqlite.org/fileformat2.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::sqlite_reads_what_rustdb_wrote", "rustdb-compat::sqlite_writes_on_top_of_rustdb_and_rustdb_reads_it_back", "rustdb-compat::rustdb_writes_into_a_database_sqlite_built", "rustdb-compat::dropping_a_table_leaves_a_database_sqlite_accepts", "rustdb-compat::a_rolled_back_transaction_is_invisible_to_sqlite"]
+tests = ["inillucent-compat::sqlite_reads_what_inillucent_wrote", "inillucent-compat::sqlite_writes_on_top_of_inillucent_and_inillucent_reads_it_back", "inillucent-compat::inillucent_writes_into_a_database_sqlite_built", "inillucent-compat::dropping_a_table_leaves_a_database_sqlite_accepts", "inillucent-compat::a_rolled_back_transaction_is_invisible_to_sqlite"]
 
 [[capability]]
 id = "txn.hooks"
@@ -2290,4 +2290,4 @@ source = "https://sqlite.org/c3ref/update_hook.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["rustdb-compat::the_update_hook_reports_every_changed_row", "rustdb-compat::a_commit_hook_can_veto_a_commit", "rustdb-compat::the_rollback_hook_fires_on_an_explicit_rollback"]
+tests = ["inillucent-compat::the_update_hook_reports_every_changed_row", "inillucent-compat::a_commit_hook_can_veto_a_commit", "inillucent-compat::the_rollback_hook_fires_on_an_explicit_rollback"]

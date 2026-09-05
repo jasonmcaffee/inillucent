@@ -8,7 +8,7 @@
 *.cache
 *.vectors
 corpus.jsonl
-/index.rustdb/
+/index.inillucent/
 
 # Editor and operating system noise.
 .DS_Store

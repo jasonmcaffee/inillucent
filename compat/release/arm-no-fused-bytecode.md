@@ -1,8 +1,8 @@
-# rust-db performance scorecard
+# inillucent performance scorecard
 
 Label `no-fused-bytecode (no fused-bytecode)`, platform `windows-x86_64`, 30 paired rounds per scale, bootstrap seed 17900001. **Arm: `fused-bytecode` switched off.** This is one side of an A/B pair and not the shipped engine; compare it with the run whose arm is empty.
 
-Both engines read the same plan file. The ratio is SQLite over rust-db, so **above one means rust-db is faster**. A workload whose two engines returned different answers is reported as a correctness failure and is not timed.
+Both engines read the same plan file. The ratio is SQLite over inillucent, so **above one means inillucent is faster**. A workload whose two engines returned different answers is reported as a correctness failure and is not timed.
 
 ## Fair configuration
 
@@ -36,7 +36,7 @@ Weighted geometric mean **0.310x**, 95% interval [0.308, 0.318]. The release bou
 
 ### By workload
 
-| workload | family | rust-db median | SQLite median | ratio | 95% interval | samples |
+| workload | family | inillucent median | SQLite median | ratio | 95% interval | samples |
 |---|---|---:|---:|---:|---|---:|
 | `prepare.trivial` | `open.prepare` | 29.84 ms | 1.89 ms | 0.056x | [0.056, 0.060] | 30 |
 | `prepare.point` | `open.prepare` | 61.13 ms | 54.82 ms | 0.891x | [0.872, 0.915] | 30 |

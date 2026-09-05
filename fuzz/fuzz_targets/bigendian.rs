@@ -6,7 +6,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use rustdb_base::bytes;
+use inillucent_base::bytes;
 
 fuzz_target!(|data: &[u8]| {
     for offset in 0..data.len().saturating_add(9) {

@@ -1,13 +1,13 @@
 # Dependency and provenance policy
 
-rust-db is a first-party database engine. This file records what that means in
+inillucent is a first-party database engine. This file records what that means in
 practice, what a production crate is allowed to depend on, and how a new
 dependency is argued for. It is not advisory: `docs/invariants/layering.toml`
-encodes the same rules and `cargo test -p rustdb-compat` fails on a violation.
+encodes the same rules and `cargo test -p inillucent-compat` fails on a violation.
 
 ## The ownership rule
 
-An implementation agent must be able to build and test rust-db with **no SQLite,
+An implementation agent must be able to build and test inillucent with **no SQLite,
 Turso, libSQL, DuckDB, or other database engine installed**.
 
 Production crates may not link to, invoke, translate, vendor, or generate code
@@ -28,16 +28,16 @@ per crate, naming the crates that may use it. The categories are:
 | Category | Why it is infrastructure |
 |---|---|
 | error and data plumbing | carries values around; decides nothing about SQL or storage |
-| synchronization | wrapped behind rust-db types; the locking protocol is ours |
-| OS boundary | `libc` and `windows-sys`, used only inside `rustdb-vfs`, every call audited |
-| hash and checksum | the algorithm and its on-disk use are specified by rust-db |
+| synchronization | wrapped behind inillucent types; the locking protocol is ours |
+| OS boundary | `libc` and `windows-sys`, used only inside `inillucent-vfs`, every call audited |
+| hash and checksum | the algorithm and its on-disk use are specified by inillucent |
 | async adaptation | the core owns polling and cancellation; an adapter only drives it |
 | unicode helpers | tables and normalisation data; never SQL or collation semantics |
 | numeric kernels | the existing retrieval engine's maths; no database behaviour |
 | test-only | may not enter a production feature graph at all |
 
-Two of the phase 1 crates take no third-party dependency at all. `rustdb-base`
-has none, and `rustdb-vfs` has only the operating-system boundary. That is
+Two of the phase 1 crates take no third-party dependency at all. `inillucent-base`
+has none, and `inillucent-vfs` has only the operating-system boundary. That is
 deliberate: everything above them inherits their failure modes, so they should
 have as few as possible.
 
@@ -54,7 +54,7 @@ check matches on substrings so a rename does not slip past.
    first-party crate that may use it.
 2. Record here, in one or two sentences, why it is infrastructure rather than
    delegated database behaviour.
-3. Run `cargo run -p rustdb-compat --bin rustdb-manifest -- layering`.
+3. Run `cargo run -p inillucent-compat --bin inillucent-manifest -- layering`.
 
 A crate that is not in the allow-list is refused even when it is harmless. The
 policy is an allow-list rather than a deny-list because the interesting mistake
@@ -65,8 +65,8 @@ that quietly implements a piece of the engine".
 
 | Crate | Category | Reason |
 |---|---|---|
-| `libc` | OS boundary | `fcntl` byte-range locking and nothing else; `rustdb-vfs` only |
-| `windows-sys` | OS boundary | `LockFileEx`, `GetFileInformationByHandle`, `BCryptGenRandom`; `rustdb-vfs` only |
+| `libc` | OS boundary | `fcntl` byte-range locking and nothing else; `inillucent-vfs` only |
+| `windows-sys` | OS boundary | `LockFileEx`, `GetFileInformationByHandle`, `BCryptGenRandom`; `inillucent-vfs` only |
 
 Nothing else was added. SHA-256, SHA3-256, CRC-32, the WAL checksum, the varint
 codec, the deterministic generator, the TOML subset reader and the JSON the
@@ -91,7 +91,7 @@ it is.
 
 ## Unsafe code
 
-`rustdb-base` forbids `unsafe` outright. `rustdb-vfs` permits it only in
+`inillucent-base` forbids `unsafe` outright. `inillucent-vfs` permits it only in
 `src/os/windows.rs` and `src/os/unix.rs`, where every block carries a written
 safety argument and no raw pointer outlives the call it was made for. Every
 other production crate is expected to forbid it; a crate that needs an exception

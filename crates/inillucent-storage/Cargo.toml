@@ -1,0 +1,26 @@
+[package]
+name = "inillucent-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SQLite file codec, pager, page cache, B-trees, overflow chains, freelist, and vacuum."
+
+[dependencies]
+inillucent-base = { workspace = true }
+inillucent-value = { workspace = true }
+inillucent-vfs = { workspace = true }
+
+[features]
+# Brackets the halves of a page edit and records them in `inillucent-base::probe`.
+# Off by default and never on in a shipped build.
+opcode-probe = []
+
+[target.'cfg(loom)'.dev-dependencies]
+# Only ever in a `RUSTFLAGS="--cfg loom"` build, so it cannot reach the
+# production graph the dependency-direction check walks.
+loom = "0.7"
+
+[lints.rust]
+# `loom` is set by the operator, not by a Cargo feature, because it has to
+# replace the atomics in every crate in the build at once.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

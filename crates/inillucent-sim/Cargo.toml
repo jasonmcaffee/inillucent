@@ -1,0 +1,10 @@
+[package]
+name = "inillucent-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Deterministic simulator VFS, failure injection, crash modelling, and replay artifacts."
+
+[dependencies]
+inillucent-base = { workspace = true }
+inillucent-vfs = { workspace = true }

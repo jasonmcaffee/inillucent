@@ -1,8 +1,8 @@
-# rust-db run-time limits.
+# inillucent run-time limits.
 #
-# This file is the source of truth; crates/rustdb-base/build.rs generates the
+# This file is the source of truth; crates/inillucent-base/build.rs generates the
 # Rust table from it. Each row is a limit SQLite exposes through
-# sqlite3_limit(), with the compile-time default rust-db ships and the hard
+# sqlite3_limit(), with the compile-time default inillucent ships and the hard
 # ceiling a caller may not raise the limit past.
 #
 # Values follow https://sqlite.org/limits.html for SQLite 3.53.4. A limit whose

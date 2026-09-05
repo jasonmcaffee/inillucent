@@ -2,34 +2,34 @@
 resolver = "2"
 members = [
     # Phase 1 foundation.
-    "crates/rustdb-base",
-    "crates/rustdb-vfs",
-    "crates/rustdb-sim",
+    "crates/inillucent-base",
+    "crates/inillucent-vfs",
+    "crates/inillucent-sim",
     # Engine layers, filled in by later phases.
-    "crates/rustdb-value",
+    "crates/inillucent-value",
     # The rearchitected engine (task-1816).
-    "crates/rustdb-pool",
-    "crates/rustdb-tree",
-    "crates/rustdb-sqlite-reader",
-    "crates/rustdb-scalar",
-    "crates/rustdb-exec",
-    "crates/rustdb-storage",
-    "crates/rustdb-transaction",
-    "crates/rustdb-catalog",
-    "crates/rustdb-sql",
-    "crates/rustdb-ext",
-    "crates/rustdb-vm",
-    "crates/rustdb-session",
-    "crates/rustdb",
-    "crates/rustdb-capi",
-    "crates/rustdb-cli",
-    "crates/rustdb-search",
-    "crates/rustdb-migrate",
+    "crates/inillucent-pool",
+    "crates/inillucent-tree",
+    "crates/inillucent-sqlite-reader",
+    "crates/inillucent-scalar",
+    "crates/inillucent-exec",
+    "crates/inillucent-storage",
+    "crates/inillucent-transaction",
+    "crates/inillucent-catalog",
+    "crates/inillucent-sql",
+    "crates/inillucent-ext",
+    "crates/inillucent-vm",
+    "crates/inillucent-session",
+    "crates/inillucent",
+    "crates/inillucent-capi",
+    "crates/inillucent-cli",
+    "crates/inillucent-search",
+    "crates/inillucent-migrate",
     # Existing retrieval engine and its grading harness.
-    "crates/rustdb-core",
-    "crates/rustdb-bench",
+    "crates/inillucent-core",
+    "crates/inillucent-bench",
     # Test-only assurance tooling.
-    "crates/rustdb-compat",
+    "crates/inillucent-compat",
 ]
 
 # The release profile, which is part of the fairness contract rather than a
@@ -55,28 +55,28 @@ license = "MIT"
 [workspace.dependencies]
 # ---------------------------------------------------------------------------
 # First-party crates. Every internal edge is declared here so that the layering
-# test in rustdb-compat can read one table instead of walking the file system.
+# test in inillucent-compat can read one table instead of walking the file system.
 # ---------------------------------------------------------------------------
-rustdb-base = { path = "crates/rustdb-base" }
-rustdb-vfs = { path = "crates/rustdb-vfs" }
-rustdb-sim = { path = "crates/rustdb-sim" }
-rustdb-value = { path = "crates/rustdb-value" }
-rustdb-pool = { path = "crates/rustdb-pool" }
-rustdb-tree = { path = "crates/rustdb-tree" }
-rustdb-sqlite-reader = { path = "crates/rustdb-sqlite-reader" }
-rustdb-scalar = { path = "crates/rustdb-scalar" }
-rustdb-exec = { path = "crates/rustdb-exec" }
-rustdb-storage = { path = "crates/rustdb-storage" }
-rustdb-transaction = { path = "crates/rustdb-transaction" }
-rustdb-catalog = { path = "crates/rustdb-catalog" }
-rustdb-sql = { path = "crates/rustdb-sql" }
-rustdb-ext = { path = "crates/rustdb-ext" }
-rustdb-vm = { path = "crates/rustdb-vm" }
-rustdb-session = { path = "crates/rustdb-session" }
-rustdb = { path = "crates/rustdb" }
-rustdb-core = { path = "crates/rustdb-core" }
-rustdb-search = { path = "crates/rustdb-search" }
-rustdb-migrate = { path = "crates/rustdb-migrate" }
+inillucent-base = { path = "crates/inillucent-base" }
+inillucent-vfs = { path = "crates/inillucent-vfs" }
+inillucent-sim = { path = "crates/inillucent-sim" }
+inillucent-value = { path = "crates/inillucent-value" }
+inillucent-pool = { path = "crates/inillucent-pool" }
+inillucent-tree = { path = "crates/inillucent-tree" }
+inillucent-sqlite-reader = { path = "crates/inillucent-sqlite-reader" }
+inillucent-scalar = { path = "crates/inillucent-scalar" }
+inillucent-exec = { path = "crates/inillucent-exec" }
+inillucent-storage = { path = "crates/inillucent-storage" }
+inillucent-transaction = { path = "crates/inillucent-transaction" }
+inillucent-catalog = { path = "crates/inillucent-catalog" }
+inillucent-sql = { path = "crates/inillucent-sql" }
+inillucent-ext = { path = "crates/inillucent-ext" }
+inillucent-vm = { path = "crates/inillucent-vm" }
+inillucent-session = { path = "crates/inillucent-session" }
+inillucent = { path = "crates/inillucent" }
+inillucent-core = { path = "crates/inillucent-core" }
+inillucent-search = { path = "crates/inillucent-search" }
+inillucent-migrate = { path = "crates/inillucent-migrate" }
 
 # ---------------------------------------------------------------------------
 # Third-party dependencies. docs/dependency-policy.md records why each one is

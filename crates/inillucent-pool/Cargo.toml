@@ -1,0 +1,13 @@
+[package]
+name = "inillucent-pool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Buffer pool: frames, version latches, pointer swizzling, cooling FIFO, writeback, free map, blob extents"
+
+[dependencies]
+inillucent-base = { workspace = true }
+inillucent-vfs = { workspace = true }
+
+[dev-dependencies]
+inillucent-sim = { workspace = true }

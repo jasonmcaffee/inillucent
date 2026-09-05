@@ -54,7 +54,7 @@ not looking. The distinct set was a linear scan of every row it had already kept
 three hundred million comparisons. It now keeps an ordered index of what it has seen and
 binary-searches it: 447 ms became 18.5 ms, on identical instruction and allocation
 counts, which is how you can tell the change was the search structure and not the plan.
-The ordering it searches by is proved in `rustdb-vm` to say `Equal` exactly where the
+The ordering it searches by is proved in `inillucent-vm` to say `Equal` exactly where the
 equality it replaced said `true`.
 
 ## What it still shows, and has not been changed

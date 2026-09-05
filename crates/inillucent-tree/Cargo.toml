@@ -1,0 +1,14 @@
+[package]
+name = "inillucent-tree"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "B+tree over PAX leaves: the storage layer of the rearchitected engine"
+
+[dependencies]
+inillucent-base = { workspace = true }
+inillucent-pool = { workspace = true }
+inillucent-value = { workspace = true }
+
+[dev-dependencies]
+inillucent-vfs = { workspace = true }

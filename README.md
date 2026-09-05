@@ -1,4 +1,4 @@
-# rust-db
+# inillucent
 
 An embedded vector search engine for retrieval augmented generation, over a corpus of workplace documents: pages, chat messages, issues, source files, design files and boards. It does the job of PostgreSQL with the pgvector extension plus `llama.cpp` serving an embedding model over HTTP, in one library that runs inside the calling process. That combination is also the baseline it is graded against.
 
@@ -9,8 +9,8 @@ does not change it. See [The relational engine](#the-relational-engine) below.
 
 Two crates carry the retrieval engine:
 
-- `rustdb-core` is the engine. It links no database client. Storage with dictionary encoded filter columns, cosine over L2 normalized vectors, exhaustive search, an HNSW graph with traversal that honours a predicate, int8 scalar quantization, an inverted index with BM25 that weights a hit by how much of the query it holds and by how tightly those terms sit together, three fusion methods, and persistence.
-- `rustdb-bench` is the grading harness. It builds the corpus, embeds it, loads it into PostgreSQL, and grades both engines. It is the only crate that talks to PostgreSQL, because its job is to query the baseline engine.
+- `inillucent-core` is the engine. It links no database client. Storage with dictionary encoded filter columns, cosine over L2 normalized vectors, exhaustive search, an HNSW graph with traversal that honours a predicate, int8 scalar quantization, an inverted index with BM25 that weights a hit by how much of the query it holds and by how tightly those terms sit together, three fusion methods, and persistence.
+- `inillucent-bench` is the grading harness. It builds the corpus, embeds it, loads it into PostgreSQL, and grades both engines. It is the only crate that talks to PostgreSQL, because its job is to query the baseline engine.
 
 The baseline is graded in two configurations. One runs pgvector's extension defaults, to show what the extension does before anyone configures it, and nothing is scored against it. The other is a correctly configured PostgreSQL, and it is the one every comparison is scored against. Its scan settings are `hnsw.iterative_scan = relaxed_order` with `hnsw.ef_search = 400`, `hnsw.max_scan_tuples = 40000` and `hnsw.scan_mem_multiplier = 4` on a filtered search, and `hnsw.iterative_scan = off` with `hnsw.ef_search = 100` on an unfiltered one, where the other two are reset rather than left set so a query cannot inherit a filtered query's scan budget on the same connection. The iterative scan is off on an unfiltered query because it changes neither the rows nor the latency there, the only remaining clause excluding 298 chunks of 186,827. `hnsw.scan_mem_multiplier` is the one most easily missed: left at the pgvector default of 1 the iterative scan exhausts its memory budget and stops early, returning as few as 30 rows of 50.
 
@@ -26,10 +26,10 @@ Every family declares one measurement that is judged; the rest are diagnostics t
 do not vote. A comparison is called *better* only when a 95% paired bootstrap interval over the
 per-query scores clears both zero and a practical threshold declared before the run. The one
 *equivalent* is a source where both engines reach recall 1.000 within the filter and neither can do
-better. The one *inconclusive* is confluence filtered recall, where rust-db leads 0.9960 to 0.9760
+better. The one *inconclusive* is confluence filtered recall, where inillucent leads 0.9960 to 0.9760
 and the interval runs 0.0000 to 0.0440 on 25 queries — a lead the run declines to call a win.
 
-| family | measurement | rust-db | best pgvector |
+| family | measurement | inillucent | best pgvector |
 |---|---|---|---|
 | Hybrid | document identity, nDCG@10 | **0.9756** | 0.8148 |
 | Hybrid | natural language headings, nDCG@10 | **0.7477** | 0.6271 |
@@ -44,13 +44,13 @@ and the interval runs 0.0000 to 0.0440 on 25 queries — a lead the run declines
 | Latency | no predicate, p50 | **0.704 ms** | 1.519 ms |
 
 The abstention row is the one worth pausing on. Given a question that nothing in the corpus answers,
-the baseline returns a confident top result every single time; rust-db does it on one query in two
+the baseline returns a confident top result every single time; inillucent does it on one query in two
 hundred. That is not a ranking difference, it is the difference between a system that can say "no"
 and one that cannot — and it is the failure that never announces itself, because ten confident
 looking passages about nothing look exactly like ten good ones.
 
-The full card, including every diagnostic, every interval and every measurement that is a rust-db
-setting rather than a comparison, is in [rust-db-scorecard.md](rust-db-scorecard.md).
+The full card, including every diagnostic, every interval and every measurement that is a inillucent
+setting rather than a comparison, is in [inillucent-scorecard.md](inillucent-scorecard.md).
 
 ### What the lexical side does that plain BM25 does not
 
@@ -60,7 +60,7 @@ size. `to_tsquery` joins query terms with `&`, so a chunk missing one word never
 that mentions the same words in different paragraphs. Scoring any term with BM25 finds far more of
 the right chunks — 49.5 rows of 50 against 6.7 — and puts them lower.
 
-rust-db keeps the recall and takes the two properties as gradients rather than gates:
+inillucent keeps the recall and takes the two properties as gradients rather than gates:
 
 | setting | what it does | default |
 |---|---|---|
@@ -87,7 +87,7 @@ A `grade` rebuilds the index every time and the build is most of the run. Nothin
 settings needs a new index, so `tune` builds one and sweeps every setting against it:
 
 ```sh
-./target/release/rustdb-bench tune --cache ~/.cache/rust-db-corpus/corpus.cache \
+./target/release/inillucent-bench tune --cache ~/.cache/inillucent-corpus/corpus.cache \
   --coverages 0,1,2,3 --proximities 0,0.5,1 --weights 0.2,0.35,0.5 \
   --prefixes true,false --tiers true,false --seed-offset 100
 ```
@@ -185,7 +185,7 @@ So the engine stopped asking one number to do both. Every hit carries a `score`,
 fusion ranks best, and a `confidence`, always computed on absolute bounds whatever fusion ordered
 the list. The abstention threshold is set on confidence, the ranking is decided by score, and each
 engine is calibrated on its own scale against held-out answerable queries — so the comparison
-assumes nothing about a rust-db score and a `ts_rank_cd` score meaning the same thing.
+assumes nothing about a inillucent score and a `ts_rank_cd` score meaning the same thing.
 
 ## The relational engine
 
@@ -225,32 +225,32 @@ ANALYZE;
 EXPLAIN QUERY PLAN SELECT * FROM people WHERE score > 5;
 ```
 
-A file rust-db writes is one SQLite opens, reads, `PRAGMA integrity_check`s and keeps writing to,
+A file inillucent writes is one SQLite opens, reads, `PRAGMA integrity_check`s and keeps writing to,
 and the reverse holds too - both directions are tested against the pinned 3.53.4 build rather than
 asserted.
 
 | crate | what it holds |
 |---|---|
-| `rustdb-base` | checked big-endian codecs, the varint, WAL and CRC-32 checksums, page arithmetic, fallible buffers, run-time limits, the stable error table |
-| `rustdb-vfs` | the VFS contract plus Windows, POSIX and in-memory implementations, the SQLite byte-range locking protocol, and shared memory |
-| `rustdb-value` | values, storage classes, affinity, collation, comparison, and the record codec |
-| `rustdb-storage` | the file header, the pager and its page cache, the four B-tree page kinds, cursors, mutation and balancing, the freelist, pointer maps and vacuum |
-| `rustdb-transaction` | the rollback journal and its five modes, the four durability levels, hot-journal recovery, and the connection's transaction machine |
-| `rustdb-sql` | the lexer, the parser, the arena AST, the binder, and the physical plan |
-| `rustdb-catalog` | `sqlite_schema` read and written, the immutable snapshot, and the schema cookie |
-| `rustdb-vm` | the opcode set, the compiler, the bytecode verifier, and the machine |
-| `rustdb-session` | connections, prepared statements, the statement lifecycle, and DDL |
-| `rustdb` | the public facade |
-| `rustdb-sim` | a deterministic simulator: layered media, torn and dropped sectors, failure injection, a replayable scheduler, event traces |
-| `rustdb-compat` | the parity manifest, the report that gates a release, the oracle protocol, and the dependency-direction check |
+| `inillucent-base` | checked big-endian codecs, the varint, WAL and CRC-32 checksums, page arithmetic, fallible buffers, run-time limits, the stable error table |
+| `inillucent-vfs` | the VFS contract plus Windows, POSIX and in-memory implementations, the SQLite byte-range locking protocol, and shared memory |
+| `inillucent-value` | values, storage classes, affinity, collation, comparison, and the record codec |
+| `inillucent-storage` | the file header, the pager and its page cache, the four B-tree page kinds, cursors, mutation and balancing, the freelist, pointer maps and vacuum |
+| `inillucent-transaction` | the rollback journal and its five modes, the four durability levels, hot-journal recovery, and the connection's transaction machine |
+| `inillucent-sql` | the lexer, the parser, the arena AST, the binder, and the physical plan |
+| `inillucent-catalog` | `sqlite_schema` read and written, the immutable snapshot, and the schema cookie |
+| `inillucent-vm` | the opcode set, the compiler, the bytecode verifier, and the machine |
+| `inillucent-session` | connections, prepared statements, the statement lifecycle, and DDL |
+| `inillucent` | the public facade |
+| `inillucent-sim` | a deterministic simulator: layered media, torn and dropped sectors, failure injection, a replayable scheduler, event traces |
+| `inillucent-compat` | the parity manifest, the report that gates a release, the oracle protocol, and the dependency-direction check |
 
-Four crates exist as declared layers with no behaviour yet - `rustdb-ext`, `rustdb-capi`,
-`rustdb-cli` and `rustdb-search`. They are there so the dependency graph is enforced from the first
+Four crates exist as declared layers with no behaviour yet - `inillucent-ext`, `inillucent-capi`,
+`inillucent-cli` and `inillucent-search`. They are there so the dependency graph is enforced from the first
 commit rather than retrofitted once the edges exist.
 
 ### The compatibility report
 
-`compat/sqlite-3.53.4.toml` carries one row per capability rust-db owes, including the ones nothing
+`compat/sqlite-3.53.4.toml` carries one row per capability inillucent owes, including the ones nothing
 has been written for yet: 263 rows, of which 217 pass and 46 are missing. That is the denominator on
 purpose. A capability with no row cannot be reported as owed.
 
@@ -260,10 +260,10 @@ test behind it, a source link that is not in `compat/sources.toml`, or a release
 recorded platform evidence.
 
 ```bash
-cargo run -p rustdb-compat --bin rustdb-manifest -- check      # validate the manifest
-cargo run -p rustdb-compat --bin rustdb-evidence               # run the suites, record results
-cargo run -p rustdb-compat --bin rustdb-manifest -- report     # regenerate compat-report.{json,md}
-cargo run -p rustdb-compat --bin rustdb-manifest -- layering   # check the dependency contract
+cargo run -p inillucent-compat --bin inillucent-manifest -- check      # validate the manifest
+cargo run -p inillucent-compat --bin inillucent-evidence               # run the suites, record results
+cargo run -p inillucent-compat --bin inillucent-manifest -- report     # regenerate compat-report.{json,md}
+cargo run -p inillucent-compat --bin inillucent-manifest -- layering   # check the dependency contract
 ```
 
 ### The oracle
@@ -274,7 +274,7 @@ bash tools/sqlite-reference.sh      # Linux
 ```
 
 Both download the pinned amalgamation and shell, verify them against the SHA3-256 sums sqlite.org
-publishes - using rust-db's own SHA3 - and compile `compat/oracle/sqlite_driver.c` into a driver that
+publishes - using inillucent's own SHA3 - and compile `compat/oracle/sqlite_driver.c` into a driver that
 speaks the harness protocol. Values cross that protocol as tagged bytes: an integer as its
 big-endian hex, a double as its exact IEEE-754 bits, text and blobs as their bytes. A decimal
 rendering would compare the harness's formatting rather than the two engines.
@@ -304,31 +304,31 @@ None of this text is committed here. It is downloaded and rebuilt on demand, whi
 ./scripts/fetch-public-corpus.sh
 
 # 2. Turn it into the compact files the builder reads.
-python3 scripts/extract-wikipedia.py ~/.cache/rust-db-corpus/raw ~/.cache/rust-db-corpus/derived
-python3 scripts/extract-github.py    ~/.cache/rust-db-corpus/raw ~/.cache/rust-db-corpus/derived
+python3 scripts/extract-wikipedia.py ~/.cache/inillucent-corpus/raw ~/.cache/inillucent-corpus/derived
+python3 scripts/extract-github.py    ~/.cache/inillucent-corpus/raw ~/.cache/inillucent-corpus/derived
 
 # 3. Assemble the corpus: 186,786 chunks across 39,366 documents.
-./target/release/rustdb-bench synth-build --out ~/.cache/rust-db-corpus/corpus.jsonl
+./target/release/inillucent-bench synth-build --out ~/.cache/inillucent-corpus/corpus.jsonl
 
 # 4. Check it supports every graded scenario, and that those scenarios can be
 #    answered rather than only generated. Do this before step 5, which is the
 #    step that costs hours: skipping it cost two complete embedding runs.
-./target/release/rustdb-bench synth-check --corpus ~/.cache/rust-db-corpus/corpus.jsonl
+./target/release/inillucent-bench synth-check --corpus ~/.cache/inillucent-corpus/corpus.jsonl
 
 # 5. Embed it. On the processor this is eight to twelve hours for the full corpus;
 #    on one GPU it is minutes. Resumable either way: rerun the same command and it
 #    continues where it stopped.
 export ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib
-./target/release/rustdb-bench synth-embed \
-  --corpus  ~/.cache/rust-db-corpus/corpus.jsonl \
-  --cache   ~/.cache/rust-db-corpus/corpus.cache \
+./target/release/inillucent-bench synth-embed \
+  --corpus  ~/.cache/inillucent-corpus/corpus.jsonl \
+  --cache   ~/.cache/inillucent-corpus/corpus.cache \
   --devices cuda:0,cuda:1 --batch 64 --window-batches 16
 
 # 6. Load the same rows and the same vectors into PostgreSQL for the baseline.
-createdb -h 127.0.0.1 -p 5433 rustdb_synth
-./target/release/rustdb-bench synth-load \
-  --corpus ~/.cache/rust-db-corpus/corpus.jsonl \
-  --cache  ~/.cache/rust-db-corpus/corpus.cache
+createdb -h 127.0.0.1 -p 5433 inillucent_synth
+./target/release/inillucent-bench synth-load \
+  --corpus ~/.cache/inillucent-corpus/corpus.jsonl \
+  --cache  ~/.cache/inillucent-corpus/corpus.cache
 ```
 
 `--scale` on `synth-build` multiplies every source's document and chunk count while keeping the proportions between sources, so a smaller corpus can be built for a faster cycle and a larger one to test beyond this size. Embedding time scales with it.
@@ -342,22 +342,22 @@ cargo build --release
 export ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib
 
 # Build an index and report what it built.
-./target/release/rustdb-bench build --cache ~/.cache/rust-db-corpus/corpus.cache --quantized
+./target/release/inillucent-bench build --cache ~/.cache/inillucent-corpus/corpus.cache --quantized
 
-# Run every scenario against rust-db and both pgvector configurations, and write
+# Run every scenario against inillucent and both pgvector configurations, and write
 # the score card. Four and a half minutes on the full corpus, half of it the index
 # build. The ranking settings all have flags, and all default to the measured winners.
-./target/release/rustdb-bench grade --cache ~/.cache/rust-db-corpus/corpus.cache --per-source 30
+./target/release/inillucent-bench grade --cache ~/.cache/inillucent-corpus/corpus.cache --per-source 30
 
-# Iterate on rust-db alone, skipping the two pgvector configurations.
-./target/release/rustdb-bench grade --cache ~/.cache/rust-db-corpus/corpus.cache --rustdb-only
+# Iterate on inillucent alone, skipping the two pgvector configurations.
+./target/release/inillucent-bench grade --cache ~/.cache/inillucent-corpus/corpus.cache --inillucent-only
 ```
 
-`grade` writes `rust-db-scorecard.md` and, beside it, the same measurements as JSON so the card can be re-rendered or re-judged without repaying the run.
+`grade` writes `inillucent-scorecard.md` and, beside it, the same measurements as JSON so the card can be re-rendered or re-judged without repaying the run.
 
 A prefix of this corpus is not a sample of it. Chunks are numbered in ingestion order and that order correlates with source, so `--limit N` gives nearly all one source. `strided_sample` exists for this reason, and `synth-check` asserts the property still holds.
 
-Defaults: `--database-url postgres://127.0.0.1:5433/rustdb_synth`, `--model-dir ~/.cache/rust-db-models/nomic-embed-text-v1.5`.
+Defaults: `--database-url postgres://127.0.0.1:5433/inillucent_synth`, `--model-dir ~/.cache/inillucent-models/nomic-embed-text-v1.5`.
 
 ## Tests
 
@@ -372,7 +372,7 @@ The corpus builder's tests cover what makes a corpus usable for grading rather t
 The relational engine's crates are tested separately, and quickly:
 
 ```sh
-cargo test -p rustdb-base -p rustdb-vfs -p rustdb-sim -p rustdb-compat
+cargo test -p inillucent-base -p inillucent-vfs -p inillucent-sim -p inillucent-compat
 ```
 
 They cover what a storage layer gets quietly wrong. Every codec is exercised with hundreds of
@@ -387,8 +387,8 @@ so "the simulator behaves like a disk" is a checked claim rather than a hope.
 ## Using the engine
 
 ```rust
-use rustdb_core::filter::Filter;
-use rustdb_core::index::{Index, IndexConfig};
+use inillucent_core::filter::Filter;
+use inillucent_core::index::{Index, IndexConfig};
 
 let mut index = Index::new(IndexConfig { dims: 768, quantized: true, ..Default::default() });
 index.add(chunks, &vectors);   // one vector per chunk
@@ -412,11 +412,11 @@ It needs the weights and the ONNX runtime library present:
 ```sh
 brew install onnxruntime
 export ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib
-# weights in ~/.cache/rust-db-models/nomic-embed-text-v1.5/
+# weights in ~/.cache/inillucent-models/nomic-embed-text-v1.5/
 #   model.onnx  tokenizer.json  tokenizer_config.json
 #   special_tokens_map.json  config.json
 
-./target/release/rustdb-bench embed-check --cache ~/.cache/rust-db-corpus/corpus.cache
+./target/release/inillucent-bench embed-check --cache ~/.cache/inillucent-corpus/corpus.cache
 ```
 
 `embed-check` asks whether the vectors in the cache were made from the text in the cache. That is a real failure this pipeline can produce: the text is assembled in one step and embedding takes hours in another, so rebuilding the text without rerunning the embedding pairs every vector with the wrong chunk. Nothing would look broken, the index would build and queries would return rows, and every retrieval number would be quietly wrong.
@@ -432,7 +432,7 @@ order, so chunk N is record N whatever ran it, and the run stays resumable.
 The CUDA execution provider is registered with `error_on_failure`. `ort` defaults to logging the
 failure and falling back to the processor, which is the worst outcome available here: a run meant
 to take an hour silently becomes one that takes a day and nothing in the output says why. Set
-`RUSTDB_CUDA_BIN` and `RUSTDB_CUDNN_BIN` to have the libraries preloaded from a specific install
+`INILLUCENT_CUDA_BIN` and `INILLUCENT_CUDNN_BIN` to have the libraries preloaded from a specific install
 rather than found on `PATH`.
 
 **Measured on 185,078 chunks: 7 minutes 10 seconds against the README's eight to twelve hour**
