@@ -54,8 +54,15 @@ if [ ! -d "$src_dir" ] || [ "$force" = "--force" ]; then
   extract "$ref_dir/sqlite-amalgamation-$release.zip" "$ref_dir"
   mv "$ref_dir/sqlite-amalgamation-$release" "$src_dir"
 fi
-if [ ! -d "$ref_dir/shell" ] || [ "$force" = "--force" ]; then
+# Keyed on this platform's own binary rather than on the directory. The two
+# scripts share `shell/`, so testing the directory made the pair
+# order-dependent: whichever ran first created it and the other skipped its
+# extraction, leaving a checkout with the Windows tools and no Linux ones -
+# which is a differential suite whose oracle cannot open a database, reported
+# as fifteen failing attach tests rather than as a missing file.
+if [ ! -x "$ref_dir/shell/sqlite3" ] || [ "$force" = "--force" ]; then
   extract "$ref_dir/sqlite-tools-linux-x64-$release.zip" "$ref_dir/shell"
+  chmod +x "$ref_dir/shell/sqlite3" 2>/dev/null || true
 fi
 
 echo "building the oracle driver"
