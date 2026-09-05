@@ -59,6 +59,7 @@ pub mod journal;
 pub mod mutate;
 pub mod overflow;
 pub mod pager;
+pub mod pinstate;
 pub mod ptrmap;
 pub mod schema;
 pub mod vacuum;
