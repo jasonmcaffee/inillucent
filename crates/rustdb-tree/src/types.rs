@@ -12,6 +12,7 @@
 
 use rustdb_base::error::corrupt;
 use rustdb_base::DbResult;
+use rustdb_value::collation::Collation;
 
 /// The layout of one column inside a leaf.
 ///
@@ -99,12 +100,27 @@ pub const COLUMN_NULLABLE: u8 = 0b0000_0001;
 pub const COLUMN_KEY: u8 = 0b0000_0010;
 
 /// One column of a leaf, as the column directory describes it.
+///
+/// The collation is part of the *column* rather than of a comparison, because
+/// the tree is **stored** in its order. An index on a `COLLATE NOCASE` column
+/// holds `Blue` between `blue` and `blue`, and a descent that compared those
+/// three with `memcmp` would walk past the row it was looking for - which is
+/// what `WHERE team = 'BLUE'` returning nothing looked like before this field
+/// existed. The TDD asks for exactly this: "Collations other than BINARY are
+/// encoded through the collation's key function... so that every interior
+/// comparison is a `memcmp`."
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ColumnSpec {
     /// The layout of the column's mini-column.
     pub physical: PhysicalType,
     /// [`COLUMN_NULLABLE`] and [`COLUMN_KEY`].
     pub flags: u8,
+    /// The collation the column's text is ordered under.
+    ///
+    /// Not written to the page: the catalog says what a column's collation is,
+    /// and a page that carried its own could disagree with it. It travels with
+    /// the column directory the reader is handed.
+    pub collation: Collation,
 }
 
 impl ColumnSpec {
@@ -115,6 +131,7 @@ impl ColumnSpec {
         ColumnSpec {
             physical,
             flags: COLUMN_NULLABLE,
+            collation: Collation::Binary,
         }
     }
 
@@ -128,7 +145,16 @@ impl ColumnSpec {
         ColumnSpec {
             physical,
             flags: COLUMN_KEY,
+            collation: Collation::Binary,
         }
+    }
+
+    /// Returns the same column under a collation.
+    ///
+    /// @param collation - the order the column's text is stored in
+    pub fn with_collation(mut self, collation: Collation) -> ColumnSpec {
+        self.collation = collation;
+        self
     }
 
     /// Reports whether the column admits NULLs.
@@ -183,6 +209,30 @@ impl ValueClass {
             2 => Ok(ValueClass::Exception),
             other => Err(corrupt(format!("value class {other} is reserved"))),
         }
+    }
+}
+
+/// Compares two values under a collation.
+///
+/// Text is compared by the collation's rule; everything else is compared the
+/// way [`crate::datum::Datum::compare`] does, because a collation is a rule
+/// about text and SQLite applies it to nothing else.
+///
+/// @param left - one value
+/// @param right - the other
+/// @param collation - the order to compare text under
+pub fn compare_under(
+    left: &crate::datum::Datum<'_>,
+    right: &crate::datum::Datum<'_>,
+    collation: Collation,
+) -> std::cmp::Ordering {
+    use crate::datum::Datum;
+    if collation == Collation::Binary {
+        return left.compare(right);
+    }
+    match (left, right) {
+        (Datum::Text(a), Datum::Text(b)) => collation.compare_bytes(a, b),
+        _ => left.compare(right),
     }
 }
 

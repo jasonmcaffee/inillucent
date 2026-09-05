@@ -123,8 +123,76 @@ pub struct KeyView<'p> {
 /// Holds no allocation: everything is derived from the page bytes on demand,
 /// because a scan visits hundreds of leaves and asks each for two or three of
 /// its columns.
+/// Where to place a bound search's next probe, by proportion.
+///
+/// It reads the leading key column's raw bytes, which for an all-typed `Int64`
+/// mini-column is a contiguous run of eight-byte little-endian values.
+struct IntegerGuide<'p> {
+    /// The leading key column's value array.
+    values: &'p [u8],
+    /// The value being looked for.
+    target: i64,
+}
+
+impl IntegerGuide<'_> {
+    /// Returns a row in `low..high` to probe next.
+    ///
+    /// Always inside the window, so the loop that calls it terminates whatever
+    /// the data looks like: a degenerate guess is a slow search, never a wrong
+    /// one or a hanging one.
+    ///
+    /// @param low - the first row still in the window
+    /// @param high - one past the last row still in the window
+    fn between(&self, low: usize, high: usize) -> DbResult<usize> {
+        let last = high.saturating_sub(1);
+        let low_value = self.read(low)?;
+        let high_value = self.read(last)?;
+        if high_value <= low_value {
+            return Ok(low.saturating_add(high.saturating_sub(low) / 2));
+        }
+        if self.target <= low_value {
+            return Ok(low);
+        }
+        if self.target >= high_value {
+            return Ok(last);
+        }
+        let span = i128::from(high_value).saturating_sub(i128::from(low_value));
+        let into = i128::from(self.target).saturating_sub(i128::from(low_value));
+        let width = last.saturating_sub(low) as i128;
+        let offset = if span == 0 { 0 } else { into * width / span };
+        Ok(low.saturating_add(offset.max(0).min(width) as usize))
+    }
+
+    /// Reads one row's value from the leading key column.
+    ///
+    /// @param row - the row to read
+    fn read(&self, row: usize) -> DbResult<i64> {
+        let at = row.saturating_mul(8);
+        let slice = self
+            .values
+            .get(at..at.saturating_add(8))
+            .ok_or_else(|| corrupt(format!("row {row} is past the key column")))?;
+        let mut raw = [0u8; 8];
+        raw.copy_from_slice(slice);
+        Ok(i64::from_le_bytes(raw))
+    }
+}
+
+/// A parsed leaf, borrowing the page it describes.
+///
+/// Holds no allocation: everything is derived from the page bytes on demand,
+/// because a scan visits hundreds of leaves and asks each for two or three of
+/// its columns.
 #[derive(Clone, Copy, Debug)]
 pub struct LeafRef<'p> {
+    /// The collation of each key column, supplied by whoever built the tree.
+    ///
+    /// Empty means BINARY throughout, which is what a bare [`LeafRef::parse`]
+    /// gives - the page does not carry collations and must not, because the
+    /// catalog is what says a column has one. The tree hands them in, and a
+    /// comparison that used the page's answer instead would silently disagree
+    /// with the order the tree is stored in.
+    collations: &'p [rustdb_value::collation::Collation],
     page: &'p [u8],
     row_count: usize,
     delta_count: usize,
@@ -191,6 +259,7 @@ impl<'p> LeafRef<'p> {
         }
 
         let leaf = LeafRef {
+            collations: &[],
             page: pageent,
             row_count,
             delta_count,
@@ -295,6 +364,27 @@ impl<'p> LeafRef<'p> {
         Ok(())
     }
 
+    /// Returns the same leaf, reading its key columns under these collations.
+    ///
+    /// @param collations - one per key column; short means BINARY for the rest
+    pub fn with_collations(
+        mut self,
+        collations: &'p [rustdb_value::collation::Collation],
+    ) -> LeafRef<'p> {
+        self.collations = collations;
+        self
+    }
+
+    /// Returns the collation of one key column.
+    ///
+    /// @param index - the key column's position
+    pub fn collation_of(&self, index: usize) -> rustdb_value::collation::Collation {
+        self.collations
+            .get(index)
+            .copied()
+            .unwrap_or(rustdb_value::collation::Collation::Binary)
+    }
+
     /// Returns the raw page bytes.
     pub fn bytes(&self) -> &'p [u8] {
         self.page
@@ -352,6 +442,23 @@ impl<'p> LeafRef<'p> {
         !self.has_exceptions() && !self.has_tombstones() && self.delta_count == 0
     }
 
+    /// Reports whether the leaf holds anything only a *write* can put there.
+    ///
+    /// Distinct from [`LeafRef::is_clean`], and the distinction cost the SLT
+    /// corpus thirty-four refusals. `is_clean` means "on the vectorised fast
+    /// path", and a leaf with *exceptions* is not - but it is perfectly
+    /// readable, because an exception is a value of the wrong class and the
+    /// scan's own vector builder falls back to the general path for that
+    /// column. The corpus's `people` table has an untyped column, so every one
+    /// of its leaves has exceptions, and a reader that refused them refused the
+    /// table.
+    ///
+    /// Tombstones and delta rows are the ones that really do not arrive until
+    /// Phase 3, because only a write makes one.
+    pub fn has_writes(&self) -> bool {
+        self.has_tombstones() || self.delta_count > 0
+    }
+
     /// Returns the number of live rows: sorted rows less tombstones, plus delta
     /// rows.
     pub fn live_rows(&self) -> DbResult<usize> {
@@ -400,6 +507,11 @@ impl<'p> LeafRef<'p> {
         Ok(ColumnSpec {
             physical: PhysicalType::from_code(type_byte)?,
             flags,
+            // The page does not carry a collation and must not: the catalog
+            // says what a column's collation is, and a page that carried its
+            // own could disagree with it. A caller that needs the collation
+            // has the column directory it built the tree from.
+            collation: rustdb_value::collation::Collation::Binary,
         })
     }
 
@@ -596,7 +708,7 @@ impl<'p> LeafRef<'p> {
                 // which is correct and only slower.
                 None => self.value(row, index)?,
             };
-            let order = held.compare(wanted);
+            let order = crate::types::compare_under(&held, wanted, self.collation_of(index));
             if order != std::cmp::Ordering::Equal {
                 return Ok(order);
             }
@@ -612,18 +724,256 @@ impl<'p> LeafRef<'p> {
     ///
     /// @param probe - the key to look for, one value per key column
     pub fn search(&self, probe: &[Datum<'_>]) -> DbResult<Result<usize, usize>> {
+        if self.key_columns == 1 {
+            if let Some(target) = self.integer_key_probe(probe)? {
+                return self.search_integer_key(target);
+            }
+        }
         let view = self.key_view()?;
-        let mut low = 0usize;
-        let mut high = self.row_count;
+        self.search_between(&view, probe, 0, self.row_count)
+    }
+
+    /// Binary-searches a window of the sorted region.
+    ///
+    /// @param view - the leaf's key columns
+    /// @param probe - the key to look for
+    /// @param from - the first row of the window
+    /// @param to - one past the last row of the window
+    fn search_between(
+        &self,
+        view: &KeyView<'p>,
+        probe: &[Datum<'_>],
+        from: usize,
+        to: usize,
+    ) -> DbResult<Result<usize, usize>> {
+        let mut low = from;
+        let mut high = to;
         while low < high {
             let middle = low.saturating_add(high.saturating_sub(low) / 2);
-            match self.compare_key_with(&view, middle, probe)? {
+            match self.compare_key_with(view, middle, probe)? {
                 std::cmp::Ordering::Less => low = middle.saturating_add(1),
                 std::cmp::Ordering::Greater => high = middle,
                 std::cmp::Ordering::Equal => return Ok(Ok(middle)),
             }
         }
         Ok(Err(low))
+    }
+
+    /// Returns the integer a probe is looking for, when this leaf is one a
+    /// rowid tree would have.
+    ///
+    /// The conditions are narrow on purpose: one key column, physically
+    /// `Int64`, every row typed, and an integer probe. Anything else - a
+    /// compound key, a NULL, an exception row, a text probe against an integer
+    /// column - falls through to the general comparison, which is correct for
+    /// all of them.
+    ///
+    /// @param probe - the key being looked for
+    fn integer_key_probe(&self, probe: &[Datum<'_>]) -> DbResult<Option<i64>> {
+        if probe.len() != 1 || self.row_count < 8 {
+            return Ok(None);
+        }
+        let Some(Datum::Int(target)) = probe.first() else {
+            return Ok(None);
+        };
+        let column = self.column(0)?;
+        if column.physical != PhysicalType::Int64 || !column.all_typed() {
+            return Ok(None);
+        }
+        Ok(Some(*target))
+    }
+
+    /// Finds an integer key by interpolation, falling back to a binary search.
+    ///
+    /// **This is a measurement, not a preference.** A 32 KiB leaf holds a few
+    /// hundred rows, and a binary search over them touches a scattered cache
+    /// line per step: measured at **120 ns** against a 100 ns descent and a
+    /// 423 ns point probe, so the search was the largest single cost in three
+    /// of the four read families - `read.point`, `read.range` through a rowid
+    /// lookup, and `read.analytical` through the skip scan's per-seek search.
+    ///
+    /// Interpolation converges in one or two steps on keys that are anywhere
+    /// near uniform, which a rowid is by construction: `INTEGER PRIMARY KEY`
+    /// values are handed out in order. It is *not* a promise about arbitrary
+    /// data, so the step count is capped and what is left of the window is
+    /// binary searched. The worst case is therefore a binary search plus four
+    /// probes, and the ordinary case is two.
+    ///
+    /// @param target - the integer being looked for
+    fn search_integer_key(&self, target: i64) -> DbResult<Result<usize, usize>> {
+        /// How many interpolation steps before giving up and bisecting.
+        ///
+        /// Four, because a distribution that has not converged in four steps is
+        /// not one interpolation is going to help with, and because bounding it
+        /// is what makes the worst case no worse than the search it replaces.
+        const STEPS: usize = 4;
+
+        let column = self.column(0)?;
+        let values = column.inline_bytes();
+        let read = |row: usize| -> DbResult<i64> {
+            let at = row.saturating_mul(8);
+            let slice = values
+                .get(at..at.saturating_add(8))
+                .ok_or_else(|| corrupt(format!("row {row} is past the key column")))?;
+            let mut raw = [0u8; 8];
+            raw.copy_from_slice(slice);
+            Ok(i64::from_le_bytes(raw))
+        };
+
+        let mut low = 0usize;
+        let mut high = self.row_count.saturating_sub(1);
+        let mut low_value = read(low)?;
+        let mut high_value = read(high)?;
+        if target < low_value {
+            return Ok(Err(0));
+        }
+        if target > high_value {
+            return Ok(Err(self.row_count));
+        }
+        for _ in 0..STEPS {
+            if low > high {
+                break;
+            }
+            if low_value == high_value {
+                return Ok(if low_value == target {
+                    Ok(low)
+                } else {
+                    Err(low)
+                });
+            }
+            // The guess, in i128 so a span of nearly the whole integer range
+            // cannot overflow the multiply.
+            let span = i128::from(high_value).saturating_sub(i128::from(low_value));
+            let into = i128::from(target).saturating_sub(i128::from(low_value));
+            let width = (high.saturating_sub(low)) as i128;
+            let offset = if span == 0 { 0 } else { into * width / span };
+            let guess = low.saturating_add(offset.max(0).min(width) as usize);
+            let seen = read(guess)?;
+            match seen.cmp(&target) {
+                std::cmp::Ordering::Equal => return Ok(Ok(guess)),
+                std::cmp::Ordering::Less => {
+                    low = guess.saturating_add(1);
+                    if low > high {
+                        return Ok(Err(low));
+                    }
+                    low_value = read(low)?;
+                    if target < low_value {
+                        return Ok(Err(low));
+                    }
+                }
+                std::cmp::Ordering::Greater => {
+                    if guess == 0 {
+                        return Ok(Err(0));
+                    }
+                    high = guess.saturating_sub(1);
+                    if low > high {
+                        return Ok(Err(low));
+                    }
+                    high_value = read(high)?;
+                    if target > high_value {
+                        return Ok(Err(high.saturating_add(1)));
+                    }
+                }
+            }
+        }
+        // Whatever window is left, bisected. The general comparison is used so
+        // that this path and the one above cannot disagree about ordering.
+        let view = self.key_view()?;
+        self.search_between(&view, &[Datum::Int(target)], low, high.saturating_add(1))
+    }
+
+    /// Returns the first row whose key is at or above a probe.
+    ///
+    /// The bound an index range and an index nested loop each need once per
+    /// leaf. It is an ordinary bound search with an **interpolated midpoint**
+    /// for its first few steps: when the leading key column is an all-typed
+    /// `Int64` - which every index on an integer column is - a guess placed by
+    /// proportion lands far closer than the middle, and the loop's invariant is
+    /// unchanged by where the midpoint came from.
+    ///
+    /// That last sentence is the whole correctness argument, and it is why the
+    /// interpolation is here rather than in a separate narrowing pass: a pass
+    /// that returned a *window* would have to be right about the window, and a
+    /// run longer than it would put the answer outside. A midpoint cannot be
+    /// wrong; it can only be a poor guess, and after a few of those the loop
+    /// falls back to bisection.
+    ///
+    /// @param probe - the bound, one value per compared column
+    pub fn lower_bound(&self, probe: &[Datum<'_>]) -> DbResult<usize> {
+        self.bounded(probe, false)
+    }
+
+    /// Returns the first row whose key is above a probe.
+    ///
+    /// @param probe - the bound, one value per compared column
+    pub fn upper_bound(&self, probe: &[Datum<'_>]) -> DbResult<usize> {
+        self.bounded(probe, true)
+    }
+
+    /// The shared bound search.
+    ///
+    /// @param probe - the bound
+    /// @param past_equal - whether a row equal to the probe is below the bound
+    fn bounded(&self, probe: &[Datum<'_>], past_equal: bool) -> DbResult<usize> {
+        /// How many interpolated midpoints before falling back to bisection.
+        const GUESSES: u32 = 4;
+
+        let view = self.key_view()?;
+        let guide = self.integer_guide(probe)?;
+        let mut low = 0usize;
+        let mut high = self.row_count;
+        let mut guesses = 0u32;
+        while low < high {
+            let middle = match &guide {
+                Some(guide) if guesses < GUESSES => {
+                    guesses = guesses.saturating_add(1);
+                    guide.between(low, high)?
+                }
+                _ => low.saturating_add(high.saturating_sub(low) / 2),
+            };
+            let order = self.compare_key_with(&view, middle, probe)?;
+            let below = match order {
+                std::cmp::Ordering::Less => true,
+                std::cmp::Ordering::Equal => past_equal,
+                std::cmp::Ordering::Greater => false,
+            };
+            if below {
+                low = middle.saturating_add(1);
+            } else {
+                high = middle;
+            }
+        }
+        Ok(low)
+    }
+
+    /// Returns what is needed to interpolate on the leading key column.
+    ///
+    /// `None` whenever interpolation does not apply, which leaves the bound
+    /// search an ordinary bisection.
+    ///
+    /// @param probe - the bound
+    fn integer_guide(&self, probe: &[Datum<'_>]) -> DbResult<Option<IntegerGuide<'p>>> {
+        if probe.is_empty() || self.row_count < 8 {
+            return Ok(None);
+        }
+        let Some(Datum::Int(target)) = probe.first() else {
+            return Ok(None);
+        };
+        let column = self.column(0)?;
+        if column.physical != PhysicalType::Int64 || !column.all_typed() {
+            return Ok(None);
+        }
+        // A collation is an order over text and never changes where an integer
+        // sits, so interpolation on an integer column is valid under any of
+        // them. The guard is here so that a collation that *did* reorder
+        // numbers would turn it off rather than silently mis-guess.
+        if self.collation_of(0) != rustdb_value::collation::Collation::Binary {
+            return Ok(None);
+        }
+        Ok(Some(IntegerGuide {
+            values: column.inline_bytes(),
+            target: *target,
+        }))
     }
 
     /// Materialises every live row, sorted region merged with the delta.
@@ -2118,6 +2468,7 @@ mod tests {
             ColumnSpec {
                 physical: PhysicalType::Int64,
                 flags: 0,
+                collation: rustdb_value::collation::Collation::Binary,
             },
         ];
         let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();
@@ -2157,5 +2508,120 @@ mod tests {
             );
             assert!(leaf.value(1, 1).unwrap().is_null(), "{physical:?}");
         }
+    }
+
+    /// The interpolation search agrees with a binary search on every key, on
+    /// dense keys, sparse keys, clustered keys and a single repeated key.
+    ///
+    /// The point of the sweep is that interpolation is *data-adaptive*: it is
+    /// fast when the keys are near-uniform and must merely be correct when they
+    /// are not. Every distribution here is one it could get wrong.
+    #[test]
+    fn the_integer_search_agrees_with_a_binary_search() {
+        let columns = vec![
+            ColumnSpec::key(PhysicalType::Int64),
+            ColumnSpec::new(PhysicalType::Int64),
+        ];
+        let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();
+        let distributions: Vec<(&str, Vec<i64>)> = vec![
+            ("dense", (0..200i64).collect()),
+            ("sparse", (0..200i64).map(|n| n * 1_000).collect()),
+            (
+                "clustered",
+                (0..200i64)
+                    .map(|n| if n < 190 { n } else { n * 100_000 })
+                    .collect(),
+            ),
+            (
+                "exponential",
+                (0..60i64)
+                    .map(|n| 1i64 << (n / 2))
+                    .scan(0i64, |last, v| {
+                        *last = (*last + 1).max(v);
+                        Some(*last)
+                    })
+                    .collect(),
+            ),
+            ("negative", (-100..100i64).collect()),
+            ("extremes", {
+                let mut keys: Vec<i64> = (0..100i64).collect();
+                keys.push(i64::MAX);
+                keys.insert(0, i64::MIN);
+                keys
+            }),
+        ];
+        for (name, keys) in distributions {
+            let rows: Vec<Vec<Datum<'_>>> = keys
+                .iter()
+                .map(|key| vec![Datum::Int(*key), Datum::Int(key.saturating_mul(2))])
+                .collect();
+            let page = builder.encode(&rows).unwrap();
+            let leaf = LeafRef::parse(&page).unwrap();
+            // Every key that is there, and the gaps either side of each.
+            for (index, key) in keys.iter().enumerate() {
+                let found = leaf.search(&[Datum::Int(*key)]).unwrap();
+                assert_eq!(found, Ok(index), "{name}: key {key}");
+                for probe in [key.saturating_sub(1), key.saturating_add(1)] {
+                    if keys.contains(&probe) {
+                        continue;
+                    }
+                    let interpolated = leaf.search(&[Datum::Int(probe)]).unwrap();
+                    let bisected = keys.binary_search(&probe);
+                    assert_eq!(
+                        interpolated, bisected,
+                        "{name}: probe {probe} disagreed with a binary search"
+                    );
+                }
+            }
+            // Outside both ends.
+            assert_eq!(
+                leaf.search(&[Datum::Int(i64::MIN)]).unwrap().is_ok(),
+                keys.contains(&i64::MIN),
+                "{name}: i64::MIN"
+            );
+            assert_eq!(
+                leaf.search(&[Datum::Int(i64::MAX)]).unwrap().is_ok(),
+                keys.contains(&i64::MAX),
+                "{name}: i64::MAX"
+            );
+        }
+    }
+
+    /// A leaf the interpolation path must not take: a NULL in the key column
+    /// makes it not all-typed, and a text probe is not an integer.
+    #[test]
+    fn the_integer_search_declines_what_it_cannot_answer() {
+        let columns = vec![
+            ColumnSpec::new(PhysicalType::Int64),
+            ColumnSpec::new(PhysicalType::Text),
+        ];
+        let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();
+        let mut rows: Vec<Vec<Datum<'_>>> = (1..40i64)
+            .map(|n| vec![Datum::Int(n), Datum::Text(b"x")])
+            .collect();
+        rows.insert(0, vec![Datum::Null, Datum::Text(b"x")]);
+        let page = builder.encode(&rows).unwrap();
+        let leaf = LeafRef::parse(&page).unwrap();
+        // The NULL makes the column not all-typed, so the general path answers.
+        assert_eq!(leaf.search(&[Datum::Int(20)]).unwrap(), Ok(20));
+        assert_eq!(leaf.search(&[Datum::Null]).unwrap(), Ok(0));
+        assert!(leaf.search(&[Datum::Text(b"zz")]).unwrap().is_err());
+    }
+
+    /// A leaf too small for interpolation to be worth a branch uses the binary
+    /// search, and still answers.
+    #[test]
+    fn a_short_leaf_uses_the_binary_search() {
+        let columns = vec![ColumnSpec::key(PhysicalType::Int64)];
+        let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();
+        let rows: Vec<Vec<Datum<'_>>> = (0..4i64).map(|n| vec![Datum::Int(n * 5)]).collect();
+        let page = builder.encode(&rows).unwrap();
+        let leaf = LeafRef::parse(&page).unwrap();
+        for (index, key) in [0i64, 5, 10, 15].iter().enumerate() {
+            assert_eq!(leaf.search(&[Datum::Int(*key)]).unwrap(), Ok(index));
+        }
+        assert_eq!(leaf.search(&[Datum::Int(7)]).unwrap(), Err(2));
+        assert_eq!(leaf.search(&[Datum::Int(-1)]).unwrap(), Err(0));
+        assert_eq!(leaf.search(&[Datum::Int(99)]).unwrap(), Err(4));
     }
 }

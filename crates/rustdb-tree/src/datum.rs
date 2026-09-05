@@ -205,7 +205,12 @@ impl<'p> Datum<'p> {
 /// rows it used to hold, and a sort or hash table whose input pages have moved
 /// on - and nowhere else. Keeping them a distinct type rather than a lifetime
 /// escape hatch is what stops "just make it owned" from spreading into the scan.
-#[derive(Clone, Debug)]
+// `PartialEq` and not `Eq`, because a `Real` holds an `f64` and NaN is not
+// equal to itself. The derive compares *representations* - `Int(1)` is not
+// `Real(1.0)` - which is what a test asserting on a materialised row wants;
+// SQL's own numeric comparison is [`Datum::compare`] and is a different
+// question with a different answer.
+#[derive(Clone, Debug, PartialEq)]
 pub enum OwnedDatum {
     /// SQL NULL.
     Null,

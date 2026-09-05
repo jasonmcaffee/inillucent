@@ -7,3 +7,8 @@ description = "B+tree over PAX leaves: the storage layer of the rearchitected en
 
 [dependencies]
 rustdb-base = { workspace = true }
+rustdb-pool = { workspace = true }
+rustdb-value = { workspace = true }
+
+[dev-dependencies]
+rustdb-vfs = { workspace = true }
