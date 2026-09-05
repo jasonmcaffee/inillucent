@@ -7,7 +7,10 @@
 #
 # `kind` decides who may depend on whom. A production crate may depend only on
 # production crates listed in its own `may_depend_on`. A test-only crate may
-# depend inward on anything; nothing may depend outward on a test-only crate.
+# depend inward on anything; nothing may depend outward on a test-only crate,
+# not even as a dev-dependency, unless the production crate names it in
+# `may_test_with` - which only the storage crates do, and only for the
+# simulator, because the TDD's fault campaigns run inside them.
 #
 # The TDD's crate table names `rustdb-value` and `rustdb-vfs` as the two leaves.
 # `rustdb-base` is a refinement made in task-1782: phase 1 needs checked
@@ -44,18 +47,46 @@ may_depend_on = ["rustdb-base"]
 # green on the scorecard and the crash campaigns.
 # ---------------------------------------------------------------------------
 
+# `rustdb-pool` is the buffer pool the TDD's Phase 2 delivers: frames, version
+# latches, pointer swizzling, the cooling FIFO, writeback, the free map and blob
+# extents. It sits above `rustdb-vfs`, which is the only thing in the workspace
+# that touches a file, and below `rustdb-tree`, which names pages and children
+# and never an offset.
+#
+# The page header moved down here with it, from `rustdb-tree::page`. A page
+# header is a property of the file format rather than of the B+tree - the pool
+# has to read one before it knows whether the page is a leaf at all - and
+# `rustdb_tree::page` is now a re-export, so every caller written against Phase
+# 1 still names the same path.
+[[crate]]
+name = "rustdb-pool"
+kind = "production"
+layer = 2
+may_depend_on = ["rustdb-base", "rustdb-vfs"]
+# The TDD's Phase 2: "`rustdb-sim` becomes a dev-dependency of `rustdb-pool`,
+# `rustdb-tree`, `rustdb-wal` and `rustdb-txn`". A buffer pool's fault campaign
+# has to inject a failure at a *site* - a read, a write, a sync - and then look
+# at the pool's own frame table, which only a test inside the crate can do.
+may_test_with = ["rustdb-sim"]
+
 # `rustdb-tree` replaces `rustdb-storage` and sits where it sits: a layer that
-# knows pages and byte records and nothing about what a column is called. It
-# reaches `rustdb-value` for nothing at all in Phase 1 - the PAX leaf has its
-# own borrowed value type, because the executor's values borrow a pinned page
-# and `rustdb_value::Value`'s owned form is reference counted, which is the
-# allocation the design exists to avoid. Phase 2 adds `rustdb-vfs` beneath it
-# when the buffer pool arrives.
+# knows pages and byte records and nothing about what a column is called. Phase
+# 2 added `rustdb-pool` beneath it when the buffer pool arrived, exactly as the
+# Phase 1 note here predicted.
+#
+# It reaches `rustdb-value` for one thing only: `Collation`. The PAX leaf keeps
+# its own borrowed value type, because the executor's values borrow a pinned
+# page and `rustdb_value::Value`'s owned form is reference counted - that is the
+# allocation the design exists to avoid, and the edge does not change it. But a
+# tree is *stored* in its collation's order: an index on a `COLLATE NOCASE`
+# column holds `Blue` between two `blue`s, and a descent that compared them with
+# `memcmp` walks past the row it wants. The collation is therefore a property of
+# the column directory, and there is one definition of it in the workspace.
 [[crate]]
 name = "rustdb-tree"
 kind = "production"
-layer = 2
-may_depend_on = ["rustdb-base"]
+layer = 3
+may_depend_on = ["rustdb-base", "rustdb-pool", "rustdb-value"]
 
 # `rustdb-exec` replaces `rustdb-vm`, and it reaches *down* to `rustdb-sql` for
 # the same reason the VM did: the planner's output is its input. It does not
@@ -64,13 +95,35 @@ may_depend_on = ["rustdb-base"]
 [[crate]]
 name = "rustdb-exec"
 kind = "production"
-layer = 5
+layer = 6
 may_depend_on = [
   "rustdb-base",
   "rustdb-value",
   "rustdb-sql",
+  "rustdb-scalar",
+  "rustdb-pool",
   "rustdb-tree",
 ]
+
+# `rustdb-scalar` holds the dialect's scalar layer: SQLite's arithmetic and
+# three-valued logic, the value coercions, and the whole built-in function set -
+# `substr`, `strftime`, `LIKE`, `printf` and the rest.
+#
+# The TDD's component triage says those function bodies "port into
+# `rustdb-exec`". The obvious reading is to copy them out of `rustdb-vm`, and
+# the rearchitecture makes that the wrong reading: both executors are in the
+# tree at once until Phase 5 deletes one, and two copies of `substr` agree until
+# the next fix. So the port was done as a *move*, into a crate both depend on,
+# with `rustdb_vm::builtin` and its five siblings left as re-exports.
+#
+# It sits above `rustdb-sql` because a built-in is identified by
+# `rustdb_sql::function::ScalarFunc` and the binder is what resolves a name to
+# one. That is the only edge; nothing here parses, binds, plans or reads a page.
+[[crate]]
+name = "rustdb-scalar"
+kind = "production"
+layer = 5
+may_depend_on = ["rustdb-base", "rustdb-value", "rustdb-sql"]
 
 # `rustdb-sqlite-reader` is the read half of `rustdb-storage` behind a narrow
 # interface, kept when the rest of that crate goes. It is a tool rather than a
@@ -81,7 +134,7 @@ may_depend_on = [
 [[crate]]
 name = "rustdb-sqlite-reader"
 kind = "production"
-layer = 6
+layer = 7
 may_depend_on = [
   "rustdb-base",
   "rustdb-value",
@@ -156,7 +209,17 @@ may_depend_on = [
   "rustdb-storage",
   "rustdb-transaction",
   "rustdb-sql",
+  "rustdb-pool",
+  "rustdb-tree",
 ]
+may_test_with = ["rustdb-vfs"]
+
+# The two new edges are `paged`, which is the TDD's "rustdb-catalog over the
+# catalog tree". The schema the new engine reads is a tree in its own file, so
+# the loader has to reach the tree layer and the pool that pages it. Both are
+# below this crate, so the direction is unchanged; what is new is that one
+# catalog crate now serves two storage stacks, which is the point - a schema
+# read two ways by two derivations is a schema that can disagree with itself.
 
 # `rustdb-ext` sitting *above* `rustdb-sql` and `rustdb-storage` is a
 # refinement made in task-1789, and it is what a virtual table actually is. A
@@ -193,6 +256,7 @@ layer = 7
 may_depend_on = [
   "rustdb-base",
   "rustdb-value",
+  "rustdb-scalar",
   "rustdb-sql",
   "rustdb-catalog",
   "rustdb-storage",
@@ -310,7 +374,9 @@ may_depend_on = [
   "rustdb-vm",
   "rustdb-session",
   "rustdb",
+  "rustdb-pool",
   "rustdb-tree",
+  "rustdb-scalar",
   "rustdb-exec",
   "rustdb-sqlite-reader",
 ]

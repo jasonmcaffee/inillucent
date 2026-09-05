@@ -1257,9 +1257,12 @@ name = "rustdb-catalog"
 version = "0.1.0"
 dependencies = [
  "rustdb-base",
+ "rustdb-pool",
  "rustdb-sql",
  "rustdb-storage",
+ "rustdb-tree",
  "rustdb-value",
+ "rustdb-vfs",
 ]
 
 [[package]]
@@ -1277,6 +1280,7 @@ dependencies = [
  "rustdb-base",
  "rustdb-catalog",
  "rustdb-exec",
+ "rustdb-pool",
  "rustdb-session",
  "rustdb-sim",
  "rustdb-sql",
@@ -1310,9 +1314,12 @@ name = "rustdb-exec"
 version = "0.1.0"
 dependencies = [
  "rustdb-base",
+ "rustdb-pool",
+ "rustdb-scalar",
  "rustdb-sql",
  "rustdb-tree",
  "rustdb-value",
+ "rustdb-vfs",
 ]
 
 [[package]]
@@ -1335,6 +1342,24 @@ dependencies = [
  "rustdb-base",
  "rustdb-core",
  "rustdb-search",
+ "rustdb-value",
+]
+
+[[package]]
+name = "rustdb-pool"
+version = "0.1.0"
+dependencies = [
+ "rustdb-base",
+ "rustdb-sim",
+ "rustdb-vfs",
+]
+
+[[package]]
+name = "rustdb-scalar"
+version = "0.1.0"
+dependencies = [
+ "rustdb-base",
+ "rustdb-sql",
  "rustdb-value",
 ]
 
@@ -1418,6 +1443,9 @@ name = "rustdb-tree"
 version = "0.1.0"
 dependencies = [
  "rustdb-base",
+ "rustdb-pool",
+ "rustdb-value",
+ "rustdb-vfs",
 ]
 
 [[package]]
@@ -1443,6 +1471,7 @@ dependencies = [
  "rustdb-base",
  "rustdb-catalog",
  "rustdb-ext",
+ "rustdb-scalar",
  "rustdb-sql",
  "rustdb-storage",
  "rustdb-value",

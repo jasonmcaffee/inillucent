@@ -8,8 +8,10 @@ members = [
     # Engine layers, filled in by later phases.
     "crates/rustdb-value",
     # The rearchitected engine (task-1816).
+    "crates/rustdb-pool",
     "crates/rustdb-tree",
     "crates/rustdb-sqlite-reader",
+    "crates/rustdb-scalar",
     "crates/rustdb-exec",
     "crates/rustdb-storage",
     "crates/rustdb-transaction",
@@ -59,8 +61,10 @@ rustdb-base = { path = "crates/rustdb-base" }
 rustdb-vfs = { path = "crates/rustdb-vfs" }
 rustdb-sim = { path = "crates/rustdb-sim" }
 rustdb-value = { path = "crates/rustdb-value" }
+rustdb-pool = { path = "crates/rustdb-pool" }
 rustdb-tree = { path = "crates/rustdb-tree" }
 rustdb-sqlite-reader = { path = "crates/rustdb-sqlite-reader" }
+rustdb-scalar = { path = "crates/rustdb-scalar" }
 rustdb-exec = { path = "crates/rustdb-exec" }
 rustdb-storage = { path = "crates/rustdb-storage" }
 rustdb-transaction = { path = "crates/rustdb-transaction" }

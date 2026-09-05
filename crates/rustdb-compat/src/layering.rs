@@ -33,6 +33,17 @@ pub struct CrateRule {
     pub kind: CrateKind,
     /// Its position in the layer graph, for reporting.
     pub layer: i64,
+    /// Test-only crates this production crate may use as a dev-dependency.
+    ///
+    /// Ordinarily a production crate may not name one at all, because a
+    /// harness in the engine's test surface is a harness that can drift into
+    /// the engine. The exception is the simulator: the TDD's Phase 2 says
+    /// "`rustdb-sim` becomes a dev-dependency of `rustdb-pool`, `rustdb-tree`,
+    /// `rustdb-wal` and `rustdb-txn`", because a storage layer's fault
+    /// campaigns have to run against the storage layer's own private types.
+    /// Naming the crates one at a time keeps that an exception rather than a
+    /// hole.
+    pub may_test_with: Vec<String>,
     /// The internal crates it may depend on.
     pub may_depend_on: BTreeSet<String>,
 }
@@ -97,6 +108,11 @@ impl Contract {
                     name,
                     kind,
                     layer: row.get("layer").and_then(Value::as_integer).unwrap_or(0),
+                    may_test_with: row
+                        .get("may_test_with")
+                        .and_then(Value::as_list)
+                        .map(<[String]>::to_vec)
+                        .unwrap_or_default(),
                     may_depend_on: row
                         .get("may_depend_on")
                         .and_then(Value::as_list)
@@ -266,7 +282,10 @@ pub fn check(contract: &Contract, manifests: &[CrateManifest]) -> Vec<String> {
             let Some(target) = contract.crates.get(dependency) else {
                 continue;
             };
-            if rule.kind == CrateKind::Production && target.kind == CrateKind::TestOnly {
+            if rule.kind == CrateKind::Production
+                && target.kind == CrateKind::TestOnly
+                && !rule.may_test_with.iter().any(|name| name == dependency)
+            {
                 violations.push(format!(
                     "production crate `{}` uses test-only crate `{dependency}` even as a dev-dependency, which puts harness code in the engine's test surface",
                     rule.name
