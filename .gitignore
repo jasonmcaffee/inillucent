@@ -23,3 +23,10 @@ corpus.jsonl
 # evidence that gates a release is not here - it is checked in under compat/,
 # because the compatibility report is generated from it.
 /_agent_output/
+
+# The scorecard's working databases, when a run is pointed at the release
+# directory. The reports belong in the repository; the pristine images it
+# clones per round are hundreds of megabytes and are rebuilt by any run.
+/compat/release/small/
+/compat/release/medium/
+/compat/release/large/
