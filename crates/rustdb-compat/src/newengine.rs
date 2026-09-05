@@ -197,7 +197,33 @@ impl ImportedDatabase {
     ///
     /// @param plan - a plan from [`ImportedDatabase::plan`]
     pub fn execute(&self, plan: &PhysicalPlan) -> DbResult<(Vec<Vec<OwnedDatum>>, Vec<String>)> {
-        let (rows, shape) = physical::run(plan, self)?;
+        let prepared = physical::prepare(plan, self)?;
+        self.execute_prepared(plan, &prepared)
+    }
+
+    /// Chooses a statement's physical plan, once.
+    ///
+    /// Separated from execution because the choice depends on the statement and
+    /// the schema and not on the data, and because making it per execution made
+    /// a query answering 64 rows spend more time choosing a tree than reading
+    /// one. `prepare once` in a scorecard plan means the same thing on both
+    /// sides.
+    ///
+    /// @param plan - a plan from [`ImportedDatabase::plan`]
+    pub fn prepare(&self, plan: &PhysicalPlan) -> DbResult<physical::Prepared> {
+        physical::prepare(plan, self)
+    }
+
+    /// Runs an already-prepared statement.
+    ///
+    /// @param plan - a plan from [`ImportedDatabase::plan`]
+    /// @param prepared - the choices [`ImportedDatabase::prepare`] made
+    pub fn execute_prepared(
+        &self,
+        plan: &PhysicalPlan,
+        prepared: &physical::Prepared,
+    ) -> DbResult<(Vec<Vec<OwnedDatum>>, Vec<String>)> {
+        let (rows, shape) = physical::run_prepared(plan, self, prepared)?;
         let names = shape
             .names
             .iter()

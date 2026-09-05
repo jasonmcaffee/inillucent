@@ -30,14 +30,15 @@
 //!
 //! Usage: rustdb-analytical <sqlite fixture> [--rounds N] [--page-size N]
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::process::{Command, ExitCode};
 use std::time::Instant;
 
 use rustdb_compat::newengine::ImportedDatabase;
 use rustdb_compat::perf::{Digest, Paired, Sample};
 use rustdb_compat::workspace_root;
-use rustdb_tree::datum::OwnedDatum;
 
 /// The seed the bootstrap uses, fixed so a report is reproducible.
 const SEED: u64 = 17_900_001;
@@ -75,9 +76,14 @@ fn main() -> ExitCode {
     let page_size = flag(&arguments, "--page-size")
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(32_768);
+    // Forty is `repeats_for("medium").1` in `scorecard.rs`: how many times the
+    // scorecard runs a `read.analytical` workload inside one timed round at
+    // this scale. A harness that used a different number would be measuring a
+    // different amount of amortisation of each engine's per-statement setup,
+    // and SQLite's is large enough for that to move the answer by 5x.
     let repeat = flag(&arguments, "--repeat")
         .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(20);
+        .unwrap_or(40);
     match run(&PathBuf::from(fixture), rounds, page_size, repeat) {
         Ok(passed) => {
             if passed {
@@ -152,7 +158,10 @@ fn run(fixture: &Path, rounds: u32, page_size: usize, repeat: u32) -> Result<boo
         let plan = database
             .plan(sql)
             .map_err(|error| format!("{name}: planning failed: {}", error.message()))?;
-        prepared.push((name, sql, plan));
+        let choice = database
+            .prepare(&plan)
+            .map_err(|error| format!("{name}: preparing failed: {}", error.message()))?;
+        prepared.push((name, sql, plan, choice));
     }
 
     let mut measured: Vec<Paired> = WORKLOADS
@@ -165,6 +174,66 @@ fn run(fixture: &Path, rounds: u32, page_size: usize, repeat: u32) -> Result<boo
             disagreement: String::new(),
         })
         .collect();
+
+    // Where an execution's time goes, before any of it is compared to
+    // anything. Three nested measurements over the same prepared statement:
+    // building the operator chain and throwing it away; building it and
+    // driving the source into a sink that counts and nothing else; and the
+    // real thing, which adds digesting every value. Each is the one before it
+    // plus one stage, so the differences are the stages.
+    //
+    // This exists because two rounds of optimising `scan.distinct` were spent
+    // on hypotheses - key comparison, then leaf parsing during the descent -
+    // that a measurement would have refused in a minute.
+    println!();
+    println!("## where one execution goes, microseconds");
+    println!(
+        "  {:<16} {:>10} {:>10} {:>10} {:>8}",
+        "workload", "build", "+produce", "+digest", "rows"
+    );
+    for (name, _, plan, choice) in &prepared {
+        let build = time_stage(64, || {
+            let sink = Box::new(DigestRows {
+                folded: Rc::new(RefCell::new(Folded::default())),
+            });
+            let built = rustdb_exec::physical::build_prepared(plan, &database, choice, sink)
+                .map_err(|error| format!("{name}: {}", error.message()))?;
+            drop(built);
+            Ok(())
+        })?;
+        let produce = time_stage(64, || {
+            let counter = Box::new(CountRows { rows: 0 });
+            let (mut pipeline, _) =
+                rustdb_exec::physical::build_prepared(plan, &database, choice, counter)
+                    .map_err(|error| format!("{name}: {}", error.message()))?;
+            pipeline
+                .scan
+                .run(pipeline.head.as_mut())
+                .map_err(|error| format!("{name}: {}", error.message()))?;
+            Ok(())
+        })?;
+        let folded = Rc::new(RefCell::new(Folded::default()));
+        let whole = time_stage(64, || {
+            let sink = Box::new(DigestRows {
+                folded: Rc::clone(&folded),
+            });
+            let (mut pipeline, _) =
+                rustdb_exec::physical::build_prepared(plan, &database, choice, sink)
+                    .map_err(|error| format!("{name}: {}", error.message()))?;
+            pipeline
+                .scan
+                .run(pipeline.head.as_mut())
+                .map_err(|error| format!("{name}: {}", error.message()))?;
+            Ok(())
+        })?;
+        let rows = folded.borrow().rows / 64;
+        println!(
+            "  {name:<16} {:>10.1} {:>10.1} {:>10.1} {rows:>8}",
+            build / 1000.0,
+            produce / 1000.0,
+            whole / 1000.0
+        );
+    }
 
     println!();
     println!("## {rounds} paired rounds, interleaved");
@@ -184,7 +253,7 @@ fn run(fixture: &Path, rounds: u32, page_size: usize, repeat: u32) -> Result<boo
             let _ = (ours, theirs);
             (ours_again, theirs_again)
         };
-        for (index, (name, _, _)) in prepared.iter().enumerate() {
+        for (index, (name, _, _, _)) in prepared.iter().enumerate() {
             let Some(slot) = measured.get_mut(index) else {
                 continue;
             };
@@ -238,7 +307,15 @@ fn run(fixture: &Path, rounds: u32, page_size: usize, repeat: u32) -> Result<boo
     }
 
     if !all_ratios.is_empty() {
-        let family = rustdb_compat::perf::median(&all_ratios).exp();
+        // The family figure is the arithmetic mean of the paired log ratios,
+        // exponentiated - the geometric mean - pooled over every workload in
+        // the family. That is `family_interval` in `scorecard.rs`, character
+        // for character, and it is written that way here rather than more
+        // conveniently because a gate measured by a different statistic than
+        // the scorecard reports is a gate on a different number. The first
+        // version of this harness took the median and read 5.21x where the
+        // scorecard's statistic said 3.88x on the same samples.
+        let family = (all_ratios.iter().sum::<f64>() / all_ratios.len() as f64).exp();
         let (low, high) = rustdb_compat::perf::bootstrap(&all_ratios, SEED);
         println!();
         println!(
@@ -260,80 +337,155 @@ fn run(fixture: &Path, rounds: u32, page_size: usize, repeat: u32) -> Result<boo
     Ok(passed)
 }
 
-/// Runs every workload once through the new engine and returns timed samples.
+/// What a digesting run accumulated, shared with the caller.
 ///
-/// The timed region is the same one the scorecard times on the old engine: the
-/// prepare is outside it, the row production and the digesting of every value
-/// are inside it. Digesting inside the timed region costs both engines the same
-/// work - `sqlite-bench` digests inside its own timer too - which is why it is
-/// there rather than being subtracted afterwards.
+/// The pipeline owns its sink, so the digest it builds has to live somewhere
+/// the caller can still reach. One `Rc` is the whole mechanism.
+#[derive(Default)]
+struct Folded {
+    digest: Digest,
+    rows: u64,
+}
+
+/// A sink that digests rows as they are produced and keeps none of them.
+///
+/// The SQLite arm digests inside its `sqlite3_step` loop and keeps nothing, so
+/// a rust-db arm that built a `Vec<Vec<OwnedDatum>>` first would be timing a
+/// result set neither engine's caller asked for - one heap allocation per row,
+/// which on a sixty-four-row answer was most of the measured cost. This is the
+/// row shape both arms actually use.
+struct DigestRows {
+    folded: Rc<RefCell<Folded>>,
+}
+
+impl rustdb_exec::Sink for DigestRows {
+    fn push(&mut self, batch: &rustdb_exec::Batch<'_>) -> rustdb_base::DbResult<rustdb_exec::Flow> {
+        let mut held = self.folded.borrow_mut();
+        for nth in 0..batch.live() {
+            for column in 0..batch.columns.len() {
+                let value = batch.value(nth, column)?;
+                eat_borrowed(&mut held.digest, &value);
+            }
+            held.rows = held.rows.saturating_add(1);
+        }
+        Ok(rustdb_exec::Flow::Continue)
+    }
+
+    fn finish(&mut self) -> rustdb_base::DbResult<()> {
+        Ok(())
+    }
+}
+
+/// Adds one borrowed value to the digest, tagged the way the reference tags it.
+///
+/// The tagging is `sqlite_bench.c`'s, value for value. A digest is only a
+/// correctness gate if both engines compute it the same way.
+///
+/// @param digest - the running digest
+/// @param value - the value to fold in
+fn eat_borrowed(digest: &mut Digest, value: &rustdb_tree::datum::Datum<'_>) {
+    use rustdb_tree::datum::Datum;
+    match value {
+        Datum::Null => digest.tag(0),
+        Datum::Int(number) => {
+            digest.tag(1);
+            digest.word(*number as u64);
+        }
+        Datum::Real(number) => {
+            digest.tag(2);
+            digest.word(number.to_bits());
+        }
+        Datum::Text(bytes) => {
+            digest.tag(3);
+            digest.word(bytes.len() as u64);
+            digest.bytes(bytes);
+        }
+        Datum::Blob(bytes) => {
+            digest.tag(4);
+            digest.word(bytes.len() as u64);
+            digest.bytes(bytes);
+        }
+    }
+}
+
+/// Runs every workload through the new engine and returns timed samples.
+///
+/// The timed region is the one the scorecard times on the old engine: the
+/// prepare is outside it, and building the operator chain, producing the rows
+/// and digesting every value are inside it. Digesting inside the timer costs
+/// both engines the same work, because `sqlite-bench` digests inside its own.
 ///
 /// @param database - the imported trees
 /// @param prepared - the planned workloads
 /// @param repeat - how many times each workload runs inside one sample
 fn time_new_engine(
     database: &ImportedDatabase,
-    prepared: &[(&str, &str, rustdb_sql::plan::PhysicalPlan)],
+    prepared: &[(
+        &str,
+        &str,
+        rustdb_sql::plan::PhysicalPlan,
+        rustdb_exec::physical::Prepared,
+    )],
     repeat: u32,
 ) -> Result<Vec<Sample>, String> {
     let mut samples = Vec::with_capacity(prepared.len());
-    for (name, _, plan) in prepared {
-        let mut digest = Digest::new();
-        let mut produced = 0u64;
+    for (name, _, plan, choice) in prepared {
+        let folded = Rc::new(RefCell::new(Folded::default()));
         let started = Instant::now();
         for _ in 0..repeat {
-            let (rows, _) = database
-                .execute(plan)
+            let sink = Box::new(DigestRows {
+                folded: Rc::clone(&folded),
+            });
+            let (mut pipeline, _) =
+                rustdb_exec::physical::build_prepared(plan, database, choice, sink)
+                    .map_err(|error| format!("{name}: {}", error.message()))?;
+            pipeline
+                .scan
+                .run(pipeline.head.as_mut())
                 .map_err(|error| format!("{name}: {}", error.message()))?;
-            for row in &rows {
-                for value in row {
-                    eat(&mut digest, value);
-                }
-                produced = produced.saturating_add(1);
-            }
         }
         let elapsed = started.elapsed();
+        let held = folded.replace(Folded::default());
         samples.push(Sample {
             workload: (*name).to_string(),
             nanos: elapsed.as_secs_f64() * 1e9,
-            rows: produced,
-            digest: digest.finish(),
+            rows: held.rows,
+            digest: held.digest.finish(),
         });
     }
     Ok(samples)
 }
 
-/// Adds one produced value to the digest, tagged the way the reference tags it.
-///
-/// A byte-for-byte copy of `scorecard.rs`'s `eat`, over the new engine's value
-/// type. It has to be: a digest is only a correctness gate if both engines
-/// compute it the same way, and the reference implementation is
-/// `compat/oracle/sqlite_bench.c`.
-///
-/// @param digest - the running digest
-/// @param value - the value to fold in
-fn eat(digest: &mut Digest, value: &OwnedDatum) {
-    match value {
-        OwnedDatum::Null => digest.tag(0),
-        OwnedDatum::Int(number) => {
-            digest.tag(1);
-            digest.word(*number as u64);
-        }
-        OwnedDatum::Real(number) => {
-            digest.tag(2);
-            digest.word(number.to_bits());
-        }
-        OwnedDatum::Text(bytes) => {
-            digest.tag(3);
-            digest.word(bytes.len() as u64);
-            digest.bytes(bytes);
-        }
-        OwnedDatum::Blob(bytes) => {
-            digest.tag(4);
-            digest.word(bytes.len() as u64);
-            digest.bytes(bytes);
-        }
+/// A sink that counts rows and reads no values, for the breakdown.
+struct CountRows {
+    rows: u64,
+}
+
+impl rustdb_exec::Sink for CountRows {
+    fn push(&mut self, batch: &rustdb_exec::Batch<'_>) -> rustdb_base::DbResult<rustdb_exec::Flow> {
+        self.rows = self.rows.saturating_add(batch.live() as u64);
+        Ok(rustdb_exec::Flow::Continue)
     }
+
+    fn finish(&mut self) -> rustdb_base::DbResult<()> {
+        Ok(())
+    }
+}
+
+/// Times one stage over several iterations and returns nanoseconds per one.
+///
+/// @param iterations - how many times to run the body
+/// @param body - the stage to time
+fn time_stage(
+    iterations: u32,
+    mut body: impl FnMut() -> Result<(), String>,
+) -> Result<f64, String> {
+    body()?;
+    let started = Instant::now();
+    for _ in 0..iterations {
+        body()?;
+    }
+    Ok(started.elapsed().as_secs_f64() * 1e9 / f64::from(iterations))
 }
 
 /// Runs the SQLite arm and parses its samples.

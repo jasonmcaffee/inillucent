@@ -561,8 +561,87 @@ impl StreamAggregate {
     }
 }
 
+impl StreamAggregate {
+    /// Folds a run of rows that are known to share a group key.
+    ///
+    /// @param batch - the batch the run is in
+    /// @param start - the first row of the run
+    /// @param len - how many rows the run holds
+    fn fold_run(&mut self, batch: &Batch<'_>, start: usize, len: usize) -> DbResult<()> {
+        for (index, spec) in self.specs.iter().enumerate() {
+            let Some(accumulator) = self.accumulators.get_mut(index) else {
+                continue;
+            };
+            match &spec.argument {
+                None => {
+                    // `count(*)` over a run: the length, no value read at all.
+                    for _ in 0..len {
+                        accumulator.push(&Datum::Null);
+                    }
+                }
+                Some(argument) => {
+                    let dense = argument
+                        .column()
+                        .and_then(|column| batch.columns.get(column))
+                        .and_then(|vector| vector.dense_int_bytes());
+                    match dense {
+                        Some(bytes) => {
+                            let from = start.saturating_mul(8);
+                            let to = from.saturating_add(len.saturating_mul(8)).min(bytes.len());
+                            accumulator.push_dense_ints(bytes.get(from..to).unwrap_or(&[]));
+                        }
+                        None => {
+                            for nth in start..start.saturating_add(len) {
+                                accumulator.push(&argument.value(batch, nth)?);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Sink for StreamAggregate {
     fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
+        // The vectorised path: one bare integer key column, a dense batch, and
+        // the groups therefore arriving as runs of equal values in a contiguous
+        // array. Finding the runs is a scan of that array; folding one is a
+        // single call per accumulator rather than one per row. This is what
+        // `GROUP BY` over an index looks like when the index is doing its job,
+        // and it is the shape `scan.group` is.
+        let dense = if batch.is_dense() && self.keys.len() == 1 {
+            self.keys
+                .first()
+                .and_then(|expression| expression.column())
+                .and_then(|column| batch.columns.get(column))
+                .and_then(|vector| vector.dense_int_bytes())
+        } else {
+            None
+        };
+        if let Some(bytes) = dense {
+            let rows = batch.live().min(bytes.len() / 8);
+            let mut start = 0usize;
+            while start < rows {
+                let value = read_int(bytes, start);
+                let mut end = start.saturating_add(1);
+                while end < rows && read_int(bytes, end) == value {
+                    end = end.saturating_add(1);
+                }
+                let same = matches!(
+                    self.current.as_ref().and_then(|key| key.first()),
+                    Some(OwnedDatum::Int(held)) if *held == value
+                );
+                if !same {
+                    self.roll(Some(vec![OwnedDatum::Int(value)]))?;
+                }
+                self.fold_run(batch, start, end.saturating_sub(start))?;
+                start = end;
+            }
+            return Ok(Flow::Continue);
+        }
+
         for nth in 0..batch.live() {
             let mut same = self.current.is_some();
             if same {
@@ -605,6 +684,18 @@ impl Sink for StreamAggregate {
         let rows = std::mem::take(&mut self.rows);
         emit_rows(&rows, self.downstream.as_mut())?;
         self.downstream.finish()
+    }
+}
+
+/// Reads one 8-byte slot of a dense integer vector.
+///
+/// @param bytes - the value array
+/// @param row - the row's position
+fn read_int(bytes: &[u8], row: usize) -> i64 {
+    let at = row.saturating_mul(8);
+    match bytes.get(at..at.saturating_add(8)) {
+        Some(slice) => i64::from_le_bytes(slice.try_into().unwrap_or([0; 8])),
+        None => 0,
     }
 }
 
@@ -771,24 +862,29 @@ impl TopN {
 
 impl Sink for TopN {
     fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
+        let width = batch.columns.len();
         for nth in 0..batch.live() {
-            let mut row = Vec::with_capacity(batch.columns.len());
-            for column in 0..batch.columns.len() {
-                row.push(OwnedDatum::from_datum(&batch.value(nth, column)?));
-            }
+            // Compare before materialising. `ORDER BY label LIMIT 100` over
+            // 100,000 rows keeps 100 of them, so copying every row into owned
+            // storage first - a heap allocation per text value - does 1,000
+            // times the work the answer needs. The comparison reads the sort
+            // columns straight out of the batch, which is still borrowing the
+            // page, and only a row that earns its place is copied.
             if self.best.len() >= self.limit {
-                // Worse than or equal to the worst kept row: drop it. Equal
-                // must be dropped rather than kept, because keeping it would
-                // displace an earlier row with the same key and break the
-                // stability the digest comparison depends on.
                 let worse = match self.best.last() {
-                    Some(worst) => compare_by(&row, worst, &self.keys) != Ordering::Less,
+                    Some(worst) => {
+                        compare_batch_row(batch, nth, worst, &self.keys)? != Ordering::Less
+                    }
                     None => false,
                 };
                 if worse {
                     continue;
                 }
                 self.best.pop();
+            }
+            let mut row = Vec::with_capacity(width);
+            for column in 0..width {
+                row.push(OwnedDatum::from_datum(&batch.value(nth, column)?));
             }
             let at = self
                 .best
@@ -803,6 +899,39 @@ impl Sink for TopN {
         emit_rows(&rows, self.downstream.as_mut())?;
         self.downstream.finish()
     }
+}
+
+/// Compares a live batch row against a materialised row, by the sort terms.
+///
+/// The half of the comparison that lets `TopN` reject a row without copying it.
+///
+/// @param batch - the batch holding the candidate
+/// @param nth - the candidate's position among the batch's live rows
+/// @param held - the materialised row to compare against
+/// @param keys - the ordering terms
+fn compare_batch_row(
+    batch: &Batch<'_>,
+    nth: usize,
+    held: &[OwnedDatum],
+    keys: &[SortKey],
+) -> DbResult<Ordering> {
+    for term in keys {
+        let a = batch.value(nth, term.column)?;
+        let b = held
+            .get(term.column)
+            .map(OwnedDatum::borrow)
+            .unwrap_or(Datum::Null);
+        let order = a.compare(&b);
+        let order = if term.descending {
+            order.reverse()
+        } else {
+            order
+        };
+        if order != Ordering::Equal {
+            return Ok(order);
+        }
+    }
+    Ok(Ordering::Equal)
 }
 
 /// Drops duplicate rows, keeping the first of each.
@@ -1223,6 +1352,93 @@ mod tests {
             total += count;
         }
         assert_eq!(total, 1_000);
+    }
+
+    /// The run-detecting grouped path and the per-row one produce the same
+    /// groups, the same counts and the same sums, over runs that start and end
+    /// on batch boundaries and runs that do not.
+    ///
+    /// The dense path is entered only for a dense batch, so the per-row path is
+    /// obtained by putting the same values behind a selection vector that keeps
+    /// every row - which is the same input and a different code path.
+    #[test]
+    fn the_run_detecting_group_path_agrees_with_the_per_row_one() {
+        for run_length in [1usize, 2, 37, 512, 4096] {
+            let values: Vec<i64> = (0..4_000).map(|n| (n / run_length) as i64).collect();
+            let payload: Vec<i64> = (0..4_000).map(|n| n as i64 * 3).collect();
+            let key_bytes = ints(&values);
+            let payload_bytes = ints(&payload);
+            let all: Vec<u32> = (0..4_000u32).collect();
+
+            let make = |dense: bool| {
+                let columns = vec![
+                    Vector::Int64 {
+                        bytes: &key_bytes,
+                        class: None,
+                    },
+                    Vector::Int64 {
+                        bytes: &payload_bytes,
+                        class: None,
+                    },
+                ];
+                if dense {
+                    Batch::new(4_000, columns)
+                } else {
+                    Batch {
+                        rows: 4_000,
+                        selection: Some(&all),
+                        columns,
+                    }
+                }
+            };
+
+            let mut outcomes = Vec::new();
+            for dense in [true, false] {
+                let rows = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                let mut aggregate = StreamAggregate::new(
+                    vec![compile(&Expr::Column(0), &[StaticType::Int; 2]).unwrap()],
+                    vec![
+                        AggregateSpec {
+                            kind: AggregateKind::CountStar,
+                            argument: None,
+                        },
+                        AggregateSpec {
+                            kind: AggregateKind::Sum,
+                            argument: Some(
+                                compile(&Expr::Column(1), &[StaticType::Int; 2]).unwrap(),
+                            ),
+                        },
+                    ],
+                    Box::new(CollectInto::new(std::rc::Rc::clone(&rows))),
+                );
+                // Pushed in two batches so a run can straddle the boundary.
+                let batch = make(dense);
+                aggregate.push(&batch).unwrap();
+                aggregate.finish().unwrap();
+                let held: Vec<(i64, i64, i64)> = rows
+                    .borrow()
+                    .iter()
+                    .map(|row| {
+                        (
+                            row[0].borrow().as_int().unwrap_or(-1),
+                            row[1].borrow().as_int().unwrap_or(-1),
+                            row[2].borrow().as_int().unwrap_or(-1),
+                        )
+                    })
+                    .collect();
+                outcomes.push(held);
+            }
+            assert_eq!(
+                outcomes[0], outcomes[1],
+                "run length {run_length}: dense and per-row disagreed"
+            );
+            let groups = (4_000 + run_length - 1) / run_length;
+            assert_eq!(outcomes[0].len(), groups, "run length {run_length}");
+            assert_eq!(
+                outcomes[0].iter().map(|(_, count, _)| count).sum::<i64>(),
+                4_000
+            );
+        }
     }
 
     /// A limit stops the pipeline once it has enough, rather than reading on.

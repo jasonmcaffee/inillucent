@@ -90,6 +90,20 @@ pub const DELTA_LIMIT: usize = 32;
 /// The size of one column directory entry.
 const DIRECTORY_ENTRY: usize = 8;
 
+/// How many key columns a [`KeyView`] holds without spilling.
+///
+/// Four covers every key in the scorecard's schema and every index this engine
+/// builds by default; a wider key still works and is only slower, because the
+/// view falls back to the general accessor past this point.
+const KEY_VIEW_INLINE: usize = 4;
+
+/// A leaf's key columns, derived once and reused across a binary search.
+#[derive(Clone, Copy, Debug)]
+pub struct KeyView<'p> {
+    columns: [Option<MiniColumn<'p>>; KEY_VIEW_INLINE],
+    width: usize,
+}
+
 /// A validated read view over one leaf page.
 ///
 /// Holds no allocation: everything is derived from the page bytes on demand,
@@ -173,13 +187,49 @@ impl<'p> LeafRef<'p> {
             flags,
         };
 
-        // The region a mini-column may occupy: after the directory, before the
-        // tombstone bitmap if there is one, else before the delta area.
-        let columns_end = leaf.tombstones_start()?;
-        let mut seen_exception = false;
-        for index in 0..column_count {
-            let column = leaf.column(index)?;
-            let start = leaf.column_offset(index)?;
+        // What `parse` checks is the header: the counts are self-consistent,
+        // the directory fits, and the heap and delta offsets are inside the
+        // page and in the right order. What it does NOT check is where each
+        // mini-column lands, and that is deliberate.
+        //
+        // Every accessor slices with `get`, so a mini-column whose declared
+        // offset runs past the page returns an error rather than reading out of
+        // bounds - safety does not depend on this check. What the check buys is
+        // *detection*: a page whose columns overlap its heap is corrupt even
+        // though every read of it is in bounds. That is an integrity question,
+        // and it belongs to `LeafRef::integrity`, the checksums and the
+        // corrupt-page campaigns rather than to every reader.
+        //
+        // It is here rather than there because it was measured: a descent
+        // parses a leaf per level, and a skip scan descends once per distinct
+        // value. Walking the directory on every parse was most of the cost of
+        // a query whose answer is sixty-four rows.
+        // Walking the delta once here means every later delta accessor is
+        // reading bytes that have already been proved to decode.
+        leaf.validate_delta()?;
+        Ok(leaf)
+    }
+
+    /// Checks the leaf's row-level invariants.
+    ///
+    /// The O(rows) half of validation, kept out of [`LeafRef::parse`] so that
+    /// reading a leaf costs time proportional to its columns. The integrity
+    /// checker runs this over every page; a reader does not.
+    ///
+    /// 1. The `has_exceptions` flag agrees with the class arrays.
+    /// 2. Sorted-region keys strictly increase.
+    /// 3. No delta key equals a live sorted-region key.
+    pub fn integrity(&self) -> DbResult<()> {
+        // The mini-column extents: inside the page, inside the region between
+        // the directory and the tombstone bitmap, and 8-byte aligned so the
+        // value array a vectorised scan reads is aligned.
+        let directory_end = leaf_header::DIRECTORY
+            .checked_add(self.column_count.saturating_mul(DIRECTORY_ENTRY))
+            .ok_or_else(|| corrupt("the column directory overflows"))?;
+        let columns_end = self.tombstones_start()?;
+        for index in 0..self.column_count {
+            let column = self.column(index)?;
+            let start = self.column_offset(index)?;
             let end = start
                 .checked_add(column.class.len())
                 .and_then(|at| at.checked_add(column.values.len()))
@@ -192,17 +242,39 @@ impl<'p> LeafRef<'p> {
             if start % 8 != 0 {
                 return Err(corrupt(format!("mini-column {index} is not 8-byte aligned")));
             }
-            seen_exception = seen_exception || column.any_exception()?;
         }
-        if seen_exception != (flags & LEAF_HAS_EXCEPTIONS != 0) {
-            return Err(corrupt(
-                "the exception flag disagrees with the class arrays",
-            ));
+        let mut seen_exception = false;
+        for index in 0..self.column_count {
+            seen_exception = seen_exception || self.column(index)?.any_exception()?;
         }
-        // Walking the delta once here means every later delta accessor is
-        // reading bytes that have already been proved to decode.
-        leaf.validate_delta()?;
-        Ok(leaf)
+        if seen_exception != self.has_exceptions() {
+            return Err(corrupt("the exception flag disagrees with the class arrays"));
+        }
+        for row in 1..self.row_count {
+            let mut previous = Vec::with_capacity(self.key_columns);
+            for column in 0..self.key_columns {
+                previous.push(self.value(row.saturating_sub(1), column)?);
+            }
+            if self.compare_key(row, &previous)? != std::cmp::Ordering::Greater {
+                return Err(corrupt(format!(
+                    "row {row} does not sort after the row before it"
+                )));
+            }
+        }
+        for entry in 0..self.delta_count {
+            let mut key = Vec::with_capacity(self.key_columns);
+            for column in 0..self.key_columns {
+                key.push(self.delta_value(entry, column)?);
+            }
+            if let Ok(row) = self.search(&key)? {
+                if !self.is_tombstoned(row)? {
+                    return Err(corrupt(format!(
+                        "delta row {entry} duplicates a live sorted-region key"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Returns the raw page bytes.
@@ -448,13 +520,55 @@ impl<'p> LeafRef<'p> {
         self.column(column)?.value(row)
     }
 
+    /// Returns a reusable view of the leaf's key columns.
+    ///
+    /// A binary search over a leaf makes about eleven comparisons, and each one
+    /// re-derived the key columns' directory entries and slice bounds from the
+    /// page. That is a dozen bounds-checked reads per comparison to rediscover
+    /// something that does not change, and on a skip scan - which searches a
+    /// leaf per seek per distinct value - it was the whole cost of the query.
+    /// Deriving it once per search and passing it down makes the comparison
+    /// two slice reads.
+    pub fn key_view(&self) -> DbResult<KeyView<'p>> {
+        let mut columns: [Option<MiniColumn<'p>>; KEY_VIEW_INLINE] = Default::default();
+        let width = self.key_columns.min(KEY_VIEW_INLINE);
+        for index in 0..width {
+            if let Some(slot) = columns.get_mut(index) {
+                *slot = Some(self.column(index)?);
+            }
+        }
+        Ok(KeyView {
+            columns,
+            width: self.key_columns,
+        })
+    }
+
     /// Compares one sorted-region row's key against a probe key.
     ///
     /// @param row - the row's position in the sorted region
     /// @param probe - the key to compare against, one value per key column
     pub fn compare_key(&self, row: usize, probe: &[Datum<'_>]) -> DbResult<std::cmp::Ordering> {
-        for (index, wanted) in probe.iter().enumerate().take(self.key_columns) {
-            let held = self.value(row, index)?;
+        self.compare_key_with(&self.key_view()?, row, probe)
+    }
+
+    /// Compares one row's key against a probe, through a prepared key view.
+    ///
+    /// @param view - the leaf's key columns, from [`LeafRef::key_view`]
+    /// @param row - the row's position in the sorted region
+    /// @param probe - the key to compare against, one value per key column
+    pub fn compare_key_with(
+        &self,
+        view: &KeyView<'p>,
+        row: usize,
+        probe: &[Datum<'_>],
+    ) -> DbResult<std::cmp::Ordering> {
+        for (index, wanted) in probe.iter().enumerate().take(view.width) {
+            let held = match view.columns.get(index).and_then(|held| held.as_ref()) {
+                Some(column) => column.value(row)?,
+                // Past the inline capacity: fall back to the general path,
+                // which is correct and only slower.
+                None => self.value(row, index)?,
+            };
             let order = held.compare(wanted);
             if order != std::cmp::Ordering::Equal {
                 return Ok(order);
@@ -471,11 +585,12 @@ impl<'p> LeafRef<'p> {
     ///
     /// @param probe - the key to look for, one value per key column
     pub fn search(&self, probe: &[Datum<'_>]) -> DbResult<Result<usize, usize>> {
+        let view = self.key_view()?;
         let mut low = 0usize;
         let mut high = self.row_count;
         while low < high {
             let middle = low.saturating_add(high.saturating_sub(low) / 2);
-            match self.compare_key(middle, probe)? {
+            match self.compare_key_with(&view, middle, probe)? {
                 std::cmp::Ordering::Less => low = middle.saturating_add(1),
                 std::cmp::Ordering::Greater => high = middle,
                 std::cmp::Ordering::Equal => return Ok(Ok(middle)),
@@ -1320,6 +1435,26 @@ mod tests {
         page::write_u32(&mut heap_past_end, leaf_header::HEAP_START, 9000).unwrap();
         assert!(LeafRef::parse(&heap_past_end).is_err());
 
+        // A mini-column offset that runs past the page is caught by the
+        // accessor and by `integrity`, not by `parse`: checking it there costs
+        // a directory walk on every read, and no read is unsafe without it.
+        let mut column_past_end = good.clone();
+        page::write_u32(&mut column_past_end, leaf_header::DIRECTORY + 4, 8_180).unwrap();
+        let leaf = LeafRef::parse(&column_past_end).unwrap();
+        assert!(leaf.integrity().is_err());
+        assert!(leaf.value(0, 0).is_err());
+        assert!(leaf.live().is_err());
+
+        // An offset that still fits reads the wrong bytes rather than failing,
+        // and that is the honest limit of what a reader can detect on its own:
+        // the values are in bounds and mean nothing. The page checksum and
+        // `integrity` are what catch it, which is why both exist.
+        let mut column_moved = good.clone();
+        page::write_u32(&mut column_moved, leaf_header::DIRECTORY + 4, 4_000).unwrap();
+        let leaf = LeafRef::parse(&column_moved).unwrap();
+        assert!(leaf.integrity().is_err());
+        assert!(leaf.value(0, 0).is_ok());
+
         let mut delta_above_heap = good.clone();
         page::write_u32(&mut delta_above_heap, leaf_header::DELTA_START, 8100).unwrap();
         assert!(LeafRef::parse(&delta_above_heap).is_err());
@@ -1336,9 +1471,16 @@ mod tests {
         page::write_u16(&mut over_the_delta_limit, leaf_header::DELTA_COUNT, 33).unwrap();
         assert!(LeafRef::parse(&over_the_delta_limit).is_err());
 
+        // A lying exception flag is not a parse failure any more: checking it
+        // costs a pass over every class array, which `parse` deliberately does
+        // not do. It is an integrity failure, and a reader is unaffected either
+        // way because `all_typed` re-derives the answer from the array.
         let mut lying_exception_flag = good.clone();
         lying_exception_flag[header::FLAGS] |= LEAF_HAS_EXCEPTIONS;
-        assert!(LeafRef::parse(&lying_exception_flag).is_err());
+        let leaf = LeafRef::parse(&lying_exception_flag).unwrap();
+        assert!(leaf.integrity().is_err());
+        assert!(!leaf.column(1).unwrap().any_exception().unwrap());
+        assert_eq!(leaf.value(0, 1).unwrap().as_int(), Some(0));
     }
 
     /// The class-array and tombstone size functions pad to eight bytes at every
