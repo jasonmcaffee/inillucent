@@ -1,0 +1,600 @@
+//! Recovery: turning a log and a data file into the committed prefix.
+//!
+//! Invariant (the TDD's twelfth): **recovery after a crash at any point yields
+//! exactly the committed prefix** - every acknowledged commit present, no
+//! unacknowledged one visible. Two properties carry it, and both are structural
+//! rather than careful:
+//!
+//! 1. **Redo is idempotent by page LSN.** A record is applied to a page only
+//!    when the page's LSN is below the record's, and applying sets it to the
+//!    record's. So a record that was already in the data file before the crash
+//!    is skipped, and a record applied by one recovery run is skipped by the
+//!    next. That is what makes `recover(); recover()` produce the same file byte
+//!    for byte, which is this module's own acceptance test.
+//! 2. **The scan stops at the first record that does not decode.** A crash
+//!    leaves a torn tail: a record half-written, or written into a sector the
+//!    media reordered. Everything below that point is a prefix of what was
+//!    logged, and everything above it is refused. A scan that skipped a bad
+//!    record and carried on would apply a *later* record without the earlier one
+//!    it depends on, which is the one way redo can produce a state that never
+//!    existed.
+//!
+//! ## Where a scan starts
+//!
+//! At the meta page's `checkpoint_lsn`, which is **not** simply the LSN the last
+//! checkpoint reached. The policy is no-steal, so a page dirtied by a
+//! transaction that has not committed is never written to the data file; a
+//! transaction that began before a checkpoint and commits after it therefore has
+//! records *below* the checkpoint that were never applied to the file. So the
+//! checkpointer writes `min(durable end, the first LSN of the oldest still-open
+//! transaction)` and this is where recovery starts. Records in that range that
+//! *were* already applied are skipped by the page-LSN rule at no cost beyond
+//! reading them.
+//!
+//! ## Two passes, and why one would not do
+//!
+//! The first pass decides which transactions committed; the second replays them.
+//! One pass cannot, because a transaction's records precede its `Commit` record
+//! by construction - a single pass would have to buffer every record of every
+//! open transaction to find out whether to apply it, which is the undo buffer
+//! all over again and unbounded in the size of the log rather than of the
+//! transaction.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use inillucent_base::error::corrupt;
+use inillucent_base::DbResult;
+use inillucent_vfs::{AccessMode, DbPath, FileKind, OpenOptions, Vfs};
+
+use crate::record::{Body, Record};
+use crate::segment::{self, SegmentHeader};
+use crate::writer::{segment_path, FIRST_LSN};
+
+/// How many pages one record can name.
+const MAX_PAGES: usize = 3;
+
+/// What a caller does with a record recovery decided to replay.
+pub trait Redo {
+    /// Returns the LSN a page currently carries, or `None` when the page does
+    /// not exist in the data file yet.
+    ///
+    /// @param page - the page's number
+    fn page_lsn(&mut self, page: u64) -> DbResult<Option<u64>>;
+
+    /// Applies a record.
+    ///
+    /// `wanted` has one entry per page in `record.pages()`, in the same order,
+    /// and is true for the pages whose LSN is below the record's. A record that
+    /// names no page - a commit, a checkpoint, an allocation - arrives with an
+    /// empty `wanted` and is always applied, because the page-LSN rule has
+    /// nothing to say about it and each of them is idempotent on its own terms.
+    ///
+    /// @param record - the record to apply
+    /// @param wanted - which of the record's pages still need it
+    fn redo(&mut self, record: &Record<'_>, wanted: &[bool]) -> DbResult<()>;
+}
+
+/// A `Redo` that applies nothing, for a caller that only wants the analysis.
+///
+/// Used by the recovery *report* - "what would this log do" - and by the
+/// corrupt-WAL fuzz target, which needs the scan to run over hostile bytes
+/// without a data file behind it.
+#[derive(Debug, Default)]
+pub struct DryRun {
+    /// Every record the second pass would have applied, by LSN.
+    pub applied: Vec<u64>,
+}
+
+impl Redo for DryRun {
+    fn page_lsn(&mut self, _page: u64) -> DbResult<Option<u64>> {
+        Ok(None)
+    }
+
+    fn redo(&mut self, record: &Record<'_>, _wanted: &[bool]) -> DbResult<()> {
+        self.applied.push(record.lsn);
+        Ok(())
+    }
+}
+
+/// Where recovery starts and what it is recovering.
+#[derive(Clone, Copy, Debug)]
+pub struct RecoveryStart {
+    /// The database's identity; a segment that disagrees is refused.
+    pub uuid: u128,
+    /// The stream position to start scanning at.
+    pub checkpoint_lsn: u64,
+    /// The segment holding that position.
+    pub sequence: u64,
+    /// The commit timestamp watermark the checkpoint recorded.
+    pub cts_watermark: u64,
+}
+
+impl RecoveryStart {
+    /// Returns the start for a database that has never been checkpointed.
+    ///
+    /// @param uuid - the database's identity
+    pub fn fresh(uuid: u128) -> RecoveryStart {
+        RecoveryStart {
+            uuid,
+            checkpoint_lsn: FIRST_LSN,
+            sequence: 1,
+            cts_watermark: 0,
+        }
+    }
+}
+
+/// What recovery found and did.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Recovered {
+    /// The stream position past the last valid record; where writing resumes.
+    pub next_lsn: u64,
+    /// The segment that position is in; the next segment to write.
+    pub sequence: u64,
+    /// The highest commit timestamp any replayed commit carried.
+    pub latest_cts: u64,
+    /// How many records the scan read.
+    pub scanned: u64,
+    /// How many records the second pass applied.
+    pub applied: u64,
+    /// How many transactions committed.
+    pub committed: u64,
+    /// How many transactions were open at the end of the log and were discarded.
+    pub losers: u64,
+    /// Why the scan stopped, when it stopped on damage rather than on the end.
+    pub stopped_because: Option<String>,
+    /// The last checkpoint record the scan saw, if any.
+    pub last_checkpoint: Option<(u64, u64)>,
+    /// True when at least one `CatalogChange` was replayed.
+    pub catalog_changed: bool,
+}
+
+/// Runs recovery against a data file.
+///
+/// @param vfs - the file system the segments live in
+/// @param base - the database file's path
+/// @param start - where to start and what to check the segments against
+/// @param redo - the applier
+pub fn recover(
+    vfs: &dyn Vfs,
+    base: &DbPath,
+    start: RecoveryStart,
+    redo: &mut dyn Redo,
+) -> DbResult<Recovered> {
+    let chain = read_chain(vfs, base, start)?;
+    let analysis = analyse(&chain, start)?;
+    let mut outcome = Recovered {
+        next_lsn: analysis.valid_end,
+        sequence: analysis.last_sequence,
+        latest_cts: analysis.latest_cts,
+        scanned: analysis.scanned,
+        applied: 0,
+        committed: analysis.committed.len() as u64,
+        losers: analysis.losers as u64,
+        stopped_because: analysis.stopped_because.clone(),
+        last_checkpoint: analysis.last_checkpoint,
+        catalog_changed: false,
+    };
+    replay(&chain, start, &analysis, redo, &mut outcome)?;
+    Ok(outcome)
+}
+
+/// Truncates the log to the recovered prefix and removes what is past it.
+///
+/// Separate from [`recover`] because a dry run - the fuzz target, the report -
+/// must not touch the files, and because a caller that recovered into a copy of
+/// the database has no business truncating the original.
+///
+/// @param vfs - the file system
+/// @param base - the database file's path
+/// @param outcome - what recovery returned
+pub fn truncate_after(vfs: &dyn Vfs, base: &DbPath, outcome: &Recovered) -> DbResult<()> {
+    let name = base.as_path().to_string_lossy().to_string();
+    let directory = base.as_path().parent().map(std::path::Path::to_path_buf);
+    let path = segment_path(&name, directory.as_deref(), outcome.sequence);
+    if let Ok(file) = vfs.open(&path, OpenOptions::of_kind(FileKind::Wal)) {
+        if let Ok(header) = read_header(file.as_ref()) {
+            let keep = segment::HEADER_BYTES as u64
+                + outcome.next_lsn.saturating_sub(header.first_lsn);
+            file.truncate(keep)
+                .map_err(inillucent_vfs::VfsError::into_db_error)?;
+            file.sync(inillucent_vfs::SyncMode::Normal)
+                .map_err(inillucent_vfs::VfsError::into_db_error)?;
+        }
+    }
+    // Segments past the one the scan stopped in describe records that are not
+    // part of the recovered prefix. They are deleted rather than left, because
+    // the next run would open the *next* sequence and a stale file at that
+    // number would be rewritten anyway - deleting is the same outcome, said out
+    // loud.
+    let mut sequence = outcome.sequence.saturating_add(1);
+    loop {
+        let path = segment_path(&name, directory.as_deref(), sequence);
+        match vfs.access(&path, AccessMode::Exists) {
+            Ok(true) => {
+                let _ = vfs.delete(&path, false);
+                sequence = sequence.saturating_add(1);
+            }
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
+/// One segment's bytes and what its header said.
+struct LoadedSegment {
+    header: SegmentHeader,
+    bytes: Vec<u8>,
+}
+
+/// The segments the scan will read, in sequence order.
+struct Chain {
+    segments: Vec<LoadedSegment>,
+}
+
+impl Chain {
+    /// Returns the record area of one segment.
+    ///
+    /// @param index - the segment's position in the chain
+    fn body(&self, index: usize) -> &[u8] {
+        self.segments
+            .get(index)
+            .and_then(|segment| segment.bytes.get(segment::HEADER_BYTES..))
+            .unwrap_or(&[])
+    }
+
+    /// Returns one segment's first LSN.
+    ///
+    /// @param index - the segment's position in the chain
+    fn first_lsn(&self, index: usize) -> u64 {
+        self.segments
+            .get(index)
+            .map(|segment| segment.header.first_lsn)
+            .unwrap_or(FIRST_LSN)
+    }
+
+    /// Returns one segment's sequence number.
+    ///
+    /// @param index - the segment's position in the chain
+    fn sequence(&self, index: usize) -> u64 {
+        self.segments
+            .get(index)
+            .map(|segment| segment.header.sequence)
+            .unwrap_or(1)
+    }
+}
+
+/// Reads every segment from the checkpoint's segment forward.
+///
+/// A segment whose header is damaged, whose uuid is another database's, or
+/// whose sequence is not the one the chain wants is refused rather than
+/// skipped - the chain stops there and everything above it is discarded.
+///
+/// @param vfs - the file system
+/// @param base - the database file's path
+/// @param start - where to start
+fn read_chain(vfs: &dyn Vfs, base: &DbPath, start: RecoveryStart) -> DbResult<Chain> {
+    let name = base.as_path().to_string_lossy().to_string();
+    let directory = base.as_path().parent().map(std::path::Path::to_path_buf);
+    let mut segments = Vec::new();
+    let mut sequence = start.sequence.max(1);
+    loop {
+        let path = segment_path(&name, directory.as_deref(), sequence);
+        let Ok(true) = vfs.access(&path, AccessMode::Exists) else {
+            break;
+        };
+        let Ok(file) = vfs.open(&path, OpenOptions::of_kind(FileKind::Wal).read_only()) else {
+            break;
+        };
+        let size = file
+            .file_size()
+            .map_err(inillucent_vfs::VfsError::into_db_error)?;
+        if size < segment::HEADER_BYTES as u64 {
+            // A segment file that does not even hold a header is a create that
+            // was cut short. It ends the chain; it does not fail the open.
+            break;
+        }
+        let mut bytes = vec![0u8; size as usize];
+        if file.read_exact_at(0, &mut bytes).is_err() {
+            // A short read here is media damage in the middle of the log rather
+            // than at its tail, and the honest answer is the same: the chain
+            // stops, and everything above is discarded.
+            break;
+        }
+        let header = match SegmentHeader::decode(&bytes) {
+            Ok(header) => header,
+            Err(_) => break,
+        };
+        if header.belongs_to(start.uuid, sequence).is_err() {
+            break;
+        }
+        if let Some(previous) = segments.last() {
+            let previous: &LoadedSegment = previous;
+            let expected = previous
+                .header
+                .first_lsn
+                .saturating_add(previous.bytes.len().saturating_sub(segment::HEADER_BYTES) as u64);
+            if header.first_lsn > expected {
+                // A gap: the previous segment's records stop before this one
+                // starts, so the stream is not continuous and the chain ends.
+                break;
+            }
+        }
+        segments.push(LoadedSegment { header, bytes });
+        sequence = sequence.saturating_add(1);
+    }
+    Ok(Chain { segments })
+}
+
+/// What the first pass learned.
+struct Analysis {
+    committed: BTreeSet<u64>,
+    aborted: BTreeSet<u64>,
+    valid_end: u64,
+    last_sequence: u64,
+    latest_cts: u64,
+    scanned: u64,
+    losers: usize,
+    stopped_because: Option<String>,
+    last_checkpoint: Option<(u64, u64)>,
+}
+
+/// Walks the chain once, deciding which transactions committed.
+///
+/// @param chain - the segments
+/// @param start - where the scan begins
+fn analyse(chain: &Chain, start: RecoveryStart) -> DbResult<Analysis> {
+    let mut committed = BTreeSet::new();
+    let mut aborted = BTreeSet::new();
+    let mut open: BTreeMap<u64, ()> = BTreeMap::new();
+    let mut latest_cts = start.cts_watermark;
+    let mut scanned = 0u64;
+    let mut last_checkpoint = None;
+    let mut stopped_because = None;
+    let mut valid_end = start.checkpoint_lsn;
+    let mut last_sequence = start.sequence.max(1);
+
+    for index in 0..chain.segments.len() {
+        last_sequence = chain.sequence(index);
+        let body = chain.body(index);
+        let first = chain.first_lsn(index);
+        // The scan resumes at the checkpoint LSN inside the first segment and
+        // at the segment's own start in every later one.
+        let mut at = if valid_end > first {
+            (valid_end.saturating_sub(first)) as usize
+        } else {
+            0
+        };
+        valid_end = valid_end.max(first);
+        loop {
+            let tail = match body.get(at..) {
+                Some(tail) => tail,
+                None => break,
+            };
+            let decoded = match Record::decode(tail) {
+                Ok(Some(record)) => record,
+                Ok(None) => break,
+                Err(error) => {
+                    stopped_because = Some(format!(
+                        "segment {} at lsn {}: {}",
+                        chain.sequence(index),
+                        valid_end,
+                        error.detail().unwrap_or("damaged")
+                    ));
+                    return Ok(Analysis {
+                        committed,
+                        aborted,
+                        valid_end,
+                        last_sequence,
+                        latest_cts,
+                        scanned,
+                        losers: open.len(),
+                        stopped_because,
+                        last_checkpoint,
+                    });
+                }
+            };
+            let expected = first.saturating_add(at as u64);
+            if decoded.lsn != expected {
+                // A record whose LSN is not where it sits is a record from an
+                // older generation of the log that a shorter run left behind:
+                // the segment was reused and this is stale tail, not damage.
+                // It is the end of the valid prefix either way.
+                stopped_because = Some(format!(
+                    "segment {} at offset {at}: a record says lsn {} and sits at {expected}",
+                    chain.sequence(index),
+                    decoded.lsn
+                ));
+                return Ok(Analysis {
+                    committed,
+                    aborted,
+                    valid_end,
+                    last_sequence,
+                    latest_cts,
+                    scanned,
+                    losers: open.len(),
+                    stopped_because,
+                    last_checkpoint,
+                });
+            }
+            scanned = scanned.saturating_add(1);
+            match decoded.body {
+                Body::Commit { cts } => {
+                    committed.insert(decoded.txn);
+                    open.remove(&decoded.txn);
+                    latest_cts = latest_cts.max(cts);
+                }
+                Body::Abort => {
+                    aborted.insert(decoded.txn);
+                    open.remove(&decoded.txn);
+                }
+                Body::Checkpoint {
+                    checkpoint_lsn,
+                    cts_watermark,
+                } => {
+                    last_checkpoint = Some((checkpoint_lsn, cts_watermark));
+                    latest_cts = latest_cts.max(cts_watermark);
+                }
+                _ => {
+                    if decoded.txn != 0 && !committed.contains(&decoded.txn) {
+                        open.insert(decoded.txn, ());
+                    }
+                }
+            }
+            at = at.saturating_add(decoded.length);
+            valid_end = expected.saturating_add(decoded.length as u64);
+        }
+    }
+    Ok(Analysis {
+        committed,
+        aborted,
+        valid_end,
+        last_sequence,
+        latest_cts,
+        scanned,
+        losers: open.len(),
+        stopped_because,
+        last_checkpoint,
+    })
+}
+
+/// Walks the chain again, applying the records of committed transactions.
+///
+/// @param chain - the segments
+/// @param start - where the scan begins
+/// @param analysis - what the first pass learned
+/// @param redo - the applier
+/// @param outcome - the report to fill in
+fn replay(
+    chain: &Chain,
+    start: RecoveryStart,
+    analysis: &Analysis,
+    redo: &mut dyn Redo,
+    outcome: &mut Recovered,
+) -> DbResult<()> {
+    let mut position = start.checkpoint_lsn;
+    for index in 0..chain.segments.len() {
+        let body = chain.body(index);
+        let first = chain.first_lsn(index);
+        let mut at = if position > first {
+            (position.saturating_sub(first)) as usize
+        } else {
+            0
+        };
+        position = position.max(first);
+        while position < analysis.valid_end {
+            let tail = match body.get(at..) {
+                Some(tail) => tail,
+                None => break,
+            };
+            let record = match Record::decode(tail) {
+                Ok(Some(record)) => record,
+                // The first pass already proved every record below `valid_end`
+                // decodes, so reaching either of these means the bytes changed
+                // between the passes - which they cannot, the chain is in
+                // memory. It is reported rather than assumed away.
+                Ok(None) => break,
+                Err(error) => return Err(error),
+            };
+            at = at.saturating_add(record.length);
+            position = position.saturating_add(record.length as u64);
+            if !should_replay(&record, analysis) {
+                continue;
+            }
+            let pages = record.pages();
+            let mut wanted = [false; MAX_PAGES];
+            let mut any = pages.as_slice().is_empty();
+            for (slot, page) in pages.as_slice().iter().enumerate() {
+                let below = match redo.page_lsn(*page)? {
+                    Some(lsn) => lsn < record.lsn,
+                    None => true,
+                };
+                if let Some(entry) = wanted.get_mut(slot) {
+                    *entry = below;
+                }
+                any = any || below;
+            }
+            if !any {
+                continue;
+            }
+            let width = pages.as_slice().len().min(MAX_PAGES);
+            redo.redo(&record, wanted.get(..width).unwrap_or(&[]))?;
+            outcome.applied = outcome.applied.saturating_add(1);
+            if matches!(record.body, Body::CatalogChange { .. }) {
+                outcome.catalog_changed = true;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Decides whether one record belongs to the committed prefix.
+///
+/// @param record - the record
+/// @param analysis - what the first pass learned
+fn should_replay(record: &Record<'_>, analysis: &Analysis) -> bool {
+    match record.body {
+        // A commit is replayed so the applier can advance its own timestamp,
+        // and an abort never is: its transaction's records are not applied, so
+        // there is nothing for the abort to undo.
+        Body::Abort => false,
+        // These belong to no transaction and are always part of the prefix: a
+        // checkpoint is a marker, a catalog change invalidates a cache, and a
+        // free-map bit is idempotent.
+        Body::Checkpoint { .. } => true,
+        _ => {
+            if record.txn == 0 {
+                return true;
+            }
+            analysis.committed.contains(&record.txn) && !analysis.aborted.contains(&record.txn)
+        }
+    }
+}
+
+/// Reads and decodes one segment's header from an open file.
+///
+/// @param file - the open segment
+fn read_header(file: &dyn inillucent_vfs::VfsFile) -> DbResult<SegmentHeader> {
+    let mut bytes = vec![0u8; segment::HEADER_BYTES];
+    file.read_exact_at(0, &mut bytes)
+        .map_err(inillucent_vfs::VfsError::into_db_error)?;
+    SegmentHeader::decode(&bytes)
+}
+
+/// Reads a log without a data file and reports what it holds.
+///
+/// This is the corrupt-WAL fuzz target's entry point and the `.walcheck`
+/// command's: it must terminate and must not panic on any bytes at all.
+///
+/// @param vfs - the file system
+/// @param base - the database file's path
+/// @param start - where to start
+pub fn inspect(vfs: &dyn Vfs, base: &DbPath, start: RecoveryStart) -> DbResult<Recovered> {
+    let mut dry = DryRun::default();
+    recover(vfs, base, start, &mut dry)
+}
+
+/// Refuses a chain whose first segment is not the one the meta page names.
+///
+/// Exposed so that a caller can distinguish "there is no log" - a database that
+/// was closed cleanly - from "the log is not this database's", which is the one
+/// case where continuing would apply another file's records.
+///
+/// @param vfs - the file system
+/// @param base - the database file's path
+/// @param start - what the meta page says
+pub fn chain_is_present(vfs: &dyn Vfs, base: &DbPath, start: RecoveryStart) -> DbResult<bool> {
+    let name = base.as_path().to_string_lossy().to_string();
+    let directory = base.as_path().parent().map(std::path::Path::to_path_buf);
+    let path = segment_path(&name, directory.as_deref(), start.sequence.max(1));
+    match vfs.access(&path, AccessMode::Exists) {
+        Ok(present) => Ok(present),
+        Err(error) => Err(error.into_db_error()),
+    }
+}
+
+/// Returns the error a caller should raise when a chain is refused.
+///
+/// @param detail - what was wrong
+pub fn refuse(detail: impl Into<String>) -> inillucent_base::DbError {
+    corrupt(detail)
+}

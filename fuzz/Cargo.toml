@@ -20,6 +20,7 @@ inillucent-base = { path = "../crates/inillucent-base" }
 inillucent-vfs = { path = "../crates/inillucent-vfs" }
 inillucent-pool = { path = "../crates/inillucent-pool" }
 inillucent-tree = { path = "../crates/inillucent-tree" }
+inillucent-wal = { path = "../crates/inillucent-wal" }
 
 [[bin]]
 name = "varint"
@@ -60,5 +61,11 @@ doc = false
 [[bin]]
 name = "memcmp_key"
 path = "fuzz_targets/memcmp_key.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "wal_record"
+path = "fuzz_targets/wal_record.rs"
 test = false
 doc = false

@@ -9,6 +9,7 @@ members = [
     "crates/inillucent-value",
     # The rearchitected engine (task-1816).
     "crates/inillucent-pool",
+    "crates/inillucent-wal",
     "crates/inillucent-tree",
     "crates/inillucent-sqlite-reader",
     "crates/inillucent-scalar",
@@ -62,6 +63,7 @@ inillucent-vfs = { path = "crates/inillucent-vfs" }
 inillucent-sim = { path = "crates/inillucent-sim" }
 inillucent-value = { path = "crates/inillucent-value" }
 inillucent-pool = { path = "crates/inillucent-pool" }
+inillucent-wal = { path = "crates/inillucent-wal" }
 inillucent-tree = { path = "crates/inillucent-tree" }
 inillucent-sqlite-reader = { path = "crates/inillucent-sqlite-reader" }
 inillucent-scalar = { path = "crates/inillucent-scalar" }

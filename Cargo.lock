@@ -583,6 +583,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "inillucent-base",
  "inillucent-core",
  "pgvector",
  "postgres",
@@ -590,6 +591,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "tokenizers",
 ]
 
 [[package]]
@@ -822,6 +824,15 @@ dependencies = [
  "inillucent-sql",
  "inillucent-storage",
  "inillucent-value",
+]
+
+[[package]]
+name = "inillucent-wal"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+ "inillucent-sim",
+ "inillucent-vfs",
 ]
 
 [[package]]
