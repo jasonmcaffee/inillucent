@@ -318,7 +318,10 @@ mod tests {
             case.encode_tagged(&mut buffer);
             for cut in 0..buffer.len() {
                 let short = &buffer[..cut];
-                assert!(Datum::decode_tagged(short).is_err(), "{case:?} cut at {cut}");
+                assert!(
+                    Datum::decode_tagged(short).is_err(),
+                    "{case:?} cut at {cut}"
+                );
             }
         }
     }
@@ -342,7 +345,10 @@ mod tests {
         assert_eq!(Datum::Int(2).compare(&Datum::Real(2.5)), Ordering::Less);
         assert_eq!(Datum::Real(2.5).compare(&Datum::Int(3)), Ordering::Less);
         assert_eq!(Datum::Int(3).compare(&Datum::Real(3.0)), Ordering::Equal);
-        assert_eq!(Datum::Text(b"a").compare(&Datum::Text(b"ab")), Ordering::Less);
+        assert_eq!(
+            Datum::Text(b"a").compare(&Datum::Text(b"ab")),
+            Ordering::Less
+        );
     }
 
     /// Integers compare exactly, including past the point where a double would

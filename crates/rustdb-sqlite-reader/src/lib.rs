@@ -101,7 +101,10 @@ impl SchemaObject {
             .rfind(')')
             .ok_or_else(|| corrupt(format!("{} has no column list", self.name)))?;
         if close <= open {
-            return Err(corrupt(format!("{}'s column list is inside out", self.name)));
+            return Err(corrupt(format!(
+                "{}'s column list is inside out",
+                self.name
+            )));
         }
         let body = self.sql.get(open.saturating_add(1)..close).unwrap_or("");
         let mut names = Vec::new();
@@ -134,7 +137,12 @@ impl SchemaObject {
 
 /// The keywords that begin a table constraint rather than a column.
 const TABLE_CONSTRAINTS: [&str; 6] = [
-    "primary", "unique", "check", "foreign", "constraint", "exclude",
+    "primary",
+    "unique",
+    "check",
+    "foreign",
+    "constraint",
+    "exclude",
 ];
 
 /// Adds one column-definition fragment's name to the list, if it is a column.

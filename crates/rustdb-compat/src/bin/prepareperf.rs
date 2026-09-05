@@ -70,7 +70,8 @@ fn main() -> ExitCode {
 /// @param rounds - how many paired rounds
 fn run(fixture: &Path, rounds: u32) -> Result<(), String> {
     let bench = sqlite_bench().ok_or_else(|| "sqlite-bench is not built".to_string())?;
-    let plan_path = std::env::temp_dir().join(format!("rustdb-prepareperf-{}.plan", std::process::id()));
+    let plan_path =
+        std::env::temp_dir().join(format!("rustdb-prepareperf-{}.plan", std::process::id()));
     std::fs::write(&plan_path, plan_file()).map_err(|error| format!("plan: {error}"))?;
 
     // Three arms, one pair of vectors per workload: with the cache, without it,
@@ -116,11 +117,9 @@ fn run(fixture: &Path, rounds: u32) -> Result<(), String> {
     let mut with_logs: Vec<f64> = Vec::new();
     let mut without_logs: Vec<f64> = Vec::new();
     for (index, (name, _, _)) in WORKLOADS.iter().enumerate() {
-        let (Some(a), Some(b), Some(c)) = (
-            cached.get(index),
-            uncached.get(index),
-            reference.get(index),
-        ) else {
+        let (Some(a), Some(b), Some(c)) =
+            (cached.get(index), uncached.get(index), reference.get(index))
+        else {
             continue;
         };
         let (with, without, theirs) = (median(a), median(b), median(c));
@@ -145,9 +144,7 @@ fn run(fixture: &Path, rounds: u32) -> Result<(), String> {
     let (with, with_low, with_high) = family(&with_logs);
     let (without, without_low, without_high) = family(&without_logs);
     println!();
-    println!(
-        "  open.prepare with the cache:    {with:.2}x  ({with_low:.2}x .. {with_high:.2}x)"
-    );
+    println!("  open.prepare with the cache:    {with:.2}x  ({with_low:.2}x .. {with_high:.2}x)");
     println!(
         "  open.prepare without the cache: {without:.2}x  ({without_low:.2}x .. {without_high:.2}x)"
     );

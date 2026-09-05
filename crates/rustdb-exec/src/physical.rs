@@ -34,10 +34,10 @@
 
 use rustdb_base::error::misuse;
 use rustdb_base::DbResult;
+use rustdb_sql::ast::{BinaryOp, SortOrder};
 use rustdb_sql::bind::{BoundExpr, BoundSelect};
 use rustdb_sql::function::AggregateFunc;
 use rustdb_sql::plan::{AccessPath, AggregationMode, PhysicalPlan};
-use rustdb_sql::ast::{BinaryOp, SortOrder};
 use rustdb_tree::datum::OwnedDatum;
 use rustdb_tree::Tree;
 
@@ -270,7 +270,9 @@ pub fn build_prepared<'t>(
             Some(index) => index,
             None => {
                 if select.distinct {
-                    return unsupported("ORDER BY over an expression not in a DISTINCT select list");
+                    return unsupported(
+                        "ORDER BY over an expression not in a DISTINCT select list",
+                    );
                 }
                 projected.push(translated);
                 projected.len().saturating_sub(1)
@@ -294,8 +296,8 @@ pub fn build_prepared<'t>(
         .iter()
         .map(|expr| translate_scan(expr, layout))
         .collect::<DbResult<Vec<Expr>>>()?;
-    let grouped_walk = plan.aggregation == AggregationMode::Grouped
-        && is_scan_prefix(&group_exprs, scan_order);
+    let grouped_walk =
+        plan.aggregation == AggregationMode::Grouped && is_scan_prefix(&group_exprs, scan_order);
 
     // Whether the projected rows arrive in the order the ORDER BY asks for.
     let sorted_already = !sort_keys.is_empty()
@@ -632,7 +634,9 @@ fn translate_scan(expr: &BoundExpr, layout: &SourceLayout) -> DbResult<Expr> {
                 .copied()
                 .flatten()
                 .ok_or_else(|| {
-                    misuse(format!("the scanned tree does not carry record slot {slot}"))
+                    misuse(format!(
+                        "the scanned tree does not carry record slot {slot}"
+                    ))
                 })?;
             Expr::Column(index)
         }
@@ -711,15 +715,14 @@ fn translate_post(
     if let BoundExpr::Aggregate { slot } = expr {
         return Ok(Expr::Column(group_width.saturating_add(*slot)));
     }
-    if let Some(index) = select
-        .group_by
-        .iter()
-        .position(|key| key == expr)
-    {
+    if let Some(index) = select.group_by.iter().position(|key| key == expr) {
         return Ok(Expr::Column(index));
     }
     match expr {
-        BoundExpr::Null | BoundExpr::Integer(_) | BoundExpr::Real(_) | BoundExpr::Text(_)
+        BoundExpr::Null
+        | BoundExpr::Integer(_)
+        | BoundExpr::Real(_)
+        | BoundExpr::Text(_)
         | BoundExpr::Blob(_) => translate_scan(expr, layout),
         BoundExpr::Arithmetic { op, left, right } => Ok(Expr::Arith(
             arith_op(*op)?,
@@ -806,7 +809,12 @@ fn aggregate_output_types(
     select: &BoundSelect,
     layout: &SourceLayout,
 ) -> DbResult<Vec<StaticType>> {
-    let mut types = Vec::with_capacity(select.group_by.len().saturating_add(select.aggregates.len()));
+    let mut types = Vec::with_capacity(
+        select
+            .group_by
+            .len()
+            .saturating_add(select.aggregates.len()),
+    );
     for key in &select.group_by {
         types.push(match translate_scan(key, layout)? {
             Expr::Column(index) => layout

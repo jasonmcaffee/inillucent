@@ -820,7 +820,8 @@ impl Sink for Sort {
         // A stable sort, because SQLite's sorter is stable and a digest
         // comparison over rows with equal keys would otherwise differ for a
         // reason that is not a bug in either engine.
-        self.rows.sort_by(|left, right| compare_by(left, right, &keys));
+        self.rows
+            .sort_by(|left, right| compare_by(left, right, &keys));
         let rows = std::mem::take(&mut self.rows);
         emit_rows(&rows, self.downstream.as_mut())?;
         self.downstream.finish()
@@ -1057,7 +1058,9 @@ fn emit_rows(rows: &[Vec<OwnedDatum>], downstream: &mut dyn Sink) -> DbResult<()
     }
     let mut start = 0usize;
     while start < rows.len() {
-        let end = start.saturating_add(crate::batch::BATCH_ROWS).min(rows.len());
+        let end = start
+            .saturating_add(crate::batch::BATCH_ROWS)
+            .min(rows.len());
         let chunk = rows.get(start..end).unwrap_or(&[]);
         let mut columns_owned: Vec<Vec<Datum<'_>>> = Vec::with_capacity(width);
         for column in 0..width {
@@ -1216,7 +1219,11 @@ mod tests {
         };
         aggregate.push(&batch).unwrap();
         assert_eq!(
-            aggregate.accumulators[0].finish().unwrap().borrow().as_int(),
+            aggregate.accumulators[0]
+                .finish()
+                .unwrap()
+                .borrow()
+                .as_int(),
             Some(selection.len() as i64)
         );
     }
@@ -1225,12 +1232,7 @@ mod tests {
     /// predicate keeps none of them.
     #[test]
     fn a_filter_keeps_only_definite_truths() {
-        let values = [
-            Datum::Int(1),
-            Datum::Int(10),
-            Datum::Null,
-            Datum::Int(20),
-        ];
+        let values = [Datum::Int(1), Datum::Int(10), Datum::Null, Datum::Int(20)];
         let predicate = compile(
             &Expr::Compare(
                 CompareOp::Greater,
@@ -1270,10 +1272,8 @@ mod tests {
             let mut top = TopN::new(keys.clone(), limit, Box::new(Collect::new()));
             let mut sort = Sort::new(keys.clone(), Box::new(Collect::with_limit(limit)));
             for chunk in rows.chunks(37) {
-                let column_a: Vec<Datum<'_>> =
-                    chunk.iter().map(|(a, _)| Datum::Int(*a)).collect();
-                let column_b: Vec<Datum<'_>> =
-                    chunk.iter().map(|(_, b)| Datum::Int(*b)).collect();
+                let column_a: Vec<Datum<'_>> = chunk.iter().map(|(a, _)| Datum::Int(*a)).collect();
+                let column_b: Vec<Datum<'_>> = chunk.iter().map(|(_, b)| Datum::Int(*b)).collect();
                 let batch = Batch::new(
                     chunk.len(),
                     vec![Vector::Values(&column_a), Vector::Values(&column_b)],
@@ -1283,8 +1283,7 @@ mod tests {
             }
             let from_top = std::mem::take(&mut top.best);
             sort.rows.sort_by(|l, r| compare_by(l, r, &keys));
-            let from_sort: Vec<Vec<OwnedDatum>> =
-                sort.rows.iter().take(limit).cloned().collect();
+            let from_sort: Vec<Vec<OwnedDatum>> = sort.rows.iter().take(limit).cloned().collect();
             assert_eq!(from_top.len(), from_sort.len(), "limit {limit}");
             for (index, (a, b)) in from_top.iter().zip(from_sort.iter()).enumerate() {
                 assert_eq!(
@@ -1326,9 +1325,7 @@ mod tests {
     /// right counts.
     #[test]
     fn grouped_aggregation_counts_each_key() {
-        let categories: Vec<Datum<'_>> = (0..1_000)
-            .map(|n| Datum::Int((n % 7) as i64))
-            .collect();
+        let categories: Vec<Datum<'_>> = (0..1_000).map(|n| Datum::Int((n % 7) as i64)).collect();
         let mut grouped = HashAggregate::new(
             vec![compile(&Expr::Column(0), &[StaticType::Int]).unwrap()],
             vec![AggregateSpec {

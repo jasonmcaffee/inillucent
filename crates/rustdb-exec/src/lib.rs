@@ -52,7 +52,7 @@ pub use batch::{Batch, Vector, BATCH_ROWS};
 pub use expr::{compile, ArithOp, CompareOp, Eval, Expr, StaticType};
 pub use ops::{
     AdjacentDistinct, AggregateSpec, Collect, CollectInto, Distinct, Filter, Flow, HashAggregate,
-    Limit, Project, Sink, SimpleAggregate, Sort, SortKey, StreamAggregate, TopN,
+    Limit, Project, SimpleAggregate, Sink, Sort, SortKey, StreamAggregate, TopN,
 };
 pub use physical::{SourceLayout, TreeCatalog};
 pub use scan::{Projection, SkipScan, TableScan};

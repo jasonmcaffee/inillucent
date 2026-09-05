@@ -182,8 +182,8 @@ impl ImportedDatabase {
         let parsed = parse_next_statement(sql.as_bytes(), 0, &self.limits)
             .map_err(|error| misuse(format!("{sql}: {error:?}")))?;
         let authorizer = AllowAll;
-        let mut binder = Binder::new(&self.catalog, &parsed.ast, &authorizer)
-            .with_source(sql.as_bytes());
+        let mut binder =
+            Binder::new(&self.catalog, &parsed.ast, &authorizer).with_source(sql.as_bytes());
         let bound = binder
             .bind_statement(&parsed.statement)
             .map_err(|error| misuse(format!("{sql}: {error:?}")))?;

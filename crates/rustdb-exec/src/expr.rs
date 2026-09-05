@@ -329,7 +329,11 @@ impl Eval for IntArith {
         // specialisation faster and wrong, which is the one thing it may not be,
         // so it falls back to the generic arithmetic instead.
         let (Some(left), Some(right)) = (left.as_int(), right.as_int()) else {
-            return generic_arith(self.op, &self.left.value(batch, nth)?, &self.right.value(batch, nth)?);
+            return generic_arith(
+                self.op,
+                &self.left.value(batch, nth)?,
+                &self.right.value(batch, nth)?,
+            );
         };
         Ok(integer_arith(self.op, left, right))
     }
@@ -546,12 +550,9 @@ impl Eval for Length {
             // SQLite counts characters in text and bytes in a blob. The
             // database encoding is UTF-8, so a character is a non-continuation
             // byte.
-            Datum::Text(bytes) => Datum::Int(
-                bytes
-                    .iter()
-                    .filter(|byte| (**byte & 0xC0) != 0x80)
-                    .count() as i64,
-            ),
+            Datum::Text(bytes) => {
+                Datum::Int(bytes.iter().filter(|byte| (**byte & 0xC0) != 0x80).count() as i64)
+            }
             Datum::Blob(bytes) => Datum::Int(bytes.len() as i64),
             Datum::Int(number) => Datum::Int(number.to_string().len() as i64),
             Datum::Real(number) => Datum::Int(format_real(number).len() as i64),
@@ -607,8 +608,7 @@ fn prefix_number(bytes: &[u8]) -> f64 {
                 true
             }
             b'+' | b'-' => {
-                index == 0
-                    || matches!(raw.get(index.saturating_sub(1)), Some(b'e') | Some(b'E'))
+                index == 0 || matches!(raw.get(index.saturating_sub(1)), Some(b'e') | Some(b'E'))
             }
             b'.' => !seen_dot && !seen_exponent,
             b'e' | b'E' => seen_digit && !seen_exponent,
@@ -709,19 +709,12 @@ mod tests {
         }
         // The same for arithmetic.
         for op in [ArithOp::Add, ArithOp::Subtract, ArithOp::Multiply] {
-            let expr = Expr::Arith(
-                op,
-                Box::new(Expr::Column(0)),
-                Box::new(Expr::Column(1)),
-            );
+            let expr = Expr::Arith(op, Box::new(Expr::Column(0)), Box::new(Expr::Column(1)));
             let fast = compile(&expr, &[StaticType::Int, StaticType::Int]).unwrap();
             let slow = compile(&expr, &[StaticType::Unknown, StaticType::Unknown]).unwrap();
             for left in samples {
                 for right in samples {
-                    let batch = Batch::new(
-                        1,
-                        vec![Vector::Const(left), Vector::Const(right)],
-                    );
+                    let batch = Batch::new(1, vec![Vector::Const(left), Vector::Const(right)]);
                     let a = fast.value(&batch, 0).unwrap();
                     let b = slow.value(&batch, 0).unwrap();
                     assert_eq!(
@@ -797,8 +790,11 @@ mod tests {
     /// `IS NULL` is never NULL, whatever its operand is.
     #[test]
     fn null_tests_are_two_valued() {
-        let is_null = compile(&Expr::IsNull(Box::new(Expr::Column(0))), &[StaticType::Unknown])
-            .unwrap();
+        let is_null = compile(
+            &Expr::IsNull(Box::new(Expr::Column(0))),
+            &[StaticType::Unknown],
+        )
+        .unwrap();
         let is_not = compile(
             &Expr::IsNotNull(Box::new(Expr::Column(0))),
             &[StaticType::Unknown],
@@ -816,8 +812,11 @@ mod tests {
     /// does.
     #[test]
     fn length_counts_characters_not_bytes() {
-        let length = compile(&Expr::Length(Box::new(Expr::Column(0))), &[StaticType::Unknown])
-            .unwrap();
+        let length = compile(
+            &Expr::Length(Box::new(Expr::Column(0))),
+            &[StaticType::Unknown],
+        )
+        .unwrap();
         let cases: [(Datum<'_>, Option<i64>); 5] = [
             (Datum::Null, None),
             (Datum::Text(b"abc"), Some(3)),
@@ -828,7 +827,11 @@ mod tests {
         ];
         for (value, wanted) in cases {
             let batch = Batch::new(1, vec![Vector::Const(value)]);
-            assert_eq!(length.value(&batch, 0).unwrap().as_int(), wanted, "{value:?}");
+            assert_eq!(
+                length.value(&batch, 0).unwrap().as_int(),
+                wanted,
+                "{value:?}"
+            );
         }
     }
 

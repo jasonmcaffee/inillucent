@@ -227,8 +227,7 @@ impl<'t> TableScan<'t> {
         while start < owned.len() {
             let end = start.saturating_add(BATCH_ROWS).min(owned.len());
             let chunk = owned.get(start..end).unwrap_or(&[]);
-            let mut per_column: Vec<Vec<Datum<'_>>> =
-                Vec::with_capacity(self.projection.0.len());
+            let mut per_column: Vec<Vec<Datum<'_>>> = Vec::with_capacity(self.projection.0.len());
             for column in 0..self.projection.0.len() {
                 per_column.push(
                     chunk
@@ -405,9 +404,15 @@ mod tests {
         TableScan::new(&tree, Projection::all(3))
             .run(&mut Widths(&mut widths))
             .unwrap();
-        assert!(widths.iter().all(|width| *width <= BATCH_ROWS), "{widths:?}");
+        assert!(
+            widths.iter().all(|width| *width <= BATCH_ROWS),
+            "{widths:?}"
+        );
         assert_eq!(widths.iter().sum::<usize>(), 5_000);
-        assert!(widths.len() > 2, "a 64 KiB leaf should hold several batches");
+        assert!(
+            widths.len() > 2,
+            "a 64 KiB leaf should hold several batches"
+        );
     }
 
     /// The sum a scan feeds an aggregate is the sum of the rows, whichever page
@@ -426,9 +431,7 @@ mod tests {
                     },
                     AggregateSpec {
                         kind: AggregateKind::Sum,
-                        argument: Some(
-                            compile(&Expr::Column(1), &[StaticType::Int; 2]).unwrap(),
-                        ),
+                        argument: Some(compile(&Expr::Column(1), &[StaticType::Int; 2]).unwrap()),
                     },
                 ],
                 Box::new(Collect::new()),
@@ -438,7 +441,11 @@ mod tests {
                 .unwrap();
             let count = aggregate.accumulator(0).unwrap().finish().unwrap();
             let sum = aggregate.accumulator(1).unwrap().finish().unwrap();
-            assert_eq!(count.borrow().as_int(), Some(3_000), "page size {page_size}");
+            assert_eq!(
+                count.borrow().as_int(),
+                Some(3_000),
+                "page size {page_size}"
+            );
             assert_eq!(sum.borrow().as_int(), Some(wanted), "page size {page_size}");
         }
     }

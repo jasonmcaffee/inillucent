@@ -68,7 +68,10 @@ impl PhysicalType {
     /// value it points at does not.
     pub fn slot_width(self) -> usize {
         match self {
-            PhysicalType::Int64 | PhysicalType::Float64 | PhysicalType::Text | PhysicalType::Blob => 8,
+            PhysicalType::Int64
+            | PhysicalType::Float64
+            | PhysicalType::Text
+            | PhysicalType::Blob => 8,
             PhysicalType::Any => 4,
         }
     }

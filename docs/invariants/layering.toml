@@ -36,6 +36,63 @@ kind = "production"
 layer = 1
 may_depend_on = ["rustdb-base"]
 
+# ---------------------------------------------------------------------------
+# The rearchitected engine (task-1816). These sit beside the crates they
+# replace rather than above them, because for the length of the transition both
+# engines are in the workspace and the old one still has to build and produce a
+# number - the TDD's rule is that nothing is deleted until its replacement is
+# green on the scorecard and the crash campaigns.
+# ---------------------------------------------------------------------------
+
+# `rustdb-tree` replaces `rustdb-storage` and sits where it sits: a layer that
+# knows pages and byte records and nothing about what a column is called. It
+# reaches `rustdb-value` for nothing at all in Phase 1 - the PAX leaf has its
+# own borrowed value type, because the executor's values borrow a pinned page
+# and `rustdb_value::Value`'s owned form is reference counted, which is the
+# allocation the design exists to avoid. Phase 2 adds `rustdb-vfs` beneath it
+# when the buffer pool arrives.
+[[crate]]
+name = "rustdb-tree"
+kind = "production"
+layer = 2
+may_depend_on = ["rustdb-base"]
+
+# `rustdb-exec` replaces `rustdb-vm`, and it reaches *down* to `rustdb-sql` for
+# the same reason the VM did: the planner's output is its input. It does not
+# reach the catalog - a pipeline is built against a `TreeCatalog` the caller
+# supplies, so the executor never resolves a name.
+[[crate]]
+name = "rustdb-exec"
+kind = "production"
+layer = 5
+may_depend_on = [
+  "rustdb-base",
+  "rustdb-value",
+  "rustdb-sql",
+  "rustdb-tree",
+]
+
+# `rustdb-sqlite-reader` is the read half of `rustdb-storage` behind a narrow
+# interface, kept when the rest of that crate goes. It is a tool rather than a
+# library the engine uses: the differential gate imports a fixture through it
+# and `rustdb-migrate` reads a legacy file through it, and nothing in the engine
+# depends on it. It reaches `rustdb-catalog` so that there is one schema reader
+# in the workspace rather than a second one that could disagree with the binder.
+[[crate]]
+name = "rustdb-sqlite-reader"
+kind = "production"
+layer = 6
+may_depend_on = [
+  "rustdb-base",
+  "rustdb-value",
+  "rustdb-vfs",
+  "rustdb-storage",
+  "rustdb-transaction",
+  "rustdb-catalog",
+  "rustdb-sql",
+  "rustdb-tree",
+]
+
 # `rustdb-storage` reaching into `rustdb-value` is a refinement made in
 # task-1783, and it is the layering rule "storage knows pages and byte records"
 # taken literally: an index cursor cannot decide which child to descend into
@@ -253,6 +310,9 @@ may_depend_on = [
   "rustdb-vm",
   "rustdb-session",
   "rustdb",
+  "rustdb-tree",
+  "rustdb-exec",
+  "rustdb-sqlite-reader",
 ]
 
 [[crate]]
