@@ -7,6 +7,11 @@ description = "Push-based vectorised executor over batches that borrow from pinn
 
 [dependencies]
 rustdb-base = { workspace = true }
+rustdb-pool = { workspace = true }
 rustdb-tree = { workspace = true }
+rustdb-scalar = { workspace = true }
 rustdb-sql = { workspace = true }
 rustdb-value = { workspace = true }
+
+[dev-dependencies]
+rustdb-vfs = { workspace = true }

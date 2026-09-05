@@ -43,16 +43,25 @@
 pub mod aggregate;
 pub mod batch;
 pub mod expr;
+pub mod join;
 pub mod ops;
+pub mod paged;
 pub mod physical;
+pub mod scalar;
 pub mod scan;
+pub mod setop;
+pub mod window;
 
 pub use aggregate::{Accumulator, AggregateKind};
 pub use batch::{Batch, Vector, BATCH_ROWS};
 pub use expr::{compile, ArithOp, CompareOp, Eval, Expr, StaticType};
+pub use join::{
+    HashJoin, IndexNestedLoopJoin, JoinKind, Materialize, NestedLoopJoin, RowStore, ValuesScan,
+};
 pub use ops::{
     AdjacentDistinct, AggregateSpec, Collect, CollectInto, Distinct, Filter, Flow, HashAggregate,
     Limit, Project, SimpleAggregate, Sink, Sort, SortKey, StreamAggregate, TopN,
 };
+pub use paged::{FullScan, PointProbe, ReverseScan, SkipScan as PagedSkipScan, SpanScan};
 pub use physical::{SourceLayout, TreeCatalog};
 pub use scan::{Projection, SkipScan, TableScan};

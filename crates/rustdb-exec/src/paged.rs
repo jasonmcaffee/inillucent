@@ -1,0 +1,624 @@
+//! The sources: what drives a pipeline over a tree in the buffer pool.
+//!
+//! Invariant: a batch never outlives the guard on the leaf it borrows. That is
+//! enforced by shape rather than by discipline - every source here fetches a
+//! leaf, builds its vectors inside the scope that holds the guard, pushes the
+//! batch, and drops the guard. Nothing returns a batch, so nothing can hold one
+//! past the page it points at.
+//!
+//! That is why the executor is push-based, and it is the same argument the
+//! buffer pool makes from the other side: a `PageGuard`'s borrow is scoped to
+//! the guard, so an operator model in which a scan hands batches *out* would
+//! need either a self-referential cursor or a copy per leaf. The push model
+//! needs neither.
+//!
+//! ## The five sources
+//!
+//! | source | what it is for |
+//! |---|---|
+//! | [`FullScan`] | every row of a tree, forward |
+//! | [`SpanScan`] | a key range, forward, one contiguous span of each leaf |
+//! | [`ReverseScan`] | a key range, backward, for `ORDER BY ... DESC LIMIT` |
+//! | [`SkipScan`] | one row per distinct key prefix |
+//! | [`PointProbe`] | one row by key, with no batch and no vector at all |
+//!
+//! [`PointProbe`] is the odd one and is meant to be. The TDD asks for "a
+//! separate compiled point-probe path" that "descends the tree with swizzled
+//! pointers, finds the row, evaluates the predicate on the row's values in
+//! place, and writes the projected values into the statement's result slots.
+//! No batch, no vector, no selection." A single-row answer that went through a
+//! batch would pay for a vector per column to carry one value each, and the
+//! phase gate asks for that answer in under 500 ns.
+
+use rustdb_base::error::misuse;
+use rustdb_base::DbResult;
+use rustdb_pool::Pool;
+use rustdb_tree::datum::{Datum, OwnedDatum};
+use rustdb_tree::leaf::LeafRef;
+use rustdb_tree::PagedTree;
+
+use crate::batch::{Batch, Vector};
+use crate::ops::{Flow, Sink};
+use crate::scan::Projection;
+
+/// Builds the vectors of one leaf, in the projection's order.
+///
+/// @param leaf - the leaf to read
+/// @param projection - which tree columns to expose, in output order
+fn vectors<'p>(leaf: &LeafRef<'p>, projection: &Projection) -> DbResult<Vec<Vector<'p>>> {
+    let mut columns = Vec::with_capacity(projection.0.len());
+    for index in &projection.0 {
+        columns.push(Vector::from_column(leaf.column(*index)?));
+    }
+    Ok(columns)
+}
+
+/// Every row of a tree, in key order.
+pub struct FullScan<'t> {
+    tree: &'t PagedTree,
+    projection: Projection,
+}
+
+impl<'t> FullScan<'t> {
+    /// Returns a scan over a whole tree.
+    ///
+    /// @param tree - the tree to read
+    /// @param projection - which tree columns to expose, in output order
+    pub fn new(tree: &'t PagedTree, projection: Projection) -> FullScan<'t> {
+        FullScan { tree, projection }
+    }
+
+    /// Drives the scan until the tree runs out or the pipeline says stop.
+    ///
+    /// @param pool - the buffer pool the tree's pages live in
+    /// @param downstream - the head of the operator chain
+    pub fn run(&self, pool: &Pool, downstream: &mut dyn Sink) -> DbResult<()> {
+        self.tree.visit_leaves(pool, &mut |leaf| {
+            if leaf.row_count() == 0 {
+                return Ok(true);
+            }
+            // Tombstones and delta rows do not arrive until Phase 3, and a
+            // reader that ignored them would return rows that should have been
+            // hidden. *Exceptions* are a different thing entirely - a value of
+            // the wrong class for its column - and are read through the
+            // general vector path, which is why the test is `has_writes` and
+            // not `is_clean`.
+            if leaf.has_writes() {
+                return Err(misuse(
+                    "a leaf has tombstones or delta rows; those arrive with writes in Phase 3",
+                ));
+            }
+            let batch = Batch::new(leaf.row_count(), vectors(leaf, &self.projection)?);
+            Ok(downstream.push(&batch)? == Flow::Continue)
+        })?;
+        downstream.finish()
+    }
+}
+
+/// A key range of a tree, in key order.
+///
+/// The bounds are values rather than encoded bytes because the leaf's own
+/// search compares values: the encoded form decides which *leaf*, and the
+/// values decide which *rows* inside it. Passing only the encoded form would
+/// make the row boundary a second implementation of the comparison.
+pub struct SpanScan<'t> {
+    tree: &'t PagedTree,
+    projection: Projection,
+    low: Option<Vec<OwnedDatum>>,
+    low_inclusive: bool,
+    high: Option<Vec<OwnedDatum>>,
+    high_inclusive: bool,
+}
+
+impl<'t> SpanScan<'t> {
+    /// Returns a scan over a key range.
+    ///
+    /// @param tree - the tree to read
+    /// @param projection - which tree columns to expose, in output order
+    /// @param low - the lower bound, or `None`
+    /// @param low_inclusive - whether a key equal to `low` is in the range
+    /// @param high - the upper bound, or `None`
+    /// @param high_inclusive - whether a key equal to `high` is in the range
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        tree: &'t PagedTree,
+        projection: Projection,
+        low: Option<Vec<OwnedDatum>>,
+        low_inclusive: bool,
+        high: Option<Vec<OwnedDatum>>,
+        high_inclusive: bool,
+    ) -> SpanScan<'t> {
+        SpanScan {
+            tree,
+            projection,
+            low,
+            low_inclusive,
+            high,
+            high_inclusive,
+        }
+    }
+
+    /// Drives the scan.
+    ///
+    /// @param pool - the buffer pool
+    /// @param downstream - the head of the operator chain
+    pub fn run(&self, pool: &Pool, downstream: &mut dyn Sink) -> DbResult<()> {
+        let low: Option<Vec<Datum<'_>>> = self
+            .low
+            .as_ref()
+            .map(|values| values.iter().map(OwnedDatum::borrow).collect());
+        let high: Option<Vec<Datum<'_>>> = self
+            .high
+            .as_ref()
+            .map(|values| values.iter().map(OwnedDatum::borrow).collect());
+        // Reused across leaves, so a range that spans forty leaves makes one
+        // allocation rather than forty.
+        let mut selection: Vec<u32> = Vec::new();
+        self.tree.visit_span(
+            pool,
+            low.as_deref(),
+            self.low_inclusive,
+            high.as_deref(),
+            self.high_inclusive,
+            &mut |leaf, start, end| {
+                if leaf.has_writes() {
+                    return Err(misuse(
+                        "a leaf has tombstones or delta rows; those arrive with writes in Phase 3",
+                    ));
+                }
+                let columns = vectors(leaf, &self.projection)?;
+                let flow = if start == 0 && end == leaf.row_count() {
+                    // The whole leaf is in range, so no selection vector at
+                    // all: the batch is dense and every consumer takes its
+                    // fast path.
+                    let batch = Batch::new(leaf.row_count(), columns);
+                    downstream.push(&batch)?
+                } else {
+                    selection.clear();
+                    selection.extend((start..end).map(|row| row as u32));
+                    let mut batch = Batch::new(leaf.row_count(), columns);
+                    batch.selection = Some(selection.as_slice());
+                    downstream.push(&batch)?
+                };
+                Ok(flow == Flow::Continue)
+            },
+        )?;
+        downstream.finish()
+    }
+}
+
+/// A key range of a tree, walked backwards.
+///
+/// Rows inside a leaf come out in reverse, and the leaves come out in reverse,
+/// so the whole stream is descending.
+///
+/// The first version said "there is no selection vector that can express
+/// reversed" and materialised every row. That was simply wrong: a selection
+/// vector is a list of row numbers and nothing requires it to ascend. Filling
+/// it backwards is a reverse scan, at no copy and with the leaf's own vectors
+/// intact. It measured 246 ns per row materialised against a 50-row limit; the
+/// selection costs four bytes per row and no allocation after the first leaf.
+pub struct ReverseScan<'t> {
+    tree: &'t PagedTree,
+    projection: Projection,
+    high: Option<Vec<OwnedDatum>>,
+    limit: Option<usize>,
+}
+
+impl<'t> ReverseScan<'t> {
+    /// Returns a reverse scan.
+    ///
+    /// @param tree - the tree to read
+    /// @param projection - which tree columns to expose, in output order
+    /// @param high - the inclusive upper bound, or `None` for the last row
+    /// @param limit - how many rows are wanted at most, when the plan says
+    pub fn new(
+        tree: &'t PagedTree,
+        projection: Projection,
+        high: Option<Vec<OwnedDatum>>,
+        limit: Option<usize>,
+    ) -> ReverseScan<'t> {
+        ReverseScan {
+            tree,
+            projection,
+            high,
+            limit,
+        }
+    }
+
+    /// Drives the scan.
+    ///
+    /// @param pool - the buffer pool
+    /// @param downstream - the head of the operator chain
+    pub fn run(&self, pool: &Pool, downstream: &mut dyn Sink) -> DbResult<()> {
+        let high: Option<Vec<Datum<'_>>> = self
+            .high
+            .as_ref()
+            .map(|values| values.iter().map(OwnedDatum::borrow).collect());
+        let mut selection: Vec<u32> = Vec::new();
+        let mut produced = 0usize;
+        self.tree
+            .visit_span_reverse(pool, high.as_deref(), &mut |leaf, start, end| {
+                if leaf.has_writes() {
+                    return Err(misuse(
+                        "a leaf has tombstones or delta rows; those arrive with writes in Phase 3",
+                    ));
+                }
+                // The selection descends, which is the whole of "reversed".
+                selection.clear();
+                let mut wanted = end.saturating_sub(start);
+                if let Some(limit) = self.limit {
+                    wanted = wanted.min(limit.saturating_sub(produced));
+                }
+                selection.extend((start..end).rev().take(wanted).map(|row| row as u32));
+                if selection.is_empty() {
+                    return Ok(false);
+                }
+                produced = produced.saturating_add(selection.len());
+                let mut batch = Batch::new(leaf.row_count(), vectors(leaf, &self.projection)?);
+                batch.selection = Some(selection.as_slice());
+                if downstream.push(&batch)? == Flow::Stop {
+                    return Ok(false);
+                }
+                if let Some(limit) = self.limit {
+                    if produced >= limit {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            })?;
+        downstream.finish()
+    }
+}
+
+/// One row per distinct value of a key prefix.
+pub struct SkipScan<'t> {
+    tree: &'t PagedTree,
+    prefix: usize,
+}
+
+impl<'t> SkipScan<'t> {
+    /// Returns a skip scan.
+    ///
+    /// @param tree - the tree to read
+    /// @param prefix - how many leading key columns form the distinct value
+    pub fn new(tree: &'t PagedTree, prefix: usize) -> SkipScan<'t> {
+        SkipScan { tree, prefix }
+    }
+
+    /// Drives the scan, one batch per [`crate::batch::BATCH_ROWS`] values.
+    ///
+    /// @param pool - the buffer pool
+    /// @param downstream - the head of the operator chain
+    pub fn run(&self, pool: &Pool, downstream: &mut dyn Sink) -> DbResult<()> {
+        let prefix = self.prefix;
+        let mut buffered: Vec<Vec<OwnedDatum>> = Vec::new();
+        let mut stop = false;
+        self.tree.skip_scan(pool, prefix, &mut |leaf, row| {
+            let mut out = Vec::with_capacity(prefix);
+            for column in 0..prefix {
+                out.push(OwnedDatum::from_datum(&leaf.value(row, column)?));
+            }
+            buffered.push(out);
+            if buffered.len() >= crate::batch::BATCH_ROWS {
+                let rows = std::mem::take(&mut buffered);
+                if crate::ops::emit_rows(&rows, downstream)? == Flow::Stop {
+                    stop = true;
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })?;
+        if !stop && !buffered.is_empty() {
+            crate::ops::emit_rows(&buffered, downstream)?;
+        }
+        downstream.finish()
+    }
+}
+
+/// One row by key: the compiled point-probe path.
+///
+/// No batch, no vector, no selection vector. A probe descends, finds the row,
+/// and hands the leaf and the row index to a projector that writes values
+/// straight out of the page. The TDD's target is under 500 ns warm, and every
+/// allocation on this path is one the answer did not need.
+pub struct PointProbe<'t> {
+    tree: &'t PagedTree,
+    projection: Projection,
+}
+
+impl<'t> PointProbe<'t> {
+    /// Returns a probe over a tree.
+    ///
+    /// @param tree - the tree to read
+    /// @param projection - which tree columns to produce, in output order
+    pub fn new(tree: &'t PagedTree, projection: Projection) -> PointProbe<'t> {
+        PointProbe { tree, projection }
+    }
+
+    /// Returns the tree the probe reads.
+    pub fn tree(&self) -> &'t PagedTree {
+        self.tree
+    }
+
+    /// Looks one key up and writes the projected values into a buffer.
+    ///
+    /// Returns false when there is no such row, which is `point.miss` - and
+    /// which costs one descent and one binary search, not a scan. The buffer is
+    /// the caller's so a probe in a loop makes no allocations at all.
+    ///
+    /// @param pool - the buffer pool
+    /// @param key - the key, one value per key column
+    /// @param out - the buffer to write the projected values into, cleared first
+    pub fn lookup(
+        &self,
+        pool: &Pool,
+        key: &[Datum<'_>],
+        out: &mut Vec<OwnedDatum>,
+    ) -> DbResult<bool> {
+        out.clear();
+        let found = self.tree.probe(pool, key, |leaf, row| {
+            for column in &self.projection.0 {
+                out.push(OwnedDatum::from_datum(&leaf.value(row, *column)?));
+            }
+            Ok(())
+        })?;
+        Ok(found.is_some())
+    }
+
+    /// Looks one key up and pushes it downstream as a one-row batch.
+    ///
+    /// @param pool - the buffer pool
+    /// @param key - the key, one value per key column
+    /// @param downstream - the head of the operator chain
+    pub fn run(&self, pool: &Pool, key: &[Datum<'_>], downstream: &mut dyn Sink) -> DbResult<()> {
+        let mut row: Vec<OwnedDatum> = Vec::with_capacity(self.projection.0.len());
+        if self.lookup(pool, key, &mut row)? {
+            crate::ops::emit_rows(std::slice::from_ref(&row), downstream)?;
+        }
+        downstream.finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ops::Collect;
+    use rustdb_pool::{Database, Options};
+    use rustdb_tree::types::{ColumnSpec, PhysicalType};
+    use rustdb_vfs::{DbPath, MemoryVfs};
+
+    /// Builds a `(id, key, label)` rowid tree of `rows` rows over small pages,
+    /// so the tree has real interior levels.
+    fn fixture(rows: i64) -> (Database, PagedTree) {
+        let vfs = MemoryVfs::new();
+        let path = DbPath::new("exec.rdb");
+        let mut database = Database::create(
+            &vfs,
+            &path,
+            Options::default().with_page_size(512).with_frames(512),
+        )
+        .unwrap();
+        let columns = vec![
+            ColumnSpec::key(PhysicalType::Int64),
+            ColumnSpec::new(PhysicalType::Int64),
+            ColumnSpec::new(PhysicalType::Text),
+        ];
+        let labels: Vec<String> = (0..rows).map(|n| format!("label-{n:05}")).collect();
+        let owned: Vec<Vec<OwnedDatum>> = (0..rows)
+            .map(|n| {
+                vec![
+                    OwnedDatum::Int(n),
+                    OwnedDatum::Int((n * 7) % 100),
+                    OwnedDatum::Text(labels[n as usize].clone().into_bytes()),
+                ]
+            })
+            .collect();
+        let borrowed: Vec<Vec<Datum<'_>>> = owned
+            .iter()
+            .map(|row| row.iter().map(OwnedDatum::borrow).collect())
+            .collect();
+        let tree = PagedTree::bulk_build(&mut database, 1, columns, 1, &borrowed).unwrap();
+        (database, tree)
+    }
+
+    /// A full scan produces every row, in order, through the batch interface.
+    #[test]
+    fn a_full_scan_produces_every_row() {
+        let (database, tree) = fixture(2_000);
+        let mut sink = Box::new(Collect::new());
+        let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut into = Box::new(crate::ops::CollectInto::new(std::rc::Rc::clone(&collected)));
+        FullScan::new(&tree, Projection::all(3))
+            .run(database.pool(), into.as_mut())
+            .unwrap();
+        let rows = collected.borrow();
+        assert_eq!(rows.len(), 2_000);
+        assert_eq!(rows[0][0], OwnedDatum::Int(0));
+        assert_eq!(rows[1_999][0], OwnedDatum::Int(1_999));
+        let _ = sink.as_mut();
+    }
+
+    /// A projection produces only the columns it names, in the order it names
+    /// them.
+    #[test]
+    fn a_projection_reorders_and_drops_columns() {
+        let (database, tree) = fixture(300);
+        let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut into = Box::new(crate::ops::CollectInto::new(std::rc::Rc::clone(&collected)));
+        FullScan::new(&tree, Projection(vec![2, 0]))
+            .run(database.pool(), into.as_mut())
+            .unwrap();
+        let rows = collected.borrow();
+        assert_eq!(rows.len(), 300);
+        assert_eq!(rows[5].len(), 2);
+        assert_eq!(rows[5][1], OwnedDatum::Int(5));
+        assert!(matches!(rows[5][0], OwnedDatum::Text(_)));
+    }
+
+    /// A span scan produces exactly the rows in range, and a whole-leaf span
+    /// arrives dense so downstream takes its fast path.
+    #[test]
+    fn a_span_scan_produces_the_range() {
+        let (database, tree) = fixture(2_000);
+        let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut into = Box::new(crate::ops::CollectInto::new(std::rc::Rc::clone(&collected)));
+        SpanScan::new(
+            &tree,
+            Projection(vec![0]),
+            Some(vec![OwnedDatum::Int(500)]),
+            true,
+            Some(vec![OwnedDatum::Int(700)]),
+            true,
+        )
+        .run(database.pool(), into.as_mut())
+        .unwrap();
+        let rows = collected.borrow();
+        assert_eq!(rows.len(), 201);
+        assert_eq!(rows[0][0], OwnedDatum::Int(500));
+        assert_eq!(rows[200][0], OwnedDatum::Int(700));
+    }
+
+    /// A reverse scan produces descending rows and honours its limit.
+    #[test]
+    fn a_reverse_scan_descends_and_stops() {
+        let (database, tree) = fixture(2_000);
+        let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut into = Box::new(crate::ops::CollectInto::new(std::rc::Rc::clone(&collected)));
+        ReverseScan::new(
+            &tree,
+            Projection(vec![0]),
+            Some(vec![OwnedDatum::Int(1_500)]),
+            Some(50),
+        )
+        .run(database.pool(), into.as_mut())
+        .unwrap();
+        let rows = collected.borrow();
+        assert_eq!(rows.len(), 50);
+        assert_eq!(rows[0][0], OwnedDatum::Int(1_500));
+        assert_eq!(rows[49][0], OwnedDatum::Int(1_451));
+    }
+
+    /// A point probe finds a row that is there, misses one that is not, and
+    /// makes no allocation beyond the caller's buffer.
+    #[test]
+    fn a_point_probe_hits_and_misses() {
+        let (database, tree) = fixture(2_000);
+        let probe = PointProbe::new(&tree, Projection(vec![2]));
+        let mut out: Vec<OwnedDatum> = Vec::new();
+        assert!(probe
+            .lookup(database.pool(), &[Datum::Int(1_234)], &mut out)
+            .unwrap());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], OwnedDatum::Text(b"label-01234".to_vec()));
+        assert!(!probe
+            .lookup(database.pool(), &[Datum::Int(9_999)], &mut out)
+            .unwrap());
+        assert!(out.is_empty(), "a miss leaves nothing behind");
+        assert_eq!(probe.tree().root(), tree.root());
+    }
+
+    /// A point probe pushed into a pipeline produces one row, or none.
+    #[test]
+    fn a_point_probe_pushes_one_row() {
+        let (database, tree) = fixture(500);
+        let probe = PointProbe::new(&tree, Projection(vec![0, 1]));
+        let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut into = Box::new(crate::ops::CollectInto::new(std::rc::Rc::clone(&collected)));
+        probe
+            .run(database.pool(), &[Datum::Int(42)], into.as_mut())
+            .unwrap();
+        assert_eq!(collected.borrow().len(), 1);
+        assert_eq!(collected.borrow()[0][0], OwnedDatum::Int(42));
+
+        let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut into = Box::new(crate::ops::CollectInto::new(std::rc::Rc::clone(&collected)));
+        probe
+            .run(database.pool(), &[Datum::Int(-1)], into.as_mut())
+            .unwrap();
+        assert!(collected.borrow().is_empty());
+    }
+
+    /// A skip scan produces one row per distinct prefix value.
+    #[test]
+    fn a_skip_scan_produces_distinct_prefixes() {
+        let vfs = MemoryVfs::new();
+        let path = DbPath::new("skipexec.rdb");
+        let mut database = Database::create(
+            &vfs,
+            &path,
+            Options::default().with_page_size(512).with_frames(256),
+        )
+        .unwrap();
+        let columns = vec![
+            ColumnSpec::key(PhysicalType::Int64),
+            ColumnSpec::key(PhysicalType::Int64),
+        ];
+        let owned: Vec<Vec<OwnedDatum>> = (0..3_200i64)
+            .map(|n| vec![OwnedDatum::Int(n / 100), OwnedDatum::Int(n)])
+            .collect();
+        let borrowed: Vec<Vec<Datum<'_>>> = owned
+            .iter()
+            .map(|row| row.iter().map(OwnedDatum::borrow).collect())
+            .collect();
+        let tree = PagedTree::bulk_build(&mut database, 2, columns, 2, &borrowed).unwrap();
+        let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut into = Box::new(crate::ops::CollectInto::new(std::rc::Rc::clone(&collected)));
+        SkipScan::new(&tree, 1)
+            .run(database.pool(), into.as_mut())
+            .unwrap();
+        let rows = collected.borrow();
+        assert_eq!(rows.len(), 32);
+        assert_eq!(rows[0][0], OwnedDatum::Int(0));
+        assert_eq!(rows[31][0], OwnedDatum::Int(31));
+    }
+
+    /// Every source stops when the pipeline says stop, which is what a `LIMIT`
+    /// downstream of one does.
+    #[test]
+    fn every_source_stops_when_told_to() {
+        let (database, tree) = fixture(2_000);
+        let pool = database.pool();
+        for name in ["full", "span"] {
+            let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut into = Box::new(crate::ops::CollectInto::with_limit(
+                std::rc::Rc::clone(&collected),
+                10,
+            ));
+            match name {
+                "full" => FullScan::new(&tree, Projection(vec![0]))
+                    .run(pool, into.as_mut())
+                    .unwrap(),
+                _ => SpanScan::new(&tree, Projection(vec![0]), None, true, None, true)
+                    .run(pool, into.as_mut())
+                    .unwrap(),
+            }
+            assert!(collected.borrow().len() <= 10, "{name} did not stop");
+            assert!(!collected.borrow().is_empty(), "{name} produced nothing");
+        }
+    }
+
+    /// An empty tree produces no rows and no error from any source.
+    #[test]
+    fn an_empty_tree_produces_nothing() {
+        let (database, tree) = fixture(0);
+        let pool = database.pool();
+        let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut into = Box::new(crate::ops::CollectInto::new(std::rc::Rc::clone(&collected)));
+        FullScan::new(&tree, Projection::all(3))
+            .run(pool, into.as_mut())
+            .unwrap();
+        assert!(collected.borrow().is_empty());
+
+        let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut into = Box::new(crate::ops::CollectInto::new(std::rc::Rc::clone(&collected)));
+        ReverseScan::new(&tree, Projection::all(3), None, Some(5))
+            .run(pool, into.as_mut())
+            .unwrap();
+        assert!(collected.borrow().is_empty());
+
+        let probe = PointProbe::new(&tree, Projection::all(3));
+        let mut out = Vec::new();
+        assert!(!probe.lookup(pool, &[Datum::Int(0)], &mut out).unwrap());
+    }
+}

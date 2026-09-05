@@ -356,7 +356,8 @@ mod tests {
             let mut skipped = Collect::new();
             SkipScan::new(&tree, 1).run(&mut skipped).unwrap();
 
-            let mut scanned = crate::ops::AdjacentDistinct::new(Box::new(Collect::new()));
+            let mut scanned =
+                crate::ops::AdjacentDistinct::new(Vec::new(), Box::new(Collect::new()));
             TableScan::new(&tree, Projection(vec![0]))
                 .run(&mut scanned)
                 .unwrap();
