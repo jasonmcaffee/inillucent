@@ -66,6 +66,17 @@ pub static STAGE_NANOS: [AtomicU64; STAGE_SLOTS] = [const { AtomicU64::new(0) };
 /// How many times each named stage ran.
 pub static STAGE_RUNS: [AtomicU64; STAGE_SLOTS] = [const { AtomicU64::new(0) }; STAGE_SLOTS];
 
+/// How many heap allocations each named stage made.
+pub static STAGE_ALLOCATIONS: [AtomicU64; STAGE_SLOTS] = [const { AtomicU64::new(0) }; STAGE_SLOTS];
+
+/// Adds one run of a stage, with the allocations it made.
+pub fn record_stage_allocating(slot: usize, nanos: u64, allocations: u64) {
+    record_stage(slot, nanos);
+    if let Some(total) = STAGE_ALLOCATIONS.get(slot) {
+        total.fetch_add(allocations, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Adds one run of a stage.
 pub fn record_stage(slot: usize, nanos: u64) {
     if let (Some(runs), Some(total)) = (STAGE_RUNS.get(slot), STAGE_NANOS.get(slot)) {
@@ -77,9 +88,14 @@ pub fn record_stage(slot: usize, nanos: u64) {
 /// Clears the stage tables.
 pub fn reset_stages() {
     for slot in 0..STAGE_SLOTS {
-        if let (Some(runs), Some(total)) = (STAGE_RUNS.get(slot), STAGE_NANOS.get(slot)) {
+        if let (Some(runs), Some(total), Some(allocations)) = (
+            STAGE_RUNS.get(slot),
+            STAGE_NANOS.get(slot),
+            STAGE_ALLOCATIONS.get(slot),
+        ) {
             runs.store(0, core::sync::atomic::Ordering::Relaxed);
             total.store(0, core::sync::atomic::Ordering::Relaxed);
+            allocations.store(0, core::sync::atomic::Ordering::Relaxed);
         }
     }
 }

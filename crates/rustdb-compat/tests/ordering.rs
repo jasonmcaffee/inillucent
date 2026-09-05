@@ -318,6 +318,12 @@ fn the_sort_is_skipped_exactly_where_the_walk_answers_the_order() {
         "SELECT k, grp, count(*) FROM t GROUP BY k, grp",
         "SELECT DISTINCT k FROM t",
         "SELECT DISTINCT grp, k FROM t ORDER BY grp, k",
+        // Backwards too. The walk runs in reverse, the rows of a key are still
+        // adjacent, and the keys still arrive in order - the other order. The
+        // pinned SQLite answers both of these off the same covering index with
+        // no sort, which is what these two are here to keep true.
+        "SELECT k, count(*) FROM t GROUP BY k ORDER BY k DESC",
+        "SELECT DISTINCT k FROM t ORDER BY k DESC",
     ];
     // Grouping and de-duplicating it cannot, so one is.
     let collected = [
@@ -338,9 +344,13 @@ fn the_sort_is_skipped_exactly_where_the_walk_answers_the_order() {
         // Two columns of one index, in opposite directions: one walk cannot
         // produce both.
         "SELECT grp, k, id FROM t ORDER BY grp, k DESC",
-        // Grouping, distinct, and a window each reorder the rows after the walk.
-        "SELECT k, count(*) FROM t GROUP BY k ORDER BY k DESC",
-        "SELECT DISTINCT k FROM t ORDER BY k DESC",
+        // A window reorders the rows after the walk. Grouping and DISTINCT do
+        // not, when they stream: they emit one row per key, in key order, so
+        // the walk answers the ORDER BY and those cases are in `streamed`
+        // above. A statement that is both grouped and DISTINCT still sorts,
+        // because the de-duplication then runs on the aggregate output rather
+        // than on the walk.
+        "SELECT DISTINCT count(*) FROM t GROUP BY k ORDER BY count(*)",
         "SELECT id, row_number() OVER (ORDER BY k, id) FROM t ORDER BY id",
         // A collation the index does not hold the column in.
         "SELECT name, id FROM t ORDER BY name COLLATE BINARY",
