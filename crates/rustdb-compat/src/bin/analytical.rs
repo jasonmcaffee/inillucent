@@ -28,6 +28,16 @@
 //! SQLite's 11 MB table does not fit its 2 MB cache. Phase 2's buffer pool is
 //! what makes this configurable on both sides.
 //!
+//! ## Superseded, and kept anyway
+//!
+//! Phase 2's gate is `rustdb-readgate`, which measures all four read families
+//! and reads its workloads out of `rustdb_compat::perf::plan_for` rather than
+//! keeping its own copy. This binary stays because the Phase 1 report quotes
+//! its output and a number nobody can reproduce is not evidence. It now runs on
+//! the Phase 2 engine - a real file behind a buffer pool - so its numbers are
+//! comparable to, and not identical with, the ones in
+//! `_agent_output/task-1816-phase1/`.
+//!
 //! Usage: rustdb-analytical <sqlite fixture> [--rounds N] [--page-size N]
 
 use std::cell::RefCell;
@@ -39,6 +49,7 @@ use std::time::Instant;
 use rustdb_compat::newengine::ImportedDatabase;
 use rustdb_compat::perf::{Digest, Paired, Sample};
 use rustdb_compat::workspace_root;
+use rustdb_exec::physical::Params;
 
 /// The seed the bootstrap uses, fixed so a report is reproducible.
 const SEED: u64 = 17_900_001;
@@ -217,19 +228,19 @@ fn run(
             let sink = Box::new(DigestRows {
                 folded: Rc::new(RefCell::new(Folded::default())),
             });
-            let built = rustdb_exec::physical::build_prepared(plan, &database, choice, sink)
+            let built = database
+                .pipeline(plan, choice, &Params::new(), sink)
                 .map_err(|error| format!("{name}: {}", error.message()))?;
             drop(built);
             Ok(())
         })?;
         let produce = time_stage(64, || {
             let counter = Box::new(CountRows { rows: 0 });
-            let (mut pipeline, _) =
-                rustdb_exec::physical::build_prepared(plan, &database, choice, counter)
-                    .map_err(|error| format!("{name}: {}", error.message()))?;
+            let (mut pipeline, _) = database
+                .pipeline(plan, choice, &Params::new(), counter)
+                .map_err(|error| format!("{name}: {}", error.message()))?;
             pipeline
-                .scan
-                .run(pipeline.head.as_mut())
+                .run()
                 .map_err(|error| format!("{name}: {}", error.message()))?;
             Ok(())
         })?;
@@ -238,12 +249,11 @@ fn run(
             let sink = Box::new(DigestRows {
                 folded: Rc::clone(&folded),
             });
-            let (mut pipeline, _) =
-                rustdb_exec::physical::build_prepared(plan, &database, choice, sink)
-                    .map_err(|error| format!("{name}: {}", error.message()))?;
+            let (mut pipeline, _) = database
+                .pipeline(plan, choice, &Params::new(), sink)
+                .map_err(|error| format!("{name}: {}", error.message()))?;
             pipeline
-                .scan
-                .run(pipeline.head.as_mut())
+                .run()
                 .map_err(|error| format!("{name}: {}", error.message()))?;
             Ok(())
         })?;
@@ -457,12 +467,11 @@ fn time_new_engine(
             let sink = Box::new(DigestRows {
                 folded: Rc::clone(&folded),
             });
-            let (mut pipeline, _) =
-                rustdb_exec::physical::build_prepared(plan, database, choice, sink)
-                    .map_err(|error| format!("{name}: {}", error.message()))?;
+            let (mut pipeline, _) = database
+                .pipeline(plan, choice, &Params::new(), sink)
+                .map_err(|error| format!("{name}: {}", error.message()))?;
             pipeline
-                .scan
-                .run(pipeline.head.as_mut())
+                .run()
                 .map_err(|error| format!("{name}: {}", error.message()))?;
         }
         let elapsed = started.elapsed();

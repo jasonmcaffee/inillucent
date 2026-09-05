@@ -160,6 +160,7 @@ fn run(rounds: u32) -> DbResult<()> {
         let mut matched = 0u32;
         for row in 0..ROWS {
             let fast = compiled.value(&batch, row)?;
+            let fast = fast.get();
             let slow = interpret(expr, &batch, row)?;
             if fast.compare(&slow) != std::cmp::Ordering::Equal || fast.is_null() != slow.is_null()
             {
@@ -175,7 +176,7 @@ fn run(rounds: u32) -> DbResult<()> {
         let fast_ns = time(rounds, || {
             let mut kept = 0u32;
             for row in 0..ROWS {
-                if truth(&compiled.value(&batch, row)?) == Some(true) {
+                if truth(&compiled.value(&batch, row)?.get()) == Some(true) {
                     kept = kept.saturating_add(1);
                 }
             }
@@ -328,5 +329,15 @@ fn interpret<'p>(expr: &Expr, batch: &Batch<'p>, row: usize) -> DbResult<Datum<'
             Datum::Int(number) => Datum::Int(number.to_string().len() as i64),
             Datum::Real(number) => Datum::Int(rustdb_exec::expr::format_real(number).len() as i64),
         },
+        // The measurement is over the Phase 1 predicate set, which is what
+        // `predicates` builds. Every other variant is unreachable from it and
+        // is refused rather than approximated, so a predicate added to the
+        // sweep later fails loudly instead of being measured against an arm
+        // that does not implement it.
+        _ => {
+            return Err(rustdb_base::error::misuse(
+                "the interpreted arm covers the Phase 1 predicate set only",
+            ))
+        }
     })
 }
