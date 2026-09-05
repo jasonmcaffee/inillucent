@@ -132,11 +132,19 @@ mod tests {
 
     /// The generator must actually cover its range rather than sticking near a
     /// single value, which is the failure mode a broken mixer produces.
+    ///
+    /// The draw count is load-bearing here in a way it is not in the other
+    /// seeded loops: the bounds below are calibrated for a hundred and sixty
+    /// thousand draws across sixteen buckets, so sampling it does not check the
+    /// property less thoroughly, it checks a different property and fails. It
+    /// is therefore skipped under Miri rather than sampled - what it tests is
+    /// the mixer's distribution, which an interpreter has nothing to say about.
+    #[cfg_attr(miri, ignore)]
     #[test]
     fn output_covers_its_range() {
         let mut rng = Rng::new(0xdead_beef);
         let mut buckets = [0u32; 16];
-        for _ in 0..crate::probe::sample_rounds(160_000) {
+        for _ in 0..160_000 {
             let index = rng.below(16) as usize;
             buckets[index] += 1;
         }
