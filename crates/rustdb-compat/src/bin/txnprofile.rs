@@ -53,6 +53,9 @@ fn run(root: &Path) -> Result<(), String> {
             per_write / reference.max(1.0),
         );
     }
+    println!();
+    let per_insert = measure_inserts(root)?;
+    println!("insert into a two-index table: {per_insert:.1} ns each");
     report_opcodes();
     report_stages();
     Ok(())
@@ -61,12 +64,17 @@ fn run(root: &Path) -> Result<(), String> {
 /// Prints what each bracketed stage of a page edit cost.
 fn report_stages() {
     use std::sync::atomic::Ordering;
-    const NAMES: [&str; 5] = [
+    const NAMES: [&str; 10] = [
         "record_image",
         "get+copy_bytes",
         "the edit itself",
         "parse_edited",
         "publish_with",
+        "idx: find_key",
+        "idx: build_cell",
+        "idx: place_cell",
+        "idx: placed in place",
+        "idx: balanced",
     ];
     let mut any = false;
     for (slot, name) in NAMES.iter().enumerate() {
@@ -149,6 +157,60 @@ fn report_opcodes() {
             *allocations as f64 / (*runs).max(1) as f64,
         );
     }
+}
+
+/// Measures inserts into the scorecard's own two-index table, in one
+/// transaction, which is the `write.insert.batch` shape.
+fn measure_inserts(root: &Path) -> Result<f64, String> {
+    let path = root.join("insert.db");
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|failure| failure.to_string())?;
+    }
+    let database = Database::open(&path).map_err(|failure| failure.to_string())?;
+    let connection = database.connect().map_err(|failure| failure.to_string())?;
+    for statement in [
+        "CREATE TABLE main_table(id INTEGER PRIMARY KEY, key INTEGER NOT NULL,          category INTEGER NOT NULL, label TEXT NOT NULL, payload BLOB)",
+        "CREATE INDEX main_key ON main_table(key)",
+        "CREATE INDEX main_category ON main_table(category, key)",
+    ] {
+        connection
+            .execute_batch(statement)
+            .map_err(|failure| format!("{statement}: {failure}"))?;
+    }
+    let mut insert = connection
+        .prepare(
+            "INSERT INTO main_table(id, key, category, label, payload)              VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .map_err(|failure| failure.to_string())?;
+    connection
+        .execute_batch("BEGIN")
+        .map_err(|failure| failure.to_string())?;
+    const COUNT: u32 = 20_000;
+    rustdb_base::probe::reset_opcodes();
+    rustdb_base::probe::reset_stages();
+    let started = Instant::now();
+    for index in 0..COUNT {
+        insert.reset().map_err(|failure| failure.to_string())?;
+        insert
+            .bind_integer(1, i64::from(index) + 1)
+            .map_err(|failure| failure.to_string())?;
+        insert
+            .bind_integer(2, i64::from(index.wrapping_mul(7_919) % COUNT))
+            .map_err(|failure| failure.to_string())?;
+        insert
+            .bind_integer(3, i64::from(index % 32))
+            .map_err(|failure| failure.to_string())?;
+        insert
+            .bind_text(4, "a label of an ordinary length")
+            .map_err(|failure| failure.to_string())?;
+        insert.bind_null(5).map_err(|failure| failure.to_string())?;
+        while insert.step().map_err(|failure| failure.to_string())? {}
+    }
+    let elapsed = started.elapsed().as_nanos() as f64;
+    connection
+        .execute_batch("COMMIT")
+        .map_err(|failure| failure.to_string())?;
+    Ok(elapsed / f64::from(COUNT))
 }
 
 /// Runs one transaction of `batch` updates and returns the cost of each.
