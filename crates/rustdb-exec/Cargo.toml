@@ -1,0 +1,12 @@
+[package]
+name = "rustdb-exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Push-based vectorised executor over batches that borrow from pinned pages"
+
+[dependencies]
+rustdb-base = { workspace = true }
+rustdb-tree = { workspace = true }
+rustdb-sql = { workspace = true }
+rustdb-value = { workspace = true }

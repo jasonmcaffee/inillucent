@@ -32,6 +32,7 @@ pub mod history;
 pub mod layering;
 pub mod manifest;
 pub mod model;
+pub mod newengine;
 pub mod obligations;
 pub mod oracle;
 pub mod perf;

@@ -11,4 +11,6 @@ rustdb-value = { workspace = true }
 rustdb-vfs = { workspace = true }
 rustdb-storage = { workspace = true }
 rustdb-transaction = { workspace = true }
+rustdb-catalog = { workspace = true }
+rustdb-sql = { workspace = true }
 rustdb-tree = { workspace = true }
