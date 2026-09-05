@@ -959,7 +959,7 @@ fn attach_index(tables: &mut [TableInfo], row: &SchemaObject) -> DbResult<()> {
 }
 
 /// Parses a `CREATE INDEX` statement into an index entry.
-fn index_from_create_sql(sql: &[u8], table: &TableInfo, root: u32) -> DbResult<IndexInfo> {
+pub fn index_from_create_sql(sql: &[u8], table: &TableInfo, root: u32) -> DbResult<IndexInfo> {
     let limits = Limits::default();
     let parsed = parse_next_statement(sql, 0, &limits)
         .map_err(|error| error::corrupt(format!("malformed index SQL: {}", error.message())))?;

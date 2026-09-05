@@ -8,6 +8,10 @@ graph the dependency-direction check walks.
 cargo +nightly fuzz run varint
 cargo +nightly fuzz run bigendian
 cargo +nightly fuzz run page_header
+cargo +nightly fuzz run leaf_page
+cargo +nightly fuzz run interior_page
+cargo +nightly fuzz run meta_page
+cargo +nightly fuzz run memcmp_key
 ```
 
 Every target has a deterministic counterpart that runs in the ordinary test
@@ -20,6 +24,14 @@ feedback:
 | `varint` | `rustdb-base::varint::tests::arbitrary_bytes_never_panic` (200k seeded inputs) |
 | `bigendian` | `rustdb-base::bytes::tests::random_offsets_never_panic` (200k seeded offsets) |
 | `page_header` | `rustdb-base::page::tests::page_sizes_follow_the_file_format_rules` |
+| `leaf_page` | `rustdb-tree::leaf::tests::no_single_byte_corruption_panics` and `rustdb-compat`'s `corrupt_pages_never_panic` |
+| `interior_page` | `rustdb-pool::interior::tests::corrupting_any_header_field_is_refused` and `rustdb-compat`'s `corrupt_pages_never_panic` |
+| `meta_page` | `rustdb-pool::meta::tests::corrupting_any_byte_is_detected` |
+| `memcmp_key` | `rustdb-tree::key::tests::encoded_order_matches_value_order_over_random_tuples` |
+
+The four targets added in task-1817 are the TDD's Phase 2 list: "new targets:
+leaf decoder, interior decoder, WAL record decoder, memcmp key decoder". The WAL
+record decoder is Phase 3's, because there is no WAL yet.
 
 A crash found by a target is reproduced by its input file; record the file with
 the ticket, and add the input as a regression case in the stable counterpart so

@@ -18,6 +18,7 @@ rustdb-session = { workspace = true }
 rustdb-transaction = { workspace = true }
 rustdb = { workspace = true }
 # The rearchitected engine (task-1816), measured beside the old one.
+rustdb-pool = { workspace = true }
 rustdb-tree = { workspace = true }
 rustdb-sqlite-reader = { workspace = true }
 rustdb-exec = { workspace = true }
@@ -49,6 +50,10 @@ path = "src/bin/paxscan.rs"
 [[bin]]
 name = "rustdb-analytical"
 path = "src/bin/analytical.rs"
+
+[[bin]]
+name = "rustdb-readgate"
+path = "src/bin/readgate.rs"
 
 [[bin]]
 name = "rustdb-exprperf"

@@ -18,6 +18,8 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 rustdb-base = { path = "../crates/rustdb-base" }
 rustdb-vfs = { path = "../crates/rustdb-vfs" }
+rustdb-pool = { path = "../crates/rustdb-pool" }
+rustdb-tree = { path = "../crates/rustdb-tree" }
 
 [[bin]]
 name = "varint"
@@ -34,5 +36,29 @@ doc = false
 [[bin]]
 name = "page_header"
 path = "fuzz_targets/page_header.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "leaf_page"
+path = "fuzz_targets/leaf_page.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "interior_page"
+path = "fuzz_targets/interior_page.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "meta_page"
+path = "fuzz_targets/meta_page.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "memcmp_key"
+path = "fuzz_targets/memcmp_key.rs"
 test = false
 doc = false

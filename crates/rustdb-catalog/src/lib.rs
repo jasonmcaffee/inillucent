@@ -18,7 +18,9 @@
 //! - [`load`] - reading `sqlite_schema` and building the snapshot;
 //! - [`ddl`] - writing `sqlite_schema`, root pages, and the cookie;
 //! - [`snapshot`] - the snapshot itself and the view the binder sees;
-//! - [`rebuild`] - copying a database into a fresh file, which is `VACUUM`.
+//! - [`rebuild`] - copying a database into a fresh file, which is `VACUUM`;
+//! - [`paged`] - the same schema as a tree in the new engine's own file, which
+//!   is what makes a database written by Phase 2 self-describing.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -41,6 +43,7 @@
 pub mod analyze;
 pub mod ddl;
 pub mod load;
+pub mod paged;
 pub mod rebuild;
 pub mod rename;
 pub mod snapshot;

@@ -10,3 +10,8 @@ rustdb-base = { workspace = true }
 rustdb-value = { workspace = true }
 rustdb-storage = { workspace = true }
 rustdb-sql = { workspace = true }
+rustdb-pool = { workspace = true }
+rustdb-tree = { workspace = true }
+
+[dev-dependencies]
+rustdb-vfs = { workspace = true }
