@@ -425,6 +425,13 @@ impl Pipeline<'_> {
     }
 }
 
+/// How many seek-key columns a point probe borrows on the stack.
+///
+/// Four covers every rowid table and every index in the scorecard fixture and
+/// in the dialect's own corpus; a wider key spills, which costs what every key
+/// used to cost.
+const POINT_KEY_INLINE: usize = 4;
+
 /// What drives a pipeline.
 pub enum Source<'t> {
     /// Every row of a tree, in key order.
@@ -451,8 +458,24 @@ impl Source<'_> {
             Source::Reverse(scan) => scan.run(pool, downstream),
             Source::Skip(scan) => scan.run(pool, downstream),
             Source::Point(probe, key) => {
-                let borrowed: Vec<Datum<'_>> = key.iter().map(OwnedDatum::borrow).collect();
-                probe.run(pool, &borrowed, downstream)
+                // The borrows go on the stack. A seek key is one column in
+                // every rowid table and at most a handful in any index, and
+                // collecting them was one allocation per execution on the
+                // shortest path the engine has.
+                let mut inline: [Datum<'_>; POINT_KEY_INLINE] = [Datum::Null; POINT_KEY_INLINE];
+                let spilled: Vec<Datum<'_>>;
+                let borrowed: &[Datum<'_>] = if key.len() <= POINT_KEY_INLINE {
+                    for (at, value) in key.iter().enumerate() {
+                        if let Some(slot) = inline.get_mut(at) {
+                            *slot = value.borrow();
+                        }
+                    }
+                    inline.get(..key.len()).unwrap_or(&[])
+                } else {
+                    spilled = key.iter().map(OwnedDatum::borrow).collect();
+                    spilled.as_slice()
+                };
+                probe.run(pool, borrowed, downstream)
             }
         }
     }

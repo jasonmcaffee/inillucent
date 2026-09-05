@@ -50,10 +50,30 @@ pub enum Vector<'p> {
         /// Two bits per row, or `None` when every row is typed.
         class: Option<&'p [u8]>,
     },
+    /// A fully typed variable-width column: eight-byte `(offset, length)` slots
+    /// into the page's heap.
+    ///
+    /// The same trade the two fixed-width variants make, extended to the
+    /// columns that actually carry the bytes. A `label` read went through
+    /// `MiniColumn::value`, which consults the class array for every row even
+    /// when the scan has already proved that no row of the column is NULL or an
+    /// exception: `inillucent-probeprofile` measured `count(label)` over 100,000
+    /// rows at 1,309 us against `count(*)` at 105 us, and `ORDER BY label LIMIT
+    /// 100` at 1,044 us against `ORDER BY id LIMIT 100` at 468 us. The
+    /// difference between those two is what a text read costs over an integer
+    /// one, and most of it was a class byte nobody needed to look at.
+    Variable {
+        /// `rows * 8` bytes, each an offset and a length into the page.
+        slots: &'p [u8],
+        /// The whole page, which the slots address absolutely.
+        page: &'p [u8],
+        /// Whether the bytes are text rather than a blob.
+        text: bool,
+    },
     /// A borrowed mini-column of any type, read through the leaf's accessors.
     ///
-    /// The general path: variable-width columns, `Any` columns, and any column
-    /// of a leaf that has exceptions.
+    /// The general path: `Any` columns, and any column of a leaf that has
+    /// NULLs or exceptions in it.
     Column(MiniColumn<'p>),
     /// Materialised values, produced by an expression or a pipeline breaker.
     Values(&'p [Datum<'p>]),
@@ -82,6 +102,30 @@ impl<'p> Vector<'p> {
                 ValueClass::Typed => Ok(Datum::Real(f64::from_bits(read_i64(bytes, row) as u64))),
                 _ => Ok(Datum::Null),
             },
+            Vector::Variable { slots, page, text } => {
+                let at = row.saturating_mul(8);
+                let Some(slot) = slots.get(at..at.saturating_add(8)) else {
+                    return Ok(Datum::Null);
+                };
+                let offset = u32::from_le_bytes(
+                    slot.get(..4)
+                        .and_then(|half| half.try_into().ok())
+                        .unwrap_or([0; 4]),
+                ) as usize;
+                let length = u32::from_le_bytes(
+                    slot.get(4..)
+                        .and_then(|half| half.try_into().ok())
+                        .unwrap_or([0; 4]),
+                ) as usize;
+                let bytes = page
+                    .get(offset..offset.saturating_add(length))
+                    .unwrap_or(&[]);
+                Ok(if *text {
+                    Datum::Text(bytes)
+                } else {
+                    Datum::Blob(bytes)
+                })
+            }
             Vector::Column(column) => column.value(row),
             Vector::Values(values) => Ok(values.get(row).copied().unwrap_or(Datum::Null)),
             Vector::Const(value) => Ok(*value),
@@ -127,6 +171,11 @@ impl<'p> Vector<'p> {
                 bytes: column.inline_bytes(),
                 class: None,
             },
+            PhysicalType::Text | PhysicalType::Blob if column.all_typed() => Vector::Variable {
+                slots: column.inline_bytes(),
+                page: column.page_bytes(),
+                text: column.physical == PhysicalType::Text,
+            },
             _ => Vector::Column(column),
         }
     }
@@ -158,6 +207,44 @@ fn class_at(class: Option<&[u8]>, row: usize) -> DbResult<ValueClass> {
     }
 }
 
+/// A batch's column list, owned or borrowed.
+///
+/// **The borrowed form exists because of the joins.** An index nested loop
+/// builds a batch per probe - one row, the outer columns as constants and the
+/// inner ones borrowed from the leaf - and a `Vec` for that list is a heap
+/// allocation and a free per probed row. `inillucent-probeprofile` measured a
+/// rowid lookup at 236 ns bare and about 320 ns inside the join, and most of
+/// the difference was this. A join whose column count fits on the stack now
+/// puts the list there and hands the batch a borrow of it.
+///
+/// Everything reads a batch's columns through `Deref`, so the two forms are the
+/// same list to every operator.
+#[derive(Clone, Debug)]
+pub enum Columns<'p> {
+    /// A list the batch owns, which is what a scan or a projection produces.
+    Owned(Vec<Vector<'p>>),
+    /// A list somebody else holds for at least as long as the batch.
+    Borrowed(&'p [Vector<'p>]),
+}
+
+impl<'p> std::ops::Deref for Columns<'p> {
+    type Target = [Vector<'p>];
+
+    fn deref(&self) -> &[Vector<'p>] {
+        match self {
+            Columns::Owned(held) => held.as_slice(),
+            Columns::Borrowed(held) => held,
+        }
+    }
+}
+
+impl<'p> From<Vec<Vector<'p>>> for Columns<'p> {
+    /// @param held - the owned column list
+    fn from(held: Vec<Vector<'p>>) -> Columns<'p> {
+        Columns::Owned(held)
+    }
+}
+
 /// A batch of rows as column vectors.
 #[derive(Clone, Debug)]
 pub struct Batch<'p> {
@@ -169,7 +256,7 @@ pub struct Batch<'p> {
     /// rows, so a predicate that keeps most rows costs one pass and no movement.
     pub selection: Option<&'p [u32]>,
     /// One vector per column, in the batch's own column order.
-    pub columns: Vec<Vector<'p>>,
+    pub columns: Columns<'p>,
 }
 
 impl<'p> Batch<'p> {
@@ -181,7 +268,19 @@ impl<'p> Batch<'p> {
         Batch {
             rows,
             selection: None,
-            columns,
+            columns: Columns::Owned(columns),
+        }
+    }
+
+    /// Returns a batch over a column list the caller holds.
+    ///
+    /// @param rows - how many rows the vectors hold
+    /// @param columns - one vector per column, borrowed for the batch's life
+    pub fn over(rows: usize, columns: &'p [Vector<'p>]) -> Batch<'p> {
+        Batch {
+            rows,
+            selection: None,
+            columns: Columns::Borrowed(columns),
         }
     }
 
@@ -289,7 +388,9 @@ mod tests {
 
     /// A text column always takes the general path and reads back exactly.
     #[test]
-    fn a_text_column_reads_through_the_general_path() {
+    fn a_text_column_reads_the_same_bytes_by_either_path() {
+        // Fully typed: the dense variable-width vector, which skips the class
+        // array because the scan has already proved there is nothing in it.
         let rows = vec![
             vec![Datum::Int(1), Datum::Int(1), Datum::Text(b"alpha")],
             vec![Datum::Int(2), Datum::Int(2), Datum::Text(b"beta")],
@@ -297,9 +398,25 @@ mod tests {
         let page = leaf_page(rows);
         let leaf = LeafRef::parse(&page).unwrap();
         let vector = Vector::from_column(leaf.column(2).unwrap());
-        assert!(matches!(vector, Vector::Column(_)));
+        assert!(matches!(vector, Vector::Variable { text: true, .. }));
         assert_eq!(vector.at(0).unwrap().as_bytes().unwrap(), b"alpha");
         assert_eq!(vector.at(1).unwrap().as_bytes().unwrap(), b"beta");
+
+        // One NULL puts the same column back on the general path, and the rows
+        // that are present read identically. The two paths agreeing is the
+        // whole of what makes the fast one safe to take.
+        let mixed = vec![
+            vec![Datum::Int(1), Datum::Int(1), Datum::Text(b"alpha")],
+            vec![Datum::Int(2), Datum::Int(2), Datum::Null],
+            vec![Datum::Int(3), Datum::Int(3), Datum::Text(b"beta")],
+        ];
+        let page = leaf_page(mixed);
+        let leaf = LeafRef::parse(&page).unwrap();
+        let vector = Vector::from_column(leaf.column(2).unwrap());
+        assert!(matches!(vector, Vector::Column(_)));
+        assert_eq!(vector.at(0).unwrap().as_bytes().unwrap(), b"alpha");
+        assert!(vector.at(1).unwrap().is_null());
+        assert_eq!(vector.at(2).unwrap().as_bytes().unwrap(), b"beta");
     }
 
     /// A selection vector renumbers the live rows without moving any data.
@@ -315,7 +432,7 @@ mod tests {
         let batch = Batch {
             rows: 4,
             selection: Some(&selection),
-            columns: vec![Vector::Values(&values)],
+            columns: vec![Vector::Values(&values)].into(),
         };
         assert_eq!(batch.live(), 2);
         assert!(!batch.is_dense());

@@ -93,7 +93,7 @@ fn run(arguments: &[String], fixture: &str) -> Result<(), String> {
     probe_stages(&database, rows)?;
     build_against_run(&database, &plan.workloads, rows)?;
     index_probe_stages(&database)?;
-    decompose(&database)?;
+    decompose(&database, rows)?;
     Ok(())
 }
 
@@ -195,42 +195,83 @@ fn index_probe_stages(database: &ImportedDatabase) -> Result<(), String> {
 /// slow; timing the ladder says which of those four it is, and each rung here
 /// is the rung above it plus exactly one stage.
 ///
+/// **The bound value moves on every execution, the way the gate's does.** A
+/// ladder that probed the same two hundred rowids two thousand times measured a
+/// working set that stays in cache, which is not the workload: `Bind::Scatter`
+/// moves the range on each iteration, so every execution touches leaves the
+/// last one did not. The first version of this instrument did not, and it read
+/// twenty per cent faster than the gate for exactly that reason.
+///
 /// @param database - the imported trees
-fn decompose(database: &ImportedDatabase) -> Result<(), String> {
-    let ladder: [(&str, &str); 7] = [
+/// @param rows - how many rows the base table holds
+fn decompose(database: &ImportedDatabase, rows: u32) -> Result<(), String> {
+    let ladder: [(&str, &str, bool); 13] = [
+        (
+            "point by rowid, label",
+            "SELECT label FROM main_table WHERE id = ?1",
+            true,
+        ),
+        (
+            "point by rowid, count",
+            "SELECT count(*) FROM main_table WHERE id = ?1",
+            true,
+        ),
         (
             "span only",
-            "SELECT count(key) FROM main_table WHERE key BETWEEN 1 AND 201",
+            "SELECT count(key) FROM main_table WHERE key BETWEEN ?1 AND ?1 + 200",
+            true,
         ),
         (
             "span + rowid lookup",
-            "SELECT count(category) FROM main_table WHERE key BETWEEN 1 AND 201",
+            "SELECT count(category) FROM main_table WHERE key BETWEEN ?1 AND ?1 + 200",
+            true,
         ),
         (
             "span + lookup + length()",
-            "SELECT sum(length(label)) FROM main_table WHERE key BETWEEN 1 AND 201",
+            "SELECT sum(length(label)) FROM main_table WHERE key BETWEEN ?1 AND ?1 + 200",
+            true,
         ),
         (
             "span + index probe",
-            "SELECT count(*) FROM main_table JOIN side_table ON side_table.owner =              main_table.id WHERE main_table.key BETWEEN 1 AND 201",
+            "SELECT count(*) FROM main_table JOIN side_table ON side_table.owner =              main_table.id WHERE main_table.key BETWEEN ?1 AND ?1 + 200",
+            true,
         ),
         (
             "span + probe + rowid lookup",
-            "SELECT count(side_table.note) FROM main_table JOIN side_table ON              side_table.owner = main_table.id WHERE main_table.key BETWEEN 1 AND 201",
+            "SELECT count(side_table.note) FROM main_table JOIN side_table ON              side_table.owner = main_table.id WHERE main_table.key BETWEEN ?1 AND ?1 + 200",
+            true,
         ),
         (
             "point probe + index probe",
-            "SELECT count(*) FROM main_table JOIN side_table ON side_table.owner =              main_table.id WHERE main_table.id = 4242",
+            "SELECT count(*) FROM main_table JOIN side_table ON side_table.owner =              main_table.id WHERE main_table.id = ?1",
+            true,
+        ),
+        ("full scan, count only", "SELECT count(*) FROM main_table", false),
+        (
+            "full scan, count(label)",
+            "SELECT count(label) FROM main_table",
+            false,
         ),
         (
-            "full scan, count only",
-            "SELECT count(*) FROM main_table",
+            "full scan, max(label)",
+            "SELECT max(label) FROM main_table",
+            false,
+        ),
+        (
+            "sort by id, limit 100",
+            "SELECT id FROM main_table ORDER BY id LIMIT 100",
+            false,
+        ),
+        (
+            "sort by label, limit 100",
+            "SELECT id FROM main_table ORDER BY label LIMIT 100",
+            false,
         ),
     ];
     println!();
-    println!("## the ladder, microseconds per execution   (statement reused)");
+    println!("## the ladder, microseconds per execution   (statement reused, bind moves)");
     println!("  {:<30} {:>12}", "query", "run");
-    for (name, sql) in ladder {
+    for (name, sql, bound) in ladder {
         let Ok(plan) = database.plan(sql) else {
             println!("  {name:<30} {:>12}", "no plan");
             continue;
@@ -239,7 +280,11 @@ fn decompose(database: &ImportedDatabase) -> Result<(), String> {
             println!("  {name:<30} {:>12}", "refused");
             continue;
         };
-        let params = Params::from_values(Vec::new());
+        let mut params = Params::from_values(if bound {
+            vec![bind_value(Bind::Scatter, 1, rows)]
+        } else {
+            Vec::new()
+        });
         let sink = Box::new(Counting { rows: 0 });
         let mut statement = match database.statement(&plan, &prepared, &params, sink) {
             Ok(statement) => statement,
@@ -248,7 +293,13 @@ fn decompose(database: &ImportedDatabase) -> Result<(), String> {
                 continue;
             }
         };
-        let elapsed = per(2_000, || {
+        let iterations: u32 = if bound { 2_000 } else { 40 };
+        let mut iteration = 0u32;
+        let elapsed = per(iterations, || {
+            if bound {
+                iteration = iteration.wrapping_add(1);
+                params.refill([bind_value(Bind::Scatter, iteration, rows)]);
+            }
             statement.run(&params).map_err(|error| why(&error))?;
             Ok(())
         })?;

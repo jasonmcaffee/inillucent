@@ -247,6 +247,95 @@ fn digest_of(tree: &PagedTree, pool: &Pool) -> u64 {
     hash
 }
 
+/// A reused statement answers what a freshly built pipeline answers, and
+/// refuses to be reused when it cannot.
+///
+/// **This is the test the `Sink::reset` contract exists for.** A statement
+/// builds its operator chain once and runs it many times, so every operator
+/// that accumulates - an aggregate, a sorter, a top-n, a distinct set, a limit
+/// counter - has to be returned to its pre-input state between executions. An
+/// operator that forgot would fold the previous execution's rows into this
+/// one's answer, and no test of a single execution can see that. So each
+/// statement is run five times over five parameter sets, deliberately not in
+/// ascending order, and every run is compared against a pipeline built from
+/// scratch for the same parameters.
+///
+/// The other half is the refusal. A parameter that reaches anything but the
+/// source is folded into the chain when the chain is built, and re-running that
+/// chain against new values would answer the old question. The builder decides
+/// that by counting the parameter reads the chain's construction makes, and
+/// this asserts both verdicts occur in the list below - a test in which every
+/// statement happened to be re-runnable would be checking the counter's
+/// optimism rather than the counter.
+#[test]
+fn a_reused_statement_answers_what_a_rebuilt_pipeline_does() {
+    let fixture = fixture(4_000, 4_096, 512);
+    let statements = [
+        "SELECT count(*), sum(category) FROM t WHERE id >= ?1",
+        "SELECT category, count(*) FROM t WHERE id >= ?1 GROUP BY category ORDER BY category",
+        "SELECT id FROM t WHERE id >= ?1 ORDER BY label LIMIT 7",
+        "SELECT DISTINCT category FROM t WHERE id >= ?1 ORDER BY category",
+        "SELECT id, label FROM t WHERE id >= ?1 AND id <= ?1 + 20",
+        "SELECT label FROM t WHERE id = ?1",
+        // The parameter is the LIMIT, so it is in the chain rather than the
+        // source and the statement must refuse to be re-bound.
+        "SELECT id FROM t WHERE id >= 1 ORDER BY id LIMIT ?1",
+    ];
+    let mut reusable = 0usize;
+    let mut refused = 0usize;
+    for sql in statements {
+        let plan = fixture.plan(sql).expect(sql);
+        let prepared =
+            inillucent_exec::physical::prepare(&plan, &fixture, ForcePlan::default()).expect(sql);
+        let reused_rows: Rc<RefCell<Vec<Vec<OwnedDatum>>>> = Rc::new(RefCell::new(Vec::new()));
+        let first = Params::from_values(vec![OwnedDatum::Int(1)]);
+        let mut statement = inillucent_exec::physical::build_statement(
+            &plan,
+            &fixture,
+            &prepared,
+            &first,
+            Box::new(inillucent_exec::ops::CollectInto::new(Rc::clone(
+                &reused_rows,
+            ))),
+        )
+        .expect(sql);
+        if !statement.rebindable() {
+            refused = refused.saturating_add(1);
+            let params = Params::from_values(vec![OwnedDatum::Int(2)]);
+            assert!(
+                statement.run(&params).is_err(),
+                "{sql} kept a parameter in its chain and still agreed to re-run"
+            );
+            continue;
+        }
+        reusable = reusable.saturating_add(1);
+        for bound in [1_i64, 3_000, 17, 3_999, 17] {
+            let params = Params::from_values(vec![OwnedDatum::Int(bound)]);
+            reused_rows.borrow_mut().clear();
+            statement.run(&params).expect(sql);
+            let reused = reused_rows.borrow().clone();
+
+            let fresh_rows: Rc<RefCell<Vec<Vec<OwnedDatum>>>> = Rc::new(RefCell::new(Vec::new()));
+            let (mut pipeline, _) = inillucent_exec::physical::build_prepared(
+                &plan,
+                &fixture,
+                &prepared,
+                &params,
+                Box::new(inillucent_exec::ops::CollectInto::new(Rc::clone(
+                    &fresh_rows,
+                ))),
+            )
+            .expect(sql);
+            pipeline.run().expect(sql);
+            let fresh = fresh_rows.borrow().clone();
+
+            assert_eq!(reused, fresh, "{sql} at ?1 = {bound}");
+        }
+    }
+    assert!(reusable >= 4, "only {reusable} statements were re-runnable");
+    assert!(refused >= 1, "no statement exercised the refusal");
+}
+
 /// The TDD's eviction campaign: the same answers through a 64-frame pool.
 ///
 /// The pool holds 64 frames of 512 bytes - 32 KiB - over a database of several

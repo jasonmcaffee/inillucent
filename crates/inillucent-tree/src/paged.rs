@@ -1242,6 +1242,16 @@ impl PagedTree {
         }
         let mut page = self.first_leaf;
         let mut row = 0usize;
+        // The leaf the last seek descended to, still pinned.
+        //
+        // A seek lands on a leaf and then works out which row of it holds the
+        // next distinct value; without this the loop dropped that guard and
+        // fetched and parsed the same page again at the top of the next
+        // iteration. One redundant fetch and parse per distinct value is what
+        // `scan.distinct` is made of - it is 65 seeks whatever the table's size,
+        // which is why the workload gets *better* with scale and why the
+        // per-seek constant is the whole of it.
+        let mut carried: Option<PageGuard<'_>> = None;
         // Reused across seeks so a scan of 64 distinct values makes one
         // allocation rather than 64.
         let mut held: Vec<OwnedDatum> = Vec::with_capacity(prefix);
@@ -1255,7 +1265,24 @@ impl PagedTree {
             // leaf twice to run it did not have to.
             let mut keep = true;
             let mut landed = false;
-            while !page.is_none() {
+            if let Some(guard) = carried.take() {
+                let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
+                if row < leaf.row_count() {
+                    keep = visit(&leaf, row)?;
+                    held.clear();
+                    for column in 0..prefix {
+                        held.push(OwnedDatum::from_datum(&leaf.value(row, column)?));
+                    }
+                    landed = true;
+                } else {
+                    // The carried leaf is only ever handed over with a row it
+                    // holds, so this cannot happen; falling through to the walk
+                    // rather than asserting keeps the two paths one behaviour.
+                    page = leaf.right_sibling();
+                    row = 0;
+                }
+            }
+            while !landed && !page.is_none() {
                 let guard = pool.fetch(page)?;
                 let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
                 if row < leaf.row_count() {
@@ -1311,20 +1338,21 @@ impl PagedTree {
                 // takes an integer fast path when the leading key column is one.
                 let low = leaf.upper_bound(borrowed)?;
                 if low < leaf.row_count() {
-                    Some((landed, low))
+                    Some((landed, low, true))
                 } else {
                     let right = leaf.right_sibling();
                     if right.is_none() {
                         None
                     } else {
-                        Some((right, 0))
+                        Some((right, 0, false))
                     }
                 }
             };
             match next {
-                Some((next_page, next_row)) => {
+                Some((next_page, next_row, here)) => {
                     page = next_page;
                     row = next_row;
+                    carried = if here { Some(guard) } else { None };
                 }
                 None => return Ok(()),
             }
@@ -1351,9 +1379,27 @@ impl PagedTree {
         let key = self.encode_key_small(probe);
         let (guard, _) = self.descend_guard(pool, key.as_slice())?;
         let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
+        self.probe_leaf(&leaf, probe, read)
+    }
+
+    /// Finds a key inside a leaf the caller has already descended to.
+    ///
+    /// The half of [`PagedTree::probe`] below the descent, factored out so the
+    /// pipelined form cannot drift from the single form - including the delta
+    /// check, which is the part that would be quietly dropped.
+    ///
+    /// @param leaf - the leaf the descent landed on
+    /// @param probe - the key, one value per key column
+    /// @param read - what to do with the leaf and the row index
+    fn probe_leaf<R>(
+        &self,
+        leaf: &LeafRef<'_>,
+        probe: &[Datum<'_>],
+        read: impl FnOnce(&LeafRef<'_>, usize) -> DbResult<R>,
+    ) -> DbResult<Option<R>> {
         if let Ok(row) = leaf.search(probe)? {
             if !leaf.is_tombstoned(row)? {
-                return Ok(Some(read(&leaf, row)?));
+                return Ok(Some(read(leaf, row)?));
             }
         }
         for entry in 0..leaf.delta_count() {

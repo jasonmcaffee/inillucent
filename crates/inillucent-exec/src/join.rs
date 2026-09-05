@@ -64,6 +64,15 @@ use crate::scan::Projection;
 /// costs what the previous version cost on every key.
 const INLINE_KEYS: usize = 4;
 
+/// How many joined columns a probe's column list keeps on the stack.
+///
+/// The scorecard's widest joined row is nine vectors - five table columns and
+/// four index ones - and a `Vector` is about sixty-four bytes, so twelve slots
+/// is under a kilobyte of stack and covers every shape the fixture and the
+/// dialect's own corpus produce. A wider row spills to the heap, which costs
+/// what every row used to cost.
+const INLINE_COLUMNS: usize = 12;
+
 /// A buffer of materialised rows, emitted as batches.
 ///
 /// The shared machinery under [`Materialize`], the build side of
@@ -538,17 +547,46 @@ impl Sink for IndexNestedLoopJoin<'_> {
             if !null_key && *kind != JoinKind::Anti {
                 if *full_key {
                     let found = inner.probe(pool, probe, |leaf, row| {
-                        let mut columns: Vec<Vector<'_>> =
-                            Vec::with_capacity(width.saturating_add(inner_width));
+                        // The joined row's column list lives on the stack when
+                        // it fits. A rowid lookup measures 236 ns bare and was
+                        // measuring about 320 ns inside this join; a `Vec` of
+                        // nine 64-byte vectors, allocated and freed once per
+                        // probed row, was most of the difference.
+                        let total = width.saturating_add(inner_width);
+                        let mut inline: [Vector<'_>; INLINE_COLUMNS] =
+                            [Vector::Const(Datum::Null); INLINE_COLUMNS];
+                        let mut spilled: Vec<Vector<'_>> = Vec::new();
+                        let mut at = 0usize;
+                        let heap = total > INLINE_COLUMNS;
+                        if heap {
+                            spilled.reserve(total);
+                        }
                         for column in 0..width {
-                            columns.push(Vector::Const(batch.value(nth, column)?));
+                            let vector = Vector::Const(batch.value(nth, column)?);
+                            if heap {
+                                spilled.push(vector);
+                            } else if let Some(slot) = inline.get_mut(at) {
+                                *slot = vector;
+                            }
+                            at = at.saturating_add(1);
                         }
                         if *kind != JoinKind::Semi {
                             for column in &inner_projection.0 {
-                                columns.push(Vector::Const(leaf.value(row, *column)?));
+                                let vector = Vector::Const(leaf.value(row, *column)?);
+                                if heap {
+                                    spilled.push(vector);
+                                } else if let Some(slot) = inline.get_mut(at) {
+                                    *slot = vector;
+                                }
+                                at = at.saturating_add(1);
                             }
                         }
-                        let one = Batch::new(1, columns);
+                        let columns: &[Vector<'_>] = if heap {
+                            spilled.as_slice()
+                        } else {
+                            inline.get(..at).unwrap_or(&[])
+                        };
+                        let one = Batch::over(1, columns);
                         downstream.push(&one)
                     })?;
                     if let Some(reported) = found {
@@ -564,17 +602,41 @@ impl Sink for IndexNestedLoopJoin<'_> {
                     let mut seen = 0usize;
                     let mut reported = Flow::Continue;
                     inner.visit_equal(pool, probe, &mut |leaf, start, end| {
-                        let mut columns: Vec<Vector<'_>> =
-                            Vec::with_capacity(width.saturating_add(inner_width));
+                        let total = width.saturating_add(inner_width);
+                        let mut inline: [Vector<'_>; INLINE_COLUMNS] =
+                            [Vector::Const(Datum::Null); INLINE_COLUMNS];
+                        let mut spilled: Vec<Vector<'_>> = Vec::new();
+                        let mut at = 0usize;
+                        let heap = total > INLINE_COLUMNS;
+                        if heap {
+                            spilled.reserve(total);
+                        }
                         for column in 0..width {
-                            columns.push(Vector::Const(batch.value(nth, column)?));
+                            let vector = Vector::Const(batch.value(nth, column)?);
+                            if heap {
+                                spilled.push(vector);
+                            } else if let Some(slot) = inline.get_mut(at) {
+                                *slot = vector;
+                            }
+                            at = at.saturating_add(1);
                         }
                         for column in &inner_projection.0 {
-                            columns.push(Vector::from_column(leaf.column(*column)?));
+                            let vector = Vector::from_column(leaf.column(*column)?);
+                            if heap {
+                                spilled.push(vector);
+                            } else if let Some(slot) = inline.get_mut(at) {
+                                *slot = vector;
+                            }
+                            at = at.saturating_add(1);
                         }
                         selection.clear();
                         selection.extend((start..end).map(|row| row as u32));
-                        let mut span = Batch::new(leaf.row_count(), columns);
+                        let columns: &[Vector<'_>] = if heap {
+                            spilled.as_slice()
+                        } else {
+                            inline.get(..at).unwrap_or(&[])
+                        };
+                        let mut span = Batch::over(leaf.row_count(), columns);
                         span.selection = Some(selection.as_slice());
                         seen = seen.saturating_add(end.saturating_sub(start));
                         if *kind == JoinKind::Semi {

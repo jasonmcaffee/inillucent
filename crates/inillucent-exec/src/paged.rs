@@ -316,6 +316,13 @@ impl<'t> SkipScan<'t> {
     }
 }
 
+/// How many projected columns a point probe keeps on the stack.
+///
+/// Twelve covers every table in the scorecard fixture and in the dialect's own
+/// corpus; a wider projection takes the owned path, which is what every probe
+/// used to take.
+const PROBE_INLINE_COLUMNS: usize = 12;
+
 /// One row by key: the compiled point-probe path.
 ///
 /// No batch, no vector, no selection vector. A probe descends, finds the row,
@@ -368,13 +375,41 @@ impl<'t> PointProbe<'t> {
 
     /// Looks one key up and pushes it downstream as a one-row batch.
     ///
+    /// **Nothing is copied and nothing is allocated.** The row went through
+    /// `OwnedDatum` and `emit_rows`, which is one `Vec` for the row, one for
+    /// the column list, one per column of borrows, and a copy of every text
+    /// value - to carry a single row that the leaf is still pinned under.
+    /// `inillucent-probeprofile` measured `SELECT label ... WHERE id = ?1` at
+    /// 1.43 us and `SELECT count(*) ... WHERE id = ?1` at 0.87 us, against a
+    /// bare `tree.probe` of about 0.24 us; the difference between those two is
+    /// what carrying one text value used to cost.
+    ///
+    /// The values are constant vectors over the leaf, exactly as an index
+    /// nested loop's are, and the column list is on the stack.
+    ///
     /// @param pool - the buffer pool
     /// @param key - the key, one value per key column
     /// @param downstream - the head of the operator chain
     pub fn run(&self, pool: &Pool, key: &[Datum<'_>], downstream: &mut dyn Sink) -> DbResult<()> {
-        let mut row: Vec<OwnedDatum> = Vec::with_capacity(self.projection.0.len());
-        if self.lookup(pool, key, &mut row)? {
-            crate::ops::emit_rows(std::slice::from_ref(&row), downstream)?;
+        let width = self.projection.0.len();
+        if width <= PROBE_INLINE_COLUMNS {
+            self.tree.probe(pool, key, |leaf, row| {
+                let mut inline: [Vector<'_>; PROBE_INLINE_COLUMNS] =
+                    [Vector::Const(Datum::Null); PROBE_INLINE_COLUMNS];
+                for (at, column) in self.projection.0.iter().enumerate() {
+                    if let Some(slot) = inline.get_mut(at) {
+                        *slot = Vector::Const(leaf.value(row, *column)?);
+                    }
+                }
+                let batch = Batch::over(1, inline.get(..width).unwrap_or(&[]));
+                downstream.push(&batch)?;
+                Ok(())
+            })?;
+        } else {
+            let mut row: Vec<OwnedDatum> = Vec::with_capacity(width);
+            if self.lookup(pool, key, &mut row)? {
+                crate::ops::emit_rows(std::slice::from_ref(&row), downstream)?;
+            }
         }
         downstream.finish()
     }

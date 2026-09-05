@@ -1268,6 +1268,15 @@ impl<'p> MiniColumn<'p> {
         self.values
     }
 
+    /// Returns the whole page the column lives in.
+    ///
+    /// A variable-width slot is an absolute `(offset, length)` into the page,
+    /// so a reader that wants to resolve one without going back through
+    /// [`MiniColumn::value`] needs the page as well as the slots.
+    pub fn page_bytes(&self) -> &'p [u8] {
+        self.page
+    }
+
     /// Returns the integer in one slot, without consulting the class array.
     ///
     /// @param row - the row's position in the sorted region
