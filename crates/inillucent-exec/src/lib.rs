@@ -42,6 +42,7 @@
 
 pub mod aggregate;
 pub mod batch;
+pub mod dml;
 pub mod expr;
 pub mod join;
 pub mod ops;

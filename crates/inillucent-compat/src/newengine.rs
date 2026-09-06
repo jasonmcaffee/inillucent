@@ -56,6 +56,7 @@ use inillucent_catalog::paged::{
     attach_catalog, read_catalog, schema_create_sql, schema_layout, write_catalog, ObjectKind,
     SchemaEntry,
 };
+use inillucent_exec::dml::{self, Changes, Trees, WriteTarget};
 use inillucent_exec::physical::{self, ForcePlan, Params, SourceLayout, TreeCatalog};
 use inillucent_exec::StaticType;
 use inillucent_pool::{Database, Options, PageId, Pool};
@@ -65,10 +66,13 @@ use inillucent_sql::parser::parse_next_statement;
 use inillucent_sql::plan::{plan_select_with, Levers, PhysicalPlan};
 use inillucent_sqlite_reader::SqliteFile;
 use inillucent_tree::datum::{Datum, OwnedDatum};
+use inillucent_tree::paged::KeyEncoding;
 use inillucent_tree::types::{ColumnSpec, PhysicalType};
+use inillucent_tree::write::TreeLog;
 use inillucent_tree::PagedTree;
 use inillucent_value::collation::Collation;
 use inillucent_vfs::{DbPath, OsVfs};
+use inillucent_wal::{Body, Synchronous, Wal, WalOptions, FIRST_LSN};
 
 /// How many frames the harness gives a pool when nothing says otherwise.
 ///
@@ -94,6 +98,17 @@ pub struct ImportedDatabase {
     /// The tables the import could not take, by name.
     skipped: Vec<String>,
     limits: Limits,
+    /// The write-ahead log every change is described in before it happens.
+    ///
+    /// Held beside the file rather than inside an `inillucent-txn` `Engine`,
+    /// because the read path takes `&Pool` as a plain borrow and an engine
+    /// keeps its file behind a `RefCell` that cannot lend one. What this
+    /// harness needs of a transaction manager is the log, the sync policy and
+    /// the commit record; the snapshots and the version log are what the Phase
+    /// 3 model driver exercises, and it drives the `Engine` directly.
+    wal: Wal,
+    /// The transaction number the next statement takes.
+    next_txn: std::cell::Cell<u64>,
 }
 
 impl TreeCatalog for ImportedDatabase {
@@ -369,6 +384,19 @@ impl ImportedDatabase {
         );
         catalog = catalog.with_table(schema_info);
 
+        // The log the write path describes every change in, opened on a file
+        // that has just been checkpointed - so it starts empty, at the first
+        // stream position, and every record in it is one this process wrote.
+        let wal = Wal::open(
+            std::sync::Arc::new(OsVfs::new()),
+            &db_path,
+            database.uuid(),
+            FIRST_LSN,
+            1,
+            WalOptions::default(),
+        )?;
+        database.pool().set_durable_lsn(wal.durable_end());
+
         // Smallest tree first, so the physical pass takes the cheapest
         // structure that covers the query. Sorting by bytes rather than by
         // column count is what makes it the right order: an index with more
@@ -393,6 +421,8 @@ impl ImportedDatabase {
             path: target,
             skipped,
             limits: Limits::default(),
+            wal,
+            next_txn: std::cell::Cell::new(1),
         })
     }
 
@@ -678,6 +708,321 @@ impl ImportedDatabase {
     pub fn describe(&self, sql: &str) -> DbResult<Vec<String>> {
         Ok(self.plan(sql)?.describe())
     }
+
+    /// Returns the log, so a caller can read its counters.
+    pub fn wal(&self) -> &Wal {
+        &self.wal
+    }
+
+    /// Checks every tree's structure: key order, separators and fill.
+    ///
+    /// The campaign tests run this after every statement. A tree that has
+    /// drifted structurally still answers a scan correctly for a long time,
+    /// which is precisely why the check has to be a check rather than a query.
+    pub fn check_trees(&self) -> DbResult<()> {
+        for tree in self.trees.values() {
+            tree.check(self.database.pool())?;
+        }
+        Ok(())
+    }
+
+    /// Sets what a commit waits for.
+    ///
+    /// @param policy - the `synchronous` setting
+    pub fn set_synchronous(&self, policy: Synchronous) {
+        self.wal.set_synchronous(policy);
+    }
+
+    /// Writes every dirty page and advances the log's recovery point.
+    ///
+    /// The log is synced *first*, so that every page about to be written is one
+    /// the log has already described durably. The other order is the durability
+    /// mutant the Phase 3 gate exists to kill.
+    pub fn checkpoint(&mut self) -> DbResult<()> {
+        self.wal.sync()?;
+        let durable = self.wal.durable_end();
+        self.database.pool().set_durable_lsn(durable);
+        let sequence = self.wal.sequence();
+        self.database.set_log_position(durable, 0, sequence);
+        self.database.checkpoint()?;
+        self.wal.note_checkpoint(durable, 0)?;
+        self.database.pool().set_durable_lsn(self.wal.durable_end());
+        Ok(())
+    }
+
+    /// Binds one statement against the imported schema.
+    ///
+    /// @param sql - the statement text
+    pub fn bind(&self, sql: &str) -> DbResult<BoundStatement> {
+        let parsed = parse_next_statement(sql.as_bytes(), 0, &self.limits)
+            .map_err(|error| misuse(format!("{sql}: {error:?}")))?;
+        let authorizer = AllowAll;
+        let mut binder =
+            Binder::new(&self.catalog, &parsed.ast, &authorizer).with_source(sql.as_bytes());
+        binder
+            .bind_statement(&parsed.statement)
+            .map_err(|error| misuse(format!("{sql}: {error:?}")))
+    }
+
+    /// Parses, plans and runs one statement of any kind.
+    ///
+    /// A `SELECT` answers with rows; an `INSERT`, `UPDATE` or `DELETE` answers
+    /// with a count and whatever `RETURNING` asked for. One entry point rather
+    /// than two, because a corpus record does not say which it is and a harness
+    /// that had to guess would be guessing from the SQL text.
+    ///
+    /// @param sql - the statement text
+    /// @param params - the values bound to `?1`, `?2`, ...
+    pub fn execute_any(&mut self, sql: &str, params: &Params) -> DbResult<Outcome> {
+        match self.bind(sql)? {
+            BoundStatement::Select(select) => {
+                let plan = plan_select_with(*select, Levers::default());
+                let (rows, names) = self.execute(&plan, params)?;
+                Ok(Outcome {
+                    rows,
+                    names,
+                    changes: Changes::default(),
+                })
+            }
+            BoundStatement::Insert(statement) => self.run_insert(&statement, params),
+            BoundStatement::Update(statement) => {
+                let keys = self.keys_of(
+                    &statement.table,
+                    statement.source,
+                    statement.filter.as_ref(),
+                    statement.limit.as_ref(),
+                    statement.offset.as_ref(),
+                    params,
+                )?;
+                self.write(params, |target, log, params| {
+                    dml::update(&statement, target, log, params, &keys)
+                })
+            }
+            BoundStatement::Delete(statement) => {
+                let keys = self.keys_of(
+                    &statement.table,
+                    statement.source,
+                    statement.filter.as_ref(),
+                    statement.limit.as_ref(),
+                    statement.offset.as_ref(),
+                    params,
+                )?;
+                self.write(params, |target, log, params| {
+                    dml::delete(&statement, target, log, params, &keys)
+                })
+            }
+            other => Err(misuse(format!(
+                "{sql} binds to {}, which the new engine does not run yet",
+                describe_statement(&other)
+            ))),
+        }
+    }
+
+    /// Runs an `INSERT`, reading its source rows before it writes any.
+    ///
+    /// `INSERT INTO t SELECT ...` has to read every row it is going to write
+    /// before it writes the first, or a statement inserting into the table it
+    /// is reading would meet its own new rows. Collecting them is not an
+    /// optimisation the buffer could avoid: it is what makes the statement
+    /// terminate.
+    ///
+    /// @param statement - the bound insert
+    /// @param params - the bound parameters
+    pub fn run_insert(
+        &mut self,
+        statement: &inillucent_sql::dml::BoundInsert,
+        params: &Params,
+    ) -> DbResult<Outcome> {
+        let rows = match &statement.source {
+            inillucent_sql::dml::BoundInsertSource::Select(select) => {
+                let plan = plan_select_with((**select).clone(), Levers::default());
+                self.execute(&plan, params)?.0
+            }
+            inillucent_sql::dml::BoundInsertSource::Values(_) => Vec::new(),
+        };
+        self.write(params, |target, log, params| {
+            dml::insert(statement, target, log, params, &rows)
+        })
+    }
+
+    /// Returns the key of every row a write's `WHERE` selects.
+    ///
+    /// Through the ordinary planner, so `WHERE id = ?1` reaches the same point
+    /// probe a `SELECT` with that clause would. A write path that scanned
+    /// instead would answer correctly and measure nothing.
+    ///
+    /// @param table - the table being written
+    /// @param source - the statement-wide number of its FROM term
+    /// @param filter - the statement's `WHERE`
+    /// @param limit - the statement's `LIMIT`
+    /// @param offset - the statement's `OFFSET`
+    /// @param params - the bound parameters
+    fn keys_of(
+        &self,
+        table: &TableInfo,
+        source: usize,
+        filter: Option<&inillucent_sql::bind::BoundExpr>,
+        limit: Option<&inillucent_sql::bind::BoundExpr>,
+        offset: Option<&inillucent_sql::bind::BoundExpr>,
+        params: &Params,
+    ) -> DbResult<Vec<Vec<OwnedDatum>>> {
+        let layout = self
+            .layouts
+            .get(&table.root)
+            .ok_or_else(|| misuse("no layout imported for the table being written"))?;
+        let select = dml::keys_query(table, source, filter, limit, offset, layout)?;
+        let plan = plan_select_with(select, Levers::default());
+        Ok(self.execute(&plan, params)?.0)
+    }
+
+    /// Runs one write as its own transaction, logged and committed.
+    ///
+    /// The commit record is appended and awaited *after* the change, which is
+    /// what makes the change atomic: recovery replays a transaction only if it
+    /// found the commit, so a crash anywhere inside `apply` leaves a log that
+    /// describes nothing that happened.
+    ///
+    /// @param params - the bound parameters
+    /// @param apply - what to change
+    fn write(
+        &mut self,
+        params: &Params,
+        apply: impl FnOnce(&mut dyn WriteTarget, &mut dyn TreeLog, &Params) -> DbResult<Changes>,
+    ) -> DbResult<Outcome> {
+        let txn = self.next_txn.get();
+        self.next_txn.set(txn.saturating_add(1));
+        let changes = {
+            let mut log = WalLog {
+                wal: &self.wal,
+                txn,
+            };
+            let mut view = WriteView {
+                database: &mut self.database,
+                trees: &mut self.trees,
+                layouts: &self.layouts,
+            };
+            apply(&mut view, &mut log, params)?
+        };
+        self.wal.commit(txn, txn)?;
+        self.database.pool().set_durable_lsn(self.wal.durable_end());
+        Ok(Outcome {
+            rows: changes.returned.clone(),
+            names: Vec::new(),
+            changes,
+        })
+    }
+}
+
+/// What running one statement produced.
+#[derive(Clone, Debug, Default)]
+pub struct Outcome {
+    /// The rows a `SELECT` answered, or the rows `RETURNING` named.
+    pub rows: Vec<Vec<OwnedDatum>>,
+    /// The result column names, for a `SELECT`.
+    pub names: Vec<String>,
+    /// What a write changed.
+    pub changes: Changes,
+}
+
+/// Names the kind of statement a refusal is about.
+///
+/// @param statement - the bound statement
+fn describe_statement(statement: &BoundStatement) -> &'static str {
+    match statement {
+        BoundStatement::Select(_) => "a query",
+        BoundStatement::Insert(_) => "an insert",
+        BoundStatement::Update(_) => "an update",
+        BoundStatement::Delete(_) => "a delete",
+        BoundStatement::Directive(_) => "a directive",
+        BoundStatement::Empty => "nothing",
+    }
+}
+
+/// The disjoint halves of an [`ImportedDatabase`] a write borrows.
+///
+/// A write needs `&mut Database` and `&mut PagedTree` at the same instant while
+/// the log holds a shared borrow of a third field. Naming the three borrows in
+/// one struct is what lets the borrow checker see they are disjoint; a method
+/// taking `&mut self` could not, because it would borrow the log too.
+struct WriteView<'a> {
+    database: &'a mut Database,
+    trees: &'a mut HashMap<u32, PagedTree>,
+    layouts: &'a HashMap<u32, SourceLayout>,
+}
+
+impl WriteTarget for WriteView<'_> {
+    fn parts(&mut self) -> (&mut Database, &mut dyn Trees) {
+        (self.database, self.trees)
+    }
+
+    fn layout(&self, root: u32) -> Option<&SourceLayout> {
+        self.layouts.get(&root)
+    }
+}
+
+/// A [`TreeLog`] that writes to the database's own write-ahead log.
+///
+/// Every record carries the transaction it belongs to, which is what lets
+/// recovery tell a committed change from one whose commit never arrived.
+struct WalLog<'a> {
+    wal: &'a Wal,
+    txn: u64,
+}
+
+impl TreeLog for WalLog<'_> {
+    fn log(&mut self, body: Body<'_>) -> DbResult<u64> {
+        self.wal.append(self.txn, body)
+    }
+}
+
+/// Puts imported rows into the order the tree they are about to build compares
+/// in.
+///
+/// **The import cannot rely on SQLite's physical order being ours.** It reads a
+/// b-tree by walking it, so the rows arrive in the order *that* file kept them,
+/// and there are two ways for that to differ from the order the new tree
+/// defines. A `DESC` index column is stored descending by SQLite and ascending
+/// here. A collated column is stored under SQLite's implementation of the
+/// collation, and agreeing with it byte for byte is an assumption rather than a
+/// fact.
+///
+/// A tree whose leaves are not in its own key order answers a **scan** exactly
+/// right and a **seek** wrongly, because the descent binary-searches separators
+/// it does not actually obey. That is why this was invisible until the write
+/// path became the first thing to seek into an index: `members_score`, over
+/// `(score DESC, email)`, imported out of order, and every delete against it
+/// silently found nothing and left the entry behind.
+///
+/// The sort key is the tree's *own* encoding under the tree's *own* collations,
+/// so there is no second opinion about ordering to drift from the first.
+///
+/// @param rows - the rows as the file gave them up
+/// @param columns - the tree's column directory
+/// @param key_columns - how many leading columns form the key
+fn in_key_order(
+    rows: Vec<Vec<OwnedDatum>>,
+    columns: &[ColumnSpec],
+    key_columns: usize,
+) -> Vec<Vec<OwnedDatum>> {
+    let encoding = KeyEncoding::choose(columns, key_columns);
+    let collations: Vec<Collation> = columns
+        .iter()
+        .take(key_columns)
+        .map(|spec| spec.collation)
+        .collect();
+    let mut keyed: Vec<(Vec<u8>, Vec<OwnedDatum>)> = rows
+        .into_iter()
+        .map(|row| {
+            let key: Vec<Datum<'_>> = row
+                .iter()
+                .take(key_columns)
+                .map(OwnedDatum::borrow)
+                .collect();
+            (encoding.encode_under(&key, &collations), row)
+        })
+        .collect();
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    keyed.into_iter().map(|(_, row)| row).collect()
 }
 
 /// The shape of one built tree, kept so it can be re-attached after the file is
@@ -900,6 +1245,7 @@ fn import_keyed_table(
         }
     }
 
+    let rows = in_key_order(rows, &columns, key_columns);
     let borrowed: Vec<Vec<Datum<'_>>> = rows
         .iter()
         .map(|row| row.iter().map(OwnedDatum::borrow).collect())
@@ -1026,6 +1372,7 @@ fn import_index(
         }
     }
 
+    let rows = in_key_order(rows, &columns, key_columns);
     let borrowed: Vec<Vec<Datum<'_>>> = rows
         .iter()
         .map(|row| row.iter().map(OwnedDatum::borrow).collect())
