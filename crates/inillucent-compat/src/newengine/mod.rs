@@ -214,8 +214,9 @@ impl TreeCatalog for ImportedDatabase {
         table: &TableInfo,
         path: &inillucent_sql::plan::AccessPath,
         params: &Params,
+        needed: &inillucent_sql::bind::ColumnUse,
     ) -> DbResult<Option<Vec<Vec<OwnedDatum>>>> {
-        self.rows_of_module(table, path, params)
+        self.rows_of_module(table, path, params, needed)
     }
 }
 

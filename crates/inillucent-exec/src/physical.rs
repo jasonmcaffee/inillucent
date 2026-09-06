@@ -150,8 +150,9 @@ pub trait TreeCatalog {
         table: &TableInfo,
         path: &AccessPath,
         params: &Params,
+        needed: &inillucent_sql::bind::ColumnUse,
     ) -> DbResult<Option<Vec<Vec<OwnedDatum>>>> {
-        let _ = (table, path, params);
+        let _ = (table, path, params, needed);
         Ok(None)
     }
 
@@ -1758,8 +1759,17 @@ fn source_for<'t>(
                 .get(stage.term)
                 .ok_or_else(|| misuse("a stage names a FROM term the plan does not have"))?;
             if let AccessPath::VirtualScan { .. } = &term.path {
+                // **The module is only asked for the columns the query reads.**
+                // A materialised virtual scan used to ask the cursor for every
+                // declared column of every row, so `SELECT count(*) FROM t
+                // WHERE t MATCH 'x'` read the content row and scored the rank
+                // column for five hundred rows it then counted. This is the
+                // same question a covering index is chosen by, asked of the
+                // same bound statement, so a column that is read is a column
+                // that is materialised.
+                let needed = plan.select.columns_read(term.id);
                 let rows = catalog
-                    .virtual_rows(&term.table, &term.path, params)?
+                    .virtual_rows(&term.table, &term.path, params, &needed)?
                     .ok_or_else(|| misuse("a virtual table the caller does not have"))?;
                 return Ok((Source::Rows(rows), describe_source(prepared)));
             }

@@ -38,6 +38,9 @@ pub mod bm25;
 pub mod expr;
 pub mod tokenize;
 
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
 use inillucent_base::{varint, DbResult};
 use inillucent_value::Value;
 
@@ -209,6 +212,7 @@ impl Module for Fts5Module {
                 without_rowid: false,
             },
             creating,
+            pending: Buffer::default(),
         }))
     }
 }
@@ -229,6 +233,8 @@ struct Fts5Table {
     shadows: ShadowTables,
     declaration: Declaration,
     creating: bool,
+    /// The doclists this transaction has changed, shared with its cursors.
+    pending: Buffer,
 }
 
 impl Fts5Table {
@@ -302,6 +308,10 @@ impl VirtualTable for Fts5Table {
         Ok(Box::new(Fts5Cursor {
             matched: Vec::new(),
             phrases: Vec::new(),
+            query: None,
+            hits_built: false,
+            pending: Arc::clone(&self.pending),
+            held: None,
             totals: Totals::empty(self.options.columns.len()),
             columns: self.options.columns.len(),
             names: self
@@ -403,7 +413,20 @@ impl VirtualTable for Fts5Table {
     /// row that is there. An index that has drifted from its content is the
     /// failure mode that matters: it answers queries with rows that are gone
     /// and misses rows that are present, and neither is visible from a query.
+    /// Writes the doclists this transaction staged.
+    ///
+    /// Both engines call this before they commit, which is what makes the
+    /// buffer a buffer: nothing durable is deferred past the transaction that
+    /// wrote it, and a reader inside the transaction sees it because the
+    /// cursors share the same handle.
+    fn sync(&mut self, context: &mut Context<'_>) -> DbResult<()> {
+        flush_doclists(context, &self.shadows, &self.pending)
+    }
+
     fn integrity(&mut self, context: &mut Context<'_>) -> DbResult<Option<String>> {
+        // The check reads `%_data` rows rather than doclists, so it is the one
+        // reader the buffer cannot answer: written out first.
+        flush_doclists(context, &self.shadows, &self.pending)?;
         let mut problems = Vec::new();
         let mut rows = Vec::new();
         self.shadows.scan(context, b"content", |rowid, _| {
@@ -667,6 +690,53 @@ pub fn decode_doclist(bytes: &[u8]) -> Vec<DocEntry> {
     entries
 }
 
+/// Collects the rows a doclist names, without decoding their positions.
+///
+/// A row is collected when it has a position in a column the caller asked for
+/// and that the table declares - the same test [`expr::phrase_hits`] applies at
+/// offset zero, decided by walking the varints rather than by building the
+/// vectors that would prove it.
+///
+/// @param bytes - the doclist as `%_data` holds it
+/// @param wanted - the column a `column:term` filter named, if any
+/// @param columns - how many columns the table declares
+/// @param out - where the rowids are appended, in doclist order
+pub fn doclist_rows(bytes: &[u8], wanted: Option<usize>, columns: usize, out: &mut Vec<i64>) {
+    let mut at = 0usize;
+    let mut rowid = 0i64;
+    while at < bytes.len() {
+        rowid = rowid.wrapping_add(read_varint(bytes, &mut at) as i64);
+        let count = read_varint(bytes, &mut at) as usize;
+        if count > 4096 {
+            break;
+        }
+        let mut matched = false;
+        for _ in 0..count {
+            let column = read_varint(bytes, &mut at) as usize;
+            let positions = read_varint(bytes, &mut at) as usize;
+            if positions > 1 << 24 {
+                return;
+            }
+            for _ in 0..positions {
+                let _ = read_varint(bytes, &mut at);
+            }
+            if positions == 0 || column >= columns {
+                continue;
+            }
+            if wanted.is_some_and(|asked| asked != column) {
+                continue;
+            }
+            matched = true;
+        }
+        if matched {
+            out.push(rowid);
+        }
+        if at >= bytes.len() {
+            break;
+        }
+    }
+}
+
 /// Reads the totals row.
 fn get_totals(context: &mut Context<'_>, shadows: &ShadowTables, columns: usize) -> Totals {
     let Ok(Some(row)) = shadows.read_row(context, b"data", TOTALS) else {
@@ -688,26 +758,212 @@ fn put_totals(context: &mut Context<'_>, shadows: &ShadowTables, totals: &Totals
     )
 }
 
-/// Returns the `%_data` row one term's doclist is in, making one if needed.
+/// The doclists this transaction has changed but has not written yet.
+///
+/// **A doclist is rewritten once per transaction, not once per document.**
+/// `merge_term` reads a term's whole doclist, appends one entry and writes the
+/// whole thing back, so a term that appears in every document of a bulk load is
+/// read and written once per document and the bytes moved grow with the load:
+/// five hundred documents over a ten-word vocabulary moved about ten megabytes
+/// to store thirty kilobytes. The entries are the same entries and the row is
+/// the same row; only the number of times it is written changes.
+///
+/// It is shared with the cursors the table opens, so a query inside the same
+/// transaction reads what the transaction has written - which is what makes
+/// this a buffer rather than a delayed write.
+#[derive(Default)]
+pub struct Pending {
+    /// The `%_data` page a doclist belongs in, and the doclist.
+    doclists: BTreeMap<i64, Vec<u8>>,
+    /// How many bytes the doclists hold, so the buffer can be bounded.
+    bytes: usize,
+    /// The highest `%_data` page handed out, staged rows included.
+    ///
+    /// A staged row is not in the table yet, so `max_rowid` cannot see it and
+    /// two new terms in one transaction would be given the same page.
+    highest: i64,
+    /// Which `%_data` page each term's doclist is in, for the terms this
+    /// transaction has looked up.
+    ///
+    /// **The dictionary is asked once per term, not once per occurrence.**
+    /// Indexing a document looks up every token it holds, so a twelve-word
+    /// document costs twelve keyed descents into `%_idx` and five hundred of
+    /// them cost six thousand - over a dictionary of ten terms. Only found
+    /// terms are cached: a term that is not there yet is created through this
+    /// same function, which is what would otherwise have to invalidate a
+    /// remembered absence.
+    terms: BTreeMap<Vec<u8>, i64>,
+}
+
+/// A handle on the buffer, shared by a table and the cursors it opens.
+pub type Buffer = Arc<Mutex<Pending>>;
+
+/// How many bytes of doclists are held before the buffer is written out.
+///
+/// A bound rather than a tuning knob: without one, a bulk load of a large
+/// corpus would hold the whole index in memory. Flushing early costs a rewrite
+/// of what is held, which is what the unbuffered path paid per document.
+const PENDING_BUDGET: usize = 8 * 1024 * 1024;
+
+/// Returns a term's doclist, from the buffer when it is staged there.
+///
+/// @param context - the host
+/// @param shadows - the table's shadow tables
+/// @param buffer - the staged doclists
+/// @param page - the `%_data` row the doclist lives in
+fn read_doclist(
+    context: &mut Context<'_>,
+    shadows: &ShadowTables,
+    buffer: &Buffer,
+    page: i64,
+) -> DbResult<Option<Vec<u8>>> {
+    if let Ok(held) = buffer.lock() {
+        if let Some(bytes) = held.doclists.get(&page) {
+            return Ok(Some(bytes.clone()));
+        }
+    }
+    Ok(shadows.read_row(context, b"data", page)?.and_then(|row| {
+        row.get(1)
+            .and_then(Value::as_blob)
+            .map(|b| b.raw().to_vec())
+    }))
+}
+
+/// Appends one entry to a staged doclist without copying it.
+///
+/// **The buffer is written into, not read out of and put back.** Reading a
+/// staged doclist hands back a copy, and appending through that copy moves the
+/// whole doclist per occurrence - which is the same quadratic the buffer was
+/// added to remove, relocated from the file into memory. A term in five hundred
+/// documents grew a two-kilobyte list, so the copies were half a megabyte per
+/// term.
+///
+/// Answers false when the term is not staged, or when the entry does not sort
+/// after everything already there; the caller then takes the general path.
+///
+/// @param buffer - the staged doclists
+/// @param page - the `%_data` row the doclist belongs in
+/// @param entry - the entry to append
+fn append_staged(buffer: &Buffer, page: i64, entry: &DocEntry) -> bool {
+    let Ok(mut held) = buffer.lock() else {
+        return false;
+    };
+    let Some(bytes) = held.doclists.get_mut(&page) else {
+        return false;
+    };
+    let Some(last) = last_doclist_rowid(bytes) else {
+        return false;
+    };
+    if entry.rowid <= last {
+        return false;
+    }
+    let was = bytes.len();
+    append_doclist_entry(bytes, entry.rowid.wrapping_sub(last), entry);
+    let grew = bytes.len().saturating_sub(was);
+    held.bytes = held.bytes.saturating_add(grew);
+    true
+}
+
+/// Stages a doclist to be written when the buffer is next flushed.
+///
+/// @param buffer - the staged doclists
+/// @param page - the `%_data` row it belongs in
+/// @param bytes - the whole doclist
+fn stage_doclist(buffer: &Buffer, page: i64, bytes: Vec<u8>) {
+    if let Ok(mut held) = buffer.lock() {
+        let was = held.doclists.get(&page).map(Vec::len).unwrap_or(0);
+        held.bytes = held.bytes.saturating_sub(was).saturating_add(bytes.len());
+        held.doclists.insert(page, bytes);
+    }
+}
+
+/// Forgets a staged doclist, for one whose row is being deleted.
+///
+/// @param buffer - the staged doclists
+/// @param page - the `%_data` row
+fn forget_doclist(buffer: &Buffer, page: i64) {
+    if let Ok(mut held) = buffer.lock() {
+        if let Some(bytes) = held.doclists.remove(&page) {
+            held.bytes = held.bytes.saturating_sub(bytes.len());
+        }
+    }
+}
+
+/// Reports whether the buffer is holding more than it should.
+///
+/// @param buffer - the staged doclists
+fn buffer_is_full(buffer: &Buffer) -> bool {
+    buffer
+        .lock()
+        .map(|held| held.bytes > PENDING_BUDGET)
+        .unwrap_or(false)
+}
+
+/// Writes every staged doclist and empties the buffer.
+///
+/// @param context - the host
+/// @param shadows - the table's shadow tables
+/// @param buffer - the staged doclists
+fn flush_doclists(
+    context: &mut Context<'_>,
+    shadows: &ShadowTables,
+    buffer: &Buffer,
+) -> DbResult<()> {
+    let staged: Vec<(i64, Vec<u8>)> = match buffer.lock() {
+        Ok(mut held) => {
+            held.bytes = 0;
+            core::mem::take(&mut held.doclists).into_iter().collect()
+        }
+        Err(_) => return Ok(()),
+    };
+    for (page, bytes) in staged {
+        shadows.write_row(
+            context,
+            b"data",
+            page,
+            &[Value::Null, Value::owned_blob(&bytes)?],
+        )?;
+    }
+    Ok(())
+}
+
 fn term_row(
     context: &mut Context<'_>,
     shadows: &ShadowTables,
+    buffer: &Buffer,
     term: &[u8],
     create: bool,
 ) -> DbResult<Option<i64>> {
+    if let Ok(held) = buffer.lock() {
+        if let Some(page) = held.terms.get(term) {
+            return Ok(Some(*page));
+        }
+    }
     let key = [Value::Integer(SEGMENT), Value::owned_blob(term)?];
     if let Some(row) = shadows.read_keyed(context, b"idx", &key, 3)? {
         if let Some(page) = row.get(2).and_then(Value::as_integer) {
+            if let Ok(mut held) = buffer.lock() {
+                held.terms.insert(term.to_vec(), page);
+            }
             return Ok(Some(page));
         }
     }
     if !create {
         return Ok(None);
     }
+    // The buffer's highest is consulted because a staged row is not in the
+    // table yet: `max_rowid` cannot see it, and two new terms in one
+    // transaction would otherwise be given the same page.
+    let staged = buffer.lock().map(|held| held.highest).unwrap_or(0);
     let next = shadows
         .max_rowid(context, b"data")?
         .max(FIRST_TERM_ROW.saturating_sub(1))
+        .max(staged)
         .saturating_add(1);
+    if let Ok(mut held) = buffer.lock() {
+        held.highest = held.highest.max(next);
+        held.terms.insert(term.to_vec(), next);
+    }
     shadows.write_keyed(
         context,
         b"idx",
@@ -794,6 +1050,14 @@ impl Fts5Table {
     /// possible at all, and what makes it the repair for an index that has
     /// drifted.
     fn rebuild(&mut self, context: &mut Context<'_>) -> DbResult<()> {
+        // Every `%_data` row is about to go, staged ones included: a doclist
+        // left in the buffer would be written back after the wipe.
+        if let Ok(mut held) = self.pending.lock() {
+            held.doclists.clear();
+            held.bytes = 0;
+            held.highest = 0;
+            held.terms.clear();
+        }
         let width = self.options.columns.len();
         let mut rows: Vec<(i64, Vec<Value<'static>>)> = Vec::new();
         self.shadows.scan(context, b"content", |rowid, values| {
@@ -912,17 +1176,19 @@ impl Fts5Table {
 
     /// Adds one entry to a term's doclist, keeping it in rowid order.
     fn merge_term(&self, context: &mut Context<'_>, term: &[u8], entry: DocEntry) -> DbResult<()> {
-        let Some(page) = term_row(context, &self.shadows, term, true)? else {
+        let Some(page) = term_row(context, &self.shadows, &self.pending, term, true)? else {
             return Ok(());
         };
-        let existing: Option<Vec<u8>> =
-            self.shadows
-                .read_row(context, b"data", page)?
-                .and_then(|row| {
-                    row.get(1)
-                        .and_then(Value::as_blob)
-                        .map(|blob| blob.raw().to_vec())
-                });
+        // The ordinary case of a bulk load: the term is already staged and the
+        // document sorts after every other, so the entry is written straight
+        // into the buffer.
+        if append_staged(&self.pending, page, &entry) {
+            if buffer_is_full(&self.pending) {
+                flush_doclists(context, &self.shadows, &self.pending)?;
+            }
+            return Ok(());
+        }
+        let existing: Option<Vec<u8>> = read_doclist(context, &self.shadows, &self.pending, page)?;
 
         // The ordinary case is a new document whose rowid is above every one
         // already in this term's list, and it is worth its own path. Decoding
@@ -943,12 +1209,11 @@ impl Fts5Table {
                     let mut out = Vec::with_capacity(bytes.len().saturating_add(16));
                     out.extend_from_slice(bytes);
                     append_doclist_entry(&mut out, entry.rowid.wrapping_sub(last), &entry);
-                    return self.shadows.write_row(
-                        context,
-                        b"data",
-                        page,
-                        &[Value::Null, Value::owned_blob(&out)?],
-                    );
+                    stage_doclist(&self.pending, page, out);
+                    if buffer_is_full(&self.pending) {
+                        flush_doclists(context, &self.shadows, &self.pending)?;
+                    }
+                    return Ok(());
                 }
             }
         }
@@ -966,12 +1231,11 @@ impl Fts5Table {
             Err(position) => entries.insert(position, entry),
         }
         let encoded = encode_doclist(&entries);
-        self.shadows.write_row(
-            context,
-            b"data",
-            page,
-            &[Value::Null, Value::owned_blob(&encoded)?],
-        )
+        stage_doclist(&self.pending, page, encoded);
+        if buffer_is_full(&self.pending) {
+            flush_doclists(context, &self.shadows, &self.pending)?;
+        }
+        Ok(())
     }
 
     /// Removes one row from the content and from every doclist it is in.
@@ -993,18 +1257,21 @@ impl Fts5Table {
         terms.sort();
         terms.dedup();
         for term in &terms {
-            let Some(page) = term_row(context, &self.shadows, term, false)? else {
+            let Some(page) = term_row(context, &self.shadows, &self.pending, term, false)? else {
                 continue;
             };
-            let Some(row) = self.shadows.read_row(context, b"data", page)? else {
+            let Some(bytes) = read_doclist(context, &self.shadows, &self.pending, page)? else {
                 continue;
             };
-            let Some(blob) = row.get(1).and_then(Value::as_blob) else {
-                continue;
-            };
-            let mut entries = decode_doclist(blob.raw());
+            let mut entries = decode_doclist(&bytes);
             entries.retain(|entry| entry.rowid != rowid);
             if entries.is_empty() {
+                // Staged as well as stored: the row may exist only in the
+                // buffer, and a delete that left it there would write it back.
+                forget_doclist(&self.pending, page);
+                if let Ok(mut held) = self.pending.lock() {
+                    held.terms.remove(term.as_slice());
+                }
                 self.shadows.delete_row(context, b"data", page)?;
                 self.shadows.delete_keyed(
                     context,
@@ -1014,12 +1281,7 @@ impl Fts5Table {
                 continue;
             }
             let encoded = encode_doclist(&entries);
-            self.shadows.write_row(
-                context,
-                b"data",
-                page,
-                &[Value::Null, Value::owned_blob(&encoded)?],
-            )?;
+            stage_doclist(&self.pending, page, encoded);
         }
 
         let sizes = match self.shadows.read_row(context, b"docsize", rowid)? {
@@ -1069,7 +1331,13 @@ struct MatchedRow {
     /// Which row.
     rowid: i64,
     /// The score `rank` reports, which is negative so that smaller is better.
-    score: f64,
+    ///
+    /// `None` until something asks for it. Scoring one row costs a read of its
+    /// `%_docsize`, and a query that names neither `rank` nor `ORDER BY rank`
+    /// never looks at the answer - which is most of them, and `count(*)` in
+    /// particular. The one query that needs every score up front is the ranked
+    /// one, where the score *is* the sort key.
+    score: Option<f64>,
 }
 
 /// A cursor over the rows one query matched.
@@ -1093,6 +1361,48 @@ struct Fts5Cursor {
     phrases: Vec<Phrase>,
     /// The collection totals the score is relative to.
     totals: Totals,
+    /// The parsed query, kept so the hits can be built if a score is asked for.
+    query: Option<Query>,
+    /// Whether `matched` holds this query's hits.
+    ///
+    /// A query that reads no score never builds them; one that reads a score
+    /// after not building them builds them once, here, rather than per row.
+    hits_built: bool,
+    /// The doclists the transaction has staged, shared with the table.
+    ///
+    /// A query inside a transaction that has written has to see what it wrote,
+    /// and the buffer is where those doclists are until the commit.
+    pending: Buffer,
+    /// The `%_content` row the cursor is on, kept for the columns after the
+    /// first.
+    ///
+    /// **One read per row, not one per column.** `column` is asked for each
+    /// column in turn and read the whole row back for every one of them, so a
+    /// two-column table read `%_content` twice per matched row and a
+    /// ten-column table ten times. The row is the same row each time.
+    held: Option<(i64, Vec<Value<'static>>)>,
+}
+
+impl Fts5Cursor {
+    /// Builds the phrase hits if the cheap walk did not.
+    ///
+    /// The one caller that needs them is a score, and a score is asked for per
+    /// row - so this runs once and every later row reads what it left.
+    ///
+    /// @param context - the host
+    fn ensure_hits(&mut self, context: &mut Context<'_>) -> DbResult<()> {
+        if self.hits_built {
+            return Ok(());
+        }
+        self.hits_built = true;
+        let Some(query) = self.query.clone() else {
+            return Ok(());
+        };
+        let (_, hits) =
+            expr::evaluate(&query, context, &self.shadows, &self.pending, self.columns)?;
+        self.matched = hits;
+        Ok(())
+    }
 }
 
 impl VirtualCursor for Fts5Cursor {
@@ -1102,18 +1412,19 @@ impl VirtualCursor for Fts5Cursor {
         self.matched.clear();
         self.phrases.clear();
         self.at = 0;
+        self.held = None;
         if plan.index_number == PLAN_ROWID {
             let Some(rowid) = plan.arguments.first().and_then(Value::as_integer) else {
                 return Ok(());
             };
             if self.shadows.read_row(context, b"content", rowid)?.is_some() {
-                self.rows.push(MatchedRow { rowid, score: 0.0 });
+                self.rows.push(MatchedRow { rowid, score: None });
             }
             return Ok(());
         }
         if plan.index_number & PLAN_MATCH == 0 {
             self.shadows.scan(context, b"content", |rowid, _| {
-                self.rows.push(MatchedRow { rowid, score: 0.0 });
+                self.rows.push(MatchedRow { rowid, score: None });
                 Ok(true)
             })?;
             return Ok(());
@@ -1124,27 +1435,57 @@ impl VirtualCursor for Fts5Cursor {
         self.pattern = pattern.clone();
         let query = Query::parse(&pattern, &self.tokenizer, &self.names)?;
         let totals = get_totals(context, &self.shadows, self.columns);
-        let (rows, hits) = expr::evaluate(&query, context, &self.shadows, self.columns)?;
-        let scores = bm25::score(
-            &rows,
-            &hits,
-            &query,
-            context,
-            &self.shadows,
-            &totals,
-            self.columns,
-        )?;
+        let ranked = plan.index_number & PLAN_RANKED != 0;
+        // **A ranked plan needs the positions, and most plans do not.** The
+        // cheap walk answers `None` for the queries whose answer depends on
+        // them, and those fall through to the full evaluation.
+        let cheap = if ranked {
+            None
+        } else {
+            expr::evaluate_rows(&query, context, &self.shadows, &self.pending, self.columns)?
+        };
+        let (rows, hits) = match cheap {
+            Some(rows) => (rows, Vec::new()),
+            None => expr::evaluate(&query, context, &self.shadows, &self.pending, self.columns)?,
+        };
+        self.hits_built = !hits.is_empty();
+        if ranked {
+            // The sort key has to exist before the sort, so this is the one
+            // plan that scores every row up front.
+            let scores = bm25::score(
+                &rows,
+                &hits,
+                &query,
+                context,
+                &self.shadows,
+                &totals,
+                self.columns,
+            )?;
+            self.rows = scores
+                .into_iter()
+                .map(|(rowid, score)| MatchedRow {
+                    rowid,
+                    score: Some(score),
+                })
+                .collect();
+        } else {
+            self.rows = rows
+                .into_iter()
+                .map(|rowid| MatchedRow { rowid, score: None })
+                .collect();
+        }
         self.phrases = query.phrases.clone();
         self.totals = totals;
         self.matched = hits;
-        self.rows = scores
-            .into_iter()
-            .map(|(rowid, score)| MatchedRow { rowid, score })
-            .collect();
-        if plan.index_number & PLAN_RANKED != 0 {
+        self.query = Some(query);
+        if ranked {
             self.rows.sort_by(|left, right| {
+                // Both sides are `Some` here: this arm is only reached when
+                // `filter` scored every row, which it does for exactly this
+                // plan. An unscored row sorts as zero rather than panicking.
                 left.score
-                    .partial_cmp(&right.score)
+                    .unwrap_or(0.0)
+                    .partial_cmp(&right.score.unwrap_or(0.0))
                     .unwrap_or(core::cmp::Ordering::Equal)
                     .then(left.rowid.cmp(&right.rowid))
             });
@@ -1157,6 +1498,7 @@ impl VirtualCursor for Fts5Cursor {
     /// Moves to the next matching row.
     fn next(&mut self, _context: &mut Context<'_>) -> DbResult<()> {
         self.at = self.at.saturating_add(1);
+        self.held = None;
         Ok(())
     }
 
@@ -1171,14 +1513,41 @@ impl VirtualCursor for Fts5Cursor {
             return Ok(Value::Null);
         };
         if index as i32 == self.rank_column {
-            return Ok(Value::Real(row.score));
+            if let Some(score) = row.score {
+                return Ok(Value::Real(score));
+            }
+            if self.phrases.is_empty() {
+                // A row reached without a `MATCH` has nothing to score against,
+                // which is what SQLite answers zero for.
+                return Ok(Value::Real(0.0));
+            }
+            // The same arithmetic `bm25::score` would have done in `filter`,
+            // for this row alone: `rank` *is* `bm25` with every weight one, so
+            // the two cannot disagree.
+            self.ensure_hits(context)?;
+            let weights = vec![1.0f64; self.columns];
+            let sizes = bm25::row_sizes(context, &self.shadows, row.rowid, self.columns)?;
+            return Ok(Value::Real(bm25::score_row(
+                row.rowid,
+                &self.matched,
+                &self.phrases,
+                &self.totals,
+                &sizes,
+                &weights,
+            )));
         }
         if index as i32 == self.match_column {
             // The hidden column that carries the query is NULL when it is read
             // as a value; it exists to be *constrained*, not to be selected.
             return Ok(Value::Null);
         }
-        let Some(content) = self.shadows.read_row(context, b"content", row.rowid)? else {
+        if self.held.as_ref().map(|(rowid, _)| *rowid) != Some(row.rowid) {
+            self.held = self
+                .shadows
+                .read_row(context, b"content", row.rowid)?
+                .map(|values| (row.rowid, values));
+        }
+        let Some((_, content)) = self.held.as_ref() else {
             return Ok(Value::Null);
         };
         Ok(content
@@ -1222,6 +1591,7 @@ impl VirtualCursor for Fts5Cursor {
             weights[index] = argument.as_real().unwrap_or(1.0);
         }
         // The hits are the query's, so the same maps score every row of it.
+        self.ensure_hits(context)?;
         let hits = self.matched.clone();
         let sizes = bm25::row_sizes(context, &self.shadows, row.rowid, self.columns)?;
         Ok(Value::Real(bm25::score_row(
