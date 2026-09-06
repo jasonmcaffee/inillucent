@@ -18,3 +18,4 @@ inillucent-wal = { workspace = true }
 inillucent-txn = { workspace = true }
 inillucent-exec = { workspace = true }
 inillucent-sqlite-reader = { workspace = true }
+inillucent-search = { workspace = true }

@@ -620,7 +620,7 @@ impl ImportedDatabase {
             next_root: FIRST_CREATED_ROOT,
             busy_timeout_ms: 0,
             foreign_keys: false,
-            registry: inillucent_ext::registry::Registry::with_builtins(),
+            registry: modules(),
             virtual_tables: HashMap::new(),
             index_stages: std::cell::Cell::new((0, 0, 0, 0)),
             catalog_generation: 0,
@@ -846,7 +846,7 @@ impl ImportedDatabase {
             next_root: FIRST_CREATED_ROOT,
             busy_timeout_ms: 0,
             foreign_keys: false,
-            registry: inillucent_ext::registry::Registry::with_builtins(),
+            registry: modules(),
             virtual_tables: HashMap::new(),
             index_stages: std::cell::Cell::new((0, 0, 0, 0)),
             catalog_generation: 0,
@@ -2048,6 +2048,23 @@ fn target_path(fixture: &std::path::Path, page_size: usize, frames: usize) -> Pa
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     directory.join(format!("{stem}-p{page_size}-f{frames}.rdb"))
+}
+
+/// Returns the modules a database of this engine has.
+///
+/// The built-ins - JSON, `generate_series`, the R-Tree and FTS5 - plus
+/// `inillucent_search`, which `Registry::with_builtins` cannot register because it
+/// lives two layers above `inillucent-ext` and registering it there would drag a
+/// vector index into every database that only wanted SQL.
+///
+/// The old engine adds it at the connection for exactly that reason
+/// (`inillucent-session`'s `connect`), and this is the same decision at the same
+/// place in the new one: a database is the first thing that both builds a
+/// registry and is allowed to know the retrieval engine exists.
+fn modules() -> inillucent_ext::registry::Registry {
+    let mut registry = inillucent_ext::registry::Registry::with_builtins();
+    inillucent_search::register(&mut registry);
+    registry
 }
 
 /// Returns how a table's stored rows map onto the columns a query sees.
