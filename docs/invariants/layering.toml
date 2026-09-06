@@ -452,6 +452,19 @@ may_depend_on = [
 # copying it into the harness so the harness could keep a shorter dependency list
 # would be duplicating a contract, which is the one thing that file exists to
 # prevent. The edge is downward from layer 12 to layer 0 and adds no cycle.
+# The executable model of the engine's transactional semantics (task-1832,
+# Phase 3). Its dependency list is one crate long **on purpose**: a reference
+# implementation that linked the engine could share a bug with it, and the two
+# agreeing would then be evidence of nothing. The engine crates reach it only as
+# dev-dependencies of the driver in `tests/`, which is an edge this contract
+# deliberately does not police for a test-only crate - so the restriction here
+# is the whole of what keeps the model honest.
+[[crate]]
+name = "inillucent-model"
+kind = "test-only"
+layer = 12
+may_depend_on = ["inillucent-base"]
+
 [[crate]]
 name = "inillucent-bench"
 kind = "test-only"

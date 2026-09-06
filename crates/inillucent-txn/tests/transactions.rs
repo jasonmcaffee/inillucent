@@ -81,8 +81,24 @@ fn read_back(engine: &Engine, page: PageId, width: usize) -> Vec<u8> {
 /// A reader never sees a writer's uncommitted state.
 ///
 /// The check is on the *bytes the reader is sent to*, not on a flag: the page
-/// already holds the new value, and what makes the reader correct is that the
-/// version log sends it somewhere else.
+/// already holds the new value, and what makes the reader correct is that
+/// something sends it somewhere else.
+///
+/// ## This test used to assert the opposite, and its name was the part that was
+/// right
+///
+/// It read: "the reader is sent to the page, because nothing has been
+/// *published* - an uncommitted change has no timestamp, so there is no version
+/// for the reader to be diverted to". Every clause of that is true about the
+/// version log and the conclusion does not follow, because the *page* has the
+/// uncommitted value on it. Sending a reader there is a **dirty read**, which is
+/// what the test's own name says must not happen.
+///
+/// The engine now keeps the open writer's before-images in a second, small map
+/// beside the version log - `Engine::uncommitted` - covering exactly the window
+/// between a write and its commit that the version log cannot. The model
+/// campaign found it on its first seed, as a reader that saw a value tagged
+/// with the writing transaction's number.
 #[test]
 fn a_reader_never_sees_an_uncommitted_write() {
     let (_, _, engine) = fresh(Synchronous::Full);
@@ -114,19 +130,28 @@ fn a_reader_never_sees_an_uncommitted_write() {
         })
         .expect("a record");
 
-    // The reader is sent to the page, because nothing has been *published*:
-    // an uncommitted change has no timestamp, so there is no version for the
-    // reader to be diverted to and no committed change for it to miss.
+    // The reader is diverted to what the row held before the writer touched it.
+    // The page holds `changed`; sending the reader there would be a dirty read.
     engine.visible(1, b"k", reader.snapshot(), |visible| {
         assert_eq!(
             visible,
-            Visible::Page,
-            "an uncommitted change should not be in the version log at all"
+            Visible::Instead(b"original"),
+            "a reader was sent to a page holding an uncommitted change"
         );
     });
-    // One image is held, and it is the setup transaction's: the row was absent
-    // before cts 1, so a reader older than that is owed `Absent`. It is not the
-    // uncommitted writer's - that is the claim being made here.
+    // The writer still reads its own write, which is the other half of the rule
+    // and the reason the asking transaction is named.
+    engine.visible_to(1, b"k", writer.snapshot(), Some(writer.id()), |visible| {
+        assert_eq!(
+            visible,
+            Visible::Page,
+            "a writer must read what it has written"
+        );
+    });
+    // One image is in the *version log*, and it is the setup transaction's: the
+    // row was absent before cts 1, so a reader older than that is owed
+    // `Absent`. The uncommitted writer's image is not there - it is in the
+    // separate map, because it has no timestamp to be filed under.
     assert_eq!(engine.versions_held(), 1);
     let older = engine.clock().active_timestamps();
     assert!(older.contains(&first));

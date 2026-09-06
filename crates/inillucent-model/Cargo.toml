@@ -1,0 +1,21 @@
+[package]
+name = "inillucent-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "An executable model of the engine's transactional semantics, and the traces that drive it"
+
+# The model depends on nothing but the error type. That is the whole point: a
+# reference implementation that linked the engine could share a bug with it, and
+# the two agreeing would then be evidence of nothing. The engine crates are
+# dev-dependencies of the *driver*, which lives in `tests/`.
+[dependencies]
+inillucent-base = { workspace = true }
+
+[dev-dependencies]
+inillucent-pool = { workspace = true }
+inillucent-tree = { workspace = true }
+inillucent-wal = { workspace = true }
+inillucent-txn = { workspace = true }
+inillucent-vfs = { workspace = true }
+inillucent-sim = { workspace = true }

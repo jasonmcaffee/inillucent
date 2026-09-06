@@ -210,8 +210,20 @@ impl ValuesScan {
     ///
     /// @param downstream - the head of the operator chain
     pub fn run(&self, downstream: &mut dyn Sink) -> DbResult<()> {
-        emit_rows(&self.rows, downstream)?;
+        self.run_without_finish(downstream)?;
         downstream.finish()
+    }
+
+    /// Pushes every row downstream and leaves the chain open.
+    ///
+    /// For an operator that several sources feed in turn - a compound query's
+    /// arms into one set operation - where finishing after the first source
+    /// would tell the chain the input had ended when it had not.
+    ///
+    /// @param downstream - the head of the operator chain
+    pub fn run_without_finish(&self, downstream: &mut dyn Sink) -> DbResult<()> {
+        emit_rows(&self.rows, downstream)?;
+        Ok(())
     }
 }
 

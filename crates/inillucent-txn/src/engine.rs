@@ -39,6 +39,8 @@
 //! leave readers seeing a transaction recovery will not replay.
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use inillucent_base::error::misuse;
@@ -123,6 +125,26 @@ pub struct Engine {
     database: RefCell<Database>,
     wal: Wal,
     clock: Clock,
+    /// The before-image of every key the **open writer** has changed and not
+    /// yet committed, keyed by tree and key.
+    ///
+    /// The version log holds what *committed* transactions overwrote, and it is
+    /// filled at commit - which leaves the window between a write and its commit
+    /// uncovered. In that window the changed page is in the buffer pool, so a
+    /// reader that consulted only the version log read the uncommitted value:
+    /// a **dirty read**, and the model campaign found it on its first seed.
+    ///
+    /// This is that window. One map rather than one per transaction because
+    /// there is one writer slot, so there is at most one transaction whose
+    /// changes are uncommitted at any moment; a design with concurrent writers
+    /// would key it by transaction and is what this comment is here to warn.
+    uncommitted: RefCell<BTreeMap<(u64, Vec<u8>), Option<Vec<u8>>>>,
+    /// The pool's no-steal watermark, held directly.
+    ///
+    /// Through a handle rather than through the file, because it is moved from
+    /// inside the tree mutation that holds the file mutably - see
+    /// `Pool::uncommitted_handle`.
+    uncommitted_lsn: Arc<AtomicU64>,
     versions: RefCell<VersionLog>,
     slot: Arc<WriterSlot>,
     /// Serialises `cts` assignment and `Commit` appends, so the two orders and
@@ -251,17 +273,30 @@ impl Engine {
         )?;
         // The pool may write pages up to what the log has already made durable,
         // which after a recovery is everything the scan accepted.
-        database.pool().set_durable_lsn(wal.durable_end());
+        database.pool().set_durable_lsn(wal.write_ahead_point());
+        let uncommitted_lsn = database.pool().uncommitted_handle();
         let slot = Arc::new(WriterSlot::new());
         slot.set_busy_timeout_ms(options.busy_timeout_ms);
         Ok(Engine {
             database: RefCell::new(database),
             wal,
             clock: Clock::new(recovered.latest_cts),
+            uncommitted: RefCell::new(BTreeMap::new()),
+            uncommitted_lsn,
             versions: RefCell::new(VersionLog::new()),
             slot,
             gate: Mutex::new(()),
-            next_txn: Cell::new(1),
+            // **Above every transaction number the log still holds.** Recovery
+            // decides what to replay by transaction number, so reusing one that
+            // is still in the log merges two different transactions: a loser
+            // from a crashed run is resurrected the moment a new transaction of
+            // the same number commits, and no later crash can undo it. The
+            // model campaign found exactly that - a row from an uncommitted
+            // transaction reappearing three crashes after it should have died.
+            // Above every number the log still holds, as a belt on top of the
+            // braces in `begin`: a log whose records were written by an older
+            // build cannot collide with this run either.
+            next_txn: Cell::new(recovered.highest_txn.saturating_add(1).max(1)),
             oldest_open_lsn: Cell::new(u64::MAX),
             stats: Cell::new(EngineStats::default()),
             path: path.clone(),
@@ -333,8 +368,77 @@ impl Engine {
         snapshot: &Snapshot,
         read: impl FnOnce(Visible<'_>) -> R,
     ) -> R {
+        self.visible_to(tree, key, snapshot, None, read)
+    }
+
+    /// Says what a reader at `snapshot` should do with one key.
+    ///
+    /// **The open writer's uncommitted changes are hidden first, then the
+    /// version log's committed ones.** The two cover different windows and both
+    /// are needed: the version log says what a *committed* transaction
+    /// overwrote since the snapshot, and [`Engine::uncommitted`] says what the
+    /// transaction that is writing *right now* has overwritten and not yet
+    /// committed. A reader that consulted only the second saw a dirty read, and
+    /// one that consulted only the first saw a stale read.
+    ///
+    /// `reader` names the asking transaction so that the writer is not hidden
+    /// from its own writes - a transaction reads what it has written, and its
+    /// writes are exactly what this map is hiding from everybody else.
+    ///
+    /// @param tree - the tree the key is in
+    /// @param key - the key's encoded bytes
+    /// @param snapshot - the reader's snapshot
+    /// @param reader - the asking transaction, when it is inside one
+    /// @param read - what to do with the answer, while the log is borrowed
+    pub fn visible_to<R>(
+        &self,
+        tree: u64,
+        key: &[u8],
+        snapshot: &Snapshot,
+        reader: Option<TxnId>,
+        read: impl FnOnce(Visible<'_>) -> R,
+    ) -> R {
+        if self.slot.holder() != reader {
+            let uncommitted = self.uncommitted.borrow();
+            if let Some(before) = uncommitted.get(&(tree, key.to_vec())) {
+                return match before {
+                    Some(bytes) => read(Visible::Instead(bytes)),
+                    None => read(Visible::Absent),
+                };
+            }
+        }
         let versions = self.versions.borrow();
         read(versions.visible(tree, key, snapshot.cts()))
+    }
+
+    /// Records that the open writer has changed a key, keeping its first image.
+    ///
+    /// First image wins: what a reader outside the transaction must see is what
+    /// the row held before the *transaction* started, not before its most recent
+    /// write to the same key.
+    ///
+    /// @param tree - the tree the key is in
+    /// @param key - the key's encoded bytes
+    /// @param before - what the row held, or `None` if it did not exist
+    fn note_uncommitted(&self, tree: u64, key: Vec<u8>, before: Option<Vec<u8>>) {
+        self.uncommitted
+            .borrow_mut()
+            .entry((tree, key))
+            .or_insert(before);
+    }
+
+    /// Forgets the open writer's uncommitted changes.
+    ///
+    /// Called on both endings. On a commit the images have just been published
+    /// to the version log, where a reader older than the commit finds them; on a
+    /// rollback they describe changes that no longer exist. Either way what is
+    /// in the trees is now what a reader should see, and leaving an entry here
+    /// would hide a row that is committed.
+    fn forget_uncommitted(&self) {
+        self.uncommitted.borrow_mut().clear();
+        // Nothing is uncommitted any more, so every page the pool has been
+        // holding back is free to go to the file at the next checkpoint.
+        self.uncommitted_lsn.store(u64::MAX, Ordering::SeqCst);
     }
 
     /// Returns how many before-images the version log holds.
@@ -346,8 +450,26 @@ impl Engine {
     ///
     /// @param how - deferred or immediate
     pub fn begin(&self, how: Begin) -> DbResult<Transaction<'_>> {
-        let id = TxnId(self.next_txn.get());
-        self.next_txn.set(self.next_txn.get().saturating_add(1));
+        // **The number comes from the log's own position, not from a counter
+        // that restarts.** Recovery decides what to replay by transaction
+        // number, so a number that appears twice in one log turns two different
+        // transactions into one - and the log outlives the run. Seeding a
+        // counter at open is not enough, because a later checkpoint can move the
+        // recovery point *backwards* (a page held out of the file by no-steal
+        // keeps it there), so the next recovery may scan records this open never
+        // saw.
+        //
+        // Taking the next LSN makes it airtight rather than probable: a
+        // transaction that writes anything puts its records at or above its own
+        // number, so the log's end afterwards is above it - and every later run
+        // starts above that end. A transaction that writes nothing never appears
+        // in the log at all, so its number cannot collide with anything.
+        //
+        // The `max` with the counter keeps two transactions that begin with no
+        // record between them apart, which matters to the writer slot and to the
+        // statistics even though the log never sees the second one.
+        let id = TxnId(self.wal.next_lsn().max(self.next_txn.get()));
+        self.next_txn.set(id.0.saturating_add(1));
         let writer = match how {
             Begin::Immediate => Some(WriterSlot::acquire(&self.slot, id)?),
             Begin::Deferred => None,
@@ -376,17 +498,28 @@ impl Engine {
         // one the log has already described durably. Doing it the other way
         // round is the durability-order mutant this phase exists to kill.
         self.wal.sync()?;
-        let durable = self.wal.durable_end();
+        let durable = self.wal.write_ahead_point();
         self.with_pool(|pool| pool.set_durable_lsn(durable));
-        let recovery_from = durable.min(self.oldest_open_lsn.get());
         let watermark = self.clock.latest();
         let sequence = self.wal.sequence();
         self.with_database(|database| -> DbResult<()> {
+            // The pages first, then the meta record that says where recovery
+            // starts - because the answer depends on which pages went out. A
+            // page held back by no-steal keeps recovery below its first
+            // unwritten change, and that change may belong to a transaction
+            // that committed long ago: `oldest_open_lsn` alone would step over
+            // it, and the model campaign reported the row it lost.
+            database.pool().flush()?;
+            let dirty = database.pool().oldest_dirty_lsn();
+            let recovery_from = durable.min(self.oldest_open_lsn.get()).min(dirty);
             database.set_log_position(recovery_from, watermark, sequence);
             database.checkpoint()
         })?;
+        let recovery_from = durable
+            .min(self.oldest_open_lsn.get())
+            .min(self.with_pool(|pool| pool.oldest_dirty_lsn()));
         self.wal.note_checkpoint(recovery_from, watermark)?;
-        let durable = self.wal.durable_end();
+        let durable = self.wal.write_ahead_point();
         self.with_pool(|pool| pool.set_durable_lsn(durable));
         self.wal.retire_segments_below(recovery_from)?;
         let mut stats = self.stats.get();
@@ -430,6 +563,10 @@ impl Engine {
     ///
     /// @param lsn - the record's LSN
     fn note_first_record(&self, lsn: u64) {
+        // No-steal: from here until this transaction ends, the pool must not
+        // write a page stamped at or above this record. The pool enforces it;
+        // this is the only place that knows the number.
+        self.uncommitted_lsn.store(lsn, Ordering::SeqCst);
         debug_assert_eq!(
             self.oldest_open_lsn.get(),
             u64::MAX,
@@ -445,6 +582,14 @@ impl Engine {
     /// open". A design with concurrent writers would keep a set here; the slot
     /// is what makes a single cell correct, and that is stated because it is the
     /// assumption a later phase would break.
+    ///
+    /// **Only the transaction that logged something calls this**, which the
+    /// caller enforces. A reader ending is not a writer ending, and when this
+    /// was called unconditionally a read-only `BEGIN ... COMMIT` between a write
+    /// and a checkpoint let the checkpoint advance the recovery point past the
+    /// open writer's records - whose pages were being held out of the file by
+    /// no-steal, so a crash lost them with nothing left to replay. The model
+    /// campaign reported it as a committed row "is missing".
     fn note_finished(&self) {
         self.oldest_open_lsn.set(u64::MAX);
     }
@@ -526,6 +671,8 @@ impl Transaction<'_> {
     /// @param key - the row's key, encoded
     /// @param before - the row's bytes, or `None` when it did not exist
     pub fn record_undo(&mut self, tree: u64, key: Vec<u8>, before: Option<Vec<u8>>) {
+        self.engine
+            .note_uncommitted(tree, key.clone(), before.clone());
         self.undo.record(tree, key, before);
     }
 
@@ -618,7 +765,7 @@ impl Transaction<'_> {
                 return Err(error);
             }
         }
-        let durable = self.engine.wal.durable_end();
+        let durable = self.engine.wal.write_ahead_point();
         self.engine.with_pool(|pool| pool.set_durable_lsn(durable));
         self.finish(true);
         Ok(cts)
@@ -629,8 +776,21 @@ impl Transaction<'_> {
     /// @param committed - whether the transaction committed
     fn finish(&mut self, committed: bool) {
         self.finished = true;
+        // **Only a transaction that wrote clears the uncommitted state**, and
+        // the difference is a correctness one rather than a saving. There is one
+        // writer slot but any number of readers, and a reader ending is an
+        // ordinary event: when a read-only `BEGIN ... COMMIT` cleared this, it
+        // took the open *writer's* before-images out of the version map and its
+        // first record out of the pool's no-steal watermark - so the next
+        // checkpoint wrote that writer's uncommitted pages to the file, and a
+        // crash could not take them back out. The model campaign found it as
+        // "(1, 6) is there and should not be", on a trace where a transaction
+        // that wrote nothing committed between a write and a checkpoint.
+        if self.has_written() {
+            self.engine.forget_uncommitted();
+            self.engine.note_finished();
+        }
         self.writer = None;
-        self.engine.note_finished();
         let mut stats = self.engine.stats.get();
         if committed {
             stats.committed = stats.committed.saturating_add(1);

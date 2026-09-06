@@ -46,9 +46,14 @@ use inillucent_base::error::misuse;
 use inillucent_base::DbResult;
 use inillucent_pool::Pool;
 use inillucent_sql::ast::{BinaryOp, NullOrder, PatternOp, SortOrder, UnaryOp};
-use inillucent_sql::bind::{BoundExpr, BoundSelect};
+use inillucent_sql::bind::{
+    BoundExpr, BoundFrameBound, BoundOrderTerm, BoundResultColumn, BoundSelect, BoundWindow,
+    WindowCall as BoundWindowCall,
+};
 use inillucent_sql::function::{AggregateFunc, ScalarFunc};
-use inillucent_sql::plan::{AccessPath, AggregationMode, BoundKind, PhysicalPlan, RangeBound};
+use inillucent_sql::plan::{
+    plan_select_with, AccessPath, AggregationMode, BoundKind, Levers, PhysicalPlan, RangeBound,
+};
 use inillucent_tree::datum::{Datum, OwnedDatum};
 use inillucent_tree::PagedTree;
 use inillucent_value::affinity::Affinity;
@@ -57,13 +62,17 @@ use inillucent_value::collation::Collation;
 use crate::aggregate::AggregateKind;
 use crate::batch::Batch;
 use crate::expr::{compile, ArithOp, CompareOp, Expr, StaticType};
-use crate::join::{IndexNestedLoopJoin, JoinKind};
+use crate::join::{IndexNestedLoopJoin, JoinKind, ValuesScan};
 use crate::ops::{
     AdjacentDistinct, AggregateSpec, CollectInto, Distinct, Filter, Flow, HashAggregate, Limit,
     Project, SimpleAggregate, Sink, Sort, SortKey, StreamAggregate, TopN,
 };
 use crate::paged::{FullScan, PointProbe, ReverseScan, SkipScan, SpanScan};
 use crate::scan::Projection;
+use crate::setop::{SetKeys, SetKind, SetOp};
+use crate::window::{
+    FrameEnd, OrderTerm as WindowOrderTerm, WindowCall, WindowFrame, WindowPlan, WindowSlot,
+};
 
 /// How one imported table's record slots map onto a tree's columns.
 #[derive(Clone, Debug)]
@@ -995,8 +1004,12 @@ fn push_stage(
 ///
 /// @param select - the bound statement
 fn refuse_unhandled(select: &BoundSelect) -> DbResult<()> {
+    // A window function is not refused here any more: `run_any` routes a
+    // windowed query to `run_windowed` before a pipeline is prepared at all,
+    // and a window that reached this point would be one nothing routed - which
+    // is a bug in the dispatcher rather than a query the engine cannot answer.
     if !select.windows.is_empty() {
-        return unsupported("a window function");
+        return unsupported("a window function reaching the pipeline builder");
     }
     Ok(())
 }
@@ -2007,7 +2020,6 @@ fn span_bounds(
             low,
             high,
             columns,
-            descending,
             ..
         } => {
             let mut prefix = Vec::with_capacity(equalities.len());
@@ -2021,26 +2033,6 @@ fn span_bounds(
             }
             // The range is on the column after the equality prefix.
             let range_affinity = index_affinity(table, columns, equalities.len());
-            // **The planner's bounds are in the index's order; the tree's are in
-            // value order.** SQLite stores a `DESC` index column descending, so
-            // the planner turns `WHERE score >= 20` into a *low* bound in index
-            // order - and it says so, in `descending`. The new engine's trees
-            // have no descending column: the import sorts every entry into the
-            // tree's own ascending key order. So a bound on a descending column
-            // arrives inverted and has to be turned back.
-            //
-            // Only the ranged column matters. Every column before it is pinned
-            // by an equality, and an equality is the same test whichever
-            // direction the column is stored in.
-            //
-            // Ignoring this was a **wrong answer, not a refusal**: over
-            // `(score DESC, email)`, `WHERE score >= 20` scanned `(-inf, 20]`
-            // and counted three rows where SQLite counted four. Nothing in the
-            // read corpus asked a range question of a descending index, so it
-            // survived Phase 2 and was found by the write path's own index
-            // maintenance test.
-            let flipped = descending.get(equalities.len()).copied().unwrap_or(false);
-            let (low, high) = if flipped { (high, low) } else { (low, high) };
             let (low_value, low_inclusive) =
                 bound_value(low.as_ref(), space, params, range_affinity)?;
             let (high_value, high_inclusive) =
@@ -2365,6 +2357,625 @@ pub fn run_prepared(
     Ok((collected, shape))
 }
 
+/// Runs a compound query: two or more arms joined by a set operator.
+///
+/// **Each arm is an ordinary plan and is run as one.** The set operation is
+/// [`crate::setop::SetOp`], the same operator a hand-built pipeline would use,
+/// so there is one implementation of what `EXCEPT` means rather than two. What
+/// this function adds is the plumbing the push executor cannot express on its
+/// own: several sources feeding one sink, and - for `EXCEPT` and `INTERSECT` -
+/// the right arm having to be complete before the left arm's first row can be
+/// judged.
+///
+/// The arms are materialised between steps. A compound is a pipeline breaker in
+/// every engine that has one, because three of the four operators are set
+/// operations over whole rows and a set operation cannot stream; `UNION ALL`
+/// could, and running it the same way costs a buffer and keeps the four arms of
+/// this function from being four different shapes.
+///
+/// ## Where the ORDER BY lives
+///
+/// On the **head** arm's `select`, not on the compound. That is the binder's
+/// doing and it is right - SQL does not let an arm of a compound carry its own
+/// `ORDER BY`, so the one that is written belongs to the whole - but it means
+/// the head arm has to be run with its ordering and its limit *removed*, or
+/// `SELECT a FROM t UNION SELECT b FROM u LIMIT 3` would take three rows from
+/// the first arm and then union them.
+///
+/// @param plan - the head arm, carrying the rest in `compounds`
+/// @param catalog - where the trees and layouts come from
+/// @param params - the values bound to `?1`, `?2`, ...
+pub fn run_compound(
+    plan: &PhysicalPlan,
+    catalog: &dyn TreeCatalog,
+    params: &Params,
+) -> DbResult<(Vec<Vec<OwnedDatum>>, Shape)> {
+    let collations: Vec<Collation> = plan
+        .select
+        .columns
+        .iter()
+        .map(|column| inillucent_sql::bind::result_collation(&column.expr))
+        .collect();
+    let (mut rows, shape) = run_arm(plan, catalog, params)?;
+    for (op, arm) in &plan.compounds {
+        if !arm.compounds.is_empty() {
+            // The binder flattens a chain of compounds onto the head, so an arm
+            // carrying its own is a shape this has never been handed. Refusing
+            // is what the physical pass does with a shape it has not seen.
+            return unsupported("a compound query nested inside a compound arm");
+        }
+        let (right, _) = run_arm(arm, catalog, params)?;
+        rows = combine(kind_of(*op), &collations, rows, right)?;
+    }
+    let ordered = order_compound(&plan.select, rows, &collations, params)?;
+    Ok((ordered, shape))
+}
+
+/// Runs one arm of a compound, without the compound's own ordering or limit.
+///
+/// @param plan - the arm
+/// @param catalog - where the trees and layouts come from
+/// @param params - the bound parameters
+fn run_arm(
+    plan: &PhysicalPlan,
+    catalog: &dyn TreeCatalog,
+    params: &Params,
+) -> DbResult<(Vec<Vec<OwnedDatum>>, Shape)> {
+    let mut arm = plan.clone();
+    arm.compounds.clear();
+    arm.select.order_by.clear();
+    arm.select.limit = None;
+    arm.select.offset = None;
+    arm.needs_sort = false;
+    arm.reverse = false;
+    run_any(&arm, catalog, params)
+}
+
+/// Runs any planned query, whichever of the three shapes it is.
+///
+/// The one entry point that knows a compound is several plans and a window
+/// query is a plan with a pass on top. Every caller that just wants an answer
+/// goes through here; `prepare` and `run_prepared` stay the single-pipeline
+/// pair they were, because a `Prepared` is the structural choice for *one*
+/// pipeline and neither of the other two shapes has only one.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees and layouts come from
+/// @param params - the values bound to `?1`, `?2`, ...
+pub fn run_any(
+    plan: &PhysicalPlan,
+    catalog: &dyn TreeCatalog,
+    params: &Params,
+) -> DbResult<(Vec<Vec<OwnedDatum>>, Shape)> {
+    if !plan.compounds.is_empty() {
+        return run_compound(plan, catalog, params);
+    }
+    if !plan.select.windows.is_empty() {
+        return run_windowed(plan, catalog, params);
+    }
+    let prepared = prepare(plan, catalog, ForcePlan::default())?;
+    run_prepared(plan, catalog, &prepared, params)
+}
+
+/// Returns the set operation a compound operator names.
+///
+/// @param op - the binder's operator
+fn kind_of(op: inillucent_sql::ast::CompoundOp) -> SetKind {
+    match op {
+        inillucent_sql::ast::CompoundOp::Union => SetKind::Union,
+        inillucent_sql::ast::CompoundOp::UnionAll => SetKind::UnionAll,
+        inillucent_sql::ast::CompoundOp::Except => SetKind::Except,
+        inillucent_sql::ast::CompoundOp::Intersect => SetKind::Intersect,
+    }
+}
+
+/// Applies one set operation to two already-materialised arms.
+///
+/// @param kind - which of the four
+/// @param collations - the collation of each result column
+/// @param left - the rows so far
+/// @param right - the arm being folded in
+fn combine(
+    kind: SetKind,
+    collations: &[Collation],
+    left: Vec<Vec<OwnedDatum>>,
+    right: Vec<Vec<OwnedDatum>>,
+) -> DbResult<Vec<Vec<OwnedDatum>>> {
+    let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut keys = SetKeys::new(collations.to_vec());
+    if kind.needs_right_first() {
+        // `EXCEPT` and `INTERSECT` cannot judge a left row until the right arm
+        // is complete, which is what `needs_right_first` says and why the right
+        // arm is reduced to its keys before the left arm is pushed at all.
+        ValuesScan::new(right.clone()).run(&mut keys)?;
+    }
+    let mut operation = SetOp::new(
+        kind,
+        collations.to_vec(),
+        keys,
+        Box::new(CollectInto::new(std::rc::Rc::clone(&collected))),
+    );
+    ValuesScan::new(left).run_without_finish(&mut operation)?;
+    if !kind.needs_right_first() {
+        // Both unions push both arms through the same operator, because neither
+        // needs to know about the other in advance.
+        ValuesScan::new(right).run_without_finish(&mut operation)?;
+    }
+    operation.finish()?;
+    let answer = collected.borrow().clone();
+    Ok(answer)
+}
+
+/// Applies a compound's own `ORDER BY`, `LIMIT` and `OFFSET`.
+///
+/// @param select - the head arm's bound statement, which carries them
+/// @param rows - the combined rows
+/// @param collations - the collation of each result column
+/// @param params - the bound parameters
+fn order_compound(
+    select: &BoundSelect,
+    rows: Vec<Vec<OwnedDatum>>,
+    collations: &[Collation],
+    params: &Params,
+) -> DbResult<Vec<Vec<OwnedDatum>>> {
+    if select.order_by.is_empty() && select.limit.is_none() && select.offset.is_none() {
+        return Ok(rows);
+    }
+    let mut keys = Vec::with_capacity(select.order_by.len());
+    for term in &select.order_by {
+        // A compound's ordering terms name *output* columns - SQL does not let
+        // one reach into an arm's FROM clause - so the binder has already
+        // resolved each to an ordinal. Anything else is a shape this cannot
+        // order and is refused rather than approximated.
+        let BoundExpr::SorterColumn { column } = &term.expr else {
+            return unsupported("a compound query ordered by an expression");
+        };
+        let descending = term.order == SortOrder::Descending;
+        keys.push(SortKey {
+            column: usize::from(*column),
+            descending,
+            collation: collations
+                .get(usize::from(*column))
+                .copied()
+                .unwrap_or(term.collation),
+            // The binder has already resolved the default, which is NULLS
+            // FIRST ascending and NULLS LAST descending.
+            nulls_first: match term.nulls {
+                NullOrder::First => true,
+                NullOrder::Last => false,
+            },
+        });
+    }
+    let limit = constant_count(select.limit.as_ref(), params, Negative::NoLimit)?;
+    let offset = constant_count(select.offset.as_ref(), params, Negative::Zero)?;
+    let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let collect: Box<dyn Sink> = Box::new(CollectInto::new(std::rc::Rc::clone(&collected)));
+    let sink: Box<dyn Sink> = match (limit, offset) {
+        (None, None) => collect,
+        (limit, offset) => Box::new(Limit::new(
+            limit.unwrap_or(usize::MAX),
+            offset.unwrap_or(0),
+            collect,
+        )),
+    };
+    let mut head: Box<dyn Sink> = if keys.is_empty() {
+        sink
+    } else {
+        Box::new(Sort::new(keys, sink))
+    };
+    ValuesScan::new(rows).run(head.as_mut())?;
+    let answer = collected.borrow().clone();
+    Ok(answer)
+}
+
+/// Runs a query with window functions.
+///
+/// **A window pass is a sort, a buffer and an append.** The rows arrive sorted
+/// by the window's partition keys and its `ORDER BY`, [`crate::window::compute`]
+/// appends one value per call to each row, and the statement's result columns
+/// are then projected out of the widened row. That is what the operator is
+/// written to expect - it addresses everything by buffered column number - so
+/// what this function does is decide the column numbers.
+///
+/// ## Why the input rows come off an ordinary plan
+///
+/// The sort and the scan below a window pass are not special. Building an inner
+/// `SELECT` whose result columns are exactly the values the pass needs, and
+/// whose `ORDER BY` is the window's own, means the input comes off the *read
+/// path* - index selection, an ordering the tree already provides, and the
+/// merge over written-to leaves all included - rather than off a second scan
+/// written here that would have to be kept in step with it.
+///
+/// ## What it refuses, and why those are the honest boundaries
+///
+/// Every call has to share one `PARTITION BY` **and** one `ORDER BY`, because
+/// the operator computes each call's peer groups over a sequence it assumes is
+/// sorted by that call's ordering, and one buffer can only be sorted one way.
+/// Two different windows are two passes and two sorts; that is a real feature,
+/// and it is refused by name rather than answered wrongly.
+///
+/// A window beside an aggregate is refused for a related reason: the pass would
+/// have to run over the *grouped* rows, and the grouped rows are a different
+/// space from the scan's.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees and layouts come from
+/// @param params - the values bound to `?1`, `?2`, ...
+pub fn run_windowed(
+    plan: &PhysicalPlan,
+    catalog: &dyn TreeCatalog,
+    params: &Params,
+) -> DbResult<(Vec<Vec<OwnedDatum>>, Shape)> {
+    let select = &plan.select;
+    if !select.aggregates.is_empty() || !select.group_by.is_empty() {
+        return unsupported("a window function beside an aggregate");
+    }
+    if !select.compounds.is_empty() {
+        return unsupported("a window function in a compound arm");
+    }
+    let Some(first) = select.windows.first() else {
+        return unsupported("a window pass with no window in it");
+    };
+    for window in &select.windows {
+        if window.partition_by != first.partition_by || window.order_by != first.order_by {
+            return unsupported("two windows with different PARTITION BY or ORDER BY");
+        }
+    }
+
+    let pre = window_inputs(select, first);
+    let rows = window_input_rows(select, &pre, first, catalog, params)?;
+    let pass = window_plan(select, &pre, first)?;
+    let widened = crate::window::compute(&rows, &pass)?;
+    project_over_window(select, &pre, pre.len(), widened, params)
+}
+
+/// Returns the values a window pass reads, in buffered-row order.
+///
+/// The partition keys and the window's ordering come first, because the inner
+/// query is ordered by them and reading them out of the same columns it sorted
+/// by is one fewer thing to keep in step. Everything else is appended as it is
+/// met, deduplicated, so a value used twice occupies one column.
+///
+/// @param select - the bound statement
+/// @param window - the window every call shares
+fn window_inputs(select: &BoundSelect, window: &BoundWindow) -> Vec<BoundExpr> {
+    let mut pre: Vec<BoundExpr> = Vec::new();
+    for expr in &window.partition_by {
+        remember(&mut pre, expr);
+    }
+    for term in &window.order_by {
+        remember(&mut pre, &term.expr);
+    }
+    for call in &select.windows {
+        for expr in &call.arguments {
+            remember(&mut pre, expr);
+        }
+        if let Some(filter) = &call.filter {
+            remember(&mut pre, filter);
+        }
+        for bound in [&call.start, &call.end] {
+            if let BoundFrameBound::Preceding(expr) | BoundFrameBound::Following(expr) = bound {
+                remember(&mut pre, expr);
+            }
+        }
+    }
+    // Every leaf the statement's own expressions read, so the projection above
+    // the pass has somewhere to read them from.
+    for column in &select.columns {
+        gather_leaves(&column.expr, &mut pre);
+    }
+    for term in &select.order_by {
+        gather_leaves(&term.expr, &mut pre);
+    }
+    pre
+}
+
+/// Adds one expression to the buffered row if it is not already there.
+///
+/// @param pre - the buffered row's expressions
+/// @param expr - the expression to carry
+fn remember(pre: &mut Vec<BoundExpr>, expr: &BoundExpr) {
+    if !pre.iter().any(|held| held == expr) {
+        pre.push(expr.clone());
+    }
+}
+
+/// Adds every column and rowid an expression reads to the buffered row.
+///
+/// A window reference is a leaf and is deliberately *not* gathered: it names a
+/// value the pass is about to compute, which does not exist in its input.
+///
+/// @param expr - the expression to walk
+/// @param pre - the buffered row's expressions
+fn gather_leaves(expr: &BoundExpr, pre: &mut Vec<BoundExpr>) {
+    match expr {
+        BoundExpr::WindowRef { .. } => {}
+        BoundExpr::Column { .. } | BoundExpr::Rowid { .. } => remember(pre, expr),
+        other => {
+            for child in other.children() {
+                gather_leaves(child, pre);
+            }
+        }
+    }
+}
+
+/// Returns the rows a window pass runs over, already sorted.
+///
+/// @param select - the bound statement
+/// @param pre - the buffered row's expressions
+/// @param window - the window every call shares
+/// @param catalog - where the trees and layouts come from
+/// @param params - the bound parameters
+fn window_input_rows(
+    select: &BoundSelect,
+    pre: &[BoundExpr],
+    window: &BoundWindow,
+    catalog: &dyn TreeCatalog,
+    params: &Params,
+) -> DbResult<Vec<Vec<OwnedDatum>>> {
+    let mut inner = select.clone();
+    inner.columns = pre
+        .iter()
+        .map(|expr| BoundResultColumn {
+            expr: expr.clone(),
+            name: b"w".to_vec(),
+            origin: None,
+            declared_type: Vec::new(),
+        })
+        .collect();
+    inner.windows.clear();
+    inner.distinct = false;
+    inner.limit = None;
+    inner.offset = None;
+    inner.having = None;
+    // The pass's own ordering: the partition keys, then the window's `ORDER BY`.
+    // A partition key only has to bring a partition's rows together, so its
+    // direction is free; the ordering terms are the window's own and are not.
+    inner.order_by = window
+        .partition_by
+        .iter()
+        .map(|expr| BoundOrderTerm {
+            expr: expr.clone(),
+            order: SortOrder::Ascending,
+            nulls: NullOrder::First,
+            collation: expression_collation(expr),
+        })
+        .chain(window.order_by.iter().cloned())
+        .collect();
+    let planned = plan_select_with(inner, Levers::default());
+    let prepared = prepare(&planned, catalog, ForcePlan::default())?;
+    Ok(run_prepared(&planned, catalog, &prepared, params)?.0)
+}
+
+/// Builds the window pass, addressing everything by buffered column.
+///
+/// @param select - the bound statement
+/// @param pre - the buffered row's expressions
+/// @param window - the window every call shares
+fn window_plan(
+    select: &BoundSelect,
+    pre: &[BoundExpr],
+    window: &BoundWindow,
+) -> DbResult<WindowPlan> {
+    let partition = window
+        .partition_by
+        .iter()
+        .map(|expr| Ok((column_of(pre, expr)?, expression_collation(expr))))
+        .collect::<DbResult<Vec<(usize, Collation)>>>()?;
+    let order = window
+        .order_by
+        .iter()
+        .map(|term| {
+            Ok(WindowOrderTerm {
+                column: column_of(pre, &term.expr)?,
+                descending: term.order == SortOrder::Descending,
+                collation: term.collation,
+            })
+        })
+        .collect::<DbResult<Vec<WindowOrderTerm>>>()?;
+    let mut calls = Vec::with_capacity(select.windows.len());
+    for call in &select.windows {
+        let func = match call.call {
+            BoundWindowCall::Plain(plain) => WindowSlot::Plain(plain),
+            BoundWindowCall::Aggregate(aggregate) => WindowSlot::Aggregate(match aggregate {
+                AggregateFunc::Count if call.star => AggregateKind::CountStar,
+                AggregateFunc::Count => AggregateKind::Count,
+                AggregateFunc::Sum => AggregateKind::Sum,
+                AggregateFunc::Total => AggregateKind::Total,
+                AggregateFunc::Avg => AggregateKind::Average,
+                AggregateFunc::Min => AggregateKind::Minimum,
+                AggregateFunc::Max => AggregateKind::Maximum,
+                AggregateFunc::GroupConcat => {
+                    let separator = match call.arguments.get(1) {
+                        None => ",".to_string(),
+                        Some(BoundExpr::Text(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+                        Some(_) => return unsupported("group_concat with a computed separator"),
+                    };
+                    AggregateKind::GroupConcat(separator)
+                }
+                other => return unsupported(&format!("the aggregate {other:?} over a window")),
+            }),
+        };
+        let arguments = call
+            .arguments
+            .iter()
+            .map(|expr| column_of(pre, expr))
+            .collect::<DbResult<Vec<usize>>>()?;
+        let filter = match &call.filter {
+            Some(expr) => Some(column_of(pre, expr)?),
+            None => None,
+        };
+        calls.push(WindowCall {
+            func,
+            distinct: call.distinct,
+            collation: call.collation,
+            arguments,
+            filter,
+            order: order.clone(),
+            frame: WindowFrame {
+                unit: call.unit,
+                start: frame_end(pre, &call.start)?,
+                end: frame_end(pre, &call.end)?,
+                exclude: call.exclude,
+            },
+        });
+    }
+    Ok(WindowPlan { partition, calls })
+}
+
+/// Returns one frame end, with its offset resolved to a buffered column.
+///
+/// @param pre - the buffered row's expressions
+/// @param bound - the written bound
+fn frame_end(pre: &[BoundExpr], bound: &BoundFrameBound) -> DbResult<FrameEnd> {
+    Ok(match bound {
+        BoundFrameBound::UnboundedPreceding => FrameEnd::UnboundedPreceding,
+        BoundFrameBound::CurrentRow => FrameEnd::CurrentRow,
+        BoundFrameBound::UnboundedFollowing => FrameEnd::UnboundedFollowing,
+        BoundFrameBound::Preceding(expr) => FrameEnd::Offset {
+            column: column_of(pre, expr)?,
+            preceding: true,
+        },
+        BoundFrameBound::Following(expr) => FrameEnd::Offset {
+            column: column_of(pre, expr)?,
+            preceding: false,
+        },
+    })
+}
+
+/// Returns which buffered column holds one of the pass's inputs.
+///
+/// Every input was put there by [`window_inputs`], so a miss is a disagreement
+/// between that function and this one rather than a query the engine cannot
+/// answer - and it says so, because the two are a pair that has to stay in step.
+///
+/// @param pre - the buffered row's expressions
+/// @param expr - the expression to find
+fn column_of(pre: &[BoundExpr], expr: &BoundExpr) -> DbResult<usize> {
+    pre.iter()
+        .position(|held| held == expr)
+        .ok_or_else(|| misuse("a window pass did not carry a value its own plan reads"))
+}
+
+/// Projects a statement's result columns out of the widened rows.
+///
+/// **The ordering happens below the projection, not above it.** Under
+/// [`Frame::Window`] a translated expression addresses the *widened* row - the
+/// values the pass was given, then one per call - so a sort built from those
+/// expressions has to run while the batch is still that row. Putting it above
+/// the projection sorted by whichever output column happened to share the
+/// index, which is a wrong answer rather than an error: `ORDER BY id` sorted by
+/// the window value instead and the rows came back in the pass's input order.
+///
+/// An ordinal or an alias is the one term that genuinely names an *output*
+/// column, and it is resolved by translating that column's own expression
+/// rather than by moving the sort - so both kinds of term end up addressing the
+/// same row.
+///
+/// @param select - the bound statement
+/// @param pre - the buffered row's expressions
+/// @param width - how many columns the buffered row had before the pass
+/// @param rows - the widened rows
+/// @param params - the bound parameters
+fn project_over_window(
+    select: &BoundSelect,
+    pre: &[BoundExpr],
+    width: usize,
+    rows: Vec<Vec<OwnedDatum>>,
+    params: &Params,
+) -> DbResult<(Vec<Vec<OwnedDatum>>, Shape)> {
+    let held = HeldSpace {
+        layouts: Vec::new(),
+        types: Vec::new(),
+        order: Vec::new(),
+    };
+    let space = held.view(&[]);
+    let frame = Frame::Window { pre, width };
+    let types = vec![StaticType::Unknown; width.saturating_add(select.windows.len())];
+    let mut projected = Vec::with_capacity(select.columns.len());
+    for column in &select.columns {
+        let translated = translate(&column.expr, &space, params, frame)?;
+        projected.push(compile(&translated, &types)?);
+    }
+    let mut keys = Vec::with_capacity(select.order_by.len());
+    for term in &select.order_by {
+        // An ordinal or an alias names an output column, so what it orders by
+        // is that column's expression - which reads the widened row like every
+        // other term here.
+        let expr = match &term.expr {
+            BoundExpr::SorterColumn { column } => select
+                .columns
+                .get(usize::from(*column))
+                .map(|held| &held.expr)
+                .ok_or_else(|| misuse("an ORDER BY ordinal outside the result list"))?,
+            other => other,
+        };
+        let translated = translate(expr, &space, params, frame)?;
+        let Expr::Column(column) = translated else {
+            return unsupported("a windowed query ordered by a computed expression");
+        };
+        let descending = term.order == SortOrder::Descending;
+        keys.push(SortKey {
+            column,
+            descending,
+            collation: term.collation,
+            nulls_first: match term.nulls {
+                NullOrder::First => true,
+                NullOrder::Last => false,
+            },
+        });
+    }
+
+    let limit = constant_count(select.limit.as_ref(), params, Negative::NoLimit)?;
+    let offset = constant_count(select.offset.as_ref(), params, Negative::Zero)?;
+    let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let collect: Box<dyn Sink> = Box::new(CollectInto::new(std::rc::Rc::clone(&collected)));
+    let mut head: Box<dyn Sink> = match (limit, offset) {
+        (None, None) => collect,
+        (limit, offset) => Box::new(Limit::new(
+            limit.unwrap_or(usize::MAX),
+            offset.unwrap_or(0),
+            collect,
+        )),
+    };
+    if select.distinct {
+        head = Box::new(Distinct::new(distinct_collations(select), head));
+    }
+    head = Box::new(Project::new(projected, head));
+    if !keys.is_empty() {
+        head = Box::new(Sort::new(keys, head));
+    }
+    ValuesScan::new(rows).run(head.as_mut())?;
+    let answer = collected.borrow().clone();
+    Ok((
+        answer,
+        Shape {
+            names: select
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
+            operators: vec![
+                "SCAN".to_string(),
+                "SORT".to_string(),
+                "WINDOW".to_string(),
+                "PROJECT".to_string(),
+            ],
+        },
+    ))
+}
+
+/// Returns the collation each result column is compared under by `DISTINCT`.
+///
+/// @param select - the bound statement
+fn distinct_collations(select: &BoundSelect) -> Vec<Collation> {
+    select
+        .columns
+        .iter()
+        .map(|column| inillucent_sql::bind::result_collation(&column.expr))
+        .collect()
+}
+
 /// Translates a bound expression that reads the scan's columns.
 ///
 /// @param expr - the bound expression
@@ -2387,6 +2998,18 @@ enum Frame<'a> {
         select: &'a BoundSelect,
         /// How many `GROUP BY` keys precede the accumulators.
         group_width: usize,
+    },
+    /// Reading the row a window pass emitted: the values it was given, then one
+    /// per call in the order they were bound.
+    ///
+    /// The third frame, and the reason the traversal takes one rather than
+    /// being written three times: a window's output space differs from the
+    /// scan's in exactly the same way an aggregate's does - only at the leaves.
+    Window {
+        /// The expressions the buffered row holds, one per column.
+        pre: &'a [BoundExpr],
+        /// How many of those precede the appended window values.
+        width: usize,
     },
 }
 
@@ -2416,6 +3039,19 @@ fn translate(
     // handled six node kinds and refused the rest, so `length(group_concat(x))`
     // was "a function call outside an aggregate" and `HAVING` had nowhere to be
     // translated at all.
+    if let Frame::Window { pre, width } = frame {
+        if let BoundExpr::WindowRef { slot } = expr {
+            return Ok(Expr::Column(width.saturating_add(*slot)));
+        }
+        // A whole sub-expression the pass already computed, which is how a
+        // window's own argument resolves without being recomputed.
+        if let Some(position) = pre.iter().position(|held| held == expr) {
+            return Ok(Expr::Column(position));
+        }
+        if matches!(expr, BoundExpr::Column { .. } | BoundExpr::Rowid { .. }) {
+            return unsupported("a column a window pass did not carry");
+        }
+    }
     if let Frame::Post {
         select,
         group_width,

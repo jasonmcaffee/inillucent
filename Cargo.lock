@@ -697,6 +697,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "inillucent-model"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+ "inillucent-pool",
+ "inillucent-sim",
+ "inillucent-tree",
+ "inillucent-txn",
+ "inillucent-vfs",
+ "inillucent-wal",
+]
+
+[[package]]
 name = "inillucent-pool"
 version = "0.1.0"
 dependencies = [

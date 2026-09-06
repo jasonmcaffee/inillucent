@@ -242,6 +242,25 @@ impl ImportedDatabase {
             });
             shapes.insert(info.root, shape);
             layouts.insert(info.root, layout);
+            // The indexes the new engine can hold. A descending one is dropped,
+            // and the *catalog* the binder sees is built without it - see
+            // `is_ascending` for why that is one decision rather than three
+            // patches.
+            let mut info = info.clone();
+            let dropped: Vec<Vec<u8>> = info
+                .indexes
+                .iter()
+                .filter(|index| !is_ascending(index))
+                .map(|index| index.name.clone())
+                .collect();
+            for name in &dropped {
+                skipped.push(format!(
+                    "{} (a descending index)",
+                    String::from_utf8_lossy(name)
+                ));
+            }
+            info.indexes.retain(is_ascending);
+            let info = &info;
             for index in &info.indexes {
                 if index.root == 0 {
                     continue;
@@ -395,7 +414,7 @@ impl ImportedDatabase {
             1,
             WalOptions::default(),
         )?;
-        database.pool().set_durable_lsn(wal.durable_end());
+        database.pool().set_durable_lsn(wal.write_ahead_point());
 
         // Smallest tree first, so the physical pass takes the cheapest
         // structure that covers the query. Sorting by bytes rather than by
@@ -569,8 +588,12 @@ impl ImportedDatabase {
         plan: &PhysicalPlan,
         params: &Params,
     ) -> DbResult<(Vec<Vec<OwnedDatum>>, Vec<String>)> {
-        let prepared = physical::prepare(plan, self, ForcePlan::default())?;
-        self.execute_prepared(plan, &prepared, params)
+        // A compound is several plans and one answer, and a windowed query is a
+        // plan with a pass on top of it; neither is a single prepared
+        // statement, so both are dispatched by `run_any` rather than inside
+        // `prepare` - which returns the structural choice for *one* pipeline.
+        let (rows, shape) = physical::run_any(plan, self, params)?;
+        Ok((rows, names_of(&shape)))
     }
 
     /// Chooses a statement's physical plan, once.
@@ -613,12 +636,7 @@ impl ImportedDatabase {
         params: &Params,
     ) -> DbResult<(Vec<Vec<OwnedDatum>>, Vec<String>)> {
         let (rows, shape) = physical::run_prepared(plan, self, prepared, params)?;
-        let names = shape
-            .names
-            .iter()
-            .map(|name| String::from_utf8_lossy(name).into_owned())
-            .collect();
-        Ok((rows, names))
+        Ok((rows, names_of(&shape)))
     }
 
     /// Builds a pipeline over an already-prepared statement.
@@ -740,13 +758,15 @@ impl ImportedDatabase {
     /// mutant the Phase 3 gate exists to kill.
     pub fn checkpoint(&mut self) -> DbResult<()> {
         self.wal.sync()?;
-        let durable = self.wal.durable_end();
+        let durable = self.wal.write_ahead_point();
         self.database.pool().set_durable_lsn(durable);
         let sequence = self.wal.sequence();
         self.database.set_log_position(durable, 0, sequence);
         self.database.checkpoint()?;
         self.wal.note_checkpoint(durable, 0)?;
-        self.database.pool().set_durable_lsn(self.wal.durable_end());
+        self.database
+            .pool()
+            .set_durable_lsn(self.wal.write_ahead_point());
         Ok(())
     }
 
@@ -904,13 +924,26 @@ impl ImportedDatabase {
             apply(&mut view, &mut log, params)?
         };
         self.wal.commit(txn, txn)?;
-        self.database.pool().set_durable_lsn(self.wal.durable_end());
+        self.database
+            .pool()
+            .set_durable_lsn(self.wal.write_ahead_point());
         Ok(Outcome {
             rows: changes.returned.clone(),
             names: Vec::new(),
             changes,
         })
     }
+}
+
+/// Returns a shape's column names as strings.
+///
+/// @param shape - what the built plan produces
+fn names_of(shape: &physical::Shape) -> Vec<String> {
+    shape
+        .names
+        .iter()
+        .map(|name| String::from_utf8_lossy(name).into_owned())
+        .collect()
 }
 
 /// What running one statement produced.
@@ -973,6 +1006,40 @@ impl TreeLog for WalLog<'_> {
     fn log(&mut self, body: Body<'_>) -> DbResult<u64> {
         self.wal.append(self.txn, body)
     }
+}
+
+/// Reports whether every key column of an index is stored ascending.
+///
+/// **A descending index is dropped by the import, and dropped from the catalog
+/// the binder is given, rather than built and then worked around.** The new
+/// engine's trees have no descending key column: every one is stored ascending.
+/// The planner reasons about direction from the *catalog's* declaration, so for
+/// an index the catalog calls `DESC` every conclusion it draws is inverted
+/// against the tree that actually exists - and it draws three:
+///
+/// - the range bounds, which it emits in the index's order, so `WHERE score >=
+///   20` became `(-inf, 20]` and counted three rows where SQLite counted four;
+/// - whether an ordering is already provided, so `ORDER BY score` came back
+///   **descending** with no sort and no error;
+/// - which direction to walk, so a reverse scan was chosen where a forward one
+///   was needed.
+///
+/// Each of those is a wrong answer rather than a refusal, and all three are one
+/// mismatch. Patching them one at a time would leave the next conclusion the
+/// planner learns to draw waiting to be found the same way, so the mismatch is
+/// removed instead: the index is not built, not registered, and not in the
+/// catalog, so no path over it is ever planned. Queries that would have used it
+/// read the table.
+///
+/// It is **skipped by name**, not silently: `ImportedDatabase::skipped` reports
+/// it, for the same reason a table the import cannot take is reported. Storing
+/// a descending key column properly is a format change - the tree, the key
+/// encoding, the leaf comparisons and every scan - and belongs to whichever
+/// phase decides to pay for it.
+///
+/// @param index - the index to judge
+fn is_ascending(index: &IndexInfo) -> bool {
+    index.columns.iter().all(|column| !column.descending)
 }
 
 /// Puts imported rows into the order the tree they are about to build compares

@@ -673,6 +673,47 @@ impl<'p> LeafRef<'p> {
         self.column(column)?.value(row)
     }
 
+    /// Returns where a key sits in this leaf: sorted region, delta area, or absent.
+    ///
+    /// **One implementation, two callers.** The write path asks this before it
+    /// changes a row, and recovery asks it before it replays one - and the two
+    /// have to agree about which row a key names, or a replay would tombstone a
+    /// different row than the original delete did. It lives here rather than on
+    /// `PagedTree` because recovery has no tree: the trees are attached after
+    /// the file opens, and the file does not open until recovery has finished.
+    ///
+    /// A tombstoned row in the sorted region reads as absent from *there* and
+    /// the delta area is searched anyway, because a key can be tombstoned in
+    /// the sorted region and live again in the delta area - which is exactly
+    /// what an insert over a deleted key leaves behind.
+    ///
+    /// @param key - the key, one value per key column
+    /// @param key_columns - how many leading columns form the key
+    pub fn locate(&self, key: &[Datum<'_>], key_columns: usize) -> DbResult<crate::write::Located> {
+        for index in 0..self.delta_count() {
+            let mut same = true;
+            for column in 0..key_columns {
+                let held = self.delta_value(index, column)?;
+                let wanted = key.get(column).copied().unwrap_or(Datum::Null);
+                if crate::types::compare_under(&held, &wanted, self.collation_of(column))
+                    != core::cmp::Ordering::Equal
+                {
+                    same = false;
+                    break;
+                }
+            }
+            if same {
+                return Ok(crate::write::Located::Delta(index));
+            }
+        }
+        if let Ok(row) = self.search(key)? {
+            if !self.is_tombstoned(row)? {
+                return Ok(crate::write::Located::Sorted(row));
+            }
+        }
+        Ok(crate::write::Located::Absent)
+    }
+
     /// Returns a reusable view of the leaf's key columns.
     ///
     /// A binary search over a leaf makes about eleven comparisons, and each one
