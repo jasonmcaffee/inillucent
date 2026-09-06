@@ -188,6 +188,19 @@ impl ImportedDatabase {
                 ref argument,
                 ..
             } => self.pragma(name, argument.as_ref()),
+            // Named apart from the other refusals because this one has a
+            // consequence the caller has to be told about rather than left to
+            // discover: the statements since `BEGIN` have already been applied.
+            // `BEGIN` groups the log so it is flushed once - it does not open
+            // something that can be abandoned, and the log is redo-only, so
+            // there is no before-image to restore from. The gap is inventoried
+            // in `crates/inillucent-compat/tests/new_engine_surface.rs`.
+            Directive::Rollback { .. } => Err(misuse(format!(
+                "{sql}: ROLLBACK is a statement the new engine does not run \
+                 yet, and the writes since BEGIN have already been applied - \
+                 BEGIN groups the log rather than opening a transaction that \
+                 can be abandoned"
+            ))),
             other => Err(misuse(format!(
                 "{sql} is {}, which the new engine does not run yet",
                 super::describe_directive(&other)
