@@ -184,13 +184,20 @@ pub trait TreeLog {
     /// `before` is `None` when the key was not there, which is what a rollback
     /// restores by deleting it again.
     ///
+    /// **The key is borrowed, not given.** A restore that has a row to write
+    /// back does not need it - the row carries its own key columns and `put`
+    /// finds them - so only the delete case has to copy it, and that decision
+    /// belongs to the log rather than to every write path that calls this.
+    /// Handing over an owned key allocated one vector per write and threw most
+    /// of them away.
+    ///
     /// @param tree - the tree the row is in
     /// @param key - the row's key columns
     /// @param before - the whole row as it was, or `None`
     fn undo(
         &mut self,
         tree: u64,
-        key: Vec<OwnedDatum>,
+        key: &[Datum<'_>],
         before: Option<Vec<OwnedDatum>>,
     ) -> DbResult<()> {
         let _ = (tree, key, before);
@@ -367,6 +374,7 @@ impl PagedTree {
         // read the caller did not ask for happens anyway. That is the whole
         // cost of being able to abandon a transaction, and it is paid only
         // inside one.
+        let caller_wants_previous = want_previous;
         let want_previous = want_previous || log.wants_undo();
         if row.len() != self.columns().len() {
             return Err(misuse(format!(
@@ -426,7 +434,7 @@ impl PagedTree {
             // Nothing between here and the mutation changes the page: the
             // room check only reads, and the log append does not touch pages
             // at all. A `make_room` restarts the attempt, which re-locates.
-            let (located, previous) = {
+            let (located, mut previous) = {
                 let guard = database.pool().fetch(page)?;
                 let leaf = LeafRef::parse(&guard)?.with_collations(self.collations());
                 let located = leaf.locate(&key, self.key_columns())?;
@@ -490,8 +498,15 @@ impl PagedTree {
             // Recorded here rather than above the room check, because a retry
             // re-locates and would record the same row twice.
             if log.wants_undo() {
-                let owned: Vec<OwnedDatum> = key.iter().map(OwnedDatum::from_datum).collect();
-                log.undo(self.tree_id(), owned, previous.clone())?;
+                // Given rather than cloned when the caller did not ask for the
+                // row: `put` and `put_absent` report presence and throw the
+                // row away, so cloning it for them was a whole row copied per
+                // write for nothing.
+                let recorded = match caller_wants_previous {
+                    true => previous.clone(),
+                    false => previous.take(),
+                };
+                log.undo(self.tree_id(), &key, recorded)?;
             }
 
             // A delta row that is about to be removed may own out-of-line
@@ -620,12 +635,7 @@ impl PagedTree {
         // Recorded after the room handling, because the retry above deletes
         // again and would record the same row twice.
         if log.wants_undo() {
-            let owned: Vec<OwnedDatum> = key
-                .iter()
-                .take(self.key_columns())
-                .map(OwnedDatum::from_datum)
-                .collect();
-            log.undo(self.tree_id(), owned, previous.clone())?;
+            log.undo(self.tree_id(), key, previous.clone())?;
         }
         let mut tagged_key = Vec::new();
         for value in key.iter().take(self.key_columns()) {
@@ -731,12 +741,7 @@ impl PagedTree {
         // never existed if two updates touched two columns of it.
         if log.wants_undo() {
             let before = self.row_at(database.pool(), page, key)?;
-            let owned: Vec<OwnedDatum> = key
-                .iter()
-                .take(self.key_columns())
-                .map(OwnedDatum::from_datum)
-                .collect();
-            log.undo(self.tree_id(), owned, before)?;
+            log.undo(self.tree_id(), key, before)?;
         }
         let mut slot = Vec::new();
         value.encode_tagged(&mut slot);

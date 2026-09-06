@@ -14,16 +14,20 @@
 
 use std::io::Write;
 
-use inillucent::{Connection, Database, Value};
+use inillucent_engine::connect::{Connection, Database};
+use inillucent_tree::datum::OwnedDatum;
+use inillucent_value::Value;
 
 use crate::render::{render, Layout, Mode};
 
 /// Everything the shell remembers between lines.
 pub struct Shell {
-    /// The database, kept boxed so the connection can borrow it.
-    database: Box<Database>,
-    /// The open connection.
-    connection: Box<Connection>,
+    /// The database.
+    ///
+    /// A connection is a borrow of it rather than a thing of its own, so one is
+    /// made where it is used instead of being stored - storing it beside the
+    /// database it borrows would be a self-referential struct for no gain.
+    database: Database,
     /// Where the database came from, for `.databases` and the prompt.
     path: String,
     /// How results are laid out.
@@ -64,15 +68,8 @@ impl Shell {
     /// Opens a shell on a database file, or on an in-memory one.
     pub fn open(path: &str) -> Result<Shell, String> {
         let database = Database::open(path).map_err(|error| error.message().to_string())?;
-        let boxed = Box::new(database);
-        // The connection borrows the database, which is boxed and never moves
-        // while this shell is alive; the two are dropped together.
-        let connection = boxed
-            .connect()
-            .map_err(|error| error.message().to_string())?;
         Ok(Shell {
-            database: boxed,
-            connection: Box::new(connection),
+            database,
             path: path.to_string(),
             layout: Layout::default(),
             output: None,
@@ -89,8 +86,17 @@ impl Shell {
     }
 
     /// Returns the connection statements run on.
-    pub fn connection(&self) -> &Connection {
-        &self.connection
+    pub fn connection(&self) -> Connection<'_> {
+        self.database.connect()
+    }
+
+    /// Copies the open database into a file and checks the copy.
+    ///
+    /// @param path - where the copy goes
+    pub fn backup_to(&self, path: &str) -> Result<(), String> {
+        self.database
+            .backup_to(path)
+            .map_err(|error| error.message().to_string())
     }
 
     /// Returns where the database was opened from.
@@ -101,9 +107,6 @@ impl Shell {
     /// Closes the current database and opens another.
     pub fn reopen(&mut self, path: &str) -> Result<(), String> {
         let replacement = Shell::open(path)?;
-        // The order matters: the old connection has to go before the database
-        // it borrows, and replacing both fields at once is what does that.
-        self.connection = replacement.connection;
         self.database = replacement.database;
         self.path = replacement.path;
         Ok(())
@@ -167,7 +170,7 @@ impl Shell {
                     self.say(&line);
                 }
                 if self.show_changes {
-                    let changes = self.connection.changes();
+                    let changes = self.database.connect().changes();
                     self.say(&format!("changes: {changes}"));
                 }
             }
@@ -203,30 +206,34 @@ impl Shell {
 
     /// Runs a statement and collects its column names and rows.
     pub fn collect(&self, sql: &str) -> Result<(Vec<String>, Vec<Vec<Value<'static>>>), Failure> {
-        let mut statement = self.connection.prepare(sql).map_err(|error| Failure {
-            message: error.message().to_string(),
-            offset: error.sql_offset(),
-            compiling: true,
-        })?;
-        let columns: Vec<String> = statement
-            .columns()
-            .iter()
-            .map(|column| String::from_utf8_lossy(&column.name).into_owned())
-            .collect();
+        let mut statement = self
+            .database
+            .connect()
+            .prepare(sql)
+            .map_err(|error| Failure {
+                message: reason(&error),
+                offset: error.sql_offset(),
+                compiling: true,
+            })?;
         let mut rows = Vec::new();
         loop {
             match statement.step() {
                 Err(error) => {
                     return Err(Failure {
-                        message: error.message().to_string(),
+                        message: reason(&error),
                         offset: None,
                         compiling: false,
                     })
                 }
                 Ok(false) => break,
-                Ok(true) => rows.push(statement.row().to_vec()),
+                Ok(true) => rows.push(statement.row().iter().map(value_of).collect()),
             }
         }
+        // Read *after* stepping. The engine's statement materialises on its
+        // first step, so it does not know its column names until it has run -
+        // where `sqlite3_column_name` answers straight after a prepare. Asking
+        // first returned an empty list, and `.headers on` printed nothing.
+        let columns: Vec<String> = statement.columns().to_vec();
         Ok((columns, rows))
     }
 
@@ -248,9 +255,10 @@ impl Shell {
 
     /// Runs a statement for its effect, reporting only a failure.
     pub fn execute(&mut self, sql: &str) -> Result<(), String> {
-        self.connection
+        self.database
+            .connect()
             .execute_batch(sql)
-            .map_err(|error| error.message().to_string())
+            .map_err(|error| reason(&error))
     }
 
     /// Returns one column of one row, as text.
@@ -520,3 +528,40 @@ pub fn mode_named(name: &str) -> Result<Mode, String> {
 
 /// Every mode name, for the message above and for `.help`.
 pub const MODE_NAMES: &str = "box column csv html insert json line list markdown quote table tabs";
+
+/// Returns a datum as the value the renderer formats.
+///
+/// The engine's rows are `OwnedDatum` and everything that prints one takes
+/// `Value`, which is `inillucent-value`'s type and the one the affinity and
+/// collation rules are written against. Converting here rather than rewriting
+/// `render.rs` keeps the formatting - `.mode`, `.nullvalue`, the width
+/// calculation - exactly as it was, which is what a caller of this shell would
+/// notice if it changed.
+///
+/// @param datum - one value out of a row
+fn value_of(datum: &OwnedDatum) -> Value<'static> {
+    match datum {
+        OwnedDatum::Null => Value::Null,
+        OwnedDatum::Int(number) => Value::Integer(*number),
+        OwnedDatum::Real(number) => Value::Real(*number),
+        OwnedDatum::Text(bytes) => Value::owned_text(bytes).unwrap_or(Value::Null),
+        OwnedDatum::Blob(bytes) => Value::owned_blob(bytes).unwrap_or(Value::Null),
+    }
+}
+
+/// Returns what a failure should say to a person.
+///
+/// **The detail, when there is one, and the code's text otherwise.** A
+/// `DbError`'s `message` is the text of its primary code - "bad parameter or
+/// other API misuse" for everything the engine refuses - and the sentence a
+/// person can act on is in `detail`: "no such table: nope". Printing the code's
+/// text made every refusal look like the same failure, which is the opposite of
+/// what a shell is for.
+///
+/// @param error - what went wrong
+fn reason(error: &inillucent_base::DbError) -> String {
+    error
+        .detail()
+        .unwrap_or_else(|| error.message())
+        .to_string()
+}

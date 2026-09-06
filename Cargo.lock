@@ -618,7 +618,10 @@ dependencies = [
 name = "inillucent-cli"
 version = "0.1.0"
 dependencies = [
- "inillucent",
+ "inillucent-base",
+ "inillucent-engine",
+ "inillucent-tree",
+ "inillucent-value",
 ]
 
 [[package]]

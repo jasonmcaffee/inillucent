@@ -577,6 +577,7 @@ impl ImportedDatabase {
             )?,
         );
         catalog = catalog.with_table(schema_info.clone());
+        catalog = catalog.with_table(schema_alias_of(&schema_info));
 
         // The log the write path describes every change in, opened on a file
         // that has just been checkpointed - so it starts empty, at the first
@@ -967,6 +968,7 @@ impl ImportedDatabase {
         );
         trees.insert(schema_root, catalog_tree);
         catalog = catalog.with_table(schema_info.clone());
+        catalog = catalog.with_table(schema_alias_of(&schema_info));
 
         // **The log resumes where recovery ended, not at the beginning.**
         // Opening it at `FIRST_LSN` with sequence 1 starts a second stream over
@@ -1187,15 +1189,23 @@ impl ImportedDatabase {
     /// in a scorecard plan.
     ///
     /// @param sql - the statement text
+    ///
+    /// **A refusal says what SQLite's says.** These used to wrap the parse or
+    /// bind failure with `{error:?}`, so `SELECT * FROM nope` reported
+    /// `SELECT * FROM nope;: ParseError { kind: Refused("no such table: nope"),
+    /// span: Span { start: 0, end: 0 } }` where SQLite reports `no such table:
+    /// nope`. The one-line message was there all along - `ParseError::message`
+    /// - and printing the struct around it made every refusal look like a bug
+    /// report about the engine rather than a sentence about the statement.
     pub fn plan(&self, sql: &str) -> DbResult<PhysicalPlan> {
         let parsed = parse_next_statement(sql.as_bytes(), 0, &self.limits)
-            .map_err(|error| misuse(format!("{sql}: {error:?}")))?;
+            .map_err(|error| misuse(error.message()))?;
         let authorizer = AllowAll;
         let mut binder =
             Binder::new(&self.catalog, &parsed.ast, &authorizer).with_source(sql.as_bytes());
         let bound = binder
             .bind_statement(&parsed.statement)
-            .map_err(|error| misuse(format!("{sql}: {error:?}")))?;
+            .map_err(|error| misuse(error.message()))?;
         match bound {
             BoundStatement::Select(select) => Ok(plan_select_with(*select, Levers::default())),
             _ => Err(misuse(format!("{sql} is not a read-only statement"))),
@@ -1762,13 +1772,13 @@ impl ImportedDatabase {
     /// @param sql - the statement text
     pub fn bind(&self, sql: &str) -> DbResult<BoundStatement> {
         let parsed = parse_next_statement(sql.as_bytes(), 0, &self.limits)
-            .map_err(|error| misuse(format!("{sql}: {error:?}")))?;
+            .map_err(|error| misuse(error.message()))?;
         let authorizer = AllowAll;
         let mut binder =
             Binder::new(&self.catalog, &parsed.ast, &authorizer).with_source(sql.as_bytes());
         binder
             .bind_statement(&parsed.statement)
-            .map_err(|error| misuse(format!("{sql}: {error:?}")))
+            .map_err(|error| misuse(error.message()))
     }
 
     /// Parses, plans and runs one statement of any kind.
@@ -2092,7 +2102,7 @@ impl ImportedDatabase {
             Binder::new(&self.catalog, &parsed.ast, &authorizer).with_source(sql.as_bytes());
         let bound = binder
             .bind_statement(inner)
-            .map_err(|error| misuse(format!("{sql}: {error:?}")))?;
+            .map_err(|error| misuse(error.message()))?;
         let lines = match bound {
             BoundStatement::Select(select) => {
                 plan_select_with(*select, Levers::default()).describe()
@@ -2137,7 +2147,7 @@ impl ImportedDatabase {
         // there is no program, and that difference is the whole of the
         // `query_plan` split below.
         let parsed = parse_next_statement(sql.as_bytes(), 0, &self.limits)
-            .map_err(|error| misuse(format!("{sql}: {error:?}")))?;
+            .map_err(|error| misuse(error.message()))?;
         if let inillucent_sql::ast::Statement::Explain { query_plan, inner } = &parsed.statement {
             return self.compile_explain(sql, *query_plan, inner, &parsed);
         }
@@ -2539,10 +2549,18 @@ impl TreeLog for WalLog<'_> {
     fn undo(
         &mut self,
         tree: u64,
-        key: Vec<OwnedDatum>,
+        key: &[Datum<'_>],
         before: Option<Vec<OwnedDatum>>,
     ) -> DbResult<()> {
         if let Some(buffer) = self.undo.as_mut() {
+            // **The key is copied only when there is no row to put back.** A
+            // restore that has a row calls `put`, which reads the key columns
+            // out of the row itself; copying them a second time allocated a
+            // vector per write and threw it away on every update and delete.
+            let key = match before {
+                Some(_) => Vec::new(),
+                None => key.iter().map(OwnedDatum::from_datum).collect(),
+            };
             buffer.push(Before {
                 tree,
                 key,
@@ -2571,7 +2589,11 @@ impl TreeLog for WalLog<'_> {
 struct Before {
     /// The tree the row is in.
     tree: u64,
-    /// The row's key columns.
+    /// The row's key columns, and empty when `row` carries them.
+    ///
+    /// A restore with a row to write back finds the key inside it, so the copy
+    /// is made only for the case that needs one: a key that was not there, put
+    /// back by deleting it again.
     key: Vec<OwnedDatum>,
     /// The whole row as it was, or `None` when the key was not there.
     row: Option<Vec<OwnedDatum>>,
@@ -2990,6 +3012,26 @@ fn identifier_of(entry: &SchemaEntry) -> DbResult<u32> {
             String::from_utf8_lossy(&entry.name)
         ))
     })
+}
+
+/// Returns `sqlite_schema` under the name almost every tool actually types.
+///
+/// **`sqlite_master` is the same table, and a database that could not answer it
+/// would be one no existing tool could inspect.** SQLite accepts both names;
+/// the old engine synthesised the alias in `inillucent-catalog`, through a
+/// helper that reaches into `inillucent-storage` and so cannot outlive it. This
+/// is the same idea with the new engine's own schema table, registered beside
+/// it rather than instead of it.
+///
+/// The alias is a name that resolves, not a row: `sqlite_schema` has never
+/// listed itself, and it does not list this either.
+///
+/// @param schema - the schema table's own declaration
+fn schema_alias_of(schema: &TableInfo) -> TableInfo {
+    let mut alias = schema.clone();
+    alias.name = b"sqlite_master".to_vec();
+    alias.folded = b"sqlite_master".to_vec();
+    alias
 }
 
 /// Returns the modules a database of this engine has.

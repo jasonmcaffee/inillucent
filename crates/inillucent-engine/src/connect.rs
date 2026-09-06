@@ -101,6 +101,35 @@ impl Database {
     pub fn check(&self) -> DbResult<()> {
         self.engine.borrow().check_trees()
     }
+
+    /// Copies this database into a file, and checks the copy.
+    ///
+    /// **A checkpoint and a file copy, not a page-by-page walk.** SQLite's
+    /// backup copies pages because it copies them *while other connections
+    /// write*, and the interesting part of its API is the incremental step. This
+    /// engine is single threaded and one file is one pool: there is no second
+    /// writer to race, so the honest backup is to fold the log into the file and
+    /// copy the file. What that costs is one checkpoint, which the caller was
+    /// going to pay on close anyway.
+    ///
+    /// The copy is opened and walked before this returns. A backup nobody
+    /// checked is a file that is assumed to be a database, and the cost of
+    /// finding out otherwise is paid at the worst possible moment.
+    ///
+    /// @param path - where the copy goes
+    pub fn backup_to(&self, path: impl AsRef<Path>) -> DbResult<()> {
+        let path = path.as_ref();
+        self.checkpoint()?;
+        std::fs::copy(&self.path, path).map_err(|error| {
+            inillucent_base::error::misuse(format!(
+                "cannot copy {} to {}: {error}",
+                self.path.display(),
+                path.display()
+            ))
+        })?;
+        let copy = Database::open(path)?;
+        copy.check()
+    }
 }
 
 /// A connection to a database.
@@ -280,7 +309,15 @@ impl Statement<'_> {
         }
     }
 
-    /// Returns the result column names.
+    /// Returns the result column names, once the statement has been stepped.
+    ///
+    /// **Empty before the first `step`**, which is where this differs from
+    /// `sqlite3_column_name`: that answers straight after a prepare, because
+    /// SQLite compiles the column names as part of compiling the statement.
+    /// This statement materialises on its first step and learns its shape from
+    /// what came back, so there is nothing to report until then. A caller that
+    /// asked first got an empty list and printed no header, which is how the
+    /// difference was found.
     pub fn columns(&self) -> &[String] {
         &self.names
     }
