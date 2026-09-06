@@ -333,6 +333,17 @@ pub struct PhysicalPlan {
     pub distinct_walk: bool,
     /// The later arms of a compound, each with the operator that joined it.
     pub compounds: Vec<(CompoundOp, PhysicalPlan)>,
+    /// Whether any expression in this plan holds a subquery used as a value.
+    ///
+    /// Decided here because it is a property of the *statement* and not of the
+    /// data, and because the alternative was deciding it per execution: the
+    /// executor folds uncorrelated subqueries on the way into each run, and it
+    /// has to ask this question first every time. Walking the expression tree
+    /// to ask it cost about 0.07 us per execution - measurable against a
+    /// `point.rowid` that takes 0.78 - because `BoundExpr::children` allocates
+    /// a vector per node. Asked once per compiled statement instead, it costs
+    /// nothing a statement runs.
+    pub subqueries: bool,
 }
 
 impl PhysicalPlan {
@@ -632,10 +643,16 @@ pub fn plan_select_with(select: BoundSelect, levers: Levers) -> PhysicalPlan {
     };
     let needs_sort = !select.order_by.is_empty() && provided.is_none();
     let reverse = provided.unwrap_or(false);
-    let compounds = compound_arms
+    let compounds: Vec<(CompoundOp, PhysicalPlan)> = compound_arms
         .into_iter()
         .map(|(op, arm)| (op, plan_select_with(arm, levers)))
         .collect();
+    let subqueries = holds_subquery(&select)
+        || residuals.iter().flatten().any(expression_holds_subquery)
+        || constant_filter
+            .as_ref()
+            .is_some_and(expression_holds_subquery)
+        || compounds.iter().any(|(_op, arm)| arm.subqueries);
     PhysicalPlan {
         sources,
         residuals,
@@ -647,7 +664,65 @@ pub fn plan_select_with(select: BoundSelect, levers: Levers) -> PhysicalPlan {
         grouped_walk,
         distinct_walk,
         compounds,
+        subqueries,
     }
+}
+
+/// Returns whether a select holds a subquery used as a value.
+///
+/// Compound arms are not walked here: `plan_select_with` has already taken them
+/// out of `select.compounds` and planned them, and each arm carries its own
+/// answer. A subquery's *block* is not walked either - finding one is enough to
+/// say the plan has one.
+///
+/// @param select - the query to look through
+fn holds_subquery(select: &BoundSelect) -> bool {
+    select.filter.iter().any(expression_holds_subquery)
+        || select.group_by.iter().any(expression_holds_subquery)
+        || select.having.iter().any(expression_holds_subquery)
+        || select
+            .columns
+            .iter()
+            .any(|column| expression_holds_subquery(&column.expr))
+        || select
+            .order_by
+            .iter()
+            .any(|term| expression_holds_subquery(&term.expr))
+        || select.limit.iter().any(expression_holds_subquery)
+        || select.offset.iter().any(expression_holds_subquery)
+        || select
+            .values
+            .iter()
+            .flatten()
+            .any(expression_holds_subquery)
+        || select
+            .aggregates
+            .iter()
+            .any(|aggregate| aggregate.arguments.iter().any(expression_holds_subquery))
+        || select.windows.iter().any(|window| {
+            window.arguments.iter().any(expression_holds_subquery)
+                || window.filter.iter().any(expression_holds_subquery)
+                || window.partition_by.iter().any(expression_holds_subquery)
+                || window
+                    .order_by
+                    .iter()
+                    .any(|term| expression_holds_subquery(&term.expr))
+        })
+        || select.sources.iter().any(|source| {
+            source.constraint.iter().any(expression_holds_subquery)
+                || matches!(&source.rows, SourceRows::Subquery(block) if holds_subquery(block))
+        })
+}
+
+/// Returns whether an expression holds a subquery, anywhere beneath it.
+///
+/// @param expr - the expression to look through
+fn expression_holds_subquery(expr: &BoundExpr) -> bool {
+    matches!(expr, BoundExpr::Subquery { .. })
+        || expr
+            .children()
+            .iter()
+            .any(|child| expression_holds_subquery(child))
 }
 
 /// Returns whether the walk brings the rows of each `GROUP BY` key together.
