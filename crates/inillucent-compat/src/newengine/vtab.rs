@@ -131,9 +131,31 @@ fn as_row(values: &[Value<'static>]) -> Vec<OwnedDatum> {
 /// @param tree - the shadow table
 /// @param rowid - the row's key
 fn read_rowid(pool: &Pool, tree: &PagedTree, rowid: i64) -> DbResult<Option<Vec<Value<'static>>>> {
-    match tree.point(pool, &[Datum::Int(rowid)])? {
-        Some(row) => Ok(Some(as_values(&row)?)),
-        None => Ok(None),
+    // **One copy of the row, not two.** `PagedTree::point` copies every column
+    // into an `OwnedDatum` and the conversion then copies each of those into a
+    // `Value`, so a module that reads a shadow row - which FTS5 does ten times
+    // per document, several of them over segment blocks measured in kilobytes -
+    // paid for the block twice. `probe` hands over the leaf's own bytes and the
+    // `Value` is built from them directly.
+    tree.probe(pool, &[Datum::Int(rowid)], |leaf, hit| {
+        let mut values = Vec::with_capacity(leaf.column_count());
+        for column in 0..leaf.column_count() {
+            values.push(borrowed_value(&leaf.value_at(hit, column)?)?);
+        }
+        Ok(values)
+    })
+}
+
+/// Returns one borrowed page value as an owned module value.
+///
+/// @param datum - the value read out of a leaf
+fn borrowed_value(datum: &Datum<'_>) -> DbResult<Value<'static>> {
+    match datum {
+        Datum::Null => Ok(Value::Null),
+        Datum::Int(number) => Ok(Value::Integer(*number)),
+        Datum::Real(number) => Ok(Value::Real(*number)),
+        Datum::Text(bytes) => Value::owned_text(bytes),
+        Datum::Blob(bytes) => Value::owned_blob(bytes),
     }
 }
 
@@ -151,14 +173,15 @@ fn read_key(
 ) -> DbResult<Option<Vec<Value<'static>>>> {
     let owned = as_row(key);
     let probe: Vec<Datum<'_>> = owned.iter().map(OwnedDatum::borrow).collect();
-    match tree.point(pool, &probe)? {
-        Some(row) => {
-            let mut values = as_values(&row)?;
-            values.truncate(columns.min(values.len()));
-            Ok(Some(values))
+    // One copy, for the reason `read_rowid` gives.
+    tree.probe(pool, &probe, |leaf, hit| {
+        let wanted = columns.min(leaf.column_count());
+        let mut values = Vec::with_capacity(wanted);
+        for column in 0..wanted {
+            values.push(borrowed_value(&leaf.value_at(hit, column)?)?);
         }
-        None => Ok(None),
-    }
+        Ok(values)
+    })
 }
 
 /// Walks a shadow table's rows in key order.
