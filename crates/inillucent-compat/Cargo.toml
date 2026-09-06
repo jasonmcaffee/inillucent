@@ -22,6 +22,8 @@ inillucent-pool = { workspace = true }
 inillucent-tree = { workspace = true }
 inillucent-sqlite-reader = { workspace = true }
 inillucent-exec = { workspace = true }
+inillucent-wal = { workspace = true }
+inillucent-txn = { workspace = true }
 
 [[bin]]
 name = "inillucent-sqlperf"

@@ -41,32 +41,11 @@ use crate::program::{
     RowChangeKind, SortColumn, SortKey, StrictType,
 };
 
-/// The result codes a constraint failure reports.
-///
-/// The numbers are SQLite's own extended codes. They are written out rather
-/// than derived because an application matches on them, and a code that was
-/// computed from an enum's discriminant would change the day the enum did.
-pub(crate) mod codes {
-    /// `SQLITE_CONSTRAINT_CHECK`.
-    pub const CHECK: i32 = 275;
-    /// `SQLITE_CONSTRAINT_DATATYPE`, which a STRICT table reports.
-    pub const DATATYPE: i32 = 3091;
-    /// `SQLITE_CONSTRAINT_NOTNULL`.
-    pub const NOT_NULL: i32 = 1299;
-    /// `SQLITE_CONSTRAINT_PRIMARYKEY`.
-    pub const PRIMARY_KEY: i32 = 1555;
-    /// `SQLITE_CONSTRAINT_UNIQUE`.
-    pub const UNIQUE: i32 = 2067;
-    /// `SQLITE_CONSTRAINT_ROWID`.
-    pub const ROWID: i32 = 2579;
-    /// `SQLITE_MISMATCH`, which an `INTEGER PRIMARY KEY` reports for a value
-    /// that is not an integer.
-    pub const MISMATCH: i32 = 20;
-    /// `SQLITE_CONSTRAINT_TRIGGER`, which `RAISE()` reports.
-    pub const TRIGGER: i32 = 1811;
-    /// `SQLITE_CONSTRAINT_FOREIGNKEY`.
-    pub const FOREIGN_KEY: i32 = 787;
-}
+// The constraint codes and the messages that go with them are the binder's,
+// so that this compiler and the vectorised executor's write path report the
+// same text and the same extended code for the same violated constraint. Two
+// copies would agree right up until one of them was corrected.
+pub(crate) use inillucent_sql::dml::{codes, unique_message};
 
 /// How a conflict is reported back to the session.
 ///
@@ -1236,27 +1215,6 @@ impl Compiler {
         ));
         Ok(())
     }
-}
-
-/// Returns the message a unique-index violation reports.
-///
-/// SQLite names every column of the index, comma separated, which is what an
-/// application parses to find out which key collided.
-fn unique_message(table: &TableInfo, index: &IndexInfo) -> String {
-    let names: Vec<String> = index
-        .columns
-        .iter()
-        .filter_map(|key| key.column)
-        .filter_map(|column| table.column(column))
-        .map(|column| {
-            format!(
-                "{}.{}",
-                String::from_utf8_lossy(&table.name),
-                String::from_utf8_lossy(&column.name)
-            )
-        })
-        .collect();
-    format!("UNIQUE constraint failed: {}", names.join(", "))
 }
 
 /// Reports whether an upsert's conflict target names this index.

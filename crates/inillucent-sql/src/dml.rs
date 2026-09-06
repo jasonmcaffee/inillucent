@@ -24,7 +24,7 @@ use crate::bind::{
     no_such_column, refused, unsupported, Binder, BoundExpr, BoundResultColumn, BoundSelect,
     BoundSource,
 };
-use crate::catalog_view::{TableInfo, TableKind, TriggerEventInfo, TriggerInfo};
+use crate::catalog_view::{IndexInfo, TableInfo, TableKind, TriggerEventInfo, TriggerInfo};
 use crate::diagnostic::ParseError;
 use crate::lexer::Span;
 use crate::parser::parse_expression;
@@ -1281,4 +1281,87 @@ pub fn column_rules(table: &TableInfo, position: u16) -> (Affinity, Collation) {
         Collation::from_name(core::str::from_utf8(&column.collation).unwrap_or("BINARY"))
             .unwrap_or(Collation::Binary);
     (column.affinity, collation)
+}
+
+/// The extended result codes a rejected write reports.
+///
+/// The numbers are SQLite's own extended codes. They are written out rather
+/// than derived because an application matches on them, and a code that was
+/// computed from an enum's discriminant would change the day the enum did.
+///
+/// They live here, beside the binder that decides which constraint a statement
+/// can violate, because **both** engines report them: the virtual machine
+/// compiles them into a `HaltError` and the vectorised executor returns them
+/// from its write path. Two copies would agree until one of them was corrected.
+pub mod codes {
+    /// `SQLITE_CONSTRAINT_CHECK`.
+    pub const CHECK: i32 = 275;
+    /// `SQLITE_CONSTRAINT_DATATYPE`, which a STRICT table reports.
+    pub const DATATYPE: i32 = 3091;
+    /// `SQLITE_CONSTRAINT_NOTNULL`.
+    pub const NOT_NULL: i32 = 1299;
+    /// `SQLITE_CONSTRAINT_PRIMARYKEY`.
+    pub const PRIMARY_KEY: i32 = 1555;
+    /// `SQLITE_CONSTRAINT_UNIQUE`.
+    pub const UNIQUE: i32 = 2067;
+    /// `SQLITE_CONSTRAINT_ROWID`.
+    pub const ROWID: i32 = 2579;
+    /// `SQLITE_MISMATCH`, which an `INTEGER PRIMARY KEY` reports for a value
+    /// that is not an integer.
+    pub const MISMATCH: i32 = 20;
+    /// `SQLITE_CONSTRAINT_TRIGGER`, which `RAISE()` reports.
+    pub const TRIGGER: i32 = 1811;
+    /// `SQLITE_CONSTRAINT_FOREIGNKEY`.
+    pub const FOREIGN_KEY: i32 = 787;
+}
+
+/// Returns the message a unique-index violation reports.
+///
+/// SQLite names every column of the index, comma separated, which is what an
+/// application parses to find out which key collided.
+///
+/// @param table - the table the index belongs to
+/// @param index - the index whose key collided
+pub fn unique_message(table: &TableInfo, index: &IndexInfo) -> String {
+    let names: Vec<String> = index
+        .columns
+        .iter()
+        .filter_map(|key| key.column)
+        .filter_map(|column| table.column(column))
+        .map(|column| {
+            format!(
+                "{}.{}",
+                String::from_utf8_lossy(&table.name),
+                String::from_utf8_lossy(&column.name)
+            )
+        })
+        .collect();
+    format!("UNIQUE constraint failed: {}", names.join(", "))
+}
+
+/// Returns the message a duplicate rowid reports, and its extended code.
+///
+/// SQLite names the aliasing column when the table has an `INTEGER PRIMARY
+/// KEY` - and reports `SQLITE_CONSTRAINT_PRIMARYKEY` for it - and names the
+/// hidden `rowid` under `SQLITE_CONSTRAINT_ROWID` when it does not.
+///
+/// @param table - the table whose key collided
+pub fn rowid_message(table: &TableInfo) -> (i32, String) {
+    match table.rowid_alias.and_then(|column| table.column(column)) {
+        Some(column) => (
+            codes::PRIMARY_KEY,
+            format!(
+                "UNIQUE constraint failed: {}.{}",
+                String::from_utf8_lossy(&table.name),
+                String::from_utf8_lossy(&column.name)
+            ),
+        ),
+        None => (
+            codes::ROWID,
+            format!(
+                "UNIQUE constraint failed: {}.rowid",
+                String::from_utf8_lossy(&table.name)
+            ),
+        ),
+    }
 }

@@ -440,6 +440,8 @@ may_depend_on = [
   "inillucent-tree",
   "inillucent-scalar",
   "inillucent-exec",
+  "inillucent-wal",
+  "inillucent-txn",
   "inillucent-sqlite-reader",
 ]
 

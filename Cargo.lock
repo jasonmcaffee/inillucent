@@ -637,9 +637,11 @@ dependencies = [
  "inillucent-storage",
  "inillucent-transaction",
  "inillucent-tree",
+ "inillucent-txn",
  "inillucent-value",
  "inillucent-vfs",
  "inillucent-vm",
+ "inillucent-wal",
 ]
 
 [[package]]

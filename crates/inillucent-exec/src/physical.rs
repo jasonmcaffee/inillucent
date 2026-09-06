@@ -1009,15 +1009,15 @@ fn refuse_unhandled(select: &BoundSelect) -> DbResult<()> {
 /// depends on the bound parameters, so it is computed once and viewed again
 /// rather than rebuilt. When it owned its `types` and `layouts`, re-deriving it
 /// per execution was three allocations that a re-run does not need.
-struct Space<'c> {
+pub(crate) struct Space<'c> {
     /// The stages, in order.
-    stages: &'c [PreparedStage],
+    pub(crate) stages: &'c [PreparedStage],
     /// Each stage's layout.
-    layouts: &'c [SourceLayout],
+    pub(crate) layouts: &'c [SourceLayout],
     /// The static type of every column of the joined row.
-    types: &'c [StaticType],
+    pub(crate) types: &'c [StaticType],
     /// The tree columns the *joined* rows arrive sorted by, when they do.
-    order: &'c [usize],
+    pub(crate) order: &'c [usize],
 }
 
 impl Space<'_> {
@@ -1122,7 +1122,7 @@ pub fn build_prepared<'t>(
 /// a view of it on every execution: none of it depends on the bound parameters,
 /// so re-deriving it per execution would be three allocations spent to arrive
 /// at the same answer.
-struct HeldSpace {
+pub(crate) struct HeldSpace {
     /// Each stage's layout.
     ///
     /// Owned rather than borrowed from the catalog, because a materialised
@@ -1130,18 +1130,18 @@ struct HeldSpace {
     /// catalog to borrow it from - and a `Statement` owns both its `Prepared`
     /// and its space, which a borrow between them would make self-referential.
     /// It is built once per prepare and never per execution.
-    layouts: Vec<SourceLayout>,
+    pub(crate) layouts: Vec<SourceLayout>,
     /// The static type of every column of the joined row.
-    types: Vec<StaticType>,
+    pub(crate) types: Vec<StaticType>,
     /// The tree columns the joined rows arrive sorted by, when they do.
-    order: Vec<usize>,
+    pub(crate) order: Vec<usize>,
 }
 
 impl HeldSpace {
     /// Returns a view of this space over a statement's stages.
     ///
     /// @param stages - the prepared stages, outermost first
-    fn view<'a>(&'a self, stages: &'a [PreparedStage]) -> Space<'a> {
+    pub(crate) fn view<'a>(&'a self, stages: &'a [PreparedStage]) -> Space<'a> {
         Space {
             stages,
             layouts: &self.layouts,
@@ -2007,6 +2007,7 @@ fn span_bounds(
             low,
             high,
             columns,
+            descending,
             ..
         } => {
             let mut prefix = Vec::with_capacity(equalities.len());
@@ -2020,6 +2021,26 @@ fn span_bounds(
             }
             // The range is on the column after the equality prefix.
             let range_affinity = index_affinity(table, columns, equalities.len());
+            // **The planner's bounds are in the index's order; the tree's are in
+            // value order.** SQLite stores a `DESC` index column descending, so
+            // the planner turns `WHERE score >= 20` into a *low* bound in index
+            // order - and it says so, in `descending`. The new engine's trees
+            // have no descending column: the import sorts every entry into the
+            // tree's own ascending key order. So a bound on a descending column
+            // arrives inverted and has to be turned back.
+            //
+            // Only the ranged column matters. Every column before it is pinned
+            // by an equality, and an equality is the same test whichever
+            // direction the column is stored in.
+            //
+            // Ignoring this was a **wrong answer, not a refusal**: over
+            // `(score DESC, email)`, `WHERE score >= 20` scanned `(-inf, 20]`
+            // and counted three rows where SQLite counted four. Nothing in the
+            // read corpus asked a range question of a descending index, so it
+            // survived Phase 2 and was found by the write path's own index
+            // maintenance test.
+            let flipped = descending.get(equalities.len()).copied().unwrap_or(false);
+            let (low, high) = if flipped { (high, low) } else { (low, high) };
             let (low_value, low_inclusive) =
                 bound_value(low.as_ref(), space, params, range_affinity)?;
             let (high_value, high_inclusive) =
@@ -2374,7 +2395,11 @@ enum Frame<'a> {
 /// @param expr - the bound expression
 /// @param space - the joined column space
 /// @param params - the bound parameters
-fn translate_scan(expr: &BoundExpr, space: &Space<'_>, params: &Params) -> DbResult<Expr> {
+pub(crate) fn translate_scan(
+    expr: &BoundExpr,
+    space: &Space<'_>,
+    params: &Params,
+) -> DbResult<Expr> {
     translate(expr, space, params, Frame::Scan)
 }
 
