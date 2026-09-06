@@ -179,7 +179,7 @@ pub struct ImportedDatabase {
     ///
     /// Keyed by the statement text, which is what a caller re-issues. Behind an
     /// `Rc` so an entry can be held across the `&mut self` a write needs.
-    statements: std::cell::RefCell<HashMap<(String, u32), std::rc::Rc<Cached>>>,
+    statements: std::cell::RefCell<HashMap<u32, HashMap<String, std::rc::Rc<Cached>>>>,
     /// The transaction every statement joins, when one has been opened.
     ///
     /// `None` is autocommit: each statement is its own transaction and pays for
@@ -250,6 +250,20 @@ pub struct ImportedDatabase {
     /// rather than a depth because there is exactly one sweep at a time by
     /// construction: it runs after a statement, at the outermost level.
     settling: std::cell::Cell<bool>,
+    /// One parse arena, kept and cleared rather than made per statement.
+    ///
+    /// **Because a statement's parse is mostly trips to the allocator.** Every
+    /// vector in an `Ast` is empty at construction and grows on its first push,
+    /// so `SELECT 1` took about half a dozen of them - 270 ns of a 1,337 ns
+    /// prepare - to build an arena that is thrown away a microsecond later. A
+    /// parser handed a cleared arena pushes into capacity that is already there.
+    ///
+    /// It is taken out on the way in and put back on the way out, so a nested
+    /// compile - a trigger body, a foreign-key check - finds the cell empty and
+    /// makes its own rather than sharing the outer statement's. Sharing it
+    /// would be the inner parse clearing the arena the outer statement is still
+    /// holding nodes in.
+    scratch_ast: std::cell::RefCell<Option<inillucent_sql::ast::Ast>>,
     /// Which planner optimizations are on.
     ///
     /// Per connection rather than per statement, because a lever is a question
@@ -775,6 +789,7 @@ impl ImportedDatabase {
             foreign_keys: false,
             defer_foreign_keys: false,
             settling: std::cell::Cell::new(false),
+            scratch_ast: std::cell::RefCell::new(None),
             levers: Levers::default(),
             collations: Vec::new(),
             registry: modules(),
@@ -1205,6 +1220,7 @@ impl ImportedDatabase {
             foreign_keys: false,
             defer_foreign_keys: false,
             settling: std::cell::Cell::new(false),
+            scratch_ast: std::cell::RefCell::new(None),
             levers: Levers::default(),
             collations: Vec::new(),
             registry: modules(),
@@ -1381,16 +1397,10 @@ impl ImportedDatabase {
     /// - and printing the struct around it made every refusal look like a bug
     /// report about the engine rather than a sentence about the statement.
     pub fn plan(&self, sql: &str) -> DbResult<PhysicalPlan> {
-        let parsed = parse_next_statement(sql.as_bytes(), 0, &self.limits).map_err(refused)?;
-        let authorizer = AllowAll;
-        let externals = self.external_functions();
-        let mut binder = Binder::new(&self.catalog, &parsed.ast, &authorizer)
-            .with_source(sql.as_bytes())
-            .with_functions(&externals)
-            .with_collations(&self.collations)
-            .with_foreign_keys(self.foreign_keys, self.defer_foreign_keys);
-        let bound = binder.bind_statement(&parsed.statement).map_err(refused)?;
-        match bound {
+        let parsed = self.parse_once(sql)?;
+        let bound = self.bind_parsed(sql, &parsed);
+        self.recycle(parsed);
+        match bound? {
             BoundStatement::Select(select) => Ok(plan_select_with(*select, self.levers)),
             _ => Err(misuse(format!("{sql} is not a read-only statement"))),
         }
@@ -2017,7 +2027,28 @@ impl ImportedDatabase {
     ///
     /// @param sql - the statement text
     pub fn bind(&self, sql: &str) -> DbResult<BoundStatement> {
-        let parsed = parse_next_statement(sql.as_bytes(), 0, &self.limits).map_err(refused)?;
+        let parsed = self.parse_once(sql)?;
+        let bound = self.bind_parsed(sql, &parsed);
+        self.recycle(parsed);
+        bound
+    }
+
+    /// Binds a statement somebody has already parsed.
+    ///
+    /// **So that a compile parses once.** `compile` has to look at the parse to
+    /// decide whether the statement is an `EXPLAIN` - the binder's job is the
+    /// statement being explained, not the explaining - and it then called
+    /// `bind`, which parsed the same text a second time. On `SELECT 1` that was
+    /// 270 ns of a 1,145 ns compile spent producing an arena that was thrown
+    /// away, and `prepare.trivial` pays a compile every iteration.
+    ///
+    /// @param sql - the statement text, for diagnostics and spans
+    /// @param parsed - the parse to bind
+    fn bind_parsed(
+        &self,
+        sql: &str,
+        parsed: &inillucent_sql::parser::ParsedStatement,
+    ) -> DbResult<BoundStatement> {
         let authorizer = AllowAll;
         let externals = self.external_functions();
         let mut binder = Binder::new(&self.catalog, &parsed.ast, &authorizer)
@@ -2258,6 +2289,32 @@ impl ImportedDatabase {
         ))
     }
 
+    /// Parses one statement into the connection's own arena, and puts it back.
+    ///
+    /// **One arena, borrowed for the length of a compile.** The arena is taken
+    /// out of the cell, filled, and the *previous* one is returned to the cell
+    /// once the caller has finished with the parse - which is what
+    /// [`ImportedDatabase::recycle`] is for. A caller that forgets to recycle
+    /// loses the capacity and nothing else: the next parse makes a fresh arena.
+    ///
+    /// @param sql - the statement text
+    fn parse_once(&self, sql: &str) -> DbResult<inillucent_sql::parser::ParsedStatement> {
+        let arena = self
+            .scratch_ast
+            .borrow_mut()
+            .take()
+            .unwrap_or_else(inillucent_sql::ast::Ast::new);
+        inillucent_sql::parser::parse_next_statement_into(sql.as_bytes(), 0, &self.limits, arena)
+            .map_err(refused)
+    }
+
+    /// Puts a finished parse's arena back for the next statement to fill.
+    ///
+    /// @param parsed - the parse nothing holds a reference into any more
+    fn recycle(&self, parsed: inillucent_sql::parser::ParsedStatement) {
+        *self.scratch_ast.borrow_mut() = Some(parsed.ast);
+    }
+
     /// Returns what the binder needs to know about the registered functions.
     ///
     /// The name, the arity and whether it reduces a group - and nothing else.
@@ -2377,7 +2434,7 @@ impl ImportedDatabase {
     /// The plan cache's size, which is what a test asserting that a
     /// registration invalidated it asks about.
     pub fn cached_plan_count(&self) -> usize {
-        self.statements.borrow().len()
+        self.statements.borrow().values().map(HashMap::len).sum()
     }
 
     /// Turns off one or more planner optimizations for this connection.
@@ -2662,24 +2719,37 @@ impl ImportedDatabase {
     ///
     /// @param sql - the statement text
     fn compiled(&self, sql: &str) -> DbResult<std::rc::Rc<Cached>> {
-        // **Keyed by the levers as well as the text.** A plan built with the
-        // covering-index rule on is that rule's answer, so the same SQL under
-        // two settings is two entries rather than one that the second setting
-        // silently inherits - which is what makes an A/B measurement of a lever
-        // trustworthy on a connection that has already run the other arm.
-        let key = (sql.to_string(), self.levers.disabled());
         if !self.levers.has(Levers::PLAN_CACHE) {
             // The lever is off, so nothing is held and every execution
             // compiles. It exists so a measurement can price the compile.
             return Ok(std::rc::Rc::new(self.compile(sql)?));
         }
-        if let Some(held) = self.statements.borrow().get(&key) {
-            return Ok(std::rc::Rc::clone(held));
+        // **Keyed by the levers as well as the text, and nested rather than
+        // paired.** A plan built with the covering-index rule on is that rule's
+        // answer, so the same SQL under two settings is two entries rather than
+        // one the second setting silently inherits - which is what makes an A/B
+        // measurement of a lever trustworthy on a connection that has already
+        // run the other arm.
+        //
+        // The nesting is what keeps the *hit* free. A `(String, u32)` key has
+        // to be built before the map can be asked, so every lookup allocated a
+        // copy of the SQL - about 90 ns on a 1,163 ns compile, and paid again
+        // on every execution of an already-cached statement, which is the one
+        // path a plan cache exists to make cheap.
+        let held = self.statements.borrow();
+        if let Some(found) = held
+            .get(&self.levers.disabled())
+            .and_then(|under| under.get(sql))
+        {
+            return Ok(std::rc::Rc::clone(found));
         }
+        drop(held);
         let compiled = std::rc::Rc::new(self.compile(sql)?);
         self.statements
             .borrow_mut()
-            .insert(key, std::rc::Rc::clone(&compiled));
+            .entry(self.levers.disabled())
+            .or_default()
+            .insert(sql.to_string(), std::rc::Rc::clone(&compiled));
         Ok(compiled)
     }
 
@@ -2764,11 +2834,13 @@ impl ImportedDatabase {
         // this a level up, where a VDBE program was available to render; here
         // there is no program, and that difference is the whole of the
         // `query_plan` split below.
-        let parsed = parse_next_statement(sql.as_bytes(), 0, &self.limits).map_err(refused)?;
+        let parsed = self.parse_once(sql)?;
         if let inillucent_sql::ast::Statement::Explain { query_plan, inner } = &parsed.statement {
             return self.compile_explain(sql, *query_plan, inner, &parsed);
         }
-        match self.bind(sql)? {
+        let bound = self.bind_parsed(sql, &parsed);
+        self.recycle(parsed);
+        match bound? {
             BoundStatement::Select(select) => {
                 let plan = plan_select_with(*select, self.levers);
                 let prepared = physical::prepare_any(&plan, self)?;
