@@ -433,11 +433,13 @@ mod tests {
                     AggregateSpec {
                         kind: AggregateKind::CountStar,
                         argument: None,
+                        extra: Vec::new(),
                         distinct: None,
                     },
                     AggregateSpec {
                         kind: AggregateKind::Sum,
                         argument: Some(compile(&Expr::Column(1), &[StaticType::Int; 2]).unwrap()),
+                        extra: Vec::new(),
                         distinct: None,
                     },
                 ],

@@ -20,16 +20,35 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use inillucent::extensions::FunctionFlags;
-use inillucent::{Connection, Database, DbError, PrimaryCode, Value};
+use inillucent_base::error::{DbError, PrimaryCode};
+use inillucent_compat::facade::{Connection, Database};
+use inillucent_ext::registry::FunctionFlags;
+use inillucent_value::Value;
 
-/// Opens an in-memory database with one connection.
+/// Returns a database file of this test's own, under the gitignored root.
+///
+/// **A file rather than `:memory:`, which the old facade accepted.** The new
+/// engine opens a path and has no in-memory VFS behind `open` yet; nothing in
+/// this file asserts anything about *where* the database lives, so the fixture
+/// moves and every assertion stays exactly as it was. A serial keeps two tests
+/// running in parallel from colliding on one file.
+fn scratch() -> std::path::PathBuf {
+    let root = inillucent_compat::workspace_root().join("_agent_output/task-1838/hostile");
+    let _ = std::fs::create_dir_all(&root);
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = root.join(format!("{}-{serial}.rdb", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    path
+}
+
+/// Opens a database of this test's own, with one connection.
 ///
 /// The database is leaked so the connection can be returned on its own. These
 /// are short tests and there is exactly one database per test; a lifetime here
 /// would be carried through every helper for nothing.
 fn connect() -> Connection {
-    let database = Database::open(":memory:").expect("opens");
+    let database = Database::open(scratch()).expect("opens");
     Box::leak(Box::new(database)).connect().expect("connects")
 }
 

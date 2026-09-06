@@ -179,7 +179,7 @@ pub struct ImportedDatabase {
     ///
     /// Keyed by the statement text, which is what a caller re-issues. Behind an
     /// `Rc` so an entry can be held across the `&mut self` a write needs.
-    statements: std::cell::RefCell<HashMap<String, std::rc::Rc<Cached>>>,
+    statements: std::cell::RefCell<HashMap<(String, u32), std::rc::Rc<Cached>>>,
     /// The transaction every statement joins, when one has been opened.
     ///
     /// `None` is autocommit: each statement is its own transaction and pays for
@@ -250,6 +250,22 @@ pub struct ImportedDatabase {
     /// rather than a depth because there is exactly one sweep at a time by
     /// construction: it runs after a statement, at the outermost level.
     settling: std::cell::Cell<bool>,
+    /// Which planner optimizations are on.
+    ///
+    /// Per connection rather than per statement, because a lever is a question
+    /// about the *planner* - "is the answer the same with this off" - and a
+    /// measurement that varied it per statement would be comparing two plans of
+    /// two different queries.
+    levers: Levers,
+    /// The collations an application registered, by upper-cased name.
+    ///
+    /// The comparator itself lives in `inillucent-value`'s custom table, which
+    /// is process-wide because a `Collation` is a `Copy` handle carried through
+    /// every key and every comparison. What is per-connection is the *name*:
+    /// two connections may register different comparators under `MYCOLL`, and
+    /// the binder resolves the name against this list before it falls back to
+    /// the built-ins.
+    collations: Vec<(String, Collation)>,
     /// The modules this connection knows, which is the built-in set.
     ///
     /// Held rather than looked up per statement because a module is registered
@@ -299,6 +315,28 @@ impl TreeCatalog for ImportedDatabase {
         needed: &inillucent_sql::bind::ColumnUse,
     ) -> DbResult<Option<Vec<Vec<OwnedDatum>>>> {
         self.rows_of_module(table, path, params, needed)
+    }
+
+    fn user_scalar(&self, name: &[u8], argc: usize) -> Option<inillucent_exec::expr::ScalarBody> {
+        match self.user_function(name, argc)?.body.clone() {
+            inillucent_ext::registry::UserBody::Scalar(body) => {
+                Some(inillucent_exec::expr::ScalarBody(body))
+            }
+            inillucent_ext::registry::UserBody::Aggregate(_) => None,
+        }
+    }
+
+    fn user_aggregate(
+        &self,
+        name: &[u8],
+        argc: usize,
+    ) -> Option<inillucent_exec::expr::AggregateBody> {
+        match self.user_function(name, argc)?.body.clone() {
+            inillucent_ext::registry::UserBody::Aggregate(body) => {
+                Some(inillucent_exec::expr::AggregateBody(body))
+            }
+            inillucent_ext::registry::UserBody::Scalar(_) => None,
+        }
     }
 }
 
@@ -737,6 +775,8 @@ impl ImportedDatabase {
             foreign_keys: false,
             defer_foreign_keys: false,
             settling: std::cell::Cell::new(false),
+            levers: Levers::default(),
+            collations: Vec::new(),
             registry: modules(),
             virtual_tables: HashMap::new(),
             index_stages: std::cell::Cell::new((0, 0, 0, 0)),
@@ -1165,6 +1205,8 @@ impl ImportedDatabase {
             foreign_keys: false,
             defer_foreign_keys: false,
             settling: std::cell::Cell::new(false),
+            levers: Levers::default(),
+            collations: Vec::new(),
             registry: modules(),
             virtual_tables: HashMap::new(),
             index_stages: std::cell::Cell::new((0, 0, 0, 0)),
@@ -1341,12 +1383,15 @@ impl ImportedDatabase {
     pub fn plan(&self, sql: &str) -> DbResult<PhysicalPlan> {
         let parsed = parse_next_statement(sql.as_bytes(), 0, &self.limits).map_err(refused)?;
         let authorizer = AllowAll;
+        let externals = self.external_functions();
         let mut binder = Binder::new(&self.catalog, &parsed.ast, &authorizer)
             .with_source(sql.as_bytes())
+            .with_functions(&externals)
+            .with_collations(&self.collations)
             .with_foreign_keys(self.foreign_keys, self.defer_foreign_keys);
         let bound = binder.bind_statement(&parsed.statement).map_err(refused)?;
         match bound {
-            BoundStatement::Select(select) => Ok(plan_select_with(*select, Levers::default())),
+            BoundStatement::Select(select) => Ok(plan_select_with(*select, self.levers)),
             _ => Err(misuse(format!("{sql} is not a read-only statement"))),
         }
     }
@@ -1974,8 +2019,11 @@ impl ImportedDatabase {
     pub fn bind(&self, sql: &str) -> DbResult<BoundStatement> {
         let parsed = parse_next_statement(sql.as_bytes(), 0, &self.limits).map_err(refused)?;
         let authorizer = AllowAll;
+        let externals = self.external_functions();
         let mut binder = Binder::new(&self.catalog, &parsed.ast, &authorizer)
             .with_source(sql.as_bytes())
+            .with_functions(&externals)
+            .with_collations(&self.collations)
             .with_foreign_keys(self.foreign_keys, self.defer_foreign_keys);
         binder.bind_statement(&parsed.statement).map_err(refused)
     }
@@ -2208,6 +2256,162 @@ impl ImportedDatabase {
         Err(misuse(
             "a foreign key's action did not settle; the schema may have a cycle that cannot resolve",
         ))
+    }
+
+    /// Returns what the binder needs to know about the registered functions.
+    ///
+    /// The name, the arity and whether it reduces a group - and nothing else.
+    /// A binder that held the *body* would be a bound tree that depends on who
+    /// was holding it, which is why the machinery looks the body up when it
+    /// runs rather than carrying it.
+    fn external_functions(&self) -> Vec<inillucent_sql::function::ExternalFunction> {
+        self.registry
+            .functions()
+            .iter()
+            .map(|held| inillucent_sql::function::ExternalFunction {
+                name: held.name.to_ascii_lowercase().into_bytes(),
+                arity: held.arity,
+                aggregate: held.is_aggregate(),
+            })
+            .collect()
+    }
+
+    /// Registers a scalar an application defined, replacing one of the same
+    /// name and arity.
+    ///
+    /// @param name - the name SQL calls it by
+    /// @param arity - how many arguments it takes, or -1 for any number
+    /// @param flags - what the function promises about itself
+    /// @param body - what it does
+    pub fn create_scalar_function(
+        &mut self,
+        name: &str,
+        arity: i32,
+        flags: inillucent_ext::registry::FunctionFlags,
+        body: inillucent_ext::registry::ScalarBody,
+    ) -> DbResult<()> {
+        self.register_function(inillucent_ext::registry::UserFunction {
+            name: name.to_string(),
+            arity,
+            flags,
+            body: inillucent_ext::registry::UserBody::Scalar(body),
+        })
+    }
+
+    /// Registers an aggregate an application defined.
+    ///
+    /// @param name - the name SQL calls it by
+    /// @param arity - how many arguments it takes, or -1 for any number
+    /// @param flags - what the function promises about itself
+    /// @param body - what it does with a whole group
+    pub fn create_aggregate_function(
+        &mut self,
+        name: &str,
+        arity: i32,
+        flags: inillucent_ext::registry::FunctionFlags,
+        body: inillucent_ext::registry::AggregateBody,
+    ) -> DbResult<()> {
+        self.register_function(inillucent_ext::registry::UserFunction {
+            name: name.to_string(),
+            arity,
+            flags,
+            body: inillucent_ext::registry::UserBody::Aggregate(body),
+        })
+    }
+
+    /// Puts one function into the registry and forgets the compiled statements.
+    ///
+    /// **The cache has to go.** Which function a name resolves to is decided
+    /// when a statement is bound - a registration can shadow a built-in - so a
+    /// statement compiled before the registration would keep calling the
+    /// built-in, and one compiled before a *removal* would keep calling code
+    /// the application has taken back.
+    ///
+    /// @param function - the registration
+    fn register_function(
+        &mut self,
+        function: inillucent_ext::registry::UserFunction,
+    ) -> DbResult<()> {
+        self.registry.register_function(function);
+        self.forget_compiled_statements();
+        Ok(())
+    }
+
+    /// Removes a function by name and arity, reporting whether one went.
+    ///
+    /// @param name - the name it was registered under
+    /// @param arity - the arity it was registered for
+    pub fn remove_function(&mut self, name: &str, arity: i32) -> bool {
+        let removed = self.registry.unregister_function(name, arity);
+        if removed {
+            self.forget_compiled_statements();
+        }
+        removed
+    }
+
+    /// Registers a collating sequence an application defined.
+    ///
+    /// **The comparator is process-wide and the name is not.** A `Collation` is
+    /// a `Copy` handle carried through every key and every comparison, so the
+    /// body lives in `inillucent-value`'s table; what this connection holds is
+    /// the name it resolves to that handle by.
+    ///
+    /// @param name - the name `COLLATE` calls it by
+    /// @param comparator - how it orders two values
+    pub fn create_collation(
+        &mut self,
+        name: &str,
+        comparator: inillucent_value::collation::Comparator,
+    ) -> DbResult<()> {
+        let collation = inillucent_value::collation::register_custom(name, comparator);
+        let folded = name.to_ascii_uppercase();
+        self.collations.retain(|(existing, _)| *existing != folded);
+        self.collations.push((folded, collation));
+        // A comparison compiled under BINARY would keep comparing under BINARY.
+        self.forget_compiled_statements();
+        Ok(())
+    }
+
+    /// Returns how many statements are compiled and held.
+    ///
+    /// The plan cache's size, which is what a test asserting that a
+    /// registration invalidated it asks about.
+    pub fn cached_plan_count(&self) -> usize {
+        self.statements.borrow().len()
+    }
+
+    /// Turns off one or more planner optimizations for this connection.
+    ///
+    /// **Every compiled statement goes with it.** A plan built under a lever is
+    /// that lever's answer, and re-running it after the lever changed would
+    /// measure the old choice while reporting the new one - which is the whole
+    /// thing a lever exists to compare.
+    ///
+    /// @param mask - the levers to switch off
+    pub fn disable_optimizations(&mut self, mask: u32) {
+        // **The cache is keyed by the levers rather than cleared by them.** A
+        // plan built under a lever is that lever's answer, so the same SQL under
+        // two settings is two entries; clearing would make the second arm's
+        // first execution pay a compile the first arm's did not, and that
+        // difference is the size of the thing such a measurement looks for.
+        self.levers = Levers::without(self.levers.disabled() | mask);
+    }
+
+    /// Returns which planner optimizations this connection has on.
+    pub fn levers(&self) -> Levers {
+        self.levers
+    }
+
+    /// Returns the body of one registered function, for the machinery.
+    ///
+    /// @param name - the folded name the call used
+    /// @param argc - how many arguments the call passed
+    pub(crate) fn user_function(
+        &self,
+        name: &[u8],
+        argc: usize,
+    ) -> Option<std::sync::Arc<inillucent_ext::registry::UserFunction>> {
+        self.registry.function(name, argc)
     }
 
     /// Checks every deferred foreign key, and reports the first violation.
@@ -2458,13 +2662,24 @@ impl ImportedDatabase {
     ///
     /// @param sql - the statement text
     fn compiled(&self, sql: &str) -> DbResult<std::rc::Rc<Cached>> {
-        if let Some(held) = self.statements.borrow().get(sql) {
+        // **Keyed by the levers as well as the text.** A plan built with the
+        // covering-index rule on is that rule's answer, so the same SQL under
+        // two settings is two entries rather than one that the second setting
+        // silently inherits - which is what makes an A/B measurement of a lever
+        // trustworthy on a connection that has already run the other arm.
+        let key = (sql.to_string(), self.levers.disabled());
+        if !self.levers.has(Levers::PLAN_CACHE) {
+            // The lever is off, so nothing is held and every execution
+            // compiles. It exists so a measurement can price the compile.
+            return Ok(std::rc::Rc::new(self.compile(sql)?));
+        }
+        if let Some(held) = self.statements.borrow().get(&key) {
             return Ok(std::rc::Rc::clone(held));
         }
         let compiled = std::rc::Rc::new(self.compile(sql)?);
         self.statements
             .borrow_mut()
-            .insert(sql.to_string(), std::rc::Rc::clone(&compiled));
+            .insert(key, std::rc::Rc::clone(&compiled));
         Ok(compiled)
     }
 
@@ -2501,14 +2716,15 @@ impl ImportedDatabase {
             )));
         }
         let authorizer = AllowAll;
+        let externals = self.external_functions();
         let mut binder = Binder::new(&self.catalog, &parsed.ast, &authorizer)
             .with_source(sql.as_bytes())
+            .with_functions(&externals)
+            .with_collations(&self.collations)
             .with_foreign_keys(self.foreign_keys, self.defer_foreign_keys);
         let bound = binder.bind_statement(inner).map_err(refused)?;
         let lines = match bound {
-            BoundStatement::Select(select) => {
-                plan_select_with(*select, Levers::default()).describe()
-            }
+            BoundStatement::Select(select) => plan_select_with(*select, self.levers).describe(),
             // A write's plan is the query that finds the rows it changes, and
             // that is the thing a reader is asking about - "did my DELETE use
             // the index" is the same question as "did the search use it".
@@ -2554,7 +2770,7 @@ impl ImportedDatabase {
         }
         match self.bind(sql)? {
             BoundStatement::Select(select) => {
-                let plan = plan_select_with(*select, Levers::default());
+                let plan = plan_select_with(*select, self.levers);
                 let prepared = physical::prepare_any(&plan, self)?;
                 Ok(Cached::Select(Box::new(plan), Box::new(prepared)))
             }
@@ -2570,7 +2786,7 @@ impl ImportedDatabase {
             BoundStatement::Insert(statement) => {
                 let source = match &statement.source {
                     inillucent_sql::dml::BoundInsertSource::Select(select) => {
-                        let plan = plan_select_with((**select).clone(), Levers::default());
+                        let plan = plan_select_with((**select).clone(), self.levers);
                         let prepared = physical::prepare_any(&plan, self)?;
                         Some((Box::new(plan), Box::new(prepared)))
                     }
@@ -2613,7 +2829,7 @@ impl ImportedDatabase {
                     statement.limit.as_ref(),
                     statement.offset.as_ref(),
                 );
-                let plan = plan_select_with(select, Levers::default());
+                let plan = plan_select_with(select, self.levers);
                 let prepared = physical::prepare_any(&plan, self)?;
                 Ok(Cached::VirtualDelete(
                     statement,
@@ -2669,7 +2885,7 @@ impl ImportedDatabase {
             .get(&table.root)
             .ok_or_else(|| misuse("no layout imported for the table being written"))?;
         let select = dml::keys_query(table, source, filter, limit, offset, layout)?;
-        let plan = plan_select_with(select, Levers::default());
+        let plan = plan_select_with(select, self.levers);
         let prepared = physical::prepare_any(&plan, self)?;
         Ok((plan, prepared))
     }

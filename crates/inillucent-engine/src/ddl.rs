@@ -1184,6 +1184,29 @@ impl ImportedDatabase {
         Ok(Outcome::empty())
     }
 
+    /// Returns the value a column's `DEFAULT` has for a row that predates it.
+    ///
+    /// It is evaluated by *running* it - `SELECT <the default text>` through
+    /// the ordinary compile-and-execute path - rather than by a second
+    /// expression evaluator written for the DDL path. `DEFAULT (1 + 1)` and
+    /// `DEFAULT 'x' || 'y'` are expressions, and an evaluator that handled only
+    /// literals would fill NULL for those while filling the right value for the
+    /// simple ones, which is the shape of bug that hides.
+    ///
+    /// A default that cannot be evaluated - one calling a function this engine
+    /// does not have - reports itself rather than silently becoming NULL.
+    ///
+    /// @param default_sql - the `DEFAULT` text as the declaration wrote it
+    fn constant_default(&mut self, default_sql: &[u8]) -> DbResult<OwnedDatum> {
+        let text = String::from_utf8_lossy(default_sql).into_owned();
+        let rows = self.query_internally(&format!("SELECT {text}"))?;
+        Ok(rows
+            .first()
+            .and_then(|row| row.first())
+            .cloned()
+            .unwrap_or(OwnedDatum::Null))
+    }
+
     /// Rebuilds every `TableInfo` from the catalog rows.
     ///
     /// After an `ALTER`, because the stored text is what changed and the derived
@@ -1256,20 +1279,36 @@ impl ImportedDatabase {
             (columns, 1, layout)
         };
         // Each new tree column is filled from the old tree column that held the
-        // same *declared* column, and from nothing when the declaration is new.
-        let mut from: Vec<Option<usize>> = vec![None; layout.width];
+        // same *declared* column. A column the declaration did not have takes
+        // its `DEFAULT`, which is SQLite's rule and is what makes
+        // `ALTER TABLE t ADD COLUMN c INTEGER DEFAULT 9` answer 9 for the rows
+        // that were already there. Filling NULL instead was a wrong answer
+        // rather than a refusal, and only visible to a statement that read the
+        // new column on an old row.
+        let mut from: Vec<Fill> = vec![Fill::Absent; layout.width];
         for (declared, slot) in layout.slots.iter().enumerate() {
             let Some(slot) = slot else { continue };
-            let Some(Some(source)) = old_layout.slots.get(declared) else {
+            if let Some(Some(source)) = old_layout.slots.get(declared) {
+                if let Some(cell) = from.get_mut(*slot) {
+                    *cell = Fill::From(*source);
+                }
+                continue;
+            }
+            let Some(default) = info
+                .columns
+                .get(declared)
+                .and_then(|column| column.default_sql.clone())
+            else {
                 continue;
             };
+            let value = self.constant_default(&default)?;
             if let Some(cell) = from.get_mut(*slot) {
-                *cell = Some(*source);
+                *cell = Fill::Constant(value);
             }
         }
         if let (Some(new_rowid), Some(old_rowid)) = (layout.rowid, old_layout.rowid) {
             if let Some(cell) = from.get_mut(new_rowid) {
-                *cell = Some(old_rowid);
+                *cell = Fill::From(old_rowid);
             }
         }
         let rows: Vec<Vec<OwnedDatum>> = old_rows
@@ -1277,8 +1316,9 @@ impl ImportedDatabase {
             .map(|row| {
                 from.iter()
                     .map(|source| match source {
-                        Some(at) => row.get(*at).cloned().unwrap_or(OwnedDatum::Null),
-                        None => OwnedDatum::Null,
+                        Fill::From(at) => row.get(*at).cloned().unwrap_or(OwnedDatum::Null),
+                        Fill::Constant(value) => value.clone(),
+                        Fill::Absent => OwnedDatum::Null,
                     })
                     .collect()
             })
@@ -1419,4 +1459,18 @@ impl Outcome {
             changes: Changes::default(),
         }
     }
+}
+
+/// Where one column of a rebuilt tree gets its values.
+///
+/// Three cases and not two: a column carried across, a column the declaration
+/// has just gained with a `DEFAULT`, and one it has gained without.
+#[derive(Clone, Debug)]
+enum Fill {
+    /// The old tree column that held the same declared column.
+    From(usize),
+    /// The `DEFAULT` a new column declared.
+    Constant(OwnedDatum),
+    /// Nothing: a new column with no default, which is NULL.
+    Absent,
 }

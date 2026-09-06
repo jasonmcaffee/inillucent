@@ -51,6 +51,14 @@ pub enum AggregateKind {
     Maximum,
     /// `group_concat(x, sep)`.
     GroupConcat(String),
+    /// An aggregate an application registered.
+    ///
+    /// It is handed every row of the group, in order, rather than a running
+    /// accumulator. That is deliberate: an implementation written in C keeps
+    /// its state in memory this engine must not look inside, and driving its
+    /// step and final at the end of the group is how that state stays entirely
+    /// on the other side of the boundary.
+    External(crate::expr::AggregateBody),
 }
 
 /// The modulus a large integer is split on before it joins a double sum.
@@ -104,6 +112,10 @@ pub struct Accumulator {
     extreme: Option<OwnedDatum>,
     /// The joined text, for `group_concat`.
     joined: String,
+    /// Every row of the group, for a registered aggregate and nothing else.
+    ///
+    /// Empty for every built-in, which is what makes them pay nothing for it.
+    rows: Vec<Vec<inillucent_value::value::Value<'static>>>,
 }
 
 impl Accumulator {
@@ -121,6 +133,7 @@ impl Accumulator {
             is_real: false,
             extreme: None,
             joined: String::new(),
+            rows: Vec::new(),
         }
     }
 
@@ -147,7 +160,20 @@ impl Accumulator {
     /// asks rather than the caller remembering, because the caller is three
     /// operators and the accumulator is one.
     pub fn takes_dense(&self) -> bool {
-        self.seen.is_none()
+        self.seen.is_none() && !matches!(self.kind, AggregateKind::External(_))
+    }
+
+    /// Folds one whole row of arguments in, for a registered aggregate.
+    ///
+    /// **The rows are kept, not reduced.** A registered aggregate is handed the
+    /// whole group at the end rather than a running accumulator, because an
+    /// implementation written in C keeps its state in memory this engine must
+    /// not look inside - see [`AggregateKind::External`].
+    ///
+    /// @param values - one row's arguments, in written order
+    pub fn push_values(&mut self, values: Vec<inillucent_value::value::Value<'static>>) {
+        self.count = self.count.saturating_add(1);
+        self.rows.push(values);
     }
 
     /// Folds one value in.
@@ -171,6 +197,10 @@ impl Accumulator {
         self.count = self.count.saturating_add(1);
         match &self.kind {
             AggregateKind::CountStar | AggregateKind::Count => {}
+            // A registered aggregate of one argument reaches here through the
+            // ordinary single-value path; more than one goes through
+            // `push_values`. Either way the row is kept rather than reduced.
+            AggregateKind::External(_) => self.rows.push(vec![crate::scalar::to_value(*value)]),
             AggregateKind::Sum | AggregateKind::Total | AggregateKind::Average => {
                 self.push_numeric(value)
             }
@@ -195,6 +225,10 @@ impl Accumulator {
     pub fn push_dense_ints(&mut self, bytes: &[u8]) {
         let rows = bytes.len() / 8;
         match self.kind {
+            // Unreachable: `takes_dense` is false for a registered aggregate,
+            // so no operator offers it a mini-column. Stated rather than folded
+            // into another arm, so a kind added later is a compilation error.
+            AggregateKind::External(_) => {}
             AggregateKind::CountStar | AggregateKind::Count => {
                 self.count = self.count.saturating_add(rows as i64);
             }
@@ -269,7 +303,7 @@ impl Accumulator {
     /// Every kind supports it; the method exists so a caller reads a name
     /// rather than a comment when it decides which path to take.
     pub fn takes_dense_ints(&self) -> bool {
-        true
+        !matches!(self.kind, AggregateKind::External(_))
     }
 
     /// Folds one numeric value into the running total.
@@ -383,6 +417,8 @@ impl Accumulator {
     pub fn finish(&self) -> DbResult<OwnedDatum> {
         Ok(match &self.kind {
             AggregateKind::CountStar | AggregateKind::Count => OwnedDatum::Int(self.count),
+            // The whole group at once, which is what the boundary promises.
+            AggregateKind::External(body) => crate::scalar::from_value((body.0)(&self.rows)?),
             AggregateKind::Sum => {
                 if self.count == 0 {
                     OwnedDatum::Null

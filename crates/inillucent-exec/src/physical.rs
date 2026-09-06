@@ -183,6 +183,30 @@ pub trait TreeCatalog {
         Vec::new()
     }
 
+    /// Returns the body of a scalar an application registered, when there is
+    /// one for this name and this many arguments.
+    ///
+    /// **The body, not a name to look up later.** A compiled chain that
+    /// resolved per row would answer a registration made after it was compiled;
+    /// registering or removing a function throws the compiled statements away,
+    /// which is what makes resolving once correct.
+    ///
+    /// @param name - the folded name the call used
+    /// @param argc - how many arguments the call passed
+    fn user_scalar(&self, name: &[u8], argc: usize) -> Option<crate::expr::ScalarBody> {
+        let _ = (name, argc);
+        None
+    }
+
+    /// Returns the body of an aggregate an application registered.
+    ///
+    /// @param name - the folded name the call used
+    /// @param argc - how many arguments the call passed
+    fn user_aggregate(&self, name: &[u8], argc: usize) -> Option<crate::expr::AggregateBody> {
+        let _ = (name, argc);
+        None
+    }
+
     /// Returns the rows a recursive CTE's queue is currently holding.
     ///
     /// **The one piece of state a recursive query has, handed in the same way a
@@ -243,6 +267,14 @@ impl TreeCatalog for WithQueue<'_> {
         needed: &inillucent_sql::bind::ColumnUse,
     ) -> DbResult<Option<Vec<Vec<OwnedDatum>>>> {
         self.inner.virtual_rows(table, path, params, needed)
+    }
+
+    fn user_scalar(&self, name: &[u8], argc: usize) -> Option<crate::expr::ScalarBody> {
+        self.inner.user_scalar(name, argc)
+    }
+
+    fn user_aggregate(&self, name: &[u8], argc: usize) -> Option<crate::expr::AggregateBody> {
+        self.inner.user_aggregate(name, argc)
     }
 
     fn recursive_rows(&self, cte: usize) -> Option<&[Vec<OwnedDatum>]> {
@@ -1288,6 +1320,12 @@ pub(crate) struct Space<'c> {
     pub(crate) types: &'c [StaticType],
     /// The tree columns the *joined* rows arrive sorted by, when they do.
     pub(crate) order: &'c [usize],
+    /// Where an application-registered function's body is looked up.
+    ///
+    /// `None` on the write path, whose row space is built from a layout rather
+    /// than from a catalog. A registered scalar reached from there refuses by
+    /// name rather than answering as though it were absent.
+    pub(crate) catalog: Option<&'c dyn TreeCatalog>,
     /// Which joined-row column each correlated subquery's answer sits in.
     ///
     /// Empty for every statement that has none, which is nearly all of them.
@@ -1478,6 +1516,7 @@ impl HeldSpace {
             layouts: &self.layouts,
             types: &self.types,
             order: &self.order,
+            catalog: None,
             correlations,
         }
     }
@@ -1569,6 +1608,7 @@ fn build_chain<'t>(
         layouts: space.layouts,
         types: space.types,
         order: space.order,
+        catalog: Some(catalog),
         correlations: &[],
     };
     let correlations = crate::correlate::correlations_of(plan, &|expr: &BoundExpr| match expr {
@@ -1589,6 +1629,7 @@ fn build_chain<'t>(
         layouts: space.layouts,
         types: &widened_types,
         order: space.order,
+        catalog: Some(catalog),
         correlations: &correlation_columns,
     };
 
@@ -2131,6 +2172,7 @@ fn source_for<'t>(
                 layouts: &[],
                 types: &[],
                 order: &[],
+                catalog: None,
                 correlations: &[],
             };
             let mut rows: Vec<Vec<OwnedDatum>> = Vec::with_capacity(plan.select.values.len());
@@ -2837,6 +2879,7 @@ pub fn literal_value(expr: &BoundExpr, params: &Params) -> DbResult<OwnedDatum> 
         layouts: &[],
         types: &[],
         order: &[],
+        catalog: None,
         correlations: &[],
     };
     constant_value(expr, &empty, params, None)
@@ -4089,6 +4132,26 @@ fn translate(
                 _ => message.clone().unwrap_or_default(),
             },
         },
+        // A call to a scalar an application registered. The body is resolved
+        // here, once, and carried by the compiled node - see `user_scalar`.
+        BoundExpr::External { name, arguments } => {
+            let Some(body) = space
+                .catalog
+                .and_then(|catalog| catalog.user_scalar(name, arguments.len()))
+            else {
+                return unsupported(&format!(
+                    "a call to the registered function {} from here",
+                    String::from_utf8_lossy(name)
+                ));
+            };
+            Expr::External {
+                body,
+                arguments: arguments
+                    .iter()
+                    .map(|expr| translate(expr, space, params, frame))
+                    .collect::<DbResult<Vec<Expr>>>()?,
+            }
+        }
         BoundExpr::Column { source, column, .. } => {
             let index = space.column(*source, *column as usize).ok_or_else(|| {
                 misuse(format!(
@@ -4512,7 +4575,34 @@ fn aggregate_specs(
                 };
                 AggregateKind::GroupConcat(separator)
             }
+            AggregateFunc::External => {
+                let name = call.external.clone().unwrap_or_default();
+                let Some(body) = space
+                    .catalog
+                    .and_then(|catalog| catalog.user_aggregate(&name, call.arguments.len()))
+                else {
+                    return unsupported(&format!(
+                        "a call to the registered aggregate {} from here",
+                        String::from_utf8_lossy(&name)
+                    ));
+                };
+                AggregateKind::External(body)
+            }
             other => return unsupported(&format!("the aggregate {other:?}")),
+        };
+        // Only a registered aggregate reads past the first argument; every
+        // built-in reduces one value per row.
+        let extra = match &kind {
+            AggregateKind::External(_) => call
+                .arguments
+                .iter()
+                .skip(1)
+                .map(|expr| {
+                    let translated = translate_scan(expr, space, params)?;
+                    compile(&translated, types)
+                })
+                .collect::<DbResult<Vec<_>>>()?,
+            _ => Vec::new(),
         };
         let argument = match (kind == AggregateKind::CountStar, call.arguments.first()) {
             (true, _) | (_, None) => None,
@@ -4537,6 +4627,7 @@ fn aggregate_specs(
         specs.push(AggregateSpec {
             kind,
             argument,
+            extra,
             distinct,
         });
     }

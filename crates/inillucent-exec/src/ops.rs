@@ -403,6 +403,14 @@ pub struct AggregateSpec {
     pub kind: AggregateKind,
     /// The argument, or `None` for `count(*)`.
     pub argument: Option<Box<dyn Eval>>,
+    /// The arguments after the first, for a registered aggregate.
+    ///
+    /// Empty for every built-in: each of those reduces one value per row, and
+    /// `group_concat`'s separator is a constant the kind already carries. A
+    /// registered aggregate is handed the whole row, so an `agg(a, b)` needs
+    /// `b` as well - and it is kept beside `argument` rather than replacing it
+    /// so the vectorised single-value path stays exactly as it was.
+    pub extra: Vec<Box<dyn Eval>>,
     /// The collation each distinct value is compared under, when the call said
     /// `DISTINCT`.
     pub distinct: Option<Collation>,
@@ -419,6 +427,37 @@ impl AggregateSpec {
             Some(collation) => Accumulator::distinct(self.kind.clone(), collation),
             None => Accumulator::new(self.kind.clone()),
         }
+    }
+
+    /// Reports whether this call needs the whole row rather than one value.
+    ///
+    /// Only a registered aggregate of more than one argument does. Asking here
+    /// keeps the three operators that feed accumulators from each carrying a
+    /// copy of the rule.
+    pub fn takes_whole_row(&self) -> bool {
+        !self.extra.is_empty()
+    }
+
+    /// Folds one row of arguments into an accumulator.
+    ///
+    /// @param accumulator - the group's accumulator
+    /// @param batch - the batch being consumed
+    /// @param nth - the row's position among the live rows
+    pub fn feed_row(
+        &self,
+        accumulator: &mut Accumulator,
+        batch: &Batch<'_>,
+        nth: usize,
+    ) -> DbResult<()> {
+        let mut values = Vec::with_capacity(self.extra.len().saturating_add(1));
+        if let Some(argument) = &self.argument {
+            values.push(crate::scalar::to_value(argument.value(batch, nth)?.get()));
+        }
+        for argument in &self.extra {
+            values.push(crate::scalar::to_value(argument.value(batch, nth)?.get()));
+        }
+        accumulator.push_values(values);
+        Ok(())
     }
 }
 
@@ -464,6 +503,12 @@ impl Sink for SimpleAggregate {
             let Some(accumulator) = self.accumulators.get_mut(index) else {
                 continue;
             };
+            if spec.takes_whole_row() {
+                for nth in 0..live {
+                    spec.feed_row(accumulator, batch, nth)?;
+                }
+                continue;
+            }
             match &spec.argument {
                 // `count(*)` over a dense batch: the row count, no values read.
                 None => {
@@ -601,6 +646,7 @@ impl Sink for HashAggregate {
                     continue;
                 };
                 match &spec.argument {
+                    _ if spec.takes_whole_row() => spec.feed_row(accumulator, batch, nth)?,
                     None => accumulator.push(&Datum::Null),
                     Some(argument) => accumulator.push(&argument.value(batch, nth)?.get()),
                 }
@@ -1556,6 +1602,7 @@ mod tests {
                     vec![AggregateSpec {
                         kind: kind.clone(),
                         argument: Some(compile(&Expr::Column(0), &[StaticType::Int]).unwrap()),
+                        extra: Vec::new(),
                         distinct: None,
                     }],
                     Box::new(Collect::new()),
@@ -1564,6 +1611,7 @@ mod tests {
                     vec![AggregateSpec {
                         kind: kind.clone(),
                         argument: Some(compile(&Expr::Column(0), &[StaticType::Int]).unwrap()),
+                        extra: Vec::new(),
                         distinct: None,
                     }],
                     Box::new(Collect::new()),
@@ -1600,6 +1648,7 @@ mod tests {
             vec![AggregateSpec {
                 kind: AggregateKind::CountStar,
                 argument: None,
+                extra: Vec::new(),
                 distinct: None,
             }],
             Box::new(Collect::new()),
@@ -1730,6 +1779,7 @@ mod tests {
             vec![AggregateSpec {
                 kind: AggregateKind::CountStar,
                 argument: None,
+                extra: Vec::new(),
                 distinct: None,
             }],
             Box::new(Collect::new()),
@@ -1799,6 +1849,7 @@ mod tests {
                         AggregateSpec {
                             kind: AggregateKind::CountStar,
                             argument: None,
+                            extra: Vec::new(),
                             distinct: None,
                         },
                         AggregateSpec {
@@ -1806,6 +1857,7 @@ mod tests {
                             argument: Some(
                                 compile(&Expr::Column(1), &[StaticType::Int; 2]).unwrap(),
                             ),
+                            extra: Vec::new(),
                             distinct: None,
                         },
                     ],

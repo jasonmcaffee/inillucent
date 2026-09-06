@@ -255,6 +255,74 @@ impl Connection {
         ))
     }
 
+    /// Registers a scalar an application defined.
+    ///
+    /// @param name - the name SQL calls it by
+    /// @param arity - how many arguments it takes, or -1 for any number
+    /// @param flags - what the function promises about itself
+    /// @param body - what it does
+    pub fn create_scalar_function(
+        &self,
+        name: &str,
+        arity: i32,
+        flags: inillucent_ext::registry::FunctionFlags,
+        body: inillucent_ext::registry::ScalarBody,
+    ) -> DbResult<()> {
+        self.engine
+            .connect()
+            .create_scalar_function(name, arity, flags, body)
+    }
+
+    /// Registers an aggregate an application defined.
+    ///
+    /// @param name - the name SQL calls it by
+    /// @param arity - how many arguments it takes, or -1 for any number
+    /// @param flags - what the function promises about itself
+    /// @param body - what it does with a whole group
+    pub fn create_aggregate_function(
+        &self,
+        name: &str,
+        arity: i32,
+        flags: inillucent_ext::registry::FunctionFlags,
+        body: inillucent_ext::registry::AggregateBody,
+    ) -> DbResult<()> {
+        self.engine
+            .connect()
+            .create_aggregate_function(name, arity, flags, body)
+    }
+
+    /// Removes a function by name and arity, reporting whether one went.
+    ///
+    /// @param name - the name it was registered under
+    /// @param arity - the arity it was registered for
+    pub fn remove_function(&self, name: &str, arity: i32) -> bool {
+        self.engine.connect().remove_function(name, arity)
+    }
+
+    /// Registers a collating sequence an application defined.
+    ///
+    /// @param name - the name `COLLATE` calls it by
+    /// @param comparator - how it orders two values
+    pub fn create_collation(
+        &self,
+        name: &str,
+        comparator: inillucent_value::collation::Comparator,
+    ) -> DbResult<()> {
+        self.engine.connect().create_collation(name, comparator)
+    }
+
+    /// Returns how many statements are compiled and held.
+    pub fn cached_plan_count(&self) -> usize {
+        self.engine.connect().cached_plan_count()
+    }
+
+    /// Turns off one or more planner optimizations for this connection.
+    ///
+    /// @param mask - the levers to switch off
+    pub fn disable_optimizations(&self, mask: u32) {
+        self.engine.connect().disable_optimizations(mask);
+    }
+
     /// Rereads the schema from the file.
     pub fn reload_schema(&self) -> DbResult<()> {
         self.engine.connect().reload_schema()
