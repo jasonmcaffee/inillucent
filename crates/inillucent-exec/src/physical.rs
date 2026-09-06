@@ -2451,6 +2451,56 @@ pub fn run_any(
     run_any_prepared(plan, catalog, &prepared, params)
 }
 
+/// Returns the one key a plan looks up, when the whole plan is a rowid seek.
+///
+/// **A write whose `WHERE` is a rowid equality does not need a pipeline to find
+/// one row.** `UPDATE t SET ... WHERE id = ?1` plans to a single-stage
+/// `RowidSeek`, and running it as a query builds a source, a projection and a
+/// collecting sink to hand back one integer the plan already contains. The write
+/// gate measured that at 0.89 us of a 1.85 us update, and 17 us of a 47 us one -
+/// about half of each, spent deciding something already decided.
+///
+/// `None` for every other shape, and the caller runs the query. The conditions
+/// are all of them: one FROM term, a rowid seek, no residual predicate, no
+/// constant filter, no limit and no offset. A plan with any of those does more
+/// than name a row, and answering it from the key alone would be answering a
+/// different question.
+///
+/// @param plan - the planner's output
+/// @param params - the values bound to `?1`, `?2`, ...
+pub fn rowid_seek_key(plan: &PhysicalPlan, params: &Params) -> DbResult<Option<OwnedDatum>> {
+    if plan.sources.len() != 1
+        || plan.constant_filter.is_some()
+        || plan.select.limit.is_some()
+        || plan.select.offset.is_some()
+        || !plan.compounds.is_empty()
+        || plan.residuals.iter().any(Option::is_some)
+    {
+        return Ok(None);
+    }
+    let Some(source) = plan.sources.first() else {
+        return Ok(None);
+    };
+    let AccessPath::RowidSeek { key, .. } = &source.path else {
+        return Ok(None);
+    };
+    let held = HeldSpace {
+        layouts: Vec::new(),
+        types: Vec::new(),
+        order: Vec::new(),
+    };
+    let space = held.view(&[]);
+    // Integer affinity, because that is what a rowid comparison applies -
+    // `WHERE id = '4'` finds row 4 - and the seek path already applies it. A
+    // shortcut that skipped it would answer a question the pipeline would not.
+    match constant_value(key, &space, params, Some(Affinity::Integer)) {
+        Ok(value) => Ok(Some(value)),
+        // The key reads a column, which a rowid seek's should not; the pipeline
+        // is the honest answer rather than a guess about what it meant.
+        Err(_) => Ok(None),
+    }
+}
+
 /// Makes the structural choice for any planned query, once.
 ///
 /// **Everything that does not depend on the bound parameters belongs here**, so

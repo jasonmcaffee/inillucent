@@ -784,6 +784,26 @@ impl ImportedDatabase {
         Ok(())
     }
 
+    /// Returns what the write path has done to every tree, added up.
+    ///
+    /// The counters, not the clock. For a write the counters are the story: a
+    /// page compacted is a whole page image in the log, and a tree that
+    /// compacts once per statement is doing work no timing will explain on its
+    /// own.
+    pub fn write_stats(&self) -> inillucent_tree::write::WriteStats {
+        let mut total = inillucent_tree::write::WriteStats::default();
+        for tree in self.trees.values() {
+            let held = tree.write_stats();
+            total.inserted = total.inserted.saturating_add(held.inserted);
+            total.deleted = total.deleted.saturating_add(held.deleted);
+            total.updated_in_place = total.updated_in_place.saturating_add(held.updated_in_place);
+            total.compactions = total.compactions.saturating_add(held.compactions);
+            total.splits = total.splits.saturating_add(held.splits);
+            total.merges = total.merges.saturating_add(held.merges);
+        }
+        total
+    }
+
     /// Checks every tree's structure: key order, separators and fill.
     ///
     /// The campaign tests run this after every statement. A tree that has
@@ -876,6 +896,85 @@ impl ImportedDatabase {
         self.execute_compiled(&held, params)
     }
 
+    /// Runs one statement and reports where its time went.
+    ///
+    /// **Two numbers, because there are two halves and they are fixed in
+    /// different places.** `find` is the query that decides which rows change -
+    /// an ordinary planned query, whose cost is the operator chain and the
+    /// descent. `apply` is everything after: compiling the assignments, reading
+    /// the rows, maintaining the indexes and writing the tree.
+    ///
+    /// This exists because the write gate misses and a guess about which half is
+    /// expensive is a guess this project has been wrong about before. It is on
+    /// the harness's own type, in a test-only crate, and nothing in the engine
+    /// consults it.
+    ///
+    /// @param statement - a handle from `prepare_statement`
+    /// @param params - the values bound to `?1`, `?2`, ...
+    pub fn execute_timed(
+        &mut self,
+        statement: &Statement,
+        params: &Params,
+    ) -> DbResult<(u128, u128)> {
+        let cached = std::rc::Rc::clone(&statement.0);
+        let found = std::time::Instant::now();
+        let rows = match &*cached {
+            Cached::Select(..) | Cached::Insert(_, None) => Vec::new(),
+            Cached::Insert(_, Some((plan, prepared))) => {
+                physical::run_any_prepared(plan, self, prepared, params)?.0
+            }
+            Cached::Update(_, plan, prepared) | Cached::Delete(_, plan, prepared) => {
+                self.keys_of(plan, prepared, params)?
+            }
+        };
+        let find = found.elapsed().as_nanos();
+        let applied = std::time::Instant::now();
+        match &*cached {
+            Cached::Select(plan, prepared) => {
+                physical::run_any_prepared(plan, self, prepared, params)?;
+            }
+            Cached::Insert(statement, _) => {
+                self.write(params, |target, log, params| {
+                    dml::insert(statement, target, log, params, &rows)
+                })?;
+            }
+            Cached::Update(statement, ..) => {
+                self.write(params, |target, log, params| {
+                    dml::update(statement, target, log, params, &rows)
+                })?;
+            }
+            Cached::Delete(statement, ..) => {
+                self.write(params, |target, log, params| {
+                    dml::delete(statement, target, log, params, &rows)
+                })?;
+            }
+        }
+        Ok((find, applied.elapsed().as_nanos()))
+    }
+
+    /// Returns the keys a write will change.
+    ///
+    /// A `WHERE` that is a rowid equality is answered from the plan itself -
+    /// see `physical::rowid_seek_key` - and everything else runs the query. The
+    /// row may not exist, and that is not this function's problem: the write
+    /// path reads each key before it changes anything and skips the ones that
+    /// are not there.
+    ///
+    /// @param plan - the keys query
+    /// @param prepared - its structural choice
+    /// @param params - the bound parameters
+    fn keys_of(
+        &self,
+        plan: &PhysicalPlan,
+        prepared: &physical::Prepared,
+        params: &Params,
+    ) -> DbResult<Vec<Vec<OwnedDatum>>> {
+        if let Some(key) = physical::rowid_seek_key(plan, params)? {
+            return Ok(vec![vec![key]]);
+        }
+        Ok(physical::run_any_prepared(plan, self, prepared, params)?.0)
+    }
+
     /// Runs one already-compiled statement.
     ///
     /// @param cached - the compiled statement
@@ -906,13 +1005,13 @@ impl ImportedDatabase {
                 })
             }
             Cached::Update(statement, plan, prepared) => {
-                let keys = physical::run_any_prepared(plan, self, prepared, params)?.0;
+                let keys = self.keys_of(plan, prepared, params)?;
                 self.write(params, |target, log, params| {
                     dml::update(statement, target, log, params, &keys)
                 })
             }
             Cached::Delete(statement, plan, prepared) => {
-                let keys = physical::run_any_prepared(plan, self, prepared, params)?.0;
+                let keys = self.keys_of(plan, prepared, params)?;
                 self.write(params, |target, log, params| {
                     dml::delete(statement, target, log, params, &keys)
                 })

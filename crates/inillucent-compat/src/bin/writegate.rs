@@ -223,6 +223,64 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         .collect();
     let mut refused: Vec<(String, String)> = Vec::new();
 
+    // Where one statement's time goes, before any of it is compared to
+    // anything. The gate misses on per-statement overhead, and a guess about
+    // which half of a statement is expensive is a guess this project has been
+    // wrong about before.
+    println!();
+    println!("## where one statement goes, microseconds");
+    println!(
+        "  {:<24} {:>9} {:>9} {:>9} {:>8} {:>8} {:>8} {:>8}",
+        "workload", "find", "apply", "total", "ins", "del", "inplace", "compact"
+    );
+    {
+        let copy = restore(fixture, &scratch, "profile")?;
+        let mut database = ImportedDatabase::import_with(copy, settings.page_size, settings.frames)
+            .map_err(|error| format!("import failed: {}", why(&error)))?;
+        for workload in &plan.workloads {
+            let Ok(statement) = database.prepare_statement(&workload.sql) else {
+                continue;
+            };
+            let iterations = workload.repeat.min(200).max(1);
+            let before = database.write_stats();
+            database.begin_batch();
+            let mut find = 0u128;
+            let mut apply = 0u128;
+            for iteration in 0..iterations {
+                let params = Params::from_values(
+                    workload
+                        .binds
+                        .iter()
+                        .map(|bind| bind_value(*bind, iteration, plan.rows))
+                        .collect(),
+                );
+                match database.execute_timed(&statement, &params) {
+                    Ok((one, two)) => {
+                        find = find.saturating_add(one);
+                        apply = apply.saturating_add(two);
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = database.commit_batch();
+            let each = u128::from(iterations).max(1);
+            let after = database.write_stats();
+            let per =
+                |now: u64, was: u64| (now.saturating_sub(was) as f64) / (iterations.max(1) as f64);
+            println!(
+                "  {:<24} {:>9.2} {:>9.2} {:>9.2} {:>8.2} {:>8.2} {:>8.2} {:>8.3}",
+                workload.name,
+                (find / each) as f64 / 1000.0,
+                (apply / each) as f64 / 1000.0,
+                ((find + apply) / each) as f64 / 1000.0,
+                per(after.inserted, before.inserted),
+                per(after.deleted, before.deleted),
+                per(after.updated_in_place, before.updated_in_place),
+                per(after.compactions, before.compactions),
+            );
+        }
+    }
+
     println!();
     println!("## {} paired rounds, interleaved", settings.rounds);
     let started = Instant::now();
@@ -316,8 +374,8 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     println!();
     println!("## families");
     println!(
-        "  {:<14} {:>9} {:>9} {:>9} {:>8}  {}",
-        "family", "ratio", "low", "high", "bar", "verdict"
+        "  {:<14} {:>9} {:>9} {:>9} {:>8} {:>9}  {}",
+        "family", "ratio", "low", "high", "bar", "worst", "verdict"
     );
     for (family, bar) in FAMILIES {
         if !settings.families.iter().any(|name| name == family) {
@@ -335,48 +393,101 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
             passed = false;
             continue;
         }
-        // **Every workload counts once.** Pooling the raw rounds lets a workload
-        // with a hundred times the absolute time decide the family on its own,
-        // and it mixes two statistics: the point estimate is a median of log
-        // ratios and the interval bootstraps their mean, which over a
-        // heterogeneous pool can put the estimate outside its own interval. The
-        // first medium run printed `write` at ratio 0.38x with a lower bound of
-        // 0.40x, which is not a number anybody can act on.
+        // **The family is every workload's every round, weighted per workload.**
         //
-        // So the family is the geometric mean of the per-workload ratios, and
-        // the interval is the bootstrap of the same quantity - one statistic,
-        // one weighting, and a line that agrees with itself.
+        // Two things had to be got right here and the first attempt got both
+        // wrong. Pooling the raw `(ours, theirs)` pairs - which is what the read
+        // gate does - lets a workload with a hundred times the absolute time
+        // decide the family on its own, and it mixes two statistics: the point
+        // estimate is a *median* of log ratios while the interval bootstraps
+        // their *mean*, so over a heterogeneous pool the estimate can fall
+        // outside its own interval. The first medium run printed `write` at
+        // ratio 0.38x with a lower bound of 0.40x, which is not a number
+        // anybody can act on.
+        //
+        // Collapsing each workload to its median first fixes the weighting and
+        // breaks the interval instead: with three workloads a bootstrap of
+        // three points has a 1-in-27 chance of drawing the minimum three times,
+        // so its 2.5th percentile *is* the minimum. `transaction`'s lower bound
+        // was its worst workload's ratio, exactly, and no amount of data would
+        // have moved it.
+        //
+        // So: one log ratio per workload per round - thirty times the sample -
+        // scaled so each workload contributes equally rather than in proportion
+        // to how long it happens to take. The `worst` column carries the
+        // information the collapse had, which is the workload holding the
+        // family back, and the per-workload table above carries the rest.
         let rolled = Paired {
             workload: family.to_string(),
             family: family.to_string(),
             pairs: members
                 .iter()
-                .map(|entry| {
-                    let (ours, theirs) = entry.medians();
-                    (ours, theirs)
-                })
+                .flat_map(|entry| entry.pairs.iter().copied())
                 .collect(),
             agreed: true,
             disagreement: String::new(),
         };
-        let (low, high) = rolled.interval(SEED);
+        let (low, high) = pooled_interval(&members, SEED);
+        let worst = members
+            .iter()
+            .map(|entry| entry.ratio())
+            .fold(f64::INFINITY, f64::min);
         // **The lower bound against the bar, not the point estimate.** A ratio
         // that clears a bar with an interval straddling it has not cleared it,
         // and saying otherwise is the one thing a gate must never do.
         let met = low >= bar;
         passed = passed && met;
         println!(
-            "  {family:<14} {:>8.2}x {:>8.2}x {:>8.2}x {bar:>7.2}x  {}",
-            rolled.ratio(),
+            "  {family:<14} {:>8.2}x {:>8.2}x {:>8.2}x {bar:>7.2}x {:>8.2}x  {}",
+            geometric_mean(&members),
             low,
             high,
+            worst,
             if met { "MET" } else { "MISSED" }
         );
+        let _ = &rolled;
     }
 
     println!();
     println!("## gate: {}", if passed { "MET" } else { "NOT MET" });
     Ok(passed)
+}
+
+/// Returns the geometric mean of a family's per-workload ratios.
+///
+/// Each workload counts once whatever its absolute time, and the geometric mean
+/// is the right centre for a ratio - halving and doubling are the same size of
+/// change.
+///
+/// @param members - the workloads in the family
+fn geometric_mean(members: &[&Paired]) -> f64 {
+    let logs: Vec<f64> = members
+        .iter()
+        .map(|entry| entry.ratio().max(f64::MIN_POSITIVE).ln())
+        .collect();
+    if logs.is_empty() {
+        return 0.0;
+    }
+    (logs.iter().sum::<f64>() / logs.len() as f64).exp()
+}
+
+/// Returns the family's bootstrap interval over every workload's every round.
+///
+/// The sample is one log ratio per workload per round, so a thirty-round run of
+/// five workloads has a hundred and fifty points rather than five - and each
+/// workload contributes the same number of them whatever it costs in
+/// nanoseconds. That is what makes the interval an interval rather than a
+/// restatement of the worst workload.
+///
+/// @param members - the workloads in the family
+/// @param seed - the seed the resampling uses
+fn pooled_interval(members: &[&Paired], seed: u64) -> (f64, f64) {
+    let logs: Vec<f64> = members
+        .iter()
+        .flat_map(|entry| entry.log_ratios())
+        .collect();
+    let (low, high) = inillucent_compat::perf::bootstrap(&logs, seed);
+    (low.exp(), high.exp())
 }
 
 /// Returns a fresh copy of the fixture for one arm of one round.

@@ -48,6 +48,37 @@ use crate::leaf::{LeafBuilder, LeafRef, Packed};
 use crate::mutate::LeafMut;
 use crate::paged::PagedTree;
 
+/// What a leaf that has run out of room turns out to need.
+///
+/// Decided while the page is still borrowed, and acted on after the borrow ends
+/// - a compaction and a split both write the page they are reading from.
+enum Fit {
+    /// The live rows fit one page: this image, and the two header fields the
+    /// old page carried that a fresh pack does not know about.
+    Compact(Vec<u8>, PageId, u64),
+    /// They do not, so the leaf splits and the rows have to outlive the borrow.
+    Split(Vec<Vec<OwnedDatum>>),
+}
+
+/// Reports whether a leaf holds fewer than half the rows it was packed with.
+///
+/// The B-tree underflow condition, and the gate on whether a merge is worth
+/// *considering*. It is a row count and a popcount over the tombstone bitmap -
+/// no allocation, no page pack - and it is what keeps the expensive test off the
+/// path of a delete that has emptied nothing.
+///
+/// A leaf with no sorted rows at all has underflowed by definition: everything
+/// it holds is in the delta area, which is small.
+///
+/// @param leaf - the leaf
+fn underflows(leaf: &LeafRef<'_>) -> DbResult<bool> {
+    let packed = leaf.row_count();
+    if packed == 0 {
+        return Ok(true);
+    }
+    Ok(leaf.live_rows()?.saturating_mul(2) < packed)
+}
+
 /// How full a compaction packs a page it is not splitting.
 ///
 /// Ninety percent rather than a hundred, so that a leaf which has just been
@@ -144,6 +175,46 @@ impl PagedTree {
         log: &mut dyn TreeLog,
         row: &[Datum<'_>],
     ) -> DbResult<Option<Vec<OwnedDatum>>> {
+        self.write_row(database, log, row, true)
+    }
+
+    /// Inserts or replaces one row without copying out what was there.
+    ///
+    /// **The same write, minus a full row materialisation the caller did not
+    /// ask for.** `insert` returns the previous row, so it reads and copies
+    /// every column of it - allocating per text and per blob - before it writes.
+    /// The executor's write path throws that away: it already knows whether the
+    /// key was there, from the uniqueness check it had to do anyway.
+    ///
+    /// Returns whether the key was already present, which is the only thing the
+    /// row count needs. On `main_table` - five columns, a text and a blob - the
+    /// copy was a measurable share of the gate's `write.insert.batch`.
+    ///
+    /// @param database - the file, for allocating pages a split needs
+    /// @param log - where the record goes
+    /// @param row - the row, one value per column, key columns first
+    pub fn put(
+        &mut self,
+        database: &mut Database,
+        log: &mut dyn TreeLog,
+        row: &[Datum<'_>],
+    ) -> DbResult<bool> {
+        Ok(self.write_row(database, log, row, false)?.is_some())
+    }
+
+    /// The body of `insert` and `put`.
+    ///
+    /// @param database - the file
+    /// @param log - where the record goes
+    /// @param row - the row
+    /// @param want_previous - whether to copy out the row that was there
+    fn write_row(
+        &mut self,
+        database: &mut Database,
+        log: &mut dyn TreeLog,
+        row: &[Datum<'_>],
+        want_previous: bool,
+    ) -> DbResult<Option<Vec<OwnedDatum>>> {
         if row.len() != self.columns().len() {
             return Err(misuse(format!(
                 "a row of {} values does not fit a tree of {} columns",
@@ -160,7 +231,46 @@ impl PagedTree {
         // which is a bug rather than a case to loop on.
         for attempt in 0..2 {
             let (page, path) = self.leaf_for(database.pool(), &encoded_key)?;
-            let previous = self.row_at(database.pool(), page, &key)?;
+            // **The key is found once.** Where it sits decides three things -
+            // whether it was there, what the caller gets back, and what the
+            // mutation below has to displace - and the first version asked the
+            // page all three times. A locate is a page parse, a binary search
+            // and a walk of the delta area, and the delta area is up to
+            // thirty-two rows compared column by column; on the gate's
+            // `write.insert.batch` the two indexes cost 8.4 us of a 19 us
+            // insert, and half of that was asking twice.
+            //
+            // Nothing between here and the mutation changes the page: the
+            // room check only reads, and the log append does not touch pages
+            // at all. A `make_room` restarts the attempt, which re-locates.
+            let (located, previous) = {
+                let guard = database.pool().fetch(page)?;
+                let leaf = LeafRef::parse(&guard)?.with_collations(self.collations());
+                let located = leaf.locate(&key, self.key_columns())?;
+                let previous = match (want_previous, located) {
+                    (_, Located::Absent) => None,
+                    (false, _) => {
+                        // A marker, not the row: `put` reports presence and this
+                        // value never leaves `write_row`.
+                        Some(Vec::new())
+                    }
+                    (true, Located::Sorted(row)) => {
+                        let mut values = Vec::with_capacity(leaf.column_count());
+                        for column in 0..leaf.column_count() {
+                            values.push(OwnedDatum::from_datum(&leaf.value(row, column)?));
+                        }
+                        Some(values)
+                    }
+                    (true, Located::Delta(index)) => {
+                        let mut values = Vec::with_capacity(leaf.column_count());
+                        for column in 0..leaf.column_count() {
+                            values.push(OwnedDatum::from_datum(&leaf.delta_value(index, column)?));
+                        }
+                        Some(values)
+                    }
+                };
+                (located, previous)
+            };
             let planned = {
                 let pool = database.pool();
                 pool.modify(page, |bytes| {
@@ -189,7 +299,6 @@ impl PagedTree {
                 page: page.0,
                 row: &encoded_row,
             })?;
-            let located = self.locate(database.pool(), page, &key)?;
             database.pool().modify(page, |bytes| {
                 let mut leaf = LeafMut::new(bytes)?;
                 match located {
@@ -378,23 +487,56 @@ impl PagedTree {
         page: PageId,
         path: &[PageId],
     ) -> DbResult<()> {
-        let rows = self.live_rows_of(database.pool(), page)?;
-        let builder = LeafBuilder::new(
-            self.page_size(),
-            self.tree_id(),
-            self.columns().to_vec(),
-            self.key_columns(),
-        )?;
-        let borrowed: Vec<Vec<Datum<'_>>> = rows
-            .iter()
-            .map(|row| row.iter().map(OwnedDatum::borrow).collect())
-            .collect();
-        match builder.pack(&borrowed, COMPACT_FILL)? {
-            Packed::Filled {
-                page: image,
-                rows: packed,
-            } if packed == borrowed.len() => self.compact_into(database, log, page, image),
-            _ => self.split(database, log, page, path, &borrowed),
+        // **Packed straight out of the page.** The rows a compaction repacks are
+        // already in a leaf, where a text or a blob is a slice; copying them to
+        // owned values and borrowing them straight back was two allocations per
+        // value, per compaction, to produce what the page already held.
+        //
+        // It matters because a compaction is not rare and it is not cheap: the
+        // write gate measured `write.insert.batch` at 7.8 us in the steady state
+        // and 17.8 us on average, and the difference was the one insert in
+        // twenty that repacks a leaf of eighty rows.
+        //
+        // The guard is dropped before anything is written, because the write
+        // needs the page mutably and this only needs to read it.
+        let fit = {
+            let guard = database.pool().fetch(page)?;
+            let leaf = LeafRef::parse(&guard)?.with_collations(self.collations());
+            let rows = leaf.live()?;
+            let builder = LeafBuilder::new(
+                self.page_size(),
+                self.tree_id(),
+                self.columns().to_vec(),
+                self.key_columns(),
+            )?;
+            match builder.pack(&rows, COMPACT_FILL)? {
+                Packed::Filled {
+                    page: image,
+                    rows: packed,
+                } if packed == rows.len() => {
+                    Fit::Compact(image, leaf.right_sibling(), leaf.max_cts())
+                }
+                // A split rewrites three pages and needs the rows to outlive the
+                // guard, so this is where they are copied - and a split is the
+                // rarer half by a wide margin.
+                _ => Fit::Split(
+                    rows.iter()
+                        .map(|row| row.iter().map(OwnedDatum::from_datum).collect())
+                        .collect(),
+                ),
+            }
+        };
+        match fit {
+            Fit::Compact(image, right, max_cts) => {
+                self.compact_into(database, log, page, image, right, max_cts)
+            }
+            Fit::Split(rows) => {
+                let borrowed: Vec<Vec<Datum<'_>>> = rows
+                    .iter()
+                    .map(|row| row.iter().map(OwnedDatum::borrow).collect())
+                    .collect();
+                self.split(database, log, page, path, &borrowed)
+            }
         }
     }
 
@@ -404,18 +546,17 @@ impl PagedTree {
     /// @param log - where the record goes
     /// @param page - the leaf
     /// @param image - the packed page, without its sibling pointer
+    /// @param right - the sibling the old page pointed at
+    /// @param max_cts - the commit watermark the old page carried
     fn compact_into(
         &mut self,
         database: &mut Database,
         log: &mut dyn TreeLog,
         page: PageId,
         mut image: Vec<u8>,
+        right: PageId,
+        max_cts: u64,
     ) -> DbResult<()> {
-        let (right, max_cts) = {
-            let guard = database.pool().fetch(page)?;
-            let leaf = LeafRef::parse(&guard)?;
-            (leaf.right_sibling(), leaf.max_cts())
-        };
         page::set_right(&mut image, right)?;
         crate::page::write_u64(&mut image, crate::leaf::leaf_header::MAX_CTS, max_cts)?;
         let lsn = log.log(Body::CompactLeaf {
@@ -716,11 +857,28 @@ impl PagedTree {
         page: PageId,
         path: &[PageId],
     ) -> DbResult<()> {
-        let right = {
+        // **The cheap question first.** A merge is only possible when a leaf has
+        // actually emptied, and that is a row count and a popcount; deciding it
+        // by packing both leaves is one `Vec` per row plus one heap allocation
+        // per text and blob in *both* of them - about five hundred allocations
+        // and a full page pack, thrown away.
+        //
+        // It answered "no" on every one of the gate's two thousand deletes, and
+        // it was the whole of the cost: `write.delete` spent 290 us per
+        // statement on three tree deletes that should cost a descent each.
+        //
+        // The condition is the classic one - a leaf underflows when it holds
+        // fewer than half the rows it was packed with - and it is asked of the
+        // leaf the delete emptied, not of its sibling. Asking it of both blocked
+        // every merge in a tree emptied in key order, where the left leaf goes
+        // first and its sibling is still full; the sibling's size is the pack's
+        // question and the pack still asks it.
+        let (right, underflowed) = {
             let guard = database.pool().fetch(page)?;
-            LeafRef::parse(&guard)?.right_sibling()
+            let leaf = LeafRef::parse(&guard)?;
+            (leaf.right_sibling(), underflows(&leaf)?)
         };
-        if right.is_none() {
+        if !underflowed || right.is_none() {
             return Ok(());
         }
         let Some(parent) = path.last().copied() else {
