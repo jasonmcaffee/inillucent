@@ -132,6 +132,26 @@ impl Pair {
         assert_eq!(mine, theirs.rows, "{sql} disagreed");
     }
 
+    /// Returns how many page fetches answering one query took.
+    ///
+    /// Every shadow row a module reads is at least one fetch, so this counts
+    /// the reads without the module having to be instrumented to report them.
+    ///
+    /// @param sql - the query
+    fn fetches_for(&mut self, sql: &str) -> u64 {
+        let before = self.engine.pool_stats();
+        let answered = self
+            .engine
+            .execute_any(sql, &Params::new())
+            .unwrap_or_else(|error| panic!("{sql}: refused: {:?}", error.detail()));
+        let after = self.engine.pool_stats();
+        let _ = answered;
+        after
+            .hits
+            .saturating_add(after.misses)
+            .saturating_sub(before.hits.saturating_add(before.misses))
+    }
+
     /// Walks every tree and fails on the first broken invariant.
     ///
     /// @param after - what was just run, for the message
@@ -218,6 +238,92 @@ fn the_rtree_answers_a_bounding_box_over_the_new_trees() {
     ] {
         pair.answers_agree(probe);
     }
+}
+
+#[test]
+fn a_modules_rowid_and_rank_are_answered() {
+    let Some(mut pair) = pair("rowid") else {
+        return no_oracle();
+    };
+    pair.both("CREATE VIRTUAL TABLE documents USING fts5(title, body)");
+    for (title, body) in [
+        ("one", "lorem ipsum dolor"),
+        ("two", "lorem sit amet"),
+        ("three", "nothing here"),
+    ] {
+        pair.both(&format!(
+            "INSERT INTO documents(title, body) VALUES ('{title}', '{body}')"
+        ));
+    }
+    pair.is_intact("the inserts");
+    // **The columns a projection does not name are not materialised, so the
+    // ones it does have to survive that.** `rowid` is not a declared column and
+    // `rank` is a hidden one whose value is computed rather than stored; both
+    // are read through the same path a `title` is, and a mask that dropped
+    // either would answer NULL rather than fail.
+    for probe in [
+        "SELECT title, rank FROM documents WHERE documents MATCH 'lorem' ORDER BY rank",
+        "SELECT rank FROM documents WHERE documents MATCH 'lorem' ORDER BY rank",
+        "SELECT title, rank FROM documents WHERE documents MATCH 'lorem' ORDER BY title",
+        "SELECT title FROM documents WHERE documents MATCH 'lorem' AND title > 'a' ORDER BY title",
+    ] {
+        pair.answers_agree(probe);
+    }
+    // **A rowid off a virtual table is refused, and refusing is the point.**
+    // A materialised virtual scan hands the pipeline the module's declared
+    // columns and nothing else, so there is no slot a rowid could come from;
+    // the plan says so rather than answering NULL. It predates this phase - the
+    // same message is raised by the same line at the commit before it - and it
+    // is asserted here because the column mask above is exactly the kind of
+    // change that could turn a refusal into a wrong answer without anyone
+    // noticing.
+    for refused in [
+        "SELECT rowid FROM documents WHERE documents MATCH 'lorem'",
+        "SELECT rowid, title FROM documents WHERE documents MATCH 'lorem'",
+        "SELECT title FROM documents WHERE documents MATCH 'lorem' ORDER BY rowid",
+    ] {
+        let answer = pair.engine.execute_any(refused, &Params::new());
+        assert!(
+            answer.is_err(),
+            "{refused}: answered instead of refusing, which means a rowid came from somewhere"
+        );
+    }
+}
+
+#[test]
+fn a_match_reads_a_bounded_number_of_shadow_rows() {
+    let Some(mut pair) = pair("reads") else {
+        return no_oracle();
+    };
+    pair.both("CREATE VIRTUAL TABLE documents USING fts5(title, body)");
+    let words = ["lorem", "ipsum", "dolor", "sit", "amet"];
+    for nth in 0..120usize {
+        let body: String = (0..8)
+            .map(|k| words[(nth * 3 + k) % words.len()])
+            .collect::<Vec<_>>()
+            .join(" ");
+        pair.both(&format!(
+            "INSERT INTO documents(title, body) VALUES ('doc {nth}', '{body}')"
+        ));
+    }
+    pair.is_intact("the inserts");
+    // **`count(*)` reads no documents and no scores.** A `MATCH` used to cost
+    // one `%_content` read per declared column per matched row and one
+    // `%_docsize` read per matched row, whatever the query asked for - so
+    // counting a term that appears in a hundred and twenty documents read
+    // three hundred and sixty shadow rows to answer with a number. It now
+    // costs the descent: the totals row and the term's doclist.
+    //
+    // The bound is generous on purpose. It is here to catch the eager shapes
+    // coming back, which are proportional to the matched rows, not to fix the
+    // exact count of a query plan.
+    let counted = pair.fetches_for("SELECT count(*) FROM documents WHERE documents MATCH 'lorem'");
+    let projected = pair
+        .fetches_for("SELECT title FROM documents WHERE documents MATCH 'lorem' ORDER BY title");
+    assert!(
+        counted * 4 < projected,
+        "count(*) read {counted} rows and a projection read {projected}:          count(*) is reading the documents it is only counting"
+    );
 }
 
 #[test]

@@ -373,11 +373,12 @@ pub fn evaluate(
     query: &Query,
     context: &mut Context<'_>,
     shadows: &ShadowTables,
+    buffer: &super::Buffer,
     columns: usize,
 ) -> DbResult<(Vec<i64>, Vec<Hits>)> {
     let mut hits = Vec::with_capacity(query.phrases.len());
     for phrase in &query.phrases {
-        hits.push(phrase_hits(phrase, context, shadows, columns)?);
+        hits.push(phrase_hits(phrase, context, shadows, buffer, columns)?);
     }
     let mut counter = 0usize;
     let rows = walk(&query.root, &hits, &mut counter);
@@ -386,6 +387,129 @@ pub fn evaluate(
     // matched row - which is what this used to do - meant a common term cost a
     // clone of the whole index for every row it found.
     Ok((rows, hits))
+}
+
+/// Runs one query and returns only the rows it matched.
+///
+/// **Positions are decoded when something needs them, and most queries do
+/// not.** A doclist entry carries a position list per column, and building the
+/// [`Hits`] map allocates one vector per row per column and inserts every row
+/// into a `BTreeMap` - work that `SELECT count(*) FROM t WHERE t MATCH 'x'`
+/// throws away. Over five hundred documents that was seventy per cent of the
+/// query.
+///
+/// Answers `None` for the queries whose *answer* depends on positions, and the
+/// caller runs [`evaluate`] for those instead: a `NEAR`, and a phrase of more
+/// than one term, where adjacency is the question. Scoring needs them too, so a
+/// ranked plan does not come here.
+///
+/// @param query - the parsed query
+/// @param context - the host
+/// @param shadows - the table's shadow tables
+/// @param buffer - the doclists this transaction has staged
+/// @param columns - how many columns the table declares
+pub fn evaluate_rows(
+    query: &Query,
+    context: &mut Context<'_>,
+    shadows: &ShadowTables,
+    buffer: &super::Buffer,
+    columns: usize,
+) -> DbResult<Option<Vec<i64>>> {
+    if query.phrases.iter().any(|phrase| phrase.terms.len() != 1) {
+        return Ok(None);
+    }
+    let mut per_phrase = Vec::with_capacity(query.phrases.len());
+    for phrase in &query.phrases {
+        per_phrase.push(phrase_rows(phrase, context, shadows, buffer, columns)?);
+    }
+    let mut counter = 0usize;
+    Ok(walk_rows(&query.root, &per_phrase, &mut counter))
+}
+
+/// Returns the rows a single-term phrase appears in, ascending.
+///
+/// The same predicate [`phrase_hits`] applies at offset zero - a column the
+/// phrase asked for, inside the table, with at least one position - decided
+/// without collecting the positions that prove it.
+///
+/// @param phrase - the phrase, which has exactly one term
+/// @param context - the host
+/// @param shadows - the table's shadow tables
+/// @param buffer - the doclists this transaction has staged
+/// @param columns - how many columns the table declares
+fn phrase_rows(
+    phrase: &Phrase,
+    context: &mut Context<'_>,
+    shadows: &ShadowTables,
+    buffer: &super::Buffer,
+    columns: usize,
+) -> DbResult<Vec<i64>> {
+    let Some(term) = phrase.terms.first() else {
+        return Ok(Vec::new());
+    };
+    let mut rows = Vec::new();
+    for page in term_pages(term, context, shadows, buffer)? {
+        let Some(bytes) = super::read_doclist(context, shadows, buffer, page)? else {
+            continue;
+        };
+        super::doclist_rows(&bytes, phrase.column, columns, &mut rows);
+    }
+    rows.sort_unstable();
+    rows.dedup();
+    Ok(rows)
+}
+
+/// Returns the rows one expression matches, or `None` if it needs positions.
+///
+/// The counter advances down both sides of every branch whatever the answer,
+/// so a `None` from one side still leaves the phrase numbering right for the
+/// other - which is what makes the walk safe to abandon half way.
+///
+/// @param node - the expression
+/// @param rows - the rows each phrase matched, in the order they were parsed
+/// @param counter - which phrase the walk has reached
+fn walk_rows(node: &Match, rows: &[Vec<i64>], counter: &mut usize) -> Option<Vec<i64>> {
+    match node {
+        Match::Phrase(_) => {
+            let index = *counter;
+            *counter = counter.saturating_add(1);
+            Some(rows.get(index).cloned().unwrap_or_default())
+        }
+        // `NEAR` is how far apart the phrases are, which is a question about
+        // positions and cannot be answered from rowids.
+        Match::Near { phrases, .. } => {
+            *counter = counter.saturating_add(phrases.len());
+            None
+        }
+        Match::And(left, right) => {
+            let left = walk_rows(left, rows, counter);
+            let right = walk_rows(right, rows, counter);
+            match (left, right) {
+                (Some(left), Some(right)) => Some(intersect(&left, &right)),
+                _ => None,
+            }
+        }
+        Match::Or(left, right) => {
+            let left = walk_rows(left, rows, counter);
+            let right = walk_rows(right, rows, counter);
+            match (left, right) {
+                (Some(left), Some(right)) => Some(union(&left, &right)),
+                _ => None,
+            }
+        }
+        Match::Not(left, right) => {
+            let left = walk_rows(left, rows, counter);
+            let right = walk_rows(right, rows, counter);
+            match (left, right) {
+                (Some(left), Some(right)) => Some(
+                    left.into_iter()
+                        .filter(|row| !right.contains(row))
+                        .collect(),
+                ),
+                _ => None,
+            }
+        }
+    }
 }
 
 /// Returns the rows one expression matches.
@@ -548,11 +672,12 @@ pub fn phrase_hits(
     phrase: &Phrase,
     context: &mut Context<'_>,
     shadows: &ShadowTables,
+    buffer: &super::Buffer,
     columns: usize,
 ) -> DbResult<Hits> {
     let mut found: Option<Hits> = None;
     for (offset, term) in phrase.terms.iter().enumerate() {
-        let entries = term_entries(term, context, shadows)?;
+        let entries = term_entries(term, context, shadows, buffer)?;
         let mut current: Hits = BTreeMap::new();
         for entry in entries {
             for (column, positions) in &entry.columns {
@@ -619,11 +744,20 @@ fn meet(left: &Hits, right: &Hits) -> Hits {
 }
 
 /// Returns the doclist entries one term matches, prefix included.
-fn term_entries(
+/// Returns the `%_data` rows one term's doclists live in.
+///
+/// One row for an ordinary term; the whole prefix run for `word*`.
+///
+/// @param term - the term
+/// @param context - the host
+/// @param shadows - the table's shadow tables
+/// @param buffer - the doclists this transaction has staged
+fn term_pages(
     term: &Term,
     context: &mut Context<'_>,
     shadows: &ShadowTables,
-) -> DbResult<Vec<DocEntry>> {
+    buffer: &super::Buffer,
+) -> DbResult<Vec<i64>> {
     let mut pages = Vec::new();
     if term.prefix {
         // A prefix reads every term the dictionary holds that starts with it.
@@ -645,37 +779,62 @@ fn term_entries(
             }
             Ok(true)
         })?;
-    } else if let Some(page) = super::term_row(context, shadows, &term.token, false)? {
+    } else if let Some(page) = super::term_row(context, shadows, buffer, &term.token, false)? {
         pages.push(page);
     }
+    Ok(pages)
+}
+
+fn term_entries(
+    term: &Term,
+    context: &mut Context<'_>,
+    shadows: &ShadowTables,
+    buffer: &super::Buffer,
+) -> DbResult<Vec<DocEntry>> {
+    let pages = term_pages(term, context, shadows, buffer)?;
+
+    // **One doclist is already the answer.** A term that is not a prefix has
+    // exactly one `%_data` row, and a doclist holds each rowid once in
+    // ascending order - so the merge below has nothing to merge, and running it
+    // anyway searched a growing vector once per entry. That is quadratic in the
+    // documents a term appears in: a term in five hundred of them cost a
+    // hundred and twenty-five thousand comparisons per query, and `evaluate`
+    // was seventy per cent of `SELECT count(*) ... MATCH`.
+    if let Some(only) = pages.first().filter(|_| pages.len() == 1) {
+        let Some(bytes) = super::read_doclist(context, shadows, buffer, *only)? else {
+            return Ok(Vec::new());
+        };
+        return Ok(decode_doclist(&bytes));
+    }
+    // A prefix reads several, and they can name the same row: merged by rowid
+    // rather than searched for it.
     let mut entries: Vec<DocEntry> = Vec::new();
     for page in pages {
-        let Some(row) = shadows.read_row(context, b"data", page)? else {
+        let Some(bytes) = super::read_doclist(context, shadows, buffer, page)? else {
             continue;
         };
-        let Some(blob) = row.get(1).and_then(Value::as_blob) else {
-            continue;
-        };
-        for entry in decode_doclist(blob.raw()) {
-            match entries.iter_mut().find(|found| found.rowid == entry.rowid) {
-                Some(found) => {
-                    for (column, positions) in entry.columns {
-                        match found.columns.iter_mut().find(|(index, _)| *index == column) {
-                            Some((_, existing)) => {
-                                existing.extend(positions);
-                                existing.sort_unstable();
-                                existing.dedup();
-                            }
-                            None => found.columns.push((column, positions)),
-                        }
-                    }
-                }
-                None => entries.push(entry),
-            }
-        }
+        entries.extend(decode_doclist(&bytes));
     }
     entries.sort_by_key(|entry| entry.rowid);
-    Ok(entries)
+    let mut merged: Vec<DocEntry> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        match merged.last_mut().filter(|last| last.rowid == entry.rowid) {
+            Some(found) => {
+                for (column, positions) in entry.columns {
+                    match found.columns.iter_mut().find(|(index, _)| *index == column) {
+                        Some((_, existing)) => {
+                            existing.extend(positions);
+                            existing.sort_unstable();
+                            existing.dedup();
+                        }
+                        None => found.columns.push((column, positions)),
+                    }
+                }
+            }
+            None => merged.push(entry),
+        }
+    }
+    Ok(merged)
 }
 
 #[cfg(test)]

@@ -353,7 +353,12 @@ impl ShadowStore for WriteStore<'_> {
             .trees
             .get_mut(&root)
             .ok_or_else(|| misuse("no shadow table for that root"))?;
-        tree.insert(self.database, self.log, &row)?;
+        // **`put`, not `insert`.** `insert` copies out the row it replaced -
+        // every column of it, allocating per text and per blob - and this
+        // caller throws that away. On FTS5's `%_data` the replaced row is the
+        // term's whole doclist, so a shadow write was paying to materialise a
+        // multi-kilobyte value nobody reads. It is the same write otherwise.
+        tree.put(self.database, self.log, &row)?;
         Ok(())
     }
 
@@ -413,7 +418,12 @@ impl ShadowStore for WriteStore<'_> {
             .trees
             .get_mut(&root)
             .ok_or_else(|| misuse("no shadow table for that root"))?;
-        tree.insert(self.database, self.log, &row)?;
+        // **`put`, not `insert`.** `insert` copies out the row it replaced -
+        // every column of it, allocating per text and per blob - and this
+        // caller throws that away. On FTS5's `%_data` the replaced row is the
+        // term's whole doclist, so a shadow write was paying to materialise a
+        // multi-kilobyte value nobody reads. It is the same write otherwise.
+        tree.put(self.database, self.log, &row)?;
         Ok(())
     }
 
@@ -579,6 +589,7 @@ impl ImportedDatabase {
         table: &inillucent_sql::catalog_view::TableInfo,
         path: &AccessPath,
         params: &inillucent_exec::physical::Params,
+        needed: &inillucent_sql::bind::ColumnUse,
     ) -> DbResult<Option<Vec<Vec<OwnedDatum>>>> {
         let Some(connected) = self.virtual_tables.get(&table.folded) else {
             return Ok(None);
@@ -635,11 +646,42 @@ impl ImportedDatabase {
             catalog: None,
         };
         let width = connected.table.declaration().columns.len();
+        // **Only the columns something reads.** `needed` is what the bound
+        // statement reads of this term - the same answer a covering index is
+        // chosen by - plus the columns the recheck below tests, which were
+        // taken out of the residual on the module's behalf and so may not be
+        // read anywhere else. An opaque answer means the reads could not be
+        // enumerated, and then every column is materialised.
+        let mut wanted = vec![needed.opaque; width];
+        for slot in &needed.columns {
+            if let Some(flag) = wanted.get_mut(usize::from(*slot)) {
+                *flag = true;
+            }
+        }
+        for (position, constraint) in offer.iter().enumerate() {
+            let promised = query
+                .usage
+                .get(position)
+                .map(|usage| usage.omit)
+                .unwrap_or(false);
+            if promised {
+                continue;
+            }
+            if let Ok(column) = usize::try_from(constraint.spec.column) {
+                if let Some(flag) = wanted.get_mut(column) {
+                    *flag = true;
+                }
+            }
+        }
         let mut rows: Vec<Vec<OwnedDatum>> = Vec::new();
         cursor.filter(&mut context, &plan)?;
         while !cursor.eof() {
             let mut row = Vec::with_capacity(width);
             for column in 0..width {
+                if !wanted.get(column).copied().unwrap_or(true) {
+                    row.push(OwnedDatum::Null);
+                    continue;
+                }
                 row.push(inillucent_exec::scalar::from_value(
                     cursor.column(&mut context, column)?,
                 ));
