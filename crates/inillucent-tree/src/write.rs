@@ -114,11 +114,23 @@ fn underflows(leaf: &LeafRef<'_>) -> DbResult<bool> {
 
 /// How full a compaction packs a page it is not splitting.
 ///
-/// Ninety percent rather than a hundred, so that a leaf which has just been
-/// compacted has room for a few more delta rows before it has to be compacted
-/// again. A hundred percent would make every insert after a compaction into
-/// another compaction.
-const COMPACT_FILL: f64 = 0.90;
+/// Not a hundred percent, so that a leaf which has just been compacted has room
+/// for more delta rows before it has to be compacted again - a hundred would
+/// make every insert after a compaction into another compaction.
+///
+/// **Seventy-five rather than ninety, and the difference is measured.** The room
+/// left over *is* the delta area, so the fill decides how many rows a leaf can
+/// take before it repacks: ninety percent of an eight-kilobyte page leaves about
+/// eight hundred bytes, which is six rows of the gate's `main_table` - so an
+/// insert-heavy workload repacked every six rows and wrote the whole page to the
+/// log each time. Seventy-five leaves two kilobytes, which is closer to
+/// seventeen.
+///
+/// It is a trade and the other side of it is size: a tree packed at
+/// seventy-five percent is a fifth larger than one packed at ninety, and a scan
+/// reads a fifth more pages. Both gates were re-run - the read families are the
+/// ones that would pay for it.
+const COMPACT_FILL: f64 = 0.75;
 
 /// How full each half of a split is packed.
 ///
