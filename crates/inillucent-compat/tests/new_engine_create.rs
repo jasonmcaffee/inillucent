@@ -73,29 +73,22 @@ fn a_created_database_survives_being_closed_and_opened() {
         }
         database.check_trees().expect("every tree is intact");
 
-        // **Unrecovered first, on purpose.** This open does not replay the log,
-        // and the failure that would hide is the worst kind: a database closed
-        // without a checkpoint coming back missing every committed transaction
-        // and answering queries about the rest perfectly. Before the guard, this
-        // very sequence returned "no such table: note" from a file that plainly
-        // had one.
-        let detail = match ImportedDatabase::open(path.clone(), PAGE_SIZE, FRAMES) {
-            Ok(_) => panic!("an unrecovered log must be refused rather than ignored"),
-            Err(refused) => refused.detail().unwrap_or_default().to_string(),
-        };
-        assert!(
-            detail.contains("committed transaction") && detail.contains("does not replay"),
-            "the refusal must say what is in the log: {detail}"
-        );
-
-        // Checkpointed, which is the supported way to hand a database over.
-        database.checkpoint().expect("the database checkpoints");
-        database.check_trees().expect("every tree is intact");
+        // **No checkpoint, on purpose.** Everything above is in the log and
+        // not yet in the pages, which is the ordinary shape of a crash and is
+        // exactly what `create` followed by DDL produces. Opening the file has
+        // to replay it.
+        //
+        // This assertion has been three things in one sitting, and the history
+        // is the point. It first read the rows back and got "no such table:
+        // note" from a file that plainly had one, because `open` did not replay
+        // and said nothing about it. Then it asserted a *refusal*, which was
+        // honest but was not an open. Now it asserts the recovery.
     }
 
-    // A different handle, over a file this process is no longer holding.
-    let reopened =
-        ImportedDatabase::open(path.clone(), PAGE_SIZE, FRAMES).expect("the file opens again");
+    // A different handle, over a file this process is no longer holding and
+    // whose log still carries every one of those statements.
+    let reopened = ImportedDatabase::open(path.clone(), PAGE_SIZE, FRAMES)
+        .expect("the file opens, replaying its log");
     let (rows, _) = reopened
         .run("SELECT body FROM note ORDER BY id")
         .expect("the rows read back");
