@@ -69,6 +69,10 @@ name = "inillucent-fullgate"
 path = "src/bin/fullgate.rs"
 
 [[bin]]
+name = "inillucent-searchgate"
+path = "src/bin/searchgate.rs"
+
+[[bin]]
 name = "inillucent-probeprofile"
 path = "src/bin/probeprofile.rs"
 
