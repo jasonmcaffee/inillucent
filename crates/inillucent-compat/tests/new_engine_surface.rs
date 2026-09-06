@@ -128,6 +128,16 @@ const SURFACE: &[(&str, &str, Answers)] = &[
         "INSERT INTO t(id, a, b) VALUES (9, 'r', 1) RETURNING id",
         Yes,
     ),
+    (
+        "subquery.values",
+        "INSERT INTO t(id, a, b) VALUES ((SELECT max(id) FROM t) + 1, 'z', 1)",
+        Yes,
+    ),
+    (
+        "subquery.set",
+        "UPDATE t SET a = (SELECT a FROM t WHERE id = 1) WHERE id = 2",
+        Yes,
+    ),
     // Schema.
     ("create.index", "CREATE INDEX ix ON t(a)", Yes),
     ("create.view", "CREATE VIEW v AS SELECT a FROM t", Yes),

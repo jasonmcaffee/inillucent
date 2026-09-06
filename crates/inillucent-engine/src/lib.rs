@@ -1715,12 +1715,29 @@ impl ImportedDatabase {
                     }
                     None => Vec::new(),
                 };
+                // A `VALUES` list has expressions and no plan, so the
+                // plan-shaped fold never sees it. Folded here instead, or a
+                // subquery in a value would be refused as though it were
+                // correlated - which is what an unfilled slot looks like from
+                // inside the physical pass.
+                let folded = self.fold_values(statement, params)?;
+                let params = folded.as_ref().unwrap_or(params);
                 self.write(params, |target, log, params| {
                     dml::insert(statement, target, log, params, &rows)
                 })
             }
             Cached::Update(statement, plan, prepared) => {
                 let keys = self.keys_of(plan, prepared, params)?;
+                // The same for an `UPDATE`'s assignments: the plan above finds
+                // the rows, and the values written into them are evaluated by
+                // the write path from expressions the plan never carried.
+                let assigned: Vec<&inillucent_sql::bind::BoundExpr> = statement
+                    .assignments
+                    .iter()
+                    .map(|assignment| &assignment.value)
+                    .collect();
+                let folded = inillucent_exec::subquery::fold_expressions(&assigned, self, params)?;
+                let params = folded.as_ref().unwrap_or(params);
                 self.write(params, |target, log, params| {
                     dml::update(statement, target, log, params, &keys)
                 })
@@ -1732,6 +1749,27 @@ impl ImportedDatabase {
                 })
             }
         }
+    }
+
+    /// Folds the subqueries in an insert's `VALUES` list, when it has one.
+    ///
+    /// An insert whose source is a `SELECT` is planned, so its subqueries are
+    /// folded by the plan-shaped path along with everything else in that plan.
+    /// A `VALUES` list is not planned at all - the write path evaluates its
+    /// expressions directly - so it is folded here.
+    ///
+    /// @param statement - the bound insert
+    /// @param params - the values bound for this execution
+    fn fold_values(
+        &self,
+        statement: &inillucent_sql::dml::BoundInsert,
+        params: &Params,
+    ) -> DbResult<Option<Params>> {
+        let inillucent_sql::dml::BoundInsertSource::Values(rows) = &statement.source else {
+            return Ok(None);
+        };
+        let values: Vec<&inillucent_sql::bind::BoundExpr> = rows.iter().flatten().collect();
+        inillucent_exec::subquery::fold_expressions(&values, self, params)
     }
 
     /// Returns one statement compiled, from the cache or by compiling it.
