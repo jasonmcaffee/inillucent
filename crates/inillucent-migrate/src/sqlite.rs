@@ -152,6 +152,27 @@ pub fn inventory(path: &Path) -> DbResult<SqliteInventory> {
             error.message()
         ))
     })?;
+    // **Triggers are named, one by one, rather than skipped.** The new engine
+    // does not run them and refuses to store one, because a stored trigger that
+    // never fires is a database whose invariants are not maintained and whose
+    // owner is not told. A migration that dropped them quietly would move that
+    // silence from the engine into the tool.
+    //
+    // Named per object because that is the difference between an answer
+    // somebody can act on - "these three triggers cannot be carried, here they
+    // are" - and one they can only be annoyed by.
+    let carried_triggers: Vec<String> = schema
+        .iter()
+        .filter(|object| object.kind == "trigger")
+        .map(|object| object.name.clone())
+        .collect();
+    if !carried_triggers.is_empty() {
+        return Err(corrupt(format!(
+            "{}: the new engine does not run triggers, so these cannot be carried: {}.              Drop them in the source, or migrate without them and recreate the behaviour              they enforced in the application.",
+            path.display(),
+            carried_triggers.join(", ")
+        )));
+    }
     let mut tables = Vec::new();
     for object in schema {
         if object.kind != "table" || object.root == 0 || object.name.starts_with("sqlite_") {

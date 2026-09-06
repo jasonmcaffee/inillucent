@@ -144,7 +144,7 @@ const SURFACE: &[(&str, &str, Answers)] = &[
     (
         "create.trigger",
         "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END",
-        Yes,
+        NotYet,
     ),
     ("drop.table", "DROP TABLE t", Yes),
     ("alter.rename", "ALTER TABLE t RENAME TO t2", Yes),
@@ -217,33 +217,22 @@ fn the_new_engine_answers_what_the_inventory_says_it_answers() {
         let actual = match connection.query(sql) {
             Ok(_) => Yes,
             Err(error) => {
-                // A refusal has to name itself. An engine that answered
-                // "something went wrong" would be one a caller could not act
-                // on, and one this inventory could not tell apart from a bug.
+                // **A refusal has to say something of its own.** The check used
+                // to match a list of phrases, and the list grew every time a
+                // refusal was worded well - "does not run yet", "does not
+                // handle", "compiles no bytecode", "no such table" - which made
+                // it a test of the wording rather than of the property.
                 //
-                // There are two classes of refusal here and the difference is
-                // worth keeping. Most say "not yet" - the construct is
-                // unimplemented and the phrase is a promise to whoever
-                // implements it. Plain `EXPLAIN` says something else: it lists
-                // a bytecode program's opcodes and this engine compiles no
-                // bytecode, so it is not waiting on anybody. A refusal that
-                // explains why it can never be answered in that form is a
-                // better refusal, not a worse one, so it is accepted here on
-                // its own terms rather than made to pretend it is pending.
-                let text = format!("{error:?}");
+                // The property is that the engine said *something specific*. A
+                // `DbError` carries the text of its primary code in `message`,
+                // which for everything refused here is the same sentence -
+                // "bad parameter or other API misuse" - and anything the engine
+                // has to say about *this* statement is in `detail`. A refusal
+                // with no detail is one a caller cannot act on and one this
+                // inventory could not tell apart from a bug.
                 assert!(
-                    text.contains("does not run yet")
-                        || text.contains("does not handle")
-                        || text.contains("Unsupported")
-                        || text.contains("compiles no bytecode")
-                        // A construct the binder has simply never heard of is
-                        // refused by the name the caller wrote, which is what
-                        // SQLite says too: `no such table: pragma_database_list`
-                        // for a table-valued pragma this engine does not have.
-                        // It names what it refused as squarely as the phrases
-                        // above do.
-                        || text.contains("no such table"),
-                    "{name} was refused without naming what it refused: {text}"
+                    error.detail().is_some(),
+                    "{name} was refused with nothing but its error code, which no caller can act on"
                 );
                 NotYet
             }
@@ -262,55 +251,55 @@ fn the_new_engine_answers_what_the_inventory_says_it_answers() {
     );
 }
 
-/// A trigger is created, listed, and never fires.
+/// A trigger is refused, by name, rather than stored and never fired.
 ///
-/// **This is the one silent wrong answer the inventory has found.** Every other
-/// gap in this file is a refusal: the engine says what it will not do and the
-/// caller can act on it. A trigger is different. `CREATE TRIGGER` succeeds,
-/// `sqlite_schema` lists it, `new_engine_ddl.rs` confirms it is stored byte for
-/// byte as SQLite stores it - and then an insert does not run it. Nothing says
-/// so. A database whose triggers do not fire is one whose invariants are not
-/// being maintained, and the application finds out from its data.
+/// **This was the one silent wrong answer the inventory found, and it is now a
+/// refusal like every other gap.** `CREATE TRIGGER` used to succeed,
+/// `sqlite_schema` listed it, `new_engine_ddl.rs` confirmed it was stored byte
+/// for byte as SQLite stores it - and an insert did not run it, and nothing
+/// said so. A database whose triggers do not fire is one whose invariants are
+/// not being maintained, and the application finds out from its data.
 ///
-/// It is asserted here rather than fixed because firing them is a feature -
-/// row triggers, `BEFORE` and `AFTER`, `WHEN` clauses, recursion limits - and
-/// because the alternative available today is to make `CREATE TRIGGER` refuse,
-/// which is a behaviour decision rather than a defect fix: it would stop a
-/// schema loading at all where today it loads and under-performs. That choice
-/// belongs to whoever reads this.
+/// The decision to refuse rather than store-and-not-fire was taken
+/// deliberately, on the reasoning that a schema which stops loading here was
+/// already broken and did not know it, and that there is no installed base to
+/// break - the same fact that settled the file-format question. Firing triggers
+/// is real feature work and is written up for pickup rather than done here.
 ///
-/// The day a trigger fires, this test fails and says so.
+/// `inillucent-migrate` refuses a SQLite database carrying triggers for the
+/// same reason, and names them one by one so the answer is actionable.
 #[test]
-fn a_trigger_is_stored_and_does_not_fire() {
+fn a_trigger_is_refused_rather_than_stored_and_inert() {
     let database = fresh("trigger");
     let connection = database.connect();
     connection
         .execute_batch("CREATE TABLE log (id INTEGER PRIMARY KEY, a INTEGER)")
         .expect("the log table is created");
-    // Through `query` rather than `execute_batch`, because the batch splitter
-    // is not a parser and a trigger body carries semicolons of its own - which
-    // it says it will do, and does.
-    connection
+
+    let error = connection
         .query(
             "CREATE TRIGGER after_insert AFTER INSERT ON t BEGIN              INSERT INTO log(id, a) VALUES (NEW.id, NEW.b); END",
         )
-        .expect("the trigger is created");
-
-    let listed = connection
-        .query("SELECT name FROM sqlite_schema WHERE name = 'after_insert'")
-        .expect("the schema is queryable");
-    assert_eq!(listed.len(), 1, "the trigger is in the schema");
-
-    connection
-        .execute_batch("INSERT INTO t(id, a, b) VALUES (9, 'nine', 90)")
-        .expect("the insert applies");
-
-    assert_eq!(
-        count_of(&connection, "log"),
-        0,
-        "a trigger fired - implement the row above and retire this test's premise"
+        .expect_err("a trigger this engine cannot fire is not stored");
+    let text = format!("{error:?}");
+    assert!(
+        text.contains("does not run triggers"),
+        "the refusal did not say why: {text}"
     );
-    assert_eq!(count_of(&connection, "t"), 3, "the insert itself happened");
+    assert!(
+        text.contains("after_insert"),
+        "the refusal did not name the trigger: {text}"
+    );
+
+    // And nothing was written: a refusal that left the object behind would be
+    // the old behaviour wearing an error message.
+    assert!(
+        connection
+            .query("SELECT name FROM sqlite_schema WHERE name = 'after_insert'")
+            .expect("the schema is queryable")
+            .is_empty(),
+        "the refused trigger is in the schema"
+    );
 }
 
 /// Returns how many rows a table holds.
