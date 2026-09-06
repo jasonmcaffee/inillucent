@@ -48,6 +48,38 @@ use crate::leaf::{LeafBuilder, LeafRef, Packed};
 use crate::mutate::LeafMut;
 use crate::paged::PagedTree;
 
+/// Reports whether a key sorts after a row's key.
+///
+/// @param key - the key arriving
+/// @param row - the row to compare against
+/// @param collations - the key columns' collations
+/// @param key_columns - how many leading columns form the key
+fn is_above(
+    key: &[Datum<'_>],
+    row: &[Datum<'_>],
+    collations: &[inillucent_value::collation::Collation],
+    key_columns: usize,
+) -> bool {
+    for column in 0..key_columns {
+        let Some(wanted) = key.get(column) else {
+            return false;
+        };
+        let Some(held) = row.get(column) else {
+            return false;
+        };
+        let collation = collations
+            .get(column)
+            .copied()
+            .unwrap_or(inillucent_value::collation::Collation::Binary);
+        match crate::types::compare_under(wanted, held, collation) {
+            core::cmp::Ordering::Greater => return true,
+            core::cmp::Ordering::Less => return false,
+            core::cmp::Ordering::Equal => {}
+        }
+    }
+    false
+}
+
 /// What a leaf that has run out of room turns out to need.
 ///
 /// Decided while the page is still borrowed, and acted on after the borrow ends
@@ -328,7 +360,7 @@ impl PagedTree {
                         "a leaf had no room for one row after being compacted and split",
                     ));
                 }
-                self.make_room(database, log, page, &path)?;
+                self.make_room(database, log, page, &path, Some(&key))?;
                 continue;
             }
 
@@ -386,7 +418,7 @@ impl PagedTree {
                 LeafMut::new(bytes)?.has_room_for_a_tombstone()
             })?;
             if !room {
-                self.make_room(database, log, page, &path)?;
+                self.make_room(database, log, page, &path, None)?;
                 return self.delete(database, log, key);
             }
         }
@@ -518,12 +550,14 @@ impl PagedTree {
     /// @param database - the file
     /// @param log - where the record goes
     /// @param page - the leaf
+    /// @param arriving - the key about to be written, when there is one
     pub fn make_room(
         &mut self,
         database: &mut Database,
         log: &mut dyn TreeLog,
         page: PageId,
         path: &[PageId],
+        arriving: Option<&[Datum<'_>]>,
     ) -> DbResult<()> {
         // **Packed straight out of the page.** The rows a compaction repacks are
         // already in a leaf, where a text or a blob is a slice; copying them to
@@ -541,6 +575,28 @@ impl PagedTree {
             let guard = database.pool().fetch(page)?;
             let leaf = LeafRef::parse(&guard)?.with_collations(self.collations());
             let rows = leaf.live()?;
+            // **An append splits rather than compacts.**
+            //
+            // A leaf filled by rows arriving in key order is compacted, filled
+            // again by the next thirty-two, and compacted again - and a
+            // compaction repacks every live row and writes the whole page to
+            // the log. On the gate's `write.insert.batch`, two thousand rows
+            // appended to a hundred thousand cost a hundred and ten of those:
+            // nine hundred kilobytes of log for two hundred and forty
+            // kilobytes of rows.
+            //
+            // Splitting instead leaves a half-empty page on the right, which is
+            // where the next rows are going anyway, so the same work happens
+            // once per page rather than once per delta area. It is the append
+            // case every b-tree special-cases, and the condition is the same
+            // one they use: this is the last leaf, and the key arriving sorts
+            // after everything in it.
+            let appending = leaf.right_sibling().is_none()
+                && rows.len() >= 2
+                && match (arriving, rows.last()) {
+                    (Some(key), Some(last)) => is_above(key, last, self.collations(), self.key_columns()),
+                    _ => false,
+                };
             let builder = LeafBuilder::new(
                 self.page_size(),
                 self.tree_id(),
@@ -551,7 +607,7 @@ impl PagedTree {
                 Packed::Filled {
                     page: image,
                     rows: packed,
-                } if packed == rows.len() => {
+                } if packed == rows.len() && !appending => {
                     Fit::Compact(image, leaf.right_sibling(), leaf.max_cts())
                 }
                 // A split rewrites three pages and needs the rows to outlive the
