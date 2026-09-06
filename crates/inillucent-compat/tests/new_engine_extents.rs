@@ -290,6 +290,46 @@ fn out_of_line_values_survive_closing_and_reopening_the_file() {
 }
 
 #[test]
+fn a_reference_in_the_delta_area_is_replaced_and_given_back() {
+    let Some(mut pair) = pair("delta", 40) else {
+        return no_oracle();
+    };
+    // **The row is written twice, and the second write is the one under test.**
+    // A large value is spilled and its *reference* goes into the delta area; the
+    // second write finds the key there rather than in the sorted region, and has
+    // to remove that row, give its pages back, and stop saying the leaf holds an
+    // out-of-line value if that was the last one. Nothing else in this suite
+    // reaches that path: every other write finds its key in the sorted region.
+    for sql in [
+        "UPDATE wide SET body = replace(hex(zeroblob(1200)), '0', 'a') WHERE id = 11",
+        "UPDATE wide SET body = replace(hex(zeroblob(1600)), '0', 'b') WHERE id = 11",
+        "UPDATE wide SET body = 'small again' WHERE id = 11",
+        "UPDATE wide SET body = replace(hex(zeroblob(1400)), '0', 'c') WHERE id = 11",
+        // And the same shape ending in a delete, which frees the reference the
+        // delta area holds rather than leaving it for a repack that never comes.
+        "UPDATE wide SET body = replace(hex(zeroblob(1300)), '0', 'd') WHERE id = 13",
+        "DELETE FROM wide WHERE id = 13",
+        // A row that is new, spilled, and then replaced while still in the delta.
+        "INSERT INTO wide VALUES (300, 'tag4', 'seed')",
+        "UPDATE wide SET body = replace(hex(zeroblob(1100)), '0', 'e') WHERE id = 300",
+        "UPDATE wide SET body = 'short' WHERE id = 300",
+    ] {
+        pair.both(sql);
+        pair.is_intact(sql);
+    }
+    for probe in PROBES {
+        pair.answers_agree(probe);
+    }
+    // The same answers after a reopen, because a delta row's reference is
+    // replayed from the log rather than rebuilt from values.
+    pair.engine.reopen().expect("the file reopens");
+    pair.is_intact("a reopen after delta references");
+    for probe in PROBES {
+        pair.answers_agree(probe);
+    }
+}
+
+#[test]
 fn a_created_index_over_a_table_of_large_values_is_correct() {
     let Some(mut pair) = pair("index", 40) else {
         return no_oracle();
