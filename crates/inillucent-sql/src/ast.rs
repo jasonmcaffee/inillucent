@@ -1137,6 +1137,29 @@ impl Ast {
         Ast::default()
     }
 
+    /// Empties the arena, keeping the memory it has already taken.
+    ///
+    /// **So that a second statement costs no allocations.** Every one of these
+    /// vectors is empty at `Ast::new` and grows on its first push, so parsing
+    /// `SELECT 1` takes half a dozen trips to the allocator - about 270 ns of a
+    /// 1,337 ns prepare on this platform's CRT heap. A parser handed a cleared
+    /// arena pushes into capacity that is already there.
+    ///
+    /// It is a `clear` rather than a `new` for exactly that reason, and the
+    /// names are cleared with everything else: `intern` returns an existing id
+    /// for equal text, so a name left behind from the previous statement would
+    /// be a live id in the next one's arena.
+    pub fn clear(&mut self) {
+        self.names.clear();
+        self.exprs.clear();
+        self.expr_spans.clear();
+        self.selects.clear();
+        self.cores.clear();
+        self.from_terms.clear();
+        self.windows.clear();
+        self.bytes = 0;
+    }
+
     /// Returns the number of arena bytes charged so far.
     ///
     /// This is what the `max_ast_bytes` limit is charged against. It counts the

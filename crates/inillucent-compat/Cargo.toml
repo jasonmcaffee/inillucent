@@ -77,6 +77,10 @@ name = "inillucent-probeprofile"
 path = "src/bin/probeprofile.rs"
 
 [[bin]]
+name = "inillucent-prepareprofile"
+path = "src/bin/prepareprofile.rs"
+
+[[bin]]
 name = "inillucent-exprperf"
 path = "src/bin/exprperf.rs"
 

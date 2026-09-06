@@ -94,11 +94,32 @@ pub struct Parser<'a> {
 impl<'a> Parser<'a> {
     /// Returns a parser positioned at an offset in the source.
     pub fn new(source: &'a [u8], offset: usize, limits: &'a Limits) -> Parser<'a> {
+        Parser::with_arena(source, offset, limits, Ast::new())
+    }
+
+    /// Returns a parser that fills an arena the caller supplies.
+    ///
+    /// **For a caller that parses one statement after another.** The arena is
+    /// cleared rather than dropped, so the second parse pushes into capacity
+    /// the first one took - see [`Ast::clear`]. Nothing else differs: the arena
+    /// is filled and handed back exactly as `new`'s own is.
+    ///
+    /// @param source - the SQL text
+    /// @param offset - where in it this statement starts
+    /// @param limits - the limits to enforce
+    /// @param arena - the arena to fill, cleared first
+    pub fn with_arena(
+        source: &'a [u8],
+        offset: usize,
+        limits: &'a Limits,
+        mut arena: Ast,
+    ) -> Parser<'a> {
+        arena.clear();
         Parser {
             source,
             lexer: Lexer::at(source, offset),
             buffer: Vec::new(),
-            ast: Ast::new(),
+            ast: arena,
             limits,
             depth: 0,
             parameters: ParameterMap::default(),
@@ -673,6 +694,26 @@ pub fn parse_next_statement(
     offset: usize,
     limits: &Limits,
 ) -> Result<ParsedStatement, ParseError> {
+    parse_next_statement_into(source, offset, limits, Ast::new())
+}
+
+/// Parses one statement into an arena the caller supplies.
+///
+/// The same parse as [`parse_next_statement`], with the arena handed in rather
+/// than made. A caller that compiles statement after statement keeps one and
+/// gets its capacity back on every parse after the first, which on `SELECT 1`
+/// is most of what a parse costs.
+///
+/// @param source - the SQL text
+/// @param offset - where in it this statement starts
+/// @param limits - the limits to enforce
+/// @param arena - the arena to fill, cleared first
+pub fn parse_next_statement_into(
+    source: &[u8],
+    offset: usize,
+    limits: &Limits,
+    arena: Ast,
+) -> Result<ParsedStatement, ParseError> {
     let length = source.len().saturating_sub(offset) as i64;
     if length > limits.get(Limit::SqlLength) {
         return Err(ParseError::new(
@@ -680,7 +721,7 @@ pub fn parse_next_statement(
             Span::at(offset),
         ));
     }
-    let mut parser = Parser::new(source, offset, limits);
+    let mut parser = Parser::with_arena(source, offset, limits, arena);
     let start = parser.cursor();
     let statement = parser.parse_statement()?;
     let end = parser.cursor();
@@ -696,7 +737,9 @@ pub fn parse_next_statement(
         _ => return Err(parser.unexpected(&[";"])?),
     };
     let span = Span::new(start, end);
-    let parameters = parser.parameters.clone();
+    // Taken rather than cloned: the parser is about to be consumed, so the map
+    // it built is the caller's and copying it is a `Vec` per parse for nothing.
+    let parameters = core::mem::take(&mut parser.parameters);
     Ok(ParsedStatement {
         ast: parser.into_ast(),
         statement,
