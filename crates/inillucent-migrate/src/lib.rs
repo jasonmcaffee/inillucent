@@ -259,32 +259,26 @@ pub fn migrate(plan: &Plan) -> Result<Outcome, String> {
         .map_err(|error| format!("cannot checkpoint the staged file: {}", error.message()))?;
     drop(connection);
     drop(database);
-    {
-        let reopened = Database::open(&plan.staging)
-            .map_err(|error| format!("reopen: {}", error.message()))?;
-        }
 
     let mut checks = vec![structure_probe(&plan.staging)];
 
-    let mut sql = SqlIndex::open(&plan.staging, SEARCH_TABLE)
-        .map_err(|error| {
-            format!(
-                "cannot reopen the staged database: {}",
-                error.detail().unwrap_or_else(|| error.message())
-            )
-        })?;
+    let mut sql = SqlIndex::open(&plan.staging, SEARCH_TABLE).map_err(|error| {
+        format!(
+            "cannot reopen the staged database: {}",
+            error.detail().unwrap_or_else(|| error.message())
+        )
+    })?;
     checks.extend(verify::run(&source.index, &mut sql));
     drop(sql);
 
     // And once more through a second open, which is the check that the first
     // reopen did not itself leave state behind.
-    let mut again = SqlIndex::open(&plan.staging, SEARCH_TABLE)
-        .map_err(|error| {
-            format!(
-                "cannot reopen the staged database: {}",
-                error.detail().unwrap_or_else(|| error.message())
-            )
-        })?;
+    let mut again = SqlIndex::open(&plan.staging, SEARCH_TABLE).map_err(|error| {
+        format!(
+            "cannot reopen the staged database: {}",
+            error.detail().unwrap_or_else(|| error.message())
+        )
+    })?;
     let repeated = verify::run(&source.index, &mut again);
     drop(again);
     let stable = repeated.iter().all(|check| check.passed);
@@ -445,10 +439,7 @@ fn structure_probe(database: &Path) -> Check {
 ///
 /// @param connection - the reopened staged database
 /// @param sql - the counting query
-fn count_of(
-    connection: &Connection<'_>,
-    sql: &str,
-) -> Result<i64, String> {
+fn count_of(connection: &Connection<'_>, sql: &str) -> Result<i64, String> {
     let rows = connection
         .query(sql)
         .map_err(|error| format!("{sql}: {}", error.message()))?;

@@ -814,7 +814,18 @@ impl ImportedDatabase {
                     .iter()
                     .find(|recorded| recorded.entry.name.to_ascii_lowercase() == shadow_name)
                 else {
-                    continue;
+                    // **Refused rather than skipped.** A module connected
+                    // without one of its shadow tables is a module that will
+                    // answer wrongly rather than fail - it may even create a
+                    // second copy of the table it could not find - so a shadow
+                    // the catalog does not name stops the open and says which
+                    // one. This is how a catalog that had lost rows was found:
+                    // the connect went ahead without them.
+                    return Err(misuse(format!(
+                        "the catalog does not name {}, which {} needs",
+                        String::from_utf8_lossy(&shadow_name),
+                        String::from_utf8_lossy(&name)
+                    )));
                 };
                 connect.shadows.push(ShadowRoot {
                     suffix: shadow.suffix.clone(),

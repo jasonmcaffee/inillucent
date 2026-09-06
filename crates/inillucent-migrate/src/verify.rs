@@ -23,13 +23,13 @@
 //! legacy default is join to `document` and drop the deleted ones, and there is
 //! a check for exactly that below.
 
-use inillucent_engine::connect::Connection;
-use inillucent_tree::datum::OwnedDatum;
 use inillucent_base::hash::Sha256;
 use inillucent_core::filter::Filter;
 use inillucent_core::index::{Branches, Index};
 use inillucent_core::store::Store;
+use inillucent_engine::connect::Connection;
 use inillucent_search::adapter::{Query, RetrievalIndex};
+use inillucent_tree::datum::OwnedDatum;
 
 use crate::copy::{self, SEARCH_TABLE};
 use crate::index::SqlIndex;
@@ -789,7 +789,12 @@ fn ranked(
             limit,
             recall: None,
         })
-        .map_err(|error| error.detail().unwrap_or_else(|| error.message()).to_string())?;
+        .map_err(|error| {
+            error
+                .detail()
+                .unwrap_or_else(|| error.message())
+                .to_string()
+        })?;
     Ok(hits
         .iter()
         .filter_map(|hit| hit.id.parse::<i64>().ok())
@@ -968,11 +973,7 @@ fn scalar(connection: &Connection<'_>, sql: &str) -> Result<i64, String> {
     {
         return Ok(0);
     }
-    Ok(statement
-        .row()
-        .first()
-        .and_then(as_integer)
-        .unwrap_or(0))
+    Ok(statement.row().first().and_then(as_integer).unwrap_or(0))
 }
 
 /// Returns the first column of every row as integers.
@@ -985,11 +986,7 @@ fn integers(connection: &Connection<'_>, sql: &str) -> Result<Vec<i64>, String> 
         .step()
         .map_err(|error| format!("{sql}: {}", error.message()))?
     {
-        if let Some(value) = statement
-            .row()
-            .first()
-            .and_then(as_integer)
-        {
+        if let Some(value) = statement.row().first().and_then(as_integer) {
             rows.push(value);
         }
     }

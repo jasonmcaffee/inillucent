@@ -20,11 +20,11 @@
 //! source: same terms, same document lengths, same corpus statistics, produced
 //! by the same single-pass build.
 
+use inillucent_base::hash::Sha256;
 use inillucent_base::DbResult;
+use inillucent_core::store::Store;
 use inillucent_engine::connect::{Connection, Statement};
 use inillucent_tree::datum::OwnedDatum;
-use inillucent_base::hash::Sha256;
-use inillucent_core::store::Store;
 
 use crate::manifest::Manifest;
 
@@ -433,22 +433,14 @@ pub fn digest(connection: &Connection<'_>, sql: &str) -> Result<(u64, String), S
 }
 
 /// Binds one value, reporting a failure as text.
-fn bind(
-    statement: &mut Statement<'_>,
-    index: u32,
-    value: OwnedDatum,
-) -> Result<(), String> {
+fn bind(statement: &mut Statement<'_>, index: u32, value: OwnedDatum) -> Result<(), String> {
     statement
         .bind(index, value)
         .map_err(|error| error.message().to_string())
 }
 
 /// Binds one text value.
-fn bind_text(
-    statement: &mut Statement<'_>,
-    index: u32,
-    value: &str,
-) -> Result<(), String> {
+fn bind_text(statement: &mut Statement<'_>, index: u32, value: &str) -> Result<(), String> {
     statement
         .bind_text(index, value)
         .map_err(|error| error.message().to_string())
