@@ -459,7 +459,7 @@ fn probe_stages(database: &ImportedDatabase, rows: u32) -> Result<(), String> {
             for value in values {
                 let found = tree
                     .probe(pool, &[Datum::Int(*value)], |leaf, row| {
-                        Ok(OwnedDatum::from_datum(&leaf.value(row, 3)?))
+                        Ok(OwnedDatum::from_datum(&leaf.value_at(row, 3)?))
                     })
                     .map_err(|error| why(&error))?;
                 std::hint::black_box(found.is_some());
@@ -477,7 +477,7 @@ fn probe_stages(database: &ImportedDatabase, rows: u32) -> Result<(), String> {
             for value in values {
                 let found = tree
                     .probe(pool, &[Datum::Int(*value)], |leaf, row| {
-                        Ok(OwnedDatum::from_datum(&leaf.value(row, 0)?))
+                        Ok(OwnedDatum::from_datum(&leaf.value_at(row, 0)?))
                     })
                     .map_err(|error| why(&error))?;
                 std::hint::black_box(found.is_some());

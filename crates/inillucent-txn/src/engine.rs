@@ -46,7 +46,7 @@ use inillucent_base::DbResult;
 use inillucent_pool::{Database, Options, Pool};
 use inillucent_vfs::{DbPath, Vfs};
 use inillucent_wal::record::Body;
-use inillucent_wal::recover::{self, RecoveryStart, Recovered};
+use inillucent_wal::recover::{self, Recovered, RecoveryStart};
 use inillucent_wal::writer::{Wal, WalOptions};
 use inillucent_wal::Synchronous;
 
@@ -169,11 +169,7 @@ impl Engine {
     /// @param vfs - the file system
     /// @param path - where to create it
     /// @param options - the page size, pool size, sync policy and timeout
-    pub fn create(
-        vfs: Arc<dyn Vfs>,
-        path: &DbPath,
-        options: EngineOptions,
-    ) -> DbResult<Engine> {
+    pub fn create(vfs: Arc<dyn Vfs>, path: &DbPath, options: EngineOptions) -> DbResult<Engine> {
         let database = Database::create(vfs.as_ref(), path, options.database)?;
         Engine::assemble(vfs, path, database, options, Recovered::default())
     }
@@ -197,7 +193,10 @@ impl Engine {
         let mut database = Database::open(vfs.as_ref(), path, options.database.frames)?;
         let start = RecoveryStart {
             uuid: database.uuid(),
-            checkpoint_lsn: database.meta().checkpoint_lsn.max(inillucent_wal::FIRST_LSN),
+            checkpoint_lsn: database
+                .meta()
+                .checkpoint_lsn
+                .max(inillucent_wal::FIRST_LSN),
             sequence: database.meta().wal_sequence.max(1),
             cts_watermark: database.meta().cts_watermark,
         };

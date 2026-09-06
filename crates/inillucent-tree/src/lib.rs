@@ -54,14 +54,18 @@
 pub mod datum;
 pub mod key;
 pub mod leaf;
+pub mod mutate;
 pub mod page;
 pub mod paged;
 pub mod tree;
 pub mod types;
+pub mod write;
 
 pub use datum::Datum;
 pub use leaf::{LeafBuilder, LeafRef};
+pub use mutate::{Applied, DeltaPlan, LeafMut};
 pub use page::{PageId, PageSize};
 pub use paged::{Descent, KeyBytes, KeyEncoding, PagedTree};
 pub use tree::{ScanCursor, Tree};
 pub use types::{ColumnSpec, PhysicalType};
+pub use write::{Located, NoLog, TreeLog, WriteStats};

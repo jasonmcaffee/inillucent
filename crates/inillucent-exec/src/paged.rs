@@ -30,11 +30,10 @@
 //! batch would pay for a vector per column to carry one value each, and the
 //! phase gate asks for that answer in under 500 ns.
 
-use inillucent_base::error::misuse;
 use inillucent_base::DbResult;
 use inillucent_pool::Pool;
 use inillucent_tree::datum::{Datum, OwnedDatum};
-use inillucent_tree::leaf::LeafRef;
+use inillucent_tree::leaf::{Hit, LeafRef};
 use inillucent_tree::PagedTree;
 
 use crate::batch::{Batch, Vector};
@@ -51,6 +50,55 @@ fn vectors<'p>(leaf: &LeafRef<'p>, projection: &Projection) -> DbResult<Vec<Vect
         columns.push(Vector::from_column(leaf.column(*index)?));
     }
     Ok(columns)
+}
+
+/// Pushes a written-to leaf's merged rows downstream, in the projection's order.
+///
+/// **This is the slow path and it is meant to be.** A leaf with tombstones or
+/// delta rows cannot be read as a run of mini-columns: some of its rows are
+/// hidden and some of them are tagged bytes in the delta area, so the answer has
+/// to be materialised. `LeafRef::live` is the one place that merge is written,
+/// which is what stops five sources having five slightly different ideas of what
+/// a live row is.
+///
+/// The fast path is unchanged for every leaf that has not been written to, and
+/// that is the whole trade: `LeafRef::has_writes` is one flag test against a
+/// header field the parse already read.
+///
+/// @param rows - the leaf's live rows, in key order
+/// @param projection - which tree columns to expose, in output order
+/// @param downstream - the head of the operator chain
+fn push_merged(
+    rows: &[Vec<Datum<'_>>],
+    projection: &Projection,
+    downstream: &mut dyn Sink,
+) -> DbResult<Flow> {
+    let mut start = 0usize;
+    while start < rows.len() {
+        let end = start
+            .saturating_add(crate::batch::BATCH_ROWS)
+            .min(rows.len());
+        let chunk = rows.get(start..end).unwrap_or(&[]);
+        let mut columns_owned: Vec<Vec<Datum<'_>>> = Vec::with_capacity(projection.0.len());
+        for index in &projection.0 {
+            columns_owned.push(
+                chunk
+                    .iter()
+                    .map(|row| row.get(*index).copied().unwrap_or(Datum::Null))
+                    .collect(),
+            );
+        }
+        let columns: Vec<Vector<'_>> = columns_owned
+            .iter()
+            .map(|values| Vector::Values(values.as_slice()))
+            .collect();
+        let batch = Batch::new(chunk.len(), columns);
+        if downstream.push(&batch)? == Flow::Stop {
+            return Ok(Flow::Stop);
+        }
+        start = end;
+    }
+    Ok(Flow::Continue)
 }
 
 /// Every row of a tree, in key order.
@@ -77,16 +125,15 @@ impl<'t> FullScan<'t> {
             if leaf.row_count() == 0 {
                 return Ok(true);
             }
-            // Tombstones and delta rows do not arrive until Phase 3, and a
-            // reader that ignored them would return rows that should have been
-            // hidden. *Exceptions* are a different thing entirely - a value of
-            // the wrong class for its column - and are read through the
-            // general vector path, which is why the test is `has_writes` and
-            // not `is_clean`.
+            // A leaf that has been written to is merged rather than read as
+            // mini-columns. *Exceptions* are a different thing entirely - a
+            // value of the wrong class for its column - and are read through
+            // the general vector path, which is why the test is `has_writes`
+            // and not `is_clean`. Confusing the two cost the SLT corpus
+            // thirty-four refusals once.
             if leaf.has_writes() {
-                return Err(misuse(
-                    "a leaf has tombstones or delta rows; those arrive with writes in Phase 3",
-                ));
+                let rows = leaf.live()?;
+                return Ok(push_merged(&rows, &self.projection, downstream)? == Flow::Continue);
             }
             let batch = Batch::new(leaf.row_count(), vectors(leaf, &self.projection)?);
             Ok(downstream.push(&batch)? == Flow::Continue)
@@ -162,9 +209,19 @@ impl<'t> SpanScan<'t> {
             self.high_inclusive,
             &mut |leaf, start, end| {
                 if leaf.has_writes() {
-                    return Err(misuse(
-                        "a leaf has tombstones or delta rows; those arrive with writes in Phase 3",
-                    ));
+                    // The span the visitor computed is over the *sorted
+                    // region*, and a written-to leaf's live rows are not that
+                    // set - so the bounds are applied again to the merged rows.
+                    // `live_between` is the merged counterpart of the
+                    // `lower_bound`/`upper_bound` pair the span came from, and
+                    // it compares under the same collations.
+                    let rows = leaf.live_between(
+                        low.as_deref(),
+                        self.low_inclusive,
+                        high.as_deref(),
+                        self.high_inclusive,
+                    )?;
+                    return Ok(push_merged(&rows, &self.projection, downstream)? == Flow::Continue);
                 }
                 let columns = vectors(leaf, &self.projection)?;
                 let flow = if start == 0 && end == leaf.row_count() {
@@ -240,9 +297,27 @@ impl<'t> ReverseScan<'t> {
         self.tree
             .visit_span_reverse(pool, high.as_deref(), &mut |leaf, start, end| {
                 if leaf.has_writes() {
-                    return Err(misuse(
-                        "a leaf has tombstones or delta rows; those arrive with writes in Phase 3",
-                    ));
+                    // Merged, filtered by the same upper bound the span used,
+                    // and reversed - which for a materialised list is one
+                    // `reverse` rather than a descending selection vector.
+                    let mut rows = leaf.live_between(None, true, high.as_deref(), true)?;
+                    rows.reverse();
+                    if let Some(limit) = self.limit {
+                        rows.truncate(limit.saturating_sub(produced));
+                    }
+                    if rows.is_empty() {
+                        return Ok(false);
+                    }
+                    produced = produced.saturating_add(rows.len());
+                    if push_merged(&rows, &self.projection, downstream)? == Flow::Stop {
+                        return Ok(false);
+                    }
+                    if let Some(limit) = self.limit {
+                        if produced >= limit {
+                            return Ok(false);
+                        }
+                    }
+                    return Ok(true);
                 }
                 // The selection descends, which is the whole of "reversed".
                 selection.clear();
@@ -301,14 +376,14 @@ impl<'t> SkipScan<'t> {
         let mut buffered: Vec<Vec<OwnedDatum>> = Vec::new();
         let mut used = 0usize;
         let mut stop = false;
-        self.tree.skip_scan(pool, prefix, &mut |leaf, row| {
+        self.tree.skip_scan(pool, prefix, &mut |values| {
             if used >= buffered.len() {
                 buffered.push(Vec::with_capacity(prefix));
             }
             if let Some(out) = buffered.get_mut(used) {
                 out.clear();
-                for column in 0..prefix {
-                    out.push(OwnedDatum::from_datum(&leaf.value(row, column)?));
+                for value in values.iter().take(prefix) {
+                    out.push(OwnedDatum::from_datum(value));
                 }
             }
             used = used.saturating_add(1);
@@ -379,9 +454,9 @@ impl<'t> PointProbe<'t> {
         out: &mut Vec<OwnedDatum>,
     ) -> DbResult<bool> {
         out.clear();
-        let found = self.tree.probe(pool, key, |leaf, row| {
+        let found = self.tree.probe(pool, key, |leaf, hit| {
             for column in &self.projection.0 {
-                out.push(OwnedDatum::from_datum(&leaf.value(row, *column)?));
+                out.push(OwnedDatum::from_datum(&leaf.value_at(hit, *column)?));
             }
             Ok(())
         })?;
@@ -408,7 +483,7 @@ impl<'t> PointProbe<'t> {
     pub fn run(&self, pool: &Pool, key: &[Datum<'_>], downstream: &mut dyn Sink) -> DbResult<()> {
         let width = self.projection.0.len();
         if width <= PROBE_INLINE_COLUMNS {
-            self.tree.probe(pool, key, |leaf, row| {
+            self.tree.probe(pool, key, |leaf, hit| {
                 // The leaf's own mini-columns under a one-row selection, not
                 // values read out of them. A stage is projected in full, so a
                 // probe into a five-column table read five columns to answer a
@@ -420,13 +495,29 @@ impl<'t> PointProbe<'t> {
                     [Vector::Const(Datum::Null); PROBE_INLINE_COLUMNS];
                 for (at, column) in self.projection.0.iter().enumerate() {
                     if let Some(slot) = inline.get_mut(at) {
-                        *slot = Vector::Column(leaf.column(*column)?);
+                        // A row in the delta area has no mini-column to borrow,
+                        // so its values go downstream as constants. The sorted
+                        // case is byte for byte what task-1819 measured, and it
+                        // is the case a leaf is in until something writes to it
+                        // and again after the next compaction.
+                        *slot = match hit {
+                            Hit::Sorted(_) => Vector::Column(leaf.column(*column)?),
+                            Hit::Delta(index) => Vector::Const(leaf.delta_value(index, *column)?),
+                        };
                     }
                 }
-                let selection = [row as u32];
-                let mut batch = Batch::over(leaf.row_count(), inline.get(..width).unwrap_or(&[]));
-                batch.selection = Some(&selection);
-                downstream.push(&batch)?;
+                let columns = inline.get(..width).unwrap_or(&[]);
+                match hit {
+                    Hit::Sorted(row) => {
+                        let selection = [row as u32];
+                        let mut batch = Batch::over(leaf.row_count(), columns);
+                        batch.selection = Some(&selection);
+                        downstream.push(&batch)?;
+                    }
+                    Hit::Delta(_) => {
+                        downstream.push(&Batch::over(1, columns))?;
+                    }
+                }
                 Ok(())
             })?;
         } else {

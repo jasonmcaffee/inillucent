@@ -1,8 +1,8 @@
 //! Transactions, isolation, the commit gate and the write-ahead rule, end to
 //! end over a real database file and a real log.
 //!
-//! Invariant these tests hold: **an isolation claim is checked against what a
-//! reader actually reads**, never against a flag saying the reader is isolated.
+//! Invariant: **an isolation claim is checked against what a reader actually
+//! reads**, never against a flag saying the reader is isolated.
 //! The two are not the same, and the difference is the whole of MVCC: a snapshot
 //! that returns the right timestamp and the wrong bytes passes every test of the
 //! timestamp.
@@ -262,9 +262,9 @@ fn a_page_ahead_of_the_log_cannot_be_written() {
 
     // A page stamped with an LSN the log has not reached.
     install(&engine, PageId(6), b"ahead", durable + 1_000);
-    let refused = engine.with_pool(|pool| pool.flush()).expect_err(
-        "a page whose lsn is above the durable log must not reach the data file",
-    );
+    let refused = engine
+        .with_pool(|pool| pool.flush())
+        .expect_err("a page whose lsn is above the durable log must not reach the data file");
     let detail = refused.detail().unwrap_or_default().to_string();
     assert!(
         detail.contains("ahead of the log"),
@@ -338,8 +338,8 @@ fn an_engine_reopens_and_replays_what_was_committed() {
     let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
     let path = DbPath::new("reopen.rdb");
     {
-        let engine = Engine::create(Arc::clone(&vfs), &path, options(Synchronous::Full))
-            .expect("an engine");
+        let engine =
+            Engine::create(Arc::clone(&vfs), &path, options(Synchronous::Full)).expect("an engine");
         for round in 1..=6u64 {
             let mut txn = engine.begin(Begin::Immediate).expect("a transaction");
             let mut image = vec![0u8; PAGE];
@@ -394,12 +394,15 @@ fn a_rollback_after_a_flush_is_not_replayed() {
     let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
     let path = DbPath::new("abort.rdb");
     {
-        let engine = Engine::create(Arc::clone(&vfs), &path, options(Synchronous::Full))
-            .expect("an engine");
+        let engine =
+            Engine::create(Arc::clone(&vfs), &path, options(Synchronous::Full)).expect("an engine");
         let mut kept = engine.begin(Begin::Immediate).expect("a transaction");
         let mut image = vec![0u8; PAGE];
         page::write_common(&mut image, page::PageKind::Leaf, 0, 1).expect("a header");
-        image.get_mut(64..69).expect("room").copy_from_slice(b"kept!");
+        image
+            .get_mut(64..69)
+            .expect("room")
+            .copy_from_slice(b"kept!");
         kept.log(Body::WritePage {
             page: 9,
             image: &image,
@@ -411,7 +414,10 @@ fn a_rollback_after_a_flush_is_not_replayed() {
         let mut abandoned = engine.begin(Begin::Immediate).expect("a transaction");
         let mut image = vec![0u8; PAGE];
         page::write_common(&mut image, page::PageKind::Leaf, 0, 1).expect("a header");
-        image.get_mut(64..69).expect("room").copy_from_slice(b"gone!");
+        image
+            .get_mut(64..69)
+            .expect("room")
+            .copy_from_slice(b"gone!");
         abandoned
             .log(Body::WritePage {
                 page: 10,
@@ -621,15 +627,18 @@ fn a_record_below_a_pages_lsn_is_skipped() {
     let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
     let path = DbPath::new("skip.rdb");
     {
-        let engine = Engine::create(Arc::clone(&vfs), &path, options(Synchronous::Full))
-            .expect("an engine");
+        let engine =
+            Engine::create(Arc::clone(&vfs), &path, options(Synchronous::Full)).expect("an engine");
         // One transaction writes page 12 twice, at two LSNs, and the *second*
         // image is put into the file. Recovery then sees a record whose LSN is
         // below the page's and one whose LSN is above it.
         let mut txn = engine.begin(Begin::Immediate).expect("a transaction");
         let mut older = vec![0u8; PAGE];
         page::write_common(&mut older, page::PageKind::Leaf, 0, 1).expect("a header");
-        older.get_mut(64..69).expect("room").copy_from_slice(b"older");
+        older
+            .get_mut(64..69)
+            .expect("room")
+            .copy_from_slice(b"older");
         txn.log(Body::WritePage {
             page: 12,
             image: &older,
@@ -638,7 +647,10 @@ fn a_record_below_a_pages_lsn_is_skipped() {
 
         let mut newer = vec![0u8; PAGE];
         page::write_common(&mut newer, page::PageKind::Leaf, 0, 1).expect("a header");
-        newer.get_mut(64..69).expect("room").copy_from_slice(b"newer");
+        newer
+            .get_mut(64..69)
+            .expect("room")
+            .copy_from_slice(b"newer");
         let lsn = txn
             .log(Body::WritePage {
                 page: 12,
@@ -682,8 +694,8 @@ fn a_split_replays_only_the_pages_that_still_need_it() {
     let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
     let path = DbPath::new("split.rdb");
     {
-        let engine = Engine::create(Arc::clone(&vfs), &path, options(Synchronous::Full))
-            .expect("an engine");
+        let engine =
+            Engine::create(Arc::clone(&vfs), &path, options(Synchronous::Full)).expect("an engine");
         let mut txn = engine.begin(Begin::Immediate).expect("a transaction");
         let build = |tag: &[u8]| {
             let mut image = vec![0u8; PAGE];
@@ -748,8 +760,8 @@ fn a_record_with_a_wrong_sized_image_is_refused() {
     let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
     let path = DbPath::new("wrong-size.rdb");
     {
-        let engine = Engine::create(Arc::clone(&vfs), &path, options(Synchronous::Full))
-            .expect("an engine");
+        let engine =
+            Engine::create(Arc::clone(&vfs), &path, options(Synchronous::Full)).expect("an engine");
         let mut txn = engine.begin(Begin::Immediate).expect("a transaction");
         txn.log(Body::WritePage {
             page: 14,
@@ -781,8 +793,8 @@ fn a_row_record_with_no_tree_is_refused() {
     let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
     let path = DbPath::new("rows.rdb");
     {
-        let engine = Engine::create(Arc::clone(&vfs), &path, options(Synchronous::Full))
-            .expect("an engine");
+        let engine =
+            Engine::create(Arc::clone(&vfs), &path, options(Synchronous::Full)).expect("an engine");
         let mut txn = engine.begin(Begin::Immediate).expect("a transaction");
         txn.log(Body::InsertRow {
             tree: 1,
@@ -829,7 +841,11 @@ fn the_version_log_is_collected_as_readers_finish() {
     let reader = engine.begin(Begin::Deferred).expect("a reader");
     for round in 0..50u64 {
         let mut writer = engine.begin(Begin::Immediate).expect("a writer");
-        writer.record_undo(1, format!("k{}", round % 5).into_bytes(), Some(vec![round as u8]));
+        writer.record_undo(
+            1,
+            format!("k{}", round % 5).into_bytes(),
+            Some(vec![round as u8]),
+        );
         writer.commit().expect("a commit");
     }
     engine.collect_versions();
@@ -840,6 +856,10 @@ fn the_version_log_is_collected_as_readers_finish() {
     );
     drop(reader);
     engine.collect_versions();
-    assert_eq!(engine.versions_held(), 0, "a finished reader releases it all");
+    assert_eq!(
+        engine.versions_held(),
+        0,
+        "a finished reader releases it all"
+    );
     assert_eq!(engine.stats().versions_collected, 50);
 }

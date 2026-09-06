@@ -1,6 +1,6 @@
 //! The log writer, measured rather than described.
 //!
-//! Invariant these tests hold: every claim about the log is asserted against a
+//! Invariant: every claim about the log here is asserted against a
 //! *counter or an artefact* - how many syncs the file system saw, what bytes are
 //! on the media - and never against the log agreeing with itself. A durability
 //! layer that is tested by asking it whether it is durable is a durability layer
@@ -39,11 +39,15 @@ fn segment_bytes(vfs: &dyn Vfs, base: &DbPath, sequence: u64) -> Vec<u8> {
         sequence,
     );
     let file = vfs
-        .open(&path, inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal))
+        .open(
+            &path,
+            inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal),
+        )
         .expect("the segment opens");
     let size = file.file_size().expect("a size") as usize;
     let mut bytes = vec![0u8; size];
-    file.read_exact_at(0, &mut bytes).expect("the segment reads");
+    file.read_exact_at(0, &mut bytes)
+        .expect("the segment reads");
     bytes
 }
 
@@ -86,7 +90,10 @@ fn appended_records_land_where_their_lsn_says() {
     assert_eq!(header.sequence, 1);
     assert_eq!(header.uuid, 0xABCD);
     let found: Vec<u64> = records_of(&bytes).iter().map(|entry| entry.0).collect();
-    assert_eq!(found, lsns, "every record sits at the lsn its append returned");
+    assert_eq!(
+        found, lsns,
+        "every record sits at the lsn its append returned"
+    );
     assert_eq!(wal.written_end(), wal.next_lsn());
 }
 
@@ -439,11 +446,15 @@ fn a_failed_write_poisons_the_log() {
         },
     )
     .expect("an append");
-    vfs.failpoints().set(Site::Write, inillucent_sim::Policy::Always(Failure::IoError));
+    vfs.failpoints().set(
+        Site::Write,
+        inillucent_sim::Policy::Always(Failure::IoError),
+    );
     let failed = wal.commit(1, 1).expect_err("the commit fails");
     assert!(failed.detail().is_some());
     assert!(wal.is_poisoned());
-    vfs.failpoints().set(Site::Write, inillucent_sim::Policy::Off);
+    vfs.failpoints()
+        .set(Site::Write, inillucent_sim::Policy::Off);
     assert!(
         wal.append(2, Body::Abort).is_err(),
         "a poisoned log refuses new work even once the media is back"
@@ -497,7 +508,8 @@ fn the_checkpoint_trigger_fires_on_bytes_and_on_time() {
         .expect("an append");
     }
     assert!(wal.checkpoint_due(0), "256 MiB is a trigger on its own");
-    wal.note_checkpoint(wal.next_lsn(), 5).expect("a checkpoint");
+    wal.note_checkpoint(wal.next_lsn(), 5)
+        .expect("a checkpoint");
     assert_eq!(wal.since_checkpoint(), 0, "the trigger resets");
     assert!(!wal.checkpoint_due(0));
 }

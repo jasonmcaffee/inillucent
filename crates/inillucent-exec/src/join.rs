@@ -50,6 +50,7 @@ use inillucent_base::DbResult;
 use inillucent_pool::Pool;
 use inillucent_tree::datum::{Datum, OwnedDatum};
 use inillucent_tree::key;
+use inillucent_tree::leaf::Hit;
 use inillucent_tree::PagedTree;
 
 use crate::batch::{Batch, Vector};
@@ -547,7 +548,7 @@ impl Sink for IndexNestedLoopJoin<'_> {
             let mut flow = Flow::Continue;
             if !null_key && *kind != JoinKind::Anti {
                 if *full_key {
-                    let found = inner.probe(pool, probe, |leaf, row| {
+                    let found = inner.probe(pool, probe, |leaf, hit| {
                         // The joined row's column list lives on the stack when
                         // it fits, and the *inner* columns are the leaf's own
                         // mini-columns under a one-row selection rather than
@@ -585,7 +586,18 @@ impl Sink for IndexNestedLoopJoin<'_> {
                         }
                         if *kind != JoinKind::Semi {
                             for column in &inner_projection.0 {
-                                let vector = Vector::Column(leaf.column(*column)?);
+                                // A row in the leaf's *delta* area has no
+                                // mini-column to borrow, so its values go
+                                // downstream as constants. That is the only
+                                // difference a write makes to this path, and
+                                // the sorted-region case below is byte for
+                                // byte what task-1819 measured.
+                                let vector = match hit {
+                                    Hit::Sorted(_) => Vector::Column(leaf.column(*column)?),
+                                    Hit::Delta(index) => {
+                                        Vector::Const(leaf.delta_value(index, *column)?)
+                                    }
+                                };
                                 if heap {
                                     spilled.push(vector);
                                 } else if let Some(slot) = inline.get_mut(at) {
@@ -599,11 +611,18 @@ impl Sink for IndexNestedLoopJoin<'_> {
                         } else {
                             inline.get(..at).unwrap_or(&[])
                         };
-                        selection.clear();
-                        selection.push(row as u32);
-                        let mut one = Batch::over(leaf.row_count(), columns);
-                        one.selection = Some(selection.as_slice());
-                        downstream.push(&one)
+                        match hit {
+                            Hit::Sorted(row) => {
+                                selection.clear();
+                                selection.push(row as u32);
+                                let mut one = Batch::over(leaf.row_count(), columns);
+                                one.selection = Some(selection.as_slice());
+                                downstream.push(&one)
+                            }
+                            // One dense row: every vector is a constant, so
+                            // there is nothing for a selection to select from.
+                            Hit::Delta(_) => downstream.push(&Batch::over(1, columns)),
+                        }
                     })?;
                     if let Some(reported) = found {
                         matched = 1;

@@ -1180,7 +1180,9 @@ mod tests {
                     // inside the ceiling the encoder checks, so a failure here
                     // is impossible rather than merely unlikely, and writing it
                     // as a condition would add a branch nothing can take.
-                    record.encode(&mut again).expect("a decoded record re-encodes");
+                    record
+                        .encode(&mut again)
+                        .expect("a decoded record re-encodes");
                     assert_eq!(
                         again.as_slice(),
                         damaged.get(at..at + record.length).unwrap_or(&[]),

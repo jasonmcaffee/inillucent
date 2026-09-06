@@ -1,7 +1,7 @@
 //! Snapshots, the version log, and the garbage collection that bounds it.
 //!
-//! Invariant (the TDD's eighth): **a version-log entry is never discarded while
-//! any snapshot older than its `cts` is active.** That is the property that
+//! Invariant: **a version-log entry is never discarded while any snapshot older
+//! than its `cts` is active.** That is the TDD's eighth. That is the property that
 //! makes a reader's answer stable, and the reason it is stated as an invariant
 //! rather than as a policy is that violating it produces no error - it produces
 //! a reader that silently sees a row change under it, which no assertion about
@@ -285,7 +285,11 @@ impl VersionLog {
     ///
     /// @param cts - the transaction's commit timestamp
     /// @param images - the undo buffer, oldest first
-    pub fn publish(&mut self, cts: Cts, images: impl IntoIterator<Item = (u64, Vec<u8>, Option<Vec<u8>>)>) {
+    pub fn publish(
+        &mut self,
+        cts: Cts,
+        images: impl IntoIterator<Item = (u64, Vec<u8>, Option<Vec<u8>>)>,
+    ) {
         for (tree, key, bytes) in images {
             let slot = self.entries.entry((tree, key)).or_default();
             if slot.last().is_some_and(|last| last.cts == cts) {
@@ -499,7 +503,10 @@ mod tests {
     fn collection_keeps_exactly_what_a_reader_can_still_need() {
         let mut log = VersionLog::new();
         for cts in 1..=10u64 {
-            log.publish(cts, [(1u64, format!("k{cts}").into_bytes(), Some(vec![cts as u8]))]);
+            log.publish(
+                cts,
+                [(1u64, format!("k{cts}").into_bytes(), Some(vec![cts as u8]))],
+            );
         }
         assert_eq!(log.len(), 10);
 
@@ -522,7 +529,13 @@ mod tests {
     fn a_withdrawn_commit_leaves_nothing_behind() {
         let mut log = VersionLog::new();
         log.publish(3, [(1u64, b"a".to_vec(), Some(b"x".to_vec()))]);
-        log.publish(4, [(1u64, b"a".to_vec(), Some(b"y".to_vec())), (1u64, b"b".to_vec(), None)]);
+        log.publish(
+            4,
+            [
+                (1u64, b"a".to_vec(), Some(b"y".to_vec())),
+                (1u64, b"b".to_vec(), None),
+            ],
+        );
         assert_eq!(log.len(), 3);
         assert_eq!(log.withdraw(4).unwrap(), 2);
         assert_eq!(log.len(), 1);
@@ -583,7 +596,11 @@ mod tests {
         log.publish(9, [(1u64, b"k".to_vec(), Some(b"at-9".to_vec()))]);
         assert_eq!(log.len(), 3);
 
-        assert_eq!(log.collect(&[7, 1]), 1, "the image at 6 is reached by nobody");
+        assert_eq!(
+            log.collect(&[7, 1]),
+            1,
+            "the image at 6 is reached by nobody"
+        );
         assert_eq!(log.len(), 2);
         assert_eq!(log.visible(1, b"k", 1), Visible::Instead(b"at-3"));
         assert_eq!(log.visible(1, b"k", 7), Visible::Instead(b"at-9"));

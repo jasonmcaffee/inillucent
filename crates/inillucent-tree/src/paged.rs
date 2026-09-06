@@ -54,7 +54,7 @@ use inillucent_value::collation::Collation;
 
 use crate::datum::{Datum, OwnedDatum};
 use crate::key;
-use crate::leaf::{LeafBuilder, LeafRef, Packed};
+use crate::leaf::{Hit, LeafBuilder, LeafRef, Packed};
 use crate::tree::BULK_FILL;
 use crate::types::{ColumnSpec, PhysicalType};
 
@@ -250,6 +250,12 @@ pub struct PagedTree {
     /// [`PagedTree::encode_key_small`] holds the tree by shared reference, as
     /// the buffer pool's own state does.
     scratch: RefCell<Vec<u8>>,
+    /// What the write path has done to this tree.
+    ///
+    /// A `Cell` rather than a field the write methods set directly, so that a
+    /// counter can be bumped from a `&self` method - the read side reports them
+    /// and the write side is the only thing that moves them.
+    pub(crate) stats: std::cell::Cell<crate::write::WriteStats>,
 }
 
 /// How many key-prefix columns a skip scan borrows on the stack.
@@ -429,6 +435,7 @@ impl PagedTree {
             leaf_count: leaves.len() as u64,
             row_count,
             scratch: RefCell::new(Vec::new()),
+            stats: std::cell::Cell::new(crate::write::WriteStats::default()),
         })
     }
 
@@ -479,6 +486,7 @@ impl PagedTree {
             leaf_count,
             row_count,
             scratch: RefCell::new(Vec::new()),
+            stats: std::cell::Cell::new(crate::write::WriteStats::default()),
         })
     }
 
@@ -523,6 +531,40 @@ impl PagedTree {
     }
 
     /// Returns the leftmost leaf.
+    /// Returns the database's page size in bytes.
+    pub fn page_size(&self) -> usize {
+        self.page_size
+    }
+
+    /// Records that the leftmost leaf moved, which a root split does.
+    ///
+    /// @param leaf - the new leftmost leaf
+    pub(crate) fn note_first_leaf(&mut self, leaf: PageId) {
+        self.first_leaf = leaf;
+    }
+
+    /// Records that the tree got taller.
+    ///
+    /// @param height - the new height
+    pub(crate) fn note_height(&mut self, height: u16) {
+        self.height = height;
+    }
+
+    /// Adjusts the leaf count by a signed amount.
+    ///
+    /// @param delta - how many leaves were gained or lost
+    pub(crate) fn note_leaves(&mut self, delta: i64) {
+        self.leaf_count = self.leaf_count.saturating_add_signed(delta);
+    }
+
+    /// Adjusts the row count by a signed amount.
+    ///
+    /// @param delta - how many rows were gained or lost
+    pub(crate) fn note_rows(&mut self, delta: i64) {
+        self.row_count = self.row_count.saturating_add_signed(delta);
+    }
+
+    /// Returns the leftmost leaf, where a full scan starts.
     pub fn first_leaf(&self) -> PageId {
         self.first_leaf
     }
@@ -992,6 +1034,28 @@ impl PagedTree {
         Ok(false)
     }
 
+    /// Reports whether two rows share their leading `prefix` key columns.
+    ///
+    /// @param left - one row
+    /// @param right - the other row
+    /// @param prefix - how many leading columns to compare
+    fn same_prefix(&self, left: &[Datum<'_>], right: &[Datum<'_>], prefix: usize) -> bool {
+        for index in 0..prefix {
+            let (Some(a), Some(b)) = (left.get(index), right.get(index)) else {
+                return false;
+            };
+            let collation = self
+                .collations
+                .get(index)
+                .copied()
+                .unwrap_or(Collation::Binary);
+            if crate::types::compare_under(a, b, collation) != std::cmp::Ordering::Equal {
+                return false;
+            }
+        }
+        true
+    }
+
     /// Returns the key that sorts immediately after every key sharing a prefix.
     ///
     /// Appending `0xFF` works because no encoded value can begin with it: a
@@ -1276,7 +1340,7 @@ impl PagedTree {
         &self,
         pool: &Pool,
         prefix: usize,
-        visit: &mut dyn FnMut(&LeafRef<'_>, usize) -> DbResult<bool>,
+        visit: &mut dyn FnMut(&[Datum<'_>]) -> DbResult<bool>,
     ) -> DbResult<()> {
         if prefix == 0 || prefix > self.key_columns {
             return Err(misuse(format!(
@@ -1296,6 +1360,11 @@ impl PagedTree {
         // Whether to look for the end of a run by walking before descending for
         // it. Switched off the first time a walk runs out of budget.
         let mut walking = true;
+        // The last prefix handed to the visitor, kept only while a leaf that
+        // had to be merged might have already emitted the value the next clean
+        // leaf starts with. A tree nobody has written to never sets it, so the
+        // resynchronising `upper_bound` below is not on the clean path at all.
+        let mut resync: Option<Vec<OwnedDatum>> = None;
 
         loop {
             if page.is_none() {
@@ -1305,21 +1374,68 @@ impl PagedTree {
                 Some(open) => open,
                 None => pool.fetch(page)?,
             };
-            let step = {
+            let step = 'step: {
                 let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
-                if row >= leaf.row_count() {
+                if leaf.has_writes() {
+                    // A leaf that has been written to is walked rather than
+                    // seeked over: its distinct values can live in the delta
+                    // area, where there is no partition point to jump to. The
+                    // seek machinery below is for the clean leaves, which is
+                    // every leaf until something writes to one and every leaf
+                    // again after the next compaction.
+                    let merged = leaf.live()?;
+                    let mut last: Option<Vec<Datum<'_>>> = resync
+                        .as_ref()
+                        .map(|held| held.iter().map(OwnedDatum::borrow).collect());
+                    for values in merged.iter().skip(row) {
+                        let head = values.get(..prefix).unwrap_or(&[]);
+                        let repeated = last
+                            .as_ref()
+                            .is_some_and(|previous| self.same_prefix(previous, head, prefix));
+                        if repeated {
+                            continue;
+                        }
+                        if !visit(head)? {
+                            return Ok(());
+                        }
+                        visited = visited.saturating_add(1);
+                        last = Some(head.to_vec());
+                    }
+                    resync = last.map(|held| held.iter().map(OwnedDatum::from_datum).collect());
+                    Step::Right(leaf.right_sibling())
+                } else if row >= leaf.row_count() {
                     // An empty leaf, or a position past the end of this one. A
                     // bulk-built tree has neither, but one that has been deleted
                     // from can, and a scan that stopped here would silently
                     // return short.
                     Step::Right(leaf.right_sibling())
                 } else {
-                    if !visit(&leaf, row)? {
-                        return Ok(());
+                    // A merged leaf just before this one may have emitted the
+                    // value this one starts with, so the position is advanced
+                    // past it. `resync` is `None` on a tree nobody has written
+                    // to, which is what keeps this off the measured path.
+                    let mut row = row;
+                    let mut past_the_end = false;
+                    if let Some(previous) = &resync {
+                        let borrowed: Vec<Datum<'_>> =
+                            previous.iter().map(OwnedDatum::borrow).collect();
+                        row = row.max(leaf.upper_bound(&borrowed)?);
+                        resync = None;
+                        past_the_end = row >= leaf.row_count();
+                    }
+                    if past_the_end {
+                        break 'step Step::Right(leaf.right_sibling());
                     }
                     held.clear();
                     for column in 0..prefix {
                         held.push(OwnedDatum::from_datum(&leaf.value(row, column)?));
+                    }
+                    {
+                        let borrowed: Vec<Datum<'_>> =
+                            held.iter().map(OwnedDatum::borrow).collect();
+                        if !visit(&borrowed)? {
+                            return Ok(());
+                        }
                     }
                     visited = visited.saturating_add(1);
                     if visited > self.row_count.saturating_add(1) {
@@ -1479,7 +1595,7 @@ impl PagedTree {
         &self,
         pool: &Pool,
         probe: &[Datum<'_>],
-        read: impl FnOnce(&LeafRef<'_>, usize) -> DbResult<R>,
+        read: impl FnOnce(&LeafRef<'_>, Hit) -> DbResult<R>,
     ) -> DbResult<Option<R>> {
         let key = self.encode_key_small(probe);
         let (guard, _) = self.descend_guard(pool, key.as_slice())?;
@@ -1500,27 +1616,32 @@ impl PagedTree {
         &self,
         leaf: &LeafRef<'_>,
         probe: &[Datum<'_>],
-        read: impl FnOnce(&LeafRef<'_>, usize) -> DbResult<R>,
+        read: impl FnOnce(&LeafRef<'_>, Hit) -> DbResult<R>,
     ) -> DbResult<Option<R>> {
         if let Ok(row) = leaf.search(probe)? {
             if !leaf.is_tombstoned(row)? {
-                return Ok(Some(read(leaf, row)?));
+                return Ok(Some(read(leaf, Hit::Sorted(row))?));
             }
         }
+        // The delta area, which Phase 2 refused and Phase 3 reads. The loop is
+        // guarded by `delta_count`, which is zero on every leaf that has not
+        // been written to - so a clean tree pays one comparison against zero
+        // per probe and nothing else, which is what keeps `point.rowid` where
+        // task-1819 left it.
         for entry in 0..leaf.delta_count() {
             let mut matches = true;
             for column in 0..self.key_columns {
                 let held = leaf.delta_value(entry, column)?;
                 let wanted = probe.get(column).copied().unwrap_or(Datum::Null);
-                if held.compare(&wanted) != std::cmp::Ordering::Equal {
+                if crate::types::compare_under(&held, &wanted, leaf.collation_of(column))
+                    != std::cmp::Ordering::Equal
+                {
                     matches = false;
                     break;
                 }
             }
             if matches {
-                return Err(misuse(
-                    "a delta row was found by a Phase 2 probe; deltas arrive in Phase 3",
-                ));
+                return Ok(Some(read(leaf, Hit::Delta(entry))?));
             }
         }
         Ok(None)
@@ -1534,10 +1655,10 @@ impl PagedTree {
     /// @param pool - the buffer pool
     /// @param probe - the key, one value per key column
     pub fn point(&self, pool: &Pool, probe: &[Datum<'_>]) -> DbResult<Option<Vec<OwnedDatum>>> {
-        self.probe(pool, probe, |leaf, row| {
+        self.probe(pool, probe, |leaf, hit| {
             let mut values = Vec::with_capacity(leaf.column_count());
             for column in 0..leaf.column_count() {
-                values.push(OwnedDatum::from_datum(&leaf.value(row, column)?));
+                values.push(OwnedDatum::from_datum(&leaf.value_at(hit, column)?));
             }
             Ok(values)
         })
@@ -1628,14 +1749,38 @@ impl PagedTree {
         }
         for child in 0..interior.children() {
             let target = pool.page_of_swip(interior.swip(child)?)?;
-            if child > 0 {
-                let separator = interior.key(child.saturating_sub(1))?;
-                let first = self.first_key_under(pool, target)?;
-                if first.as_slice() != separator {
-                    return Err(corrupt(format!(
-                        "interior separator {} is not its child's first key",
-                        child.saturating_sub(1)
-                    )));
+            // **The separator bounds its children; it is not equal to one.**
+            //
+            // A bulk-built tree makes every separator exactly its child's first
+            // key, and the first version of this check asserted that - which
+            // was an accident of the builder rather than the tree's invariant.
+            // The moment a row is deleted, the child's first *live* key is
+            // above the separator and the check fired on a correct tree.
+            //
+            // What a B+tree actually promises is that child `i` holds every key
+            // `k` with `K[i-1] <= k < K[i]`, and that is what is checked here:
+            // both ends, on every child, which is strictly *more* than the old
+            // rule caught. The old one never looked at the upper bound at all.
+            let (lowest, highest) = self.key_range_under(pool, target)?;
+            if let Some(lowest) = &lowest {
+                if child > 0 {
+                    let separator = interior.key(child.saturating_sub(1))?;
+                    if lowest.as_slice() < separator {
+                        return Err(corrupt(format!(
+                            "a key below separator {} is in the child above it",
+                            child.saturating_sub(1)
+                        )));
+                    }
+                }
+            }
+            if let Some(highest) = &highest {
+                if child < interior.count() {
+                    let separator = interior.key(child)?;
+                    if highest.as_slice() >= separator {
+                        return Err(corrupt(format!(
+                            "a key at or above separator {child} is in the child below it"
+                        )));
+                    }
                 }
             }
             self.check_subtree(pool, target, level.saturating_sub(1))?;
@@ -1643,35 +1788,73 @@ impl PagedTree {
         Ok(())
     }
 
-    /// Returns the encoded first key of the leftmost leaf under a page.
+    /// Returns the lowest and highest **live** encoded keys under a page.
+    ///
+    /// `None` for a subtree holding no live rows at all, which a tree that has
+    /// been deleted from can perfectly well contain: an empty leaf is still
+    /// routed to, and refusing one would be refusing a legal shape.
+    ///
+    /// Every leaf under the page is read, which is what makes this an integrity
+    /// check rather than something a reader could afford.
     ///
     /// @param pool - the buffer pool
     /// @param page - the subtree's root
-    fn first_key_under(&self, pool: &Pool, page: PageId) -> DbResult<Vec<u8>> {
-        let mut current = page;
-        for _ in 0..64 {
-            let leaf_key = {
-                let guard = pool.fetch(current)?;
-                if page::kind_of(&guard)? == PageKind::Leaf {
-                    let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
-                    if leaf.row_count() == 0 {
-                        return Ok(Vec::new());
-                    }
-                    let mut head = Vec::with_capacity(self.key_columns);
-                    for column in 0..self.key_columns {
-                        head.push(leaf.value(0, column)?);
-                    }
-                    Some(self.encode_key(&head))
-                } else {
-                    None
+    fn key_range_under(
+        &self,
+        pool: &Pool,
+        page: PageId,
+    ) -> DbResult<(Option<Vec<u8>>, Option<Vec<u8>>)> {
+        let mut lowest: Option<Vec<u8>> = None;
+        let mut highest: Option<Vec<u8>> = None;
+        self.visit_subtree(pool, page, 0, &mut |leaf| {
+            for row in leaf.live()? {
+                let head: Vec<Datum<'_>> = row.iter().copied().take(self.key_columns).collect();
+                let encoded = self.encode_key(&head);
+                if lowest.as_ref().is_none_or(|held| encoded < *held) {
+                    lowest = Some(encoded.clone());
                 }
-            };
-            if let Some(key) = leaf_key {
-                return Ok(key);
+                if highest.as_ref().is_none_or(|held| encoded > *held) {
+                    highest = Some(encoded);
+                }
             }
-            current = self.take_child(pool, current, 0)?;
+            Ok(())
+        })?;
+        Ok((lowest, highest))
+    }
+
+    /// Runs `visit` over every leaf under a page.
+    ///
+    /// @param pool - the buffer pool
+    /// @param page - the subtree's root
+    /// @param depth - how deep the walk already is
+    /// @param visit - what to do with each leaf
+    fn visit_subtree(
+        &self,
+        pool: &Pool,
+        page: PageId,
+        depth: u16,
+        visit: &mut dyn FnMut(&LeafRef<'_>) -> DbResult<()>,
+    ) -> DbResult<()> {
+        if depth > 64 {
+            return Err(corrupt("a subtree is deeper than 64 levels"));
         }
-        Err(corrupt("a subtree is deeper than 64 levels"))
+        let children = {
+            let guard = pool.fetch(page)?;
+            if page::kind_of(&guard)? == PageKind::Leaf {
+                let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
+                return visit(&leaf);
+            }
+            let interior = InteriorRef::parse(&guard)?;
+            let mut children = Vec::with_capacity(interior.children());
+            for child in 0..interior.children() {
+                children.push(pool.page_of_swip(interior.swip(child)?)?);
+            }
+            children
+        };
+        for child in children {
+            self.visit_subtree(pool, child, depth.saturating_add(1), visit)?;
+        }
+        Ok(())
     }
 }
 
@@ -2267,8 +2450,8 @@ mod tests {
         tree.check(database.pool()).unwrap();
         database.pool().reset_stats();
         let mut distinct: Vec<i64> = Vec::new();
-        tree.skip_scan(database.pool(), 1, &mut |leaf, row| {
-            distinct.push(leaf.value(row, 0)?.as_int().unwrap_or(-1));
+        tree.skip_scan(database.pool(), 1, &mut |values| {
+            distinct.push(values.first().and_then(Datum::as_int).unwrap_or(-1));
             Ok(true)
         })
         .unwrap();
@@ -2290,17 +2473,17 @@ mod tests {
         );
         // Stopping early stops.
         let mut count = 0usize;
-        tree.skip_scan(database.pool(), 1, &mut |_, _| {
+        tree.skip_scan(database.pool(), 1, &mut |_| {
             count = count.saturating_add(1);
             Ok(count < 5)
         })
         .unwrap();
         assert_eq!(count, 5);
         assert!(tree
-            .skip_scan(database.pool(), 0, &mut |_, _| Ok(true))
+            .skip_scan(database.pool(), 0, &mut |_| Ok(true))
             .is_err());
         assert!(tree
-            .skip_scan(database.pool(), 9, &mut |_, _| Ok(true))
+            .skip_scan(database.pool(), 9, &mut |_| Ok(true))
             .is_err());
     }
 
@@ -2311,8 +2494,8 @@ mod tests {
     fn a_skip_scan_over_unique_keys_still_answers() {
         let (database, tree, _) = build(500, 512);
         let mut seen: Vec<i64> = Vec::new();
-        tree.skip_scan(database.pool(), 1, &mut |leaf, row| {
-            seen.push(leaf.value(row, 0)?.as_int().unwrap_or(-1));
+        tree.skip_scan(database.pool(), 1, &mut |values| {
+            seen.push(values.first().and_then(Datum::as_int).unwrap_or(-1));
             Ok(true)
         })
         .unwrap();
