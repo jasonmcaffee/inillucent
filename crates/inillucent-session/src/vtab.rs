@@ -145,27 +145,7 @@ pub fn shadow_roots(catalog: &CatalogSnapshot, database: usize, table: &[u8]) ->
 }
 
 /// Turns a module's declaration into the columns the binder will see.
-pub fn declared_columns(declaration: &Declaration) -> Vec<ColumnInfo> {
-    declaration
-        .columns
-        .iter()
-        .map(|column| ColumnInfo {
-            folded: column.name.to_ascii_lowercase(),
-            name: column.name.clone(),
-            declared_type: column.declared_type.clone(),
-            affinity: column.affinity,
-            collation: column.collation.clone(),
-            not_null: false,
-            not_null_conflict: None,
-            default_sql: None,
-            primary_key_position: None,
-            hidden: column.hidden,
-            generated: false,
-            stored: true,
-            generated_sql: None,
-        })
-        .collect()
-}
+pub use inillucent_sql::declare::declared_columns;
 
 /// Returns the table entry one eponymous module provides.
 pub fn eponymous_table(registry: &Registry, name: &str) -> DbResult<Option<TableInfo>> {

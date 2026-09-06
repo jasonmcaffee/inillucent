@@ -1,3 +1,34 @@
+//! The rearchitected engine as a database.
+//!
+//! Invariant: **this crate is the engine, and nothing above it is.** It owns
+//! the buffer pool, the trees, the log, the catalog, DDL, the pragma set, the
+//! statement path and the virtual-table host, and it depends on none of the
+//! old engine - not `inillucent-storage`, not `inillucent-transaction`, not
+//! `inillucent-vm`. A caller reaches the new engine by depending on this and
+//! on nothing else.
+//!
+//! It was `inillucent_compat::newengine` until task-1834, which is where Phases 1
+//! to 4 built and measured it: inside the test-and-bench crate, because until
+//! Phase 5 there was nothing above it to be the caller. That was the right
+//! place to build it and the wrong place to ship it - `inillucent-migrate` cannot
+//! depend on a test crate, and neither can a connection - so Phase 5 lifts it
+//! out unchanged. `inillucent_compat::newengine` is a re-export of this crate, so
+//! every gate, probe and campaign written against the old path still resolves
+//! and still measures the same code.
+
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+#![deny(clippy::indexing_slicing)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_used
+    )
+)]
+
 //! Driving the rearchitected engine from SQL, for the Phase 1 gate.
 //!
 //! Invariant: the SQL the new engine runs is byte-for-byte the SQL the old

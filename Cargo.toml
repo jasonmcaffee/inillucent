@@ -15,6 +15,7 @@ members = [
     "crates/inillucent-sqlite-reader",
     "crates/inillucent-scalar",
     "crates/inillucent-exec",
+    "crates/inillucent-engine",
     "crates/inillucent-storage",
     "crates/inillucent-transaction",
     "crates/inillucent-catalog",
@@ -72,6 +73,7 @@ inillucent-model = { path = "crates/inillucent-model" }
 inillucent-sqlite-reader = { path = "crates/inillucent-sqlite-reader" }
 inillucent-scalar = { path = "crates/inillucent-scalar" }
 inillucent-exec = { path = "crates/inillucent-exec" }
+inillucent-engine = { path = "crates/inillucent-engine" }
 inillucent-storage = { path = "crates/inillucent-storage" }
 inillucent-transaction = { path = "crates/inillucent-transaction" }
 inillucent-catalog = { path = "crates/inillucent-catalog" }

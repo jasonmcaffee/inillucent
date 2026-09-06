@@ -628,6 +628,7 @@ dependencies = [
  "inillucent",
  "inillucent-base",
  "inillucent-catalog",
+ "inillucent-engine",
  "inillucent-exec",
  "inillucent-ext",
  "inillucent-pool",
@@ -659,6 +660,24 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokenizers",
+]
+
+[[package]]
+name = "inillucent-engine"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+ "inillucent-catalog",
+ "inillucent-exec",
+ "inillucent-ext",
+ "inillucent-pool",
+ "inillucent-sql",
+ "inillucent-sqlite-reader",
+ "inillucent-tree",
+ "inillucent-txn",
+ "inillucent-value",
+ "inillucent-vfs",
+ "inillucent-wal",
 ]
 
 [[package]]

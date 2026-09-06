@@ -62,18 +62,6 @@ pub struct Connected {
 /// pretending to be one.
 pub struct Nowhere;
 
-impl inillucent_storage::PagerSet for Nowhere {
-    fn pager(&mut self, _database: usize) -> DbResult<&mut inillucent_storage::pager::Pager> {
-        Err(misuse(
-            "this engine has no pager; a module reads its shadow tables through the store",
-        ))
-    }
-
-    fn count(&self) -> usize {
-        1
-    }
-}
-
 impl Host for Nowhere {}
 
 /// The shadow tables of one database, for reading.

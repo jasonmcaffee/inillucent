@@ -297,6 +297,11 @@ impl inillucent_vm::host::Host for ConnectionState {
 }
 
 impl inillucent_ext::vtab::Host for ConnectionState {
+    /// This host is the old engine, so its shadow tables are behind pagers.
+    fn pager_set(&mut self) -> Option<&mut dyn inillucent_storage::PagerSet> {
+        Some(self)
+    }
+
     /// Answers a pragma that only reads.
     ///
     /// The same register the `PRAGMA` directive reads through, called from the
