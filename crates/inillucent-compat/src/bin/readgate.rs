@@ -362,6 +362,16 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         println!();
         println!("## PointProbe, warm");
         println!("  {nanos:.1} ns per probe   (TDD acceptance: under 500 ns)");
+        // The same probe carrying only the rowid. Every column of this fixture
+        // but the rowid and `key` is a text or a blob, so the all-column
+        // projection allocates and this one does not; the gap between them is
+        // what the acceptance number is actually varying by.
+        if let Some(bare) = measure_point_probe_key_only(&database, plan.rows)? {
+            println!(
+                "  {bare:.1} ns per probe carrying the rowid alone                    (the other {:.1} ns is the projection's OwnedDatum copies)",
+                nanos - bare
+            );
+        }
         // Where a probe's time goes, in the same shape as the pipeline
         // breakdown above and for the same reason: the descent is the cost of
         // three of the four read families, and a guess about which part of it
@@ -838,6 +848,43 @@ fn build_arms<'a>(
 /// @param database - the imported trees
 /// @param rows - how many rows the base table holds
 fn measure_point_probe(database: &ImportedDatabase, rows: u32) -> Result<Option<f64>, String> {
+    measure_probe_with(database, rows, None)
+}
+
+/// Measures the same probe over the key column alone.
+///
+/// **This exists to separate the descent from what carrying the row costs.**
+/// `PointProbe::lookup` writes `OwnedDatum`s into the caller's buffer, and an
+/// `OwnedDatum` over a text or a blob owns its bytes - so a five-column
+/// projection of `main_table` allocates twice per probe, for `label` and
+/// `payload`, and frees them on the next call's `clear`. A projection of the
+/// rowid alone does the identical descent and leaf search and allocates
+/// nothing, so the difference between the two numbers is the carrying.
+///
+/// task-1834 measured this because the large fixture read 566.5 ns and
+/// 1761.8 ns on two runs of one binary and the standing explanation was that
+/// the fixture had outgrown the 128 MiB pool. It has not: at 384 MiB the spread
+/// is the same and the descent is stable to 1.5%.
+///
+/// @param database - the imported trees
+/// @param rows - how many rows the base table holds
+fn measure_point_probe_key_only(
+    database: &ImportedDatabase,
+    rows: u32,
+) -> Result<Option<f64>, String> {
+    measure_probe_with(database, rows, Some(inillucent_exec::Projection(vec![0])))
+}
+
+/// The body of both probe measurements.
+///
+/// @param database - the imported trees
+/// @param rows - how many rows the base table holds
+/// @param projection - which columns to carry out, or every column
+fn measure_probe_with(
+    database: &ImportedDatabase,
+    rows: u32,
+    projection: Option<inillucent_exec::Projection>,
+) -> Result<Option<f64>, String> {
     let Some(root) = database.table_root("main_table") else {
         return Ok(None);
     };
@@ -845,7 +892,8 @@ fn measure_point_probe(database: &ImportedDatabase, rows: u32) -> Result<Option<
         return Ok(None);
     };
     let width = tree.columns().len();
-    let probe = inillucent_exec::PointProbe::new(tree, inillucent_exec::Projection::all(width));
+    let projection = projection.unwrap_or_else(|| inillucent_exec::Projection::all(width));
+    let probe = inillucent_exec::PointProbe::new(tree, projection);
     let pool = inillucent_exec::physical::TreeCatalog::pool(database);
     let mut out: Vec<OwnedDatum> = Vec::with_capacity(width);
     let keys: Vec<i64> = (0..4_096u64)
