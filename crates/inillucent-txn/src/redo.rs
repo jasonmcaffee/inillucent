@@ -31,6 +31,7 @@ use inillucent_base::DbResult;
 use inillucent_pool::page::{self, header};
 use inillucent_pool::{Database, PageId};
 use inillucent_tree::datum::Datum;
+use inillucent_tree::leaf::{LeafBuilder, LeafRef, Packed};
 use inillucent_tree::mutate::{Applied, LeafMut};
 use inillucent_tree::types::ColumnSpec;
 use inillucent_tree::write::Located;
@@ -71,6 +72,25 @@ pub trait RowRedo {
         lsn: u64,
     ) -> DbResult<()>;
 
+    /// Repacks a leaf's live rows, the way the write path did.
+    ///
+    /// The record that asks for this carries no page image: a compaction is
+    /// deterministic given the page it starts from, and redo replays in LSN
+    /// order, so the page is in that state when the record is reached. See
+    /// `PagedTree::compact_into` for why the log is a great deal smaller for it.
+    ///
+    /// @param database - the file the leaf lives in
+    /// @param tree - the tree the leaf belongs to
+    /// @param page - the leaf's page number
+    /// @param lsn - the record's LSN, to stamp the page with
+    fn compact_leaf(
+        &mut self,
+        database: &mut Database,
+        tree: u64,
+        page: PageId,
+        lsn: u64,
+    ) -> DbResult<()>;
+
     /// Overwrites one fixed-width slot of one row.
     ///
     /// @param database - the file the leaf lives in
@@ -102,6 +122,19 @@ pub trait RowRedo {
 pub struct RefuseRows;
 
 impl RowRedo for RefuseRows {
+    fn compact_leaf(
+        &mut self,
+        _database: &mut Database,
+        _tree: u64,
+        page: PageId,
+        _lsn: u64,
+    ) -> DbResult<()> {
+        Err(misuse(format!(
+            "a CompactLeaf record for page {} needs a tree to repack it",
+            page.0
+        )))
+    }
+
     fn insert_row(
         &mut self,
         _database: &mut Database,
@@ -248,6 +281,66 @@ fn decode_all(bytes: &[u8], most: usize) -> DbResult<Vec<Datum<'_>>> {
 }
 
 impl RowRedo for TreeRows {
+    fn compact_leaf(
+        &mut self,
+        database: &mut Database,
+        tree: u64,
+        page: PageId,
+        lsn: u64,
+    ) -> DbResult<()> {
+        let shape = self.shape(tree)?.clone();
+        let page_size = database.page_size();
+        // Read the leaf, repack it, and put it back - the same three steps the
+        // write path took, in the same order, with the same fill.
+        let mut image = {
+            let guard = database.pool().fetch(page)?;
+            // The collations come from the column directory, which is what the
+            // tree itself reads them from - a compaction sorts under them and a
+            // replay that used BINARY would repack the rows in a different
+            // order.
+            let collations: Vec<inillucent_value::collation::Collation> = shape
+                .columns
+                .iter()
+                .take(shape.key_columns)
+                .map(|spec| spec.collation)
+                .collect();
+            let leaf = LeafRef::parse(&guard)?.with_collations(&collations);
+            let rows = leaf.live()?;
+            let builder =
+                LeafBuilder::new(page_size, tree, shape.columns.clone(), shape.key_columns)?;
+            let packed = builder.pack(&rows, inillucent_tree::write::COMPACT_FILL)?;
+            let Packed::Filled {
+                page: mut image,
+                rows: taken,
+            } = packed
+            else {
+                return Err(corrupt(format!(
+                    "replaying a compaction of leaf {} produced no page",
+                    page.0
+                )));
+            };
+            if taken != rows.len() {
+                // The write path only logs a compaction when every live row
+                // fits; a replay that cannot fit them is looking at a different
+                // page than the one the record was written against.
+                return Err(corrupt(format!(
+                    "replaying a compaction of leaf {} fitted {taken} of {} rows",
+                    page.0,
+                    rows.len()
+                )));
+            }
+            inillucent_pool::page::set_right(&mut image, leaf.right_sibling())?;
+            page::write_u64(
+                &mut image,
+                inillucent_tree::leaf::leaf_header::MAX_CTS,
+                leaf.max_cts(),
+            )?;
+            image
+        };
+        page::write_u64(&mut image, header::LSN, lsn)?;
+        database.install(page, &image)
+    }
+
     fn insert_row(
         &mut self,
         database: &mut Database,
@@ -448,6 +541,13 @@ impl<R: RowRedo> Redo for Applier<'_, R> {
         let lsn = record.lsn;
         match record.body {
             Body::WritePage { page, image } => self.put_image(page, image, lsn)?,
+            // An empty image means "re-run the compaction"; one that carries a
+            // page is copied, so a log written before this change still replays.
+            Body::CompactLeaf { tree, page, image } if image.is_empty() => {
+                self.rows
+                    .compact_leaf(self.database, tree, PageId(page), lsn)?;
+                self.stats.images = self.stats.images.saturating_add(1);
+            }
             Body::CompactLeaf { page, image, .. } => self.put_image(page, image, lsn)?,
             Body::Structural {
                 left,

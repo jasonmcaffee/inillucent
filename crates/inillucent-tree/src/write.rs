@@ -130,7 +130,7 @@ fn underflows(leaf: &LeafRef<'_>) -> DbResult<bool> {
 /// seventy-five percent is a fifth larger than one packed at ninety, and a scan
 /// reads a fifth more pages. Both gates were re-run - the read families are the
 /// ones that would pay for it.
-const COMPACT_FILL: f64 = 0.75;
+pub const COMPACT_FILL: f64 = 0.75;
 
 /// How full each half of a split is packed.
 ///
@@ -683,10 +683,27 @@ impl PagedTree {
     ) -> DbResult<()> {
         page::set_right(&mut image, right)?;
         crate::page::write_u64(&mut image, crate::leaf::leaf_header::MAX_CTS, max_cts)?;
+        // **The record says what happened, not what the page became.**
+        //
+        // A compaction is the leaf's own live rows repacked, and it is
+        // deterministic: the same rows, the same order, the same fill. Redo
+        // replays in LSN order, so when recovery reaches this record the page is
+        // in exactly the state it was in when the compaction ran - which means
+        // re-running it produces the same bytes as copying them would have.
+        //
+        // Copying them costs a whole page in the log. On the gate's
+        // `write.insert.batch` that was ninety compactions and splits per two
+        // thousand inserts - one to two megabytes of log for two hundred and
+        // forty kilobytes of rows, while SQLite's rollback journal writes each
+        // original page once per transaction and amortises it away.
+        //
+        // An empty image is what says "re-run it". A record carrying one is
+        // still applied by copying, so a log written by an older build still
+        // replays.
         let lsn = log.log(Body::CompactLeaf {
             tree: self.tree_id(),
             page: page.0,
-            image: &image,
+            image: &[],
         })?;
         page::write_u64(&mut image, page::header::LSN, lsn)?;
         database.install(page, &image)?;
