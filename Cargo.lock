@@ -712,7 +712,6 @@ dependencies = [
 name = "inillucent-migrate"
 version = "0.1.0"
 dependencies = [
- "inillucent",
  "inillucent-base",
  "inillucent-catalog",
  "inillucent-core",

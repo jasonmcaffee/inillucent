@@ -476,6 +476,13 @@ impl AccessKind {
 /// One stage's physical choice.
 #[derive(Clone, Debug)]
 pub struct PreparedStage {
+    /// The module's auxiliary functions this stage materialises, in slot order.
+    ///
+    /// Empty for everything but a virtual scan. Their answers sit after the
+    /// declared columns and the rowid, so a query reading `score(t)` finds it
+    /// at a column the module filled rather than at an expression the pipeline
+    /// has no way to evaluate.
+    pub functions: Vec<(Vec<u8>, usize)>,
     /// The tree this stage reads.
     pub root: u32,
     /// How it reads it.
@@ -1046,6 +1053,7 @@ fn plan_stages(
                     return unsupported("a correlated subquery as the outermost term");
                 }
                 stages.push(PreparedStage {
+                    functions: Vec::new(),
                     root: 0,
                     kind: AccessKind::Materialised,
                     source: source.id,
@@ -1080,8 +1088,23 @@ fn plan_stages(
                     // was chosen for one set of constraints. Refused by name.
                     return unsupported("a virtual table as an inner join term");
                 }
-                let width = source.table.columns.len().max(1);
+                let declared = source.table.columns.len().max(1);
+                // **A module's row carries its rowid when the query asks for
+                // one.** `SELECT rowid FROM t WHERE t MATCH ...` is the shape
+                // every search adapter is written in - the rowid is the answer,
+                // and the columns are what was searched - and it used to be
+                // refused with "the tree read does not carry a rowid". The
+                // module has always had it: `VirtualCursor::rowid` is on the
+                // trait. It is appended after the declared columns rather than
+                // put first, so every column keeps the slot it already had.
+                let read = plan.select.columns_read(source.id);
+                let carries_rowid = read.rowid;
+                let functions = read.functions.clone();
+                let width = declared
+                    .saturating_add(usize::from(carries_rowid))
+                    .saturating_add(functions.len());
                 stages.push(PreparedStage {
+                    functions: functions.clone(),
                     root: 0,
                     kind: AccessKind::Materialised,
                     source: source.id,
@@ -1090,12 +1113,12 @@ fn plan_stages(
                     offset,
                     width,
                     // A module's row is its own record, exactly as a
-                    // materialised subquery's is: slot `i` is column `i`, there
-                    // is no rowid, and nothing is known about the order.
+                    // materialised subquery's is: slot `i` is column `i`, and
+                    // nothing is known about the order.
                     layout: Some(SourceLayout {
                         tree_key: 0,
-                        slots: (0..width).map(Some).collect(),
-                        rowid: None,
+                        slots: (0..declared).map(Some).collect(),
+                        rowid: carries_rowid.then_some(declared),
                         types: vec![StaticType::Unknown; width],
                         width,
                         key_columns: Vec::new(),
@@ -1132,6 +1155,7 @@ fn push_stage(
         .layout(root)
         .ok_or_else(|| misuse(format!("no layout imported for root page {root}")))?;
     stages.push(PreparedStage {
+        functions: Vec::new(),
         root,
         kind,
         source,
@@ -1210,6 +1234,32 @@ impl Space<'_> {
     /// Returns the joined-row column holding a FROM term's rowid.
     ///
     /// @param source - the planner FROM term
+    /// Returns the column one of a module's auxiliary functions was put in.
+    ///
+    /// @param source - the FROM term the call is about
+    /// @param name - the function's folded name
+    /// @param arity - how many arguments follow the table
+    fn virtual_function(&self, source: usize, name: &[u8], arity: usize) -> Option<usize> {
+        for (index, stage) in self.stages.iter().enumerate() {
+            if stage.source != source {
+                continue;
+            }
+            let position = stage
+                .functions
+                .iter()
+                .position(|(held, count)| held.as_slice() == name && *count == arity)?;
+            let layout = self.layouts.get(index)?;
+            // The functions sit after the declared columns and the rowid, in
+            // the order the reads were met.
+            let before = layout
+                .slots
+                .len()
+                .saturating_add(usize::from(layout.rowid.is_some()));
+            return Some(stage.offset.saturating_add(before).saturating_add(position));
+        }
+        None
+    }
+
     fn rowid(&self, source: usize) -> Option<usize> {
         for (index, stage) in self.stages.iter().enumerate() {
             if stage.source != source {
@@ -3378,6 +3428,25 @@ fn translate(
             space
                 .rowid(*source)
                 .ok_or_else(|| misuse("the tree read does not carry a rowid"))?,
+        ),
+        // `score(t)`, `bm25(t)`: the module answered it per row when the rows
+        // were materialised, so by the time an expression is translated it is a
+        // column like any other. It cannot be evaluated here - the module is
+        // the only thing that knows the answer, and it is not reachable from an
+        // expression node.
+        BoundExpr::VirtualFunction {
+            source,
+            name,
+            arguments,
+        } => Expr::Column(
+            space
+                .virtual_function(*source, name, arguments.len())
+                .ok_or_else(|| {
+                    misuse(format!(
+                        "the tree read does not carry {}, which the module answers per row",
+                        String::from_utf8_lossy(name)
+                    ))
+                })?,
         ),
         // "Column n of the row at this point", which is what the binder gives a
         // `VALUES` arm's result columns and an `ORDER BY` written as an

@@ -60,7 +60,8 @@ pub mod verify;
 
 use std::path::{Path, PathBuf};
 
-use inillucent::Database;
+use inillucent_engine::connect::{Connection, Database};
+use inillucent_tree::datum::OwnedDatum;
 
 use crate::copy::SEARCH_TABLE;
 use crate::index::SqlIndex;
@@ -81,8 +82,6 @@ pub struct Plan {
     pub manifest: PathBuf,
     /// Whether to publish, or to stop with a verified staging file.
     pub publish: bool,
-    /// The pinned SQLite shell, when the interoperability probe should run.
-    pub sqlite: Option<PathBuf>,
 }
 
 impl Plan {
@@ -104,7 +103,6 @@ impl Plan {
             staging,
             manifest,
             publish: true,
-            sqlite: None,
         }
     }
 }
@@ -193,9 +191,7 @@ pub fn migrate(plan: &Plan) -> Result<Outcome, String> {
 
     let database = Database::open(&plan.staging)
         .map_err(|error| format!("cannot open the staging database: {}", error.message()))?;
-    let connection = database
-        .connect()
-        .map_err(|error| format!("cannot connect: {}", error.message()))?;
+    let connection = database.connect();
 
     if !manifest.finished("schema") {
         copy::create_schema(&connection, dims)
@@ -253,25 +249,42 @@ pub fn migrate(plan: &Plan) -> Result<Outcome, String> {
     )?;
     manifest.record("target.search_generation", generation)?;
 
-    // Everything is written. Close before verifying, so what is verified is
-    // what a fresh process sees rather than what one warm cache saw.
+    // Everything is written. Checkpoint, then close, so what is verified is
+    // what a fresh process sees rather than what one warm cache saw. The
+    // checkpoint is what makes the close a *clean* one: it folds the log into
+    // the file, so the next open reads a finished database rather than
+    // replaying its way to one.
+    database
+        .checkpoint()
+        .map_err(|error| format!("cannot checkpoint the staged file: {}", error.message()))?;
     drop(connection);
     drop(database);
+    {
+        let reopened = Database::open(&plan.staging)
+            .map_err(|error| format!("reopen: {}", error.message()))?;
+        }
 
-    let mut checks = Vec::new();
-    if let Some(shell) = &plan.sqlite {
-        checks.push(sqlite_probe(shell, &plan.staging));
-    }
+    let mut checks = vec![structure_probe(&plan.staging)];
 
     let mut sql = SqlIndex::open(&plan.staging, SEARCH_TABLE)
-        .map_err(|error| format!("cannot reopen the staged database: {}", error.message()))?;
+        .map_err(|error| {
+            format!(
+                "cannot reopen the staged database: {}",
+                error.detail().unwrap_or_else(|| error.message())
+            )
+        })?;
     checks.extend(verify::run(&source.index, &mut sql));
     drop(sql);
 
     // And once more through a second open, which is the check that the first
     // reopen did not itself leave state behind.
     let mut again = SqlIndex::open(&plan.staging, SEARCH_TABLE)
-        .map_err(|error| format!("cannot reopen the staged database: {}", error.message()))?;
+        .map_err(|error| {
+            format!(
+                "cannot reopen the staged database: {}",
+                error.detail().unwrap_or_else(|| error.message())
+            )
+        })?;
     let repeated = verify::run(&source.index, &mut again);
     drop(again);
     let stable = repeated.iter().all(|check| check.passed);
@@ -358,57 +371,95 @@ fn publish(staging: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Runs the other engine over the staged file.
+/// Walks every tree of the staged file and reads rows back out of it.
 ///
-/// A database only this engine can read is not the file this project promises,
-/// so the check is not "did our reader like it" but "does SQLite". The shadow
-/// tables are ordinary tables, so the probe also reads rows back out of the
-/// search index's own storage through the other engine - which is the strongest
-/// statement available about the format.
-fn sqlite_probe(shell: &Path, database: &Path) -> Check {
-    let script = format!(
-        "PRAGMA integrity_check;\nSELECT count(*) FROM chunk;\nSELECT count(*) FROM {SEARCH_TABLE}_content;\n"
-    );
-    let output = std::process::Command::new(shell)
-        .arg(database)
-        .arg(&script)
-        .output();
-    match output {
-        Ok(output) if output.status.success() => {
-            let text = String::from_utf8_lossy(&output.stdout).to_string();
-            let lines: Vec<&str> = text.lines().map(str::trim).collect();
-            if lines.first() == Some(&"ok") {
-                let rows = lines.get(1..).unwrap_or_default().join("/");
-                Check {
-                    name: "sqlite.integrity".to_string(),
-                    passed: true,
-                    detail: format!(
-                        "integrity_check ok; the other engine reads {rows} rows out of chunk and out of the search index's own storage"
-                    ),
-                }
-            } else {
-                Check {
-                    name: "sqlite.integrity".to_string(),
-                    passed: false,
-                    detail: text.replace('\n', " "),
-                }
+/// **This used to run the pinned SQLite shell**, on the reasoning that "a
+/// database only this engine can read is not the file this project promises".
+/// That promise was withdrawn: `task-1816-rearchitecture-tdd.md` lists SQLite
+/// file-format compatibility among the rearchitecture's non-goals - "SQLite
+/// will not open our files and we will not open SQLite's, except through a
+/// test-only and migration-only reader". The comment outlived the requirement,
+/// and a probe that asked SQLite to open an `.rdb` would now be asking for
+/// something the project has decided not to provide.
+///
+/// What replaces it checks the format that exists, and is not weaker for it:
+/// `check_trees` walks **every** tree in the file and verifies its key order,
+/// which is what `PRAGMA integrity_check` does and is strictly more than a
+/// reader's opinion of the pages it happened to touch. It runs on a **fresh
+/// open of the closed file**, so it sees what a new process sees rather than
+/// what the writer's warm pool saw.
+///
+/// What is honestly lost is *engine independence*: this is no longer a second
+/// implementation reading the bytes, it is a second open. That is the direct
+/// consequence of the format decision above rather than a choice made here, and
+/// the rest of `verify.rs` - counts and ordered digests against the source -
+/// is what carries the weight it used to.
+///
+/// It also no longer needs an external binary, so it always runs. The old probe
+/// was skipped whenever no shell was configured, which meant the strongest
+/// check in the procedure was the one most likely not to happen.
+///
+/// @param database - the staged file
+fn structure_probe(database: &Path) -> Check {
+    let opened = inillucent_engine::connect::Database::open(database);
+    let database = match opened {
+        Ok(database) => database,
+        Err(error) => {
+            return Check {
+                name: "structure.integrity".to_string(),
+                passed: false,
+                detail: format!("cannot reopen the staged file: {}", error.message()),
             }
         }
-        Ok(output) => Check {
-            name: "sqlite.integrity".to_string(),
+    };
+    if let Err(error) = database.check() {
+        return Check {
+            name: "structure.integrity".to_string(),
             passed: false,
-            detail: String::from_utf8_lossy(&output.stderr).replace('\n', " "),
+            detail: format!("a tree is not intact: {}", error.message()),
+        };
+    }
+    let connection = database.connect();
+    let chunks = count_of(&connection, "SELECT count(*) FROM chunk");
+    let content = count_of(
+        &connection,
+        &format!("SELECT count(*) FROM {SEARCH_TABLE}_content"),
+    );
+    match (chunks, content) {
+        (Ok(chunks), Ok(content)) => Check {
+            name: "structure.integrity".to_string(),
+            passed: true,
+            detail: format!(
+                "every tree walks in key order; a fresh open reads {chunks} rows out of chunk                  and {content} out of the search index's own storage"
+            ),
         },
-        Err(error) => Check {
-            name: "sqlite.integrity".to_string(),
+        (Err(detail), _) | (_, Err(detail)) => Check {
+            name: "structure.integrity".to_string(),
             passed: false,
-            detail: format!("cannot run {}: {error}", shell.display()),
+            detail,
         },
     }
 }
 
+/// Returns the single integer a counting query answers.
+///
+/// @param connection - the reopened staged database
+/// @param sql - the counting query
+fn count_of(
+    connection: &Connection<'_>,
+    sql: &str,
+) -> Result<i64, String> {
+    let rows = connection
+        .query(sql)
+        .map_err(|error| format!("{sql}: {}", error.message()))?;
+    match rows.first().and_then(|row| row.first()) {
+        Some(OwnedDatum::Int(number)) => Ok(*number),
+        other => Err(format!("{sql} answered {other:?}")),
+    }
+}
+
 /// Returns one value of a query as text.
-fn scalar_text(connection: &inillucent::Connection, sql: &str) -> Result<String, String> {
+fn scalar_text(connection: &Connection<'_>, sql: &str) -> Result<String, String> {
     let mut statement = connection
         .prepare(sql)
         .map_err(|error| format!("{sql}: {}", error.message()))?;
@@ -419,10 +470,8 @@ fn scalar_text(connection: &inillucent::Connection, sql: &str) -> Result<String,
         return Ok(String::new());
     }
     Ok(match statement.row().first() {
-        Some(inillucent::Value::Integer(number)) => number.to_string(),
-        Some(inillucent::Value::Text(text)) => {
-            String::from_utf8_lossy(&text.utf8_bytes()).into_owned()
-        }
+        Some(OwnedDatum::Int(number)) => number.to_string(),
+        Some(OwnedDatum::Text(text)) => String::from_utf8_lossy(text).into_owned(),
         _ => String::new(),
     })
 }

@@ -14,18 +14,22 @@
 //! they become visible, which is exactly the difference this phase set out to
 //! make.
 
-use inillucent::{Connection, Database, DbError, DbResult, Value};
+use inillucent_base::{DbError, DbResult};
+use inillucent_engine::connect::{Connection, Database};
+use inillucent_tree::datum::OwnedDatum;
 use inillucent_core::rank::HitOrigin;
 use inillucent_core::store::ChunkInput;
 use inillucent_search::adapter::{Hit, Query, RetrievalIndex};
 
 /// A search table, opened as a retrieval index.
 pub struct SqlIndex {
-    connection: Connection,
+    /// The database handle. A connection is a borrow of it rather than a thing
+    /// of its own, so one is made where it is used instead of being stored -
+    /// storing it beside the database it borrows would be a self-referential
+    /// struct for no gain.
+    database: Database,
     table: String,
     dims: usize,
-    /// The database handle, kept alive because the connection reads through it.
-    _database: Database,
 }
 
 impl SqlIndex {
@@ -38,19 +42,22 @@ impl SqlIndex {
     /// @param table - the `inillucent_search` table's name
     pub fn open(path: impl AsRef<std::path::Path>, table: &str) -> DbResult<SqlIndex> {
         let database = Database::open(path)?;
-        let connection = database.connect()?;
-        let dims = declared_dims(&connection, table)?;
+        let dims = declared_dims(&database.connect(), table)?;
         Ok(SqlIndex {
-            connection,
+            database,
             table: table.to_string(),
             dims,
-            _database: database,
         })
     }
 
-    /// Returns the connection, for a caller that wants ordinary SQL as well.
-    pub fn connection(&self) -> &Connection {
-        &self.connection
+    /// Returns a connection, for a caller that wants ordinary SQL as well.
+    pub fn connection(&self) -> Connection<'_> {
+        self.database.connect()
+    }
+
+    /// Walks every tree of the database and verifies its key order.
+    pub fn check(&self) -> DbResult<()> {
+        self.database.check()
     }
 
     /// Returns the vector width the table declared.
@@ -69,12 +76,12 @@ impl SqlIndex {
             "INSERT INTO {}({}) VALUES ('{}')",
             self.table, self.table, command
         );
-        self.connection.execute_batch(&sql)
+        self.database.connect().execute_batch(&sql)
     }
 }
 
 /// Returns the vector width a search table declared, from its own config rows.
-fn declared_dims(connection: &Connection, table: &str) -> DbResult<usize> {
+fn declared_dims(connection: &Connection<'_>, table: &str) -> DbResult<usize> {
     let sql = format!("SELECT v FROM {table}_config WHERE k = 'dims'");
     let mut statement = connection.prepare(&sql)?;
     if !statement.step()? {
@@ -82,11 +89,8 @@ fn declared_dims(connection: &Connection, table: &str) -> DbResult<usize> {
             .with_detail(format!("{table} is not a inillucent_search table")));
     }
     let width = match statement.row().first() {
-        Some(Value::Integer(number)) => *number as usize,
-        Some(Value::Text(text)) => String::from_utf8_lossy(&text.utf8_bytes())
-            .trim()
-            .parse()
-            .unwrap_or(0),
+        Some(OwnedDatum::Int(number)) => *number as usize,
+        Some(OwnedDatum::Text(text)) => String::from_utf8_lossy(text).trim().parse().unwrap_or(0),
         _ => 0,
     };
     Ok(width)
@@ -122,15 +126,15 @@ impl RetrievalIndex for SqlIndex {
             return Err(DbError::primary(inillucent_base::PrimaryCode::Misuse)
                 .with_detail("each chunk needs exactly one vector"));
         }
-        self.connection.execute_batch("BEGIN")?;
+        self.database.connect().execute_batch("BEGIN")?;
         let outcome = self.append_inside(&chunks, embeddings);
         match outcome {
             Ok(count) => {
-                self.connection.execute_batch("COMMIT")?;
+                self.database.connect().execute_batch("COMMIT")?;
                 Ok(count)
             }
             Err(failure) => {
-                let _ = self.connection.execute_batch("ROLLBACK");
+                let _ = self.database.connect().execute_batch("ROLLBACK");
                 Err(failure)
             }
         }
@@ -142,20 +146,20 @@ impl RetrievalIndex for SqlIndex {
             return Ok(false);
         };
         let sql = format!("SELECT count(*) FROM {}_content WHERE id = ?1", self.table);
-        let mut probe = self.connection.prepare(&sql)?;
+        let mut probe = self.database.connect().prepare(&sql)?;
         probe.bind_integer(1, rowid)?;
         let present = probe.step()?
             && probe
                 .row()
                 .first()
-                .and_then(Value::as_integer)
+                .and_then(as_integer)
                 .is_some_and(|count| count > 0);
         drop(probe);
         if !present {
             return Ok(false);
         }
         let sql = format!("DELETE FROM {} WHERE rowid = ?1", self.table);
-        let mut statement = self.connection.prepare(&sql)?;
+        let mut statement = self.database.connect().prepare(&sql)?;
         statement.bind_integer(1, rowid)?;
         while statement.step()? {}
         Ok(true)
@@ -208,7 +212,7 @@ impl RetrievalIndex for SqlIndex {
             self.table,
             terms.join(" AND ")
         );
-        let mut statement = self.connection.prepare(&sql)?;
+        let mut statement = self.database.connect().prepare(&sql)?;
         if has_text {
             statement.bind_text(1, &query.text)?;
         }
@@ -218,13 +222,13 @@ impl RetrievalIndex for SqlIndex {
         let mut hits = Vec::new();
         while statement.step()? {
             let row = statement.row();
-            let Some(id) = row.first().and_then(Value::as_integer) else {
+            let Some(id) = row.first().and_then(as_integer) else {
                 continue;
             };
             hits.push(Hit {
                 id: id.to_string(),
-                score: row.get(1).and_then(Value::as_real).unwrap_or(0.0) as f32,
-                confidence: row.get(2).and_then(Value::as_real).unwrap_or(0.0) as f32,
+                score: row.get(1).and_then(as_real).unwrap_or(0.0) as f32,
+                confidence: row.get(2).and_then(as_real).unwrap_or(0.0) as f32,
                 origin: origin_of(row.get(3)),
             });
         }
@@ -234,14 +238,14 @@ impl RetrievalIndex for SqlIndex {
     /// Returns how many rows the table holds.
     fn live_chunks(&mut self) -> DbResult<usize> {
         let sql = format!("SELECT count(*) FROM {}_content", self.table);
-        let mut statement = self.connection.prepare(&sql)?;
+        let mut statement = self.database.connect().prepare(&sql)?;
         if !statement.step()? {
             return Ok(0);
         }
         Ok(statement
             .row()
             .first()
-            .and_then(Value::as_integer)
+            .and_then(as_integer)
             .unwrap_or(0)
             .max(0) as usize)
     }
@@ -264,7 +268,7 @@ impl SqlIndex {
                 return Err(DbError::primary(inillucent_base::PrimaryCode::Misuse)
                     .with_detail(format!("{external} is not a rowid")));
             };
-            let mut statement = self.connection.prepare(&sql)?;
+            let mut statement = self.database.connect().prepare(&sql)?;
             statement.bind_integer(1, rowid)?;
             statement.bind_text(2, &chunk.content)?;
             if self.dims > 0 {
@@ -280,14 +284,42 @@ impl SqlIndex {
 }
 
 /// Reads a hit origin back from the name the module reports.
-fn origin_of(value: Option<&Value<'static>>) -> HitOrigin {
+fn origin_of(value: Option<&OwnedDatum>) -> HitOrigin {
     let text = match value {
-        Some(Value::Text(text)) => String::from_utf8_lossy(&text.utf8_bytes()).into_owned(),
+        Some(OwnedDatum::Text(text)) => String::from_utf8_lossy(text).into_owned(),
         _ => String::new(),
     };
     match text.as_str() {
         "vector" => HitOrigin::Vector,
         "both" => HitOrigin::Both,
         _ => HitOrigin::Lexical,
+    }
+}
+
+/// Returns a datum's integer value, when it holds one.
+///
+/// The old facade's `Value` carried these as methods. `OwnedDatum` is the
+/// engine's own row value and deliberately does not convert silently, so the
+/// two readings a caller wants are written out here rather than assumed.
+///
+/// @param value - the datum
+fn as_integer(value: &OwnedDatum) -> Option<i64> {
+    match value {
+        OwnedDatum::Int(number) => Some(*number),
+        _ => None,
+    }
+}
+
+/// Returns a datum's real value, when it holds a number.
+///
+/// An integer answers here as well, because a score column holding a whole
+/// number is still a score.
+///
+/// @param value - the datum
+fn as_real(value: &OwnedDatum) -> Option<f64> {
+    match value {
+        OwnedDatum::Real(number) => Some(*number),
+        OwnedDatum::Int(number) => Some(*number as f64),
+        _ => None,
     }
 }

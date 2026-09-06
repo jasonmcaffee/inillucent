@@ -20,7 +20,9 @@
 //! source: same terms, same document lengths, same corpus statistics, produced
 //! by the same single-pass build.
 
-use inillucent::{Connection, DbResult, Value};
+use inillucent_base::DbResult;
+use inillucent_engine::connect::{Connection, Statement};
+use inillucent_tree::datum::OwnedDatum;
 use inillucent_base::hash::Sha256;
 use inillucent_core::store::Store;
 
@@ -82,7 +84,7 @@ pub fn schema(dims: usize) -> Vec<String> {
 }
 
 /// Creates the destination schema in one transaction.
-pub fn create_schema(connection: &Connection, dims: usize) -> DbResult<()> {
+pub fn create_schema(connection: &Connection<'_>, dims: usize) -> DbResult<()> {
     connection.execute_batch("BEGIN")?;
     for statement in schema(dims) {
         if let Err(failure) = connection.execute_batch(&statement) {
@@ -102,7 +104,7 @@ pub fn create_schema(connection: &Connection, dims: usize) -> DbResult<()> {
 /// @param store - the legacy store
 /// @param manifest - the log to checkpoint into
 pub fn copy_documents(
-    connection: &Connection,
+    connection: &Connection<'_>,
     store: &Store,
     manifest: &mut Manifest,
 ) -> Result<u64, String> {
@@ -134,7 +136,7 @@ pub fn copy_documents(
 
 /// Writes one batch of documents and everything hanging off them.
 fn write_documents(
-    connection: &Connection,
+    connection: &Connection<'_>,
     store: &Store,
     from: usize,
     to: usize,
@@ -168,7 +170,7 @@ fn write_documents(
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )
             .map_err(|error| error.message().to_string())?;
-        bind(&mut statement, 1, Value::Integer(id))?;
+        bind(&mut statement, 1, OwnedDatum::Int(id))?;
         bind_text(&mut statement, 2, &source)?;
         bind_text(&mut statement, 3, &document.external_id)?;
         bind_text(&mut statement, 4, &document.title)?;
@@ -176,16 +178,16 @@ fn write_documents(
         bind_optional(&mut statement, 6, space.as_deref())?;
         bind_optional(&mut statement, 7, author.as_deref())?;
         bind_optional(&mut statement, 8, author_id.as_deref())?;
-        bind(&mut statement, 9, Value::Integer(document.updated_at))?;
+        bind(&mut statement, 9, OwnedDatum::Int(document.updated_at))?;
         bind(
             &mut statement,
             10,
-            Value::Integer(i64::from(document.deleted)),
+            OwnedDatum::Int(i64::from(document.deleted)),
         )?;
         bind(
             &mut statement,
             11,
-            Value::Integer(i64::from(document.chunk_count)),
+            OwnedDatum::Int(i64::from(document.chunk_count)),
         )?;
         drain(&mut statement)?;
 
@@ -197,7 +199,7 @@ fn write_documents(
             let mut statement = connection
                 .prepare("INSERT INTO document_label(document, label) VALUES (?1, ?2)")
                 .map_err(|error| error.message().to_string())?;
-            bind(&mut statement, 1, Value::Integer(id))?;
+            bind(&mut statement, 1, OwnedDatum::Int(id))?;
             bind_text(&mut statement, 2, &text)?;
             drain(&mut statement)?;
         }
@@ -219,7 +221,7 @@ fn write_documents(
                     "INSERT INTO document_attribute(document, name, value) VALUES (?1, ?2, ?3)",
                 )
                 .map_err(|error| error.message().to_string())?;
-            bind(&mut statement, 1, Value::Integer(id))?;
+            bind(&mut statement, 1, OwnedDatum::Int(id))?;
             bind_text(&mut statement, 2, &name_text)?;
             bind_text(&mut statement, 3, &value_text)?;
             drain(&mut statement)?;
@@ -233,7 +235,7 @@ fn write_documents(
             let mut statement = connection
                 .prepare("INSERT INTO document_flag(document, flag) VALUES (?1, ?2)")
                 .map_err(|error| error.message().to_string())?;
-            bind(&mut statement, 1, Value::Integer(id))?;
+            bind(&mut statement, 1, OwnedDatum::Int(id))?;
             bind_text(&mut statement, 2, &name)?;
             drain(&mut statement)?;
         }
@@ -248,7 +250,7 @@ fn write_documents(
 /// it means an interrupted migration can never leave a destination whose chunks
 /// are present and unsearchable.
 pub fn copy_chunks(
-    connection: &Connection,
+    connection: &Connection<'_>,
     store: &Store,
     manifest: &mut Manifest,
 ) -> Result<u64, String> {
@@ -279,7 +281,7 @@ pub fn copy_chunks(
 
 /// Writes one batch of chunks, into the table and into the index.
 fn write_chunks(
-    connection: &Connection,
+    connection: &Connection<'_>,
     store: &Store,
     from: usize,
     to: usize,
@@ -299,12 +301,12 @@ fn write_chunks(
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )
             .map_err(|error| error.message().to_string())?;
-        bind(&mut statement, 1, Value::Integer(id))?;
-        bind(&mut statement, 2, Value::Integer(i64::from(chunk.doc)))?;
+        bind(&mut statement, 1, OwnedDatum::Int(id))?;
+        bind(&mut statement, 2, OwnedDatum::Int(i64::from(chunk.doc)))?;
         bind(
             &mut statement,
             3,
-            Value::Integer(i64::from(chunk.chunk_index)),
+            OwnedDatum::Int(i64::from(chunk.chunk_index)),
         )?;
         bind_text(&mut statement, 4, &external)?;
         bind_text(&mut statement, 5, &heading)?;
@@ -320,7 +322,7 @@ fn write_chunks(
 /// than the store, and because a caller migrating the relational tables of an
 /// index whose search cannot be reproduced still wants the chunks.
 pub fn copy_search(
-    connection: &Connection,
+    connection: &Connection<'_>,
     store: &Store,
     vectors: &inillucent_core::vectors::VectorSet,
     dims: usize,
@@ -353,7 +355,7 @@ pub fn copy_search(
 
 /// Writes one batch of search rows.
 fn write_search(
-    connection: &Connection,
+    connection: &Connection<'_>,
     store: &Store,
     vectors: &inillucent_core::vectors::VectorSet,
     dims: usize,
@@ -366,7 +368,7 @@ fn write_search(
         let mut statement = connection
             .prepare(&sql)
             .map_err(|error| error.message().to_string())?;
-        bind(&mut statement, 1, Value::Integer(ordinal as i64))?;
+        bind(&mut statement, 1, OwnedDatum::Int(ordinal as i64))?;
         bind_text(&mut statement, 2, &content)?;
         if dims > 0 && ordinal < vectors.len() {
             let mut bytes = Vec::with_capacity(dims.saturating_mul(4));
@@ -391,7 +393,7 @@ fn write_search(
 /// Ordered because the point is to compare two orderings, not two multisets: a
 /// destination that holds every row in the wrong order would pass a count check
 /// and a set check and still return a different top ten.
-pub fn digest(connection: &Connection, sql: &str) -> Result<(u64, String), String> {
+pub fn digest(connection: &Connection<'_>, sql: &str) -> Result<(u64, String), String> {
     let mut statement = connection
         .prepare(sql)
         .map_err(|error| format!("{sql}: {}", error.message()))?;
@@ -404,22 +406,22 @@ pub fn digest(connection: &Connection, sql: &str) -> Result<(u64, String), Strin
         let row = statement.row();
         for index in 0..row.len() {
             match row.get(index) {
-                Some(Value::Null) | None => hasher.update(b"\x00"),
-                Some(Value::Integer(number)) => {
+                Some(OwnedDatum::Null) | None => hasher.update(b"\x00"),
+                Some(OwnedDatum::Int(number)) => {
                     hasher.update(b"\x01");
                     hasher.update(&number.to_le_bytes());
                 }
-                Some(Value::Real(number)) => {
+                Some(OwnedDatum::Real(number)) => {
                     hasher.update(b"\x02");
                     hasher.update(&number.to_bits().to_le_bytes());
                 }
-                Some(Value::Text(text)) => {
+                Some(OwnedDatum::Text(text)) => {
                     hasher.update(b"\x03");
-                    hasher.update(&text.utf8_bytes());
+                    hasher.update(text);
                 }
-                Some(Value::Blob(blob)) => {
+                Some(OwnedDatum::Blob(blob)) => {
                     hasher.update(b"\x04");
-                    hasher.update(blob.raw());
+                    hasher.update(blob);
                 }
             }
             hasher.update(b"\x1f");
@@ -432,9 +434,9 @@ pub fn digest(connection: &Connection, sql: &str) -> Result<(u64, String), Strin
 
 /// Binds one value, reporting a failure as text.
 fn bind(
-    statement: &mut inillucent::Statement<'_>,
+    statement: &mut Statement<'_>,
     index: u32,
-    value: Value<'static>,
+    value: OwnedDatum,
 ) -> Result<(), String> {
     statement
         .bind(index, value)
@@ -443,7 +445,7 @@ fn bind(
 
 /// Binds one text value.
 fn bind_text(
-    statement: &mut inillucent::Statement<'_>,
+    statement: &mut Statement<'_>,
     index: u32,
     value: &str,
 ) -> Result<(), String> {
@@ -454,7 +456,7 @@ fn bind_text(
 
 /// Binds one optional text value, NULL when there is none.
 fn bind_optional(
-    statement: &mut inillucent::Statement<'_>,
+    statement: &mut Statement<'_>,
     index: u32,
     value: Option<&str>,
 ) -> Result<(), String> {
@@ -467,7 +469,7 @@ fn bind_optional(
 }
 
 /// Steps a statement to completion.
-fn drain(statement: &mut inillucent::Statement<'_>) -> Result<(), String> {
+fn drain(statement: &mut Statement<'_>) -> Result<(), String> {
     while statement
         .step()
         .map_err(|error| error.message().to_string())?

@@ -169,6 +169,7 @@ impl RowSpace {
         let mut types = Vec::with_capacity(sources.len().saturating_mul(layout.width));
         for (term, source) in sources.iter().enumerate() {
             stages.push(PreparedStage {
+                functions: Vec::new(),
                 root: layout.tree_key,
                 // These stages read no tree: they are row images the caller
                 // already holds. `Materialised` is the kind that says so.

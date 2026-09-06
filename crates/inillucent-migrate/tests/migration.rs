@@ -156,18 +156,6 @@ fn collect(directory: &Path, into: &mut Vec<PathBuf>) {
     }
 }
 
-/// Returns the pinned SQLite shell, when it has been built.
-fn sqlite_shell() -> Option<PathBuf> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .map(Path::to_path_buf)?;
-    let path = root
-        .join(".sqlite-ref/3.53.4/shell")
-        .join(format!("sqlite3{}", std::env::consts::EXE_SUFFIX));
-    path.is_file().then_some(path)
-}
-
 /// A real index migrates, verifies every check, and publishes.
 #[test]
 fn a_legacy_index_migrates_and_every_check_passes() {
@@ -177,7 +165,6 @@ fn a_legacy_index_migrates_and_every_check_passes() {
     let before = tree_digest(&source_dir);
 
     let mut plan = Plan::new(&source_dir, root.join("corpus.db"));
-    plan.sqlite = sqlite_shell();
     let outcome = migrate(&plan).expect("the migration runs");
 
     for check in &outcome.checks {
@@ -268,8 +255,9 @@ fn an_interrupted_migration_resumes() {
         for line in inventory.manifest_lines() {
             manifest.record("source.file", line).expect("recorded");
         }
-        let database = inillucent::Database::open(&plan.staging).expect("the staging opens");
-        let connection = database.connect().expect("it connects");
+        let database = inillucent_engine::connect::Database::open(&plan.staging)
+            .expect("the staging opens");
+        let connection = database.connect();
         inillucent_migrate::copy::create_schema(&connection, DIMS).expect("the schema builds");
         manifest.record("stage", "schema").expect("recorded");
         inillucent_migrate::copy::copy_documents(&connection, source.store(), &mut manifest)

@@ -676,6 +676,28 @@ impl ImportedDatabase {
                     cursor.column(&mut context, column)?,
                 ));
             }
+            // Appended after the declared columns, which is where
+            // `plan_stages` puts the rowid slot for a materialised virtual
+            // scan. Asked of the cursor only when the query reads it, so a
+            // module whose rowid is expensive is not asked for one nobody
+            // wanted.
+            if needed.rowid {
+                row.push(OwnedDatum::Int(cursor.rowid()?));
+            }
+            // The module's auxiliary functions, in the order `plan_stages`
+            // allocated their slots. `bm25(docs)` is the whole reason the
+            // mechanism exists, and it reads the cursor rather than a column -
+            // so it can only be answered here, while the cursor is still on the
+            // row. The arguments after the table are constants of the
+            // statement; a call whose arguments varied per row would be a
+            // different feature and is not one the modules declare.
+            for (name, _arity) in &needed.functions {
+                row.push(inillucent_exec::scalar::from_value(cursor.auxiliary(
+                    &mut context,
+                    name,
+                    &[],
+                )?));
+            }
             rows.push(row);
             cursor.next(&mut context)?;
         }
@@ -725,6 +747,90 @@ impl ImportedDatabase {
             rows = kept;
         }
         Ok(Some(rows))
+    }
+
+    /// Connects every virtual table the catalog declares.
+    ///
+    /// **A reopened database has to reach its modules.** `CREATE VIRTUAL TABLE`
+    /// connects one and holds it in `virtual_tables`, which lives in memory; a
+    /// later open starts with that map empty, so every virtual table answered
+    /// "no such table" until this ran. The module trait already anticipated it -
+    /// `connect(arguments, creating)` documents `creating` as "true only for
+    /// the `CREATE VIRTUAL TABLE` that first makes it. A module that has to
+    /// write an initial row into a shadow table does it then; every later open
+    /// is a connect and writes nothing." Nobody was calling it with `false`.
+    ///
+    /// The arguments are read back out of the stored `CREATE VIRTUAL TABLE`
+    /// through the ordinary parser rather than remembered separately, because a
+    /// second remembered copy of a declaration is a second thing that can
+    /// disagree with the file.
+    pub(super) fn reconnect_modules(&mut self) -> DbResult<()> {
+        let declarations: Vec<Vec<u8>> = self
+            .entries
+            .iter()
+            .filter(|recorded| recorded.entry.kind == ObjectKind::Table)
+            .map(|recorded| recorded.entry.sql.clone())
+            .collect();
+        for sql in declarations {
+            let parsed = match inillucent_sql::parser::parse_next_statement(&sql, 0, &self.limits) {
+                Ok(parsed) => parsed,
+                Err(_) => continue,
+            };
+            let inillucent_sql::ast::Statement::CreateVirtualTable {
+                name,
+                module,
+                arguments,
+                ..
+            } = &parsed.statement
+            else {
+                continue;
+            };
+            let name = parsed.ast.text(*name).to_vec();
+            let module = parsed.ast.text(*module).to_vec();
+            let arguments: Vec<Vec<u8>> = arguments.clone();
+            let Some(found) = self.registry.module(&module) else {
+                // A file naming a module this build does not have is a file
+                // this build cannot answer for. It is skipped rather than
+                // refused so the rest of the database still opens, and the
+                // table itself will say "no such table" if anybody asks.
+                continue;
+            };
+            let mut connect = ModuleArguments {
+                database: 0,
+                schema: b"main".to_vec(),
+                table: name.clone(),
+                module: module.clone(),
+                arguments,
+                shadows: Vec::new(),
+            };
+            for shadow in found.shadow_tables(&connect)? {
+                // Looked up in the catalog rows rather than through
+                // `table_root`, which answers over the tables the *planner* can
+                // see. A shadow table is a real tree either way, and the row is
+                // the authority for what it is registered under.
+                let shadow_name = shadow_table_name(&name, &shadow.suffix).to_ascii_lowercase();
+                let Some(recorded) = self
+                    .entries
+                    .iter()
+                    .find(|recorded| recorded.entry.name.to_ascii_lowercase() == shadow_name)
+                else {
+                    continue;
+                };
+                connect.shadows.push(ShadowRoot {
+                    suffix: shadow.suffix.clone(),
+                    root: recorded.root,
+                });
+            }
+            let table = found.connect(&connect, false)?;
+            self.virtual_tables.insert(
+                name.to_ascii_lowercase(),
+                Connected {
+                    table,
+                    arguments: connect,
+                },
+            );
+        }
+        Ok(())
     }
 
     /// Applies one change to a virtual table.
@@ -821,10 +927,37 @@ impl ImportedDatabase {
                     *slot = value.clone();
                 }
             }
+            // **A supplied rowid is the caller's, not the module's to choose.**
+            // This passed `Null` unconditionally, so `INSERT INTO t(rowid, ...)
+            // VALUES (?1, ...)` was accepted and the rowid silently discarded -
+            // the module allocated its own, and every row came back under a
+            // number the caller had not written. It surfaced as a migrated
+            // search index whose every ranking was correct and whose every
+            // identifier was one too high, because the source numbered its
+            // chunks from zero and the module numbered them from one.
+            let rowid = match (statement.named_rowid, &statement.rowid) {
+                // `INSERT INTO t(rowid, ...)`, which the binder records apart
+                // from the columns because a rowid is not one: nothing writes
+                // it into the record. It is the only place the value appears -
+                // no `ColumnSource` refers to it - so reading `statement.rowid`
+                // alone found nothing and the value was dropped on the floor.
+                (Some(at), _) => supplied.get(at).cloned().unwrap_or(Value::Null),
+                (None, Some(inillucent_sql::dml::ColumnSource::Row(at))) => {
+                    supplied.get(*at).cloned().unwrap_or(Value::Null)
+                }
+                (None, Some(inillucent_sql::dml::ColumnSource::Expr(expr))) => {
+                    inillucent_exec::scalar::to_value(
+                        inillucent_exec::physical::literal_value(expr, params)?.borrow(),
+                    )
+                }
+                // Nothing named one, so the module allocates - which is what
+                // `Null` asks it for.
+                (None, Some(inillucent_sql::dml::ColumnSource::Generated(_)) | None) => Value::Null,
+            };
             self.change_module(
                 &statement.table.name,
                 &Change::Insert {
-                    rowid: Value::Null,
+                    rowid,
                     values: cells,
                 },
             )?;

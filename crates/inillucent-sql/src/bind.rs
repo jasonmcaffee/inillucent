@@ -619,6 +619,11 @@ impl BoundExpr {
             BoundExpr::Subquery { block, .. } if block.correlations.contains(&source) => {
                 into.opaque = true;
             }
+            BoundExpr::VirtualFunction {
+                source: held,
+                name,
+                arguments,
+            } if *held == source => into.add_function(name, arguments.len()),
             _ => {}
         }
         for child in self.children() {
@@ -641,6 +646,16 @@ pub struct ColumnUse {
     /// that turned out not to cover a column would read it from an index that
     /// does not hold it.
     pub opaque: bool,
+    /// The module's auxiliary functions this term is asked for, in the order
+    /// they were met, as a folded name and an argument count.
+    ///
+    /// `score(t)` and `bm25(t)` read the *cursor* rather than a column, so they
+    /// are neither a column read nor an opaque one: the module can answer them
+    /// per row, and a materialised virtual scan carries the answers beside the
+    /// columns. Recorded here because this is already the answer to "what does
+    /// this term have to produce", and a second list would be a second thing
+    /// that can disagree with it.
+    pub functions: Vec<(Vec<u8>, usize)>,
 }
 
 impl ColumnUse {
@@ -651,6 +666,17 @@ impl ColumnUse {
         }
     }
 
+    /// Records that one of the module's auxiliary functions is read.
+    ///
+    /// @param name - the function's folded name
+    /// @param arity - how many arguments follow the table
+    pub fn add_function(&mut self, name: &[u8], arity: usize) {
+        let held = (name.to_vec(), arity);
+        if !self.functions.contains(&held) {
+            self.functions.push(held);
+        }
+    }
+
     /// Folds another use into this one.
     pub fn merge(&mut self, other: &ColumnUse) {
         for slot in &other.columns {
@@ -658,6 +684,9 @@ impl ColumnUse {
         }
         self.rowid |= other.rowid;
         self.opaque |= other.opaque;
+        for (name, arity) in &other.functions {
+            self.add_function(name, *arity);
+        }
     }
 }
 

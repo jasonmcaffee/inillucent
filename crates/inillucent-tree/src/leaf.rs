@@ -1405,13 +1405,31 @@ impl<'p> LeafRef<'p> {
             // shadowed entry is dropped here rather than sorted and deduped
             // afterwards, because a stable sort would keep whichever the
             // comparison happened to leave first.
-            let duplicate = rows
+            let shadowed = rows
                 .get(sorted_rows..)
                 .unwrap_or(&[])
                 .iter()
                 .any(|held| self.compare_keys(held, &values) == std::cmp::Ordering::Equal);
-            if !duplicate {
-                rows.push(values);
+            if shadowed {
+                continue;
+            }
+            // **A delta row is newer than the sorted region, so it replaces the
+            // row it shadows rather than joining it.** Comparing only against
+            // the other delta entries - which is what this did - emitted both
+            // copies of every row that had been written after it was packed,
+            // and a table read back twice as many rows as it held. It survived
+            // for as long as it did because the two copies only exist together
+            // after a compaction has moved rows into the sorted region and a
+            // later write has put them back in the delta area, which is a state
+            // a freshly written table never reaches and a reopened one does.
+            let position = rows
+                .get(..sorted_rows)
+                .unwrap_or(&[])
+                .iter()
+                .position(|held| self.compare_keys(held, &values) == std::cmp::Ordering::Equal);
+            match position.and_then(|at| rows.get_mut(at)) {
+                Some(slot) => *slot = values,
+                None => rows.push(values),
             }
         }
         rows.sort_by(|left, right| self.compare_keys(left, right));

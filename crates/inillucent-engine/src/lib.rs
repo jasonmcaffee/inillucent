@@ -801,6 +801,35 @@ impl ImportedDatabase {
             if entry.kind != ObjectKind::Table {
                 continue;
             }
+            // A virtual table has **no tree of its own**. Its rows live in the
+            // shadow tables the module declared, which are ordinary tables in
+            // this same catalog and are loaded by this same loop. So its row
+            // carries no tree identifier, and asking for one refused to open
+            // every database holding a search table - which is how this was
+            // found, by moving `inillucent-migrate` onto the engine.
+            //
+            // The kind is learned from a throwaway parse rather than from the
+            // parse below, because that one is given the identifier and every
+            // shape it derives is derived against it. Parsing once with a
+            // placeholder root and patching `info.root` afterwards looked like
+            // the same thing and was not: it left the *derived* shapes pointing
+            // at the placeholder, and every table then scanned the same tree -
+            // `count(*)` answered the same number for every table in the file.
+            if matches!(
+                table_from_create_sql(&entry.sql, 0, 0).map(|info| info.kind),
+                Ok(inillucent_sql::catalog_view::TableKind::Virtual)
+            ) {
+                // `entries` and `identifiers` are zipped into `Recorded` below,
+                // so they are parallel and a row pushed to one has to be pushed
+                // to the other. Pushing only the entry shifted every later
+                // object onto the previous one's tree - which read as a table
+                // whose covering index answered another table's rows, and cost
+                // an afternoon to find. Zero is what `Recorded.root` documents
+                // for an object with no tree.
+                entries.push(entry.clone());
+                identifiers.push(0);
+                continue;
+            }
             let identifier = identifier_of(entry)?;
             highest_identifier = highest_identifier.max(identifier);
             let mut info = match table_from_create_sql(&entry.sql, 0, identifier) {
@@ -977,6 +1006,13 @@ impl ImportedDatabase {
             index_stages: std::cell::Cell::new((0, 0, 0, 0)),
             catalog_generation: 0,
         };
+        opened.rebuild_tables()?;
+        opened.refresh_catalog();
+        // The modules are connected after the tables are loaded, because a
+        // module's shadow tables have to exist before it can be connected to
+        // them. Nothing did this before, so a reopened database holding a
+        // search table answered "no such table" for it.
+        opened.reconnect_modules()?;
         opened.rebuild_tables()?;
         opened.refresh_catalog();
         Ok(opened)
