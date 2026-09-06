@@ -336,3 +336,52 @@ fn a_folded_in_answers_the_same_as_the_literal_in() {
     );
     assert_eq!(folded, vec![2, 3]);
 }
+
+/// A subquery in a `VALUES` list and in a `SET` is folded too.
+///
+/// These two are the paths with expressions and **no plan**: a `VALUES` list is
+/// evaluated by the write path directly, and an `UPDATE`'s assignments are
+/// evaluated after the plan has found the rows. The plan-shaped fold never sees
+/// either, so before `fold_expressions` existed they came back as "a correlated
+/// subquery used as a value" - which is what an unfilled slot looks like from
+/// inside the physical pass, and a false statement about the query.
+///
+/// Both answers are SQLite 3.53.4's for the same script: `1|one`, `2|one`,
+/// `3|three`.
+#[test]
+fn a_subquery_in_a_values_list_and_in_a_set_is_folded() {
+    let database = fixture("novplan");
+    let connection = database.connect();
+    connection
+        .execute_batch("DELETE FROM item")
+        .expect("the fixture table is emptied");
+    connection
+        .execute_batch(
+            "INSERT INTO item(id, name, price) VALUES (1, 'one', 1);              INSERT INTO item(id, name, price) VALUES (2, 'two', 2)",
+        )
+        .expect("two rows load");
+
+    connection
+        .execute_batch(
+            "INSERT INTO item(id, name, price) VALUES ((SELECT max(id) FROM item) + 1, 'three', 3)",
+        )
+        .expect("a subquery in a VALUES list is answered");
+    connection
+        .execute_batch("UPDATE item SET name = (SELECT name FROM item WHERE id = 1) WHERE id = 2")
+        .expect("a subquery in a SET is answered");
+
+    let names: Vec<String> = connection
+        .query("SELECT name FROM item ORDER BY id")
+        .expect("the rows read back")
+        .iter()
+        .map(|row| match row.first() {
+            Some(OwnedDatum::Text(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+            other => panic!("name was {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec!["one".to_string(), "one".to_string(), "three".to_string()],
+        "the rowid the VALUES subquery computed, or the value the SET subquery read, is wrong"
+    );
+}

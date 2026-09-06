@@ -108,6 +108,15 @@ pub fn fold(
     if found.is_empty() {
         return Ok(None);
     }
+    fill(found, catalog, params).map(Some)
+}
+
+/// Runs each gathered block and returns the parameters carrying the answers.
+///
+/// @param found - the blocks, innermost first
+/// @param catalog - where the trees and layouts come from
+/// @param params - the values bound for this execution
+fn fill(found: Vec<Block<'_>>, catalog: &dyn TreeCatalog, params: &Params) -> DbResult<Params> {
     let width = found
         .iter()
         .map(|block| block.id.saturating_add(1))
@@ -131,7 +140,7 @@ pub fn fold(
             .collect();
         folded.set_subquery(block.id, Subvalue { column });
     }
-    Ok(Some(folded))
+    Ok(folded)
 }
 
 /// Collects every subquery of a planned statement, innermost first.
@@ -155,6 +164,40 @@ fn gather_plan<'a>(plan: &'a PhysicalPlan, into: &mut Vec<Block<'a>>) {
     for (_op, arm) in &plan.compounds {
         gather_plan(arm, into);
     }
+}
+
+/// Evaluates every uncorrelated subquery in a list of expressions, once.
+///
+/// The companion to [`fold`], for the statements that have expressions but no
+/// plan to hang them on: a `VALUES` list and an `UPDATE`'s assignments are
+/// evaluated by the write path directly, so nothing ever built a
+/// `PhysicalPlan` for them and the plan-shaped fold never saw them.
+///
+/// The symptom of that was a *misleading* refusal rather than a wrong answer.
+/// `INSERT INTO t VALUES ((SELECT max(id) FROM t) + 1)` came back as "a
+/// correlated subquery used as a value", which is what an unfilled slot looks
+/// like from inside `translate` - a true statement about the slot and a false
+/// one about the query.
+///
+/// @param exprs - the expressions to look through
+/// @param catalog - where the trees and layouts come from
+/// @param params - the values bound for this execution
+pub fn fold_expressions(
+    exprs: &[&BoundExpr],
+    catalog: &dyn TreeCatalog,
+    params: &Params,
+) -> DbResult<Option<Params>> {
+    if params.has_subqueries() {
+        return Ok(None);
+    }
+    let mut found = Vec::new();
+    for expr in exprs {
+        gather_expression(expr, &mut found);
+    }
+    if found.is_empty() {
+        return Ok(None);
+    }
+    fill(found, catalog, params).map(Some)
 }
 
 /// One subquery the fold has to evaluate.
