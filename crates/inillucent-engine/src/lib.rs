@@ -105,6 +105,7 @@ use inillucent_tree::datum::{Datum, OwnedDatum};
 use inillucent_tree::types::{ColumnSpec, PhysicalType};
 use inillucent_tree::write::TreeLog;
 use inillucent_tree::PagedTree;
+use inillucent_txn::redo::{RowRedo, TreeRows};
 use inillucent_value::collation::Collation;
 use inillucent_vfs::{DbPath, OsVfs};
 use inillucent_wal::{Body, Synchronous, Wal, WalOptions, FIRST_LSN};
@@ -706,31 +707,19 @@ impl ImportedDatabase {
         let db_path = DbPath::new(path.to_string_lossy().as_ref());
         let database = Database::open(&vfs, &db_path, frames.max(64))?;
 
-        // **A log with committed work in it is refused, not ignored.**
+        // **Recovery.** The log is replayed into the file before anything is
+        // read out of it, which is what makes this an open rather than a
+        // reader of whatever the last checkpoint happened to leave behind.
         //
-        // This open reads the data file and attaches the trees the catalog names.
-        // It does not replay the log, and `inillucent-engine` has no `Redo` applier
-        // to replay it with - that is Phase 3's recovery, which lives in
-        // `inillucent-txn` and which the harness has never needed because `reopen`
-        // checkpoints before it closes.
+        // It could not be done until task-1834 put a tree's identifier in the
+        // catalog. `TreeRows` is keyed by that identifier, every logical row
+        // record carries it, and until then the writer's numbering and a
+        // reader's were different - so a replay would have put rows into the
+        // wrong tree, which is a wrong answer rather than a refusal.
         //
-        // Without this check the failure is silent and is the worst kind: a
-        // database closed without a checkpoint comes back missing every
-        // committed transaction since the last one, and answers queries about
-        // the rest perfectly. A test caught exactly that - `CREATE TABLE note`,
-        // three inserts, close, open, "no such table: note" - and a caller who
-        // did not happen to look would have got an empty table rather than an
-        // error.
-        //
-        // So the scan runs with `DryRun`, which applies nothing, and anything it
-        // finds past the last checkpoint stops the open with a message naming
-        // what is there. A refusal is a correct answer; a stale database is not.
-        // **From the file's own checkpoint, not from the start of the log.**
-        // `RecoveryStart::fresh` scans from `FIRST_LSN`, which counts every
-        // transaction the last checkpoint already applied - so a database that
-        // had just been checkpointed was refused for work that was safely in
-        // its pages. The meta page records where recovery must start, which is
-        // what it is for.
+        // From the file's own checkpoint, not from the start of the log:
+        // `RecoveryStart::fresh` scans from `FIRST_LSN` and would replay
+        // everything the last checkpoint already applied.
         let meta = database.meta();
         let start = if meta.checkpoint_lsn == 0 {
             inillucent_wal::RecoveryStart::fresh(database.uuid())
@@ -742,17 +731,44 @@ impl ImportedDatabase {
                 cts_watermark: meta.cts_watermark,
             }
         };
-        let mut dry = inillucent_wal::DryRun::default();
-        let scanned = inillucent_wal::recover(&vfs, &db_path, start, &mut dry)?;
-        if scanned.committed > 0 {
-            return Err(misuse(format!(
-                "{} has {} committed transaction(s) in its log that this open does not replay: \
-                 checkpoint it, or open it through a path that recovers",
-                path.display(),
-                scanned.committed
-            )));
+        let mut database = database;
+        // **Recovery, which this open owes and which the identifier made
+        // possible.** `TreeRows` is keyed by tree id, and until task-1834 put
+        // the identifier in the catalog there was no id a reader could derive
+        // that the writer would have agreed with - so a replay would have handed
+        // row records to the wrong tree. It can now be built from the file.
+        //
+        // The shapes come from the catalog as it stood at the last checkpoint,
+        // plus the catalog tree itself, whose own rows are what a `CREATE TABLE`
+        // writes. A record naming a tree that is in none of them - a table
+        // created *after* the checkpoint, whose rows were then written - makes
+        // `TreeRows` refuse, which fails this open with a named error rather
+        // than replaying into a tree that is not the one meant. A refusal is
+        // still the floor; recovery raises how much is above it.
+        let checkpointed = {
+            let before = attach_catalog(database.pool(), database.catalog_root())?;
+            read_catalog(database.pool(), &before)?
+        };
+        let (outcome, allocated, freed) = {
+            let mut applier =
+                inillucent_txn::redo::Applier::new(&mut database, LearningRows::new(&checkpointed));
+            let outcome = inillucent_wal::recover(&vfs, &db_path, start, &mut applier)?;
+            let (allocated, freed) = applier.allocations();
+            (outcome, allocated.to_vec(), freed.to_vec())
+        };
+        // The free map is rebuilt after the scan rather than inside it: the map
+        // and every page write are both behind `&mut Database`, and one record
+        // cannot hold two mutable borrows of the same object.
+        for page in &allocated {
+            database.claim(*page)?;
         }
+        for page in &freed {
+            database.release(*page, 1)?;
+        }
+        inillucent_wal::truncate_after(&vfs, &db_path, &outcome)?;
 
+        // The catalog is read again, because recovery may have changed it: a
+        // `CREATE TABLE` after the checkpoint is a row in this very tree.
         let catalog_tree = attach_catalog(database.pool(), database.catalog_root())?;
         let stored = read_catalog(database.pool(), &catalog_tree)?;
 
@@ -2216,6 +2232,193 @@ fn let_the_pool_ask_the_log(pool: &Pool, wal: &std::rc::Rc<Wal>) {
         held.sync()?;
         Ok(held.write_ahead_point())
     }));
+}
+
+/// A [`RowRedo`] that learns a tree's shape from the catalog rows it replays.
+///
+/// **The problem it solves.** `TreeRows` has to be told every tree's column
+/// directory before the replay starts, and the only place to get one is the
+/// catalog. But the catalog a reader can read before the replay is the catalog
+/// as at the *last checkpoint* - so a table created after it, and then written
+/// to, names a tree the applier has never heard of, and the replay refuses.
+/// That is not a corner: a database that is created, given a schema and filled
+/// without ever being checkpointed is the ordinary shape of a crash, and it is
+/// exactly what `ImportedDatabase::create` followed by DDL produces.
+///
+/// **Why it works.** A `CREATE TABLE` is a row inserted into the catalog tree,
+/// and the log is replayed in LSN order - so that row goes past *before* any row
+/// of the tree it describes. Watching the catalog tree go by is therefore enough
+/// to know every shape by the time it is needed, and it needs no second pass.
+///
+/// The catalog row is decoded by `inillucent-catalog`'s own decoder rather than
+/// here, because a second decoder is a second opinion about which column is
+/// which, and the columns are what the format is.
+struct LearningRows {
+    /// The applier this delegates to, gaining trees as it goes.
+    rows: TreeRows,
+    /// Every catalog entry seen, so an index can find the table it is on.
+    seen: Vec<SchemaEntry>,
+}
+
+impl LearningRows {
+    /// Returns an applier that already knows the checkpointed catalog.
+    ///
+    /// @param checkpointed - the catalog as at the last checkpoint
+    fn new(checkpointed: &[SchemaEntry]) -> LearningRows {
+        let mut rows = TreeRows::new().with_tree(
+            inillucent_catalog::paged::SCHEMA_TREE_ID,
+            schema_layout(),
+            1,
+        );
+        for entry in checkpointed {
+            let Ok(identifier) = identifier_of(entry) else {
+                continue;
+            };
+            let Some((columns, key_columns)) = shape_of(entry, checkpointed, identifier) else {
+                continue;
+            };
+            rows = rows.with_tree(u64::from(identifier), columns, key_columns);
+        }
+        LearningRows {
+            rows,
+            seen: checkpointed.to_vec(),
+        }
+    }
+
+    /// Learns a tree's shape from a catalog row the replay is about to apply.
+    ///
+    /// Silent about a row it cannot make a shape of - a view, a trigger, an
+    /// index whose table has not gone past yet - because the applier refuses by
+    /// name if a record then needs it, and refusing there says which tree.
+    ///
+    /// @param row - the catalog row's encoded values
+    fn learn(&mut self, row: &[u8]) {
+        let Ok(values) = decode_row(row) else {
+            return;
+        };
+        let Ok(entry) = inillucent_catalog::paged::entry_from_row(&values) else {
+            return;
+        };
+        self.seen.push(entry.clone());
+        let Ok(identifier) = identifier_of(&entry) else {
+            return;
+        };
+        if let Some((columns, key_columns)) = shape_of(&entry, &self.seen, identifier) {
+            let held = std::mem::take(&mut self.rows);
+            self.rows = held.with_tree(u64::from(identifier), columns, key_columns);
+        }
+    }
+}
+
+/// Decodes a run of tagged values, which is how a row record carries a row.
+///
+/// @param row - the record's row bytes
+fn decode_row(row: &[u8]) -> DbResult<Vec<Datum<'_>>> {
+    let mut values = Vec::new();
+    let mut at = 0usize;
+    while at < row.len() {
+        let (value, width) = Datum::decode_tagged(row.get(at..).unwrap_or(&[]))?;
+        values.push(value);
+        at = at.saturating_add(width);
+    }
+    Ok(values)
+}
+
+impl RowRedo for LearningRows {
+    fn insert_row(
+        &mut self,
+        database: &mut Database,
+        tree: u64,
+        page: PageId,
+        row: &[u8],
+        lsn: u64,
+    ) -> DbResult<()> {
+        if tree == inillucent_catalog::paged::SCHEMA_TREE_ID {
+            self.learn(row);
+        }
+        self.rows.insert_row(database, tree, page, row, lsn)
+    }
+
+    fn delete_row(
+        &mut self,
+        database: &mut Database,
+        tree: u64,
+        page: PageId,
+        key: &[u8],
+        lsn: u64,
+    ) -> DbResult<()> {
+        self.rows.delete_row(database, tree, page, key, lsn)
+    }
+
+    fn update_in_place(
+        &mut self,
+        database: &mut Database,
+        tree: u64,
+        page: PageId,
+        key: &[u8],
+        column: u32,
+        value: &[u8],
+        lsn: u64,
+    ) -> DbResult<()> {
+        self.rows
+            .update_in_place(database, tree, page, key, column, value, lsn)
+    }
+
+    fn compact_leaf(
+        &mut self,
+        database: &mut Database,
+        tree: u64,
+        page: PageId,
+        lsn: u64,
+    ) -> DbResult<()> {
+        self.rows.compact_leaf(database, tree, page, lsn)
+    }
+}
+
+/// Returns a catalog entry's tree shape, for the recovery applier.
+///
+/// The same derivations the open uses below, in the one form the applier wants:
+/// the column directory and how many leading columns form the key. An entry
+/// whose declaration will not parse - or an index whose table is not in the
+/// catalog - answers `None`, and the applier then refuses any record naming it
+/// rather than replaying into a shape it guessed.
+///
+/// @param entry - the catalog row
+/// @param catalog - every row, so an index can find its table
+/// @param identifier - the tree's identifier
+fn shape_of(
+    entry: &SchemaEntry,
+    catalog: &[SchemaEntry],
+    identifier: u32,
+) -> Option<(Vec<ColumnSpec>, usize)> {
+    match entry.kind {
+        ObjectKind::Table => {
+            let mut info = table_from_create_sql(&entry.sql, 0, identifier).ok()?;
+            info.root = identifier;
+            if info.without_rowid {
+                let (columns, key_columns, _) = keyed_table_shape(&info).ok()?;
+                Some((columns, key_columns))
+            } else {
+                let (columns, _) = table_shape(&info);
+                Some((columns, 1))
+            }
+        }
+        ObjectKind::Index => {
+            let folded = entry.table.to_ascii_lowercase();
+            let owner = catalog.iter().find(|held| {
+                held.kind == ObjectKind::Table && held.name.to_ascii_lowercase() == folded
+            })?;
+            let mut table = table_from_create_sql(&owner.sql, 0, owner.tree_id as u32).ok()?;
+            table.root = owner.tree_id as u32;
+            let index =
+                inillucent_catalog::load::index_from_create_sql(&entry.sql, &table, identifier)
+                    .ok()?;
+            let (columns, _) = index_shape(&table, &index, identifier);
+            let key_columns = columns.len();
+            Some((columns, key_columns))
+        }
+        _ => None,
+    }
 }
 
 /// Returns the identifier a catalog row registers its tree under.

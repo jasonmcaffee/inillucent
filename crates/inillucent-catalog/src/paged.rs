@@ -369,6 +369,20 @@ pub fn delete_entry(
 /// Reads one catalog row out of the values a leaf holds.
 ///
 /// @param row - the row's values, rowid first
+/// Returns the object one catalog row describes.
+///
+/// **Public because recovery needs it row by row.** A replay reads catalog rows
+/// out of the log one at a time, as the records that wrote them come past, and
+/// has to learn the shape of a tree created since the last checkpoint before the
+/// rows of that tree arrive. Decoding the row a second time in the engine would
+/// be a second decoder that could disagree with this one about which column is
+/// which - and the columns are what the format is.
+///
+/// @param row - the row's values, rowid first
+pub fn entry_from_row(row: &[Datum<'_>]) -> DbResult<SchemaEntry> {
+    entry_of(row)
+}
+
 fn entry_of(row: &[Datum<'_>]) -> DbResult<SchemaEntry> {
     let kind = ObjectKind::from_text(&text_at(row, 1)?).ok_or_else(|| {
         error::corrupt("a catalog row's type is not one of table, index, view or trigger")
