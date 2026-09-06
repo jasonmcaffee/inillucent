@@ -840,29 +840,6 @@ impl PagedTree {
         leaf.locate(key, self.key_columns())
     }
 
-    /// Reports whether one delta row's key equals a probe.
-    ///
-    /// @param leaf - the leaf
-    /// @param index - the delta row
-    /// @param key - the probe
-    fn delta_key_matches(
-        &self,
-        leaf: &LeafRef<'_>,
-        index: usize,
-        key: &[Datum<'_>],
-    ) -> DbResult<bool> {
-        for column in 0..self.key_columns() {
-            let held = leaf.delta_value(index, column)?;
-            let wanted = key.get(column).copied().unwrap_or(Datum::Null);
-            if crate::types::compare_under(&held, &wanted, leaf.collation_of(column))
-                != std::cmp::Ordering::Equal
-            {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
     /// Returns the row a key names in a leaf, copied out.
     ///
     /// @param pool - the buffer pool
