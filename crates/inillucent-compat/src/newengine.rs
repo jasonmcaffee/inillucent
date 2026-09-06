@@ -847,7 +847,45 @@ impl ImportedDatabase {
     /// @param params - the values bound to `?1`, `?2`, ...
     pub fn execute_any(&mut self, sql: &str, params: &Params) -> DbResult<Outcome> {
         let cached = self.compiled(sql)?;
-        match &*cached {
+        self.execute_compiled(&cached, params)
+    }
+
+    /// Compiles one statement and hands back the handle, without running it.
+    ///
+    /// **So that a caller can take the compile out of a timed region**, which is
+    /// where SQLite's already is: `sqlite_bench.c` calls `sqlite3_prepare_v2`
+    /// before it reads the clock and then resets and re-binds inside the loop.
+    /// A harness that looked its statement up per iteration would be timing a
+    /// hash of the SQL text that the other arm does not pay.
+    ///
+    /// @param sql - the statement text
+    pub fn prepare_statement(&self, sql: &str) -> DbResult<Statement> {
+        Ok(Statement(self.compiled(sql)?))
+    }
+
+    /// Runs a statement [`ImportedDatabase::prepare_statement`] compiled.
+    ///
+    /// @param statement - the handle
+    /// @param params - the values bound to `?1`, `?2`, ...
+    pub fn execute_statement(
+        &mut self,
+        statement: &Statement,
+        params: &Params,
+    ) -> DbResult<Outcome> {
+        let held = std::rc::Rc::clone(&statement.0);
+        self.execute_compiled(&held, params)
+    }
+
+    /// Runs one already-compiled statement.
+    ///
+    /// @param cached - the compiled statement
+    /// @param params - the bound parameters
+    fn execute_compiled(
+        &mut self,
+        cached: &std::rc::Rc<Cached>,
+        params: &Params,
+    ) -> DbResult<Outcome> {
+        match &**cached {
             Cached::Select(plan, prepared) => {
                 let (rows, shape) = physical::run_any_prepared(plan, self, prepared, params)?;
                 Ok(Outcome {
@@ -1041,6 +1079,12 @@ fn names_of(shape: &physical::Shape) -> Vec<String> {
         .map(|name| String::from_utf8_lossy(name).into_owned())
         .collect()
 }
+
+/// A statement compiled once and run many times.
+///
+/// Opaque on purpose: what is inside is the engine's business, and a caller that
+/// could see it would be a caller that could be broken by a plan shape changing.
+pub struct Statement(std::rc::Rc<Cached>);
 
 /// One statement, compiled as far as it can be before its parameters arrive.
 ///
