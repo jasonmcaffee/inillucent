@@ -524,7 +524,6 @@ impl ImportedDatabase {
                 shape.root,
                 shape.columns.clone(),
                 shape.key_columns,
-                shape.first_leaf,
                 shape.leaf_count,
                 shape.row_count,
             )?;
@@ -565,7 +564,6 @@ impl ImportedDatabase {
                 catalog_shape.root,
                 catalog_shape.columns.clone(),
                 catalog_shape.key_columns,
-                catalog_shape.first_leaf,
                 catalog_shape.leaf_count,
                 catalog_shape.row_count,
             )?,
@@ -771,13 +769,31 @@ impl ImportedDatabase {
         // The catalog is read again, because recovery may have changed it: a
         // `CREATE TABLE` after the checkpoint is a row in this very tree.
         let catalog_tree = attach_catalog(database.pool(), database.catalog_root())?;
-        let stored = read_catalog(database.pool(), &catalog_tree)?;
+        // **Read with the rowid each row is stored under, not without it.**
+        // The two loops below visit the tables and then the indexes, which is
+        // not the order the catalog holds them in - a schema that creates a
+        // table, an index, another table interleaves the two. The rowid used to
+        // be reconstructed from the position in *this* reordered list, so every
+        // object after the first index was numbered as some other object. The
+        // number is what `seal` and every later `DROP` write by, so the next
+        // catalog write landed on the wrong row: rows came back duplicated and
+        // rows came back missing.
+        let stored_rows =
+            inillucent_catalog::paged::read_catalog_rows(database.pool(), &catalog_tree)?;
+        let stored: Vec<SchemaEntry> = stored_rows.iter().map(|(_, entry)| entry.clone()).collect();
+        let rowid_of_name = |entry: &SchemaEntry| -> i64 {
+            stored_rows
+                .iter()
+                .find(|(_, held)| held.name == entry.name && held.kind == entry.kind)
+                .map(|(rowid, _)| *rowid)
+                .unwrap_or_default()
+        };
 
         let mut catalog = StaticCatalog::default();
         let mut trees: HashMap<u32, PagedTree> = HashMap::new();
         let mut layouts: HashMap<u32, SourceLayout> = HashMap::new();
         let mut covering: HashMap<u32, Vec<u32>> = HashMap::new();
-        let mut entries: Vec<SchemaEntry> = Vec::new();
+        let mut entries: Vec<(i64, SchemaEntry)> = Vec::new();
         let mut identifiers: Vec<u32> = Vec::new();
         let mut skipped: Vec<String> = Vec::new();
         // **The identifier comes out of the catalog row, not out of a counter.**
@@ -826,7 +842,7 @@ impl ImportedDatabase {
                 // whose covering index answered another table's rows, and cost
                 // an afternoon to find. Zero is what `Recorded.root` documents
                 // for an object with no tree.
-                entries.push(entry.clone());
+                entries.push((rowid_of_name(entry), entry.clone()));
                 identifiers.push(0);
                 continue;
             }
@@ -858,14 +874,13 @@ impl ImportedDatabase {
                 entry.root,
                 columns,
                 key_columns,
-                entry.stats.first_leaf,
                 entry.stats.leaf_count,
                 entry.stats.row_count,
             )?;
             trees.insert(identifier, tree);
             layouts.insert(identifier, layout);
             infos.insert(info.folded.clone(), (identifier, info.clone()));
-            entries.push(entry.clone());
+            entries.push((rowid_of_name(entry), entry.clone()));
             identifiers.push(identifier);
         }
 
@@ -899,7 +914,6 @@ impl ImportedDatabase {
                 entry.root,
                 columns,
                 key_columns,
-                entry.stats.first_leaf,
                 entry.stats.leaf_count,
                 entry.stats.row_count,
             )?;
@@ -911,7 +925,7 @@ impl ImportedDatabase {
             if let Some((_, info)) = infos.get_mut(&folded) {
                 info.indexes.push(index);
             }
-            entries.push(entry.clone());
+            entries.push((rowid_of_name(entry), entry.clone()));
             identifiers.push(identifier);
         }
 
@@ -989,12 +1003,7 @@ impl ImportedDatabase {
             entries: entries
                 .into_iter()
                 .zip(identifiers)
-                .enumerate()
-                .map(|(nth, (entry, root))| Recorded {
-                    rowid: nth.saturating_add(1) as i64,
-                    root,
-                    entry,
-                })
+                .map(|((rowid, entry), root)| Recorded { rowid, root, entry })
                 .collect(),
             tables: Vec::new(),
             schema_info,
@@ -1345,6 +1354,7 @@ impl ImportedDatabase {
             Cached::QueryPlan(_) => Ok(vec!["a query plan".to_string()]),
             Cached::Insert(..) => Ok(vec!["an insert".to_string()]),
             Cached::VirtualInsert(_) => Ok(vec!["an insert into a module".to_string()]),
+            Cached::VirtualDelete(..) => Ok(vec!["a delete from a module".to_string()]),
             Cached::Update(..) => Ok(vec!["an update".to_string()]),
             Cached::Delete(..) => Ok(vec!["a delete".to_string()]),
         }
@@ -1539,7 +1549,6 @@ impl ImportedDatabase {
                 entry.root,
                 columns,
                 key_columns,
-                entry.stats.first_leaf,
                 entry.stats.leaf_count,
                 entry.stats.row_count,
             )?;
@@ -1647,6 +1656,7 @@ impl ImportedDatabase {
         let rows = match &*cached {
             Cached::Ddl(_)
             | Cached::QueryPlan(_)
+            | Cached::VirtualDelete(..)
             | Cached::VirtualInsert(_)
             | Cached::Select(..)
             | Cached::Insert(_, None, _) => Vec::new(),
@@ -1668,6 +1678,9 @@ impl ImportedDatabase {
             // nothing to time. It is here to be exhaustive rather than to be
             // measured: a plan description is not a workload.
             Cached::QueryPlan(_) => {}
+            // A module's own write, which this harness does not time: what it
+            // costs is the module's business and not the engine's.
+            Cached::VirtualDelete(..) => {}
             Cached::VirtualInsert(statement) => {
                 let statement = statement.clone();
                 self.insert_into_module(&statement, params)?;
@@ -1786,6 +1799,32 @@ impl ImportedDatabase {
                 let params = folded.as_ref().unwrap_or(params);
                 self.write(params, |target, log, params| {
                     dml::update(statement, target, log, params, &keys)
+                })
+            }
+            Cached::VirtualDelete(statement, plan, prepared) => {
+                let keys = physical::run_any_prepared(plan, self, prepared, params)?.0;
+                let mut changed = 0usize;
+                for key in &keys {
+                    let Some(rowid) = key.first() else { continue };
+                    self.change_module(
+                        &statement.table.name,
+                        &inillucent_sql::vtab::Change::Delete(inillucent_exec::scalar::to_value(
+                            rowid.borrow(),
+                        )),
+                    )?;
+                    changed = changed.saturating_add(1);
+                }
+                if self.batch.get().is_none() {
+                    self.sync_modules()?;
+                    self.seal()?;
+                }
+                Ok(Outcome {
+                    rows: Vec::new(),
+                    names: Vec::new(),
+                    changes: Changes {
+                        rows: changed,
+                        returned: Vec::new(),
+                    },
                 })
             }
             Cached::Delete(statement, plan, prepared) => {
@@ -1973,6 +2012,24 @@ impl ImportedDatabase {
                     assignments_hold_subquery,
                 ))
             }
+            BoundStatement::Delete(statement)
+                if statement.table.kind == inillucent_sql::catalog_view::TableKind::Virtual =>
+            {
+                let select = inillucent_exec::dml::module_keys_query(
+                    &statement.table,
+                    statement.source,
+                    statement.filter.as_ref(),
+                    statement.limit.as_ref(),
+                    statement.offset.as_ref(),
+                );
+                let plan = plan_select_with(select, Levers::default());
+                let prepared = physical::prepare_any(&plan, self)?;
+                Ok(Cached::VirtualDelete(
+                    statement,
+                    Box::new(plan),
+                    Box::new(prepared),
+                ))
+            }
             BoundStatement::Delete(statement) => {
                 let (plan, prepared) = self.keys_plan(
                     &statement.table,
@@ -2149,6 +2206,17 @@ enum Cached {
     QueryPlan(Vec<String>),
     /// An insert into a virtual table, which the module applies.
     VirtualInsert(Box<inillucent_sql::dml::BoundInsert>),
+    /// A delete from a virtual table, with the query that finds its rowids.
+    ///
+    /// A module owns its storage, so the only handle on one of its rows is the
+    /// rowid it answers with: the plan asks which rowids match and the module
+    /// is told about each. That is what SQLite does, and the reason `xUpdate`
+    /// takes a rowid rather than a predicate.
+    VirtualDelete(
+        Box<inillucent_sql::dml::BoundDelete>,
+        Box<PhysicalPlan>,
+        Box<physical::Prepared>,
+    ),
     /// A query.
     Select(Box<PhysicalPlan>, Box<physical::Prepared>),
     /// An insert, with the plan for its `SELECT` source when it has one.

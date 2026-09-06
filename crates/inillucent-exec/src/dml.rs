@@ -293,6 +293,58 @@ pub fn keys_query(
     })
 }
 
+/// Returns the query that finds the rowids a write to a module will change.
+///
+/// The same shape as [`keys_query`] and without its layout, because a virtual
+/// table has none: the module owns its storage, and the only handle the engine
+/// has on one of its rows is the rowid the module answers with. A `DELETE` is
+/// therefore "ask which rowids match, then tell the module about each" - which
+/// is what SQLite does, and the reason `xUpdate` takes a rowid rather than a
+/// predicate.
+///
+/// @param table - the virtual table being written
+/// @param source - the FROM term id the filter's columns refer to
+/// @param filter - the statement's `WHERE`, if it has one
+/// @param limit - the statement's `LIMIT`, if it has one
+/// @param offset - the statement's `OFFSET`, if it has one
+pub fn module_keys_query(
+    table: &TableInfo,
+    source: usize,
+    filter: Option<&BoundExpr>,
+    limit: Option<&BoundExpr>,
+    offset: Option<&BoundExpr>,
+) -> BoundSelect {
+    BoundSelect {
+        sources: vec![BoundSource {
+            id: source,
+            rows: SourceRows::Table,
+            table: std::rc::Rc::new(table.clone()),
+            alias: table.name.clone(),
+            join: SqlJoinKind::Inner,
+            constraint: None,
+            suppressed: Vec::new(),
+        }],
+        filter: filter.cloned(),
+        group_by: Vec::new(),
+        having: None,
+        columns: vec![BoundResultColumn {
+            expr: BoundExpr::Rowid { source },
+            name: b"key".to_vec(),
+            origin: None,
+            declared_type: Vec::new(),
+        }],
+        distinct: false,
+        order_by: Vec::new(),
+        limit: limit.cloned(),
+        offset: offset.cloned(),
+        aggregates: Vec::new(),
+        values: Vec::new(),
+        compounds: Vec::new(),
+        windows: Vec::new(),
+        correlations: Vec::new(),
+    }
+}
+
 /// Returns the expressions that read a table's key, in key order.
 ///
 /// A rowid table's key is its rowid, and reading it *as* a rowid is what lets

@@ -701,7 +701,6 @@ impl PagedTree {
         root: PageId,
         columns: Vec<ColumnSpec>,
         key_columns: usize,
-        first_leaf: PageId,
         leaf_count: u64,
         row_count: u64,
     ) -> DbResult<PagedTree> {
@@ -711,6 +710,23 @@ impl PagedTree {
             PageKind::Interior => page::level_of(&guard)?,
             other => return Err(corrupt(format!("a tree root cannot be {other:?}"))),
         };
+        drop(guard);
+        // **The leftmost leaf is read out of the file, never taken on trust.**
+        // The height above already is, and the first leaf is the same kind of
+        // fact: the file knows it and a recorded copy can be stale.
+        //
+        // It *was* taken from the catalog, whose statistics are written at a
+        // checkpoint. `checkpoint`'s own comment explains why - a tree's shape
+        // changes on every split, and rewriting a catalog row that often would
+        // put a catalog write on the write path - and reasons that "everything
+        // after it is in the log for recovery to replay". That is true of the
+        // *pages* and false of the *shape*. The root page id never changes, by
+        // design; the first leaf does, because a root split moves the root's
+        // contents into a new page. So a database closed without a checkpoint
+        // reopened with `first_leaf` naming the root, which is now an interior,
+        // and every read of it failed with "page is not a leaf". Fifty rows was
+        // enough. Deriving it costs one descent per tree per open.
+        let first_leaf = PagedTree::leftmost_leaf(pool, root)?;
         let encoding = KeyEncoding::choose(&columns, key_columns);
         let collations = collations_of(&columns, key_columns);
         Ok(PagedTree {
@@ -931,7 +947,6 @@ impl PagedTree {
             root,
             columns,
             key_columns,
-            first_leaf,
             leaf_count,
             row_count,
         )
@@ -1156,8 +1171,15 @@ impl PagedTree {
             drop(guard);
             page = next;
             seen = seen.saturating_add(1);
-            if seen > self.leaf_count.saturating_add(1) {
-                return Err(corrupt("the leaf chain is longer than the tree"));
+            // **Bounded by the file, not by the recorded leaf count.** The
+            // guard is here to stop a cyclic chain from looping forever, and a
+            // chain cannot be longer than the file has pages - which is true
+            // whatever the catalog last wrote down. It used to be bounded by
+            // `self.leaf_count`, a statistic written at the last checkpoint, so
+            // a database closed without one refused to read a tree that had
+            // simply grown since: fifty rows, two leaves, one recorded.
+            if seen > pool.page_count().max(1) {
+                return Err(corrupt("a leaf chain is longer than the file has pages"));
             }
         }
         Ok(())
@@ -2043,10 +2065,16 @@ impl PagedTree {
             }
             Ok(true)
         })?;
-        if chain != self.leaf_count {
+        // **Against the interior levels, which is what invariant 4 says.** It
+        // used to be compared against `self.leaf_count`, a statistic the
+        // catalog writes at a checkpoint - so a database closed without one
+        // failed its own integrity check for having grown, while every row in
+        // it read back correctly. A cached count is not an invariant; the
+        // agreement between the two ways of reaching a leaf is.
+        let reachable = self.count_leaves(pool, self.root)?;
+        if chain != reachable {
             return Err(corrupt(format!(
-                "the sibling chain visits {chain} leaves but the tree claims {}",
-                self.leaf_count
+                "the sibling chain visits {chain} leaves and the interior levels reach {reachable}"
             )));
         }
         self.check_subtree(pool, self.root, self.height)?;
@@ -2252,6 +2280,29 @@ impl PagedTree {
     /// @param pool - the buffer pool
     /// @param page - the subtree's root
     /// @param level - the level the page should declare
+    /// Returns how many leaves the interior levels reach from a page.
+    ///
+    /// @param pool - the buffer pool
+    /// @param page - the subtree's root
+    fn count_leaves(&self, pool: &Pool, page: PageId) -> DbResult<u64> {
+        let children = {
+            let guard = pool.fetch(page)?;
+            if page::kind_of(&guard)? == PageKind::Leaf {
+                return Ok(1);
+            }
+            let interior = InteriorRef::parse(&guard)?;
+            (0..interior.children())
+                .map(|child| interior.swip(child))
+                .collect::<DbResult<Vec<Swip>>>()?
+        };
+        let mut leaves = 0u64;
+        for swip in children {
+            let target = pool.page_of_swip(swip)?;
+            leaves = leaves.saturating_add(self.count_leaves(pool, target)?);
+        }
+        Ok(leaves)
+    }
+
     fn check_subtree(&self, pool: &Pool, page: PageId, level: u16) -> DbResult<()> {
         let image = {
             let guard = pool.fetch(page)?;
@@ -2412,7 +2463,7 @@ fn upper_bound(leaf: &LeafRef<'_>, probe: &[Datum<'_>]) -> DbResult<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use inillucent_pool::{Options, PageId};
+    use inillucent_pool::Options;
     use inillucent_vfs::{DbPath, MemoryVfs};
     use std::collections::BTreeMap;
 
@@ -3071,7 +3122,7 @@ mod tests {
     fn a_tree_reads_correctly_through_a_tiny_pool() {
         let vfs = MemoryVfs::new();
         let path = DbPath::new("tiny.rdb");
-        let (root, first, leaves, count) = {
+        let (root, leaves, count) = {
             let mut database = Database::create(
                 &vfs,
                 &path,
@@ -3095,25 +3146,11 @@ mod tests {
                 PagedTree::bulk_build(&mut database, 7, rowid_columns(), 1, &borrowed).unwrap();
             database.set_catalog_root(tree.root());
             database.checkpoint().unwrap();
-            (
-                tree.root(),
-                tree.first_leaf(),
-                tree.leaf_count(),
-                tree.row_count(),
-            )
+            (tree.root(), tree.leaf_count(), tree.row_count())
         };
         let database = Database::open(&vfs, &path, 64).unwrap();
-        let tree = PagedTree::attach(
-            database.pool(),
-            7,
-            root,
-            rowid_columns(),
-            1,
-            first,
-            leaves,
-            count,
-        )
-        .unwrap();
+        let tree =
+            PagedTree::attach(database.pool(), 7, root, rowid_columns(), 1, leaves, count).unwrap();
         assert_eq!(tree.root(), root);
         tree.check(database.pool()).unwrap();
         for key in (0..4_000i64).step_by(37) {
@@ -3265,16 +3302,6 @@ mod tests {
         let mut image = vec![0u8; 512];
         page::write_common(&mut image, PageKind::BlobExtent, 0, 1).unwrap();
         database.install(page, &image).unwrap();
-        assert!(PagedTree::attach(
-            database.pool(),
-            1,
-            page,
-            rowid_columns(),
-            1,
-            PageId::NONE,
-            0,
-            0
-        )
-        .is_err());
+        assert!(PagedTree::attach(database.pool(), 1, page, rowid_columns(), 1, 0, 0).is_err());
     }
 }

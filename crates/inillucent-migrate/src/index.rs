@@ -15,11 +15,11 @@
 //! make.
 
 use inillucent_base::{DbError, DbResult};
-use inillucent_engine::connect::{Connection, Database};
-use inillucent_tree::datum::OwnedDatum;
 use inillucent_core::rank::HitOrigin;
 use inillucent_core::store::ChunkInput;
+use inillucent_engine::connect::{Connection, Database};
 use inillucent_search::adapter::{Hit, Query, RetrievalIndex};
+use inillucent_tree::datum::OwnedDatum;
 
 /// A search table, opened as a retrieval index.
 pub struct SqlIndex {
