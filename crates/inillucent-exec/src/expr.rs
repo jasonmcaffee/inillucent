@@ -135,6 +135,60 @@ pub trait Eval: Send + Sync {
     }
 }
 
+/// What an application-defined scalar does with one row's arguments.
+///
+/// A newtype rather than a bare `Arc` for one reason: [`Expr`] derives `Debug`
+/// and [`crate::aggregate::AggregateKind`] derives `Eq` as well, and a closure
+/// has neither. Two registrations are the same registration when they are the
+/// same allocation, which is the only comparison that means anything about a
+/// function nobody here wrote.
+///
+/// The inner type is the one `inillucent-ext` names. It is spelled again here
+/// rather than imported because `inillucent-exec` sits *beside* that crate in
+/// the layering, not above it, and an `Arc<dyn Fn(..)>` is structural - the
+/// pointer the engine hands over is this type whichever crate spells it.
+#[derive(Clone)]
+pub struct ScalarBody(
+    pub std::sync::Arc<dyn Fn(&[Value<'static>]) -> DbResult<Value<'static>> + Send + Sync>,
+);
+
+impl core::fmt::Debug for ScalarBody {
+    fn fmt(&self, out: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        out.write_str("a registered scalar")
+    }
+}
+
+impl PartialEq for ScalarBody {
+    fn eq(&self, other: &ScalarBody) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ScalarBody {}
+
+/// What an application-defined aggregate does with a whole group.
+///
+/// Every row of the group, in order, rather than a running accumulator - see
+/// [`crate::aggregate::AggregateKind::External`] for why.
+#[derive(Clone)]
+pub struct AggregateBody(
+    pub std::sync::Arc<dyn Fn(&[Vec<Value<'static>>]) -> DbResult<Value<'static>> + Send + Sync>,
+);
+
+impl core::fmt::Debug for AggregateBody {
+    fn fmt(&self, out: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        out.write_str("a registered aggregate")
+    }
+}
+
+impl PartialEq for AggregateBody {
+    fn eq(&self, other: &AggregateBody) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for AggregateBody {}
+
 /// The expression language the physical planner hands to the compiler.
 #[derive(Clone, Debug)]
 pub enum Expr {
@@ -142,6 +196,20 @@ pub enum Expr {
     Column(usize),
     /// A constant.
     Literal(OwnedDatum),
+    /// A call to a scalar an application registered.
+    ///
+    /// The body rather than the name, resolved when the chain was built: a
+    /// bound tree that carried a closure would depend on who was holding it,
+    /// and a compiled chain that looked the name up per row would answer a
+    /// registration made after it was compiled. Registering or removing a
+    /// function throws the compiled statements away, which is what makes
+    /// resolving once correct.
+    External {
+        /// What it does.
+        body: ScalarBody,
+        /// The arguments, in written order.
+        arguments: Vec<Expr>,
+    },
     /// `RAISE(ABORT|FAIL|ROLLBACK, 'message')`, which never returns a value.
     ///
     /// It sits in a result column because that is where the grammar puts it -
@@ -402,6 +470,10 @@ pub fn compile(expr: &Expr, types: &[StaticType]) -> DbResult<Box<dyn Eval>> {
         Expr::Literal(value) => Box::new(Literal {
             value: value.clone(),
         }),
+        Expr::External { body, arguments } => Box::new(ExternalCall {
+            body: body.clone(),
+            arguments: compile_all(arguments, types)?,
+        }),
         Expr::Raise { code, message } => Box::new(Raise {
             code: *code,
             message: String::from_utf8_lossy(message).into_owned(),
@@ -628,8 +700,9 @@ fn compile_all(exprs: &[Expr], types: &[StaticType]) -> DbResult<Vec<Box<dyn Eva
 pub fn static_type(expr: &Expr, types: &[StaticType]) -> StaticType {
     match expr {
         Expr::Column(index) => column_type(*index, types),
-        // Nothing is proved about a value that is never produced.
-        Expr::Raise { .. } => StaticType::Unknown,
+        // Nothing is proved about a value that is never produced, nor about
+        // one somebody else's code returns.
+        Expr::Raise { .. } | Expr::External { .. } => StaticType::Unknown,
         Expr::Literal(OwnedDatum::Int(_)) => StaticType::Int,
         Expr::Literal(OwnedDatum::Real(_)) => StaticType::Real,
         Expr::Literal(OwnedDatum::Text(_)) => StaticType::Text,
@@ -711,6 +784,30 @@ impl Eval for Literal {
             OwnedDatum::Real(number) => Computed::Borrowed(Datum::Real(*number)),
             owned => Computed::Owned(owned.clone()),
         })
+    }
+}
+
+/// A call to a scalar an application registered.
+///
+/// The arguments are materialised into owned `Value`s before the call, because
+/// the body is somebody else's code and may hold them for as long as it likes -
+/// handing it a borrow of a pinned page would be handing it a borrow of a frame
+/// the pool may evict.
+struct ExternalCall {
+    /// What it does.
+    body: ScalarBody,
+    /// The compiled arguments.
+    arguments: Vec<Box<dyn Eval>>,
+}
+
+impl Eval for ExternalCall {
+    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
+        let mut values = Vec::with_capacity(self.arguments.len());
+        for argument in &self.arguments {
+            values.push(crate::scalar::to_value(argument.value(batch, nth)?.get()));
+        }
+        let answer = (self.body.0)(&values)?;
+        Ok(Computed::Owned(crate::scalar::from_value(answer)))
     }
 }
 

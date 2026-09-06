@@ -13,7 +13,8 @@
 //! gives. A cache that held on would return the first answer and pass every
 //! other test in this repository.
 
-use inillucent::{Database, Value};
+use inillucent_compat::facade::Database;
+use inillucent_value::Value;
 
 /// A database file of this test's own, under the gitignored agent-output root.
 ///
@@ -42,20 +43,32 @@ fn open(name: &str, setup: &[&str]) -> Database {
     let database =
         Database::open_with_busy_timeout(&path, std::time::Duration::from_secs(5)).expect("open");
     let connection = database.connect().expect("connect");
-    connection
-        .execute_batch("PRAGMA journal_mode=delete")
-        .expect("journal mode");
+    // **No `journal_mode = delete`.** The old facade accepted it and this
+    // engine is WAL-only by design - `PRAGMA journal_mode` refuses anything
+    // else rather than reporting a mode it does not have. Nothing in this file
+    // asserts anything about the journal; the pragma was here so the fixture
+    // left one file behind rather than three, and a scratch directory does not
+    // care.
     for statement in setup {
         connection.execute_batch(statement).expect(statement);
     }
-    database
+    // **Reopened, so the cache starts empty.** On this engine the compiled
+    // statements live on the *database* rather than on the connection - one
+    // file is one pool and one plan cache, and a `Connection` is a handle on
+    // it - so a second `connect()` would inherit the fixture's own `INSERT`.
+    // Every assertion below is about how the cache grows and what invalidates
+    // it, and each needs a known starting point rather than a particular place
+    // for the cache to live.
+    drop(connection);
+    drop(database);
+    Database::open_with_busy_timeout(&path, std::time::Duration::from_secs(5)).expect("reopen")
 }
 
 /// Runs a query and returns its rows as strings.
 ///
 /// @param connection - the connection to run on
 /// @param sql - the statement
-fn rows(connection: &inillucent::Connection, sql: &str) -> Vec<String> {
+fn rows(connection: &inillucent_compat::facade::Connection, sql: &str) -> Vec<String> {
     let mut statement = connection.prepare(sql).expect(sql);
     let mut out = Vec::new();
     while statement.step().expect(sql) {
@@ -242,7 +255,7 @@ fn a_lever_change_is_cached_separately() {
     let connection = database.connect().expect("connect");
     let with = rows(&connection, "SELECT a, b FROM t ORDER BY a");
     assert_eq!(connection.cached_plan_count(), 1);
-    connection.disable_optimizations(inillucent::Levers::COVERING_INDEX);
+    connection.disable_optimizations(inillucent_sql::plan::Levers::COVERING_INDEX);
     let without = rows(&connection, "SELECT a, b FROM t ORDER BY a");
     assert_eq!(
         connection.cached_plan_count(),
@@ -274,7 +287,7 @@ fn the_cache_changes_no_answer() {
         "SELECT a FROM t ORDER BY b DESC LIMIT 1",
     ];
     let mut answers = Vec::new();
-    for disabled in [0u32, inillucent::Levers::PLAN_CACHE] {
+    for disabled in [0u32, inillucent_sql::plan::Levers::PLAN_CACHE] {
         let database = open(
             "cache_off",
             &[
@@ -292,7 +305,7 @@ fn the_cache_changes_no_answer() {
                 held.push(rows(&connection, statement));
             }
         }
-        if disabled == inillucent::Levers::PLAN_CACHE {
+        if disabled == inillucent_sql::plan::Levers::PLAN_CACHE {
             assert_eq!(
                 connection.cached_plan_count(),
                 0,

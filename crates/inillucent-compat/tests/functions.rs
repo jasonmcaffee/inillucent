@@ -9,20 +9,38 @@
 
 use std::sync::Arc;
 
-use inillucent::extensions::FunctionFlags;
-use inillucent::{Database, Value};
+use inillucent_compat::facade::Database;
+use inillucent_ext::registry::FunctionFlags;
+use inillucent_value::Value;
 
 /// Returns the first column of the first row, as an integer.
-fn single(connection: &inillucent::Connection, sql: &str) -> Option<i64> {
+fn single(connection: &inillucent_compat::facade::Connection, sql: &str) -> Option<i64> {
     let rows = connection.query(sql).expect("runs");
     rows.first()
         .and_then(|row| row.first())
         .and_then(Value::as_integer)
 }
 
-/// Opens an in-memory database with one connection.
-fn connect() -> inillucent::Connection {
-    let database = Database::open(":memory:").expect("opens");
+/// Returns a database file of this test's own, under the gitignored root.
+///
+/// **A file rather than `:memory:`, which the old facade accepted.** The new
+/// engine opens a path and has no in-memory VFS behind `open` yet; nothing in
+/// this file asserts anything about *where* the database lives, so the fixture
+/// moves and every assertion stays exactly as it was. A serial keeps two tests
+/// running in parallel from colliding on one file.
+fn scratch() -> std::path::PathBuf {
+    let root = inillucent_compat::workspace_root().join("_agent_output/task-1838/functions");
+    let _ = std::fs::create_dir_all(&root);
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = root.join(format!("{}-{serial}.rdb", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    path
+}
+
+/// Opens a database of this test's own, with one connection.
+fn connect() -> inillucent_compat::facade::Connection {
+    let database = Database::open(scratch()).expect("opens");
     Box::leak(Box::new(database)).connect().expect("connects")
 }
 
@@ -159,7 +177,10 @@ fn a_removed_function_is_unknown_again() {
         )
         .expect("registers");
     assert!(connection.query("SELECT gone()").is_ok());
-    assert!(connection.remove_function("gone", 0).expect("removes"));
+    assert!(
+        connection.remove_function("gone", 0),
+        "the function was removed"
+    );
     let refused = connection.query("SELECT gone()");
     assert!(refused.is_err(), "the name should be unknown again");
 }
