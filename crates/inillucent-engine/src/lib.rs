@@ -856,6 +856,16 @@ impl ImportedDatabase {
         Ok(opened)
     }
 
+    /// Returns the catalog a statement is bound against.
+    ///
+    /// Exposed so an instrument can time binding on its own. `plan` is parse,
+    /// bind and logical planning together, and knowing that the three of them
+    /// are 64% of compiling `SELECT 1` does not say which of the three to
+    /// change.
+    pub fn catalog_view(&self) -> &StaticCatalog {
+        &self.catalog
+    }
+
     /// Returns the tables the import could not take.
     ///
     /// A caller that finds a query refused can tell "the engine does not do
