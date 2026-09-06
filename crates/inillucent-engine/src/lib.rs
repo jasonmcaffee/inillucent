@@ -628,6 +628,48 @@ impl ImportedDatabase {
         })
     }
 
+    /// Creates a fresh, empty database.
+    ///
+    /// **The primitive the re-rooting needs, and the one the engine did not
+    /// have.** It could `import` a SQLite file and, since this ticket, `open` a
+    /// file it had written; it could not make one. `Database::open` on a path
+    /// that does not exist has to create it, so a connection cannot be re-rooted
+    /// onto this engine without it.
+    ///
+    /// What it writes is the smallest legal database: the file, its meta page,
+    /// and a catalog tree with no rows in it. Everything else - tables, indexes,
+    /// virtual tables - arrives through DDL afterwards, which is the path that
+    /// already exists and is already tested.
+    ///
+    /// It goes through the same close-and-reopen the import does, for the same
+    /// reason: what the caller gets back has been read off a disk rather than
+    /// kept in the pool that wrote it, so a format that does not round-trip
+    /// fails here rather than in a query much later.
+    ///
+    /// @param path - where to create the database
+    /// @param page_size - the page size to build at
+    /// @param frames - how many frames the buffer pool holds
+    pub fn create(path: PathBuf, page_size: usize, frames: usize) -> DbResult<ImportedDatabase> {
+        let vfs = OsVfs::new();
+        let _ = std::fs::remove_file(&path);
+        let db_path = DbPath::new(path.to_string_lossy().as_ref());
+        let mut database = Database::create(
+            &vfs,
+            &db_path,
+            Options::default()
+                .with_page_size(page_size)
+                .with_frames(frames.max(64)),
+        )?;
+        // An empty catalog is a catalog tree with no entries, not the absence of
+        // one: every later DDL statement inserts into it, and a database whose
+        // catalog root pointed nowhere would be one no `CREATE TABLE` could
+        // start from.
+        let _ = write_catalog(&mut database, &[])?;
+        database.checkpoint()?;
+        drop(database);
+        ImportedDatabase::open(path, page_size, frames)
+    }
+
     /// Opens a database this engine wrote, reading its schema from the file.
     ///
     /// **This is the engine's own open path, and it is a different thing from
@@ -657,6 +699,53 @@ impl ImportedDatabase {
         let vfs = OsVfs::new();
         let db_path = DbPath::new(path.to_string_lossy().as_ref());
         let database = Database::open(&vfs, &db_path, frames.max(64))?;
+
+        // **A log with committed work in it is refused, not ignored.**
+        //
+        // This open reads the data file and attaches the trees the catalog names.
+        // It does not replay the log, and `inillucent-engine` has no `Redo` applier
+        // to replay it with - that is Phase 3's recovery, which lives in
+        // `inillucent-txn` and which the harness has never needed because `reopen`
+        // checkpoints before it closes.
+        //
+        // Without this check the failure is silent and is the worst kind: a
+        // database closed without a checkpoint comes back missing every
+        // committed transaction since the last one, and answers queries about
+        // the rest perfectly. A test caught exactly that - `CREATE TABLE note`,
+        // three inserts, close, open, "no such table: note" - and a caller who
+        // did not happen to look would have got an empty table rather than an
+        // error.
+        //
+        // So the scan runs with `DryRun`, which applies nothing, and anything it
+        // finds past the last checkpoint stops the open with a message naming
+        // what is there. A refusal is a correct answer; a stale database is not.
+        // **From the file's own checkpoint, not from the start of the log.**
+        // `RecoveryStart::fresh` scans from `FIRST_LSN`, which counts every
+        // transaction the last checkpoint already applied - so a database that
+        // had just been checkpointed was refused for work that was safely in
+        // its pages. The meta page records where recovery must start, which is
+        // what it is for.
+        let meta = database.meta();
+        let start = if meta.checkpoint_lsn == 0 {
+            inillucent_wal::RecoveryStart::fresh(database.uuid())
+        } else {
+            inillucent_wal::RecoveryStart {
+                uuid: database.uuid(),
+                checkpoint_lsn: meta.checkpoint_lsn,
+                sequence: meta.wal_sequence,
+                cts_watermark: meta.cts_watermark,
+            }
+        };
+        let mut dry = inillucent_wal::DryRun::default();
+        let scanned = inillucent_wal::recover(&vfs, &db_path, start, &mut dry)?;
+        if scanned.committed > 0 {
+            return Err(misuse(format!(
+                "{} has {} committed transaction(s) in its log that this open does not replay: \
+                 checkpoint it, or open it through a path that recovers",
+                path.display(),
+                scanned.committed
+            )));
+        }
 
         let catalog_tree = attach_catalog(database.pool(), database.catalog_root())?;
         let stored = read_catalog(database.pool(), &catalog_tree)?;
