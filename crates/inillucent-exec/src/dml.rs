@@ -349,6 +349,21 @@ fn declared(table: &TableInfo, column: usize) -> (inillucent_value::Affinity, Co
     }
 }
 
+/// Returns the row images a statement's expressions can reach.
+///
+/// The target row always, and `OLD` and `NEW` only when a trigger could name
+/// them. Each image is a cloned layout and a run of batch columns paid for on
+/// every execution, so carrying one the statement cannot mention is pure cost.
+///
+/// @param source - the statement-wide number of the target's FROM term
+/// @param triggers - the triggers the write fires
+fn sources_for(source: usize, triggers: &[inillucent_sql::dml::BoundTrigger]) -> Vec<usize> {
+    if triggers.is_empty() {
+        return vec![source];
+    }
+    vec![source, OLD_SOURCE, NEW_SOURCE]
+}
+
 /// Applies an `INSERT`.
 ///
 /// @param statement - the bound insert
@@ -365,7 +380,13 @@ pub fn insert(
 ) -> DbResult<Changes> {
     let table = &statement.table;
     let layout = layout_of(target, table)?;
-    let space = RowSpace::new(&[statement.target_source, EXCLUDED_SOURCE], &layout);
+    // `excluded` only exists inside an `ON CONFLICT ... DO UPDATE`, so a plain
+    // insert carries one image rather than two.
+    let mut sources = vec![statement.target_source];
+    if statement.upsert.is_some() {
+        sources.push(EXCLUDED_SOURCE);
+    }
+    let space = RowSpace::new(&sources, &layout);
     let plan = InsertPlan::compile(statement, &layout, &space, params)?;
 
     let rows: Vec<Row> = match &statement.source {
@@ -384,10 +405,16 @@ pub fn insert(
         BoundInsertSource::Select(_) => supplied.to_vec(),
     };
 
-    let mut next_rowid = highest_rowid(target, table)?;
+    // **Found on demand, not up front.** Reading the largest rowid costs a
+    // descent, and a statement that supplies its own key needs none - which is
+    // every `INSERT INTO t(id, ...) VALUES (?1, ...)`, the shape the gate's
+    // `write.insert.batch` measures. `None` here means "not asked yet".
+    let mut next_rowid: Option<i64> = None;
     let mut changes = Changes::default();
     for supplied_row in &rows {
-        let image = plan.build_row(supplied_row, &space, &mut next_rowid)?;
+        let image = plan.build_row(supplied_row, &space, &mut next_rowid, || {
+            highest_rowid(&mut Borrowed(target), table)
+        })?;
         let Some(stored) = write_one(statement, &layout, &space, &plan, target, log, image)? else {
             continue;
         };
@@ -518,7 +545,8 @@ impl InsertPlan {
         &self,
         supplied: &[OwnedDatum],
         space: &RowSpace,
-        next_rowid: &mut i64,
+        next_rowid: &mut Option<i64>,
+        highest: impl FnOnce() -> DbResult<i64>,
     ) -> DbResult<Row> {
         let mut row: Row = vec![OwnedDatum::Null; space.width];
         for planned in &self.columns {
@@ -548,8 +576,13 @@ impl InsertPlan {
                 // table holds, which is SQLite's rule for a table that is not
                 // `AUTOINCREMENT`: deleted numbers are reused.
                 OwnedDatum::Null => {
-                    *next_rowid = next_rowid.saturating_add(1);
-                    *next_rowid
+                    let held = match *next_rowid {
+                        Some(held) => held,
+                        None => highest()?,
+                    };
+                    let allocated = held.saturating_add(1);
+                    *next_rowid = Some(allocated);
+                    allocated
                 }
                 // `INSERT INTO t(rowid) VALUES ('x')` is a mismatch rather than
                 // a conversion, which is what SQLite reports too.
@@ -559,7 +592,11 @@ impl InsertPlan {
                         .with_detail(format!("a rowid must be an integer, not {other:?}")))
                 }
             };
-            *next_rowid = (*next_rowid).max(rowid);
+            // A statement that supplies its own keys still moves the mark, so a
+            // later row that supplies none does not collide with it.
+            if let Some(held) = *next_rowid {
+                *next_rowid = Some(held.max(rowid));
+            }
             if let Some(cell) = row.get_mut(slot) {
                 *cell = OwnedDatum::Int(rowid);
             }
@@ -777,7 +814,12 @@ pub fn update(
 ) -> DbResult<Changes> {
     let table = &statement.table;
     let layout = layout_of(target, table)?;
-    let space = RowSpace::new(&[statement.source, OLD_SOURCE, NEW_SOURCE], &layout);
+    // **Only the images the statement can actually read.** A row space costs a
+    // layout clone and a batch column per stage, per statement, and a statement
+    // with no triggers can reach neither `OLD` nor `NEW` - so building them was
+    // three times the allocation for one image's worth of use. The gate's
+    // `txn.large` is forty of these in one transaction and pays for every one.
+    let space = RowSpace::new(&sources_for(statement.source, &statement.triggers), &layout);
     let mut assignments = Vec::with_capacity(statement.assignments.len());
     for assignment in &statement.assignments {
         let Some(slot) = layout
@@ -830,10 +872,7 @@ pub fn update(
         if !projected.is_empty() {
             let mut out = Vec::with_capacity(projected.len());
             for eval in &projected {
-                out.push(space.evaluate(
-                    eval.as_ref(),
-                    &[after.as_slice(), before.as_slice(), after.as_slice()],
-                )?);
+                out.push(space.evaluate(eval.as_ref(), &[after.as_slice()])?);
             }
             changes.returned.push(out);
         }
@@ -857,7 +896,7 @@ pub fn delete(
 ) -> DbResult<Changes> {
     let table = &statement.table;
     let layout = layout_of(target, table)?;
-    let space = RowSpace::new(&[statement.source, OLD_SOURCE], &layout);
+    let space = RowSpace::new(&sources_for(statement.source, &statement.triggers), &layout);
     let mut projected = Vec::with_capacity(statement.returning.len());
     for column in &statement.returning {
         projected.push(space.compile(&column.expr, params)?);
@@ -873,7 +912,7 @@ pub fn delete(
         if !projected.is_empty() {
             let mut out = Vec::with_capacity(projected.len());
             for eval in &projected {
-                out.push(space.evaluate(eval.as_ref(), &[row.as_slice(), row.as_slice()])?);
+                out.push(space.evaluate(eval.as_ref(), &[row.as_slice()])?);
             }
             changes.returned.push(out);
         }
@@ -1110,6 +1149,23 @@ fn missing_tree(table: &TableInfo) -> DbError {
         "no tree imported for {}",
         String::from_utf8_lossy(&table.name)
     ))
+}
+
+/// A `WriteTarget` that borrows another, so a closure can hold one.
+///
+/// The rowid lookup is passed as a closure to `build_row`, which already holds
+/// the target through a different path; this is the borrow that lets both exist
+/// without the target being moved.
+struct Borrowed<'a>(&'a mut dyn WriteTarget);
+
+impl WriteTarget for Borrowed<'_> {
+    fn parts(&mut self) -> (&mut Database, &mut dyn Trees) {
+        self.0.parts()
+    }
+
+    fn layout(&self, root: u32) -> Option<&SourceLayout> {
+        self.0.layout(root)
+    }
 }
 
 /// Returns the largest rowid a table holds, or zero when it holds none.

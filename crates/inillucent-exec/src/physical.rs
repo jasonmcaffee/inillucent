@@ -2447,14 +2447,51 @@ pub fn run_any(
     catalog: &dyn TreeCatalog,
     params: &Params,
 ) -> DbResult<(Vec<Vec<OwnedDatum>>, Shape)> {
+    let prepared = prepare_any(plan, catalog)?;
+    run_any_prepared(plan, catalog, &prepared, params)
+}
+
+/// Makes the structural choice for any planned query, once.
+///
+/// **Everything that does not depend on the bound parameters belongs here**, so
+/// that a caller re-running a statement pays for the parameters and the work and
+/// not for the decision. A compound and a windowed query have no single set of
+/// stages - a compound has one per arm, and a window pass plans an inner query
+/// of its own - so they get an empty `Prepared` and are re-decided per
+/// execution. That is honest rather than tidy: the alternative is a `Prepared`
+/// that describes one of several pipelines and is silently wrong about the rest.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees and layouts come from
+pub fn prepare_any(plan: &PhysicalPlan, catalog: &dyn TreeCatalog) -> DbResult<Prepared> {
+    if !plan.compounds.is_empty() || !plan.select.windows.is_empty() {
+        return Ok(Prepared {
+            stages: Vec::new(),
+            forced: ForcePlan::default(),
+        });
+    }
+    prepare(plan, catalog, ForcePlan::default())
+}
+
+/// Runs any planned query against a choice [`prepare_any`] already made.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees and layouts come from
+/// @param prepared - the structural choice
+/// @param params - the values bound to `?1`, `?2`, ...
+pub fn run_any_prepared(
+    plan: &PhysicalPlan,
+    catalog: &dyn TreeCatalog,
+    prepared: &Prepared,
+    params: &Params,
+) -> DbResult<(Vec<Vec<OwnedDatum>>, Shape)> {
     if !plan.compounds.is_empty() {
         return run_compound(plan, catalog, params);
     }
     if !plan.select.windows.is_empty() {
         return run_windowed(plan, catalog, params);
     }
-    let prepared = prepare(plan, catalog, ForcePlan::default())?;
-    run_prepared(plan, catalog, &prepared, params)
+    run_prepared(plan, catalog, prepared, params)
 }
 
 /// Returns the set operation a compound operator names.

@@ -109,6 +109,26 @@ pub struct ImportedDatabase {
     wal: Wal,
     /// The transaction number the next statement takes.
     next_txn: std::cell::Cell<u64>,
+    /// The statements already parsed, bound, planned and prepared, by SQL text.
+    ///
+    /// **Both arms must reuse what they prepared.** SQLite steps a VDBE program
+    /// compiled once; a write path that parsed, bound, planned and prepared on
+    /// every execution is not measuring the same thing, and the first run of the
+    /// write gate said so plainly - `txn.large` at **0.02x**, forty updates in
+    /// 1.7 ms against SQLite's 32 us. The work was the compilation, not the
+    /// write.
+    ///
+    /// Keyed by the statement text, which is what a caller re-issues. Behind an
+    /// `Rc` so an entry can be held across the `&mut self` a write needs.
+    statements: std::cell::RefCell<HashMap<String, std::rc::Rc<Cached>>>,
+    /// The transaction every statement joins, when one has been opened.
+    ///
+    /// `None` is autocommit: each statement is its own transaction and pays for
+    /// its own commit. That is the right default and it is also the *expensive*
+    /// one, which is why the difference has to be expressible - the gate's
+    /// `transaction` family is exactly the question of what a commit costs, and
+    /// a harness that could only run one grouping could not ask it.
+    batch: std::cell::Cell<Option<u64>>,
 }
 
 impl TreeCatalog for ImportedDatabase {
@@ -442,6 +462,8 @@ impl ImportedDatabase {
             limits: Limits::default(),
             wal,
             next_txn: std::cell::Cell::new(1),
+            statements: std::cell::RefCell::new(HashMap::new()),
+            batch: std::cell::Cell::new(None),
         })
     }
 
@@ -732,6 +754,36 @@ impl ImportedDatabase {
         &self.wal
     }
 
+    /// Opens a transaction that the statements after it all join.
+    ///
+    /// The difference between this and autocommit is the whole of what a commit
+    /// costs, which is the gate's `transaction` family. Calling it twice without
+    /// a commit between keeps the first transaction, because that is what
+    /// `BEGIN` inside a transaction does.
+    pub fn begin_batch(&mut self) {
+        if self.batch.get().is_some() {
+            return;
+        }
+        let txn = self.next_txn.get();
+        self.next_txn.set(txn.saturating_add(1));
+        self.batch.set(Some(txn));
+    }
+
+    /// Commits the open transaction, if there is one.
+    ///
+    /// A no-op outside a transaction, so a caller can commit at a boundary
+    /// without having to know whether it opened one.
+    pub fn commit_batch(&mut self) -> DbResult<()> {
+        let Some(txn) = self.batch.take() else {
+            return Ok(());
+        };
+        self.wal.commit(txn, txn)?;
+        self.database
+            .pool()
+            .set_durable_lsn(self.wal.write_ahead_point());
+        Ok(())
+    }
+
     /// Checks every tree's structure: key order, separators and fill.
     ///
     /// The campaign tests run this after every statement. A tree that has
@@ -794,42 +846,108 @@ impl ImportedDatabase {
     /// @param sql - the statement text
     /// @param params - the values bound to `?1`, `?2`, ...
     pub fn execute_any(&mut self, sql: &str, params: &Params) -> DbResult<Outcome> {
-        match self.bind(sql)? {
-            BoundStatement::Select(select) => {
-                let plan = plan_select_with(*select, Levers::default());
-                let (rows, names) = self.execute(&plan, params)?;
+        let cached = self.compiled(sql)?;
+        match &*cached {
+            Cached::Select(plan, prepared) => {
+                let (rows, shape) = physical::run_any_prepared(plan, self, prepared, params)?;
                 Ok(Outcome {
                     rows,
-                    names,
+                    names: names_of(&shape),
                     changes: Changes::default(),
                 })
             }
-            BoundStatement::Insert(statement) => self.run_insert(&statement, params),
-            BoundStatement::Update(statement) => {
-                let keys = self.keys_of(
-                    &statement.table,
-                    statement.source,
-                    statement.filter.as_ref(),
-                    statement.limit.as_ref(),
-                    statement.offset.as_ref(),
-                    params,
-                )?;
+            Cached::Insert(statement, source) => {
+                let rows = match source {
+                    Some((plan, prepared)) => {
+                        physical::run_any_prepared(plan, self, prepared, params)?.0
+                    }
+                    None => Vec::new(),
+                };
                 self.write(params, |target, log, params| {
-                    dml::update(&statement, target, log, params, &keys)
+                    dml::insert(statement, target, log, params, &rows)
                 })
             }
-            BoundStatement::Delete(statement) => {
-                let keys = self.keys_of(
+            Cached::Update(statement, plan, prepared) => {
+                let keys = physical::run_any_prepared(plan, self, prepared, params)?.0;
+                self.write(params, |target, log, params| {
+                    dml::update(statement, target, log, params, &keys)
+                })
+            }
+            Cached::Delete(statement, plan, prepared) => {
+                let keys = physical::run_any_prepared(plan, self, prepared, params)?.0;
+                self.write(params, |target, log, params| {
+                    dml::delete(statement, target, log, params, &keys)
+                })
+            }
+        }
+    }
+
+    /// Returns one statement compiled, from the cache or by compiling it.
+    ///
+    /// Everything that does not depend on the bound parameters happens here and
+    /// happens once: the parse, the bind, the plan and the structural choice.
+    /// What is left per execution is the parameters and the work.
+    ///
+    /// @param sql - the statement text
+    fn compiled(&self, sql: &str) -> DbResult<std::rc::Rc<Cached>> {
+        if let Some(held) = self.statements.borrow().get(sql) {
+            return Ok(std::rc::Rc::clone(held));
+        }
+        let compiled = std::rc::Rc::new(self.compile(sql)?);
+        self.statements
+            .borrow_mut()
+            .insert(sql.to_string(), std::rc::Rc::clone(&compiled));
+        Ok(compiled)
+    }
+
+    /// Compiles one statement as far as its parameters allow.
+    ///
+    /// @param sql - the statement text
+    fn compile(&self, sql: &str) -> DbResult<Cached> {
+        match self.bind(sql)? {
+            BoundStatement::Select(select) => {
+                let plan = plan_select_with(*select, Levers::default());
+                let prepared = physical::prepare_any(&plan, self)?;
+                Ok(Cached::Select(Box::new(plan), Box::new(prepared)))
+            }
+            BoundStatement::Insert(statement) => {
+                let source = match &statement.source {
+                    inillucent_sql::dml::BoundInsertSource::Select(select) => {
+                        let plan = plan_select_with((**select).clone(), Levers::default());
+                        let prepared = physical::prepare_any(&plan, self)?;
+                        Some((Box::new(plan), Box::new(prepared)))
+                    }
+                    inillucent_sql::dml::BoundInsertSource::Values(_) => None,
+                };
+                Ok(Cached::Insert(statement, source))
+            }
+            BoundStatement::Update(statement) => {
+                let (plan, prepared) = self.keys_plan(
                     &statement.table,
                     statement.source,
                     statement.filter.as_ref(),
                     statement.limit.as_ref(),
                     statement.offset.as_ref(),
-                    params,
                 )?;
-                self.write(params, |target, log, params| {
-                    dml::delete(&statement, target, log, params, &keys)
-                })
+                Ok(Cached::Update(
+                    statement,
+                    Box::new(plan),
+                    Box::new(prepared),
+                ))
+            }
+            BoundStatement::Delete(statement) => {
+                let (plan, prepared) = self.keys_plan(
+                    &statement.table,
+                    statement.source,
+                    statement.filter.as_ref(),
+                    statement.limit.as_ref(),
+                    statement.offset.as_ref(),
+                )?;
+                Ok(Cached::Delete(
+                    statement,
+                    Box::new(plan),
+                    Box::new(prepared),
+                ))
             }
             other => Err(misuse(format!(
                 "{sql} binds to {}, which the new engine does not run yet",
@@ -838,61 +956,29 @@ impl ImportedDatabase {
         }
     }
 
-    /// Runs an `INSERT`, reading its source rows before it writes any.
-    ///
-    /// `INSERT INTO t SELECT ...` has to read every row it is going to write
-    /// before it writes the first, or a statement inserting into the table it
-    /// is reading would meet its own new rows. Collecting them is not an
-    /// optimisation the buffer could avoid: it is what makes the statement
-    /// terminate.
-    ///
-    /// @param statement - the bound insert
-    /// @param params - the bound parameters
-    pub fn run_insert(
-        &mut self,
-        statement: &inillucent_sql::dml::BoundInsert,
-        params: &Params,
-    ) -> DbResult<Outcome> {
-        let rows = match &statement.source {
-            inillucent_sql::dml::BoundInsertSource::Select(select) => {
-                let plan = plan_select_with((**select).clone(), Levers::default());
-                self.execute(&plan, params)?.0
-            }
-            inillucent_sql::dml::BoundInsertSource::Values(_) => Vec::new(),
-        };
-        self.write(params, |target, log, params| {
-            dml::insert(statement, target, log, params, &rows)
-        })
-    }
-
-    /// Returns the key of every row a write's `WHERE` selects.
-    ///
-    /// Through the ordinary planner, so `WHERE id = ?1` reaches the same point
-    /// probe a `SELECT` with that clause would. A write path that scanned
-    /// instead would answer correctly and measure nothing.
+    /// Plans and prepares the query that finds the rows a write will change.
     ///
     /// @param table - the table being written
     /// @param source - the statement-wide number of its FROM term
     /// @param filter - the statement's `WHERE`
     /// @param limit - the statement's `LIMIT`
     /// @param offset - the statement's `OFFSET`
-    /// @param params - the bound parameters
-    fn keys_of(
+    fn keys_plan(
         &self,
         table: &TableInfo,
         source: usize,
         filter: Option<&inillucent_sql::bind::BoundExpr>,
         limit: Option<&inillucent_sql::bind::BoundExpr>,
         offset: Option<&inillucent_sql::bind::BoundExpr>,
-        params: &Params,
-    ) -> DbResult<Vec<Vec<OwnedDatum>>> {
+    ) -> DbResult<(PhysicalPlan, physical::Prepared)> {
         let layout = self
             .layouts
             .get(&table.root)
             .ok_or_else(|| misuse("no layout imported for the table being written"))?;
         let select = dml::keys_query(table, source, filter, limit, offset, layout)?;
         let plan = plan_select_with(select, Levers::default());
-        Ok(self.execute(&plan, params)?.0)
+        let prepared = physical::prepare_any(&plan, self)?;
+        Ok((plan, prepared))
     }
 
     /// Runs one write as its own transaction, logged and committed.
@@ -909,8 +995,16 @@ impl ImportedDatabase {
         params: &Params,
         apply: impl FnOnce(&mut dyn WriteTarget, &mut dyn TreeLog, &Params) -> DbResult<Changes>,
     ) -> DbResult<Outcome> {
-        let txn = self.next_txn.get();
-        self.next_txn.set(txn.saturating_add(1));
+        // A statement inside an open batch joins it and does not commit; a
+        // statement outside one is its own transaction and does.
+        let (txn, autocommit) = match self.batch.get() {
+            Some(held) => (held, false),
+            None => {
+                let txn = self.next_txn.get();
+                self.next_txn.set(txn.saturating_add(1));
+                (txn, true)
+            }
+        };
         let changes = {
             let mut log = WalLog {
                 wal: &self.wal,
@@ -923,10 +1017,12 @@ impl ImportedDatabase {
             };
             apply(&mut view, &mut log, params)?
         };
-        self.wal.commit(txn, txn)?;
-        self.database
-            .pool()
-            .set_durable_lsn(self.wal.write_ahead_point());
+        if autocommit {
+            self.wal.commit(txn, txn)?;
+            self.database
+                .pool()
+                .set_durable_lsn(self.wal.write_ahead_point());
+        }
         Ok(Outcome {
             rows: changes.returned.clone(),
             names: Vec::new(),
@@ -944,6 +1040,35 @@ fn names_of(shape: &physical::Shape) -> Vec<String> {
         .iter()
         .map(|name| String::from_utf8_lossy(name).into_owned())
         .collect()
+}
+
+/// One statement, compiled as far as it can be before its parameters arrive.
+///
+/// A `SELECT` is a plan and the structural choice over it. A write is the bound
+/// statement plus, for an `UPDATE` or a `DELETE`, the plan that finds the rows
+/// it will change - which is an ordinary query and is prepared like one, so
+/// `WHERE id = ?1` reaches the same point probe on the second execution as on
+/// the first.
+enum Cached {
+    /// A query.
+    Select(Box<PhysicalPlan>, Box<physical::Prepared>),
+    /// An insert, with the plan for its `SELECT` source when it has one.
+    Insert(
+        Box<inillucent_sql::dml::BoundInsert>,
+        Option<(Box<PhysicalPlan>, Box<physical::Prepared>)>,
+    ),
+    /// An update, with the plan that finds the rows it changes.
+    Update(
+        Box<inillucent_sql::dml::BoundUpdate>,
+        Box<PhysicalPlan>,
+        Box<physical::Prepared>,
+    ),
+    /// A delete, with the plan that finds the rows it removes.
+    Delete(
+        Box<inillucent_sql::dml::BoundDelete>,
+        Box<PhysicalPlan>,
+        Box<physical::Prepared>,
+    ),
 }
 
 /// What running one statement produced.
