@@ -140,6 +140,50 @@ impl<'p> LeafMut<'p> {
 
     /// Returns where the mini-columns end, which is the floor for everything
     /// that grows downwards.
+    /// Reports whether a row of this size and a tombstone would both fit.
+    ///
+    /// **One question, one page parse, one walk of the column directory.** The
+    /// two halves used to be asked separately and each of them recomputed where
+    /// the mini-columns end - a loop over every column reading its spec - so a
+    /// write asked the same arithmetic three times before it wrote anything. It
+    /// was the most expensive phase of a put, ahead of the descent that found
+    /// the page.
+    ///
+    /// Both halves have to hold: the row needs room in the delta area, and the
+    /// write may also have to tombstone whatever was under the key, which needs
+    /// the bitmap to exist or to have room to.
+    ///
+    /// @param encoded_len - how many bytes the row's tagged form occupies
+    pub fn room_for(&self, encoded_len: usize) -> DbResult<bool> {
+        let leaf = LeafRef::parse(self.page)?;
+        let (delta_count, delta_start, row_count, has_tombstones) = (
+            leaf.delta_count(),
+            leaf.delta_start(),
+            leaf.row_count(),
+            leaf.has_tombstones(),
+        );
+        drop(leaf);
+        if delta_count >= DELTA_LIMIT || encoded_len > u16::MAX as usize {
+            return Ok(false);
+        }
+        let floor = self.columns_end()?;
+        let bitmap = if has_tombstones {
+            tombstone_bytes(row_count)
+        } else {
+            0
+        };
+        let Some(new_delta_start) = delta_start.checked_sub(encoded_len.saturating_add(2)) else {
+            return Ok(false);
+        };
+        if new_delta_start.saturating_sub(bitmap) < floor {
+            return Ok(false);
+        }
+        if !has_tombstones && delta_start.saturating_sub(tombstone_bytes(row_count)) < floor {
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
     fn columns_end(&self) -> DbResult<usize> {
         let leaf = LeafRef::parse(self.page)?;
         let mut end = leaf_header::DIRECTORY.saturating_add(leaf.column_count().saturating_mul(8));
