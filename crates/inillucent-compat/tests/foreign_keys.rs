@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use inillucent_compat::facade::Database;
-use inillucent_value::Value;
 use inillucent_compat::workspace_root;
+use inillucent_value::Value;
 
 /// Returns the pinned SQLite shell, or `None` when it has not been downloaded.
 fn pinned_shell() -> Option<PathBuf> {
