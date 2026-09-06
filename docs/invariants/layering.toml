@@ -441,6 +441,12 @@ may_depend_on = [
   "inillucent-transaction",
   "inillucent-vm",
   "inillucent-session",
+  # task-1833: the harness stands in for the session layer until Phase 5 builds
+  # one, and a virtual table needs the module registry - `CREATE VIRTUAL TABLE`
+  # asks a module what shadow tables to build, and a scan asks it for its rows.
+  # `inillucent-exec` still cannot reach this crate: the module runs on the
+  # harness's side of `TreeCatalog` and only its rows cross.
+  "inillucent-ext",
   "inillucent",
   "inillucent-pool",
   "inillucent-tree",

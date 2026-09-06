@@ -629,6 +629,7 @@ dependencies = [
  "inillucent-base",
  "inillucent-catalog",
  "inillucent-exec",
+ "inillucent-ext",
  "inillucent-pool",
  "inillucent-session",
  "inillucent-sim",

@@ -1946,21 +1946,6 @@ impl LeafBuilder {
         fixed
     }
 
-    /// Returns the bytes the given rows would occupy, or `None` if they cannot
-    /// be laid out at all.
-    ///
-    /// @param rows - the rows to measure
-    fn encoded_size(&self, rows: &[Vec<Datum<'_>>]) -> DbResult<Option<usize>> {
-        let fixed = self.fixed_size(rows.len());
-        let mut heap = 0usize;
-        for row in rows {
-            for (index, column) in self.columns.iter().enumerate() {
-                let value = row.get(index).copied().unwrap_or(Datum::Null);
-                heap = heap.saturating_add(heap_cost(column.physical, &value));
-            }
-        }
-        Ok(Some(fixed.saturating_add(heap)))
-    }
 
     /// Encodes the rows into a page.
     ///
@@ -2176,10 +2161,6 @@ fn align8(at: usize) -> usize {
 ///
 /// @param physical - the column's layout
 /// @param value - the value to classify
-fn classify(physical: PhysicalType, value: &Datum<'_>) -> ValueClass {
-    classify_at(physical, value, usize::MAX)
-}
-
 /// Returns the class of one value in a column, spilling past a threshold.
 ///
 /// A `Text` or `Blob` value longer than `threshold` is stored out of line. Only
@@ -2226,10 +2207,6 @@ fn classify_at(physical: PhysicalType, value: &Datum<'_>, threshold: usize) -> V
 ///
 /// @param physical - the column's layout
 /// @param value - the value to measure
-fn heap_cost(physical: PhysicalType, value: &Datum<'_>) -> usize {
-    heap_cost_at(physical, value, usize::MAX)
-}
-
 /// Returns the heap bytes one value costs, given the spill threshold.
 ///
 /// A value that goes out of line costs the leaf sixteen bytes whatever its

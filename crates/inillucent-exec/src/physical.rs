@@ -51,6 +51,7 @@ use inillucent_sql::bind::{
     WindowCall as BoundWindowCall,
 };
 use inillucent_sql::function::{AggregateFunc, ScalarFunc};
+use inillucent_sql::catalog_view::TableInfo;
 use inillucent_sql::plan::{
     plan_select_with, AccessPath, AggregationMode, BoundKind, Levers, PhysicalPlan, RangeBound,
 };
@@ -141,16 +142,16 @@ pub trait TreeCatalog {
     /// `None` means the caller has no virtual tables at all, which is what makes
     /// this a defaulted method rather than one every catalog has to write.
     ///
-    /// @param term - which FROM term of the plan
+    /// @param table - the FROM term's table, which names the module's instance
     /// @param path - the access path the planner chose for it
     /// @param params - the values bound to `?1`, `?2`, ...
     fn virtual_rows(
         &self,
-        term: usize,
+        table: &TableInfo,
         path: &AccessPath,
         params: &Params,
     ) -> DbResult<Option<Vec<Vec<OwnedDatum>>>> {
-        let _ = (term, path, params);
+        let _ = (table, path, params);
         Ok(None)
     }
 
@@ -1758,7 +1759,7 @@ fn source_for<'t>(
                 .ok_or_else(|| misuse("a stage names a FROM term the plan does not have"))?;
             if let AccessPath::VirtualScan { .. } = &term.path {
                 let rows = catalog
-                    .virtual_rows(stage.term, &term.path, params)?
+                    .virtual_rows(&term.table, &term.path, params)?
                     .ok_or_else(|| misuse("a virtual table the caller does not have"))?;
                 return Ok((Source::Rows(rows), describe_source(prepared)));
             }
@@ -2181,6 +2182,29 @@ fn bound_value(
 /// @param expr - the bound expression
 /// @param space - the joined column space
 /// @param params - the bound parameters
+/// Returns the value an expression that reads no column folds to.
+///
+/// For a caller outside a pipeline - a `VALUES` row handed to a virtual table's
+/// module, which has no scan behind it and no columns to read.
+///
+/// @param expr - the bound expression
+/// @param params - the values bound to `?1`, `?2`, ...
+pub fn literal_value(expr: &BoundExpr, params: &Params) -> DbResult<OwnedDatum> {
+    let empty = Space {
+        stages: &[],
+        layouts: &[],
+        types: &[],
+        order: &[],
+    };
+    constant_value(expr, &empty, params, None)
+}
+
+/// Returns the value a constant expression folds to.
+///
+/// @param expr - the bound expression
+/// @param space - the joined column space
+/// @param params - the bound parameters
+/// @param affinity - the affinity a comparison would apply
 fn constant_value(
     expr: &BoundExpr,
     space: &Space<'_>,

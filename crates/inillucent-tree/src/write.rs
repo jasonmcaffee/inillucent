@@ -1539,30 +1539,6 @@ impl PagedTree {
         leaf.locate(key, self.key_columns())
     }
 
-    /// Returns one leaf's live rows, sorted, copied out.
-    ///
-    /// @param pool - the buffer pool
-    /// @param page - the leaf
-    fn live_rows_of(&self, pool: &Pool, page: PageId) -> DbResult<Vec<Vec<OwnedDatum>>> {
-        let guard = pool.fetch(page)?;
-        let leaf = LeafRef::parse(&guard)?.with_collations(self.collations());
-        // **An out-of-line value comes back whole, and goes back out of line
-        // when the leaf is repacked.** A compaction, a split and a merge all
-        // read their rows here and hand them to the builder, and the builder
-        // spills whatever is still oversized - so an extent survives a repack by
-        // being read and written rather than by being carried, and nothing
-        // between here and the page has to know that a value was ever out of
-        // line. The pages the old run held are freed by the caller, which is
-        // where the log record for the free belongs.
-        let held = self.read_extents(pool, &leaf)?;
-        let leaf = leaf.with_extents(&held);
-        Ok(leaf
-            .live()?
-            .iter()
-            .map(|row| row.iter().map(OwnedDatum::from_datum).collect())
-            .collect())
-    }
-
     /// Returns a leaf's live rows without reading a single out-of-line value.
     ///
     /// **This is the reader a repack uses, and the difference from

@@ -13,6 +13,7 @@ inillucent-vfs = { workspace = true }
 inillucent-sim = { workspace = true }
 inillucent-sql = { workspace = true }
 inillucent-catalog = { workspace = true }
+inillucent-ext = { workspace = true }
 inillucent-vm = { workspace = true }
 inillucent-session = { workspace = true }
 inillucent-transaction = { workspace = true }
