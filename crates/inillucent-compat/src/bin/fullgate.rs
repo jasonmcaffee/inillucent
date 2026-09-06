@@ -347,6 +347,14 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         "workload", "inillucent ns", "sqlite ns", "ratio", "low", "high", "agreed"
     );
     let mut passed = true;
+    // **A family that produced no sample must not be renormalised away.**
+    // `weighted_mean` averages over the families a round actually has and
+    // divides by the weight it used, so a workload that fails outright makes
+    // the headline go *up*: at large, `schema.index` could not run at all and
+    // the headline read 4.16x; with the same runs and `schema` present at
+    // 0.58x it reads 3.86x. A number that improves when a family breaks is not
+    // a headline, and this is what stops it being printed as one.
+    let mut every_family_reported = true;
     for entry in &measured {
         if !entry.agreed || entry.pairs.is_empty() {
             println!(
@@ -389,6 +397,7 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
                 "-", "-", "-"
             );
             passed = false;
+            every_family_reported = false;
             continue;
         }
         // The family is one log ratio per workload per round, weighted equally
@@ -430,7 +439,7 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         Err(reason) => return Err(format!("the performance contract does not parse: {reason}")),
     };
     let rounds = qualified_rounds(&measured);
-    let full_plan = settings.families.len() == FAMILIES.len();
+    let full_plan = settings.families.len() == FAMILIES.len() && every_family_reported;
     println!();
     println!("## headline");
     if rounds.is_empty() {
@@ -462,7 +471,9 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
             "  {:<26} {centre:>8.2}x {low:>8.2}x {high:>8.2}x {:>7.2}x  {}",
             "weighted, per the contract",
             contract.headline,
-            if !full_plan {
+            if !every_family_reported {
+                "A FAMILY REPORTED NOTHING - not a headline"
+            } else if !full_plan {
                 "PARTIAL RUN - not a headline"
             } else if met {
                 "MET"
