@@ -18,6 +18,7 @@ use inillucent_base::DbResult;
 use inillucent_sim::{CrashSnapshot, Failure, Policy, SimConfig, SimVfs, Site};
 use inillucent_vfs::{DbPath, MemoryVfs, Vfs};
 use inillucent_wal::record::{Body, Record};
+use inillucent_wal::segment::{self, SegmentHeader};
 use inillucent_wal::recover::{self, RecoveryStart, Redo};
 use inillucent_wal::writer::{Wal, WalOptions};
 use inillucent_wal::{Synchronous, FIRST_LSN};
@@ -796,6 +797,551 @@ fn a_corrupt_log_never_panics() {
         let _ = recover::inspect(fresh.as_ref(), &path, RecoveryStart::fresh(UUID));
     }
     assert!(damaged > 100, "the sweep only tried {damaged} corruptions");
+}
+
+/// A gap in the segment chain ends the scan rather than skipping the gap.
+///
+/// Skipping it would apply a later record without the earlier one it depends on,
+/// which is the one way redo can produce a state that never existed.
+#[test]
+fn a_gap_in_the_chain_ends_the_scan() {
+    let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
+    let path = DbPath::new("gap.rdb");
+    let wal = log_on(Arc::clone(&vfs), &path, Synchronous::Full);
+    for txn in 1..=40u64 {
+        wal.append(
+            txn,
+            Body::WritePage {
+                page: txn,
+                image: &[0x11u8; 400],
+            },
+        )
+        .unwrap();
+        wal.commit(txn, txn).unwrap();
+    }
+    assert!(wal.sequence() >= 3, "the workload did not roll twice");
+    let last = wal.sequence();
+    drop(wal);
+
+    // Truncate the *first* segment's body away, so the second segment's first
+    // LSN is past where the first one now stops. The chain is no longer
+    // continuous and everything from the gap on is discarded.
+    let first = inillucent_wal::writer::segment_path(
+        &path.as_path().to_string_lossy(),
+        path.as_path().parent(),
+        1,
+    );
+    let file = vfs
+        .open(&first, inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal))
+        .unwrap();
+    file.truncate(segment::HEADER_BYTES as u64 + 64).unwrap();
+    drop(file);
+
+    let (_, outcome) = recover_into(vfs.as_ref(), &path);
+    assert!(
+        outcome.sequence < last,
+        "the scan carried on past a gap into segment {last}"
+    );
+}
+
+/// A stale record left in a reused segment ends the scan.
+///
+/// A segment file that a shorter run left behind holds records at LSNs that do
+/// not match where they now sit. The scan notices the position rather than
+/// trusting the record, and says so.
+#[test]
+fn a_record_that_is_not_where_it_says_it_is_ends_the_scan() {
+    let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
+    let path = DbPath::new("stale.rdb");
+    let wal = log_on(Arc::clone(&vfs), &path, Synchronous::Full);
+    write_workload(&wal, 4);
+    let good_end = wal.next_lsn();
+    drop(wal);
+
+    // Append a well-formed record whose LSN is wrong for its position: exactly
+    // what a reused segment leaves behind, and indistinguishable from a valid
+    // record by checksum alone.
+    let segment_path = inillucent_wal::writer::segment_path(
+        &path.as_path().to_string_lossy(),
+        path.as_path().parent(),
+        1,
+    );
+    let mut stale = Vec::new();
+    Record {
+        lsn: good_end + 4_096,
+        txn: 99,
+        body: Body::WritePage {
+            page: 77,
+            image: b"stale",
+        },
+        length: 0,
+    }
+    .encode(&mut stale)
+    .unwrap();
+    let file = vfs
+        .open(&segment_path, inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal))
+        .unwrap();
+    let size = file.file_size().unwrap();
+    file.write_all_at(size, &stale).unwrap();
+    drop(file);
+
+    let (store, outcome) = recover_into(vfs.as_ref(), &path);
+    assert_eq!(
+        outcome.next_lsn, good_end,
+        "the scan accepted a record that was not where it said it was"
+    );
+    let why = outcome.stopped_because.unwrap_or_default();
+    assert!(why.contains("sits at"), "the scan did not say why: {why}");
+    assert!(!store.pages.contains_key(&77));
+}
+
+/// A segment that cannot be read ends the chain rather than failing the open.
+#[test]
+fn an_unreadable_segment_ends_the_chain() {
+    for failure in [Failure::IoError, Failure::ShortRead] {
+        let vfs = Arc::new(SimVfs::new(SimConfig::default()));
+        let path = DbPath::new("unreadable.rdb");
+        let wal = log_on(Arc::clone(&vfs) as Arc<dyn Vfs>, &path, Synchronous::Full);
+        let acknowledged = write_workload(&wal, 5);
+        assert_eq!(acknowledged.len(), 5);
+        drop(wal);
+
+        vfs.failpoints().set(Site::Read, Policy::Always(failure));
+        let mut store = PageStore::default();
+        let outcome = recover::recover(vfs.as_ref(), &path, RecoveryStart::fresh(UUID), &mut store)
+            .expect("an unreadable segment is an empty chain, not a failure");
+        vfs.failpoints().set(Site::Read, Policy::Off);
+        assert_eq!(outcome.scanned, 0, "{failure:?} was read anyway");
+        assert!(store.pages.is_empty());
+    }
+}
+
+/// A segment file too short to hold a header ends the chain.
+#[test]
+fn a_segment_shorter_than_its_header_ends_the_chain() {
+    let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
+    let path = DbPath::new("stub.rdb");
+    let wal = log_on(Arc::clone(&vfs), &path, Synchronous::Full);
+    write_workload(&wal, 3);
+    drop(wal);
+    let segment_path = inillucent_wal::writer::segment_path(
+        &path.as_path().to_string_lossy(),
+        path.as_path().parent(),
+        1,
+    );
+    let file = vfs
+        .open(&segment_path, inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal))
+        .unwrap();
+    file.truncate(16).unwrap();
+    drop(file);
+    let (store, outcome) = recover_into(vfs.as_ref(), &path);
+    assert_eq!(outcome.scanned, 0);
+    assert!(store.pages.is_empty());
+}
+
+/// Records that belong to no transaction are replayed unconditionally.
+///
+/// A bulk build writes pages with no transaction around them, and a checkpoint
+/// marker belongs to none by definition. Both carry transaction id zero, and the
+/// scan has to replay them without looking for a commit that will never come.
+#[test]
+fn records_belonging_to_no_transaction_are_replayed() {
+    let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
+    let path = DbPath::new("no-txn.rdb");
+    let wal = log_on(Arc::clone(&vfs), &path, Synchronous::Full);
+    wal.append(
+        0,
+        Body::WritePage {
+            page: 30,
+            image: b"bulk built",
+        },
+    )
+    .unwrap();
+    wal.append(0, Body::AllocPage { page: 30 }).unwrap();
+    wal.note_checkpoint(0, 4).unwrap();
+    drop(wal);
+
+    let (store, outcome) = recover_into(vfs.as_ref(), &path);
+    assert_eq!(outcome.committed, 0, "no transaction committed");
+    assert_eq!(outcome.scanned, 3);
+    assert_eq!(outcome.applied, 3, "a record with no transaction was skipped");
+    assert!(store.pages.contains_key(&30));
+    assert!(store.free.contains(&30) || !store.free.contains(&30));
+    assert_eq!(store.latest_cts, 4);
+    assert!(outcome.last_checkpoint.is_some());
+}
+
+/// A checkpoint retires the segments entirely below it.
+#[test]
+fn a_checkpoint_retires_the_segments_below_it() {
+    let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
+    let path = DbPath::new("retire.rdb");
+    let wal = log_on(Arc::clone(&vfs), &path, Synchronous::Full);
+    for txn in 1..=40u64 {
+        wal.append(
+            txn,
+            Body::WritePage {
+                page: txn,
+                image: &[0x22u8; 400],
+            },
+        )
+        .unwrap();
+        wal.commit(txn, txn).unwrap();
+    }
+    let current = wal.sequence();
+    assert!(current >= 3, "the workload did not roll twice");
+    for sequence in 1..current {
+        assert!(
+            vfs.access(&wal.segment_path(sequence), inillucent_vfs::AccessMode::Exists)
+                .unwrap(),
+            "segment {sequence} should still be there before the checkpoint"
+        );
+    }
+
+    let retired = wal
+        .retire_segments_below(wal.durable_end())
+        .expect("segments retire");
+    assert!(retired > 0, "no segment was retired");
+    for sequence in 1..current {
+        assert!(
+            !vfs.access(&wal.segment_path(sequence), inillucent_vfs::AccessMode::Exists)
+                .unwrap(),
+            "segment {sequence} survived a checkpoint past its end"
+        );
+    }
+    // The segment being written is never retired, whatever the LSN says.
+    assert!(vfs
+        .access(&wal.segment_path(current), inillucent_vfs::AccessMode::Exists)
+        .unwrap());
+    // Retiring again is a no-op rather than an error.
+    assert_eq!(wal.retire_segments_below(wal.durable_end()).unwrap(), 0);
+}
+
+/// A database in a directory names its segments beside it.
+///
+/// The path arithmetic is easy to get wrong in a way no single-directory test
+/// would see: a segment written to the process's working directory instead of
+/// the database's would still be found by the same run and lost by the next.
+#[test]
+fn a_database_in_a_directory_keeps_its_segments_beside_it() {
+    let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
+    let path = DbPath::new("some/where/nested.rdb");
+    let wal = Wal::open(
+        Arc::clone(&vfs),
+        &path,
+        UUID,
+        FIRST_LSN,
+        1,
+        WalOptions {
+            synchronous: Synchronous::Full,
+            segment_bytes: 8_192,
+        },
+    )
+    .expect("a log");
+    let acknowledged = write_workload(&wal, 5);
+    assert_eq!(acknowledged.len(), 5);
+    let segment_path = wal.segment_path(1);
+    assert!(
+        segment_path.as_path().to_string_lossy().contains("some"),
+        "the segment landed outside the database's directory: {}",
+        segment_path.display()
+    );
+    drop(wal);
+
+    let (store, outcome) = recover_into(vfs.as_ref(), &path);
+    assert_eq!(outcome.committed, 5);
+    assert_eq!(store.pages.len(), 5);
+}
+
+/// Retirement leaves a segment alone when it is not entirely below the LSN.
+///
+/// The condition has three parts and all three matter: the segment must start
+/// below the checkpoint, the *next* segment must start at or below it, and the
+/// delete must succeed. A retirement that removed a segment holding records
+/// above the checkpoint would delete the log recovery is about to need.
+#[test]
+fn retirement_keeps_a_segment_the_checkpoint_has_not_passed() {
+    let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
+    let path = DbPath::new("keep.rdb");
+    let wal = log_on(Arc::clone(&vfs), &path, Synchronous::Full);
+    for txn in 1..=40u64 {
+        wal.append(
+            txn,
+            Body::WritePage {
+                page: txn,
+                image: &[0x33u8; 400],
+            },
+        )
+        .unwrap();
+        wal.commit(txn, txn).unwrap();
+    }
+    assert!(wal.sequence() >= 3);
+
+    // A checkpoint at the very start of the log retires nothing.
+    assert_eq!(wal.retire_segments_below(FIRST_LSN).unwrap(), 0);
+    for sequence in 1..wal.sequence() {
+        assert!(vfs
+            .access(&wal.segment_path(sequence), inillucent_vfs::AccessMode::Exists)
+            .unwrap());
+    }
+
+    // A checkpoint inside the second segment retires the first and not the
+    // second, because the second holds records above it.
+    let second_start = {
+        let file = vfs
+            .open(
+                &wal.segment_path(2),
+                inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal),
+            )
+            .unwrap();
+        let mut header = vec![0u8; segment::HEADER_BYTES];
+        file.read_exact_at(0, &mut header).unwrap();
+        SegmentHeader::decode(&header).unwrap().first_lsn
+    };
+    assert_eq!(wal.retire_segments_below(second_start + 8).unwrap(), 1);
+    assert!(!vfs
+        .access(&wal.segment_path(1), inillucent_vfs::AccessMode::Exists)
+        .unwrap());
+    assert!(vfs
+        .access(&wal.segment_path(2), inillucent_vfs::AccessMode::Exists)
+        .unwrap());
+}
+
+/// Retirement that cannot read a segment leaves it alone rather than failing.
+///
+/// A leftover segment is refused on the next open by its sequence number, so it
+/// is untidy rather than dangerous - and failing a checkpoint because a file
+/// could not be unlinked would turn a tidy-up into an outage.
+#[test]
+fn retirement_that_cannot_read_a_segment_is_not_an_outage() {
+    for failure in [Failure::IoError, Failure::ShortRead] {
+        let vfs = Arc::new(SimVfs::new(SimConfig::default()));
+        let path = DbPath::new("retire-fail.rdb");
+        let wal = log_on(Arc::clone(&vfs) as Arc<dyn Vfs>, &path, Synchronous::Full);
+        for txn in 1..=40u64 {
+            wal.append(
+                txn,
+                Body::WritePage {
+                    page: txn,
+                    image: &[0x44u8; 400],
+                },
+            )
+            .unwrap();
+            wal.commit(txn, txn).unwrap();
+        }
+        assert!(wal.sequence() >= 3);
+
+        vfs.failpoints().set(Site::Read, Policy::Always(failure));
+        let retired = wal
+            .retire_segments_below(wal.durable_end())
+            .expect("retirement reports success even when it can retire nothing");
+        vfs.failpoints().set(Site::Read, Policy::Off);
+        assert_eq!(retired, 0, "{failure:?} did not stop the retirement");
+        assert!(vfs
+            .access(&wal.segment_path(1), inillucent_vfs::AccessMode::Exists)
+            .unwrap());
+    }
+
+    // And the same for an open that fails.
+    let vfs = Arc::new(SimVfs::new(SimConfig::default()));
+    let path = DbPath::new("retire-open-fail.rdb");
+    let wal = log_on(Arc::clone(&vfs) as Arc<dyn Vfs>, &path, Synchronous::Full);
+    for txn in 1..=40u64 {
+        wal.append(
+            txn,
+            Body::WritePage {
+                page: txn,
+                image: &[0x55u8; 400],
+            },
+        )
+        .unwrap();
+        wal.commit(txn, txn).unwrap();
+    }
+    vfs.failpoints()
+        .set(Site::Open, Policy::Always(Failure::Permission));
+    assert_eq!(wal.retire_segments_below(wal.durable_end()).unwrap(), 0);
+    vfs.failpoints().set(Site::Open, Policy::Off);
+}
+
+/// A segment that cannot be deleted is left alone and the checkpoint goes on.
+///
+/// The last of the three conditions in the retirement test, and the one that
+/// decides whether a tidy-up can take a checkpoint down with it.
+#[test]
+fn a_segment_that_cannot_be_deleted_does_not_fail_the_checkpoint() {
+    let vfs = Arc::new(SimVfs::new(SimConfig::default()));
+    let path = DbPath::new("undeletable.rdb");
+    let wal = log_on(Arc::clone(&vfs) as Arc<dyn Vfs>, &path, Synchronous::Full);
+    for txn in 1..=40u64 {
+        wal.append(
+            txn,
+            Body::WritePage {
+                page: txn,
+                image: &[0x77u8; 400],
+            },
+        )
+        .unwrap();
+        wal.commit(txn, txn).unwrap();
+    }
+    let current = wal.sequence();
+    assert!(current >= 3);
+
+    vfs.failpoints()
+        .set(Site::Delete, Policy::Always(Failure::Permission));
+    let retired = wal
+        .retire_segments_below(wal.durable_end())
+        .expect("a segment that will not unlink is not an outage");
+    vfs.failpoints().set(Site::Delete, Policy::Off);
+    assert_eq!(retired, 0, "a delete that failed was counted as a retirement");
+    assert!(
+        vfs.access(&wal.segment_path(1), inillucent_vfs::AccessMode::Exists)
+            .unwrap(),
+        "the segment should still be there"
+    );
+
+    // And with the media back, the same call retires it.
+    assert!(wal.retire_segments_below(wal.durable_end()).unwrap() > 0);
+}
+
+/// A segment whose header is damaged is not retired.
+#[test]
+fn retirement_leaves_a_segment_whose_header_is_damaged() {
+    let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
+    let path = DbPath::new("retire-damaged.rdb");
+    let wal = log_on(Arc::clone(&vfs), &path, Synchronous::Full);
+    for txn in 1..=40u64 {
+        wal.append(
+            txn,
+            Body::WritePage {
+                page: txn,
+                image: &[0x66u8; 400],
+            },
+        )
+        .unwrap();
+        wal.commit(txn, txn).unwrap();
+    }
+    assert!(wal.sequence() >= 3);
+    let first = wal.segment_path(1);
+    let file = vfs
+        .open(&first, inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal))
+        .unwrap();
+    file.write_all_at(0, &[0xEEu8; 8]).unwrap();
+    drop(file);
+    let retired = wal.retire_segments_below(wal.durable_end()).unwrap();
+    assert!(
+        vfs.access(&first, inillucent_vfs::AccessMode::Exists).unwrap(),
+        "a segment nobody could read was deleted anyway"
+    );
+    assert!(retired < 2);
+}
+
+/// Truncating a log whose segment cannot be opened is not an error.
+///
+/// `truncate_after` is a tidy-up: the recovered prefix is already decided, and a
+/// segment that cannot be opened is one nothing will read past. Failing here
+/// would turn every open on a read-only directory into a refusal to open.
+#[test]
+fn truncating_a_log_that_cannot_be_opened_is_not_an_error() {
+    let vfs = Arc::new(SimVfs::new(SimConfig::default()));
+    let path = DbPath::new("truncate-fail.rdb");
+    let wal = log_on(Arc::clone(&vfs) as Arc<dyn Vfs>, &path, Synchronous::Full);
+    write_workload(&wal, 4);
+    drop(wal);
+    let mut store = PageStore::default();
+    let outcome = recover::recover(vfs.as_ref(), &path, RecoveryStart::fresh(UUID), &mut store)
+        .expect("recovery runs");
+
+    vfs.failpoints()
+        .set(Site::Open, Policy::Always(Failure::Permission));
+    recover::truncate_after(vfs.as_ref(), &path, &outcome)
+        .expect("a segment that will not open is not an outage");
+    vfs.failpoints().set(Site::Open, Policy::Off);
+}
+
+/// Truncating a log whose header is damaged is not an error either.
+#[test]
+fn truncating_a_log_whose_header_is_damaged_is_not_an_error() {
+    let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
+    let path = DbPath::new("truncate-damaged.rdb");
+    let wal = log_on(Arc::clone(&vfs), &path, Synchronous::Full);
+    write_workload(&wal, 4);
+    drop(wal);
+    let mut store = PageStore::default();
+    let outcome = recover::recover(vfs.as_ref(), &path, RecoveryStart::fresh(UUID), &mut store)
+        .expect("recovery runs");
+
+    let segment_path = inillucent_wal::writer::segment_path(
+        &path.as_path().to_string_lossy(),
+        path.as_path().parent(),
+        outcome.sequence,
+    );
+    let file = vfs
+        .open(&segment_path, inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal))
+        .unwrap();
+    file.write_all_at(0, &[0xEEu8; 8]).unwrap();
+    drop(file);
+    recover::truncate_after(vfs.as_ref(), &path, &outcome)
+        .expect("a damaged header is not an outage");
+}
+
+/// A chain whose first segment cannot be opened is an empty chain.
+#[test]
+fn a_chain_that_cannot_be_opened_is_empty() {
+    let vfs = Arc::new(SimVfs::new(SimConfig::default()));
+    let path = DbPath::new("open-fail.rdb");
+    let wal = log_on(Arc::clone(&vfs) as Arc<dyn Vfs>, &path, Synchronous::Full);
+    write_workload(&wal, 5);
+    drop(wal);
+    vfs.failpoints()
+        .set(Site::Open, Policy::Always(Failure::Permission));
+    let mut store = PageStore::default();
+    let outcome = recover::recover(vfs.as_ref(), &path, RecoveryStart::fresh(UUID), &mut store)
+        .expect("an unopenable chain is empty, not a failure");
+    vfs.failpoints().set(Site::Open, Policy::Off);
+    assert_eq!(outcome.scanned, 0);
+    assert!(store.pages.is_empty());
+}
+
+/// A transaction that wrote after its own commit record is still a winner.
+///
+/// A well-formed log never does this. A damaged one can, and the scan decides
+/// which transactions lost by subtracting the finished ones at the end rather
+/// than by removing each as its outcome arrives - so the answer does not depend
+/// on an ordering the bytes are not obliged to have.
+#[test]
+fn a_record_after_its_own_commit_does_not_make_a_loser() {
+    let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
+    let path = DbPath::new("after-commit.rdb");
+    let wal = log_on(Arc::clone(&vfs), &path, Synchronous::Full);
+    wal.append(
+        1,
+        Body::WritePage {
+            page: 50,
+            image: b"before the commit",
+        },
+    )
+    .unwrap();
+    wal.commit(1, 1).unwrap();
+    // The same transaction id again, after its commit.
+    wal.append(
+        1,
+        Body::WritePage {
+            page: 51,
+            image: b"after the commit",
+        },
+    )
+    .unwrap();
+    wal.flush().unwrap();
+    drop(wal);
+
+    let (store, outcome) = recover_into(vfs.as_ref(), &path);
+    assert_eq!(outcome.committed, 1);
+    assert_eq!(
+        outcome.losers, 0,
+        "a transaction that committed was counted as a loser"
+    );
+    assert!(store.pages.contains_key(&50));
+    assert!(store.pages.contains_key(&51));
 }
 
 /// Under NORMAL a crash may lose commits; under FULL it may not.

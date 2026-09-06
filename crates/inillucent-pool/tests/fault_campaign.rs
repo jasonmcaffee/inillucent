@@ -152,6 +152,95 @@ fn failing_each_read_in_turn_never_corrupts_the_pool() {
     }
 }
 
+/// A pool that has seen more failed reads than it has frames still works.
+///
+/// **The leak this catches has the wrong error message, which is why it went
+/// unnoticed.** `load` claimed a frame and then read into it, and every way the
+/// read could fail - the buffer borrowed, the file short or unreadable, the
+/// checksum wrong - returned the error while keeping the frame. A pool of eight
+/// frames that saw eight failed reads had none left, and the ninth fetch
+/// reported `every frame in the buffer pool is pinned; nothing can be evicted`,
+/// which is a true statement about a state that should have been impossible and
+/// says nothing about what caused it.
+///
+/// It survived the campaign above because that one fails a single read per run
+/// against a four-frame pool, and one leaked frame out of four is invisible. It
+/// was found by a Phase 3 recovery campaign probing for pages a truncated file
+/// does not hold - which is what any reader does when it asks whether a page is
+/// there, and what every fault campaign does by construction.
+#[test]
+fn a_pool_survives_more_failed_reads_than_it_has_frames() {
+    let frames = 8usize;
+    let (vfs, path) = populated(512, 40);
+    let pool = pool_over(&vfs, &path, 512, frames, 40);
+
+    // Every read fails, for four times as many fetches as there are frames.
+    vfs.failpoints()
+        .set(Site::Read, Policy::Always(Failure::IoError));
+    for page in 2..(2 + frames as u64 * 4) {
+        let outcome = pool.fetch(PageId(page));
+        assert!(
+            outcome.is_err(),
+            "page {page} came back while every read was failing"
+        );
+        let detail = outcome.err().and_then(|error| error.detail().map(str::to_string));
+        assert!(
+            !detail
+                .clone()
+                .unwrap_or_default()
+                .contains("every frame in the buffer pool is pinned"),
+            "the pool ran out of frames after failed reads: {detail:?}"
+        );
+    }
+    vfs.failpoints().set(Site::Read, Policy::Off);
+
+    // And the pool is exactly as usable as it was before.
+    assert_eq!(pool.resident(), 0, "a failed read left a frame in use");
+    for page in 2..40u64 {
+        let guard = pool
+            .fetch(PageId(page))
+            .unwrap_or_else(|error| panic!("page {page} unreadable afterwards: {error:?}"));
+        assert_eq!(page::read_u64(&guard, 32).expect("a marker"), page);
+    }
+}
+
+/// A page whose checksum is wrong is refused and does not cost a frame.
+///
+/// The other half of the same leak: a read that *succeeds* and then fails
+/// validation took the same path out.
+#[test]
+fn a_checksum_failure_does_not_cost_a_frame() {
+    let frames = 4usize;
+    let (vfs, path) = populated(512, 40);
+    // Damage more pages than the pool has frames, so a leak exhausts it.
+    let file = vfs
+        .open(&path, OpenOptions::main_db())
+        .expect("the file opens");
+    for page in 2..(2 + frames as u64 * 3) {
+        file.write_all_at(page * 512 + 64, &[0xA5u8; 16])
+            .expect("the damage lands");
+    }
+    drop(file);
+
+    let pool = pool_over(&vfs, &path, 512, frames, 40);
+    for page in 2..(2 + frames as u64 * 3) {
+        let error = pool
+            .fetch(PageId(page))
+            .expect_err("a damaged page must be refused");
+        assert!(
+            !error
+                .detail()
+                .unwrap_or_default()
+                .contains("every frame in the buffer pool is pinned"),
+            "the pool ran out of frames after checksum failures"
+        );
+    }
+    assert_eq!(pool.resident(), 0);
+    // An undamaged page still reads.
+    let guard = pool.fetch(PageId(38)).expect("an undamaged page");
+    assert_eq!(page::read_u64(&guard, 32).expect("a marker"), 38);
+}
+
 /// A failed writeback is reported and the page stays dirty.
 ///
 /// A pool that cleared the dirty bit on a failed write would lose the change

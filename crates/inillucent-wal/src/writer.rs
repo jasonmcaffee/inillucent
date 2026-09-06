@@ -55,7 +55,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use inillucent_base::error::{misuse, DbError};
 use inillucent_base::DbResult;
-use inillucent_vfs::{AccessMode, DbPath, FileKind, OpenOptions, SyncMode, Vfs, VfsFile};
+use inillucent_vfs::{DbPath, FileKind, OpenOptions, SyncMode, Vfs, VfsFile};
 
 use crate::record::{Body, Record};
 use crate::segment::{self, SegmentHeader};
@@ -371,17 +371,40 @@ impl Wal {
     pub fn commit(&self, txn: u64, cts: u64) -> DbResult<u64> {
         let lsn = self.append(txn, Body::Commit { cts })?;
         let end = self.with_inner(|inner| inner.next_lsn);
-        match self.synchronous() {
-            Synchronous::Full => self.drive(end, true)?,
-            Synchronous::Normal => {
-                let due = self.with_inner(|inner| inner.unsynced.saturating_add(
-                    inner.next_lsn.saturating_sub(inner.written_end),
-                )) >= NORMAL_SYNC_BYTES;
-                self.drive(end, due)?;
-            }
-            Synchronous::Off => self.drive(end, false)?,
-        }
+        self.await_commit(end)?;
         Ok(lsn)
+    }
+
+    /// Makes everything below `end` durable under the policy.
+    ///
+    /// The half of [`Wal::commit`] that does not append, for a caller that has
+    /// already written its own `Commit` record and only needs the wait. A
+    /// transaction manager is such a caller: it appends the record **under the
+    /// commit gate**, so that commit order equals visibility order equals log
+    /// order, and then waits out here where the next committer can append past
+    /// it - which is what group commit is.
+    ///
+    /// The first version of the transaction manager called [`Wal::commit`] for
+    /// the wait and got a second `Commit` record for the same transaction. It
+    /// was harmless to recovery, which takes the first one, and it was still
+    /// wrong: the log said something that did not happen. What found it was a
+    /// reopen test asserting the number of records replayed - eighteen where six
+    /// transactions had been committed.
+    ///
+    /// @param end - the stream position the caller needs to reach
+    pub fn await_commit(&self, end: u64) -> DbResult<()> {
+        match self.synchronous() {
+            Synchronous::Full => self.drive(end, true),
+            Synchronous::Normal => {
+                let due = self.with_inner(|inner| {
+                    inner
+                        .unsynced
+                        .saturating_add(inner.next_lsn.saturating_sub(inner.written_end))
+                }) >= NORMAL_SYNC_BYTES;
+                self.drive(end, due)
+            }
+            Synchronous::Off => self.drive(end, false),
+        }
     }
 
     /// Writes everything buffered to the segment without syncing.
@@ -441,16 +464,11 @@ impl Wal {
         let mut removed = 0usize;
         for sequence in 1..current {
             let path = self.segment_path(sequence);
-            let Ok(exists) = self
-                .shared
-                .vfs
-                .access(&path, AccessMode::Exists)
-            else {
-                continue;
-            };
-            if !exists {
-                continue;
-            }
+            // No `access` check first: the read-only open below fails for a
+            // segment that is not there, so asking twice was one extra call and
+            // one extra error arm that no file system this engine runs on can
+            // take - which is a branch the coverage gate can only be lied to
+            // about. The open is the check.
             let mut header = vec![0u8; segment::HEADER_BYTES];
             let Ok(file) = self
                 .shared

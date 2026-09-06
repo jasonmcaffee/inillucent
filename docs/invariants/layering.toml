@@ -113,6 +113,38 @@ kind = "production"
 layer = 3
 may_depend_on = ["inillucent-base", "inillucent-pool", "inillucent-value"]
 
+# `inillucent-txn` is the TDD's Phase 3 transaction manager: snapshots, the writer
+# slot, undo buffers, the version log and its garbage collection, savepoints and
+# the commit gate. It replaces `inillucent-transaction`, whose rollback journal,
+# super-journal, SQLite WAL format and lock state machines all die with it.
+#
+# It is the first crate that holds a database file and a log at the same time,
+# which is why the write-ahead rule is tied together here rather than in either
+# of them: it is the only thing that calls `Pool::set_durable_lsn`, and it calls
+# it after every sync of the log and never before one. Neither `inillucent-pool`
+# nor `inillucent-wal` can do that, because neither knows the other exists - and
+# that is the arrangement, not an oversight.
+#
+# Layer 4 puts it beside `inillucent-sql` and above `inillucent-tree`. It depends
+# on neither the parser nor the catalog: a transaction knows about trees, keys
+# and bytes, and what a column is called is somebody else's question.
+[[crate]]
+name = "inillucent-txn"
+kind = "production"
+layer = 4
+may_depend_on = [
+  "inillucent-base",
+  "inillucent-vfs",
+  "inillucent-value",
+  "inillucent-pool",
+  "inillucent-tree",
+  "inillucent-wal",
+]
+# The TDD's Phase 2 note names this crate alongside the pool, the tree and the
+# log: a transaction manager's fault campaign crashes at a chosen sync and then
+# reads back what the *file* holds, which needs the simulator inside the crate.
+may_test_with = ["inillucent-sim"]
+
 # `inillucent-exec` replaces `inillucent-vm`, and it reaches *down* to `inillucent-sql` for
 # the same reason the VM did: the planner's output is its input. It does not
 # reach the catalog - a pipeline is built against a `TreeCatalog` the caller

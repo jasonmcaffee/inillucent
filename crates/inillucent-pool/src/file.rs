@@ -196,6 +196,31 @@ impl Database {
         self.free.free_count()
     }
 
+    /// Records where the log had reached when this checkpoint was taken.
+    ///
+    /// `checkpoint_lsn` is **where recovery starts**, which is not simply the
+    /// LSN the checkpoint reached. The policy is no-steal, so a page dirtied by
+    /// an uncommitted transaction is never written here; a transaction that
+    /// began before the checkpoint and commits after it therefore has records
+    /// *below* the checkpoint that were never applied to this file. The
+    /// checkpointer passes `min(durable end, the first LSN of the oldest still
+    /// open transaction)` and recovery starts there. Records in that range that
+    /// were already applied cost a read and are skipped by the page-LSN rule.
+    ///
+    /// @param checkpoint_lsn - where recovery must start
+    /// @param cts_watermark - the newest commit timestamp at the checkpoint
+    /// @param wal_sequence - the segment `checkpoint_lsn` lives in
+    pub fn set_log_position(&mut self, checkpoint_lsn: u64, cts_watermark: u64, wal_sequence: u64) {
+        self.meta.checkpoint_lsn = checkpoint_lsn;
+        self.meta.cts_watermark = cts_watermark;
+        self.meta.wal_sequence = wal_sequence;
+    }
+
+    /// Returns the database's identity, which stamps every WAL segment.
+    pub fn uuid(&self) -> u128 {
+        self.meta.uuid
+    }
+
     /// Allocates a contiguous run of pages, growing the file if it must.
     ///
     /// @param count - how many pages are wanted
@@ -225,6 +250,31 @@ impl Database {
         self.pool
             .set_page_count(self.pool.page_count().max(page.0.saturating_add(count)));
         Ok(page)
+    }
+
+    /// Marks one page as in use, whatever the free map currently says.
+    ///
+    /// The one caller is **recovery**, and it is the one caller that can have
+    /// one: outside recovery a page is claimed by [`Database::allocate`], which
+    /// is what chose it. Replaying an `AllocPage` record means claiming a page
+    /// somebody else chose, in a map that may or may not already say so - a
+    /// checkpoint may have written the map after the allocation, or before it.
+    /// So this is idempotent by construction, which is also what the page-LSN
+    /// rule cannot give it: a free-map bit has no LSN.
+    ///
+    /// The map is grown first when the page is past its end, so a page the file
+    /// holds is always one the map can describe.
+    ///
+    /// @param page - the page to claim
+    pub fn claim(&mut self, page: PageId) -> DbResult<()> {
+        if page.0 >= self.free.described_pages() {
+            let mut next = self.pool.page_count().max(self.free.described_pages());
+            self.free.ensure(page.0.saturating_add(1), &mut next)?;
+            self.pool.set_page_count(self.pool.page_count().max(next));
+        }
+        self.pool
+            .set_page_count(self.pool.page_count().max(page.0.saturating_add(1)));
+        self.free.allocate_at(page)
     }
 
     /// Returns a run of pages to the free map.

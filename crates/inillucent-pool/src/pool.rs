@@ -295,6 +295,23 @@ pub struct Pool {
     /// reading and writing the whole struct to increment `hits` copied
     /// seventy-two bytes in each direction on every fetch.
     counters: Counters,
+    /// The write-ahead watermark: no page whose LSN is at or above this may be
+    /// written to the data file.
+    ///
+    /// **This is the whole of the pool's relationship with the log.** The rule
+    /// is "nothing is durable before its log record is", and the number that
+    /// decides it can only be known by the log - so the pool is *told* it rather
+    /// than made to depend on the crate that owns it. `inillucent-wal` sits at
+    /// the same layer as this crate and neither depends on the other; a `u64`
+    /// crosses the gap where a dependency edge would have pointed the wrong way,
+    /// because the log is written before any page is.
+    ///
+    /// `u64::MAX` means "no log", which is what a Phase 2 read-only open and
+    /// every bulk build is: there is no log to be ahead of, so nothing is
+    /// refused. A caller that has a log calls [`Pool::set_durable_lsn`] after
+    /// every sync, and [`Pool::writeback`] refuses a page the log has not
+    /// caught up with.
+    durable_lsn: Cell<u64>,
 }
 
 /// The pool's counters, one cell each.
@@ -382,7 +399,29 @@ impl Pool {
             file,
             page_count: Cell::new(page_count),
             counters: Counters::default(),
+            // No log until a caller says otherwise, so nothing is refused. A
+            // bulk build and a read-only open both run this way, and both are
+            // correct to: a page cannot be ahead of a log that does not exist.
+            durable_lsn: Cell::new(u64::MAX),
         })
+    }
+
+    /// Tells the pool how far the log is durable.
+    ///
+    /// After this, [`Pool::writeback`] refuses any page whose LSN is above
+    /// `lsn`. The caller sets it after every sync of the log and never before
+    /// one: a watermark that ran ahead of the media would turn the check into a
+    /// formality that always passes, which is worse than no check at all
+    /// because it looks like one.
+    ///
+    /// @param lsn - the position past the last durable byte of the log
+    pub fn set_durable_lsn(&self, lsn: u64) {
+        self.durable_lsn.set(lsn);
+    }
+
+    /// Returns the write-ahead watermark, or `u64::MAX` when there is no log.
+    pub fn durable_lsn(&self) -> u64 {
+        self.durable_lsn.get()
     }
 
     /// Returns the page size in bytes.
@@ -613,20 +652,26 @@ impl Pool {
         // descent holding an observation of this frame is reading a page that
         // is no longer there, and the bump is what tells it so.
         let held = self.latch(frame).map(|latch| latch.try_exclusive());
-        {
-            let mut bytes = self
-                .buffers
-                .get(frame as usize)
-                .ok_or_else(|| misuse("frame index out of range"))?
-                .try_borrow_mut()
-                .map_err(|_| misuse("a frame chosen for loading was still borrowed"))?;
-            self.file
-                .read_exact_at(
-                    page.0.saturating_mul(self.page_size as u64),
-                    bytes.as_mut_slice(),
-                )
-                .map_err(|error| error.into_db_error())?;
-            page::verify_checksum(&bytes, page)?;
+        let filled = self.fill_frame(frame, page);
+        if let Err(error) = filled {
+            // **The frame goes back.** A read can fail three ways - the buffer
+            // is borrowed, the file is short or unreadable, the checksum does
+            // not match - and every one of them used to return the error while
+            // keeping the frame, so a pool that saw sixteen failed reads had
+            // sixteen fewer frames and then reported "every frame is pinned",
+            // which is not even the right diagnosis.
+            //
+            // Found by a Phase 3 recovery campaign fetching pages a truncated
+            // file does not hold, which is the ordinary shape of a fault
+            // campaign and of any reader probing for a page. The exclusive
+            // latch leaked with it.
+            if held == Some(true) {
+                if let Some(latch) = self.latch(frame) {
+                    latch.release_exclusive();
+                }
+            }
+            self.state.borrow_mut().free.push(frame);
+            return Err(error);
         }
         let mut state = self.state.borrow_mut();
         if let Some(meta) = state.frames.get_mut(frame as usize) {
@@ -648,6 +693,30 @@ impl Pool {
         Counters::add(&self.counters.misses, 1);
         Counters::add(&self.counters.reads, 1);
         Ok(frame)
+    }
+
+    /// Reads a page into a claimed frame and checks it.
+    ///
+    /// Separate from [`Pool::load`] so that every way it can fail returns
+    /// through one place, which is what lets the frame be given back on all of
+    /// them rather than on the ones somebody remembered.
+    ///
+    /// @param frame - the claimed frame
+    /// @param page - the page to read into it
+    fn fill_frame(&self, frame: u32, page: PageId) -> DbResult<()> {
+        let mut bytes = self
+            .buffers
+            .get(frame as usize)
+            .ok_or_else(|| misuse("frame index out of range"))?
+            .try_borrow_mut()
+            .map_err(|_| misuse("a frame chosen for loading was still borrowed"))?;
+        self.file
+            .read_exact_at(
+                page.0.saturating_mul(self.page_size as u64),
+                bytes.as_mut_slice(),
+            )
+            .map_err(|error| error.into_db_error())?;
+        page::verify_checksum(&bytes, page)
     }
 
     /// Returns a frame holding nothing, cooling and evicting to get one.
@@ -859,6 +928,13 @@ impl Pool {
     /// @param frame - the frame to write
     /// @param page - the page it holds
     fn writeback(&self, frame: u32, page: PageId) -> DbResult<()> {
+        // The write-ahead rule, and the only place in the engine it is
+        // enforced. Phase 2 said this seam was here and that Phase 3 would add
+        // "a condition rather than a caller"; this is that condition. Every
+        // page write in the engine funnels through this function - the
+        // checkpointer's flush, an eviction, a manual flush - so a page cannot
+        // reach the data file by a route that skips it.
+        self.refuse_if_ahead_of_the_log(frame, page)?;
         let mut image = {
             let bytes = self
                 .buffers
@@ -880,6 +956,41 @@ impl Pool {
         drop(state);
         Counters::add(&self.counters.writes, 1);
         Counters::add(&self.counters.translated, translated as u64);
+        Ok(())
+    }
+
+    /// Refuses a writeback the log has not caught up with.
+    ///
+    /// Reads the LSN out of the page's own header rather than out of any
+    /// bookkeeping beside it, because the header is what the file will hold and
+    /// bookkeeping is what can drift from it. A page whose LSN is at or above
+    /// the durable watermark describes a change whose log record is not on the
+    /// media, and writing it would mean a crash could leave the data file ahead
+    /// of the log with no way back.
+    ///
+    /// @param frame - the frame about to be written
+    /// @param page - the page it holds, for the message
+    fn refuse_if_ahead_of_the_log(&self, frame: u32, page: PageId) -> DbResult<()> {
+        let durable = self.durable_lsn.get();
+        if durable == u64::MAX {
+            return Ok(());
+        }
+        let lsn = {
+            let bytes = self
+                .buffers
+                .get(frame as usize)
+                .ok_or_else(|| misuse("frame index out of range"))?
+                .try_borrow()
+                .map_err(|_| misuse("a frame chosen for writeback was mutably borrowed"))?;
+            page::read_u64(&bytes, page::header::LSN)?
+        };
+        if lsn > durable {
+            return Err(misuse(format!(
+                "page {} carries lsn {lsn} and the log is durable to {durable}: \
+                 writing it would put the data file ahead of the log",
+                page.0
+            )));
+        }
         Ok(())
     }
 

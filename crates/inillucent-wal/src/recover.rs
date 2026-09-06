@@ -169,7 +169,7 @@ pub fn recover(
         scanned: analysis.scanned,
         applied: 0,
         committed: analysis.committed.len() as u64,
-        losers: analysis.losers as u64,
+        losers: analysis.losers,
         stopped_because: analysis.stopped_because.clone(),
         last_checkpoint: analysis.last_checkpoint,
         catalog_changed: false,
@@ -333,7 +333,7 @@ struct Analysis {
     last_sequence: u64,
     latest_cts: u64,
     scanned: u64,
-    losers: usize,
+    losers: u64,
     stopped_because: Option<String>,
     last_checkpoint: Option<(u64, u64)>,
 }
@@ -381,13 +381,13 @@ fn analyse(chain: &Chain, start: RecoveryStart) -> DbResult<Analysis> {
                         error.detail().unwrap_or("damaged")
                     ));
                     return Ok(Analysis {
+                        losers: count_losers(&open, &committed, &aborted),
                         committed,
                         aborted,
                         valid_end,
                         last_sequence,
                         latest_cts,
                         scanned,
-                        losers: open.len(),
                         stopped_because,
                         last_checkpoint,
                     });
@@ -405,13 +405,13 @@ fn analyse(chain: &Chain, start: RecoveryStart) -> DbResult<Analysis> {
                     decoded.lsn
                 ));
                 return Ok(Analysis {
+                    losers: count_losers(&open, &committed, &aborted),
                     committed,
                     aborted,
                     valid_end,
                     last_sequence,
                     latest_cts,
                     scanned,
-                    losers: open.len(),
                     stopped_because,
                     last_checkpoint,
                 });
@@ -420,12 +420,10 @@ fn analyse(chain: &Chain, start: RecoveryStart) -> DbResult<Analysis> {
             match decoded.body {
                 Body::Commit { cts } => {
                     committed.insert(decoded.txn);
-                    open.remove(&decoded.txn);
                     latest_cts = latest_cts.max(cts);
                 }
                 Body::Abort => {
                     aborted.insert(decoded.txn);
-                    open.remove(&decoded.txn);
                 }
                 Body::Checkpoint {
                     checkpoint_lsn,
@@ -434,8 +432,16 @@ fn analyse(chain: &Chain, start: RecoveryStart) -> DbResult<Analysis> {
                     last_checkpoint = Some((checkpoint_lsn, cts_watermark));
                     latest_cts = latest_cts.max(cts_watermark);
                 }
+                // Every transaction that wrote anything, whether or not it went
+                // on to commit. Which of them are *losers* is decided at the
+                // end, by subtracting the ones that committed or aborted -
+                // rather than by removing each one as its outcome arrives,
+                // which made the answer depend on a record never appearing
+                // after its own commit. That is true of a well-formed log and
+                // is not something a scan reading damaged bytes should be
+                // relying on, and it cost a branch no ordinary input could take.
                 _ => {
-                    if decoded.txn != 0 && !committed.contains(&decoded.txn) {
+                    if decoded.txn != 0 {
                         open.insert(decoded.txn, ());
                     }
                 }
@@ -445,16 +451,37 @@ fn analyse(chain: &Chain, start: RecoveryStart) -> DbResult<Analysis> {
         }
     }
     Ok(Analysis {
+        losers: count_losers(&open, &committed, &aborted),
         committed,
         aborted,
         valid_end,
         last_sequence,
         latest_cts,
         scanned,
-        losers: open.len(),
         stopped_because,
         last_checkpoint,
     })
+}
+
+/// Counts the transactions that wrote and never finished.
+///
+/// A loser is a transaction the scan saw a record for and saw neither a commit
+/// nor an abort for. Computed by subtraction at the end rather than by removing
+/// each transaction as its outcome arrives, so the answer does not depend on the
+/// order records appear in - which is not a property a scan reading a damaged
+/// log should be assuming.
+///
+/// @param open - every transaction that wrote something
+/// @param committed - the transactions that committed
+/// @param aborted - the transactions that aborted
+fn count_losers(
+    open: &BTreeMap<u64, ()>,
+    committed: &BTreeSet<u64>,
+    aborted: &BTreeSet<u64>,
+) -> u64 {
+    open.keys()
+        .filter(|txn| !committed.contains(txn) && !aborted.contains(txn))
+        .count() as u64
 }
 
 /// Walks the chain again, applying the records of committed transactions.
@@ -503,14 +530,17 @@ fn replay(
             let pages = record.pages();
             let mut wanted = [false; MAX_PAGES];
             let mut any = pages.as_slice().is_empty();
-            for (slot, page) in pages.as_slice().iter().enumerate() {
+            // Zipped rather than indexed by an enumerated slot: a `zip` stops at
+            // whichever runs out, so there is no `get_mut` whose `None` arm no
+            // input can take. A branch no input can take is one the coverage
+            // gate can only ever be lied to about, and this crate is held to
+            // every branch.
+            for (entry, page) in wanted.iter_mut().zip(pages.as_slice()) {
                 let below = match redo.page_lsn(*page)? {
                     Some(lsn) => lsn < record.lsn,
                     None => true,
                 };
-                if let Some(entry) = wanted.get_mut(slot) {
-                    *entry = below;
-                }
+                *entry = below;
                 any = any || below;
             }
             if !any {
