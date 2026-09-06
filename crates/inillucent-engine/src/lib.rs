@@ -166,6 +166,14 @@ pub struct ImportedDatabase {
     /// `transaction` family is exactly the question of what a commit costs, and
     /// a harness that could only run one grouping could not ask it.
     batch: std::cell::Cell<Option<u64>>,
+    /// What the open transaction changed, newest last, so it can be abandoned.
+    ///
+    /// Empty outside a transaction, and never filled there: an autocommit
+    /// statement cannot be rolled back, so it records nothing.
+    undo: Vec<Before>,
+    /// Named savepoints, and where each one sits in `undo`.
+    marks: Vec<(Vec<u8>, usize)>,
+
     /// The catalog tree's rows, with what each one needs beside it.
     ///
     /// Held beside the tree rather than read back out of it on every DDL
@@ -612,6 +620,8 @@ impl ImportedDatabase {
             next_txn: std::cell::Cell::new(1),
             statements: std::cell::RefCell::new(HashMap::new()),
             batch: std::cell::Cell::new(None),
+            undo: Vec::new(),
+            marks: Vec::new(),
             entries: entries
                 .into_iter()
                 .zip(identifiers)
@@ -1000,6 +1010,8 @@ impl ImportedDatabase {
             next_txn: std::cell::Cell::new(1),
             statements: std::cell::RefCell::new(HashMap::new()),
             batch: std::cell::Cell::new(None),
+            undo: Vec::new(),
+            marks: Vec::new(),
             entries: entries
                 .into_iter()
                 .zip(identifiers)
@@ -1392,6 +1404,170 @@ impl ImportedDatabase {
         let txn = self.next_txn.get();
         self.next_txn.set(txn.saturating_add(1));
         self.batch.set(Some(txn));
+        self.undo.clear();
+        self.marks.clear();
+    }
+
+    /// Undoes everything the open transaction changed, newest first.
+    ///
+    /// **Newest first, and that is the whole of the ordering rule.** A key
+    /// written twice inside one transaction has two records; restoring the
+    /// older one last is what puts the row back the way it was before the
+    /// transaction rather than the way it was in the middle of it.
+    ///
+    /// The restores are ordinary writes and are logged like any other, because
+    /// the log is redo-only: a crash between the rollback and the commit record
+    /// has to replay to the *rolled back* state, not to the state the aborted
+    /// statements left. Undoing by not-logging would leave the log describing
+    /// changes the file no longer has.
+    ///
+    /// @param to - the savepoint to stop at, or `None` for the whole transaction
+    fn undo_to(&mut self, to: Option<&[u8]>) -> DbResult<()> {
+        let floor = match to {
+            Some(name) => {
+                let folded = name.to_ascii_lowercase();
+                let Some(position) = self
+                    .marks
+                    .iter()
+                    .rposition(|(held, _)| *held == folded)
+                    .map(|index| self.marks.get(index).map(|(_, at)| *at).unwrap_or(0))
+                else {
+                    return Err(misuse(format!(
+                        "no such savepoint: {}",
+                        String::from_utf8_lossy(name)
+                    )));
+                };
+                position
+            }
+            None => 0,
+        };
+        let txn = self.current_txn();
+        while self.undo.len() > floor {
+            let Some(entry) = self.undo.pop() else { break };
+            let mut log = WalLog {
+                wal: &self.wal,
+                txn,
+                // The restore is not itself undoable: it *is* the undo, and
+                // recording it would grow the buffer being drained.
+                undo: None,
+            };
+            // **The catalog tree answers to two numbers.** Its `tree_id` is
+            // `SCHEMA_TREE_ID`, which is what the log records carry, and it
+            // lives in `trees` under `SCHEMA_VIEW_ROOT`, which is the
+            // identifier the planner reads `sqlite_schema` through. An undo
+            // record carries the first and this map is keyed by the second, so
+            // a catalog row's before-image was looked up under a number nothing
+            // held and silently skipped - which is why a rolled-back
+            // `CREATE TABLE` stayed in the schema.
+            let root = if entry.tree == inillucent_catalog::paged::SCHEMA_TREE_ID {
+                SCHEMA_VIEW_ROOT
+            } else {
+                u32::try_from(entry.tree).unwrap_or(0)
+            };
+            let Some(tree) = self.trees.get_mut(&root) else {
+                // The tree is gone, which a rollback of a `CREATE TABLE` makes
+                // true. Its rows went with it.
+                continue;
+            };
+            match &entry.row {
+                Some(row) => {
+                    let values: Vec<Datum<'_>> = row.iter().map(OwnedDatum::borrow).collect();
+                    tree.put(&mut self.database, &mut log, &values)?;
+                }
+                None => {
+                    let key: Vec<Datum<'_>> = entry.key.iter().map(OwnedDatum::borrow).collect();
+                    tree.delete(&mut self.database, &mut log, &key)?;
+                }
+            }
+        }
+        self.marks.retain(|(_, at)| *at <= self.undo.len());
+        // The catalog tree may have been restored along with everything else,
+        // so the schema the binder sees is rebuilt from it.
+        let missing = self.reload_entries()?;
+        if !missing.is_empty() {
+            // A `DROP` undone by restoring its catalog row puts the object back
+            // in the schema without putting its tree back in this handle, and a
+            // table the binder names and nothing can read is a wrong answer
+            // waiting to happen. Refused by name until the re-attach is written.
+            return Err(misuse(format!(
+                "rolling back left {} in the schema with no tree attached;                  undoing a DROP inside a transaction is not supported yet",
+                missing.join(", ")
+            )));
+        }
+        Ok(())
+    }
+
+    /// Rebuilds the in-memory schema from the catalog tree.
+    ///
+    /// **The catalog tree is the authority and `entries` is a cache of it.** A
+    /// rollback restores the tree - a catalog row is a row, and it is undone
+    /// like one - and this is what makes the cache agree again. Without it a
+    /// `CREATE TABLE` that was abandoned stayed visible: the row was gone from
+    /// the file and still in the list the binder is built from.
+    ///
+    /// It does not re-attach trees. Every object it names that has no tree is
+    /// reported, because a schema naming a table nothing can read is worse than
+    /// a refusal - see [`ImportedDatabase::undo_to`], which turns that into
+    /// one.
+    fn reload_entries(&mut self) -> DbResult<Vec<String>> {
+        let catalog_tree = attach_catalog(self.database.pool(), self.database.catalog_root())?;
+        let stored =
+            inillucent_catalog::paged::read_catalog_rows(self.database.pool(), &catalog_tree)?;
+        let mut missing = Vec::new();
+        self.entries = stored
+            .into_iter()
+            .map(|(rowid, entry)| {
+                let root = u32::try_from(entry.tree_id).unwrap_or(0);
+                if root != 0 && !self.trees.contains_key(&root) {
+                    missing.push(String::from_utf8_lossy(&entry.name).into_owned());
+                }
+                Recorded { rowid, root, entry }
+            })
+            .collect();
+        self.rebuild_tables()?;
+        self.refresh_catalog();
+        Ok(missing)
+    }
+
+    /// Abandons the open transaction.
+    pub fn rollback(&mut self) -> DbResult<()> {
+        self.undo_to(None)?;
+        self.marks.clear();
+        self.batch.set(None);
+        self.refresh_catalog();
+        Ok(())
+    }
+
+    /// Names a point the transaction can be rolled back to.
+    ///
+    /// @param name - the savepoint's name
+    pub fn savepoint(&mut self, name: &[u8]) {
+        self.marks
+            .push((name.to_ascii_lowercase(), self.undo.len()));
+    }
+
+    /// Undoes back to a savepoint, keeping the transaction open.
+    ///
+    /// @param name - the savepoint's name
+    pub fn rollback_to(&mut self, name: &[u8]) -> DbResult<()> {
+        self.undo_to(Some(name))?;
+        self.refresh_catalog();
+        Ok(())
+    }
+
+    /// Forgets a savepoint without undoing anything.
+    ///
+    /// @param name - the savepoint's name
+    pub fn release(&mut self, name: &[u8]) -> DbResult<()> {
+        let folded = name.to_ascii_lowercase();
+        let Some(position) = self.marks.iter().rposition(|(held, _)| *held == folded) else {
+            return Err(misuse(format!(
+                "no such savepoint: {}",
+                String::from_utf8_lossy(name)
+            )));
+        };
+        self.marks.truncate(position);
+        Ok(())
     }
 
     /// Commits the open transaction, if there is one.
@@ -1402,6 +1578,10 @@ impl ImportedDatabase {
         // Every module flushes what it is holding before the log's commit
         // record, because what it flushes is more writes.
         self.sync_modules()?;
+        // Nothing to abandon once it is committed, and holding the before-images
+        // would hold every row a long transaction touched.
+        self.undo.clear();
+        self.marks.clear();
         let Some(txn) = self.batch.take() else {
             return Ok(());
         };
@@ -2111,6 +2291,9 @@ impl ImportedDatabase {
             let mut log = WalLog {
                 wal: &self.wal,
                 txn,
+                // Collected only inside a transaction: outside one there is
+                // nothing that could abandon the write.
+                undo: (!autocommit).then_some(&mut self.undo),
             };
             let mut view = WriteView {
                 database: &mut self.database,
@@ -2334,12 +2517,64 @@ impl WriteTarget for WriteView<'_> {
 struct WalLog<'a> {
     wal: &'a Wal,
     txn: u64,
+    /// Where before-images go while a transaction is open, or `None` outside
+    /// one.
+    ///
+    /// An autocommit statement cannot be abandoned, so it collects nothing and
+    /// pays nothing for the possibility. The buffer is handed in by the caller
+    /// rather than owned here because it has to outlive the log: the log lives
+    /// for one statement and the transaction for many.
+    undo: Option<&'a mut Vec<Before>>,
 }
 
 impl TreeLog for WalLog<'_> {
     fn log(&mut self, body: Body<'_>) -> DbResult<u64> {
         self.wal.append(self.txn, body)
     }
+
+    fn wants_undo(&self) -> bool {
+        self.undo.is_some()
+    }
+
+    fn undo(
+        &mut self,
+        tree: u64,
+        key: Vec<OwnedDatum>,
+        before: Option<Vec<OwnedDatum>>,
+    ) -> DbResult<()> {
+        if let Some(buffer) = self.undo.as_mut() {
+            buffer.push(Before {
+                tree,
+                key,
+                row: before,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// One row as it was before a statement inside a transaction changed it.
+///
+/// **Not `inillucent_txn::Undo`, and the difference is worth stating.** That
+/// type carries a key and a before-image as `Vec<u8>`, because the transaction
+/// engine below works in encoded rows. This engine's rows are `OwnedDatum`
+/// vectors all the way down - the write path takes them, the trees store them
+/// as PAX mini-columns, and there is no row-bytes encoding to borrow. Encoding
+/// a row to bytes to record it and decoding it to restore it would be inventing
+/// a third representation to bridge two that already exist.
+///
+/// So the two undo buffers are not duplicates of each other; they are the same
+/// idea at two layers that disagree about what a row is, and that disagreement
+/// is why routing this engine's writes through `inillucent_txn::Transaction` is
+/// a piece of work rather than a wiring job.
+#[derive(Clone, Debug)]
+struct Before {
+    /// The tree the row is in.
+    tree: u64,
+    /// The row's key columns.
+    key: Vec<OwnedDatum>,
+    /// The whole row as it was, or `None` when the key was not there.
+    row: Option<Vec<OwnedDatum>>,
 }
 
 /// Reports whether every key column of an index is stored ascending.

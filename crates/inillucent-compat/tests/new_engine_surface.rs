@@ -156,6 +156,12 @@ const SURFACE: &[(&str, &str, Answers)] = &[
     ("pragma.journal_mode", "PRAGMA journal_mode", Yes),
     ("pragma.table_info", "PRAGMA table_info(t)", Yes),
     ("pragma.foreign_keys", "PRAGMA foreign_keys=ON", Yes),
+    // Abandoning a transaction. `crates/inillucent-compat/tests/new_engine_rollback.rs`
+    // is where the undo is checked; these rows only record that the statements
+    // are answered.
+    ("savepoint", "SAVEPOINT s1", Yes),
+    ("release", "SAVEPOINT s1; RELEASE s1", Yes),
+    ("rollback", "BEGIN; ROLLBACK", Yes),
     (
         "explain.query_plan",
         "EXPLAIN QUERY PLAN SELECT a FROM t",
@@ -186,9 +192,6 @@ const SURFACE: &[(&str, &str, Answers)] = &[
         "SELECT a FROM t WHERE EXISTS (SELECT 1 FROM t AS u WHERE u.id = t.id)",
         NotYet,
     ),
-    ("rollback", "ROLLBACK", NotYet),
-    ("savepoint", "SAVEPOINT s1", NotYet),
-    ("release", "RELEASE s1", NotYet),
     ("attach", "ATTACH DATABASE ':memory:' AS other", NotYet),
     ("vacuum", "VACUUM", NotYet),
     // Plain EXPLAIN is refused for a reason that is not "yet": see the two
@@ -244,28 +247,23 @@ fn the_new_engine_answers_what_the_inventory_says_it_answers() {
     );
 }
 
-/// `BEGIN` is accepted and `ROLLBACK` is refused, which is the load-bearing gap.
+/// A transaction can be entered and abandoned, and the abandonment sticks.
 ///
-/// This is separate from the table above because it is not one more construct:
-/// it is the reason Part 4 cannot proceed. `BEGIN` maps to the engine's *log
-/// batching*, which groups writes so the log is flushed once. That is a
-/// durability grouping, not atomicity, and it has nothing to undo with.
+/// This file used to assert the opposite, and the reason is worth keeping. The
+/// engine accepted `BEGIN` and refused `ROLLBACK`, because `BEGIN` mapped to
+/// its *log batching* - a durability grouping that flushes the log once, with
+/// nothing to undo with. A caller could enter a transaction and could not leave
+/// one, and `inillucent-cli`'s import path is such a caller: it wraps a load in
+/// `BEGIN` and issues `ROLLBACK` when a row fails. That was named here as the
+/// thing standing between Phase 5 and Part 4.
 ///
-/// The consequence is a caller that can enter a transaction and cannot abandon
-/// one, and `inillucent-cli`'s own import path is such a caller: it wraps a
-/// load in `BEGIN` and issues `ROLLBACK` when a row fails to insert. Moving it
-/// onto this engine would turn a failed import from "nothing happened" into
-/// "half the file is in the table".
-///
-/// The gap is structural rather than unwired. `inillucent-txn` has the whole
-/// mechanism - `savepoint`, `rollback_to`, `release`, `rollback`, an undo
-/// buffer and an `UndoSink` - but `ImportedDatabase` does not route its writes
-/// through it, and the write-ahead log is redo-only: `InsertRow`, `DeleteRow`
-/// and `UpdateInPlace` carry an after-image and no before-image. Rolling back
-/// therefore cannot be done by replaying the log backwards. It needs the undo
-/// buffer populated on every write, and the catalog's own changes covered too.
+/// It is answered now. The before-images are collected while a transaction is
+/// open - the log is redo-only and cannot be replayed backwards - and the
+/// restores are themselves logged, so the rollback survives the next open. The
+/// details are in `new_engine_rollback.rs`; what this file records is that the
+/// gap it was written to describe is closed.
 #[test]
-fn a_transaction_can_be_entered_and_not_abandoned() {
+fn a_transaction_can_be_entered_and_abandoned() {
     let database = fresh("txn");
     let connection = database.connect();
     assert_eq!(count(&connection), 2);
@@ -279,21 +277,25 @@ fn a_transaction_can_be_entered_and_not_abandoned() {
     assert_eq!(
         count(&connection),
         3,
-        "the write is visible inside the batch"
+        "the write is visible inside the transaction"
     );
 
-    assert!(
-        connection.query("ROLLBACK").is_err(),
-        "ROLLBACK now works - implement the Part 4 inventory row and retire this test's premise"
-    );
+    connection
+        .query("ROLLBACK")
+        .expect("the transaction is abandoned");
     assert_eq!(
         count(&connection),
-        3,
-        "the write the caller tried to abandon is still there"
+        2,
+        "the write the caller abandoned is still there"
     );
 
-    // The other half: COMMIT is accepted, so the pair a caller writes is
-    // half-implemented rather than absent. That asymmetry is the finding.
+    // And the other half, so a rollback-on-commit would not pass.
+    connection
+        .execute_batch("BEGIN")
+        .expect("BEGIN is accepted");
+    connection
+        .execute_batch("INSERT INTO t(id, a, b) VALUES (4, 'w', 40)")
+        .expect("the insert applies");
     connection
         .execute_batch("COMMIT")
         .expect("COMMIT is accepted");

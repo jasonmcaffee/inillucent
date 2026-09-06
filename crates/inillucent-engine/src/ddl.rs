@@ -188,19 +188,30 @@ impl ImportedDatabase {
                 ref argument,
                 ..
             } => self.pragma(name, argument.as_ref()),
-            // Named apart from the other refusals because this one has a
-            // consequence the caller has to be told about rather than left to
-            // discover: the statements since `BEGIN` have already been applied.
-            // `BEGIN` groups the log so it is flushed once - it does not open
-            // something that can be abandoned, and the log is redo-only, so
-            // there is no before-image to restore from. The gap is inventoried
-            // in `crates/inillucent-compat/tests/new_engine_surface.rs`.
-            Directive::Rollback { .. } => Err(misuse(format!(
-                "{sql}: ROLLBACK is a statement the new engine does not run \
-                 yet, and the writes since BEGIN have already been applied - \
-                 BEGIN groups the log rather than opening a transaction that \
-                 can be abandoned"
-            ))),
+            Directive::Rollback { savepoint } => match savepoint {
+                Some(name) => {
+                    self.rollback_to(&name)?;
+                    Ok(Outcome::empty())
+                }
+                None => {
+                    self.rollback()?;
+                    Ok(Outcome::empty())
+                }
+            },
+            // A `SAVEPOINT` outside a transaction opens one, which is what
+            // SQLite does: it is the only way to name a point inside a
+            // statement that would otherwise be its own transaction.
+            Directive::Savepoint(name) => {
+                if self.batch.get().is_none() {
+                    self.begin_batch();
+                }
+                self.savepoint(&name);
+                Ok(Outcome::empty())
+            }
+            Directive::Release(name) => {
+                self.release(&name)?;
+                Ok(Outcome::empty())
+            }
             other => Err(misuse(format!(
                 "{sql} is {}, which the new engine does not run yet",
                 super::describe_directive(&other)
@@ -260,10 +271,16 @@ impl ImportedDatabase {
         // row records somewhere else.
         entry.tree_id = u64::from(root);
         let txn = self.current_txn();
+        let open = self.batch.get().is_some();
         {
             let mut log = WalLog {
                 wal: &self.wal,
                 txn,
+                // **A catalog row is a row.** A `CREATE TABLE` inside a
+                // transaction has to come back out when the transaction is
+                // abandoned, and the way it comes back out is the same way a
+                // deleted row does: the catalog tree's before-image, restored.
+                undo: open.then_some(&mut self.undo),
             };
             let tree = self
                 .trees
@@ -331,9 +348,15 @@ impl ImportedDatabase {
     fn rewrite(&mut self, rowid: i64, entry: SchemaEntry) -> DbResult<()> {
         {
             let txn = self.current_txn();
+            let open = self.batch.get().is_some();
             let mut log = WalLog {
                 wal: &self.wal,
                 txn,
+                // **A catalog row is a row.** A `CREATE TABLE` inside a
+                // transaction has to come back out when the transaction is
+                // abandoned, and the way it comes back out is the same way a
+                // deleted row does: the catalog tree's before-image, restored.
+                undo: open.then_some(&mut self.undo),
             };
             let tree = self
                 .trees
@@ -356,9 +379,15 @@ impl ImportedDatabase {
     fn forget(&mut self, rowid: i64) -> DbResult<()> {
         {
             let txn = self.current_txn();
+            let open = self.batch.get().is_some();
             let mut log = WalLog {
                 wal: &self.wal,
                 txn,
+                // **A catalog row is a row.** A `CREATE TABLE` inside a
+                // transaction has to come back out when the transaction is
+                // abandoned, and the way it comes back out is the same way a
+                // deleted row does: the catalog tree's before-image, restored.
+                undo: open.then_some(&mut self.undo),
             };
             let tree = self
                 .trees
@@ -407,9 +436,15 @@ impl ImportedDatabase {
             .collect();
         let txn = self.current_txn();
         let tree = {
+            let open = self.batch.get().is_some();
             let mut log = WalLog {
                 wal: &self.wal,
                 txn,
+                // **A catalog row is a row.** A `CREATE TABLE` inside a
+                // transaction has to come back out when the transaction is
+                // abandoned, and the way it comes back out is the same way a
+                // deleted row does: the catalog tree's before-image, restored.
+                undo: open.then_some(&mut self.undo),
             };
             PagedTree::bulk_build_logged(
                 &mut self.database,
