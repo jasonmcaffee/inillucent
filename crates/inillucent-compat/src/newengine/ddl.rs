@@ -148,6 +148,23 @@ impl ImportedDatabase {
                 exists,
                 false,
             ),
+            Directive::CreateVirtualTable {
+                if_not_exists,
+                name,
+                name_offset,
+                module,
+                arguments,
+                exists,
+                ..
+            } => self.create_virtual_table(
+                source,
+                name_offset,
+                &name,
+                &module,
+                &arguments,
+                exists,
+                if_not_exists,
+            ),
             Directive::Drop {
                 kind,
                 if_exists,
@@ -218,7 +235,7 @@ impl ImportedDatabase {
     /// Writes one row into the catalog tree and records it.
     ///
     /// @param entry - the object to record
-    fn record(&mut self, root: u32, mut entry: SchemaEntry) -> DbResult<()> {
+    pub(super) fn record(&mut self, root: u32, mut entry: SchemaEntry) -> DbResult<()> {
         let rowid = self.next_catalog_rowid();
         // The statistics come off the tree that was just built rather than from
         // the caller, so there is one place they can be wrong instead of four.
@@ -515,7 +532,20 @@ impl ImportedDatabase {
         // and the reader reconstructs the declaration from the table's text -
         // which is exactly what `table_from_create_sql` has already done here.
         let automatic: Vec<IndexInfo> = info.indexes.clone();
+        // **A `WITHOUT ROWID` table's primary key is the table.** There is one
+        // b-tree, keyed by the primary key, so SQLite writes no
+        // `sqlite_autoindex_` row for it - and building one here would make a
+        // second tree holding the same keys, and put a row in `sqlite_schema`
+        // that SQLite's does not have. The import already refuses the same
+        // shape, for the same reason.
+        let primary: Vec<u16> = info.primary_key();
         for (position, index) in automatic.iter().enumerate() {
+            if info.without_rowid {
+                let key: Vec<u16> = index.columns.iter().filter_map(|key| key.column).collect();
+                if key == primary {
+                    continue;
+                }
+            }
             let index_root = self.allocate_root();
             let mut index = index.clone();
             index.root = index_root;
@@ -1061,7 +1091,28 @@ impl ImportedDatabase {
             .map(|held| held.entry.clone())
             .collect();
         let roots: Vec<u32> = self.entries.iter().map(|held| held.root).collect();
-        self.tables = tables_from_entries(&entries, &roots, 0)?;
+        let mut rebuilt = tables_from_entries(&entries, &roots, 0)?;
+        // **A virtual table's columns come from its module, not its text.**
+        // `CREATE VIRTUAL TABLE documents USING fts5(title, body)` names a
+        // module and its arguments; what the *columns* are is the module's
+        // answer, and only a connected module can give it. Deriving them from
+        // the statement would be a second implementation of every module's
+        // argument grammar, agreeing with the module until the day it did not.
+        for table in &mut rebuilt {
+            let Some(connected) = self.virtual_tables.get(&table.folded) else {
+                continue;
+            };
+            let declaration = connected.table.declaration();
+            table.kind = inillucent_sql::catalog_view::TableKind::Virtual;
+            table.without_rowid = declaration.without_rowid;
+            table.columns = inillucent_session::vtab::declared_columns(declaration);
+            table.module = Some(inillucent_sql::vtab::ModuleRef {
+                name: connected.arguments.module.clone(),
+                folded: connected.arguments.module.to_ascii_lowercase(),
+                arguments: connected.arguments.arguments.clone(),
+            });
+        }
+        self.tables = rebuilt;
         Ok(())
     }
 

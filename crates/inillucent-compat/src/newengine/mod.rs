@@ -48,6 +48,7 @@
 pub mod analyze;
 pub mod ddl;
 pub mod pragma;
+pub mod vtab;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -167,6 +168,14 @@ pub struct ImportedDatabase {
     busy_timeout_ms: u64,
     /// Whether `PRAGMA foreign_keys` is on.
     foreign_keys: bool,
+    /// The modules this connection knows, which is the built-in set.
+    ///
+    /// Held rather than looked up per statement because a module is registered
+    /// once and asked many times, and because `CREATE VIRTUAL TABLE` has to find
+    /// one by name before anything else can happen.
+    registry: inillucent_ext::registry::Registry,
+    /// The virtual tables that have been connected, by folded name.
+    virtual_tables: HashMap<Vec<u8>, vtab::Connected>,
     /// Where the last `CREATE INDEX` spent its time, in nanoseconds.
     ///
     /// Scan, sort, uniqueness check, pack. On the harness's own type, in a
@@ -198,6 +207,15 @@ impl TreeCatalog for ImportedDatabase {
 
     fn covering_candidates(&self, table_root: u32) -> Vec<u32> {
         self.covering.get(&table_root).cloned().unwrap_or_default()
+    }
+
+    fn virtual_rows(
+        &self,
+        table: &TableInfo,
+        path: &inillucent_sql::plan::AccessPath,
+        params: &Params,
+    ) -> DbResult<Option<Vec<Vec<OwnedDatum>>>> {
+        self.rows_of_module(table, path, params)
     }
 }
 
@@ -543,6 +561,8 @@ impl ImportedDatabase {
             next_root: FIRST_CREATED_ROOT,
             busy_timeout_ms: 0,
             foreign_keys: false,
+            registry: inillucent_ext::registry::Registry::with_builtins(),
+            virtual_tables: HashMap::new(),
             index_stages: std::cell::Cell::new((0, 0, 0, 0)),
             catalog_generation: 0,
         })
@@ -844,6 +864,7 @@ impl ImportedDatabase {
             Cached::Select(_, prepared) => Ok(prepared.describe()),
             Cached::Ddl(_) => Ok(vec!["a directive".to_string()]),
             Cached::Insert(..) => Ok(vec!["an insert".to_string()]),
+            Cached::VirtualInsert(_) => Ok(vec!["an insert into a module".to_string()]),
             Cached::Update(..) => Ok(vec!["an update".to_string()]),
             Cached::Delete(..) => Ok(vec!["a delete".to_string()]),
         }
@@ -888,6 +909,9 @@ impl ImportedDatabase {
     /// A no-op outside a transaction, so a caller can commit at a boundary
     /// without having to know whether it opened one.
     pub fn commit_batch(&mut self) -> DbResult<()> {
+        // Every module flushes what it is holding before the log's commit
+        // record, because what it flushes is more writes.
+        self.sync_modules()?;
         let Some(txn) = self.batch.take() else {
             return Ok(());
         };
@@ -1134,7 +1158,10 @@ impl ImportedDatabase {
         let cached = std::rc::Rc::clone(&statement.0);
         let found = std::time::Instant::now();
         let rows = match &*cached {
-            Cached::Ddl(_) | Cached::Select(..) | Cached::Insert(_, None) => Vec::new(),
+            Cached::Ddl(_)
+            | Cached::VirtualInsert(_)
+            | Cached::Select(..)
+            | Cached::Insert(_, None) => Vec::new(),
             Cached::Insert(_, Some((plan, prepared))) => {
                 physical::run_any_prepared(plan, self, prepared, params)?.0
             }
@@ -1148,6 +1175,10 @@ impl ImportedDatabase {
             Cached::Ddl(sql) => {
                 let sql = sql.clone();
                 self.execute_ddl(&sql)?;
+            }
+            Cached::VirtualInsert(statement) => {
+                let statement = statement.clone();
+                self.insert_into_module(&statement, params)?;
             }
             Cached::Select(plan, prepared) => {
                 physical::run_any_prepared(plan, self, prepared, params)?;
@@ -1207,6 +1238,10 @@ impl ImportedDatabase {
             Cached::Ddl(sql) => {
                 let sql = sql.clone();
                 self.execute_ddl(&sql)
+            }
+            Cached::VirtualInsert(statement) => {
+                let statement = statement.clone();
+                self.insert_into_module(&statement, params)
             }
             Cached::Select(plan, prepared) => {
                 let (rows, shape) = physical::run_any_prepared(plan, self, prepared, params)?;
@@ -1269,6 +1304,15 @@ impl ImportedDatabase {
                 let plan = plan_select_with(*select, Levers::default());
                 let prepared = physical::prepare_any(&plan, self)?;
                 Ok(Cached::Select(Box::new(plan), Box::new(prepared)))
+            }
+            BoundStatement::Insert(statement)
+                if statement.table.kind == inillucent_sql::catalog_view::TableKind::Virtual =>
+            {
+                // A write to a virtual table is the *module's* to make. The
+                // engine evaluates the row and hands it over; what happens to it
+                // is the module's business, which is what makes a module a
+                // module rather than a table with a funny name.
+                Ok(Cached::VirtualInsert(statement))
             }
             BoundStatement::Insert(statement) => {
                 let source = match &statement.source {
@@ -1428,6 +1472,8 @@ enum Cached {
     /// Re-bound on every execution, because binding a `DROP TABLE` resolves
     /// whether the table is there and the answer changes when it runs.
     Ddl(String),
+    /// An insert into a virtual table, which the module applies.
+    VirtualInsert(Box<inillucent_sql::dml::BoundInsert>),
     /// A query.
     Select(Box<PhysicalPlan>, Box<physical::Prepared>),
     /// An insert, with the plan for its `SELECT` source when it has one.
