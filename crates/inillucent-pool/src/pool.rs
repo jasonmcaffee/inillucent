@@ -321,6 +321,12 @@ pub struct Pool {
     /// every sync, and [`Pool::writeback`] refuses a page the log has not
     /// caught up with.
     durable_lsn: Cell<u64>,
+    /// What to call when a page the pool must write is ahead of the log.
+    ///
+    /// `None` means there is nothing to ask, which is a read-only open and a
+    /// bulk build with no log.
+    #[allow(clippy::type_complexity)]
+    advance_log: RefCell<Option<Box<dyn Fn() -> DbResult<u64>>>>,
     /// The LSN at or above which a page's change belongs to a transaction that
     /// has not committed.
     ///
@@ -429,6 +435,7 @@ impl Pool {
             // bulk build and a read-only open both run this way, and both are
             // correct to: a page cannot be ahead of a log that does not exist.
             durable_lsn: Cell::new(u64::MAX),
+            advance_log: RefCell::new(None),
             // Nothing is uncommitted until a transaction says so.
             uncommitted_lsn: Arc::new(AtomicU64::new(u64::MAX)),
         })
@@ -445,6 +452,29 @@ impl Pool {
     /// @param lsn - the position past the last durable byte of the log
     pub fn set_durable_lsn(&self, lsn: u64) {
         self.durable_lsn.set(lsn);
+    }
+
+    /// Registers what the pool may call when a page it must write is ahead of
+    /// the log.
+    ///
+    /// **The pool cannot flush the log and must not learn how.** It does not
+    /// know `inillucent-wal` exists - the layering invariant says so, and the log
+    /// is written before any page is, so an edge from the pool to the log would
+    /// point the wrong way. But refusing the write is not a correct answer
+    /// either: a statement that dirties more pages than the pool holds has to
+    /// evict, and every candidate it has carries an LSN the log has not reached
+    /// yet, so the statement fails through no fault of its own.
+    ///
+    /// A closure is the seam. The pool asks "make the log durable and tell me
+    /// how far it got"; whoever registered it knows what a log is. The guard
+    /// below still refuses if the answer is not far enough, so the write-ahead
+    /// rule is enforced by the same check it always was - the caller simply now
+    /// gets a chance to satisfy it.
+    ///
+    /// @param advance - makes the log durable and returns its new durable point
+    #[allow(clippy::type_complexity)]
+    pub fn on_log_behind(&self, advance: Box<dyn Fn() -> DbResult<u64>>) {
+        *self.advance_log.borrow_mut() = Some(advance);
     }
 
     /// Returns the write-ahead watermark, or `u64::MAX` when there is no log.
@@ -1137,14 +1167,39 @@ impl Pool {
                 .map_err(|_| misuse("a frame chosen for writeback was mutably borrowed"))?;
             page::read_u64(&bytes, page::header::LSN)?
         };
-        if lsn > durable {
+        if lsn <= durable {
+            return Ok(());
+        }
+        // The log is behind. Ask it to catch up before refusing: a statement
+        // that dirties more pages than the pool holds has to evict, and every
+        // candidate it has carries an LSN the log has not reached, so refusing
+        // outright fails a statement that has done nothing wrong.
+        //
+        // The borrow is taken and released around the call so that an
+        // `advance` which reached back into the pool could not find this
+        // already borrowed.
+        let asked = self.advance_log.borrow().is_some();
+        if !asked {
             return Err(misuse(format!(
-                "page {} carries lsn {lsn} and the log is durable to {durable}: \
-                 writing it would put the data file ahead of the log",
+                "page {} carries lsn {lsn} and the log is durable to {durable}: writing it would put the data file ahead of the log",
                 page.0
             )));
         }
-        Ok(())
+        let reached = {
+            let held = self.advance_log.borrow();
+            match held.as_ref() {
+                Some(advance) => advance()?,
+                None => durable,
+            }
+        };
+        self.durable_lsn.set(reached);
+        if lsn <= reached {
+            return Ok(());
+        }
+        Err(misuse(format!(
+            "page {} carries lsn {lsn}, the log was asked to catch up and reached {reached}: writing it would put the data file ahead of the log",
+            page.0
+        )))
     }
 
     /// Pins a frame and borrows its bytes.

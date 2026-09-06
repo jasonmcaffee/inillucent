@@ -141,7 +141,7 @@ pub struct ImportedDatabase {
     /// harness needs of a transaction manager is the log, the sync policy and
     /// the commit record; the snapshots and the version log are what the Phase
     /// 3 model driver exercises, and it drives the `Engine` directly.
-    wal: Wal,
+    wal: std::rc::Rc<Wal>,
     /// The transaction number the next statement takes.
     next_txn: std::cell::Cell<u64>,
     /// The statements already parsed, bound, planned and prepared, by SQL text.
@@ -567,15 +567,16 @@ impl ImportedDatabase {
         // The log the write path describes every change in, opened on a file
         // that has just been checkpointed - so it starts empty, at the first
         // stream position, and every record in it is one this process wrote.
-        let wal = Wal::open(
+        let wal = std::rc::Rc::new(Wal::open(
             std::sync::Arc::new(OsVfs::new()),
             &db_path,
             database.uuid(),
             FIRST_LSN,
             1,
             WalOptions::default(),
-        )?;
+        )?);
         database.pool().set_durable_lsn(wal.write_ahead_point());
+        let_the_pool_ask_the_log(database.pool(), &wal);
 
         // Smallest tree first, so the physical pass takes the cheapest
         // structure that covers the query. Sorting by bytes rather than by
@@ -797,15 +798,16 @@ impl ImportedDatabase {
         trees.insert(schema_root, catalog_tree);
         catalog = catalog.with_table(schema_info.clone());
 
-        let wal = Wal::open(
+        let wal = std::rc::Rc::new(Wal::open(
             std::sync::Arc::new(OsVfs::new()),
             &db_path,
             database.uuid(),
             FIRST_LSN,
             1,
             WalOptions::default(),
-        )?;
+        )?);
         database.pool().set_durable_lsn(wal.write_ahead_point());
+        let_the_pool_ask_the_log(database.pool(), &wal);
 
         for roots in covering.values_mut() {
             roots.sort_by_key(|root| {
@@ -1361,17 +1363,18 @@ impl ImportedDatabase {
         trees.insert(SCHEMA_VIEW_ROOT, catalog_tree);
         self.trees = trees;
         self.entries = entries;
-        self.wal = Wal::open(
+        self.wal = std::rc::Rc::new(Wal::open(
             std::sync::Arc::new(OsVfs::new()),
             &db_path,
             self.database.uuid(),
             FIRST_LSN,
             1,
             WalOptions::default(),
-        )?;
+        )?);
         self.database
             .pool()
             .set_durable_lsn(self.wal.write_ahead_point());
+        let_the_pool_ask_the_log(self.database.pool(), &self.wal);
         self.rebuild_tables()?;
         self.refresh_catalog();
         Ok(())
@@ -1869,6 +1872,10 @@ impl WriteTarget for WriteView<'_> {
 ///
 /// Every record carries the transaction it belongs to, which is what lets
 /// recovery tell a committed change from one whose commit never arrived.
+///
+/// It holds no handle of its own: when the pool needs to write a page the log
+/// has not reached, the pool asks the log directly through the closure
+/// `let_the_pool_ask_the_log` registers. See `Pool::on_log_behind`.
 struct WalLog<'a> {
     wal: &'a Wal,
     txn: u64,
@@ -2058,6 +2065,30 @@ fn target_path(fixture: &std::path::Path, page_size: usize, frames: usize) -> Pa
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     directory.join(format!("{stem}-p{page_size}-f{frames}.rdb"))
+}
+
+/// Tells a pool how to make the log catch up when it is behind.
+///
+/// **Registered wherever a database and a log come together**, which is the
+/// import, the open and the reopen. Without it the pool can only refuse a page
+/// whose LSN is past the durable point, and a statement that dirties more pages
+/// than the pool holds has no way to satisfy it: `CREATE INDEX` on the large
+/// fixture failed on every one of thirty qualification rounds for exactly that
+/// reason.
+///
+/// The sync is real. `write_ahead_point` is `durable_end` under NORMAL and
+/// FULL, so what is handed back is a point the log has reached rather than one
+/// it has merely been given bytes for, and the pool's guard still refuses if it
+/// is not far enough.
+///
+/// @param pool - the pool that will do the asking
+/// @param wal - the log it should ask
+fn let_the_pool_ask_the_log(pool: &Pool, wal: &std::rc::Rc<Wal>) {
+    let held = std::rc::Rc::clone(wal);
+    pool.on_log_behind(Box::new(move || {
+        held.sync()?;
+        Ok(held.write_ahead_point())
+    }));
 }
 
 /// Returns the modules a database of this engine has.
