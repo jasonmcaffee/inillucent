@@ -54,7 +54,7 @@ use inillucent_base::DbResult;
 use inillucent_catalog::load::table_from_create_sql;
 use inillucent_catalog::paged::{
     attach_catalog, read_catalog, schema_create_sql, schema_layout, write_catalog, ObjectKind,
-    SchemaEntry, SCHEMA_TABLE,
+    SchemaEntry,
 };
 use inillucent_exec::physical::{self, ForcePlan, Params, SourceLayout, TreeCatalog};
 use inillucent_exec::StaticType;
@@ -197,17 +197,21 @@ impl ImportedDatabase {
             }
             // A `WITHOUT ROWID` table is keyed by its primary key rather than
             // by a rowid, so its pages are index pages and its rows are index
-            // entries. The TDD's leaf layout covers it - `key_columns > 1` and
-            // the same PAX leaf - but the *import* would need a second reader,
-            // and Phase 2's read families have no such table. It is skipped
-            // rather than half-read, and skipping it here means a query against
-            // it is refused by the binder with a name it cannot resolve, which
-            // is a loud failure rather than a wrong answer.
-            if info.without_rowid {
-                skipped.push(String::from_utf8_lossy(&info.name).into_owned());
-                continue;
-            }
-            let (shape, layout) = match import_table(&mut database, &mut file, info) {
+            // entries. Phase 2 skipped it and named it in `skipped()`; Phase 3
+            // takes it, because thirteen of the read-only SLT corpus's
+            // thirty-seven refusals were the `teams` table and every query that
+            // joined it.
+            //
+            // The new format needs no special case at all - it is a tree whose
+            // key is more than one column, which every index already is. What
+            // it needs is the *reader* to know the record's field order, and
+            // SQLite records that in `primary_key_position`.
+            let imported = if info.without_rowid {
+                import_keyed_table(&mut database, &mut file, info)
+            } else {
+                import_table(&mut database, &mut file, info)
+            };
+            let (shape, layout) = match imported {
                 Ok(imported) => imported,
                 Err(_) => {
                     skipped.push(String::from_utf8_lossy(&info.name).into_owned());
@@ -225,6 +229,16 @@ impl ImportedDatabase {
             layouts.insert(info.root, layout);
             for index in &info.indexes {
                 if index.root == 0 {
+                    continue;
+                }
+                // A `WITHOUT ROWID` table's primary-key index *is* the table:
+                // SQLite reports it at the table's own root page, because there
+                // is only one b-tree. Importing it as an index would overwrite
+                // the table's layout with one that carries the key columns and
+                // nothing else - which is what happened, and the symptom was
+                // `SELECT * FROM teams` refusing with "the tree read for FROM
+                // term 0 does not carry record slot 1".
+                if info.without_rowid && index.root == info.root {
                     continue;
                 }
                 let (shape, layout) =
@@ -808,6 +822,124 @@ fn import_table(
             width,
             // A rowid-clustered tree is ordered by its rowid, which is column 0.
             key_columns: vec![0],
+        },
+    ))
+}
+
+/// Imports one `WITHOUT ROWID` table into a key-ordered PAX tree.
+///
+/// A `WITHOUT ROWID` table *is* an index b-tree: there is no separate table
+/// b-tree and no rowid, and the record holds every column with the primary key's
+/// columns first. So the import is the index import with the whole record as the
+/// row and the primary key as the key - and the resulting tree needs nothing the
+/// engine does not already do, because an index tree has a multi-column key too.
+///
+/// **The field order is SQLite's, not the declaration's.** For
+/// `CREATE TABLE t(a, b, PRIMARY KEY(b))` the record is `(b, a)`, and
+/// `primary_key_position` is what says so. Reconstructing that order by guessing
+/// - assuming the key is a prefix of the declared columns, say - would read the
+/// right bytes into the wrong columns on any table whose primary key is not
+/// written first, and every value would still be a plausible value.
+///
+/// @param database - the file the tree is built in
+/// @param file - the open fixture
+/// @param info - the table's catalog entry
+fn import_keyed_table(
+    database: &mut Database,
+    file: &mut SqliteFile,
+    info: &TableInfo,
+) -> DbResult<(TreeShape, SourceLayout)> {
+    let width = info.columns.len();
+    // The record's field order: primary-key columns in their key order, then
+    // every other column in declaration order.
+    let mut order: Vec<usize> = Vec::with_capacity(width);
+    let mut keyed: Vec<(u16, usize)> = info
+        .columns
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, column)| column.primary_key_position.map(|at| (at, slot)))
+        .collect();
+    keyed.sort_unstable();
+    let key_columns = keyed.len();
+    if key_columns == 0 {
+        return Err(misuse(
+            "a WITHOUT ROWID table with no primary key cannot be keyed",
+        ));
+    }
+    order.extend(keyed.iter().map(|(_, slot)| *slot));
+    for slot in 0..width {
+        if !order.contains(&slot) {
+            order.push(slot);
+        }
+    }
+
+    let rows = file.read_index(info.root, width)?;
+    let mut columns = Vec::with_capacity(width);
+    let mut types = Vec::with_capacity(width);
+    // `slots[declared] = tree column`, which is the inverse of `order`.
+    let mut slots: Vec<Option<usize>> = vec![None; width];
+    for (position, declared) in order.iter().enumerate() {
+        let (physical, static_type) = match info.columns.get(*declared) {
+            Some(column) => physical_for(column.affinity),
+            None => (PhysicalType::Any, StaticType::Unknown),
+        };
+        let collation = info
+            .columns
+            .get(*declared)
+            .map(|column| collation_of(&column.collation))
+            .unwrap_or(Collation::Binary);
+        let spec = if position < key_columns {
+            ColumnSpec::key(physical)
+        } else {
+            ColumnSpec::new(physical)
+        };
+        columns.push(spec.with_collation(collation));
+        types.push(static_type);
+        if let Some(slot) = slots.get_mut(*declared) {
+            *slot = Some(position);
+        }
+    }
+
+    let borrowed: Vec<Vec<Datum<'_>>> = rows
+        .iter()
+        .map(|row| row.iter().map(OwnedDatum::borrow).collect())
+        .collect();
+    let tree = PagedTree::bulk_build(
+        database,
+        u64::from(info.root),
+        columns.clone(),
+        key_columns,
+        &borrowed,
+    )?;
+    // A non-binary collation means the tree is *seekable* but not "already
+    // sorted" for an ORDER BY that did not name the same collation, which is
+    // the same disqualification `import_index` makes and for the same reason.
+    let ordered = columns
+        .iter()
+        .take(key_columns)
+        .all(|spec| spec.collation == Collation::Binary);
+    Ok((
+        TreeShape {
+            root: tree.root(),
+            columns,
+            key_columns,
+            first_leaf: tree.first_leaf(),
+            leaf_count: tree.leaf_count(),
+            row_count: tree.row_count(),
+        },
+        SourceLayout {
+            tree_key: info.root,
+            slots,
+            // There is no rowid: that is what `WITHOUT ROWID` means, and a
+            // query that asks for one is refused rather than given the key.
+            rowid: None,
+            types,
+            width,
+            key_columns: if ordered {
+                (0..key_columns).collect()
+            } else {
+                Vec::new()
+            },
         },
     ))
 }

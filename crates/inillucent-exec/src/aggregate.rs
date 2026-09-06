@@ -24,8 +24,11 @@
 //! - **`group_concat(x, sep)`** joins non-NULL values with `sep` (default
 //!   `","`) and is NULL over no non-NULL rows.
 
+use std::collections::HashSet;
+
 use inillucent_base::DbResult;
 use inillucent_tree::datum::{Datum, OwnedDatum};
+use inillucent_value::collation::Collation;
 
 use crate::expr::{format_real, numeric};
 
@@ -69,6 +72,19 @@ const EXACT_IN_DOUBLE: i64 = 4_503_599_627_370_496;
 #[derive(Clone, Debug)]
 pub struct Accumulator {
     kind: AggregateKind,
+    /// The argument values already folded in, when the call said `DISTINCT`.
+    ///
+    /// `count(DISTINCT team)` counts the distinct teams, not the rows, and the
+    /// set is what makes that true. It is per accumulator rather than per
+    /// operator because `GROUP BY` gives each group its own - `count(DISTINCT
+    /// x)` inside a group counts the distinct values *of that group*, and a set
+    /// shared across groups would count each value once for the whole query.
+    ///
+    /// The values are encoded under the argument's collation, through the same
+    /// `inillucent_tree::key` encoding `DISTINCT` and the set operations use, so
+    /// `count(DISTINCT team)` over a `NOCASE` column agrees with `SELECT DISTINCT
+    /// team` over it.
+    seen: Option<(Collation, HashSet<Vec<u8>>)>,
     /// Rows counted, or non-NULL values seen.
     count: i64,
     /// The integer running total, while the sum is still exact.
@@ -97,6 +113,7 @@ impl Accumulator {
     pub fn new(kind: AggregateKind) -> Accumulator {
         Accumulator {
             kind,
+            seen: None,
             count: 0,
             integer_sum: 0,
             real_sum: 0.0,
@@ -107,9 +124,30 @@ impl Accumulator {
         }
     }
 
+    /// Returns an accumulator that folds each distinct argument value once.
+    ///
+    /// @param kind - which aggregate it computes
+    /// @param collation - the collation the argument is compared under
+    pub fn distinct(kind: AggregateKind, collation: Collation) -> Accumulator {
+        let mut accumulator = Accumulator::new(kind);
+        accumulator.seen = Some((collation, HashSet::new()));
+        accumulator
+    }
+
     /// Returns which aggregate this computes.
     pub fn kind(&self) -> &AggregateKind {
         &self.kind
+    }
+
+    /// Reports whether a whole run of integers may be folded in at once.
+    ///
+    /// A `DISTINCT` accumulator has to look at every value to decide whether it
+    /// has seen it, so the vectorised path is not available to it - and an
+    /// accumulator that took it anyway would count duplicates. The fast path
+    /// asks rather than the caller remembering, because the caller is three
+    /// operators and the accumulator is one.
+    pub fn takes_dense(&self) -> bool {
+        self.seen.is_none()
     }
 
     /// Folds one value in.
@@ -122,6 +160,13 @@ impl Accumulator {
         }
         if value.is_null() {
             return;
+        }
+        if let Some((collation, seen)) = &mut self.seen {
+            let mut encoded = Vec::new();
+            inillucent_tree::key::encode_into_with(value, *collation, &mut encoded);
+            if !seen.insert(encoded) {
+                return;
+            }
         }
         self.count = self.count.saturating_add(1);
         match &self.kind {
