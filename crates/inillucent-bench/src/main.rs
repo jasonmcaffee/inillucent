@@ -371,12 +371,21 @@ enum Command {
         /// Each model's narrowed ranking against its own full-width ranking.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         matryoshka: bool,
+        /// Gate G4: how often each model answers confidently when nothing in
+        /// the corpus answers the question, on its own calibrated threshold.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        abstention: bool,
         /// Distinct chunks re-embedded to time each model.
         #[arg(long, default_value_t = 2000)]
         cost_samples: usize,
         /// Processors the cost lane times each model on, comma separated.
         #[arg(long, default_value = "cpu,cuda:0")]
         cost_devices: String,
+        /// Timed passes per model per device, each over a disjoint slice of
+        /// chunks. One timing is not a measurement: the same model on this
+        /// machine has varied 3.7x between runs.
+        #[arg(long, default_value_t = 3)]
+        cost_repeats: usize,
         /// Chunks the Matryoshka lane ranks over.
         #[arg(long, default_value_t = 25000)]
         matryoshka_chunks: usize,
@@ -839,8 +848,10 @@ fn main() -> Result<()> {
             hybrid,
             cost,
             matryoshka,
+            abstention,
             cost_samples,
             cost_devices,
+            cost_repeats,
             matryoshka_chunks,
         } => {
             let options = gradeembed::EmbeddingGradeOptions {
@@ -857,8 +868,10 @@ fn main() -> Result<()> {
                 hybrid,
                 cost,
                 matryoshka,
+                abstention,
                 cost_samples,
                 cost_devices: if cost { parse_devices(&cost_devices)? } else { Vec::new() },
+                cost_repeats,
                 matryoshka_chunks,
                 arm_options: arm::ArmOptions {
                     device: Device::parse(&device)?,
