@@ -132,28 +132,37 @@ impl ImportedDatabase {
                 exists,
                 if_not_exists,
             ),
-            // **Refused, because storing one would be a silent wrong answer.**
-            // This engine does not fire triggers. It used to accept
-            // `CREATE TRIGGER`, store the statement byte for byte, and list the
-            // trigger in `sqlite_schema` - and then not run it, and say
-            // nothing. A database whose triggers do not fire is one whose
-            // invariants are not being maintained, and the application finds
-            // out from its data.
+            // **Stored and fired, since task-1838.** It used to be refused,
+            // and the refusal was right at the time: this engine could store a
+            // trigger and list it in `sqlite_schema` but could not run one, and
+            // a database whose triggers never fire is one whose invariants are
+            // not being maintained by anything - which the application finds
+            // out from its data rather than from an error.
             //
-            // Every other gap in this engine is a refusal that names itself,
-            // and that consistency is worth more than accepting a statement it
-            // cannot honour. A schema that stops loading here is a schema that
-            // was already broken and did not know it.
-            //
-            // Firing them is real feature work - row triggers, `BEFORE` and
-            // `AFTER`, `WHEN` clauses, recursion limits - and is not this
-            // phase's. `crates/inillucent-compat/tests/new_engine_surface.rs`
-            // holds the line until it is.
-            Directive::CreateTrigger { name, .. } => Err(misuse(format!(
-                "the new engine does not run triggers, so it will not store one: {} \
-                 would never fire",
-                String::from_utf8_lossy(&name)
-            ))),
+            // `inillucent-exec`'s firing point is what makes it honest, and it
+            // is the same mechanism foreign keys are enforced by: the binder
+            // turns a `REFERENCES` clause into `CREATE TRIGGER` text, so a
+            // written trigger and a key take exactly one path.
+            Directive::CreateTrigger {
+                name,
+                name_offset,
+                table,
+                exists,
+                ..
+            } => self.create_bodiless(
+                "CREATE TRIGGER",
+                ObjectKind::Trigger,
+                source,
+                name_offset,
+                &name,
+                &table,
+                exists,
+                // The directive carries no `if_not_exists` because it does not
+                // need one: `bind_create_trigger` has already refused a
+                // duplicate that did not say so, and `exists` reaching here at
+                // all therefore means the statement did.
+                true,
+            ),
             Directive::CreateVirtualTable {
                 if_not_exists,
                 name,
@@ -252,6 +261,18 @@ impl ImportedDatabase {
     /// cache is the bug this function exists to make unwriteable: the next
     /// execution would take a plan built against the tree that used to be there.
     pub(super) fn refresh_catalog(&mut self) {
+        // **The keys are re-planned every time the schema changes**, and this
+        // is the only place that can do it: a foreign key records the child's
+        // side alone, so the parent's trigger is found by asking every table
+        // what it points at - which cannot be answered one `CREATE TABLE` at a
+        // time. Doing it here rather than in `create_table` is also what makes
+        // `CREATE TABLE child(... REFERENCES parent)` written *before* the
+        // parent exists start being enforced when the parent arrives.
+        inillucent_sql::foreign_key::plan_schema(
+            &mut self.tables,
+            b"main",
+            &inillucent_base::limits::Limits::default(),
+        );
         let mut catalog = StaticCatalog::empty();
         for table in &self.tables {
             catalog = catalog.with_table(table.clone());
@@ -259,8 +280,19 @@ impl ImportedDatabase {
         catalog = catalog.with_table(self.schema_info.clone());
         catalog = catalog.with_table(super::schema_alias_of(&self.schema_info));
         self.catalog = catalog;
-        self.statements.borrow_mut().clear();
+        self.forget_compiled_statements();
         self.catalog_generation = self.catalog_generation.saturating_add(1);
+    }
+
+    /// Throws away every statement compiled against the catalog as it was.
+    ///
+    /// A compiled statement carries decisions the catalog and the connection's
+    /// settings made when it was compiled - which tree it reads, which index it
+    /// probes, and whether its foreign keys are checked. Anything that changes
+    /// one of those has to come through here, or the next execution answers
+    /// with the old decision.
+    pub(super) fn forget_compiled_statements(&self) {
+        self.statements.borrow_mut().clear();
     }
 
     /// Writes one row into the catalog tree and records it.

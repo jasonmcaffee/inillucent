@@ -35,12 +35,22 @@
 //!
 //! ## How a bound column finds its vector
 //!
-//! A `BoundExpr::Column` names a *record slot* in the SQLite sense, because the
-//! binder and the catalog were built for that layout. The new engine's trees do
-//! not have record slots; they have mini-columns. [`SourceLayout`] is the map
-//! between them, and it is built by whatever imported the table, because that
-//! is the only thing that knows which slot became which column. Keying it that
-//! way - rather than by name - is what lets the whole front end stay unchanged.
+//! A `BoundExpr::Column` carries both numbers a column has: its *declared*
+//! position, which is what the schema, the index keys and every DML path name
+//! it by, and its *record slot*, which is where a SQLite record would hold it.
+//! The two differ the moment a table declares a `VIRTUAL` generated column,
+//! because such a column takes no record field. The new engine's trees have
+//! neither: they have mini-columns, and [`SourceLayout`] is the map onto them.
+//!
+//! **That map is indexed by the declared position**, and every builder of one -
+//! `table_shape`, `keyed_table_shape`, `index_shape` - and every other reader of
+//! one - the insert, update and delete paths, `CREATE INDEX`, `ALTER TABLE` -
+//! already indexed it that way. This pass used to index it by the record slot
+//! instead, which agreed with all of them exactly as long as no table had a
+//! `VIRTUAL` column and returned the previous column's value for every column
+//! after one as soon as a table did. `None` still means the tree does not carry
+//! the column, which is how a covering index says so and how a `VIRTUAL` column
+//! says it is computed rather than stored.
 
 use inillucent_base::error::misuse;
 use inillucent_base::DbResult;
@@ -701,9 +711,18 @@ pub struct Shape {
 ///
 /// @param what - the construct, in words
 fn unsupported<T>(what: &str) -> DbResult<T> {
-    Err(misuse(format!(
-        "the new engine's physical pass does not handle {what} yet"
-    )))
+    // **The sentence and the marker are written in the same place**, so a
+    // caller asking `DbError::unsupported()` and a caller reading the message
+    // cannot be told different things. The wording is unchanged from before
+    // the marker existed, because assertions elsewhere quote it.
+    let said = format!("the new engine's physical pass does not handle {what} yet");
+    // The sentence is the message *and* the detail. `misuse` attaches what it is
+    // given as detail alone, which left every refusal answering `message()` with
+    // "bad parameter or other API misuse"; the detail is kept so that every
+    // existing reader of it is unaffected.
+    Err(misuse(said.clone())
+        .with_message(said)
+        .with_unsupported(what))
 }
 
 /// Chooses a statement's physical plan.
@@ -1205,22 +1224,23 @@ pub(crate) struct Space<'c> {
 impl Space<'_> {
     /// Returns the joined-row column a bound column reference names.
     ///
-    /// A FROM term may be two stages, so the slot is looked for in the table
+    /// A FROM term may be two stages, so the column is looked for in the table
     /// stage first and the index stage second: the table carries every column
     /// and the index only some, and preferring the table means a query that
     /// reads a column the index happens to hold still reads it from wherever
     /// the row was actually fetched.
     ///
     /// @param source - the planner FROM term
-    /// @param slot - the record slot
-    fn column(&self, source: usize, slot: usize) -> Option<usize> {
+    /// @param declared - the column's declared position, which is what every
+    ///   builder of a [`SourceLayout`] indexes its `slots` by
+    fn column(&self, source: usize, declared: usize) -> Option<usize> {
         let mut found = None;
         for (index, stage) in self.stages.iter().enumerate() {
             if stage.source != source {
                 continue;
             }
             let layout = self.layouts.get(index)?;
-            if let Some(Some(tree_column)) = layout.slots.get(slot) {
+            if let Some(Some(tree_column)) = layout.slots.get(declared) {
                 let resolved = stage.offset.saturating_add(*tree_column);
                 if stage.is_lookup {
                     return Some(resolved);
@@ -2489,11 +2509,11 @@ fn skip_scan_applies(plan: &PhysicalPlan, catalog: &dyn TreeCatalog, root: u32) 
         return Ok(false);
     }
     for (position, column) in select.columns.iter().enumerate() {
-        let slot = match &column.expr {
-            BoundExpr::Column { slot, .. } => *slot as usize,
+        let declared = match &column.expr {
+            BoundExpr::Column { column, .. } => *column as usize,
             _ => return Ok(false),
         };
-        let tree_column = match layout.slots.get(slot) {
+        let tree_column = match layout.slots.get(declared) {
             Some(Some(tree_column)) => *tree_column,
             _ => return Ok(false),
         };
@@ -3416,10 +3436,33 @@ fn translate(
         BoundExpr::Text(bytes) => Expr::Literal(OwnedDatum::Text(bytes.clone())),
         BoundExpr::Blob(bytes) => Expr::Literal(OwnedDatum::Blob(bytes.clone())),
         BoundExpr::Parameter(index) => Expr::Literal(params.get(*index)),
-        BoundExpr::Column { source, slot, .. } => {
-            let index = space.column(*source, *slot as usize).ok_or_else(|| {
+        // `RAISE(...)` is a value in the grammar and a failure in practice,
+        // which is why it is compiled rather than refused: the whole body of
+        // every foreign-key check trigger the binder synthesises is one
+        // `SELECT RAISE(ABORT, '...') WHERE <the key is missing>`, and the
+        // error is what enforcement *is*. `IGNORE` abandons the row instead of
+        // failing, and the firing point is what catches it.
+        BoundExpr::Raise {
+            action,
+            message,
+            foreign_key,
+        } => Expr::Raise {
+            code: match (action, foreign_key) {
+                (inillucent_sql::ast::RaiseAction::Ignore, _) => 0,
+                (_, true) => inillucent_sql::dml::codes::FOREIGN_KEY,
+                (_, false) => inillucent_sql::dml::codes::TRIGGER,
+            },
+            message: match action {
+                inillucent_sql::ast::RaiseAction::Ignore => {
+                    crate::expr::RAISE_IGNORE.as_bytes().to_vec()
+                }
+                _ => message.clone().unwrap_or_default(),
+            },
+        },
+        BoundExpr::Column { source, column, .. } => {
+            let index = space.column(*source, *column as usize).ok_or_else(|| {
                 misuse(format!(
-                    "the tree read for FROM term {source} does not carry record slot {slot}"
+                    "the tree read for FROM term {source} does not carry column {column}"
                 ))
             })?;
             Expr::Column(index)

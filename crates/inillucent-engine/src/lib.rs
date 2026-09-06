@@ -87,7 +87,7 @@ use std::path::PathBuf;
 
 use inillucent_base::error::misuse;
 use inillucent_base::limits::Limits;
-use inillucent_base::DbResult;
+pub use inillucent_base::DbResult;
 use inillucent_catalog::load::table_from_create_sql;
 use inillucent_catalog::paged::{
     attach_catalog, read_catalog, schema_create_sql, schema_layout, write_catalog, ObjectKind,
@@ -110,6 +110,28 @@ use inillucent_txn::redo::{RowRedo, TreeRows};
 use inillucent_value::collation::Collation;
 use inillucent_vfs::{DbPath, OsVfs};
 use inillucent_wal::{Body, Synchronous, Wal, WalOptions, FIRST_LSN};
+
+/// The error every call in this crate reports, and its result alias.
+///
+/// Re-exported for the reason [`BoundParams`] is: a caller of this crate needs
+/// no other, and `inillucent-driver` classifies a failure by reading
+/// [`DbError::unsupported`] and [`DbError::code`], both of which it has to be
+/// able to name.
+pub use inillucent_base::error::{DbError, PrimaryCode};
+
+/// The bound-parameter map a statement is executed with.
+///
+/// Re-exported so that a caller of this crate needs no other. `inillucent-driver`
+/// is the reason: its whole purpose is to be the one edge an application depends
+/// on, and an application that had to name `inillucent-exec` to bind a parameter
+/// would be depending on the layer the driver exists to hide.
+pub use inillucent_exec::physical::Params as BoundParams;
+
+/// A value going into a statement or coming out of one.
+///
+/// Re-exported for the reason [`BoundParams`] is. It is named `Value` here
+/// because `Datum` is already the borrowed form in this crate's own imports.
+pub use inillucent_tree::datum::OwnedDatum as Value;
 
 /// How many frames the harness gives a pool when nothing says otherwise.
 ///
@@ -218,6 +240,16 @@ pub struct ImportedDatabase {
     busy_timeout_ms: u64,
     /// Whether `PRAGMA foreign_keys` is on.
     foreign_keys: bool,
+    /// Whether `PRAGMA defer_foreign_keys` has put every immediate check off
+    /// until the commit, for the transaction now open.
+    defer_foreign_keys: bool,
+    /// Whether a cyclic-key sweep is already running.
+    ///
+    /// The sweep runs statements, and a statement runs the sweep; without this
+    /// the first cascade would recur until the stack ran out. It is a flag
+    /// rather than a depth because there is exactly one sweep at a time by
+    /// construction: it runs after a statement, at the outermost level.
+    settling: std::cell::Cell<bool>,
     /// The modules this connection knows, which is the built-in set.
     ///
     /// Held rather than looked up per statement because a module is registered
@@ -649,6 +681,8 @@ impl ImportedDatabase {
             next_root: FIRST_CREATED_ROOT,
             busy_timeout_ms: 0,
             foreign_keys: false,
+            defer_foreign_keys: false,
+            settling: std::cell::Cell::new(false),
             registry: modules(),
             virtual_tables: HashMap::new(),
             index_stages: std::cell::Cell::new((0, 0, 0, 0)),
@@ -951,6 +985,44 @@ impl ImportedDatabase {
             identifiers.push(identifier);
         }
 
+        // **The triggers, then the keys, and in that order.** A written
+        // trigger is a catalog row like a table or an index and joins its
+        // table's declaration; a foreign key is a trigger the binder writes,
+        // and `plan_schema` can only write it once every table is in hand,
+        // because a key records only the child's side and the parent's has to
+        // be found by asking every table what it points at.
+        //
+        // Neither was done here until now, which is the whole reason foreign
+        // keys were unenforced: the binder fills a statement's `triggers` from
+        // exactly these two places, and both were empty on this engine.
+        for entry in &stored {
+            if entry.kind != ObjectKind::Trigger {
+                continue;
+            }
+            let folded = entry.table.to_ascii_lowercase();
+            let Some((_, info)) = infos.get_mut(&folded) else {
+                skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
+                continue;
+            };
+            match inillucent_catalog::load::trigger_from_create_sql(&entry.sql) {
+                // Newest first, which is SQLite's own order: it pushes each
+                // trigger onto the front of the table's list as it reads the
+                // schema, so the most recently created one fires first.
+                Ok(trigger) => info.triggers.insert(0, trigger),
+                Err(_) => skipped.push(String::from_utf8_lossy(&entry.name).into_owned()),
+            }
+            entries.push((rowid_of_name(entry), entry.clone()));
+            identifiers.push(0);
+        }
+
+        let mut planned: Vec<TableInfo> = infos.values().map(|(_, info)| info.clone()).collect();
+        inillucent_sql::foreign_key::plan_schema(&mut planned, b"main", &Limits::default());
+        for info in planned {
+            if let Some((_, held)) = infos.get_mut(&info.folded) {
+                held.foreign_key_triggers = info.foreign_key_triggers.clone();
+            }
+        }
+
         for (_, (_, info)) in infos.iter() {
             catalog = catalog.with_table(info.clone());
         }
@@ -1037,6 +1109,8 @@ impl ImportedDatabase {
             next_root: highest_identifier.saturating_add(1).max(FIRST_CREATED_ROOT),
             busy_timeout_ms: 0,
             foreign_keys: false,
+            defer_foreign_keys: false,
+            settling: std::cell::Cell::new(false),
             registry: modules(),
             virtual_tables: HashMap::new(),
             index_stages: std::cell::Cell::new((0, 0, 0, 0)),
@@ -1211,14 +1285,12 @@ impl ImportedDatabase {
     /// - and printing the struct around it made every refusal look like a bug
     /// report about the engine rather than a sentence about the statement.
     pub fn plan(&self, sql: &str) -> DbResult<PhysicalPlan> {
-        let parsed = parse_next_statement(sql.as_bytes(), 0, &self.limits)
-            .map_err(|error| misuse(error.message()))?;
+        let parsed = parse_next_statement(sql.as_bytes(), 0, &self.limits).map_err(refused)?;
         let authorizer = AllowAll;
-        let mut binder =
-            Binder::new(&self.catalog, &parsed.ast, &authorizer).with_source(sql.as_bytes());
-        let bound = binder
-            .bind_statement(&parsed.statement)
-            .map_err(|error| misuse(error.message()))?;
+        let mut binder = Binder::new(&self.catalog, &parsed.ast, &authorizer)
+            .with_source(sql.as_bytes())
+            .with_foreign_keys(self.foreign_keys, self.defer_foreign_keys);
+        let bound = binder.bind_statement(&parsed.statement).map_err(refused)?;
         match bound {
             BoundStatement::Select(select) => Ok(plan_select_with(*select, Levers::default())),
             _ => Err(misuse(format!("{sql} is not a read-only statement"))),
@@ -1422,8 +1494,7 @@ impl ImportedDatabase {
     ///
     /// @param sql - the script, positioned at the statement to measure
     pub fn statement_length(&self, sql: &str) -> DbResult<usize> {
-        let parsed = parse_next_statement(sql.as_bytes(), 0, &self.limits)
-            .map_err(|error| misuse(error.message()))?;
+        let parsed = parse_next_statement(sql.as_bytes(), 0, &self.limits).map_err(refused)?;
         Ok(parsed.consumed)
     }
 
@@ -1604,6 +1675,9 @@ impl ImportedDatabase {
         self.undo_to(None)?;
         self.marks.clear();
         self.batch.set(None);
+        // The transaction's own setting goes with the transaction, which is
+        // SQLite's rule for `PRAGMA defer_foreign_keys`.
+        self.defer_foreign_keys = false;
         self.refresh_catalog();
         Ok(())
     }
@@ -1645,9 +1719,22 @@ impl ImportedDatabase {
     /// A no-op outside a transaction, so a caller can commit at a boundary
     /// without having to know whether it opened one.
     pub fn commit_batch(&mut self) -> DbResult<()> {
+        // **A deferred key is checked here, and a failure means the commit does
+        // not happen.** That is SQLite's rule and the whole meaning of
+        // `DEFERRABLE INITIALLY DEFERRED`: the rows are allowed to be
+        // inconsistent inside the transaction and are required to be consistent
+        // at its end. The transaction is left open so the caller can repair it
+        // or roll it back, which is what SQLite does too.
+        self.check_deferred_foreign_keys()?;
         // Every module flushes what it is holding before the log's commit
         // record, because what it flushes is more writes.
         self.sync_modules()?;
+        // `PRAGMA defer_foreign_keys` is the transaction's setting, not the
+        // connection's, and SQLite clears it at each commit and rollback.
+        if self.defer_foreign_keys {
+            self.defer_foreign_keys = false;
+            self.forget_compiled_statements();
+        }
         // Nothing to abandon once it is committed, and holding the before-images
         // would hold every row a long transaction touched.
         self.undo.clear();
@@ -1831,14 +1918,12 @@ impl ImportedDatabase {
     ///
     /// @param sql - the statement text
     pub fn bind(&self, sql: &str) -> DbResult<BoundStatement> {
-        let parsed = parse_next_statement(sql.as_bytes(), 0, &self.limits)
-            .map_err(|error| misuse(error.message()))?;
+        let parsed = parse_next_statement(sql.as_bytes(), 0, &self.limits).map_err(refused)?;
         let authorizer = AllowAll;
-        let mut binder =
-            Binder::new(&self.catalog, &parsed.ast, &authorizer).with_source(sql.as_bytes());
-        binder
-            .bind_statement(&parsed.statement)
-            .map_err(|error| misuse(error.message()))
+        let mut binder = Binder::new(&self.catalog, &parsed.ast, &authorizer)
+            .with_source(sql.as_bytes())
+            .with_foreign_keys(self.foreign_keys, self.defer_foreign_keys);
+        binder.bind_statement(&parsed.statement).map_err(refused)
     }
 
     /// Parses, plans and runs one statement of any kind.
@@ -1957,6 +2042,165 @@ impl ImportedDatabase {
         Ok((find, applied.elapsed().as_nanos()))
     }
 
+    /// One foreign key's violation query, with what it is about.
+    ///
+    /// The child and parent names and the key's own id are carried alongside
+    /// the SQL because `PRAGMA foreign_key_check` reports all three and the
+    /// query itself only produces a rowid.
+    fn violation_queries(&self, only: Option<&str>) -> DbResult<Vec<ViolationQuery>> {
+        let mut queries = Vec::new();
+        for child in &self.tables {
+            if child.kind != inillucent_sql::catalog_view::TableKind::Table
+                || child.folded.starts_with(b"sqlite_")
+            {
+                continue;
+            }
+            if only.is_some_and(|name| child.folded != name.as_bytes()) {
+                continue;
+            }
+            for key in &child.foreign_keys {
+                let Some(parent) = self
+                    .tables
+                    .iter()
+                    .find(|candidate| candidate.folded == key.parent_folded)
+                else {
+                    continue;
+                };
+                let Some(sql) =
+                    inillucent_sql::foreign_key::violation_query(child, parent, key, b"main")
+                else {
+                    continue;
+                };
+                queries.push(ViolationQuery {
+                    sql,
+                    child: child.name.clone(),
+                    parent: parent.name.clone(),
+                    key: u16::try_from(key.id).unwrap_or_default(),
+                });
+            }
+        }
+        Ok(queries)
+    }
+
+    /// Runs one query the engine wrote for itself, and returns its rows.
+    ///
+    /// **The engine asking itself a question.** A foreign-key check *is* a
+    /// query, and running it through the ordinary compile-and-execute path is
+    /// what makes it use the ordinary indexes - and what stops there being a
+    /// second, hand-written scan that has to be kept in step with the first.
+    ///
+    /// @param sql - the statement the engine generated
+    pub(crate) fn query_internally(&mut self, sql: &str) -> DbResult<Vec<Vec<OwnedDatum>>> {
+        Ok(self.execute_any(sql, &Params::default())?.rows)
+    }
+
+    /// Applies the actions of every key that can lead back to its own table.
+    ///
+    /// **A cyclic action cannot be inlined**, because the body would have to
+    /// appear once per level the data happens to be deep and that is not known
+    /// when the statement is compiled. The binder therefore stops a cascade at
+    /// the level it can see - the rows that pointed directly at the row that
+    /// went - and this takes what that leaves: every row whose key now has no
+    /// parent, repeated until nothing changes.
+    ///
+    /// It terminates because every pass either changes a row or stops, and a
+    /// pass only ever removes a row or clears a key.
+    ///
+    /// It runs after the statement rather than inside it, and only on a schema
+    /// that has such a key, so a schema without one pays a flag test.
+    pub(crate) fn settle_foreign_keys(&mut self) -> DbResult<()> {
+        if !self.foreign_keys || !self.has_cyclic_foreign_keys() {
+            return Ok(());
+        }
+        let mut statements = Vec::new();
+        for child in &self.tables {
+            if child.kind != inillucent_sql::catalog_view::TableKind::Table {
+                continue;
+            }
+            for key in &child.foreign_keys {
+                if !key.cyclic {
+                    continue;
+                }
+                let Some(parent) = self
+                    .tables
+                    .iter()
+                    .find(|candidate| candidate.folded == key.parent_folded)
+                else {
+                    continue;
+                };
+                if let Some(sql) =
+                    inillucent_sql::foreign_key::sweep_statement(child, parent, key, b"main")
+                {
+                    statements.push(sql);
+                }
+            }
+        }
+        if statements.is_empty() {
+            return Ok(());
+        }
+        for _ in 0..MAX_SWEEP_PASSES {
+            // The running total is what says whether a pass did anything: it
+            // moves as each statement finishes, so comparing it across a pass
+            // asks exactly "did any of these change a row" without the sweep
+            // having to count them itself.
+            let before = self.changed_ever.get();
+            for sql in &statements {
+                self.execute_any(sql, &Params::default())?;
+            }
+            if self.changed_ever.get() == before {
+                return Ok(());
+            }
+        }
+        Err(misuse(
+            "a foreign key's action did not settle; the schema may have a cycle that cannot resolve",
+        ))
+    }
+
+    /// Checks every deferred foreign key, and reports the first violation.
+    ///
+    /// **A full check rather than a running count.** SQLite keeps a counter of
+    /// outstanding violations and moves it as rows appear and disappear; a
+    /// counter that drifts by one reports a violation that is not there, or
+    /// misses one that is, and neither is visible until a commit fails for a
+    /// reason nobody can reproduce. Asking the question directly costs a query
+    /// per deferred key per commit and cannot drift.
+    pub(crate) fn check_deferred_foreign_keys(&mut self) -> DbResult<()> {
+        if !self.foreign_keys || !self.has_deferred_foreign_keys() {
+            return Ok(());
+        }
+        for query in self.violation_queries(None)? {
+            if self.query_internally(&query.sql)?.is_empty() {
+                continue;
+            }
+            return Err(DbError::new(inillucent_base::ExtendedCode(
+                inillucent_sql::dml::codes::FOREIGN_KEY,
+            ))
+            .with_message("FOREIGN KEY constraint failed")
+            .with_detail(format!(
+                "deferred key {} of {}",
+                query.key,
+                String::from_utf8_lossy(&query.child)
+            )));
+        }
+        Ok(())
+    }
+
+    /// Reports whether any key's checks are waiting for the commit.
+    fn has_deferred_foreign_keys(&self) -> bool {
+        self.defer_foreign_keys
+            || self
+                .tables
+                .iter()
+                .any(|table| table.foreign_keys.iter().any(|key| key.is_deferred()))
+    }
+
+    /// Reports whether any key can lead back to the table that declares it.
+    fn has_cyclic_foreign_keys(&self) -> bool {
+        self.tables
+            .iter()
+            .any(|table| table.foreign_keys.iter().any(|key| key.cyclic))
+    }
+
     /// Returns the keys a write will change.
     ///
     /// A `WHERE` that is a rowid equality is answered from the plan itself -
@@ -1985,6 +2229,36 @@ impl ImportedDatabase {
     /// @param cached - the compiled statement
     /// @param params - the bound parameters
     fn execute_compiled(
+        &mut self,
+        cached: &std::rc::Rc<Cached>,
+        params: &Params,
+    ) -> DbResult<Outcome> {
+        let outcome = self.apply_compiled(cached, params)?;
+        // **The cyclic half of a foreign key's action happens here**, after the
+        // statement rather than inside it, because a cascade that can reach
+        // itself cannot be inlined to a depth the data decides: the body would
+        // have to appear once per level the data happens to be deep, and that
+        // is not known when the statement is compiled.
+        //
+        // It sits on this function rather than on `execute_any` because this is
+        // the funnel *both* callers reach - a statement run by text and a
+        // statement prepared and stepped - and a settle that only one of them
+        // performed would leave the tree half-repaired depending on which API
+        // the application happened to use.
+        if !self.settling.get() {
+            self.settling.set(true);
+            let settled = self.settle_foreign_keys();
+            self.settling.set(false);
+            settled?;
+        }
+        Ok(outcome)
+    }
+
+    /// Runs one already-compiled statement, without settling anything after it.
+    ///
+    /// @param cached - the compiled statement
+    /// @param params - the bound parameters
+    fn apply_compiled(
         &mut self,
         cached: &std::rc::Rc<Cached>,
         params: &Params,
@@ -2159,11 +2433,10 @@ impl ImportedDatabase {
             )));
         }
         let authorizer = AllowAll;
-        let mut binder =
-            Binder::new(&self.catalog, &parsed.ast, &authorizer).with_source(sql.as_bytes());
-        let bound = binder
-            .bind_statement(inner)
-            .map_err(|error| misuse(error.message()))?;
+        let mut binder = Binder::new(&self.catalog, &parsed.ast, &authorizer)
+            .with_source(sql.as_bytes())
+            .with_foreign_keys(self.foreign_keys, self.defer_foreign_keys);
+        let bound = binder.bind_statement(inner).map_err(refused)?;
         let lines = match bound {
             BoundStatement::Select(select) => {
                 plan_select_with(*select, Levers::default()).describe()
@@ -2207,8 +2480,7 @@ impl ImportedDatabase {
         // this a level up, where a VDBE program was available to render; here
         // there is no program, and that difference is the whole of the
         // `query_plan` split below.
-        let parsed = parse_next_statement(sql.as_bytes(), 0, &self.limits)
-            .map_err(|error| misuse(error.message()))?;
+        let parsed = parse_next_statement(sql.as_bytes(), 0, &self.limits).map_err(refused)?;
         if let inillucent_sql::ast::Statement::Explain { query_plan, inner } = &parsed.statement {
             return self.compile_explain(sql, *query_plan, inner, &parsed);
         }
@@ -2370,6 +2642,7 @@ impl ImportedDatabase {
                 database: &mut self.database,
                 trees: &mut self.trees,
                 layouts: &self.layouts,
+                covering: &self.covering,
             };
             apply(&mut view, &mut log, params)?
         };
@@ -2390,6 +2663,24 @@ impl ImportedDatabase {
             changes,
         })
     }
+}
+
+/// How many times the cyclic sweep repeats before it gives up.
+///
+/// One pass per level of the deepest chain in the data. A tree deeper than this
+/// is a tree with a million levels, which is a different problem.
+const MAX_SWEEP_PASSES: usize = 1_000_000;
+
+/// One foreign key's violation query, and what it is about.
+struct ViolationQuery {
+    /// The `SELECT` that finds the rows with no parent.
+    sql: String,
+    /// The child table's name, which the pragma reports.
+    child: Vec<u8>,
+    /// The parent table's name, which the pragma reports.
+    parent: Vec<u8>,
+    /// The key's position in its table, which the pragma reports as `fkid`.
+    key: u16,
 }
 
 /// Returns a shape's column names as strings.
@@ -2519,6 +2810,45 @@ pub struct Outcome {
     pub changes: Changes,
 }
 
+/// Turns a parse or bind failure into a database error, keeping its kind.
+///
+/// **The message is exactly what it was**; what this adds is that a refusal the
+/// binder marked `Unsupported` - "a construct the grammar has but this phase
+/// does not implement" - arrives carrying that fact, where every conversion
+/// site used to flatten it into an ordinary `SQLITE_MISUSE`.
+///
+/// It matters because this engine is deliberately incomplete, and a caller in
+/// front of it has to tell "this engine cannot do that yet" from "you typed it
+/// wrong" without matching on the wording of a sentence. `inillucent-driver`
+/// is that caller; `ParseErrorKind::Refused` stays a plain misuse, because it
+/// is the reference's own wording for a statement the schema will not have and
+/// is not a gap in this engine.
+///
+/// @param error - the parser's or binder's failure
+fn refused(error: inillucent_sql::diagnostic::ParseError) -> inillucent_base::error::DbError {
+    // **The sentence goes in the message as well as the detail**, and that is a
+    // fix rather than a flourish. `misuse` attaches what it is given as
+    // *detail*, so every refusal this engine produced answered `message()` with
+    // its primary code's own text - "bad parameter or other API misuse" - and
+    // the sentence a person can act on was in the field `inillucent-base`
+    // documents as never leaving the process. `inillucent-cli::shell::reason`
+    // and `readgate::why` had each worked around it separately, which is what a
+    // defect looks like when it has been met twice and fixed neither time.
+    //
+    // A parse or bind refusal is caller-safe by construction: it names tables,
+    // columns and constructs, which are the caller's own words, and never a
+    // path, a bound value or page bytes. The detail is left in place so that
+    // everything reading it - the shell, the gate, the surface inventory -
+    // sees exactly what it saw before.
+    let built = misuse(error.message()).with_message(error.message());
+    match error.kind {
+        inillucent_sql::diagnostic::ParseErrorKind::Unsupported(what) => {
+            built.with_unsupported(what)
+        }
+        _ => built,
+    }
+}
+
 /// Names the kind of statement a refusal is about.
 ///
 /// @param statement - the bound statement
@@ -2570,6 +2900,9 @@ struct WriteView<'a> {
     database: &'a mut Database,
     trees: &'a mut HashMap<u32, PagedTree>,
     layouts: &'a HashMap<u32, SourceLayout>,
+    /// Which index trees cover which table, so a query a trigger body runs
+    /// inside the write reaches the same covering indexes a typed one does.
+    covering: &'a HashMap<u32, Vec<u32>>,
 }
 
 impl WriteTarget for WriteView<'_> {
@@ -2579,6 +2912,55 @@ impl WriteTarget for WriteView<'_> {
 
     fn layout(&self, root: u32) -> Option<&SourceLayout> {
         self.layouts.get(&root)
+    }
+
+    fn catalog(&self) -> &dyn TreeCatalog {
+        self
+    }
+}
+
+/// The write's own view of the trees, read as a planned query reads them.
+///
+/// **The same trees, seen the other way round.** A trigger body is a statement
+/// and has to find its rows, and it fires in the middle of a write that is
+/// already holding these trees mutably. Answering as a [`TreeCatalog`] as well
+/// is what lets `DELETE FROM child WHERE parent_id = OLD.id` reach the ordinary
+/// planner - and so the ordinary index probe - rather than a scan written a
+/// second time inside the write path.
+///
+/// A module's rows are the one thing it cannot answer: a virtual table's rows
+/// come from the module, the module is registered on the connection, and the
+/// connection is exactly what a write has split apart. A trigger body over a
+/// virtual table is refused by name rather than answered with nothing.
+impl TreeCatalog for WriteView<'_> {
+    fn pool(&self) -> &Pool {
+        self.database.pool()
+    }
+
+    fn tree(&self, root: u32) -> Option<&PagedTree> {
+        self.trees.get(&root)
+    }
+
+    fn layout(&self, root: u32) -> Option<&SourceLayout> {
+        self.layouts.get(&root)
+    }
+
+    fn covering_candidates(&self, table_root: u32) -> Vec<u32> {
+        self.covering.get(&table_root).cloned().unwrap_or_default()
+    }
+
+    fn virtual_rows(
+        &self,
+        table: &TableInfo,
+        path: &inillucent_sql::plan::AccessPath,
+        params: &Params,
+        needed: &inillucent_sql::bind::ColumnUse,
+    ) -> DbResult<Option<Vec<Vec<OwnedDatum>>>> {
+        let _ = (path, params, needed);
+        Err(misuse(format!(
+            "a trigger body reads {}, which is a virtual table",
+            String::from_utf8_lossy(&table.name)
+        )))
     }
 }
 
@@ -3117,6 +3499,42 @@ fn modules() -> inillucent_ext::registry::Registry {
     registry
 }
 
+/// Returns whether a declared column is a `VIRTUAL` generated one.
+///
+/// The one predicate behind the whole `VIRTUAL` shift. A `VIRTUAL` generated
+/// column is computed on read and never written, so it occupies no field in a
+/// SQLite record and no column in one of this engine's trees; a `STORED` one is
+/// an ordinary column that happens to have been filled in by an expression.
+///
+/// @param info - the table's declaration
+/// @param declared - the column's declared position
+fn is_virtual_column(info: &TableInfo, declared: usize) -> bool {
+    info.columns
+        .get(declared)
+        .is_some_and(|column| column.generated && !column.stored)
+}
+
+/// Returns the declared positions a table's record holds, in record order.
+///
+/// **One derivation of "which columns are actually stored", used by the shape,
+/// the import and the row comparison alike.** Everything that walks a record -
+/// the tree builder, the fixture importer, `logical_row` - used to walk
+/// `0..info.columns.len()` and so silently assumed that a declared position and
+/// a record field are the same number. They are, until a table declares a
+/// `VIRTUAL` generated column, after which every later column reads one field
+/// early and returns its neighbour's value: data rather than a refusal, which
+/// is the one failure this engine is not allowed to have.
+///
+/// The rowid-alias column is included, because SQLite's record does carry a
+/// (NULL) field for it and the callers drop it themselves.
+///
+/// @param info - the table's declaration
+fn stored_positions(info: &TableInfo) -> Vec<usize> {
+    (0..info.columns.len())
+        .filter(|declared| !is_virtual_column(info, *declared))
+        .collect()
+}
+
 /// Returns how a table's stored rows map onto the columns a query sees.
 ///
 /// **One derivation, exposed rather than copied.** The import turns SQLite's
@@ -3159,13 +3577,13 @@ pub fn logical_row(
         let alias = info.rowid_alias.map(usize::from);
         let mut out = Vec::with_capacity(layout.width);
         out.push(stored.first().cloned().unwrap_or(OwnedDatum::Null));
-        for slot in 0..info.columns.len() {
-            if Some(slot) == alias {
+        for (field, declared) in stored_positions(info).iter().enumerate() {
+            if Some(*declared) == alias {
                 continue;
             }
             out.push(
                 stored
-                    .get(slot.saturating_add(1))
+                    .get(field.saturating_add(1))
                     .cloned()
                     .unwrap_or(OwnedDatum::Null),
             );
@@ -3229,8 +3647,10 @@ fn import_table(
     file: &mut SqliteFile,
     info: &TableInfo,
 ) -> DbResult<(TreeShape, SourceLayout)> {
-    let record_width = info.columns.len();
-    let raw = file.read_table(info.root, record_width)?;
+    // The record's width is the count of *stored* columns, not of declared
+    // ones: SQLite writes no field for a `VIRTUAL` generated column.
+    let positions = stored_positions(info);
+    let raw = file.read_table(info.root, positions.len())?;
     // `read_table` returns [rowid] ++ record slots. The rowid alias slot holds
     // NULL in every SQLite record, so it is dropped and the rowid takes its
     // place as the tree's key column.
@@ -3242,12 +3662,12 @@ fn import_table(
     for row in raw {
         let mut out: Vec<OwnedDatum> = Vec::with_capacity(width);
         out.push(row.first().cloned().unwrap_or(OwnedDatum::Null));
-        for slot in 0..record_width {
-            if Some(slot) == alias {
+        for (field, declared) in positions.iter().enumerate() {
+            if Some(*declared) == alias {
                 continue;
             }
             out.push(
-                row.get(slot.saturating_add(1))
+                row.get(field.saturating_add(1))
                     .cloned()
                     .unwrap_or(OwnedDatum::Null),
             );
@@ -3292,39 +3712,41 @@ fn import_table(
 ///
 /// @param info - the table's declaration
 fn table_shape(info: &TableInfo) -> (Vec<ColumnSpec>, SourceLayout) {
-    let record_width = info.columns.len();
     let alias = info.rowid_alias.map(usize::from);
-    let mut slots: Vec<Option<usize>> = Vec::with_capacity(record_width);
+    // `slots` is indexed by *declared* position and `None` means the tree does
+    // not carry that column, which is exactly what a `VIRTUAL` generated column
+    // is: it takes no record field and no tree column, and every column
+    // declared after one therefore sits that many places earlier in the tree.
+    let mut slots: Vec<Option<usize>> = vec![None; info.columns.len()];
     let mut next = 1usize;
-    for slot in 0..record_width {
-        if Some(slot) == alias {
-            slots.push(Some(0));
-        } else {
-            slots.push(Some(next));
-            next = next.saturating_add(1);
-        }
-    }
-    let width = next;
     let mut columns = vec![ColumnSpec::key(PhysicalType::Int64)];
     let mut types = vec![StaticType::Int];
-    for slot in 0..record_width {
-        if Some(slot) == alias {
+    for declared in stored_positions(info) {
+        if Some(declared) == alias {
+            if let Some(slot) = slots.get_mut(declared) {
+                *slot = Some(0);
+            }
             continue;
         }
-        let (physical, static_type) = match info.columns.get(slot) {
+        let (physical, static_type) = match info.columns.get(declared) {
             Some(column) => physical_for(column.affinity),
             None => (PhysicalType::Any, StaticType::Unknown),
         };
         columns.push(
             ColumnSpec::new(physical).with_collation(
                 info.columns
-                    .get(slot)
+                    .get(declared)
                     .map(|column| collation_of(&column.collation))
                     .unwrap_or(Collation::Binary),
             ),
         );
         types.push(static_type);
+        if let Some(slot) = slots.get_mut(declared) {
+            *slot = Some(next);
+        }
+        next = next.saturating_add(1);
     }
+    let width = next;
     (
         columns,
         SourceLayout {
@@ -3362,9 +3784,10 @@ fn import_keyed_table(
     file: &mut SqliteFile,
     info: &TableInfo,
 ) -> DbResult<(TreeShape, SourceLayout)> {
-    let width = info.columns.len();
     let (columns, key_columns, layout) = keyed_table_shape(info)?;
-    let rows = file.read_index(info.root, width)?;
+    // The record's width is the count of *stored* columns: SQLite writes no
+    // field for a `VIRTUAL` generated column here either.
+    let rows = file.read_index(info.root, layout.width)?;
     let rows = in_key_order(rows, &columns, key_columns);
     let borrowed: Vec<Vec<Datum<'_>>> = rows
         .iter()
@@ -3417,13 +3840,18 @@ fn keyed_table_shape(info: &TableInfo) -> DbResult<(Vec<ColumnSpec>, usize, Sour
         ));
     }
     order.extend(keyed.iter().map(|(_, slot)| *slot));
+    // A `VIRTUAL` generated column is in no record and so in no tree column,
+    // here for the same reason it is in none of a rowid table's - and SQLite
+    // will not let one be part of a primary key, so the filter is only needed
+    // over the columns that follow the key.
     for slot in 0..width {
-        if !order.contains(&slot) {
+        if !order.contains(&slot) && !is_virtual_column(info, slot) {
             order.push(slot);
         }
     }
-    let mut columns = Vec::with_capacity(width);
-    let mut types = Vec::with_capacity(width);
+    let stored_width = order.len();
+    let mut columns = Vec::with_capacity(stored_width);
+    let mut types = Vec::with_capacity(stored_width);
     // `slots[declared] = tree column`, which is the inverse of `order`.
     let mut slots: Vec<Option<usize>> = vec![None; width];
     for (position, declared) in order.iter().enumerate() {
@@ -3464,7 +3892,7 @@ fn keyed_table_shape(info: &TableInfo) -> DbResult<(Vec<ColumnSpec>, usize, Sour
             // query that asks for one is refused rather than given the key.
             rowid: None,
             types,
-            width,
+            width: stored_width,
             key_columns: if ordered {
                 (0..key_columns).collect()
             } else {

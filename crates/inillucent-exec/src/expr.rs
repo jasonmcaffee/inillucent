@@ -142,6 +142,24 @@ pub enum Expr {
     Column(usize),
     /// A constant.
     Literal(OwnedDatum),
+    /// `RAISE(ABORT|FAIL|ROLLBACK, 'message')`, which never returns a value.
+    ///
+    /// It sits in a result column because that is where the grammar puts it -
+    /// `SELECT RAISE(ABORT, 'FOREIGN KEY constraint failed') WHERE NOT EXISTS
+    /// (...)` is the whole body of every foreign-key check trigger the binder
+    /// synthesises - and evaluating it is the error. So the node is a value in
+    /// the type system and a failure in practice, which is exactly what the
+    /// virtual machine's `HaltError` is.
+    ///
+    /// `RAISE(IGNORE)` is not here: it does not fail, it abandons the row, and
+    /// the firing point rather than the expression is what can do that. It
+    /// arrives as [`RAISE_IGNORE`] and is caught there.
+    Raise {
+        /// The extended result code, which says which constraint asked.
+        code: i32,
+        /// The message the caller sees.
+        message: Vec<u8>,
+    },
     /// Addition, subtraction, multiplication.
     Arith(ArithOp, Box<Expr>, Box<Expr>),
     /// A comparison with no affinity conversion and BINARY collation.
@@ -384,6 +402,10 @@ pub fn compile(expr: &Expr, types: &[StaticType]) -> DbResult<Box<dyn Eval>> {
         Expr::Literal(value) => Box::new(Literal {
             value: value.clone(),
         }),
+        Expr::Raise { code, message } => Box::new(Raise {
+            code: *code,
+            message: String::from_utf8_lossy(message).into_owned(),
+        }),
         Expr::CompareWith {
             op,
             affinity,
@@ -606,6 +628,8 @@ fn compile_all(exprs: &[Expr], types: &[StaticType]) -> DbResult<Vec<Box<dyn Eva
 pub fn static_type(expr: &Expr, types: &[StaticType]) -> StaticType {
     match expr {
         Expr::Column(index) => column_type(*index, types),
+        // Nothing is proved about a value that is never produced.
+        Expr::Raise { .. } => StaticType::Unknown,
         Expr::Literal(OwnedDatum::Int(_)) => StaticType::Int,
         Expr::Literal(OwnedDatum::Real(_)) => StaticType::Real,
         Expr::Literal(OwnedDatum::Text(_)) => StaticType::Text,
@@ -687,6 +711,36 @@ impl Eval for Literal {
             OwnedDatum::Real(number) => Computed::Borrowed(Datum::Real(*number)),
             owned => Computed::Owned(owned.clone()),
         })
+    }
+}
+
+/// The message a `RAISE(IGNORE)` reports.
+///
+/// **It is a control transfer wearing an error's clothes**, and it is never
+/// seen by a caller: `RAISE(IGNORE)` in a trigger body means "stop this trigger
+/// and abandon the row the write is on", which no expression can do on its own
+/// because an expression does not know what a row is. So it travels as a
+/// failure with this exact text, and the trigger firing point - the one place
+/// that does know - catches it and skips the row.
+///
+/// A `RAISE(IGNORE)` outside a trigger body is a parse error, so there is no
+/// path by which this can escape to an application.
+pub const RAISE_IGNORE: &str = "inillucent: RAISE(IGNORE)";
+
+/// `RAISE(...)`: an expression whose evaluation is the failure.
+struct Raise {
+    /// The extended result code.
+    code: i32,
+    /// The message.
+    message: String,
+}
+
+impl Eval for Raise {
+    fn value<'p>(&self, _batch: &Batch<'p>, _nth: usize) -> DbResult<Computed<'p>> {
+        Err(
+            inillucent_base::error::DbError::new(inillucent_base::error::ExtendedCode(self.code))
+                .with_message(self.message.clone()),
+        )
     }
 }
 

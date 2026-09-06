@@ -144,7 +144,7 @@ const SURFACE: &[(&str, &str, Answers)] = &[
     (
         "create.trigger",
         "CREATE TRIGGER tr AFTER INSERT ON t BEGIN SELECT 1; END",
-        NotYet,
+        Yes,
     ),
     ("drop.table", "DROP TABLE t", Yes),
     ("alter.rename", "ALTER TABLE t RENAME TO t2", Yes),
@@ -253,52 +253,65 @@ fn the_new_engine_answers_what_the_inventory_says_it_answers() {
 
 /// A trigger is refused, by name, rather than stored and never fired.
 ///
-/// **This was the one silent wrong answer the inventory found, and it is now a
-/// refusal like every other gap.** `CREATE TRIGGER` used to succeed,
-/// `sqlite_schema` listed it, `new_engine_ddl.rs` confirmed it was stored byte
-/// for byte as SQLite stores it - and an insert did not run it, and nothing
-/// said so. A database whose triggers do not fire is one whose invariants are
-/// not being maintained, and the application finds out from its data.
+/// A trigger is stored **and fires**, which is what makes storing it honest.
 ///
-/// The decision to refuse rather than store-and-not-fire was taken
-/// deliberately, on the reasoning that a schema which stops loading here was
-/// already broken and did not know it, and that there is no installed base to
-/// break - the same fact that settled the file-format question. Firing triggers
-/// is real feature work and is written up for pickup rather than done here.
+/// **This was the one silent wrong answer the inventory found.** For a while
+/// `CREATE TRIGGER` succeeded, `sqlite_schema` listed it, `new_engine_ddl.rs`
+/// confirmed it was stored byte for byte as SQLite stores it - and an insert
+/// did not run it, and nothing said so. Task-1834 turned that into a refusal,
+/// on the reasoning that a database whose triggers do not fire is one whose
+/// invariants are not being maintained and the application finds out from its
+/// data.
 ///
-/// `inillucent-migrate` refuses a SQLite database carrying triggers for the
-/// same reason, and names them one by one so the answer is actionable.
+/// Task-1838 built the firing point, so the refusal is gone and the storage is
+/// no longer the interesting half: what this test asserts is that the trigger
+/// *runs*. The same mechanism enforces foreign keys, because the binder turns
+/// a `REFERENCES` clause into `CREATE TRIGGER` text - so there is one path and
+/// `foreign_keys.rs` grades it against the pinned shell.
 #[test]
-fn a_trigger_is_refused_rather_than_stored_and_inert() {
+fn a_trigger_is_stored_and_fires() {
     let database = fresh("trigger");
     let connection = database.connect();
+    // `fresh` already built `t` with two rows in it.
     connection
         .execute_batch("CREATE TABLE log (id INTEGER PRIMARY KEY, a INTEGER)")
         .expect("the log table is created");
 
-    let error = connection
+    connection
         .query(
             "CREATE TRIGGER after_insert AFTER INSERT ON t BEGIN              INSERT INTO log(id, a) VALUES (NEW.id, NEW.b); END",
         )
-        .expect_err("a trigger this engine cannot fire is not stored");
-    let text = format!("{error:?}");
-    assert!(
-        text.contains("does not run triggers"),
-        "the refusal did not say why: {text}"
-    );
-    assert!(
-        text.contains("after_insert"),
-        "the refusal did not name the trigger: {text}"
-    );
+        .expect("the trigger is stored");
 
-    // And nothing was written: a refusal that left the object behind would be
-    // the old behaviour wearing an error message.
+    // It is in the schema, under the name it was written with.
     assert!(
-        connection
+        !connection
             .query("SELECT name FROM sqlite_schema WHERE name = 'after_insert'")
             .expect("the schema is queryable")
             .is_empty(),
-        "the refused trigger is in the schema"
+        "the stored trigger is not in the schema"
+    );
+
+    // And it fires, with `NEW` carrying the row that was written.
+    connection
+        .execute_batch("INSERT INTO t(id, b) VALUES (7, 42)")
+        .expect("the insert runs");
+    assert_eq!(
+        connection
+            .query("SELECT id, a FROM log")
+            .expect("the log reads"),
+        vec![vec![OwnedDatum::Int(7), OwnedDatum::Int(42)]],
+        "the trigger did not write what NEW held"
+    );
+
+    // Dropping it stops it firing, which is the other half of storing one.
+    connection
+        .execute_batch("DROP TRIGGER after_insert; INSERT INTO t(id, b) VALUES (8, 43)")
+        .expect("the trigger is dropped and the insert runs");
+    assert_eq!(
+        count_of(&connection, "log"),
+        1,
+        "a dropped trigger still fired"
     );
 }
 
