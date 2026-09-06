@@ -357,10 +357,7 @@ impl PagedTree {
             let planned = {
                 let pool = database.pool();
                 pool.modify(page, |bytes| {
-                    let leaf = LeafMut::new(bytes)?;
-                    let ready = leaf.fits_delta(encoded_row.len())?;
-                    let room = leaf.has_room_for_a_tombstone()?;
-                    Ok(ready && room)
+                    LeafMut::new(bytes)?.room_for(encoded_row.len())
                 })?
             };
             if !planned {
@@ -603,7 +600,9 @@ impl PagedTree {
             let appending = leaf.right_sibling().is_none()
                 && rows.len() >= 2
                 && match (arriving, rows.last()) {
-                    (Some(key), Some(last)) => is_above(key, last, self.collations(), self.key_columns()),
+                    (Some(key), Some(last)) => {
+                        is_above(key, last, self.collations(), self.key_columns())
+                    }
                     _ => false,
                 };
             let builder = LeafBuilder::new(
