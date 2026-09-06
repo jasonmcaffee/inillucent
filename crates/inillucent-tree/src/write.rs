@@ -40,6 +40,7 @@ use inillucent_base::error::{corrupt, misuse};
 use inillucent_base::DbResult;
 use inillucent_pool::interior::{InteriorBuilder, InteriorRef};
 use inillucent_pool::page;
+use inillucent_pool::extent::ExtentRef;
 use inillucent_pool::{Database, PageId, Pool, Swip};
 use inillucent_wal::record::{Body, Structural};
 
@@ -85,6 +86,9 @@ fn is_above(
 /// Decided while the page is still borrowed, and acted on after the borrow ends
 /// - a compaction and a split both write the page they are reading from.
 enum Fit {
+    /// The leaf holds out-of-line values and has to be rebuilt with the file in
+    /// hand, because moving one needs a run of pages allocated.
+    Repack(bool),
     /// The live rows fit one page: this image, and the two header fields the
     /// old page carried that a fresh pack does not know about.
     Compact(Vec<u8>, PageId, u64),
@@ -158,6 +162,34 @@ pub trait TreeLog {
     ///
     /// @param body - what is about to happen
     fn log(&mut self, body: Body<'_>) -> DbResult<u64>;
+}
+
+/// A [`Spill`] that answers with a reference to nowhere.
+///
+/// For the *measuring* half of a split or a merge, which asks only how many
+/// rows fit. A spiller that allocated there would write a run for every value
+/// the encode is about to write again, and the run it wrote would be
+/// unreferenced by anything. The size is what the measure needs and the size of
+/// an extent reference does not depend on where it points.
+///
+/// The page it names is one rather than zero because
+/// [`inillucent_pool::extent::ExtentRef::decode`] refuses page zero, and a
+/// reference that could not be decoded would be one this could not be swapped
+/// for a real spiller against in a test.
+struct Measuring;
+
+impl crate::leaf::Spill for Measuring {
+    fn spill(
+        &mut self,
+        _row: usize,
+        _column: usize,
+        value: &[u8],
+    ) -> DbResult<inillucent_pool::extent::ExtentRef> {
+        Ok(inillucent_pool::extent::ExtentRef {
+            first: PageId(1),
+            length: value.len() as u64,
+        })
+    }
 }
 
 /// A `TreeLog` that logs nothing and hands out increasing LSNs.
@@ -329,6 +361,16 @@ impl PagedTree {
                 let guard = database.pool().fetch(page)?;
                 let leaf = LeafRef::parse(&guard)?.with_collations(self.collations());
                 let located = leaf.locate(&key, self.key_columns())?;
+                // One row's out-of-line values, and only when the caller wants
+                // the row it is replacing. Locating reads key columns, which are
+                // never out of line, so this comes after.
+                let held = match (want_previous, located) {
+                    (true, Located::Sorted(row)) => {
+                        self.read_extents_row(database.pool(), &leaf, row)?
+                    }
+                    _ => crate::leaf::Extents::default(),
+                };
+                let leaf = leaf.with_extents(&held);
                 let previous = match (want_previous, located) {
                     (_, Located::Absent) => None,
                     (false, _) => {
@@ -356,6 +398,24 @@ impl PagedTree {
             // A caller that refuses a duplicate is told so before anything is
             // written, which is the whole point of asking.
             if !replace && previous.is_some() {
+                return Ok(previous);
+            }
+            // **A row with a value too large for a leaf never goes into the
+            // delta area.** The delta holds tagged values *inline*, so a
+            // four-kilobyte body would want more room than a compaction leaves,
+            // the retry would find the same, and the second attempt would fail
+            // with "a leaf had no room for one row after being compacted and
+            // split" - which is exactly what `large.write` did. Such a row is
+            // placed by repacking the leaf around it, because the builder is
+            // where the spiller is.
+            if self.oversized(row) {
+                self.place_wide(database, log, page, &path, row, &key)?;
+                let mut stats = self.stats.get();
+                stats.inserted = stats.inserted.saturating_add(1);
+                self.stats.set(stats);
+                if previous.is_none() {
+                    self.note_rows(1);
+                }
                 return Ok(previous);
             }
             // Encoded once, here, and used three times: to find out whether it
@@ -411,6 +471,112 @@ impl PagedTree {
             return Ok(previous);
         }
         Err(corrupt("an insert did not converge"))
+    }
+
+    /// Reports whether a row holds a value that will be stored out of line.
+    ///
+    /// The same threshold the builder uses, asked one level up so the write path
+    /// can choose where to put the row before it encodes anything.
+    ///
+    /// @param row - the row about to be written
+    fn oversized(&self, row: &[Datum<'_>]) -> bool {
+        let threshold = self.page_size() / crate::leaf::EXTENT_DIVISOR;
+        row.iter()
+            .enumerate()
+            .skip(self.key_columns())
+            .any(|(index, value)| {
+                let physical = self
+                    .columns()
+                    .get(index)
+                    .map(|column| column.physical)
+                    .unwrap_or(crate::types::PhysicalType::Any);
+                match (physical, value) {
+                    (crate::types::PhysicalType::Text, Datum::Text(bytes)) => {
+                        bytes.len() > threshold
+                    }
+                    (crate::types::PhysicalType::Blob, Datum::Blob(bytes)) => {
+                        bytes.len() > threshold
+                    }
+                    _ => false,
+                }
+            })
+    }
+
+    /// Writes a row whose value goes out of line, by repacking its leaf.
+    ///
+    /// The leaf's live rows are read whole - out-of-line values included - the
+    /// arriving row replaces or joins them in key order, and the whole set is
+    /// packed with a spiller. So the new row's oversized value is written to a
+    /// fresh run and every value that was already out of line is moved to one,
+    /// which is what makes the old runs safe to free afterwards.
+    ///
+    /// @param database - the file
+    /// @param log - where the records go
+    /// @param page - the leaf the key belongs in
+    /// @param path - the interior pages above it, root first
+    /// @param row - the row to write
+    /// @param key - its key columns
+    fn place_wide(
+        &mut self,
+        database: &mut Database,
+        log: &mut dyn TreeLog,
+        page: PageId,
+        path: &[PageId],
+        row: &[Datum<'_>],
+        key: &[Datum<'_>],
+    ) -> DbResult<()> {
+        let (mut rows, mut carried) = self.rows_to_repack(database.pool(), page)?;
+        // The arriving row replaces one of the same key. Dropped by index rather
+        // than by `retain`, because the carried table has to lose the same entry
+        // and the two are aligned by position.
+        let replacing = rows.iter().position(|held| {
+            let head: Vec<Datum<'_>> = held
+                .iter()
+                .take(self.key_columns())
+                .map(OwnedDatum::borrow)
+                .collect();
+            crate::leaf::compare_rows(&head, key, self.key_columns()) == std::cmp::Ordering::Equal
+        });
+        if let Some(at) = replacing {
+            rows.remove(at);
+            carried.remove(at);
+        }
+        let arriving: Vec<OwnedDatum> = row.iter().map(OwnedDatum::from_datum).collect();
+        // The new row's own values are new, so none of them is carried: whatever
+        // is over the threshold is written to a fresh run by the spiller.
+        carried.push(vec![None; arriving.len()]);
+        rows.push(arriving);
+        let collations = self.collations().to_vec();
+        let key_columns = self.key_columns();
+        // Sorted as pairs, so a row and its carried references stay together.
+        let mut paired: Vec<(Vec<OwnedDatum>, Vec<Option<ExtentRef>>)> =
+            rows.into_iter().zip(carried).collect();
+        paired.sort_by(|left, right| {
+            for column in 0..key_columns {
+                let (Some(one), Some(two)) = (left.0.get(column), right.0.get(column)) else {
+                    continue;
+                };
+                let order = crate::types::compare_under(
+                    &one.borrow(),
+                    &two.borrow(),
+                    collations
+                        .get(column)
+                        .copied()
+                        .unwrap_or(inillucent_value::collation::Collation::Binary),
+                );
+                if order != std::cmp::Ordering::Equal {
+                    return order;
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+        let (rows, carried): (Vec<Vec<OwnedDatum>>, Vec<Vec<Option<ExtentRef>>>) =
+            paired.into_iter().unzip();
+        let borrowed: Vec<Vec<Datum<'_>>> = rows
+            .iter()
+            .map(|held| held.iter().map(OwnedDatum::borrow).collect())
+            .collect();
+        self.repack(database, log, page, path, &borrowed, &carried, false)
     }
 
     /// Deletes one row by key, returning what was there.
@@ -589,10 +755,19 @@ impl PagedTree {
         //
         // The guard is dropped before anything is written, because the write
         // needs the page mutably and this only needs to read it.
-        let fit = {
+        let fit = 'fit: {
             let guard = database.pool().fetch(page)?;
             let leaf = LeafRef::parse(&guard)?.with_collations(self.collations());
+            let held = self.read_extents(database.pool(), &leaf)?;
+            let leaf = leaf.with_extents(&held);
             let rows = leaf.live()?;
+            // **A leaf with out-of-line values always takes the owned route.**
+            // The fast path below packs straight out of the page, which needs
+            // the guard held - and repacking an extent needs the *file*, to
+            // allocate the run the value moves into. The two cannot be held at
+            // once, and a leaf with extents holds few rows, so the copy costs
+            // little where it costs anything at all.
+            let spilled = leaf.has_extents();
             // **An append splits rather than compacts.**
             //
             // A leaf filled by rows arriving in key order is compacted, filled
@@ -617,6 +792,13 @@ impl PagedTree {
                     }
                     _ => false,
                 };
+            if spilled {
+                // The rows are *not* copied out here. Reading them through the
+                // guard would resolve every out-of-line value, which is the read
+                // the repack exists to avoid; `rows_to_repack` reads them again
+                // without one.
+                break 'fit Fit::Repack(appending);
+            }
             let builder = LeafBuilder::new(
                 self.page_size(),
                 self.tree_id(),
@@ -643,7 +825,7 @@ impl PagedTree {
         };
         match fit {
             Fit::Compact(image, right, max_cts) => {
-                self.compact_into(database, log, page, image, right, max_cts)
+                self.compact_into(database, log, page, image, right, max_cts, true)
             }
             Fit::Split(rows, appending) => {
                 let borrowed: Vec<Vec<Datum<'_>>> = rows
@@ -661,7 +843,88 @@ impl PagedTree {
                 let fill = if appending { APPEND_FILL } else { SPLIT_FILL };
                 self.split(database, log, page, path, &borrowed, fill)
             }
+            Fit::Repack(appending) => {
+                let (rows, carried) = self.rows_to_repack(database.pool(), page)?;
+                let borrowed: Vec<Vec<Datum<'_>>> = rows
+                    .iter()
+                    .map(|row| row.iter().map(OwnedDatum::borrow).collect())
+                    .collect();
+                self.repack(database, log, page, path, &borrowed, &carried, appending)
+            }
         }
+    }
+
+    /// Rebuilds a leaf around rows that may hold out-of-line values.
+    ///
+    /// Compacts when the rows fit one page and splits when they do not, in both
+    /// cases through a spiller that hands back the run an already-out-of-line
+    /// value is in. Only the runs the repack did *not* keep are freed, which is
+    /// what stops a write to one row of a leaf full of large values from
+    /// rewriting every one of them.
+    ///
+    /// @param database - the file
+    /// @param log - where the records go
+    /// @param page - the leaf
+    /// @param path - the interior pages above it, root first
+    /// @param rows - the rows to pack, sorted
+    /// @param carried - the reference each already-out-of-line value is in
+    /// @param appending - whether the rows are arriving in key order
+    #[allow(clippy::too_many_arguments)]
+    fn repack(
+        &mut self,
+        database: &mut Database,
+        log: &mut dyn TreeLog,
+        page: PageId,
+        path: &[PageId],
+        rows: &[Vec<Datum<'_>>],
+        carried: &[Vec<Option<ExtentRef>>],
+        appending: bool,
+    ) -> DbResult<()> {
+        let held = self.extents_of(database.pool(), page)?;
+        let (old_right, max_cts) = {
+            let guard = database.pool().fetch(page)?;
+            let leaf = LeafRef::parse(&guard)?;
+            (leaf.right_sibling(), leaf.max_cts())
+        };
+        let builder = LeafBuilder::new(
+            self.page_size(),
+            self.tree_id(),
+            self.columns().to_vec(),
+            self.key_columns(),
+        )?;
+        let fits = !appending
+            && matches!(
+                builder.pack_with(rows, COMPACT_FILL, Some(&mut Measuring))?,
+                Packed::Filled { rows: packed, .. } if packed == rows.len()
+            );
+        let kept = if fits {
+            let (image, kept) = {
+                let mut spiller = crate::paged::Carrying {
+                    inner: crate::paged::Extender {
+                        database,
+                        log,
+                        tree_id: self.tree_id(),
+                        written: Vec::new(),
+                    },
+                    carried: carried.to_vec(),
+                    used: Vec::new(),
+                };
+                let image = builder.encode_with(rows, Some(&mut spiller))?;
+                (image, spiller.used)
+            };
+            self.compact_into(database, log, page, image, old_right, max_cts, false)?;
+            kept
+        } else {
+            let fill = if appending { APPEND_FILL } else { SPLIT_FILL };
+            self.split_carrying(database, log, page, path, rows, carried, fill)?
+        };
+        for reference in held {
+            if kept.contains(&reference) {
+                continue;
+            }
+            crate::paged::free_extent(database, log, reference)?;
+        }
+        Ok(())
     }
 
     /// Replaces a leaf with a freshly packed image of the same rows.
@@ -680,6 +943,7 @@ impl PagedTree {
         mut image: Vec<u8>,
         right: PageId,
         max_cts: u64,
+        logical: bool,
     ) -> DbResult<()> {
         page::set_right(&mut image, right)?;
         crate::page::write_u64(&mut image, crate::leaf::leaf_header::MAX_CTS, max_cts)?;
@@ -700,10 +964,16 @@ impl PagedTree {
         // An empty image is what says "re-run it". A record carrying one is
         // still applied by copying, so a log written by an older build still
         // replays.
+        //
+        // **A compaction that moved an out-of-line value is not deterministic**,
+        // because the run it moved into came from the free map and recovery
+        // would allocate somewhere else. Such a compaction carries its image, so
+        // redo copies rather than re-runs - the `AllocPage` and `WritePage`
+        // records for the new run are already in the log ahead of it.
         let lsn = log.log(Body::CompactLeaf {
             tree: self.tree_id(),
             page: page.0,
-            image: &[],
+            image: if logical { &[] } else { &image },
         })?;
         page::write_u64(&mut image, page::header::LSN, lsn)?;
         database.install(page, &image)?;
@@ -730,10 +1000,41 @@ impl PagedTree {
         rows: &[Vec<Datum<'_>>],
         fill: f64,
     ) -> DbResult<()> {
+        // A leaf with no out-of-line values carries none, and the split then
+        // spills nothing because nothing is over the threshold.
+        let carried: Vec<Vec<Option<ExtentRef>>> =
+            rows.iter().map(|row| vec![None; row.len()]).collect();
+        self.split_carrying(database, log, page, path, rows, &carried, fill)?;
+        Ok(())
+    }
+
+    /// Splits a leaf, keeping the runs its out-of-line values are already in.
+    ///
+    /// Returns the carried references the two halves kept, so the caller frees
+    /// exactly the ones they did not.
+    ///
+    /// @param database - the file
+    /// @param log - where the record goes
+    /// @param page - the leaf being split
+    /// @param path - the interior pages above it, root first
+    /// @param rows - its live rows, sorted
+    /// @param carried - the reference each already-out-of-line value is in
+    /// @param fill - how full to pack the left half
+    #[allow(clippy::too_many_arguments)]
+    fn split_carrying(
+        &mut self,
+        database: &mut Database,
+        log: &mut dyn TreeLog,
+        page: PageId,
+        path: &[PageId],
+        rows: &[Vec<Datum<'_>>],
+        carried: &[Vec<Option<ExtentRef>>],
+        fill: f64,
+    ) -> DbResult<Vec<ExtentRef>> {
         if rows.len() < 2 {
             return Err(misuse(
-                "a leaf holding fewer than two rows cannot be split; the row is larger \
-                 than a page and out-of-line blobs are Phase 4",
+                "a leaf holding fewer than two rows cannot be split; its one row's keys \
+                 and fixed-width columns alone are larger than a page",
             ));
         }
         let builder = LeafBuilder::new(
@@ -742,18 +1043,40 @@ impl PagedTree {
             self.columns().to_vec(),
             self.key_columns(),
         )?;
-        let taken = match builder.pack(rows, fill)? {
+        // **The measuring pack does not spill and the encoding ones do.** The
+        // measure only asks how many rows fit, and a spiller there would write
+        // runs for values the encode is about to write again. The two agree
+        // about the count because they use the same threshold; what differs is
+        // only whether the bytes are moved.
+        let taken = match builder.pack_with(rows, fill, Some(&mut Measuring))? {
             Packed::Filled { rows: packed, .. } => packed.max(1).min(rows.len().saturating_sub(1)),
             Packed::RowTooLarge => {
                 return Err(misuse(
-                    "a row is larger than half a page; out-of-line blobs are Phase 4",
+                    "a row's keys and fixed-width columns alone are larger than half a page",
                 ))
             }
         };
         let left_rows = rows.get(..taken).unwrap_or(&[]);
         let right_rows = rows.get(taken..).unwrap_or(&[]);
-        let mut left_image = builder.encode(left_rows)?;
-        let mut right_image = builder.encode(right_rows)?;
+        // The two halves are encoded with their own slices of the carried table,
+        // because the spiller is asked by *position among the rows it is
+        // packing* and the right half's first row is row zero to it.
+        let (mut left_image, mut right_image, kept) = {
+            let mut spiller = crate::paged::Carrying {
+                inner: crate::paged::Extender {
+                    database,
+                    log,
+                    tree_id: self.tree_id(),
+                    written: Vec::new(),
+                },
+                carried: carried.get(..taken).unwrap_or(&[]).to_vec(),
+                used: Vec::new(),
+            };
+            let left = builder.encode_with(left_rows, Some(&mut spiller))?;
+            spiller.carried = carried.get(taken..).unwrap_or(&[]).to_vec();
+            let right = builder.encode_with(right_rows, Some(&mut spiller))?;
+            (left, right, spiller.used)
+        };
         let separator = {
             let head: Vec<Datum<'_>> = right_rows
                 .first()
@@ -819,7 +1142,7 @@ impl PagedTree {
         let mut stats = self.stats.get();
         stats.splits = stats.splits.saturating_add(1);
         self.stats.set(stats);
-        Ok(())
+        Ok(kept)
     }
 
     /// Rewrites the root page as an interior with two children.
@@ -1038,8 +1361,12 @@ impl PagedTree {
             return Ok(());
         }
 
-        let mut rows = self.live_rows_of(database.pool(), page)?;
-        rows.extend(self.live_rows_of(database.pool(), right)?);
+        let (mut rows, mut carried) = self.rows_to_repack(database.pool(), page)?;
+        let (right_rows, right_carried) = self.rows_to_repack(database.pool(), right)?;
+        rows.extend(right_rows);
+        carried.extend(right_carried);
+        let mut doomed = self.extents_of(database.pool(), page)?;
+        doomed.extend(self.extents_of(database.pool(), right)?);
         let builder = LeafBuilder::new(
             self.page_size(),
             self.tree_id(),
@@ -1050,14 +1377,31 @@ impl PagedTree {
             .iter()
             .map(|row| row.iter().map(OwnedDatum::borrow).collect())
             .collect();
-        let mut merged = match builder.pack(&borrowed, COMPACT_FILL)? {
-            Packed::Filled {
-                page: image,
-                rows: packed,
-            } if packed == borrowed.len() => image,
+        // Measured without spilling and then encoded with it, for the reason
+        // `split` gives: a spiller in the measure would write runs the encode
+        // then writes again.
+        let fits = matches!(
+            builder.pack_with(&borrowed, COMPACT_FILL, Some(&mut Measuring))?,
+            Packed::Filled { rows: packed, .. } if packed == borrowed.len()
+        );
+        if !fits {
             // They do not fit, which is the ordinary answer for two leaves that
             // are merely a bit empty. Nothing to do.
-            _ => return Ok(()),
+            return Ok(());
+        }
+        let (mut merged, kept) = {
+            let mut spiller = crate::paged::Carrying {
+                inner: crate::paged::Extender {
+                    database,
+                    log,
+                    tree_id: self.tree_id(),
+                    written: Vec::new(),
+                },
+                carried: carried.clone(),
+                used: Vec::new(),
+            };
+            let image = builder.encode_with(&borrowed, Some(&mut spiller))?;
+            (image, spiller.used)
         };
         // A merge that emptied the parent of every separator would leave an
         // interior page with one child, which is legal but pointless, and an
@@ -1113,6 +1457,16 @@ impl PagedTree {
         database.install(parent, &parent_image)?;
         log.log(Body::FreePage { page: right.0 })?;
         database.release(right, 1)?;
+        // The merged page's out-of-line values went into new runs, so both
+        // leaves' old runs are dead. Freed after the install rather than before,
+        // so a failure between the two leaks pages rather than leaving the new
+        // page pointing at pages the free map has handed out again.
+        for reference in doomed {
+            if kept.contains(&reference) {
+                continue;
+            }
+            crate::paged::free_extent(database, log, reference)?;
+        }
         self.note_leaves(-1);
         let mut stats = self.stats.get();
         stats.merges = stats.merges.saturating_add(1);
@@ -1156,6 +1510,10 @@ impl PagedTree {
         let leaf = LeafRef::parse(&guard)?.with_collations(self.collations());
         match self.locate_in(&leaf, key)? {
             Located::Sorted(row) => {
+                // The row's own out-of-line values, not the leaf's: a delete
+                // reads one row out of a leaf that may hold hundreds.
+                let held = self.read_extents_row(pool, &leaf, row)?;
+                let leaf = leaf.with_extents(&held);
                 let mut values = Vec::with_capacity(leaf.column_count());
                 for column in 0..leaf.column_count() {
                     values.push(OwnedDatum::from_datum(&leaf.value(row, column)?));
@@ -1188,11 +1546,112 @@ impl PagedTree {
     fn live_rows_of(&self, pool: &Pool, page: PageId) -> DbResult<Vec<Vec<OwnedDatum>>> {
         let guard = pool.fetch(page)?;
         let leaf = LeafRef::parse(&guard)?.with_collations(self.collations());
+        // **An out-of-line value comes back whole, and goes back out of line
+        // when the leaf is repacked.** A compaction, a split and a merge all
+        // read their rows here and hand them to the builder, and the builder
+        // spills whatever is still oversized - so an extent survives a repack by
+        // being read and written rather than by being carried, and nothing
+        // between here and the page has to know that a value was ever out of
+        // line. The pages the old run held are freed by the caller, which is
+        // where the log record for the free belongs.
+        let held = self.read_extents(pool, &leaf)?;
+        let leaf = leaf.with_extents(&held);
         Ok(leaf
             .live()?
             .iter()
             .map(|row| row.iter().map(OwnedDatum::from_datum).collect())
             .collect())
+    }
+
+    /// Returns a leaf's live rows without reading a single out-of-line value.
+    ///
+    /// **This is the reader a repack uses, and the difference from
+    /// `live_rows_of` is the whole of what makes a repack affordable.** A leaf
+    /// whose values are out of line holds a great many rows - the leaf is
+    /// sixteen bytes per value rather than four kilobytes - so materialising
+    /// them all to move one would read and rewrite the lot. Instead each
+    /// out-of-line value comes back as a placeholder of its own length, which is
+    /// all the builder's sizing needs, and its reference travels beside it so
+    /// the spiller can hand the same run back.
+    ///
+    /// The placeholder never leaves the repack: the builder classifies it as
+    /// out-of-line - which it is, by length - and asks the spiller for it, and
+    /// the spiller answers with the reference rather than writing the
+    /// placeholder anywhere.
+    ///
+    /// @param pool - the buffer pool
+    /// @param page - the leaf
+    fn rows_to_repack(
+        &self,
+        pool: &Pool,
+        page: PageId,
+    ) -> DbResult<(Vec<Vec<OwnedDatum>>, Vec<Vec<Option<ExtentRef>>>)> {
+        let guard = pool.fetch(page)?;
+        let leaf = LeafRef::parse(&guard)?.with_collations(self.collations());
+        if !leaf.has_extents() {
+            let rows: Vec<Vec<OwnedDatum>> = leaf
+                .live()?
+                .iter()
+                .map(|row| row.iter().map(OwnedDatum::from_datum).collect())
+                .collect();
+            let carried = rows.iter().map(|row| vec![None; row.len()]).collect();
+            return Ok((rows, carried));
+        }
+        // A leaf with extents is read row by row rather than through `live`,
+        // because `live` would resolve them - which is the read this exists to
+        // avoid. Such a leaf has no delta area: a row with an out-of-line value
+        // never goes into one, so its live rows are its untombstoned sorted ones.
+        let mut rows = Vec::with_capacity(leaf.row_count());
+        let mut carried = Vec::with_capacity(leaf.row_count());
+        for row in 0..leaf.row_count() {
+            if leaf.is_tombstoned(row)? {
+                continue;
+            }
+            let mut values = Vec::with_capacity(leaf.column_count());
+            let mut refs = Vec::with_capacity(leaf.column_count());
+            for column in 0..leaf.column_count() {
+                if leaf.column(column)?.class_at(row)? == crate::types::ValueClass::Extent {
+                    let reference = leaf.extent_at(row, column)?;
+                    let blob = matches!(
+                        self.columns().get(column).map(|spec| spec.physical),
+                        Some(crate::types::PhysicalType::Blob)
+                    );
+                    let filler = vec![0u8; reference.length as usize];
+                    values.push(if blob {
+                        OwnedDatum::Blob(filler)
+                    } else {
+                        OwnedDatum::Text(filler)
+                    });
+                    refs.push(Some(reference));
+                    continue;
+                }
+                values.push(OwnedDatum::from_datum(&leaf.value(row, column)?));
+                refs.push(None);
+            }
+            rows.push(values);
+            carried.push(refs);
+        }
+        // The delta area, which cannot hold an out-of-line value but can hold
+        // ordinary ones written since the leaf was packed.
+        for index in 0..leaf.delta_count() {
+            let mut values = Vec::with_capacity(leaf.column_count());
+            for column in 0..leaf.column_count() {
+                values.push(OwnedDatum::from_datum(&leaf.delta_value(index, column)?));
+            }
+            carried.push(vec![None; values.len()]);
+            rows.push(values);
+        }
+        Ok((rows, carried))
+    }
+
+    /// Returns the references every out-of-line value in a leaf names.
+    ///
+    /// @param pool - the buffer pool
+    /// @param page - the leaf
+    fn extents_of(&self, pool: &Pool, page: PageId) -> DbResult<Vec<ExtentRef>> {
+        let guard = pool.fetch(page)?;
+        let leaf = LeafRef::parse(&guard)?;
+        PagedTree::extent_refs(&leaf)
     }
 
     /// Returns an interior page's separators, children and level.

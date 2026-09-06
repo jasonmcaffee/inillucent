@@ -562,12 +562,12 @@ impl Sink for IndexNestedLoopJoin<'_> {
                 let mut seen = 0usize;
                 let mut reported = Flow::Continue;
                 inner.visit_leaves(pool, &mut |leaf| {
-                    let rows: Vec<Vec<Datum<'_>>> = if leaf.has_writes() {
+                    let rows: Vec<Vec<Datum<'_>>> = if leaf.needs_materialising() {
                         leaf.live()?
                     } else {
                         Vec::new()
                     };
-                    let live = if leaf.has_writes() {
+                    let live = if leaf.needs_materialising() {
                         rows.len()
                     } else {
                         leaf.row_count()
@@ -581,7 +581,7 @@ impl Sink for IndexNestedLoopJoin<'_> {
                         columns.push(Vector::Const(batch.value(nth, column)?));
                     }
                     let mut held: Vec<Vec<Datum<'_>>> = Vec::new();
-                    if leaf.has_writes() {
+                    if leaf.needs_materialising() {
                         for index in &inner_projection.0 {
                             held.push(
                                 rows.iter()
@@ -591,7 +591,7 @@ impl Sink for IndexNestedLoopJoin<'_> {
                         }
                     }
                     for (position, column) in inner_projection.0.iter().enumerate() {
-                        columns.push(if leaf.has_writes() {
+                        columns.push(if leaf.needs_materialising() {
                             Vector::Values(held.get(position).map(Vec::as_slice).unwrap_or(&[]))
                         } else {
                             Vector::from_column(leaf.column(*column)?)
@@ -677,6 +677,12 @@ impl Sink for IndexNestedLoopJoin<'_> {
                                 // the sorted-region case below is byte for
                                 // byte what task-1819 measured.
                                 let vector = match hit {
+                                    // A leaf with an out-of-line value cannot
+                                    // lend its mini-column: the slot holds a
+                                    // reference rather than the value.
+                                    Hit::Sorted(_) if leaf.has_extents() => {
+                                        Vector::Const(leaf.value_at(hit, *column)?)
+                                    }
                                     Hit::Sorted(_) => Vector::Column(leaf.column(*column)?),
                                     Hit::Delta(index) => {
                                         Vector::Const(leaf.delta_value(index, *column)?)
@@ -696,6 +702,9 @@ impl Sink for IndexNestedLoopJoin<'_> {
                             inline.get(..at).unwrap_or(&[])
                         };
                         match hit {
+                            Hit::Sorted(_) if leaf.has_extents() => {
+                                downstream.push(&Batch::over(1, columns))
+                            }
                             Hit::Sorted(row) => {
                                 selection.clear();
                                 selection.push(row as u32);
@@ -745,13 +754,13 @@ impl Sink for IndexNestedLoopJoin<'_> {
                         // computed is over the *sorted region* rather than over the
                         // live rows. So it is merged, filtered by the same prefix
                         // the visitor matched on, and pushed as values.
-                        let merged: Vec<Vec<Datum<'_>>> = if leaf.has_writes() {
+                        let merged: Vec<Vec<Datum<'_>>> = if leaf.needs_materialising() {
                             leaf.live_between(Some(probe), true, Some(probe), true)?
                         } else {
                             Vec::new()
                         };
                         let mut held: Vec<Vec<Datum<'_>>> = Vec::new();
-                        if leaf.has_writes() {
+                        if leaf.needs_materialising() {
                             for index in &inner_projection.0 {
                                 held.push(
                                     merged
@@ -762,7 +771,7 @@ impl Sink for IndexNestedLoopJoin<'_> {
                             }
                         }
                         for (position, column) in inner_projection.0.iter().enumerate() {
-                            let vector = if leaf.has_writes() {
+                            let vector = if leaf.needs_materialising() {
                                 Vector::Values(held.get(position).map(Vec::as_slice).unwrap_or(&[]))
                             } else {
                                 Vector::from_column(leaf.column(*column)?)
@@ -779,7 +788,7 @@ impl Sink for IndexNestedLoopJoin<'_> {
                         } else {
                             inline.get(..at).unwrap_or(&[])
                         };
-                        if leaf.has_writes() {
+                        if leaf.needs_materialising() {
                             if merged.is_empty() {
                                 return Ok(true);
                             }

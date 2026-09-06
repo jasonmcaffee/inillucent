@@ -208,6 +208,15 @@ pub enum ValueClass {
     /// vectorised scan pays for the possibility once per leaf rather than once
     /// per row.
     Exception,
+    /// A value too large to keep in the leaf, held in a blob extent.
+    ///
+    /// The slot holds a `u32` heap offset of a sixteen-byte
+    /// `(first page, total length)` reference. The bytes are on pages of their
+    /// own, so the leaf's own accessor cannot return them - it has no pool -
+    /// and a reader that sees this class asks the *tree* for the row instead.
+    /// A leaf that holds one says so in a header flag, exactly as it does for
+    /// an exception, so a scan pays for the possibility once per leaf.
+    Extent,
 }
 
 impl ValueClass {
@@ -217,12 +226,15 @@ impl ValueClass {
             ValueClass::Null => 0,
             ValueClass::Typed => 1,
             ValueClass::Exception => 2,
+            ValueClass::Extent => 3,
         }
     }
 
     /// Decodes a two-bit class code.
     ///
-    /// Code `3` is reserved and is a corruption, not a case to handle.
+    /// All four codes are now spoken for. Code 3 was reserved when the class
+    /// array was designed with two bits per value; the reservation was the
+    /// design leaving room for exactly this.
     ///
     /// @param code - the two bits read from the class array
     pub fn from_code(code: u8) -> DbResult<ValueClass> {
@@ -230,7 +242,8 @@ impl ValueClass {
             0 => Ok(ValueClass::Null),
             1 => Ok(ValueClass::Typed),
             2 => Ok(ValueClass::Exception),
-            other => Err(corrupt(format!("value class {other} is reserved"))),
+            3 => Ok(ValueClass::Extent),
+            other => Err(corrupt(format!("value class {other} is not two bits"))),
         }
     }
 }
@@ -274,13 +287,20 @@ mod tests {
         }
     }
 
-    /// Every class code round-trips, and the reserved code is refused.
+    /// Every class code round-trips, and anything wider than two bits is
+    /// refused. All four codes are now spoken for: the reserved one became
+    /// `Extent` when values began going out of line.
     #[test]
     fn value_class_codes_round_trip() {
-        for class in [ValueClass::Null, ValueClass::Typed, ValueClass::Exception] {
+        for class in [
+            ValueClass::Null,
+            ValueClass::Typed,
+            ValueClass::Exception,
+            ValueClass::Extent,
+        ] {
             assert_eq!(ValueClass::from_code(class.code()).unwrap(), class);
         }
-        assert!(ValueClass::from_code(3).is_err());
+        assert!(ValueClass::from_code(4).is_err());
     }
 
     /// The slot widths are the ones the leaf codec lays out.

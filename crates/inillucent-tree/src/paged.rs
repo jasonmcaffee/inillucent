@@ -48,13 +48,14 @@ use inillucent_base::error::{corrupt, misuse};
 use inillucent_base::DbResult;
 use inillucent_pool::interior::{InteriorBuilder, InteriorRef};
 use inillucent_pool::page::{self, PageKind};
+use inillucent_pool::extent::{self, ExtentRef};
 use inillucent_pool::{Database, PageGuard, PageId, Pool, Swip};
 
 use inillucent_value::collation::Collation;
 
 use crate::datum::{Datum, OwnedDatum};
 use crate::key;
-use crate::leaf::{Hit, LeafBuilder, LeafRef, Packed};
+use crate::leaf::{Extents, Hit, LeafBuilder, LeafRef, Packed, Spill};
 use crate::tree::BULK_FILL;
 use crate::types::{ColumnSpec, PhysicalType};
 
@@ -133,6 +134,150 @@ impl KeyEncoding {
             (KeyEncoding::Rowid, Some(_)) => vec![0xFF; 8],
             (KeyEncoding::General, _) => key::encode_with(values, collations).into_bytes(),
         }
+    }
+}
+
+/// Reads one out-of-line value.
+///
+/// The reference's length is checked against the lengths the pages themselves
+/// declare rather than trusted: the two disagreeing is a corruption, and reading
+/// the longer of the two would walk off the end of the chain.
+///
+/// @param pool - the buffer pool the file is open through
+/// @param reference - what the leaf holds
+pub fn read_extent(pool: &Pool, reference: ExtentRef) -> DbResult<Vec<u8>> {
+    let mut out = Vec::with_capacity(reference.length.min(1 << 20) as usize);
+    let mut page = reference.first;
+    let mut pages = 0u64;
+    while !page.is_none() {
+        let guard = pool.fetch(page)?;
+        let (body, next) = extent::read_page(guard.bytes())?;
+        out.extend_from_slice(body);
+        page = next;
+        pages = pages.saturating_add(1);
+        if out.len() as u64 > reference.length {
+            return Err(corrupt("an extent holds more bytes than its reference says"));
+        }
+        // A chain that loops would otherwise read for ever. The bound is the
+        // most pages the declared length could possibly need, plus one for the
+        // zero-length case.
+        if pages > extent::pages_needed(reference.length, pool.page_size()).saturating_add(1) {
+            return Err(corrupt("an extent chain is longer than its length allows"));
+        }
+    }
+    if out.len() as u64 != reference.length {
+        return Err(corrupt(format!(
+            "an extent holds {} bytes where its reference says {}",
+            out.len(),
+            reference.length
+        )));
+    }
+    Ok(out)
+}
+
+/// Writes one value out of line, logging every page it takes.
+///
+/// The allocator asks the free map for a **contiguous run** big enough for the
+/// whole value, so the common case is one seek and one sequential read rather
+/// than SQLite's chain of dependent four-kilobyte reads. That is the whole of
+/// the `large.values` argument in the TDD.
+///
+/// @param database - the file the pages are allocated and installed in
+/// @param log - where the records go
+/// @param tree_id - the tree the value belongs to
+/// @param value - the bytes to store
+pub fn write_extent(
+    database: &mut Database,
+    log: &mut dyn crate::write::TreeLog,
+    tree_id: u64,
+    value: &[u8],
+) -> DbResult<ExtentRef> {
+    let page_size = database.page_size();
+    let pages = extent::pages_needed(value.len() as u64, page_size).max(1);
+    let first = database.allocate(pages)?;
+    let images = extent::encode_run(value, first, page_size, tree_id)?;
+    for (id, mut image) in images {
+        log_built_page(&mut Some(log), database, id, &mut image)?;
+    }
+    Ok(ExtentRef {
+        first,
+        length: value.len() as u64,
+    })
+}
+
+/// Gives one out-of-line value's pages back to the free map.
+///
+/// @param database - the file
+/// @param log - where the records go
+/// @param reference - what the leaf held
+pub fn free_extent(
+    database: &mut Database,
+    log: &mut dyn crate::write::TreeLog,
+    reference: ExtentRef,
+) -> DbResult<()> {
+    let pages = extent::pages_needed(reference.length, database.page_size()).max(1);
+    for offset in 0..pages {
+        let page = PageId(reference.first.0.saturating_add(offset));
+        log.log(inillucent_wal::record::Body::FreePage { page: page.0 })?;
+        database.release(page, 1)?;
+    }
+    Ok(())
+}
+
+/// A [`Spill`] that allocates a run and describes it in the log.
+///
+/// Held apart from the tree so that the builder, which knows nothing about
+/// files, can ask for one without the tree lending it anything else.
+pub struct Extender<'a> {
+    /// The file the run is allocated in.
+    pub database: &'a mut Database,
+    /// Where the records go.
+    pub log: &'a mut dyn crate::write::TreeLog,
+    /// The tree the values belong to.
+    pub tree_id: u64,
+    /// Every run this spiller has written, so a failure can be traced.
+    pub written: Vec<ExtentRef>,
+}
+
+impl Spill for Extender<'_> {
+    fn spill(&mut self, _row: usize, _column: usize, value: &[u8]) -> DbResult<ExtentRef> {
+        let reference = write_extent(self.database, self.log, self.tree_id, value)?;
+        self.written.push(reference);
+        Ok(reference)
+    }
+}
+
+/// A [`Spill`] that hands back a reference a repack already had.
+///
+/// Wraps an [`Extender`] and consults a per-row table first: a value that was
+/// already out of line keeps its run, and only a value arriving for the first
+/// time is written. That is what makes a write to one row of a leaf full of
+/// large values cost one run rather than all of them.
+///
+/// `used` records which carried references the repack kept, so the caller frees
+/// exactly the ones it did not.
+pub struct Carrying<'a> {
+    /// Where a genuinely new value goes.
+    pub inner: Extender<'a>,
+    /// `carried[row][column]`, aligned with the rows being packed.
+    pub carried: Vec<Vec<Option<ExtentRef>>>,
+    /// The carried references this pack kept.
+    pub used: Vec<ExtentRef>,
+}
+
+impl Spill for Carrying<'_> {
+    fn spill(&mut self, row: usize, column: usize, value: &[u8]) -> DbResult<ExtentRef> {
+        if let Some(held) = self
+            .carried
+            .get(row)
+            .and_then(|columns| columns.get(column))
+            .copied()
+            .flatten()
+        {
+            self.used.push(held);
+            return Ok(held);
+        }
+        self.inner.spill(row, column, value)
     }
 }
 
@@ -395,9 +540,29 @@ impl PagedTree {
         let mut images: Vec<Vec<u8>> = Vec::new();
         let mut at = 0usize;
         let mut row_count = 0u64;
+        // **The bulk builder always spills, logged or not.** The import builds
+        // unlogged - it writes into a file nothing has read and checkpoints it -
+        // and it has to produce the same tree the DDL path produces from the
+        // same rows, because `ImportedDatabase::import_with` reads the catalog
+        // back and refuses if it differs from what it wrote. A builder that
+        // spilled only when it had a log would make the two disagree about where
+        // a four-kilobyte value lives.
+        let mut nowhere = crate::write::NoLog::default();
         while at < rows.len() {
             let remaining = rows.get(at..).unwrap_or(&[]);
-            match builder.pack(remaining, BULK_FILL)? {
+            let packed = {
+                let mut spiller = Extender {
+                    database,
+                    log: match log.as_deref_mut() {
+                        Some(log) => log,
+                        None => &mut nowhere,
+                    },
+                    tree_id,
+                    written: Vec::new(),
+                };
+                builder.pack_with(remaining, BULK_FILL, Some(&mut spiller))?
+            };
+            match packed {
                 Packed::Filled { page, rows: packed } => {
                     let first = remaining
                         .first()
@@ -409,9 +574,13 @@ impl PagedTree {
                     row_count = row_count.saturating_add(packed as u64);
                 }
                 Packed::RowTooLarge => {
+                    // Every oversized text and blob has already gone out of
+                    // line, so what is left is keys, fixed-width slots and
+                    // sixteen bytes per reference. A row that still does not fit
+                    // is one whose *key* is most of a page.
                     return Err(misuse(
-                        "a row is larger than a page; out-of-line blobs are Phase 4",
-                    ))
+                        "a row's keys and fixed-width columns alone are larger than a page",
+                    ));
                 }
             }
         }
@@ -420,6 +589,8 @@ impl PagedTree {
             // has a page to land on and nothing has to special-case a root that
             // does not exist.
             images.push(builder.encode(&[])?);
+            #[allow(clippy::let_underscore_untyped)]
+            let _ = &mut nowhere;
             separators.push(Vec::new());
         }
 
@@ -971,6 +1142,14 @@ impl PagedTree {
         while !page.is_none() {
             let guard = pool.fetch(page)?;
             let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
+            // **The out-of-line values are read here, once per leaf, for every
+            // walk in the crate.** A consumer that had to know about extents
+            // would be five consumers that each had to; attaching them where the
+            // leaf is opened means a scan branches on whether a leaf has any and
+            // never on where a value lives. A leaf with none reads nothing and
+            // allocates nothing.
+            let held = self.read_extents(pool, &leaf)?;
+            let leaf = leaf.with_extents(&held);
             let next = leaf.right_sibling();
             if !visit(&leaf)? {
                 return Ok(());
@@ -1032,6 +1211,8 @@ impl PagedTree {
             {
                 let guard = pool.fetch(descent.leaf)?;
                 let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
+                let held = self.read_extents(pool, &leaf)?;
+                let leaf = leaf.with_extents(&held);
                 if !visit(&leaf)? {
                     return Ok(());
                 }
@@ -1296,6 +1477,8 @@ impl PagedTree {
         let (guard, page) = self.descend_guard(pool, encoded.as_slice())?;
         let mut next = {
             let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
+            let held = self.read_extents(pool, &leaf)?;
+            let leaf = leaf.with_extents(&held);
             match Self::equal_span(&leaf, key, RUN_SCAN, visit)? {
                 Some(right) => right,
                 None => return Ok(()),
@@ -1307,6 +1490,8 @@ impl PagedTree {
         while !next.is_none() {
             let guard = pool.fetch(next)?;
             let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
+            let held = self.read_extents(pool, &leaf)?;
+            let leaf = leaf.with_extents(&held);
             match Self::equal_span(&leaf, key, RUN_SCAN, visit)? {
                 Some(right) => next = right,
                 None => return Ok(()),
@@ -1470,6 +1655,8 @@ impl PagedTree {
             };
             let step = 'step: {
                 let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
+                let resolved = self.read_extents(pool, &leaf)?;
+                let leaf = leaf.with_extents(&resolved);
                 if leaf.has_writes() {
                     // A leaf that has been written to is walked rather than
                     // seeked over: its distinct values can live in the delta
@@ -1694,7 +1881,29 @@ impl PagedTree {
         let key = self.encode_key_small(probe);
         let (guard, _) = self.descend_guard(pool, key.as_slice())?;
         let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
-        self.probe_leaf(&leaf, probe, read)
+        // **One row's out-of-line values, not the leaf's.** A leaf whose values
+        // are out of line holds a great many rows - it is sixteen bytes per
+        // value rather than four kilobytes - so resolving the whole leaf to
+        // answer one probe read three hundred extents to return one. It measured
+        // 31 us per point read against SQLite's 13.
+        //
+        // The row is found first, which is safe because finding it reads only
+        // key columns and a key is never out of line.
+        if !leaf.has_extents() {
+            return self.probe_leaf(&leaf, probe, read);
+        }
+        let Some(hit) = self.hit_in(&leaf, probe)? else {
+            return Ok(None);
+        };
+        let held = match hit {
+            Hit::Sorted(row) => self.read_extents_row(pool, &leaf, row)?,
+            // A row in the delta area never holds an out-of-line value: the
+            // write path repacks the leaf around such a row rather than putting
+            // it there, because the delta holds its values inline.
+            Hit::Delta(_) => crate::leaf::Extents::default(),
+        };
+        let leaf = leaf.with_extents(&held);
+        Ok(Some(read(&leaf, hit)?))
     }
 
     /// Finds a key inside a leaf the caller has already descended to.
@@ -1843,6 +2052,114 @@ impl PagedTree {
         }
         self.check_subtree(pool, self.root, self.height)?;
         Ok(())
+    }
+
+    /// Reads the out-of-line values of one row.
+    ///
+    /// @param pool - the buffer pool the file is open through
+    /// @param leaf - the leaf the row is in
+    /// @param row - the row's position in the sorted region
+    pub fn read_extents_row(
+        &self,
+        pool: &Pool,
+        leaf: &LeafRef<'_>,
+        row: usize,
+    ) -> DbResult<Extents> {
+        let mut held = Extents::default();
+        if !leaf.has_extents() {
+            return Ok(held);
+        }
+        for column in 0..leaf.column_count() {
+            if leaf.column(column)?.class_at(row)? != crate::types::ValueClass::Extent {
+                continue;
+            }
+            held.push(row, column, read_extent(pool, leaf.extent_at(row, column)?)?);
+        }
+        Ok(held)
+    }
+
+    /// Returns where a probe's key sits in a leaf, without reading its values.
+    ///
+    /// The locating half of [`PagedTree::probe_leaf`], split out so a probe into
+    /// a leaf with out-of-line values can find the row before deciding which
+    /// values to read.
+    ///
+    /// @param leaf - the leaf the descent landed on
+    /// @param probe - the key, one value per key column
+    fn hit_in(&self, leaf: &LeafRef<'_>, probe: &[Datum<'_>]) -> DbResult<Option<Hit>> {
+        if let Ok(row) = leaf.search(probe)? {
+            if !leaf.is_tombstoned(row)? {
+                return Ok(Some(Hit::Sorted(row)));
+            }
+        }
+        let compared = probe.len().min(self.key_columns);
+        for entry in 0..leaf.delta_count() {
+            let mut matches = true;
+            for column in 0..compared {
+                let held = leaf.delta_value(entry, column)?;
+                let wanted = probe.get(column).copied().unwrap_or(Datum::Null);
+                if crate::types::compare_under(&held, &wanted, leaf.collation_of(column))
+                    != std::cmp::Ordering::Equal
+                {
+                    matches = false;
+                    break;
+                }
+            }
+            if matches {
+                return Ok(Some(Hit::Delta(entry)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Reads every out-of-line value one leaf holds.
+    ///
+    /// One pass per leaf rather than one per access: a leaf with extents is
+    /// scanned column by column, and a resolver called per access would re-read
+    /// the same value once per pass.
+    ///
+    /// A leaf whose flag is clear reads nothing and allocates nothing, which is
+    /// what keeps this off every other leaf's path.
+    ///
+    /// @param pool - the buffer pool the file is open through
+    /// @param leaf - the leaf to read
+    pub fn read_extents(&self, pool: &Pool, leaf: &LeafRef<'_>) -> DbResult<Extents> {
+        let mut held = Extents::default();
+        if !leaf.has_extents() {
+            return Ok(held);
+        }
+        for row in 0..leaf.row_count() {
+            for column in 0..leaf.column_count() {
+                if leaf.column(column)?.class_at(row)? != crate::types::ValueClass::Extent {
+                    continue;
+                }
+                held.push(row, column, read_extent(pool, leaf.extent_at(row, column)?)?);
+            }
+        }
+        Ok(held)
+    }
+
+    /// Returns the references every out-of-line value in a leaf names.
+    ///
+    /// For the write path, which has to give a replaced value's pages back to
+    /// the free map. Reading the references is cheap - they are in the leaf -
+    /// where reading the values is not.
+    ///
+    /// @param leaf - the leaf to read
+    pub fn extent_refs(leaf: &LeafRef<'_>) -> DbResult<Vec<ExtentRef>> {
+        let mut refs = Vec::new();
+        if !leaf.has_extents() {
+            return Ok(refs);
+        }
+        for row in 0..leaf.row_count() {
+            for column in 0..leaf.column_count() {
+                if leaf.column(column)?.class_at(row)? != crate::types::ValueClass::Extent {
+                    continue;
+                }
+                refs.push(leaf.extent_at(row, column)?);
+            }
+        }
+        Ok(refs)
     }
 
     /// Returns every page the tree occupies, interior pages and leaves.
@@ -2004,6 +2321,8 @@ impl PagedTree {
             let guard = pool.fetch(page)?;
             if page::kind_of(&guard)? == PageKind::Leaf {
                 let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
+                let held = self.read_extents(pool, &leaf)?;
+                let leaf = leaf.with_extents(&held);
                 return visit(&leaf);
             }
             let interior = InteriorRef::parse(&guard)?;

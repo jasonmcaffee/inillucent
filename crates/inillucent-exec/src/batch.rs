@@ -95,8 +95,10 @@ impl<'p> Vector<'p> {
                 ValueClass::Typed => Ok(Datum::Int(read_i64(bytes, row))),
                 ValueClass::Null => Ok(Datum::Null),
                 // An exception in a typed vector is impossible: the scan puts a
-                // leaf with exceptions on the `Column` path instead.
-                ValueClass::Exception => Ok(Datum::Null),
+                // leaf with exceptions on the `Column` path instead. So is an
+                // out-of-line value, and for the same reason - a leaf with one
+                // is not read as vectors at all.
+                ValueClass::Exception | ValueClass::Extent => Ok(Datum::Null),
             },
             Vector::Float64 { bytes, class } => match class_at(*class, row)? {
                 ValueClass::Typed => Ok(Datum::Real(f64::from_bits(read_i64(bytes, row) as u64))),

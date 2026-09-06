@@ -47,6 +47,8 @@
 use inillucent_base::error::{corrupt, misuse};
 use inillucent_base::DbResult;
 
+use inillucent_pool::extent::{ExtentRef, EXTENT_REF_BYTES};
+
 use crate::datum::Datum;
 use crate::page::{self, header, PageId, PageKind};
 use crate::types::{ColumnSpec, PhysicalType, ValueClass, COLUMN_ALL_TYPED, COLUMN_KEY};
@@ -79,6 +81,17 @@ pub const LEAF_HAS_EXCEPTIONS: u8 = 0b0000_0001;
 pub const LEAF_HAS_TOMBSTONES: u8 = 0b0000_0010;
 /// Bit 2: the delta area holds rows.
 pub const LEAF_HAS_DELTA: u8 = 0b0000_0100;
+/// Bit 3: some class array holds a value stored out of line in a blob extent.
+pub const LEAF_HAS_EXTENTS: u8 = 0b0000_1000;
+
+/// The divisor that decides when a value is stored out of line.
+///
+/// The TDD's rule, quoted: "A value longer than `page_size / 8` (4 KiB at the
+/// default page size) is stored out of line." An eighth is the trade between two
+/// costs that pull opposite ways: a large value kept inline empties the leaf, so
+/// a scan reads a page per row; a small value pushed out of line costs a second
+/// read to get at bytes that would have been free.
+pub const EXTENT_DIVISOR: usize = 8;
 
 /// The most rows the delta area may hold before a compaction is forced.
 ///
@@ -201,6 +214,8 @@ pub struct LeafRef<'p> {
     heap_start: usize,
     delta_start: usize,
     flags: u8,
+    /// The out-of-line values, when a caller has read them.
+    extents: Option<&'p Extents>,
 }
 
 impl<'p> LeafRef<'p> {
@@ -268,6 +283,7 @@ impl<'p> LeafRef<'p> {
             heap_start,
             delta_start,
             flags,
+            extents: None,
         };
 
         // What `parse` checks is the header: the counts are self-consistent,
@@ -329,13 +345,34 @@ impl<'p> LeafRef<'p> {
             }
         }
         let mut seen_exception = false;
+        let mut seen_extent = false;
         for index in 0..self.column_count {
-            seen_exception = seen_exception || self.column(index)?.any_exception()?;
+            let column = self.column(index)?;
+            seen_exception = seen_exception || column.any_exception()?;
+            seen_extent = seen_extent || column.any_extent()?;
         }
         if seen_exception != self.has_exceptions() {
             return Err(corrupt(
                 "the exception flag disagrees with the class arrays",
             ));
+        }
+        // **The extent flag is what a reader believes.** A leaf whose flag is
+        // clear is read as mini-columns, so a leaf holding an out-of-line value
+        // without saying so would have its sixteen-byte reference read as
+        // though it were the value.
+        if seen_extent != self.has_extents() {
+            return Err(corrupt("the extent flag disagrees with the class arrays"));
+        }
+        for row in 0..self.row_count {
+            for column in 0..self.column_count {
+                if self.column(column)?.class_at(row)? != ValueClass::Extent {
+                    continue;
+                }
+                // The reference itself has to decode: a page number of zero or
+                // sixteen bytes that run off the page are corruption a reader
+                // would otherwise meet as a failed fetch much later.
+                self.extent_at(row, column)?;
+            }
         }
         for row in 1..self.row_count {
             let mut previous = Vec::with_capacity(self.key_columns);
@@ -373,6 +410,20 @@ impl<'p> LeafRef<'p> {
     ) -> LeafRef<'p> {
         self.collations = collations;
         self
+    }
+
+    /// Attaches the out-of-line values a caller has read.
+    ///
+    /// Every accessor then answers for them exactly as it does for an inline
+    /// value, which is what keeps the extent out of the readers: a scan does not
+    /// branch on where a value is, only on whether the leaf has any.
+    ///
+    /// @param extents - the resolved values, which must outlive the view
+    pub fn with_extents(self, extents: &'p Extents) -> LeafRef<'p> {
+        LeafRef {
+            extents: Some(extents),
+            ..self
+        }
     }
 
     /// Returns the collation of one key column.
@@ -432,6 +483,28 @@ impl<'p> LeafRef<'p> {
         self.flags & LEAF_HAS_TOMBSTONES != 0
     }
 
+    /// Reports whether any value in this leaf is stored out of line.
+    ///
+    /// **A reader that ignores this gets an error, not a wrong answer.** The
+    /// leaf's own accessors cannot return an out-of-line value - the bytes are
+    /// on pages this view does not hold and it has no pool to fetch them
+    /// through - so [`MiniColumn::value`] refuses one by name. A consumer that
+    /// sees this flag asks the *tree* for the rows instead, which is the same
+    /// shape [`LeafRef::has_writes`] already has: one flag test per leaf that
+    /// sends the reader down a materialising path rather than the vectorised
+    /// one.
+    pub fn has_extents(&self) -> bool {
+        self.flags & LEAF_HAS_EXTENTS != 0
+    }
+
+    /// Returns the extent reference one out-of-line value names.
+    ///
+    /// @param row - the row's position in the sorted region
+    /// @param column - which column
+    pub fn extent_at(&self, row: usize, column: usize) -> DbResult<ExtentRef> {
+        self.column(column)?.extent(row)
+    }
+
     /// Returns where the delta area begins.
     ///
     /// Exposed for [`crate::mutate`], which grows the area downwards and needs
@@ -453,7 +526,28 @@ impl<'p> LeafRef<'p> {
     /// no per-row branch. This is the case the whole design optimises for and
     /// the case a freshly built or freshly compacted leaf is in.
     pub fn is_clean(&self) -> bool {
-        !self.has_exceptions() && !self.has_tombstones() && self.delta_count == 0
+        !self.has_exceptions()
+            && !self.has_extents()
+            && !self.has_tombstones()
+            && self.delta_count == 0
+    }
+
+    /// Reports whether this leaf's rows have to be merged rather than read as
+    /// mini-columns.
+    ///
+    /// **One predicate, because there is one decision.** A leaf can fail to be
+    /// readable as vectors for two unrelated reasons - a write put rows in its
+    /// delta area or tombstoned some of its sorted ones, or a build sent one of
+    /// its values out of line - and a consumer that tested only the first would
+    /// read a sixteen-byte extent reference through a slot accessor that expects
+    /// an offset and a length. The length half of that reference is zero, so the
+    /// answer would be an empty string rather than an error.
+    ///
+    /// An *exception* is deliberately not here: an exception is read through the
+    /// general vector path and stays vectorised. Confusing the two cost the SLT
+    /// corpus thirty-four refusals once, which is why the two flags are separate.
+    pub fn needs_materialising(&self) -> bool {
+        self.has_writes() || self.has_extents()
     }
 
     /// Reports whether the leaf holds anything only a *write* can put there.
@@ -553,6 +647,8 @@ impl<'p> LeafRef<'p> {
             values,
             rows: self.row_count,
             page: self.page,
+            extents: self.extents,
+            index,
         })
     }
 
@@ -1378,6 +1474,10 @@ pub struct MiniColumn<'p> {
     pub rows: usize,
     /// The whole page, because text and blob slots address it absolutely.
     page: &'p [u8],
+    /// The out-of-line values, when a caller has read them.
+    extents: Option<&'p Extents>,
+    /// Which column this is, so an out-of-line value can be found by position.
+    index: usize,
 }
 
 impl<'p> MiniColumn<'p> {
@@ -1492,6 +1592,23 @@ impl<'p> MiniColumn<'p> {
     pub fn value(&self, row: usize) -> DbResult<Datum<'p>> {
         match self.class_at(row)? {
             ValueClass::Null => Ok(Datum::Null),
+            // Answered from the resolved values when the caller read them, and
+            // **refused rather than answered with the reference** when it did
+            // not. The sixteen bytes in the heap are a page number and a length,
+            // not the value, and handing them back as a blob would be a wrong
+            // answer that looked like a right one. `PagedTree::read_extents` is
+            // what a caller reads them with; it has the pool and this does not.
+            ValueClass::Extent => match self
+                .extents
+                .and_then(|held| held.get(row, self.index))
+            {
+                Some(bytes) if self.physical == PhysicalType::Blob => Ok(Datum::Blob(bytes)),
+                Some(bytes) => Ok(Datum::Text(bytes)),
+                None => Err(misuse(concat!(
+                    "this value is stored out of line; read the leaf's extents ",
+                    "through the tree first"
+                ))),
+            },
             ValueClass::Exception => {
                 let offset = self.slot_u32(row)? as usize;
                 let (value, _) = Datum::decode_tagged(self.page.get(offset..).unwrap_or(&[]))?;
@@ -1517,6 +1634,31 @@ impl<'p> MiniColumn<'p> {
                 }
             },
         }
+    }
+
+    /// Reports whether any of this column's values is stored out of line.
+    pub fn any_extent(&self) -> DbResult<bool> {
+        for row in 0..self.rows {
+            if self.class_at(row)? == ValueClass::Extent {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Returns the extent reference one out-of-line value names.
+    ///
+    /// @param row - the row's position in the sorted region
+    pub fn extent(&self, row: usize) -> DbResult<ExtentRef> {
+        if self.class_at(row)? != ValueClass::Extent {
+            return Err(misuse("that value is not stored out of line"));
+        }
+        let offset = self.slot_u32(row)? as usize;
+        let raw = self
+            .page
+            .get(offset..offset.saturating_add(EXTENT_REF_BYTES))
+            .ok_or_else(|| corrupt("an extent reference runs past the page"))?;
+        ExtentRef::decode(raw)
     }
 
     /// Returns the `(offset, length)` heap slice one variable-width slot names.
@@ -1568,6 +1710,77 @@ pub struct LeafBuilder {
     key_columns: usize,
 }
 
+/// The out-of-line values one leaf holds, read into memory.
+///
+/// **This is what lets a leaf answer for a value that is not in it.** A
+/// `LeafRef` hands back `Datum<'p>` borrowed from the page, and an extent's
+/// bytes are on other pages - so the only way the ordinary accessor can return
+/// one is for the bytes to already be somewhere that outlives the borrow. That
+/// somewhere is this: the caller reads the extents once through the pool, hands
+/// the result to [`LeafRef::with_extents`], and every accessor then works
+/// exactly as it does for an inline value.
+///
+/// One read per leaf rather than one per access, which matters because a leaf
+/// with extents is scanned column by column and a naive resolver would re-read
+/// the same value once per column pass.
+#[derive(Debug, Default)]
+pub struct Extents {
+    /// `(row, column, bytes)`, in the order the leaf holds them.
+    values: Vec<(usize, usize, Vec<u8>)>,
+}
+
+impl Extents {
+    /// Records one resolved value.
+    ///
+    /// @param row - the row's position in the sorted region
+    /// @param column - which column
+    /// @param bytes - the value
+    pub fn push(&mut self, row: usize, column: usize, bytes: Vec<u8>) {
+        self.values.push((row, column, bytes));
+    }
+
+    /// Returns one resolved value, when it was read.
+    ///
+    /// @param row - the row's position in the sorted region
+    /// @param column - which column
+    pub fn get(&self, row: usize, column: usize) -> Option<&[u8]> {
+        self.values
+            .iter()
+            .find(|(held_row, held_column, _)| *held_row == row && *held_column == column)
+            .map(|(_, _, bytes)| bytes.as_slice())
+    }
+
+    /// Reports whether anything was read.
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+}
+
+/// Where a value too large for a leaf is written.
+///
+/// The builder decides *that* a value goes out of line - it is the only thing
+/// that knows the page size and the layout - and this decides *where*. The two
+/// are separate because the builder has no file: it is handed rows and hands
+/// back a page image, and allocating a run of pages and describing it in the log
+/// is the caller's business.
+pub trait Spill {
+    /// Writes a value out of line and returns the reference the leaf stores.
+    ///
+    /// **The position is passed because a repack usually has nothing to write.**
+    /// A compaction, a split or a merge repacks rows that are already in the
+    /// tree, and a value that was out of line before is out of line in the same
+    /// run afterwards - so the spiller answers with the reference it already has
+    /// and no bytes move. Without the position it could not tell that case from
+    /// a value arriving for the first time, and every repack of a leaf holding
+    /// three hundred out-of-line values would read and rewrite all of them to
+    /// change one.
+    ///
+    /// @param row - the row's position among the rows being packed
+    /// @param column - which column
+    /// @param value - the bytes to store
+    fn spill(&mut self, row: usize, column: usize, value: &[u8]) -> DbResult<ExtentRef>;
+}
+
 /// What a build produced, or why the rows would not fit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Packed {
@@ -1578,8 +1791,13 @@ pub enum Packed {
         /// How many of the offered rows it holds.
         rows: usize,
     },
-    /// Not even one row fits, which means a row is larger than a page and
-    /// belongs in a blob extent (Phase 4).
+    /// Not even one row fits.
+    ///
+    /// With a spiller this means a row whose *inline* part alone is larger than
+    /// the page - every oversized text and blob has already gone out of line, so
+    /// what is left is keys, fixed-width slots and sixteen bytes per reference.
+    /// Without one it is the older answer: a value too large to keep in a leaf
+    /// and nowhere to put it.
     RowTooLarge,
 }
 
@@ -1623,6 +1841,24 @@ impl LeafBuilder {
     /// @param rows - the rows to pack, sorted by key
     /// @param fill - the fraction of the page to fill, 0.0..=1.0
     pub fn pack(&self, rows: &[Vec<Datum<'_>>], fill: f64) -> DbResult<Packed> {
+        self.pack_with(rows, fill, None)
+    }
+
+    /// Packs as many of `rows` as fit, sending oversized values out of line.
+    ///
+    /// With `None` for the spiller nothing goes out of line and this is
+    /// [`LeafBuilder::pack`] exactly - which is what the import wants, because
+    /// it builds into a file nothing has read and measures the same bytes twice.
+    ///
+    /// @param rows - the rows to pack, sorted by key
+    /// @param fill - the fraction of the page to fill, 0.0..=1.0
+    /// @param spill - where an oversized value goes, when there is somewhere
+    pub fn pack_with(
+        &self,
+        rows: &[Vec<Datum<'_>>],
+        fill: f64,
+        spill: Option<&mut dyn Spill>,
+    ) -> DbResult<Packed> {
         let budget = ((self.page_size as f64) * fill.clamp(0.05, 1.0)) as usize;
         // **One forward pass over the rows it places, not a binary search over
         // the rows it does not.**
@@ -1645,7 +1881,8 @@ impl LeafBuilder {
             let mut row_heap = 0usize;
             for (index, column) in self.columns.iter().enumerate() {
                 let value = row.get(index).copied().unwrap_or(Datum::Null);
-                row_heap = row_heap.saturating_add(heap_cost(column.physical, &value));
+                row_heap = row_heap
+                    .saturating_add(heap_cost_at(column.physical, &value, self.threshold(index, spill.is_some())));
             }
             let next = placed.saturating_add(1);
             let size = self
@@ -1660,11 +1897,29 @@ impl LeafBuilder {
         if placed == 0 {
             return Ok(Packed::RowTooLarge);
         }
-        let page = self.encode(rows.get(..placed).unwrap_or(&[]))?;
+        let page = self.encode_with(rows.get(..placed).unwrap_or(&[]), spill)?;
         Ok(Packed::Filled {
             page,
             rows: placed,
         })
+    }
+
+    /// Returns the longest value one column keeps in the leaf.
+    ///
+    /// **A key column never spills, whatever its length.** Every comparison the
+    /// tree makes - the binary search inside a leaf, the separator an interior
+    /// page holds, the order a bulk build relies on - reads key columns out of
+    /// the page, and a key whose bytes were on another page would turn each of
+    /// those into a page fetch. A long key is a slow tree; a long key out of
+    /// line would be a tree that cannot be searched without the pool.
+    ///
+    /// @param column - which column
+    /// @param spilling - whether the caller gave a spiller
+    fn threshold(&self, column: usize, spilling: bool) -> usize {
+        if !spilling || column < self.key_columns {
+            return usize::MAX;
+        }
+        self.page_size / EXTENT_DIVISOR
     }
 
     /// Returns the bytes a leaf of `count` rows spends before its heap.
@@ -1711,6 +1966,18 @@ impl LeafBuilder {
     ///
     /// @param rows - the rows to encode, sorted by key
     pub fn encode(&self, rows: &[Vec<Datum<'_>>]) -> DbResult<Vec<u8>> {
+        self.encode_with(rows, None)
+    }
+
+    /// Encodes the rows into a page, sending oversized values out of line.
+    ///
+    /// @param rows - the rows to encode, sorted by key
+    /// @param spill - where an oversized value goes, when there is somewhere
+    pub fn encode_with(
+        &self,
+        rows: &[Vec<Datum<'_>>],
+        mut spill: Option<&mut dyn Spill>,
+    ) -> DbResult<Vec<u8>> {
         let count = rows.len();
         if count > u16::MAX as usize {
             return Err(misuse("a leaf cannot hold more than 65535 rows"));
@@ -1739,6 +2006,7 @@ impl LeafBuilder {
         // every exception is appended to it as the columns are written.
         let mut heap_end = self.page_size;
         let mut has_exceptions = false;
+        let mut has_extents = false;
         // Which columns turned out to hold nothing but present, correctly typed
         // values. The builder is walking every value anyway, so recording the
         // answer costs a branch and saves every later reader the walk.
@@ -1747,11 +2015,15 @@ impl LeafBuilder {
         for (index, column) in self.columns.iter().enumerate() {
             let base = offsets.get(index).copied().unwrap_or(0);
             let values_at = base.saturating_add(class_bytes(count));
+            let threshold = self.threshold(index, spill.is_some());
             for (row, values) in rows.iter().enumerate() {
                 let value = values.get(index).copied().unwrap_or(Datum::Null);
-                let class = classify(column.physical, &value);
+                let class = classify_at(column.physical, &value, threshold);
                 if class == ValueClass::Exception {
                     has_exceptions = true;
+                }
+                if class == ValueClass::Extent {
+                    has_extents = true;
                 }
                 if class != ValueClass::Typed {
                     if let Some(slot) = all_typed.get_mut(index) {
@@ -1799,6 +2071,24 @@ impl LeafBuilder {
                     },
                     ValueClass::Exception => {
                         heap_end = write_tagged(&mut page, heap_end, &value)?;
+                        page::write_u32(&mut page, slot, heap_end as u32)?;
+                    }
+                    ValueClass::Extent => {
+                        // Unreachable without a spiller: `classify_at` returns
+                        // this class only when `threshold` is finite, and
+                        // `threshold` is `usize::MAX` when there is none.
+                        let spiller = spill
+                            .as_deref_mut()
+                            .ok_or_else(|| unreachable_branch("an extent with no spiller"))?;
+                        let reference =
+                            spiller.spill(row, index, value.as_bytes().unwrap_or(&[]))?;
+                        heap_end = heap_end
+                            .checked_sub(EXTENT_REF_BYTES)
+                            .ok_or_else(|| misuse("the heap overflowed the page"))?;
+                        let target = page
+                            .get_mut(heap_end..heap_end.saturating_add(EXTENT_REF_BYTES))
+                            .ok_or_else(|| misuse("the heap overflowed the page"))?;
+                        target.copy_from_slice(&reference.encode());
                         page::write_u32(&mut page, slot, heap_end as u32)?;
                     }
                 }
@@ -1860,11 +2150,16 @@ impl LeafBuilder {
                 offsets.get(index).copied().unwrap_or(0) as u32,
             )?;
         }
-        if has_exceptions {
+        if has_exceptions || has_extents {
             let flags = page
                 .get_mut(header::FLAGS)
                 .ok_or_else(|| misuse("the page has no flag byte"))?;
-            *flags |= LEAF_HAS_EXCEPTIONS;
+            if has_exceptions {
+                *flags |= LEAF_HAS_EXCEPTIONS;
+            }
+            if has_extents {
+                *flags |= LEAF_HAS_EXTENTS;
+            }
         }
         Ok(page)
     }
@@ -1882,6 +2177,32 @@ fn align8(at: usize) -> usize {
 /// @param physical - the column's layout
 /// @param value - the value to classify
 fn classify(physical: PhysicalType, value: &Datum<'_>) -> ValueClass {
+    classify_at(physical, value, usize::MAX)
+}
+
+/// Returns the class of one value in a column, spilling past a threshold.
+///
+/// A `Text` or `Blob` value longer than `threshold` is stored out of line. Only
+/// those two: a `PhysicalType::Any` column's slot is a tagged value whose class
+/// is in the bytes, and an extent reference carries only a page and a length -
+/// so a reader would have nothing to say whether it had found text or a blob.
+/// An oversized value in an `Any` column therefore stays inline, and if the row
+/// then does not fit its page the builder says `RowTooLarge` as it always has.
+///
+/// @param physical - the column's layout
+/// @param value - the value being placed
+/// @param threshold - the longest value kept in the leaf
+fn classify_at(physical: PhysicalType, value: &Datum<'_>, threshold: usize) -> ValueClass {
+    if matches!(physical, PhysicalType::Text | PhysicalType::Blob) {
+        let spillable = match (physical, value) {
+            (PhysicalType::Text, Datum::Text(bytes)) => Some(bytes.len()),
+            (PhysicalType::Blob, Datum::Blob(bytes)) => Some(bytes.len()),
+            _ => None,
+        };
+        if spillable.is_some_and(|length| length > threshold) {
+            return ValueClass::Extent;
+        }
+    }
     match (physical, value) {
         (_, Datum::Null) => ValueClass::Null,
         (PhysicalType::Any, _) => ValueClass::Typed,
@@ -1906,8 +2227,22 @@ fn classify(physical: PhysicalType, value: &Datum<'_>) -> ValueClass {
 /// @param physical - the column's layout
 /// @param value - the value to measure
 fn heap_cost(physical: PhysicalType, value: &Datum<'_>) -> usize {
-    match classify(physical, value) {
+    heap_cost_at(physical, value, usize::MAX)
+}
+
+/// Returns the heap bytes one value costs, given the spill threshold.
+///
+/// A value that goes out of line costs the leaf sixteen bytes whatever its
+/// length, which is the whole point of the extent and is why the threshold has
+/// to reach the size calculation and not only the encoder.
+///
+/// @param physical - the column's layout
+/// @param value - the value to measure
+/// @param threshold - the longest value kept in the leaf
+fn heap_cost_at(physical: PhysicalType, value: &Datum<'_>, threshold: usize) -> usize {
+    match classify_at(physical, value, threshold) {
         ValueClass::Null => 0,
+        ValueClass::Extent => EXTENT_REF_BYTES,
         ValueClass::Exception => value.tagged_len(),
         ValueClass::Typed => match physical {
             PhysicalType::Int64 | PhysicalType::Float64 => 0,
