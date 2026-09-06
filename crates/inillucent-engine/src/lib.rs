@@ -396,6 +396,11 @@ impl ImportedDatabase {
                 root: shape.root,
                 sql: info.create_sql.clone(),
                 stats: stats_of(&shape),
+                // The identifier this tree is registered and logged under. The
+                // import numbers by the *source* file's root pages, which is
+                // arbitrary but stable, and putting it in the catalog is what
+                // makes it the number a later open derives rather than invents.
+                tree_id: u64::from(info.root),
             });
             identifiers.push(info.root);
             shapes.insert(info.root, shape);
@@ -440,6 +445,7 @@ impl ImportedDatabase {
                     name: index.name.clone(),
                     table: info.name.clone(),
                     root: shape.root,
+                    tree_id: u64::from(index.root),
                     // An automatic index - one a UNIQUE or PRIMARY KEY
                     // constraint produced - has no CREATE text of its own in
                     // SQLite either, and is reconstructed from the table's
@@ -757,13 +763,18 @@ impl ImportedDatabase {
         let mut entries: Vec<SchemaEntry> = Vec::new();
         let mut identifiers: Vec<u32> = Vec::new();
         let mut skipped: Vec<String> = Vec::new();
-        // The identifier a tree is registered under is this process's
-        // bookkeeping and is deliberately not in the file - two processes that
-        // opened the same database would otherwise have to agree about it. They
-        // are handed out in catalog order, starting above nothing and staying
-        // below `FIRST_CREATED_ROOT` so a `CREATE TABLE` after this open cannot
-        // collide with one.
-        let mut next_identifier = 1u32;
+        // **The identifier comes out of the catalog row, not out of a counter.**
+        // It used to be handed out here in catalog order, on the reasoning that
+        // it was this process's own bookkeeping. It is not: every logical row
+        // record in the log carries it, so a reader that numbered trees
+        // differently from the writer would hand recovery's records to the wrong
+        // tree - a wrong answer rather than a refusal. task-1834 put it in the
+        // catalog; this reads it back.
+        //
+        // `next_root` is set past the largest so a `CREATE TABLE` after this
+        // open cannot collide with one already in the file, which a counter that
+        // restarted at every open could and did.
+        let mut highest_identifier = 0u32;
         // Every table by folded name, because an index's shape is derived
         // against its table's declaration and the catalog does not order tables
         // before their indexes.
@@ -773,8 +784,8 @@ impl ImportedDatabase {
             if entry.kind != ObjectKind::Table {
                 continue;
             }
-            let identifier = next_identifier;
-            next_identifier = next_identifier.saturating_add(1);
+            let identifier = identifier_of(entry)?;
+            highest_identifier = highest_identifier.max(identifier);
             let mut info = match table_from_create_sql(&entry.sql, 0, identifier) {
                 Ok(info) => info,
                 Err(_) => {
@@ -821,8 +832,8 @@ impl ImportedDatabase {
                 skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
                 continue;
             };
-            let identifier = next_identifier;
-            next_identifier = next_identifier.saturating_add(1);
+            let identifier = identifier_of(entry)?;
+            highest_identifier = highest_identifier.max(identifier);
             let index = match inillucent_catalog::load::index_from_create_sql(
                 &entry.sql,
                 &table_info,
@@ -934,7 +945,7 @@ impl ImportedDatabase {
                 .collect(),
             tables: Vec::new(),
             schema_info,
-            next_root: FIRST_CREATED_ROOT,
+            next_root: highest_identifier.saturating_add(1).max(FIRST_CREATED_ROOT),
             busy_timeout_ms: 0,
             foreign_keys: false,
             registry: modules(),
@@ -955,6 +966,25 @@ impl ImportedDatabase {
     /// change.
     pub fn catalog_view(&self) -> &StaticCatalog {
         &self.catalog
+    }
+
+    /// Returns every object's name and the identifier its tree is known by.
+    ///
+    /// The identifier is what the log refers to a tree by, so it is the thing
+    /// two processes have to agree about. This exposes it so that agreement can
+    /// be *tested* rather than assumed - a writer and a reader that disagreed
+    /// would corrupt a recovery quietly, and the only cheap way to catch a
+    /// caller reintroducing a process-local number is to compare the two.
+    pub fn tree_identifiers(&self) -> Vec<(String, u64)> {
+        self.entries
+            .iter()
+            .map(|held| {
+                (
+                    String::from_utf8_lossy(&held.entry.name).into_owned(),
+                    held.entry.tree_id,
+                )
+            })
+            .collect()
     }
 
     /// Returns the tables the import could not take.
@@ -1411,10 +1441,18 @@ impl ImportedDatabase {
         let mut entries: Vec<Recorded> = Vec::new();
         for (position, entry) in stored.into_iter().enumerate() {
             let rowid = position.saturating_add(1) as i64;
-            // The identifier a tree was registered under is this process's own
-            // bookkeeping and is not in the file; a genuine open would number
-            // them itself. Carrying the old numbering across keeps the plans and
-            // the layouts this harness already holds pointing at the same trees.
+            // The identifier this tree is registered under, carried across so the
+            // plans and layouts this handle already holds keep pointing at the
+            // same trees.
+            //
+            // **This comment used to say the identifier was "this process's own
+            // bookkeeping and is not in the file", and that stopped being true
+            // in task-1834.** It was never quite true: every logical row record
+            // in the log carries it, so a reader that numbered trees differently
+            // would send recovery's records to the wrong tree. It is in the
+            // catalog now, `open` reads it from there, and the lookup below
+            // agrees with what `open` would derive rather than merely with what
+            // this handle happens to remember.
             let root = self
                 .entries
                 .iter()
@@ -2178,6 +2216,30 @@ fn let_the_pool_ask_the_log(pool: &Pool, wal: &std::rc::Rc<Wal>) {
         held.sync()?;
         Ok(held.write_ahead_point())
     }));
+}
+
+/// Returns the identifier a catalog row registers its tree under.
+///
+/// **Refused rather than defaulted.** A zero here is a row written before the
+/// identifier was persisted, and guessing one would put the tree back in the
+/// state this change exists to leave: a number the writer did not use, which
+/// recovery would follow to the wrong tree. A file that does not say is a file
+/// this engine will not open.
+///
+/// @param entry - the catalog row
+fn identifier_of(entry: &SchemaEntry) -> DbResult<u32> {
+    if entry.tree_id == 0 {
+        return Err(misuse(format!(
+            "the catalog row for {} carries no tree identifier; the database predates              task-1834 and has to be rebuilt",
+            String::from_utf8_lossy(&entry.name)
+        )));
+    }
+    u32::try_from(entry.tree_id).map_err(|_| {
+        misuse(format!(
+            "the catalog row for {} carries a tree identifier that does not fit",
+            String::from_utf8_lossy(&entry.name)
+        ))
+    })
 }
 
 /// Returns the modules a database of this engine has.
