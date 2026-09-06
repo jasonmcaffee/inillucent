@@ -282,6 +282,7 @@ impl inillucent_vm::host::Host for ConnectionState {
         let outcome = {
             let mut context = inillucent_ext::vtab::Context {
                 host: self,
+                store: None,
                 database,
                 limits: &limits,
                 catalog: None,

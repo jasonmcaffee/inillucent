@@ -48,6 +48,18 @@ impl ShadowTables {
         Ok(ShadowTables { roots })
     }
 
+    /// Returns one shadow table's root as the store names it.
+    ///
+    /// @param suffix - which shadow table
+    pub fn root_id(&self, suffix: &[u8]) -> DbResult<u32> {
+        self.roots.get(suffix).copied().ok_or_else(|| {
+            error::misuse(format!(
+                "no shadow table {}",
+                String::from_utf8_lossy(suffix)
+            ))
+        })
+    }
+
     /// Returns one shadow table's root page.
     pub fn root(&self, suffix: &[u8]) -> DbResult<PageId> {
         let Some(root) = self.roots.get(suffix).copied() else {
@@ -70,6 +82,14 @@ impl ShadowTables {
         suffix: &[u8],
         rowid: i64,
     ) -> DbResult<Option<Vec<Value<'static>>>> {
+        // **The store answers when the caller gave one.** The old engine's
+        // rows are in b-trees behind a pager and the new engine's are in PAX
+        // trees; the modules above this file know about neither. The two arms
+        // are two *engines* rather than two implementations of one thing, and
+        // the pager arm goes when the old engine does.
+        if let Some(store) = context.store.as_deref_mut() {
+            return store.read_row(self.root_id(suffix)?, rowid);
+        }
         let root = self.root(suffix)?;
         let limits = context.limits.clone();
         let pager = context.host.pager(context.database)?;
@@ -90,6 +110,14 @@ impl ShadowTables {
         rowid: i64,
         values: &[Value<'static>],
     ) -> DbResult<()> {
+        // **The store answers when the caller gave one.** The old engine's
+        // rows are in b-trees behind a pager and the new engine's are in PAX
+        // trees; the modules above this file know about neither. The two arms
+        // are two *engines* rather than two implementations of one thing, and
+        // the pager arm goes when the old engine does.
+        if let Some(store) = context.store.as_deref_mut() {
+            return store.write_row(self.root_id(suffix)?, rowid, values);
+        }
         let root = self.root(suffix)?;
         // The first value is the rowid, which a rowid table stores as NULL in
         // the record and reads back off the cell. Every shadow table here
@@ -106,6 +134,14 @@ impl ShadowTables {
 
     /// Removes one row by rowid, reporting nothing when there was not one.
     pub fn delete_row(&self, context: &mut Context<'_>, suffix: &[u8], rowid: i64) -> DbResult<()> {
+        // **The store answers when the caller gave one.** The old engine's
+        // rows are in b-trees behind a pager and the new engine's are in PAX
+        // trees; the modules above this file know about neither. The two arms
+        // are two *engines* rather than two implementations of one thing, and
+        // the pager arm goes when the old engine does.
+        if let Some(store) = context.store.as_deref_mut() {
+            return store.delete_row(self.root_id(suffix)?, rowid);
+        }
         let root = self.root(suffix)?;
         let pager = context.host.pager(context.database)?;
         mutate::delete_row(pager, root, rowid)?;
@@ -114,6 +150,14 @@ impl ShadowTables {
 
     /// Returns the largest rowid one shadow table holds.
     pub fn max_rowid(&self, context: &mut Context<'_>, suffix: &[u8]) -> DbResult<i64> {
+        // **The store answers when the caller gave one.** The old engine's
+        // rows are in b-trees behind a pager and the new engine's are in PAX
+        // trees; the modules above this file know about neither. The two arms
+        // are two *engines* rather than two implementations of one thing, and
+        // the pager arm goes when the old engine does.
+        if let Some(store) = context.store.as_deref_mut() {
+            return store.max_rowid(self.root_id(suffix)?);
+        }
         let root = self.root(suffix)?;
         let pager = context.host.pager(context.database)?;
         let mut cursor = BTreeCursor::table(root);
@@ -130,6 +174,10 @@ impl ShadowTables {
         suffix: &[u8],
         mut body: impl FnMut(i64, &[Value<'static>]) -> DbResult<bool>,
     ) -> DbResult<()> {
+        // The store answers when the caller gave one; see `read_row`.
+        if let Some(store) = context.store.as_deref_mut() {
+            return store.scan(self.root_id(suffix)?, &mut body);
+        }
         let root = self.root(suffix)?;
         let limits = context.limits.clone();
         let pager = context.host.pager(context.database)?;
@@ -165,6 +213,10 @@ impl ShadowTables {
         key: &[Value<'static>],
         columns: usize,
     ) -> DbResult<Option<Vec<Value<'static>>>> {
+        // The store answers when the caller gave one; see `read_row`.
+        if let Some(store) = context.store.as_deref_mut() {
+            return store.read_keyed(self.root_id(suffix)?, key, columns);
+        }
         let root = self.root(suffix)?;
         let info = key_info(key.len());
         let limits = context.limits.clone();
@@ -207,6 +259,10 @@ impl ShadowTables {
         key_columns: usize,
         values: &[Value<'static>],
     ) -> DbResult<()> {
+        // The store answers when the caller gave one; see `read_row`.
+        if let Some(store) = context.store.as_deref_mut() {
+            return store.write_keyed(self.root_id(suffix)?, key_columns, values);
+        }
         let key: Vec<Value<'static>> = values.iter().take(key_columns).cloned().collect();
         self.delete_keyed(context, suffix, &key)?;
         let root = self.root(suffix)?;
@@ -224,6 +280,10 @@ impl ShadowTables {
         suffix: &[u8],
         key: &[Value<'static>],
     ) -> DbResult<()> {
+        // The store answers when the caller gave one; see `read_row`.
+        if let Some(store) = context.store.as_deref_mut() {
+            return store.delete_keyed(self.root_id(suffix)?, key);
+        }
         let Some(existing) = self.read_keyed(context, suffix, key, usize::MAX)? else {
             return Ok(());
         };
@@ -243,6 +303,10 @@ impl ShadowTables {
         key_columns: usize,
         mut body: impl FnMut(&[Value<'static>]) -> DbResult<bool>,
     ) -> DbResult<()> {
+        // The store answers when the caller gave one; see `read_row`.
+        if let Some(store) = context.store.as_deref_mut() {
+            return store.scan_keyed(self.root_id(suffix)?, key_columns, &mut body);
+        }
         let root = self.root(suffix)?;
         let info = key_info(key_columns);
         let limits = context.limits.clone();

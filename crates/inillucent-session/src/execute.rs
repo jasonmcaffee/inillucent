@@ -220,6 +220,7 @@ fn create_virtual_table(
         {
             let mut context = inillucent_ext::vtab::Context {
                 host: state,
+                store: None,
                 database: *database,
                 limits: &limits,
                 catalog: None,

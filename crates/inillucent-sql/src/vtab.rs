@@ -12,6 +12,7 @@
 //! into a module to describe a plan would be a planner whose output depended on
 //! run-time state.
 
+use inillucent_base::DbResult;
 use inillucent_value::{Affinity, Value};
 
 /// The comparison a constraint applies.
@@ -397,4 +398,99 @@ mod tests {
         assert!(!ConstraintOp::IsNotNull.has_value());
         assert!(ConstraintOp::Eq.has_value());
     }
+}
+
+/// The rows of a module's shadow tables, whatever engine holds them.
+///
+/// **This is the seam the TDD's "shadow tables become ordinary trees" needs.**
+/// FTS5 and the R-Tree keep their whole state in shadow tables and reach them
+/// only through `ShadowTables`, so the modules themselves say nothing about
+/// pages, cursors or b-trees - which is what lets the same module code run over
+/// the old engine's `sqlite_master` b-trees and the new engine's PAX trees. A
+/// module that had reached a pager directly would have to be written twice.
+///
+/// Every method names a *root*, because a module is handed the roots of its own
+/// shadow tables and nothing else. There is no name resolution here and no
+/// catalog: a module that wanted to read somebody else's table would have to be
+/// given it.
+///
+/// The rowid methods are for a rowid table, where the first value of a row *is*
+/// its rowid; the keyed ones are for a `WITHOUT ROWID` table, whose whole row is
+/// its key. FTS5 uses both.
+pub trait ShadowStore {
+    /// Reads one row by rowid, or nothing when there is not one.
+    ///
+    /// @param root - the shadow table's root
+    /// @param rowid - the row's key
+    fn read_row(&mut self, root: u32, rowid: i64) -> DbResult<Option<Vec<Value<'static>>>>;
+
+    /// Writes one row by rowid, replacing whatever was there.
+    ///
+    /// @param root - the shadow table's root
+    /// @param rowid - the row's key
+    /// @param values - the row, its rowid first
+    fn write_row(&mut self, root: u32, rowid: i64, values: &[Value<'static>]) -> DbResult<()>;
+
+    /// Removes one row by rowid, reporting nothing when there was not one.
+    ///
+    /// @param root - the shadow table's root
+    /// @param rowid - the row's key
+    fn delete_row(&mut self, root: u32, rowid: i64) -> DbResult<()>;
+
+    /// Returns the largest rowid one shadow table holds.
+    ///
+    /// @param root - the shadow table's root
+    fn max_rowid(&mut self, root: u32) -> DbResult<i64>;
+
+    /// Runs a body over every row, in rowid order, stopping when it says so.
+    ///
+    /// @param root - the shadow table's root
+    /// @param body - what to do with each row
+    fn scan(
+        &mut self,
+        root: u32,
+        body: &mut dyn FnMut(i64, &[Value<'static>]) -> DbResult<bool>,
+    ) -> DbResult<()>;
+
+    /// Reads one row of a keyed shadow table, or nothing when there is not one.
+    ///
+    /// @param root - the shadow table's root
+    /// @param key - the leading columns that identify it
+    /// @param columns - how many columns to return, `usize::MAX` for all
+    fn read_keyed(
+        &mut self,
+        root: u32,
+        key: &[Value<'static>],
+        columns: usize,
+    ) -> DbResult<Option<Vec<Value<'static>>>>;
+
+    /// Writes one row of a keyed shadow table, replacing whatever was there.
+    ///
+    /// @param root - the shadow table's root
+    /// @param key_columns - how many leading columns form the key
+    /// @param values - the whole row
+    fn write_keyed(
+        &mut self,
+        root: u32,
+        key_columns: usize,
+        values: &[Value<'static>],
+    ) -> DbResult<()>;
+
+    /// Removes one row of a keyed shadow table.
+    ///
+    /// @param root - the shadow table's root
+    /// @param key - the leading columns that identify it
+    fn delete_keyed(&mut self, root: u32, key: &[Value<'static>]) -> DbResult<()>;
+
+    /// Runs a body over every row of a keyed shadow table, in key order.
+    ///
+    /// @param root - the shadow table's root
+    /// @param key_columns - how many leading columns form the key
+    /// @param body - what to do with each row
+    fn scan_keyed(
+        &mut self,
+        root: u32,
+        key_columns: usize,
+        body: &mut dyn FnMut(&[Value<'static>]) -> DbResult<bool>,
+    ) -> DbResult<()>;
 }
