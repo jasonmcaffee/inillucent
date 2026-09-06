@@ -233,7 +233,9 @@ impl CompiledFilter {
                 .collect();
             let tuples: Vec<(u32, u32)> = pairs
                 .iter()
-                .filter_map(|(s, a)| Some((store.sources.get(s)?, store.author_ids.get(a)?)))
+                .filter_map(|(s, a)| {
+                    Some((store.sources.get(s)?, store.author_ids.get(a)?))
+                })
                 .collect();
             Some((named, tuples))
         });
@@ -283,7 +285,8 @@ impl CompiledFilter {
         // scorer and the unfiltered graph walk both skip `passes` entirely when
         // this is set. Before tombstoning existed nothing could reach that state,
         // so it was invisible.
-        let trivial = filter.is_empty() && (filter.include_deleted || store.deleted_chunks == 0);
+        let trivial =
+            filter.is_empty() && (filter.include_deleted || store.deleted_chunks == 0);
 
         let mut compiled = CompiledFilter {
             sources,
@@ -418,12 +421,8 @@ impl CompiledFilter {
             }
         }
         if let Some((by_name, by_id)) = &self.author_contains {
-            let matches = doc
-                .author
-                .is_some_and(|a| by_name.binary_search(&a).is_ok())
-                || doc
-                    .author_id
-                    .is_some_and(|a| by_id.binary_search(&a).is_ok());
+            let matches = doc.author.is_some_and(|a| by_name.binary_search(&a).is_ok())
+                || doc.author_id.is_some_and(|a| by_id.binary_search(&a).is_ok());
             if !matches {
                 return false;
             }
@@ -552,9 +551,7 @@ mod tests {
 
     fn passing(f: &Filter, s: &Store) -> Vec<u32> {
         let c = CompiledFilter::compile(f, s);
-        (0..s.n_chunks() as u32)
-            .filter(|i| c.passes(*i, s))
-            .collect()
+        (0..s.n_chunks() as u32).filter(|i| c.passes(*i, s)).collect()
     }
 
     #[test]
@@ -668,26 +665,11 @@ mod tests {
             Filter::default(),
             Filter::source("confluence"),
             Filter::source("slack"),
-            Filter {
-                sources: Some(vec!["slack".into(), "jira".into()]),
-                ..Default::default()
-            },
-            Filter {
-                include_deleted: true,
-                ..Default::default()
-            },
-            Filter {
-                updated_after: Some(3000),
-                ..Default::default()
-            },
-            Filter {
-                author: Some("Ada".into()),
-                ..Default::default()
-            },
-            Filter {
-                labels: Some(vec!["design".into()]),
-                ..Default::default()
-            },
+            Filter { sources: Some(vec!["slack".into(), "jira".into()]), ..Default::default() },
+            Filter { include_deleted: true, ..Default::default() },
+            Filter { updated_after: Some(3000), ..Default::default() },
+            Filter { author: Some("Ada".into()), ..Default::default() },
+            Filter { labels: Some(vec!["design".into()]), ..Default::default() },
             Filter {
                 source: Some("confluence".into()),
                 labels: Some(vec!["ops".into()]),
@@ -696,9 +678,7 @@ mod tests {
         ];
         for f in shapes {
             let c = CompiledFilter::compile(&f, &s);
-            let scanned = (0..s.n_chunks() as u32)
-                .filter(|i| c.passes(*i, &s))
-                .count();
+            let scanned = (0..s.n_chunks() as u32).filter(|i| c.passes(*i, &s)).count();
             assert_eq!(c.pass_count(), scanned, "disagreement for {f:?}");
         }
     }
@@ -745,38 +725,14 @@ mod tests {
             deleted: false,
         };
         s.add_chunks(vec![
-            mk(
-                "m1",
-                "Terri Shaw",
-                "terri.shaw@example.org",
-                Some(1000),
-                vec!["terri.shaw@example.org", "Terri Shaw", "jason@example.com"],
-                vec!["has_attachment"],
-            ),
-            mk(
-                "m2",
-                "Jean Platt",
-                "jean@example.net",
-                Some(2000),
-                vec!["jean@example.net", "Jean Platt"],
-                vec![],
-            ),
-            mk(
-                "m3",
-                "Terri Shaw (Work)",
-                "tshaw@work.example",
-                Some(3000),
-                vec!["tshaw@work.example", "Terri Shaw (Work)"],
-                vec!["has_attachment"],
-            ),
-            mk(
-                "m4",
-                "Nobody",
-                "nobody@example.com",
-                None,
-                vec!["nobody@example.com"],
-                vec![],
-            ),
+            mk("m1", "Terri Shaw", "terri.shaw@example.org", Some(1000),
+               vec!["terri.shaw@example.org", "Terri Shaw", "jason@example.com"],
+               vec!["has_attachment"]),
+            mk("m2", "Jean Platt", "jean@example.net", Some(2000),
+               vec!["jean@example.net", "Jean Platt"], vec![]),
+            mk("m3", "Terri Shaw (Work)", "tshaw@work.example", Some(3000),
+               vec!["tshaw@work.example", "Terri Shaw (Work)"], vec!["has_attachment"]),
+            mk("m4", "Nobody", "nobody@example.com", None, vec!["nobody@example.com"], vec![]),
         ]);
         s
     }
@@ -784,10 +740,7 @@ mod tests {
     #[test]
     fn updated_before_is_inclusive_and_excludes_a_missing_timestamp() {
         let s = mail_store();
-        let f = Filter {
-            updated_before: Some(2000),
-            ..Default::default()
-        };
+        let f = Filter { updated_before: Some(2000), ..Default::default() };
         // m4 has no timestamp: NULL <= x is not true, so it must not pass.
         assert_eq!(passing(&f, &s), vec![0, 1]);
     }
@@ -806,14 +759,8 @@ mod tests {
     #[test]
     fn a_boolean_flag_selects_and_deselects_without_touching_labels() {
         let s = mail_store();
-        assert_eq!(
-            passing(&Filter::default().with_flag("has_attachment", true), &s),
-            vec![0, 2]
-        );
-        assert_eq!(
-            passing(&Filter::default().with_flag("has_attachment", false), &s),
-            vec![1, 3]
-        );
+        assert_eq!(passing(&Filter::default().with_flag("has_attachment", true), &s), vec![0, 2]);
+        assert_eq!(passing(&Filter::default().with_flag("has_attachment", false), &s), vec![1, 3]);
         // The flag is not a label, so it never appears in the label vocabulary a
         // filter drawer reads back.
         assert!(s.labels.is_empty());
@@ -840,36 +787,24 @@ mod tests {
     fn a_substring_author_matches_display_name_and_address_alike() {
         let s = mail_store();
         // "Terri Shaw" is the display name of m1 and a prefix of m3's.
-        let by_name = Filter {
-            author_contains: Some("Terri Shaw".into()),
-            ..Default::default()
-        };
+        let by_name = Filter { author_contains: Some("Terri Shaw".into()), ..Default::default() };
         assert_eq!(passing(&by_name, &s), vec![0, 2]);
         // The same filter written as part of an address reaches only that sender.
-        let by_address = Filter {
-            author_contains: Some("tshaw@".into()),
-            ..Default::default()
-        };
+        let by_address = Filter { author_contains: Some("tshaw@".into()), ..Default::default() };
         assert_eq!(passing(&by_address, &s), vec![2]);
     }
 
     #[test]
     fn a_substring_author_is_matched_without_case() {
         let s = mail_store();
-        let f = Filter {
-            author_contains: Some("terri shaw".into()),
-            ..Default::default()
-        };
+        let f = Filter { author_contains: Some("terri shaw".into()), ..Default::default() };
         assert_eq!(passing(&f, &s), vec![0, 2]);
     }
 
     #[test]
     fn a_substring_author_the_corpus_lacks_selects_nothing_rather_than_everything() {
         let s = mail_store();
-        let f = Filter {
-            author_contains: Some("nobody by this name".into()),
-            ..Default::default()
-        };
+        let f = Filter { author_contains: Some("nobody by this name".into()), ..Default::default() };
         let c = CompiledFilter::compile(&f, &s);
         assert!(c.is_dead());
         assert!(passing(&f, &s).is_empty());
@@ -880,10 +815,8 @@ mod tests {
         let s = mail_store();
         // jason is a recipient of m1 and its sender is somebody else, which is
         // exactly what an author filter cannot express.
-        let f = Filter::default().with_attribute(AttributeFilter::containing(
-            "participant",
-            "jason@example.com",
-        ));
+        let f = Filter::default()
+            .with_attribute(AttributeFilter::containing("participant", "jason@example.com"));
         assert_eq!(passing(&f, &s), vec![0]);
     }
 
@@ -908,10 +841,8 @@ mod tests {
     #[test]
     fn an_attribute_value_the_corpus_lacks_selects_nothing() {
         let s = mail_store();
-        let f = Filter::default().with_attribute(AttributeFilter::containing(
-            "participant",
-            "stranger@nowhere",
-        ));
+        let f = Filter::default()
+            .with_attribute(AttributeFilter::containing("participant", "stranger@nowhere"));
         let c = CompiledFilter::compile(&f, &s);
         assert!(c.is_dead());
         assert!(passing(&f, &s).is_empty());
@@ -956,37 +887,19 @@ mod tests {
         let s = mail_store();
         let shapes = vec![
             Filter::default(),
-            Filter {
-                updated_before: Some(2000),
-                ..Default::default()
-            },
-            Filter {
-                updated_after: Some(1500),
-                updated_before: Some(3000),
-                ..Default::default()
-            },
+            Filter { updated_before: Some(2000), ..Default::default() },
+            Filter { updated_after: Some(1500), updated_before: Some(3000), ..Default::default() },
             Filter::default().with_flag("has_attachment", true),
             Filter::default().with_flag("has_attachment", false),
-            Filter {
-                author_contains: Some("Terri".into()),
-                ..Default::default()
-            },
+            Filter { author_contains: Some("Terri".into()), ..Default::default() },
             Filter::default().with_attribute(AttributeFilter::containing("participant", "Terri")),
-            Filter::default().with_attribute(AttributeFilter::any_of(
-                "participant",
-                &["jean@example.net"],
-            )),
-            Filter {
-                source: Some("email".into()),
-                updated_before: Some(2000),
-                ..Default::default()
-            },
+            Filter::default()
+                .with_attribute(AttributeFilter::any_of("participant", &["jean@example.net"])),
+            Filter { source: Some("email".into()), updated_before: Some(2000), ..Default::default() },
         ];
         for f in shapes {
             let c = CompiledFilter::compile(&f, &s);
-            let scanned = (0..s.n_chunks() as u32)
-                .filter(|i| c.passes(*i, &s))
-                .count();
+            let scanned = (0..s.n_chunks() as u32).filter(|i| c.passes(*i, &s)).count();
             assert_eq!(c.pass_count(), scanned, "disagreement for {f:?}");
         }
     }
@@ -1008,10 +921,7 @@ mod tests {
             "the soft delete check would have been skipped"
         );
         // Asking for the deleted rows as well genuinely constrains nothing again.
-        let all = Filter {
-            include_deleted: true,
-            ..Default::default()
-        };
+        let all = Filter { include_deleted: true, ..Default::default() };
         assert!(CompiledFilter::compile(&all, &s).is_trivial());
     }
 
@@ -1025,25 +935,16 @@ mod tests {
         // "e" appears in every address and display name in the fixture, which is
         // the shape that used to be slow and is the shape a binary search gets
         // wrong if the ids are not sorted.
-        let by_author = Filter {
-            author_contains: Some("e".into()),
-            ..Default::default()
-        };
+        let by_author = Filter { author_contains: Some("e".into()), ..Default::default() };
         assert_eq!(passing(&by_author, &s), vec![0, 1, 2, 3]);
 
-        let by_participant =
-            Filter::default().with_attribute(AttributeFilter::containing("participant", "e"));
+        let by_participant = Filter::default()
+            .with_attribute(AttributeFilter::containing("participant", "e"));
         assert_eq!(passing(&by_participant, &s), vec![0, 1, 2, 3]);
 
         // And a compiled set really is ascending, which is what the search assumes.
-        let ids = s
-            .attribute_dictionary("participant")
-            .unwrap()
-            .find_containing("e");
-        assert!(
-            ids.windows(2).all(|w| w[0] < w[1]),
-            "not ascending: {ids:?}"
-        );
+        let ids = s.attribute_dictionary("participant").unwrap().find_containing("e");
+        assert!(ids.windows(2).all(|w| w[0] < w[1]), "not ascending: {ids:?}");
         assert!(ids.len() > 1);
     }
 
@@ -1053,11 +954,7 @@ mod tests {
         // Written newest-first on purpose; the compiled clause has to sort it.
         let f = Filter::default().with_attribute(AttributeFilter::any_of(
             "participant",
-            &[
-                "tshaw@work.example",
-                "jean@example.net",
-                "terri.shaw@example.org",
-            ],
+            &["tshaw@work.example", "jean@example.net", "terri.shaw@example.org"],
         ));
         assert_eq!(passing(&f, &s), vec![0, 1, 2]);
     }

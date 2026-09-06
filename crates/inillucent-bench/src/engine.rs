@@ -24,11 +24,11 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
+use pgvector::Vector;
+use postgres::{Client, NoTls};
 use inillucent_core::filter::Filter;
 use inillucent_core::index::Index;
 use inillucent_core::rank::{self, Fusion, PER_DOC_CAP};
-use pgvector::Vector;
-use postgres::{Client, NoTls};
 
 /// A hit identified the way both engines can agree on: the chunk's identifier in
 /// the source database, as text.
@@ -261,11 +261,7 @@ impl PgVectorEngine {
     /// approaches, and every later query would then be scaled to near zero.
     /// @param queries - calibration queries, from seeds the graded run does not use
     /// @param percentile - where in the observed scores to put the ceiling
-    pub fn calibrate_lexical_ceiling(
-        &mut self,
-        queries: &[String],
-        percentile: f64,
-    ) -> Result<f32> {
+    pub fn calibrate_lexical_ceiling(&mut self, queries: &[String], percentile: f64) -> Result<f32> {
         let filter = Filter::default();
         let mut scores: Vec<f32> = Vec::new();
         for q in queries {
@@ -338,12 +334,8 @@ impl PgVectorEngine {
         }
         if let Some(authors) = &filter.authors {
             if !authors.is_empty() {
-                let sources: Vec<String> = authors
-                    .iter()
-                    .map(|(s, _)| s.clone())
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .into_iter()
-                    .collect();
+                let sources: Vec<String> =
+                    authors.iter().map(|(s, _)| s.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect();
                 values.push(Box::new(sources));
                 let src_idx = i;
                 i += 1;
@@ -430,11 +422,7 @@ impl SearchEngine for PgVectorEngine {
             .iter()
             .map(|r| {
                 let similarity = 1.0 - r.get::<_, f64>("distance") as f32;
-                Hit {
-                    key: r.get("key"),
-                    score: similarity,
-                    confidence: similarity.clamp(0.0, 1.0),
-                }
+                Hit { key: r.get("key"), score: similarity, confidence: similarity.clamp(0.0, 1.0) }
             })
             .collect())
     }
@@ -530,14 +518,7 @@ impl InillucentEngine {
             .enumerate()
             .map(|(i, k)| (k.clone(), i as u32))
             .collect();
-        InillucentEngine {
-            index,
-            keys,
-            name,
-            ef_search,
-            filtered_ef_search: ef_search,
-            ordinal_of,
-        }
+        InillucentEngine { index, keys, name, ef_search, filtered_ef_search: ef_search, ordinal_of }
     }
 
     /// The traversal width for one query: the filtered budget when the predicate
@@ -748,11 +729,7 @@ pub fn fuse_keyed(
         .into_iter()
         .map(|(key, score)| {
             let c = confidence.get(&key).copied().unwrap_or(0.0);
-            Hit {
-                key,
-                score,
-                confidence: c,
-            }
+            Hit { key, score, confidence: c }
         })
         .collect();
     all.sort_by(|a, b| {
@@ -765,11 +742,7 @@ pub fn fuse_keyed(
     let mut per_doc: HashMap<String, usize> = HashMap::new();
     let mut out = Vec::with_capacity(k);
     for hit in all {
-        let doc = hit
-            .key
-            .split_once('#')
-            .map(|(d, _)| d.to_string())
-            .unwrap_or_default();
+        let doc = hit.key.split_once('#').map(|(d, _)| d.to_string()).unwrap_or_default();
         let used = per_doc.entry(doc).or_insert(0);
         if *used >= per_doc_cap {
             continue;
@@ -795,10 +768,9 @@ pub fn fuse_with(
 ) -> Vec<Hit> {
     let compiled = engine.index.compile(filter);
     let candidates = engine.index.config().candidates.max(k);
-    let vector_hits =
-        engine
-            .index
-            .vector_search(query_vector, &compiled, candidates, engine.ef_search);
+    let vector_hits = engine
+        .index
+        .vector_search(query_vector, &compiled, candidates, engine.ef_search);
     let lexical_hits = engine.index.lexical_search(query, &compiled, candidates);
     rank::fuse(
         &vector_hits,
@@ -824,6 +796,7 @@ pub fn fuse_with(
     .collect()
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -834,8 +807,7 @@ mod tests {
     /// budget and stopped early, and nothing failed.
     #[test]
     fn a_filtered_query_sets_all_four_iterative_scan_settings() {
-        let settings =
-            pg_session_settings(PgMode::WellConfigured, &Filter::source("confluence"), 50);
+        let settings = pg_session_settings(PgMode::WellConfigured, &Filter::source("confluence"), 50);
         assert_eq!(
             settings,
             vec![
@@ -945,10 +917,7 @@ mod tests {
     /// query onto the filtered path.
     #[test]
     fn include_deleted_alone_is_not_a_filter() {
-        let filter = Filter {
-            include_deleted: true,
-            ..Default::default()
-        };
+        let filter = Filter { include_deleted: true, ..Default::default() };
         assert_eq!(
             pg_session_settings(PgMode::WellConfigured, &filter, 50),
             pg_session_settings(PgMode::WellConfigured, &Filter::default(), 50)
@@ -959,10 +928,7 @@ mod tests {
     /// pgvector's plan, so it must not turn the iterative scan on for nothing.
     #[test]
     fn an_empty_sources_list_is_not_a_filter() {
-        let filter = Filter {
-            sources: Some(Vec::new()),
-            ..Default::default()
-        };
+        let filter = Filter { sources: Some(Vec::new()), ..Default::default() };
         let (where_sql, _) = PgVectorEngine::where_clause(&filter, 2);
         assert_eq!(where_sql, DELETED_ONLY);
         assert_eq!(
@@ -977,10 +943,7 @@ mod tests {
     #[test]
     fn the_labels_say_which_configuration_each_column_is() {
         assert_eq!(PgMode::Default.label(), "pgvector (extension defaults)");
-        assert_eq!(
-            PgMode::WellConfigured.label(),
-            "pgvector (correctly configured)"
-        );
+        assert_eq!(PgMode::WellConfigured.label(), "pgvector (correctly configured)");
     }
 
     /// One filter per field `where_clause` reads, each carrying exactly one
@@ -988,30 +951,15 @@ mod tests {
     fn filters_with_a_predicate() -> Vec<Filter> {
         vec![
             Filter::source("confluence"),
-            Filter {
-                sources: Some(vec!["slack".into(), "jira".into()]),
-                ..Default::default()
-            },
-            Filter {
-                space_key: Some("ENG".into()),
-                ..Default::default()
-            },
-            Filter {
-                author: Some("someone".into()),
-                ..Default::default()
-            },
+            Filter { sources: Some(vec!["slack".into(), "jira".into()]), ..Default::default() },
+            Filter { space_key: Some("ENG".into()), ..Default::default() },
+            Filter { author: Some("someone".into()), ..Default::default() },
             Filter {
                 authors: Some(vec![("slack".into(), "U123".into())]),
                 ..Default::default()
             },
-            Filter {
-                updated_after: Some(1_700_000_000),
-                ..Default::default()
-            },
-            Filter {
-                labels: Some(vec!["runbook".into()]),
-                ..Default::default()
-            },
+            Filter { updated_after: Some(1_700_000_000), ..Default::default() },
+            Filter { labels: Some(vec!["runbook".into()]), ..Default::default() },
         ]
     }
 }

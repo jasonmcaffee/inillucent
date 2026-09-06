@@ -258,11 +258,7 @@ impl Hnsw {
         let n_nodes = u32::from_le_bytes(buf4) as usize;
         r.read_exact(&mut buf4)?;
         let raw_entry = u32::from_le_bytes(buf4);
-        let entry = if raw_entry == u32::MAX {
-            None
-        } else {
-            Some(raw_entry)
-        };
+        let entry = if raw_entry == u32::MAX { None } else { Some(raw_entry) };
 
         let mut node_top = vec![0u8; n_nodes];
         r.read_exact(&mut node_top)?;
@@ -388,13 +384,8 @@ impl Hnsw {
         // At each layer the node occupies, find neighbours and link both ways.
         let start_layer = level.min(top);
         for layer in (0..=start_layer).rev() {
-            let candidates = self.search_layer_unfiltered(
-                vectors,
-                &query,
-                &[current],
-                layer,
-                self.params.ef_construction,
-            );
+            let candidates =
+                self.search_layer_unfiltered(vectors, &query, &[current], layer, self.params.ef_construction);
             let selected = self.select_neighbours(vectors, &candidates, self.max_degree(layer));
 
             self.layers[layer][node as usize] = selected.clone();
@@ -467,8 +458,9 @@ impl Hnsw {
                 break;
             }
             let cv = vectors.get(c.node);
-            let closer_to_query_than_to_kept =
-                kept.iter().all(|k| c.distance < vectors.distance(*k, cv));
+            let closer_to_query_than_to_kept = kept
+                .iter()
+                .all(|k| c.distance < vectors.distance(*k, cv));
             if closer_to_query_than_to_kept {
                 kept.push(c.node);
             }
@@ -536,14 +528,8 @@ impl Hnsw {
             }
             let d = vectors.distance(*entry, query);
             visited[*entry as usize] = true;
-            frontier.push(Nearest {
-                distance: d,
-                node: *entry,
-            });
-            results.push(Furthest {
-                distance: d,
-                node: *entry,
-            });
+            frontier.push(Nearest { distance: d, node: *entry });
+            results.push(Furthest { distance: d, node: *entry });
         }
         while results.len() > ef {
             results.pop();
@@ -562,14 +548,8 @@ impl Hnsw {
                 let nd = vectors.distance(*n, query);
                 let worst = results.peek().map(|f| f.distance).unwrap_or(f32::MAX);
                 if results.len() < ef || nd < worst {
-                    frontier.push(Nearest {
-                        distance: nd,
-                        node: *n,
-                    });
-                    results.push(Furthest {
-                        distance: nd,
-                        node: *n,
-                    });
+                    frontier.push(Nearest { distance: nd, node: *n });
+                    results.push(Furthest { distance: nd, node: *n });
                     if results.len() > ef {
                         results.pop();
                     }
@@ -579,10 +559,7 @@ impl Hnsw {
 
         let mut out: Vec<Nearest> = results
             .into_iter()
-            .map(|f| Nearest {
-                distance: f.distance,
-                node: f.node,
-            })
+            .map(|f| Nearest { distance: f.distance, node: f.node })
             .collect();
         out.sort_by(|a, b| {
             a.distance
@@ -625,15 +602,9 @@ impl Hnsw {
             }
             let d = vectors.distance(*entry, query);
             visited[*entry as usize] = true;
-            frontier.push(Nearest {
-                distance: d,
-                node: *entry,
-            });
+            frontier.push(Nearest { distance: d, node: *entry });
             if filter.passes(*entry, store) {
-                results.push(Furthest {
-                    distance: d,
-                    node: *entry,
-                });
+                results.push(Furthest { distance: d, node: *entry });
             }
         }
         while results.len() > ef {
@@ -668,16 +639,10 @@ impl Hnsw {
                 // stepping stone. Refusing to walk through it is what
                 // disconnects the reachable set and collapses accuracy.
                 if results.len() < ef || nd < worst || !passes {
-                    frontier.push(Nearest {
-                        distance: nd,
-                        node: *n,
-                    });
+                    frontier.push(Nearest { distance: nd, node: *n });
                 }
                 if passes && (results.len() < ef || nd < worst) {
-                    results.push(Furthest {
-                        distance: nd,
-                        node: *n,
-                    });
+                    results.push(Furthest { distance: nd, node: *n });
                     if results.len() > ef {
                         results.pop();
                     }
@@ -687,10 +652,7 @@ impl Hnsw {
 
         let mut out: Vec<Nearest> = results
             .into_iter()
-            .map(|f| Nearest {
-                distance: f.distance,
-                node: f.node,
-            })
+            .map(|f| Nearest { distance: f.distance, node: f.node })
             .collect();
         out.sort_by(|a, b| {
             a.distance
@@ -754,14 +716,7 @@ impl Hnsw {
             self.search_layer_unfiltered(scorer, query, &starts, 0, ef)
         } else {
             self.search_layer_filtered(
-                scorer,
-                store,
-                filter,
-                query,
-                &starts,
-                ef,
-                max_visits,
-                &mut exhausted,
+                scorer, store, filter, query, &starts, ef, max_visits, &mut exhausted,
             )
         };
 
@@ -777,10 +732,7 @@ impl Hnsw {
         found
             .into_iter()
             .take(k)
-            .map(|n| Neighbour {
-                chunk: n.node,
-                distance: n.distance,
-            })
+            .map(|n| Neighbour { chunk: n.node, distance: n.distance })
             .collect()
     }
 
@@ -826,7 +778,9 @@ impl Hnsw {
             current = self.greedy_descend(scorer, query, current, layer);
         }
         if top >= 1 && wanted > 1 {
-            for candidate in self.search_layer_unfiltered(scorer, query, &[current], 1, wanted) {
+            for candidate in
+                self.search_layer_unfiltered(scorer, query, &[current], 1, wanted)
+            {
                 starts.push(candidate.node);
             }
         } else if top >= 1 {
@@ -861,6 +815,7 @@ impl Hnsw {
             .collect()
     }
 }
+
 
 /// One layer's adjacency lists during a parallel build, each behind its own lock.
 ///
@@ -1047,14 +1002,17 @@ impl Hnsw {
     /// @param node - the node the list belongs to
     /// @param list - the current neighbours, which may exceed the cap
     /// @param cap - the degree cap for this layer
-    fn prune_to_cap(&self, vectors: &VectorSet, node: u32, list: &[u32], cap: usize) -> Vec<u32> {
+    fn prune_to_cap(
+        &self,
+        vectors: &VectorSet,
+        node: u32,
+        list: &[u32],
+        cap: usize,
+    ) -> Vec<u32> {
         let node_vector = vectors.get(node).to_vec();
         let mut candidates: Vec<Nearest> = list
             .iter()
-            .map(|n| Nearest {
-                distance: vectors.distance(*n, &node_vector),
-                node: *n,
-            })
+            .map(|n| Nearest { distance: vectors.distance(*n, &node_vector), node: *n })
             .collect();
         candidates.sort_by(|a, b| {
             a.distance
@@ -1112,14 +1070,8 @@ fn search_layer_locked(
 
     let d = vectors.distance(entry, query);
     visited.insert(entry);
-    frontier.push(Nearest {
-        distance: d,
-        node: entry,
-    });
-    results.push(Furthest {
-        distance: d,
-        node: entry,
-    });
+    frontier.push(Nearest { distance: d, node: entry });
+    results.push(Furthest { distance: d, node: entry });
 
     while let Some(candidate) = frontier.pop() {
         let worst = results.peek().map(|f| f.distance).unwrap_or(f32::MAX);
@@ -1137,14 +1089,8 @@ fn search_layer_locked(
             let nd = vectors.distance(n, query);
             let worst = results.peek().map(|f| f.distance).unwrap_or(f32::MAX);
             if results.len() < ef || nd < worst {
-                frontier.push(Nearest {
-                    distance: nd,
-                    node: n,
-                });
-                results.push(Furthest {
-                    distance: nd,
-                    node: n,
-                });
+                frontier.push(Nearest { distance: nd, node: n });
+                results.push(Furthest { distance: nd, node: n });
                 if results.len() > ef {
                     results.pop();
                 }
@@ -1154,10 +1100,7 @@ fn search_layer_locked(
 
     let mut out: Vec<Nearest> = results
         .into_iter()
-        .map(|f| Nearest {
-            distance: f.distance,
-            node: f.node,
-        })
+        .map(|f| Nearest { distance: f.distance, node: f.node })
         .collect();
     out.sort_by(|a, b| {
         a.distance
@@ -1220,7 +1163,10 @@ mod tests {
             .collect();
         for i in 0..n {
             let c = &centres[i % n_clusters];
-            let v: Vec<f32> = c.iter().map(|x| x + rng.gen_range(-0.35..0.35)).collect();
+            let v: Vec<f32> = c
+                .iter()
+                .map(|x| x + rng.gen_range(-0.35..0.35))
+                .collect();
             vs.push(&v);
         }
         (vs, store)
@@ -1238,10 +1184,7 @@ mod tests {
     #[test]
     fn unfiltered_recall_is_high_against_exhaustive_search() {
         let (vs, store) = fixture(4000, 32);
-        let mut g = Hnsw::new(HnswParams {
-            exhaustive_below: 0,
-            ..Default::default()
-        });
+        let mut g = Hnsw::new(HnswParams { exhaustive_below: 0, ..Default::default() });
         g.force_graph_traversal();
         g.build(&vs);
         let f = CompiledFilter::compile(&Filter::default(), &store);
@@ -1255,19 +1198,13 @@ mod tests {
             total += recall(&approx, &exact);
         }
         let mean = total / trials as f32;
-        assert!(
-            mean > 0.95,
-            "unfiltered recall@10 was {mean}, expected > 0.95"
-        );
+        assert!(mean > 0.95, "unfiltered recall@10 was {mean}, expected > 0.95");
     }
 
     #[test]
     fn a_vector_finds_itself() {
         let (vs, store) = fixture(2000, 32);
-        let mut g = Hnsw::new(HnswParams {
-            exhaustive_below: 0,
-            ..Default::default()
-        });
+        let mut g = Hnsw::new(HnswParams { exhaustive_below: 0, ..Default::default() });
         g.force_graph_traversal();
         g.build(&vs);
         let f = CompiledFilter::compile(&Filter::default(), &store);
@@ -1283,10 +1220,7 @@ mod tests {
     #[test]
     fn a_selective_source_filter_still_fills_the_result_set() {
         let (vs, store) = fixture(20000, 32);
-        let mut g = Hnsw::new(HnswParams {
-            exhaustive_below: 0,
-            ..Default::default()
-        });
+        let mut g = Hnsw::new(HnswParams { exhaustive_below: 0, ..Default::default() });
         g.force_graph_traversal();
         g.build(&vs);
 
@@ -1307,10 +1241,7 @@ mod tests {
     #[test]
     fn filtered_recall_is_high_against_exhaustive_search_within_the_filter() {
         let (vs, store) = fixture(20000, 32);
-        let mut g = Hnsw::new(HnswParams {
-            exhaustive_below: 0,
-            ..Default::default()
-        });
+        let mut g = Hnsw::new(HnswParams { exhaustive_below: 0, ..Default::default() });
         g.force_graph_traversal();
         g.build(&vs);
 
@@ -1335,10 +1266,7 @@ mod tests {
     #[test]
     fn every_returned_chunk_satisfies_the_predicate() {
         let (vs, store) = fixture(5000, 32);
-        let mut g = Hnsw::new(HnswParams {
-            exhaustive_below: 0,
-            ..Default::default()
-        });
+        let mut g = Hnsw::new(HnswParams { exhaustive_below: 0, ..Default::default() });
         g.force_graph_traversal();
         g.build(&vs);
         let f = CompiledFilter::compile(&Filter::source("slack"), &store);
@@ -1369,10 +1297,7 @@ mod tests {
     #[test]
     fn search_is_deterministic_across_repeated_calls() {
         let (vs, store) = fixture(3000, 32);
-        let mut g = Hnsw::new(HnswParams {
-            exhaustive_below: 0,
-            ..Default::default()
-        });
+        let mut g = Hnsw::new(HnswParams { exhaustive_below: 0, ..Default::default() });
         g.force_graph_traversal();
         g.build(&vs);
         let f = CompiledFilter::compile(&Filter::default(), &store);
@@ -1389,36 +1314,18 @@ mod tests {
     /// reason it is a formula and not a constant.
     #[test]
     fn the_cost_model_routes_selective_filters_to_exhaustive_search() {
-        let g = Hnsw::new(HnswParams {
-            exhaustive_below: 1_000,
-            ..Default::default()
-        });
+        let g = Hnsw::new(HnswParams { exhaustive_below: 1_000, ..Default::default() });
         let n = 186_829;
         // sqrt(128 * 32 * 186781) is about 27,662.
-        assert!(
-            g.prefers_exhaustive(17_675, n, 128),
-            "slack sized filter should scan"
-        );
-        assert!(
-            g.prefers_exhaustive(11_160, n, 128),
-            "jira sized filter should scan"
-        );
-        assert!(
-            !g.prefers_exhaustive(47_525, n, 128),
-            "github sized filter should walk"
-        );
-        assert!(
-            !g.prefers_exhaustive(93_617, n, 128),
-            "confluence sized filter should walk"
-        );
+        assert!(g.prefers_exhaustive(17_675, n, 128), "slack sized filter should scan");
+        assert!(g.prefers_exhaustive(11_160, n, 128), "jira sized filter should scan");
+        assert!(!g.prefers_exhaustive(47_525, n, 128), "github sized filter should walk");
+        assert!(!g.prefers_exhaustive(93_617, n, 128), "confluence sized filter should walk");
     }
 
     #[test]
     fn the_crossover_moves_with_ef_and_with_corpus_size() {
-        let g = Hnsw::new(HnswParams {
-            exhaustive_below: 1_000,
-            ..Default::default()
-        });
+        let g = Hnsw::new(HnswParams { exhaustive_below: 1_000, ..Default::default() });
         let n = 186_829;
         // A larger ef makes the walk more expensive, so scanning wins more often.
         assert!(!g.prefers_exhaustive(40_000, n, 128));
@@ -1430,10 +1337,7 @@ mod tests {
 
     #[test]
     fn the_hard_floor_always_scans() {
-        let g = Hnsw::new(HnswParams {
-            exhaustive_below: 5_000,
-            ..Default::default()
-        });
+        let g = Hnsw::new(HnswParams { exhaustive_below: 5_000, ..Default::default() });
         assert!(g.prefers_exhaustive(4_999, 10_000_000, 16));
     }
 
@@ -1449,16 +1353,11 @@ mod tests {
     #[test]
     fn a_dead_filter_returns_nothing() {
         let (vs, store) = fixture(500, 16);
-        let mut g = Hnsw::new(HnswParams {
-            exhaustive_below: 0,
-            ..Default::default()
-        });
+        let mut g = Hnsw::new(HnswParams { exhaustive_below: 0, ..Default::default() });
         g.force_graph_traversal();
         g.build(&vs);
         let f = CompiledFilter::compile(&Filter::source("sharepoint"), &store);
-        assert!(g
-            .search(&vs, &store, &f, &vs.get(0).to_vec(), 10, None)
-            .is_empty());
+        assert!(g.search(&vs, &store, &f, &vs.get(0).to_vec(), 10, None).is_empty());
     }
 
     #[test]
@@ -1466,11 +1365,7 @@ mod tests {
         let (vs, _store) = fixture(5000, 16);
         let mut g = Hnsw::new(HnswParams::default());
         g.build(&vs);
-        assert!(
-            g.n_layers() > 1,
-            "expected a hierarchy, got {} layer(s)",
-            g.n_layers()
-        );
+        assert!(g.n_layers() > 1, "expected a hierarchy, got {} layer(s)", g.n_layers());
         assert_eq!(g.len(), 5000);
     }
 
@@ -1480,19 +1375,13 @@ mod tests {
     #[test]
     fn a_parallel_build_is_as_accurate_as_the_sequential_one() {
         let (vectors, store) = fixture(6000, 32);
-        let base = HnswParams {
-            exhaustive_below: 0,
-            ..Default::default()
-        };
+        let base = HnswParams { exhaustive_below: 0, ..Default::default() };
 
         let mut sequential = Hnsw::new(base);
         sequential.force_graph_traversal();
         sequential.build(&vectors);
 
-        let mut parallel = Hnsw::new(HnswParams {
-            build_threads: 4,
-            ..base
-        });
+        let mut parallel = Hnsw::new(HnswParams { build_threads: 4, ..base });
         parallel.force_graph_traversal();
         parallel.build(&vectors);
 
@@ -1505,14 +1394,10 @@ mod tests {
         for probe in [7u32, 300, 1500, 2900, 4400, 5100] {
             let q = vectors.get(probe).to_vec();
             let exact = flat::search(&vectors, &store, &filter, &q, 10);
-            sequential_recall += recall(
-                &sequential.search(&vectors, &store, &filter, &q, 10, Some(128)),
-                &exact,
-            );
-            parallel_recall += recall(
-                &parallel.search(&vectors, &store, &filter, &q, 10, Some(128)),
-                &exact,
-            );
+            sequential_recall +=
+                recall(&sequential.search(&vectors, &store, &filter, &q, 10, Some(128)), &exact);
+            parallel_recall +=
+                recall(&parallel.search(&vectors, &store, &filter, &q, 10, Some(128)), &exact);
         }
         sequential_recall /= 6.0;
         parallel_recall /= 6.0;
@@ -1527,11 +1412,7 @@ mod tests {
     #[test]
     fn a_parallel_build_leaves_no_node_unlinked() {
         let (vectors, _) = fixture(4000, 16);
-        let mut graph = Hnsw::new(HnswParams {
-            build_threads: 8,
-            exhaustive_below: 0,
-            ..Default::default()
-        });
+        let mut graph = Hnsw::new(HnswParams { build_threads: 8, exhaustive_below: 0, ..Default::default() });
         graph.build(&vectors);
         let isolated = (0..graph.len())
             .filter(|n| graph.layers[0][*n].is_empty())
@@ -1551,19 +1432,13 @@ mod tests {
     #[test]
     fn a_parallel_build_does_not_lose_edges_to_a_race() {
         let (vectors, _) = fixture(8_000, 16);
-        let base = HnswParams {
-            exhaustive_below: 0,
-            ..Default::default()
-        };
+        let base = HnswParams { exhaustive_below: 0, ..Default::default() };
         let mut sequential = Hnsw::new(base);
         sequential.build(&vectors);
         let expected = sequential.edge_count();
 
         for attempt in 0..3 {
-            let mut parallel = Hnsw::new(HnswParams {
-                build_threads: 16,
-                ..base
-            });
+            let mut parallel = Hnsw::new(HnswParams { build_threads: 16, ..base });
             parallel.build(&vectors);
             let edges = parallel.edge_count();
             assert!(
@@ -1579,24 +1454,16 @@ mod tests {
     fn publishing_a_nodes_own_neighbours_keeps_edges_another_thread_added() {
         let (vectors, _) = fixture(200, 8);
         let graph = Hnsw::new(HnswParams::default());
-        let layer: LockedLayer = (0..200)
-            .map(|_| std::sync::RwLock::new(Vec::new()))
-            .collect();
+        let layer: LockedLayer = (0..200).map(|_| std::sync::RwLock::new(Vec::new())).collect();
 
         // Another thread got there first and linked back to node 5.
         layer[5].write().unwrap().push(42);
         graph.publish_neighbours(&layer, &vectors, 5, &[7, 9, 11], 0);
 
         let list = layer[5].read().unwrap().clone();
-        assert!(
-            list.contains(&42),
-            "the reciprocal edge was erased: {list:?}"
-        );
+        assert!(list.contains(&42), "the reciprocal edge was erased: {list:?}");
         for chosen in [7u32, 9, 11] {
-            assert!(
-                list.contains(&chosen),
-                "the node's own choice {chosen} is missing: {list:?}"
-            );
+            assert!(list.contains(&chosen), "the node's own choice {chosen} is missing: {list:?}");
         }
     }
 
@@ -1604,21 +1471,13 @@ mod tests {
     #[test]
     fn a_parallel_build_respects_the_degree_cap() {
         let (vectors, _) = fixture(4000, 16);
-        let params = HnswParams {
-            build_threads: 8,
-            exhaustive_below: 0,
-            ..Default::default()
-        };
+        let params = HnswParams { build_threads: 8, exhaustive_below: 0, ..Default::default() };
         let mut graph = Hnsw::new(params);
         graph.build(&vectors);
         for (layer, lists) in graph.layers.iter().enumerate() {
             let cap = graph.max_degree(layer);
             for (node, list) in lists.iter().enumerate() {
-                assert!(
-                    list.len() <= cap,
-                    "node {node} at layer {layer} has {} edges",
-                    list.len()
-                );
+                assert!(list.len() <= cap, "node {node} at layer {layer} has {} edges", list.len());
             }
         }
     }
@@ -1629,24 +1488,13 @@ mod tests {
     #[test]
     fn extra_entry_points_are_several_distinct_places_to_start() {
         let (vectors, _) = fixture(2000, 16);
-        let mut graph = Hnsw::new(HnswParams {
-            entry_points: 8,
-            ..Default::default()
-        });
+        let mut graph = Hnsw::new(HnswParams { entry_points: 8, ..Default::default() });
         graph.build(&vectors);
         let query = vectors.get(11).to_vec();
         let starts = graph.entry_points(&vectors, &query);
-        assert!(
-            starts.len() >= 8,
-            "only {} starting points: {starts:?}",
-            starts.len()
-        );
+        assert!(starts.len() >= 8, "only {} starting points: {starts:?}", starts.len());
         let unique: std::collections::HashSet<u32> = starts.iter().copied().collect();
-        assert_eq!(
-            unique.len(),
-            starts.len(),
-            "starting points repeat: {starts:?}"
-        );
+        assert_eq!(unique.len(), starts.len(), "starting points repeat: {starts:?}");
     }
 
     #[test]
@@ -1664,11 +1512,7 @@ mod tests {
     #[test]
     fn the_seed_set_includes_points_near_the_query() {
         let (vectors, store) = fixture(6000, 32);
-        let mut graph = Hnsw::new(HnswParams {
-            entry_points: 8,
-            exhaustive_below: 0,
-            ..Default::default()
-        });
+        let mut graph = Hnsw::new(HnswParams { entry_points: 8, exhaustive_below: 0, ..Default::default() });
         graph.force_graph_traversal();
         graph.build(&vectors);
 
@@ -1678,14 +1522,8 @@ mod tests {
         let cutoff = exact.last().map(|n| n.distance).unwrap_or(f32::MAX);
 
         let starts = graph.entry_points(&vectors, &query);
-        let near = starts
-            .iter()
-            .filter(|n| vectors.distance(**n, &query) <= cutoff)
-            .count();
-        assert!(
-            near > 0,
-            "no starting point was anywhere near the query: {starts:?}"
-        );
+        let near = starts.iter().filter(|n| vectors.distance(**n, &query) <= cutoff).count();
+        assert!(near > 0, "no starting point was anywhere near the query: {starts:?}");
     }
 
     /// More entry points must never make the answer worse; the walk starts from a
@@ -1693,20 +1531,14 @@ mod tests {
     #[test]
     fn extra_entry_points_do_not_lower_recall() {
         let (vectors, store) = fixture(6000, 32);
-        let base = HnswParams {
-            exhaustive_below: 0,
-            ..Default::default()
-        };
+        let base = HnswParams { exhaustive_below: 0, ..Default::default() };
         let mut one = Hnsw::new(base);
         one.force_graph_traversal();
         one.build(&vectors);
 
         // Same seed, same insertion order, so the two graphs are identical and only
         // the number of starting points differs.
-        let mut many = Hnsw::new(HnswParams {
-            entry_points: 8,
-            ..base
-        });
+        let mut many = Hnsw::new(HnswParams { entry_points: 8, ..base });
         many.force_graph_traversal();
         many.build(&vectors);
 
@@ -1716,14 +1548,8 @@ mod tests {
         for probe in [11u32, 640, 1900, 3300, 4800, 5500] {
             let q = vectors.get(probe).to_vec();
             let exact = flat::search(&vectors, &store, &filter, &q, 10);
-            single += recall(
-                &one.search(&vectors, &store, &filter, &q, 10, Some(32)),
-                &exact,
-            );
-            multiple += recall(
-                &many.search(&vectors, &store, &filter, &q, 10, Some(32)),
-                &exact,
-            );
+            single += recall(&one.search(&vectors, &store, &filter, &q, 10, Some(32)), &exact);
+            multiple += recall(&many.search(&vectors, &store, &filter, &q, 10, Some(32)), &exact);
         }
         assert!(
             multiple >= single,
@@ -1748,10 +1574,7 @@ mod tests {
         for probe in [3u32, 900, 2100, 3600] {
             let q = vectors.get(probe).to_vec();
             let exact = flat::search(&vectors, &store, &filter, &q, 10);
-            total += recall(
-                &graph.search(&vectors, &store, &filter, &q, 10, Some(128)),
-                &exact,
-            );
+            total += recall(&graph.search(&vectors, &store, &filter, &q, 10, Some(128)), &exact);
         }
         assert!(total / 4.0 > 0.8, "recall fell to {}", total / 4.0);
     }

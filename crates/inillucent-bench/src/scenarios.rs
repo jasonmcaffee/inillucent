@@ -19,11 +19,11 @@ use inillucent_core::store::ChunkInput;
 
 use crate::corpus::Corpus;
 use crate::engine::{
-    exhaustive_reference, fuse_with, InillucentEngine, PgMode, PgVectorEngine, SearchEngine,
+    exhaustive_reference, fuse_with, PgMode, PgVectorEngine, InillucentEngine, SearchEngine,
 };
 use crate::metrics::{
     graded_recall_at_k, ndcg_at_k_attainable, ndcg_graded_at_k, percentile, precision_at_k,
-    recall_at_k, reciprocal_rank, success_at_k, Accumulator,
+    reciprocal_rank, recall_at_k, success_at_k, Accumulator,
 };
 use crate::queryset::{self, GradedQuery, Perturbation};
 use crate::report::{
@@ -141,10 +141,7 @@ pub fn build_selected(
 /// The pgvector side selects `d.id || '#' || c.chunk_index` so the two match
 /// exactly; without a shared key every comparison would silently score zero.
 fn corpus_key(corpus: &Corpus, ordinal: usize) -> String {
-    format!(
-        "{}#{}",
-        corpus.chunks[ordinal].external_doc_id, corpus.chunks[ordinal].chunk_index
-    )
+    format!("{}#{}", corpus.chunks[ordinal].external_doc_id, corpus.chunks[ordinal].chunk_index)
 }
 
 fn keys_of(hits: &[crate::engine::Hit]) -> Vec<String> {
@@ -159,9 +156,7 @@ pub struct KeySpace {
 
 impl KeySpace {
     pub fn new() -> Self {
-        KeySpace {
-            ids: std::collections::HashMap::new(),
-        }
+        KeySpace { ids: std::collections::HashMap::new() }
     }
     pub fn id(&mut self, key: &str) -> u32 {
         let next = self.ids.len() as u32;
@@ -224,17 +219,11 @@ impl GradeOptions {
         let mut arm = BTreeMap::new();
         arm.insert("fusion".into(), format!("{:?}", self.fusion));
         arm.insert("lexical_coverage".into(), self.lexical_coverage.to_string());
-        arm.insert(
-            "lexical_proximity".into(),
-            self.lexical_proximity.to_string(),
-        );
+        arm.insert("lexical_proximity".into(), self.lexical_proximity.to_string());
         arm.insert("lexical_prefix".into(), self.lexical_prefix.to_string());
         arm.insert("lexical_tier".into(), self.lexical_tier.to_string());
         arm.insert("lexical_phrase".into(), self.lexical_phrase.to_string());
-        arm.insert(
-            "lexical_rescore_depth".into(),
-            self.lexical_rescore_depth.to_string(),
-        );
+        arm.insert("lexical_rescore_depth".into(), self.lexical_rescore_depth.to_string());
         arm.insert("adaptive_fusion".into(), self.adaptive_fusion.to_string());
         arm.insert("adaptive".into(), format!("{:?}", self.adaptive));
         arm.insert("mmr_lambda".into(), self.mmr_lambda.to_string());
@@ -298,8 +287,7 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
     let (index, keys, stats, build_seconds) = build_index(corpus, limit, true)?;
     eprintln!("  built in {build_seconds:.1}s");
 
-    let mut inillucent =
-        InillucentEngine::new(index, keys.clone(), INILLUCENT.to_string(), Some(128));
+    let mut inillucent = InillucentEngine::new(index, keys.clone(), INILLUCENT.to_string(), Some(128));
     // The same asymmetry the well configured baseline is given: a wider traversal on
     // a filtered query, because a filtered walk has to step past everything the
     // predicate rejects. pgvector gets hnsw.ef_search 400 filtered against 100
@@ -316,12 +304,8 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
     inillucent.index.set_lexical_prefix(lexical_prefix);
     inillucent.index.set_lexical_tier(lexical_tier);
     inillucent.index.set_lexical_phrase(options.lexical_phrase);
-    inillucent
-        .index
-        .set_lexical_rescore_depth(options.lexical_rescore_depth);
-    inillucent
-        .index
-        .set_adaptive_fusion(options.adaptive_fusion, options.adaptive);
+    inillucent.index.set_lexical_rescore_depth(options.lexical_rescore_depth);
+    inillucent.index.set_adaptive_fusion(options.adaptive_fusion, options.adaptive);
     inillucent.index.set_mmr_lambda(options.mmr_lambda);
     inillucent.index.set_fusion(fusion);
 
@@ -366,10 +350,7 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
         calibration.len()
     );
 
-    eprintln!(
-        "embedding queries with {} from {model_dir}",
-        model.manifest.id
-    );
+    eprintln!("embedding queries with {} from {model_dir}", model.manifest.id);
     // The cache's own header, checked against the model about to embed the
     // queries. Documents embedded by one model and queries by another is a
     // comparison of two coordinate systems, and it produces a plausible-looking
@@ -395,10 +376,7 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
     // seconds and there is no reason to pay for it nine times.
     let embedder = queryset::open_query_embedder(
         model,
-        &crate::arm::ArmOptions {
-            device,
-            ..options.arm_options.clone()
-        },
+        &crate::arm::ArmOptions { device, ..options.arm_options.clone() },
     )?;
     let embed = |qs: &[GradedQuery]| -> Result<Vec<Vec<f32>>> {
         let texts: Vec<String> = qs.iter().map(|q| q.text.clone()).collect();
@@ -444,9 +422,7 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
     let mut writer = match RunWriter::create(&options.runs_dir, &run_id) {
         Ok(w) => Some(w),
         Err(e) => {
-            eprintln!(
-                "  could not open the run directory, continuing without per-query records: {e:#}"
-            );
+            eprintln!("  could not open the run directory, continuing without per-query records: {e:#}");
             None
         }
     };
@@ -462,19 +438,13 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
         None
     } else {
         engines.push(PgMode::WellConfigured.label().to_string());
-        Some(PgVectorEngine::connect(
-            database_url,
-            PgMode::WellConfigured,
-        )?)
+        Some(PgVectorEngine::connect(database_url, PgMode::WellConfigured)?)
     };
 
     // The baseline is fused the same way, so the hybrid family measures retrieval
     // rather than which engine was handed the better ranking policy.
     let calibration_texts: Vec<String> = calibration.iter().map(|q| q.text.clone()).collect();
-    for engine in [pg_default.as_mut(), pg_well_configured.as_mut()]
-        .into_iter()
-        .flatten()
-    {
+    for engine in [pg_default.as_mut(), pg_well_configured.as_mut()].into_iter().flatten() {
         engine.set_fusion(fusion);
         // Theoretical min-max needs a bound on each engine's lexical scores.
         // inillucent has one analytically; `ts_rank_cd` does not, so the baseline's is
@@ -482,10 +452,7 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
         // report does not score.
         if matches!(fusion, Fusion::TheoreticalMinMax { .. }) {
             let ceiling = engine.calibrate_lexical_ceiling(&calibration_texts, 0.99)?;
-            eprintln!(
-                "  {} lexical ceiling calibrated to {ceiling:.4}",
-                engine.name()
-            );
+            eprintln!("  {} lexical ceiling calibrated to {ceiling:.4}", engine.name());
         }
     }
 
@@ -517,12 +484,7 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
 
     // ---- Family: filter correctness gate ----
     eprintln!("scenario: filter correctness");
-    scenarios.push(filter_correctness(
-        &mut inillucent,
-        &identity_vectors,
-        corpus,
-        n,
-    ));
+    scenarios.push(filter_correctness(&mut inillucent, &identity_vectors, corpus, n));
 
     // ---- Family: lexical retrieval ----
     eprintln!("scenario: lexical retrieval");
@@ -547,62 +509,26 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
         let filter = Filter::default();
 
         let identity_scores = run_family(
-            &mut engines,
-            &identity,
-            &identity_vectors,
-            &filter,
-            per_doc_cap,
-            10,
-            &mut writer,
+            &mut engines, &identity, &identity_vectors, &filter, per_doc_cap, 10, &mut writer,
         )?;
         let heading_scores = run_family(
-            &mut engines,
-            &headings,
-            &heading_vectors,
-            &filter,
-            per_doc_cap,
-            10,
-            &mut writer,
+            &mut engines, &headings, &heading_vectors, &filter, per_doc_cap, 10, &mut writer,
         )?;
         scenarios.push(hybrid(&identity_scores, &heading_scores));
 
         // ---- Family: the hard packs ----
         eprintln!("scenario: passage evidence, perturbations and multi-source");
         let passage_scores = run_family(
-            &mut engines,
-            &passage,
-            &passage_vectors,
-            &filter,
-            per_doc_cap,
-            10,
-            &mut writer,
+            &mut engines, &passage, &passage_vectors, &filter, per_doc_cap, 10, &mut writer,
         )?;
         let typo_scores = run_family(
-            &mut engines,
-            &typo,
-            &typo_vectors,
-            &filter,
-            per_doc_cap,
-            10,
-            &mut writer,
+            &mut engines, &typo, &typo_vectors, &filter, per_doc_cap, 10, &mut writer,
         )?;
         let shorthand_scores = run_family(
-            &mut engines,
-            &shorthand,
-            &shorthand_vectors,
-            &filter,
-            per_doc_cap,
-            10,
-            &mut writer,
+            &mut engines, &shorthand, &shorthand_vectors, &filter, per_doc_cap, 10, &mut writer,
         )?;
         let multi_scores = run_family(
-            &mut engines,
-            &multi_source,
-            &multi_vectors,
-            &filter,
-            per_doc_cap,
-            10,
-            &mut writer,
+            &mut engines, &multi_source, &multi_vectors, &filter, per_doc_cap, 10, &mut writer,
         )?;
         scenarios.push(hard_retrieval(
             &passage_scores,
@@ -614,13 +540,7 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
         // ---- Family: abstention on questions nothing answers ----
         eprintln!("scenario: abstention");
         let calibration_scores = run_family(
-            &mut engines,
-            &calibration,
-            &calibration_vectors,
-            &filter,
-            per_doc_cap,
-            10,
-            &mut writer,
+            &mut engines, &calibration, &calibration_vectors, &filter, per_doc_cap, 10, &mut writer,
         )?;
         let negative_scores = run_family(
             &mut engines,
@@ -714,25 +634,11 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
     provenance.insert("run id".into(), run_id.clone());
     provenance.insert(
         "commit".into(),
-        format!(
-            "{}{}",
-            git_commit,
-            if git_dirty {
-                " (working tree dirty)"
-            } else {
-                ""
-            }
-        ),
+        format!("{}{}", git_commit, if git_dirty { " (working tree dirty)" } else { "" }),
     );
     provenance.insert("command".into(), runs::command_line());
-    provenance.insert(
-        "corpus cache".into(),
-        options.cache_path.display().to_string(),
-    );
-    provenance.insert(
-        "embedding model".into(),
-        format!("{model_dir}/{model_file}"),
-    );
+    provenance.insert("corpus cache".into(), options.cache_path.display().to_string());
+    provenance.insert("embedding model".into(), format!("{model_dir}/{model_file}"));
     // Beside the path, what the path was taken to mean. A directory says where
     // the weights were; only this says which prefixes, pooling, width and token
     // bound produced the vectors, and those are what another run has to match.
@@ -744,11 +650,7 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
             model.manifest.dims,
             model.manifest.max_tokens,
             crate::corpus::short(&model.digest()),
-            if model.manifest_on_disk {
-                ""
-            } else {
-                " (assumed from the baseline constants)"
-            }
+            if model.manifest_on_disk { "" } else { " (assumed from the baseline constants)" }
         ),
     );
     provenance.insert("corpus cache header".into(), corpus.header.describe());
@@ -760,28 +662,17 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
             "{} {}, {} logical processors",
             std::env::consts::OS,
             std::env::consts::ARCH,
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(0)
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0)
         ),
     );
     provenance.insert(
         "query seeds".into(),
-        seeds()
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join(", "),
+        seeds().iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", "),
     );
     provenance.insert("statistics seed".into(), options.stats_seed.to_string());
     provenance.insert(
         "ranking settings".into(),
-        options
-            .arm()
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join(", "),
+        options.arm().iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", "),
     );
 
     match writer {
@@ -790,16 +681,9 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
             let dir = w.finish(&manifest)?;
             provenance.insert(
                 "per-query records".into(),
-                format!(
-                    "{} lines in {}",
-                    records,
-                    dir.join("per-query.jsonl").display()
-                ),
+                format!("{} lines in {}", records, dir.join("per-query.jsonl").display()),
             );
-            provenance.insert(
-                "run manifest".into(),
-                dir.join("manifest.json").display().to_string(),
-            );
+            provenance.insert("run manifest".into(), dir.join("manifest.json").display().to_string());
         }
         None => {
             provenance.insert("per-query records".into(), "**not written**".into());
@@ -864,10 +748,7 @@ fn vector_accuracy(
         rows.push(MetricRow::diagnostic(
             format!("all sources, no predicate ({} queries)", acc.len()),
             &format!("recall@{k}"),
-            vec![Measure {
-                engine: INILLUCENT.to_string(),
-                value: acc.mean() as f64,
-            }],
+            vec![Measure { engine: INILLUCENT.to_string(), value: acc.mean() as f64 }],
             true,
         ));
     }
@@ -919,14 +800,8 @@ fn ef_sweep(engine: &mut InillucentEngine, vectors: &[Vec<f32>]) -> Result<Scena
             acc.push(recall_at_k(&got_ids, &ref_ids, 10));
         }
         samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        recall.push(Measure {
-            engine: format!("ef_search = {ef}"),
-            value: acc.mean() as f64,
-        });
-        p50.push(Measure {
-            engine: format!("ef_search = {ef}"),
-            value: percentile(&samples, 0.5),
-        });
+        recall.push(Measure { engine: format!("ef_search = {ef}"), value: acc.mean() as f64 });
+        p50.push(Measure { engine: format!("ef_search = {ef}"), value: percentile(&samples, 0.5) });
     }
 
     // Leave the index exactly as it was found, or every later scenario silently
@@ -1011,10 +886,7 @@ fn filtered_vector(
                 k.min(pass)
             ));
         }
-        recall_series.push(Series {
-            engine: INILLUCENT.to_string(),
-            values: inillucent_recall_values,
-        });
+        recall_series.push(Series { engine: INILLUCENT.to_string(), values: inillucent_recall_values });
 
         let mut row_measures = vec![Measure {
             engine: INILLUCENT.to_string(),
@@ -1055,18 +927,9 @@ fn filtered_vector(
                     sample.len()
                 ));
             }
-            row_measures.push(Measure {
-                engine: name.clone(),
-                value: returned.mean() as f64,
-            });
-            recall_measures.push(Measure {
-                engine: name.clone(),
-                value: recall.mean() as f64,
-            });
-            recall_series.push(Series {
-                engine: name,
-                values,
-            });
+            row_measures.push(Measure { engine: name.clone(), value: returned.mean() as f64 });
+            recall_measures.push(Measure { engine: name.clone(), value: recall.mean() as f64 });
+            recall_series.push(Series { engine: name, values });
         }
 
         rows.push(MetricRow::diagnostic(
@@ -1134,10 +997,7 @@ fn filter_correctness(
             break;
         }
     }
-    let mut timestamps: Vec<i64> = corpus.chunks[..n]
-        .iter()
-        .filter_map(|c| c.updated_at)
-        .collect();
+    let mut timestamps: Vec<i64> = corpus.chunks[..n].iter().filter_map(|c| c.updated_at).collect();
     timestamps.sort_unstable();
     let midpoint = timestamps.get(timestamps.len() / 2).copied();
 
@@ -1148,10 +1008,7 @@ fn filter_correctness(
     if let Some(after) = midpoint {
         filters.push((
             "updated_after = corpus midpoint".to_string(),
-            Filter {
-                updated_after: Some(after),
-                ..Default::default()
-            },
+            Filter { updated_after: Some(after), ..Default::default() },
         ));
         filters.push((
             "source = confluence and updated_after".to_string(),
@@ -1165,18 +1022,12 @@ fn filter_correctness(
     if !label_pool.is_empty() {
         filters.push((
             format!("labels overlap {:?}", label_pool),
-            Filter {
-                labels: Some(label_pool.clone()),
-                ..Default::default()
-            },
+            Filter { labels: Some(label_pool.clone()), ..Default::default() },
         ));
     }
     filters.push((
         "sources = slack or jira".to_string(),
-        Filter {
-            sources: Some(vec!["slack".into(), "jira".into()]),
-            ..Default::default()
-        },
+        Filter { sources: Some(vec!["slack".into(), "jira".into()]), ..Default::default() },
     ));
     filters.push((
         "a source the corpus does not contain".to_string(),
@@ -1191,11 +1042,7 @@ fn filter_correctness(
             // count must never exceed what the predicate admits.
             if hits.len() > compiled.pass_count() {
                 violations += 1;
-                detail = format!(
-                    "{label}: returned {} rows but only {} pass",
-                    hits.len(),
-                    compiled.pass_count()
-                );
+                detail = format!("{label}: returned {} rows but only {} pass", hits.len(), compiled.pass_count());
             }
             for h in &hits {
                 checked += 1;
@@ -1204,8 +1051,7 @@ fn filter_correctness(
                     Some(o) => {
                         if !compiled.passes(o, inillucent.index.store()) {
                             violations += 1;
-                            detail =
-                                format!("{label}: chunk {} does not satisfy the predicate", h.key);
+                            detail = format!("{label}: chunk {} does not satisfy the predicate", h.key);
                         }
                     }
                     None => {
@@ -1217,9 +1063,7 @@ fn filter_correctness(
         }
         // A filter naming a value the corpus lacks has to return nothing.
         if label.contains("does not contain") {
-            let hits = inillucent
-                .vector_search(&vectors[0], filter, 50)
-                .unwrap_or_default();
+            let hits = inillucent.vector_search(&vectors[0], filter, 50).unwrap_or_default();
             if !hits.is_empty() {
                 violations += 1;
                 detail = "a filter naming an absent value returned rows".to_string();
@@ -1286,26 +1130,11 @@ fn lexical(
                 mrr_values.push(rr as f64);
             }
             let name = engine.name().to_string();
-            success.push(Measure {
-                engine: name.clone(),
-                value: s.mean() as f64,
-            });
-            mrr.push(Measure {
-                engine: name.clone(),
-                value: r.mean() as f64,
-            });
-            returned.push(Measure {
-                engine: name.clone(),
-                value: n.mean() as f64,
-            });
-            mrr_series.push(Series {
-                engine: name.clone(),
-                values: mrr_values,
-            });
-            success_series.push(Series {
-                engine: name,
-                values: success_values,
-            });
+            success.push(Measure { engine: name.clone(), value: s.mean() as f64 });
+            mrr.push(Measure { engine: name.clone(), value: r.mean() as f64 });
+            returned.push(Measure { engine: name.clone(), value: n.mean() as f64 });
+            mrr_series.push(Series { engine: name.clone(), values: mrr_values });
+            success_series.push(Series { engine: name, values: success_values });
         }
         // Reciprocal rank is the primary measurement here rather than success@10:
         // it is the same evidence at finer resolution, so it separates two engines
@@ -1318,7 +1147,8 @@ fn lexical(
             true,
             mrr_series,
         ));
-        let mut hit_row = MetricRow::diagnostic(label.to_string(), "success@10", success, true);
+        let mut hit_row =
+            MetricRow::diagnostic(label.to_string(), "success@10", success, true);
         hit_row.series = success_series;
         rows.push(hit_row);
         rows.push(MetricRow::diagnostic(
@@ -1414,19 +1244,9 @@ fn hard_retrieval(
 
     // The multi-source pack is decided by whether all the required evidence
     // arrived, not by whether some of it did.
-    rows.push(multi.row(
-        "multi-source, evidence in two sources",
-        M_EVIDENCE_RECALL,
-        true,
-        Role::Primary,
-    ));
+    rows.push(multi.row("multi-source, evidence in two sources", M_EVIDENCE_RECALL, true, Role::Primary));
     for metric in [M_NDCG_GRADED, M_SUCCESS_10, M_MRR] {
-        rows.push(multi.row(
-            "multi-source, evidence in two sources",
-            metric,
-            true,
-            Role::Diagnostic,
-        ));
+        rows.push(multi.row("multi-source, evidence in two sources", metric, true, Role::Diagnostic));
     }
 
     Scenario {
@@ -1492,30 +1312,15 @@ fn abstention(calibration: &FamilyScores, negative: &FamilyScores) -> Scenario {
         } else {
             flags.iter().sum::<f64>() / flags.len() as f64
         };
-        let mean = |v: &[f64]| {
-            if v.is_empty() {
-                0.0
-            } else {
-                v.iter().sum::<f64>() / v.len() as f64
-            }
-        };
+        let mean = |v: &[f64]| if v.is_empty() { 0.0 } else { v.iter().sum::<f64>() / v.len() as f64 };
 
-        thresholds.push(Measure {
-            engine: engine.clone(),
-            value: threshold,
-        });
-        false_positive.push(Measure {
-            engine: engine.clone(),
-            value: rate,
-        });
+        thresholds.push(Measure { engine: engine.clone(), value: threshold });
+        false_positive.push(Measure { engine: engine.clone(), value: rate });
         margin.push(Measure {
             engine: engine.clone(),
             value: mean(calibration_scores) - mean(negative_scores),
         });
-        fp_series.push(Series {
-            engine: engine.clone(),
-            values: flags,
-        });
+        fp_series.push(Series { engine: engine.clone(), values: flags });
     }
 
     let rows = vec![
@@ -1608,10 +1413,7 @@ impl FamilyScores {
         let measures: Vec<Measure> = self
             .engines()
             .into_iter()
-            .map(|e| Measure {
-                value: self.mean(&e, metric),
-                engine: e,
-            })
+            .map(|e| Measure { value: self.mean(&e, metric), engine: e })
             .collect();
         let series: Vec<Series> = self
             .engines()
@@ -1620,20 +1422,13 @@ impl FamilyScores {
                 self.by_engine
                     .get(&e)
                     .and_then(|m| m.get(metric))
-                    .map(|values| Series {
-                        engine: e,
-                        values: values.clone(),
-                    })
+                    .map(|values| Series { engine: e, values: values.clone() })
             })
             .collect();
         match role {
-            Role::Primary => MetricRow::primary(
-                label.to_string(),
-                metric,
-                measures,
-                higher_is_better,
-                series,
-            ),
+            Role::Primary => {
+                MetricRow::primary(label.to_string(), metric, measures, higher_is_better, series)
+            }
             Role::Diagnostic => {
                 let mut row =
                     MetricRow::diagnostic(label.to_string(), metric, measures, higher_is_better);
@@ -1687,14 +1482,8 @@ fn run_family(
             let got = space.ids_of(&keys_of(&hits));
 
             let scores: [(&str, f64); 10] = [
-                (
-                    M_NDCG_GRADED,
-                    ndcg_graded_at_k(&got, &grades, k, per_doc_cap) as f64,
-                ),
-                (
-                    M_NDCG,
-                    ndcg_at_k_attainable(&got, &correct, k, per_doc_cap) as f64,
-                ),
+                (M_NDCG_GRADED, ndcg_graded_at_k(&got, &grades, k, per_doc_cap) as f64),
+                (M_NDCG, ndcg_at_k_attainable(&got, &correct, k, per_doc_cap) as f64),
                 (M_SUCCESS_1, success_at_k(&got, &correct, 1) as f64),
                 (M_SUCCESS_10, success_at_k(&got, &correct, k) as f64),
                 (M_MRR, reciprocal_rank(&got, &correct) as f64),
@@ -1704,20 +1493,11 @@ fn run_family(
                     graded_recall_at_k(&got, &grades, k, queryset::GRADE_ANSWER) as f64,
                 ),
                 (M_LATENCY, latency),
-                (
-                    M_TOP_SCORE,
-                    hits.first().map(|h| h.score as f64).unwrap_or(0.0),
-                ),
-                (
-                    M_TOP_CONFIDENCE,
-                    hits.first().map(|h| h.confidence as f64).unwrap_or(0.0),
-                ),
+                (M_TOP_SCORE, hits.first().map(|h| h.score as f64).unwrap_or(0.0)),
+                (M_TOP_CONFIDENCE, hits.first().map(|h| h.confidence as f64).unwrap_or(0.0)),
             ];
             for (metric, value) in scores {
-                per_metric
-                    .entry(metric.to_string())
-                    .or_default()
-                    .push(value);
+                per_metric.entry(metric.to_string()).or_default().push(value);
             }
 
             if let Some(w) = writer.as_mut() {
@@ -1753,10 +1533,7 @@ fn run_family(
         by_engine.insert(name, per_metric);
     }
 
-    Ok(FamilyScores {
-        by_engine,
-        queries: queries.len(),
-    })
+    Ok(FamilyScores { by_engine, queries: queries.len() })
 }
 
 fn fusion_methods(
@@ -1771,30 +1548,11 @@ fn fusion_methods(
     // defaults to, so the family says why the default is the default rather than
     // comparing two settings nobody ships.
     let candidates: Vec<(String, Fusion)> = vec![
-        (
-            "Reciprocal Rank Fusion, k = 60".to_string(),
-            Fusion::ReciprocalRank { k: 60.0 },
-        ),
-        (
-            "min-max, vector weight 0.35 (default)".to_string(),
-            Fusion::NormalizedScore {
-                vector_weight: 0.35,
-            },
-        ),
-        (
-            "min-max, vector weight 0.5".to_string(),
-            Fusion::NormalizedScore { vector_weight: 0.5 },
-        ),
-        (
-            "min-max, vector weight 0.7".to_string(),
-            Fusion::NormalizedScore { vector_weight: 0.7 },
-        ),
-        (
-            "convex, vector weight 0.35".to_string(),
-            Fusion::Convex {
-                vector_weight: 0.35,
-            },
-        ),
+        ("Reciprocal Rank Fusion, k = 60".to_string(), Fusion::ReciprocalRank { k: 60.0 }),
+        ("min-max, vector weight 0.35 (default)".to_string(), Fusion::NormalizedScore { vector_weight: 0.35 }),
+        ("min-max, vector weight 0.5".to_string(), Fusion::NormalizedScore { vector_weight: 0.5 }),
+        ("min-max, vector weight 0.7".to_string(), Fusion::NormalizedScore { vector_weight: 0.7 }),
+        ("convex, vector weight 0.35".to_string(), Fusion::Convex { vector_weight: 0.35 }),
     ];
 
     let mut ndcg = Vec::new();
@@ -1815,27 +1573,11 @@ fn fusion_methods(
             ));
             a_s1.push(success_at_k(&got, &correct, 1));
         }
-        ndcg.push(Measure {
-            engine: name.clone(),
-            value: a_ndcg.mean() as f64,
-        });
-        s1.push(Measure {
-            engine: name.clone(),
-            value: a_s1.mean() as f64,
-        });
+        ndcg.push(Measure { engine: name.clone(), value: a_ndcg.mean() as f64 });
+        s1.push(Measure { engine: name.clone(), value: a_s1.mean() as f64 });
     }
-    rows.push(MetricRow::diagnostic(
-        "document identity".into(),
-        "nDCG@10",
-        ndcg,
-        true,
-    ));
-    rows.push(MetricRow::diagnostic(
-        "document identity".into(),
-        "success@1",
-        s1,
-        true,
-    ));
+    rows.push(MetricRow::diagnostic("document identity".into(), "nDCG@10", ndcg, true));
+    rows.push(MetricRow::diagnostic("document identity".into(), "success@1", s1, true));
 
     Scenario {
         name: "Fusion methods compared".to_string(),
@@ -1868,12 +1610,8 @@ fn quantization_ladder(
     // reference ranking, so every rung is measured against the same answer.
     let (reference_index, reference_keys, _stats, _s) =
         build_selected(corpus, selected.clone(), false, corpus.dims)?;
-    let reference_engine = InillucentEngine::new(
-        reference_index,
-        reference_keys,
-        "reference".to_string(),
-        Some(256),
-    );
+    let reference_engine =
+        InillucentEngine::new(reference_index, reference_keys, "reference".to_string(), Some(256));
 
     let mut recall_measures = Vec::new();
     let mut bytes_measures = Vec::new();
@@ -1892,7 +1630,8 @@ fn quantization_ladder(
             let mut acc = Accumulator::default();
             for v in &sample {
                 let narrowed = inillucent_core::distance::truncate_normalized(v, width);
-                let reference = exhaustive_reference(&reference_engine, v, &filter, 10);
+                let reference =
+                    exhaustive_reference(&reference_engine, v, &filter, 10);
                 let got = keys_of(&engine.vector_search(&narrowed, &filter, 10)?);
                 let mut space = KeySpace::new();
                 let ref_ids = space.ids_of(&reference);
@@ -1904,14 +1643,8 @@ fn quantization_ladder(
             } else {
                 stats.vector_bytes as f64 / stats.chunks.max(1) as f64
             };
-            recall_measures.push(Measure {
-                engine: label.clone(),
-                value: acc.mean() as f64,
-            });
-            bytes_measures.push(Measure {
-                engine: label,
-                value: per_vector,
-            });
+            recall_measures.push(Measure { engine: label.clone(), value: acc.mean() as f64 });
+            bytes_measures.push(Measure { engine: label, value: per_vector });
             // Release the rung before the next one is built, so the ladder holds
             // one index at a time rather than eleven.
             drop(engine);
@@ -1986,23 +1719,11 @@ fn latency(
             // The unsorted samples, in query order, so this row can be compared
             // as a paired series like every other primary row: the same query
             // timed under both engines.
-            series.push(Series {
-                engine: name.clone(),
-                values: samples.clone(),
-            });
-            per_query.push(Measure {
-                engine: name.clone(),
-                value: mean,
-            });
+            series.push(Series { engine: name.clone(), values: samples.clone() });
+            per_query.push(Measure { engine: name.clone(), value: mean });
             samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            p50.push(Measure {
-                engine: name.clone(),
-                value: percentile(&samples, 0.5),
-            });
-            p95.push(Measure {
-                engine: name,
-                value: percentile(&samples, 0.95),
-            });
+            p50.push(Measure { engine: name.clone(), value: percentile(&samples, 0.5) });
+            p95.push(Measure { engine: name, value: percentile(&samples, 0.95) });
         }
         // The median is what this family is judged on, and it is the one row here
         // that carries no per-query series.
@@ -2031,12 +1752,7 @@ fn latency(
             MetricRow::diagnostic(label.clone(), "vector search mean ms", per_query, false);
         mean_row.series = series;
         rows.push(mean_row);
-        rows.push(MetricRow::diagnostic(
-            label,
-            "vector search p95 ms",
-            p95,
-            false,
-        ));
+        rows.push(MetricRow::diagnostic(label, "vector search p95 ms", p95, false));
     }
 
     Ok(Scenario {
@@ -2052,37 +1768,19 @@ fn invariants(inillucent: &mut InillucentEngine, vectors: &[Vec<f32>]) -> Scenar
     let mut failures: Vec<String> = Vec::new();
 
     // Determinism: the same query twice must give the same answer.
-    let a = keys_of(
-        &inillucent
-            .vector_search(&vectors[0], &filter, 20)
-            .unwrap_or_default(),
-    );
-    let b = keys_of(
-        &inillucent
-            .vector_search(&vectors[0], &filter, 20)
-            .unwrap_or_default(),
-    );
+    let a = keys_of(&inillucent.vector_search(&vectors[0], &filter, 20).unwrap_or_default());
+    let b = keys_of(&inillucent.vector_search(&vectors[0], &filter, 20).unwrap_or_default());
     if a != b {
         failures.push("vector search is not deterministic".into());
     }
-    let ha = keys_of(
-        &inillucent
-            .hybrid_search("offer eligibility", &vectors[0], &filter, 10)
-            .unwrap_or_default(),
-    );
-    let hb = keys_of(
-        &inillucent
-            .hybrid_search("offer eligibility", &vectors[0], &filter, 10)
-            .unwrap_or_default(),
-    );
+    let ha = keys_of(&inillucent.hybrid_search("offer eligibility", &vectors[0], &filter, 10).unwrap_or_default());
+    let hb = keys_of(&inillucent.hybrid_search("offer eligibility", &vectors[0], &filter, 10).unwrap_or_default());
     if ha != hb {
         failures.push("hybrid search is not deterministic".into());
     }
 
     // The per document cap.
-    let hits = inillucent
-        .hybrid_search("offer eligibility rules", &vectors[0], &filter, 20)
-        .unwrap_or_default();
+    let hits = inillucent.hybrid_search("offer eligibility rules", &vectors[0], &filter, 20).unwrap_or_default();
     let mut per_doc: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
     for h in &hits {
         if let Some(o) = inillucent.ordinal(&h.key) {
@@ -2090,10 +1788,7 @@ fn invariants(inillucent: &mut InillucentEngine, vectors: &[Vec<f32>]) -> Scenar
             *per_doc.entry(doc).or_insert(0) += 1;
         }
     }
-    if per_doc
-        .values()
-        .any(|c| *c > inillucent.index.config().per_doc_cap)
-    {
+    if per_doc.values().any(|c| *c > inillucent.index.config().per_doc_cap) {
         failures.push("the per document cap was exceeded".into());
     }
 
@@ -2108,29 +1803,19 @@ fn invariants(inillucent: &mut InillucentEngine, vectors: &[Vec<f32>]) -> Scenar
         }
     }
     if deleted_leaked > 0 {
-        failures.push(format!(
-            "{deleted_leaked} soft deleted chunks were returned"
-        ));
+        failures.push(format!("{deleted_leaked} soft deleted chunks were returned"));
     }
 
     // Pathological queries must return empty rather than panicking.
     for q in ["", "   ", "the of and a", "!!!???", &"x".repeat(5000)] {
         let _ = inillucent.lexical_search(q, &filter, 10);
     }
-    if !inillucent
-        .lexical_search("the of and a", &filter, 10)
-        .unwrap_or_default()
-        .is_empty()
-    {
+    if !inillucent.lexical_search("the of and a", &filter, 10).unwrap_or_default().is_empty() {
         failures.push("a query of only stopwords returned rows".into());
     }
 
     // k = 0 must return nothing.
-    if !inillucent
-        .vector_search(&vectors[0], &filter, 0)
-        .unwrap_or_default()
-        .is_empty()
-    {
+    if !inillucent.vector_search(&vectors[0], &filter, 0).unwrap_or_default().is_empty() {
         failures.push("k = 0 returned rows".into());
     }
 

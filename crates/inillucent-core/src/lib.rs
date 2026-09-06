@@ -1,20 +1,20 @@
 pub mod binio;
-pub mod bm25;
 pub mod distance;
-pub mod embed;
-#[cfg(feature = "onnx")]
-pub mod embed_onnx;
 pub mod filter;
 pub mod flat;
 pub mod hnsw;
-pub mod index;
-pub mod model;
-pub mod persist;
+pub mod store;
+pub mod vectors;
+pub mod bm25;
+pub mod tokenize;
 pub mod quantize;
 pub mod rank;
-pub mod store;
-pub mod tokenize;
-pub mod vectors;
+pub mod embed;
+pub mod model;
+pub mod index;
+pub mod persist;
+#[cfg(feature = "onnx")]
+pub mod embed_onnx;
 
 /// An `Index` can be shared across threads, asserted at compile time.
 ///

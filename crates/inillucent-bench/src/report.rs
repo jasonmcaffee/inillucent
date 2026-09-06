@@ -115,10 +115,7 @@ impl MetricRow {
 
     /// The per-query scores for one engine, if this row carries them.
     fn values_for(&self, engine: &str) -> Option<&[f64]> {
-        self.series
-            .iter()
-            .find(|s| s.engine == engine)
-            .map(|s| s.values.as_slice())
+        self.series.iter().find(|s| s.engine == engine).map(|s| s.values.as_slice())
     }
 }
 
@@ -368,11 +365,7 @@ pub fn judge(card: &ScoreCard) -> Vec<Judgement> {
 fn scenario_columns(scenario: &Scenario, engines: &[String]) -> Vec<String> {
     let mut columns: Vec<String> = Vec::new();
     for e in engines {
-        if scenario
-            .rows
-            .iter()
-            .any(|r| r.measures.iter().any(|m| &m.engine == e))
-        {
+        if scenario.rows.iter().any(|r| r.measures.iter().any(|m| &m.engine == e)) {
             columns.push(e.clone());
         }
     }
@@ -418,10 +411,8 @@ pub fn render(card: &ScoreCard) -> String {
     let better = count(Verdict::Better);
     let equivalent = count(Verdict::Equivalent);
     let inconclusive = count(Verdict::Inconclusive);
-    let worse: Vec<&Judgement> = judgements
-        .iter()
-        .filter(|j| j.verdict == Verdict::Worse)
-        .collect();
+    let worse: Vec<&Judgement> =
+        judgements.iter().filter(|j| j.verdict == Verdict::Worse).collect();
 
     s.push_str("## Verdict\n\n");
     s.push_str("Every family below declares **one** primary measurement, and only those are judged. The rest are diagnostics: they are measured and printed, and they do not vote, because nDCG, success@1, success@10 and reciprocal rank all move together when one behaviour changes and counting each of them separately turns one result into four.\n\n");
@@ -471,25 +462,11 @@ pub fn render(card: &ScoreCard) -> String {
                     p.disagreements.to_string(),
                 ),
                 None => {
-                    let d = if j.inillucent.is_finite() {
-                        j.inillucent - j.best_baseline
-                    } else {
-                        0.0
-                    };
-                    (
-                        fmt(d),
-                        "not paired".to_string(),
-                        "n/a".into(),
-                        "n/a".into(),
-                        "n/a".into(),
-                    )
+                    let d = if j.inillucent.is_finite() { j.inillucent - j.best_baseline } else { 0.0 };
+                    (fmt(d), "not paired".to_string(), "n/a".into(), "n/a".into(), "n/a".into())
                 }
             };
-            let verdict = if j.at_ceiling {
-                "equivalent, at the ceiling"
-            } else {
-                j.verdict.label()
-            };
+            let verdict = if j.at_ceiling { "equivalent, at the ceiling" } else { j.verdict.label() };
             s.push_str(&format!(
                 "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
                 j.scenario,
@@ -519,11 +496,7 @@ pub fn render(card: &ScoreCard) -> String {
     }
 
     // Gates first: a correctness failure changes how every other number should be read.
-    let gates: Vec<&Scenario> = card
-        .scenarios
-        .iter()
-        .filter(|sc| sc.gate.is_some())
-        .collect();
+    let gates: Vec<&Scenario> = card.scenarios.iter().filter(|sc| sc.gate.is_some()).collect();
     if !gates.is_empty() {
         s.push_str("## Correctness gates\n\n");
         s.push_str("These pass or fail rather than scoring. An engine that returns rows it was told to exclude is not a faster engine, it is a wrong one, so a failure here caps the result regardless of any accuracy number.\n\n");
@@ -659,32 +632,23 @@ pub fn print_summary(card: &ScoreCard) {
     );
     for x in j.iter().filter(|x| x.verdict != Verdict::Better) {
         let interval = match &x.paired {
-            Some(p) => format!(
-                "delta {} [{} .. {}] p={:.4} n={}",
-                fmt(p.delta),
-                fmt(p.low),
-                fmt(p.high),
-                p.p_value,
-                p.queries
-            ),
+            Some(p) => format!("delta {} [{} .. {}] p={:.4} n={}", fmt(p.delta), fmt(p.low), fmt(p.high), p.p_value, p.queries),
             None => "not paired".to_string(),
         };
         eprintln!(
             "  {:<12} [{}] {} {} :: inillucent={} baseline={} ({}) {}",
-            x.verdict.label(),
-            x.scenario,
-            x.label,
-            x.metric,
-            fmt(x.inillucent),
-            fmt(x.best_baseline),
-            x.best_baseline_engine,
-            interval
+            x.verdict.label(), x.scenario, x.label, x.metric,
+            fmt(x.inillucent), fmt(x.best_baseline), x.best_baseline_engine, interval
         );
     }
     eprintln!("\n=== summary ===");
     for sc in &card.scenarios {
         if let Some(g) = &sc.gate {
-            eprintln!("{}: {}", sc.name, if g.passed { "pass" } else { "FAIL" });
+            eprintln!(
+                "{}: {}",
+                sc.name,
+                if g.passed { "pass" } else { "FAIL" }
+            );
         }
         for row in &sc.rows {
             let parts: Vec<String> = row
@@ -692,13 +656,7 @@ pub fn print_summary(card: &ScoreCard) {
                 .iter()
                 .map(|m| format!("{}={}", m.engine, fmt(m.value)))
                 .collect();
-            eprintln!(
-                "  [{}] {} {} :: {}",
-                sc.name,
-                row.label,
-                row.metric,
-                parts.join("  ")
-            );
+            eprintln!("  [{}] {} {} :: {}", sc.name, row.label, row.metric, parts.join("  "));
         }
     }
 }
@@ -728,25 +686,13 @@ mod tests {
                     "all sources".into(),
                     "recall@10",
                     vec![
-                        Measure {
-                            engine: "inillucent".into(),
-                            value: mean(inillucent),
-                        },
-                        Measure {
-                            engine: "pgvector".into(),
-                            value: mean(baseline),
-                        },
+                        Measure { engine: "inillucent".into(), value: mean(inillucent) },
+                        Measure { engine: "pgvector".into(), value: mean(baseline) },
                     ],
                     true,
                     vec![
-                        Series {
-                            engine: "inillucent".into(),
-                            values: inillucent.to_vec(),
-                        },
-                        Series {
-                            engine: "pgvector".into(),
-                            values: baseline.to_vec(),
-                        },
+                        Series { engine: "inillucent".into(), values: inillucent.to_vec() },
+                        Series { engine: "pgvector".into(), values: baseline.to_vec() },
                     ],
                 )],
                 gate: None,
@@ -777,10 +723,7 @@ mod tests {
     #[test]
     fn marks_the_better_value_in_bold() {
         let md = render(&card());
-        assert!(
-            md.contains("**0.9800**"),
-            "expected the winner marked: {md}"
-        );
+        assert!(md.contains("**0.9800**"), "expected the winner marked: {md}");
     }
 
     #[test]
@@ -790,10 +733,7 @@ mod tests {
             name: "Filter correctness".into(),
             rationale: "r".into(),
             rows: vec![],
-            gate: Some(GateResult {
-                passed: false,
-                detail: "3 rows violated the predicate".into(),
-            }),
+            gate: Some(GateResult { passed: false, detail: "3 rows violated the predicate".into() }),
         });
         let md = render(&c);
         assert!(md.contains("**FAIL**"));
@@ -816,32 +756,14 @@ mod tests {
             PgMode::WellConfigured.label().into(),
         ];
         c.scenarios[0].rows[0].measures = vec![
-            Measure {
-                engine: "inillucent".into(),
-                value: 0.95,
-            },
-            Measure {
-                engine: PgMode::Default.label().into(),
-                value: 0.10,
-            },
-            Measure {
-                engine: PgMode::WellConfigured.label().into(),
-                value: 0.90,
-            },
+            Measure { engine: "inillucent".into(), value: 0.95 },
+            Measure { engine: PgMode::Default.label().into(), value: 0.10 },
+            Measure { engine: PgMode::WellConfigured.label().into(), value: 0.90 },
         ];
         c.scenarios[0].rows[0].series = vec![
-            Series {
-                engine: "inillucent".into(),
-                values: vec![0.95; 40],
-            },
-            Series {
-                engine: PgMode::Default.label().into(),
-                values: vec![0.10; 40],
-            },
-            Series {
-                engine: PgMode::WellConfigured.label().into(),
-                values: vec![0.90; 40],
-            },
+            Series { engine: "inillucent".into(), values: vec![0.95; 40] },
+            Series { engine: PgMode::Default.label().into(), values: vec![0.10; 40] },
+            Series { engine: PgMode::WellConfigured.label().into(), values: vec![0.90; 40] },
         ];
         let j = judge(&c);
         assert_eq!(j.len(), 1);
@@ -860,32 +782,14 @@ mod tests {
             PgMode::WellConfigured.label().into(),
         ];
         c.scenarios[0].rows[0].measures = vec![
-            Measure {
-                engine: "inillucent".into(),
-                value: 0.80,
-            },
-            Measure {
-                engine: PgMode::Default.label().into(),
-                value: 0.10,
-            },
-            Measure {
-                engine: PgMode::WellConfigured.label().into(),
-                value: 0.90,
-            },
+            Measure { engine: "inillucent".into(), value: 0.80 },
+            Measure { engine: PgMode::Default.label().into(), value: 0.10 },
+            Measure { engine: PgMode::WellConfigured.label().into(), value: 0.90 },
         ];
         c.scenarios[0].rows[0].series = vec![
-            Series {
-                engine: "inillucent".into(),
-                values: vec![0.80; 40],
-            },
-            Series {
-                engine: PgMode::Default.label().into(),
-                values: vec![0.10; 40],
-            },
-            Series {
-                engine: PgMode::WellConfigured.label().into(),
-                values: vec![0.90; 40],
-            },
+            Series { engine: "inillucent".into(), values: vec![0.80; 40] },
+            Series { engine: PgMode::Default.label().into(), values: vec![0.10; 40] },
+            Series { engine: PgMode::WellConfigured.label().into(), values: vec![0.90; 40] },
         ];
         let j = judge(&c);
         assert_eq!(j[0].verdict, Verdict::Worse);
@@ -904,10 +808,7 @@ mod tests {
         inillucent[0] = 1.0;
         let c = card_with(&inillucent, &baseline);
         let j = judge(&c);
-        assert!(
-            j[0].inillucent > j[0].best_baseline,
-            "the point estimate really did move"
-        );
+        assert!(j[0].inillucent > j[0].best_baseline, "the point estimate really did move");
         assert_ne!(j[0].verdict, Verdict::Better);
         assert_eq!(j[0].paired.as_ref().unwrap().disagreements, 1);
     }
@@ -940,24 +841,15 @@ mod tests {
             "all sources".into(),
             "rows returned of 50",
             vec![
-                Measure {
-                    engine: "inillucent".into(),
-                    value: 50.0,
-                },
-                Measure {
-                    engine: "pgvector".into(),
-                    value: 30.0,
-                },
+                Measure { engine: "inillucent".into(), value: 50.0 },
+                Measure { engine: "pgvector".into(), value: 30.0 },
             ],
             true,
         ));
         let j = judge(&c);
         assert_eq!(j.len(), 1, "only the primary row is judged");
         assert_eq!(j[0].metric, "recall@10");
-        assert!(
-            render(&c).contains("rows returned of 50"),
-            "the diagnostic is still printed"
-        );
+        assert!(render(&c).contains("rows returned of 50"), "the diagnostic is still printed");
     }
 
     /// The ladder and the sweep compare inillucent settings against each other. If
@@ -967,14 +859,8 @@ mod tests {
         let mut c = card();
         c.engines = vec!["inillucent".into(), PgMode::Default.label().into()];
         c.scenarios[0].rows[0].measures = vec![
-            Measure {
-                engine: "768 dims, f32".into(),
-                value: 1.0,
-            },
-            Measure {
-                engine: "64 dims, int8".into(),
-                value: 0.34,
-            },
+            Measure { engine: "768 dims, f32".into(), value: 1.0 },
+            Measure { engine: "64 dims, int8".into(), value: 0.34 },
         ];
         assert!(judge(&c).is_empty());
     }
@@ -986,24 +872,12 @@ mod tests {
         c.scenarios[0].rows[0].metric = "vector search mean ms".into();
         c.scenarios[0].rows[0].higher_is_better = false;
         c.scenarios[0].rows[0].measures = vec![
-            Measure {
-                engine: "inillucent".into(),
-                value: 1.2,
-            },
-            Measure {
-                engine: PgMode::Default.label().into(),
-                value: 3.1,
-            },
+            Measure { engine: "inillucent".into(), value: 1.2 },
+            Measure { engine: PgMode::Default.label().into(), value: 3.1 },
         ];
         c.scenarios[0].rows[0].series = vec![
-            Series {
-                engine: "inillucent".into(),
-                values: vec![1.2; 40],
-            },
-            Series {
-                engine: PgMode::Default.label().into(),
-                values: vec![3.1; 40],
-            },
+            Series { engine: "inillucent".into(), values: vec![1.2; 40] },
+            Series { engine: PgMode::Default.label().into(), values: vec![3.1; 40] },
         ];
         assert_eq!(judge(&c)[0].verdict, Verdict::Better, "faster should win");
     }
@@ -1015,10 +889,7 @@ mod tests {
             name: "Filter correctness".into(),
             rationale: "r".into(),
             rows: vec![],
-            gate: Some(GateResult {
-                passed: false,
-                detail: "bad".into(),
-            }),
+            gate: Some(GateResult { passed: false, detail: "bad".into() }),
         });
         assert!(render(&c).contains("**A GATE FAILED**"));
     }
@@ -1043,8 +914,7 @@ mod tests {
     fn provenance_is_rendered_when_the_run_recorded_it() {
         let mut c = card();
         c.provenance.insert("commit".into(), "abc1234".into());
-        c.provenance
-            .insert("per-query records".into(), "180 lines in runs/x".into());
+        c.provenance.insert("per-query records".into(), "180 lines in runs/x".into());
         let md = render(&c);
         assert!(md.contains("## Provenance"));
         assert!(md.contains("abc1234"));
@@ -1065,11 +935,7 @@ mod tests {
         let c = card();
         let j = judge(&c);
         assert!(j[0].paired.is_none());
-        assert_eq!(
-            j[0].verdict,
-            Verdict::Better,
-            "0.98 against 0.91 clears the threshold"
-        );
+        assert_eq!(j[0].verdict, Verdict::Better, "0.98 against 0.91 clears the threshold");
         assert!(render(&c).contains("not paired"));
     }
 }

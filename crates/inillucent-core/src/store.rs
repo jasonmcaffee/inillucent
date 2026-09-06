@@ -516,10 +516,7 @@ impl Store {
 
         let space_key = input.space_key.as_deref().map(|s| self.spaces.intern(s));
         let author = input.author.as_deref().map(|s| self.authors.intern(s));
-        let author_id = input
-            .author_id
-            .as_deref()
-            .map(|s| self.author_ids.intern(s));
+        let author_id = input.author_id.as_deref().map(|s| self.author_ids.intern(s));
 
         let d = self.documents.len() as u32;
         self.documents.push(Document {
@@ -540,6 +537,7 @@ impl Store {
         d
     }
 }
+
 
 /// One chunk's fixed-width on-disk record.
 ///
@@ -736,7 +734,8 @@ impl Store {
 
         let label_arena = binio::read_u32_vec(r)?;
         let flat = binio::read_u32_vec(r)?;
-        let attribute_arena: Vec<(u32, u32)> = flat.chunks_exact(2).map(|p| (p[0], p[1])).collect();
+        let attribute_arena: Vec<(u32, u32)> =
+            flat.chunks_exact(2).map(|p| (p[0], p[1])).collect();
         let heading_arena = binio::read_u32_vec(r)?;
         let text = binio::read_text(r)?;
 
@@ -880,11 +879,7 @@ mod tests {
         let confluence = s.sources.get("confluence").unwrap();
         let slack = s.sources.get("slack").unwrap();
         assert_eq!(s.live_chunks_for_source(confluence), 2);
-        assert_eq!(
-            s.live_chunks_for_source(slack),
-            1,
-            "the deleted chunk must not count"
-        );
+        assert_eq!(s.live_chunks_for_source(slack), 1, "the deleted chunk must not count");
         assert_eq!(s.live_chunks, 3);
         assert_eq!(s.n_chunks(), 4);
     }

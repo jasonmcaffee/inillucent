@@ -74,8 +74,7 @@ fn header(w: &mut impl Write, kind: u8) -> Result<()> {
 /// this build can open" without caring which section it happens to be looking at.
 fn check_header_version(r: &mut impl Read) -> Result<()> {
     let mut magic = [0u8; 8];
-    r.read_exact(&mut magic)
-        .context("reading the file header")?;
+    r.read_exact(&mut magic).context("reading the file header")?;
     if !is_known_magic(&magic) {
         anyhow::bail!("not an inillucent index file");
     }
@@ -92,8 +91,7 @@ fn check_header_version(r: &mut impl Read) -> Result<()> {
 
 fn check_header(r: &mut impl Read, kind: u8) -> Result<()> {
     let mut magic = [0u8; 8];
-    r.read_exact(&mut magic)
-        .context("reading the file header")?;
+    r.read_exact(&mut magic).context("reading the file header")?;
     if !is_known_magic(&magic) {
         anyhow::bail!("not an inillucent index file");
     }
@@ -222,15 +220,9 @@ impl SavedFusion {
     fn to_fusion(&self) -> Result<Fusion> {
         Ok(match self.method.as_str() {
             "rrf" => Fusion::ReciprocalRank { k: self.rrf_k },
-            "minmax" => Fusion::NormalizedScore {
-                vector_weight: self.vector_weight,
-            },
-            "convex" => Fusion::Convex {
-                vector_weight: self.vector_weight,
-            },
-            "tmm" => Fusion::TheoreticalMinMax {
-                vector_weight: self.vector_weight,
-            },
+            "minmax" => Fusion::NormalizedScore { vector_weight: self.vector_weight },
+            "convex" => Fusion::Convex { vector_weight: self.vector_weight },
+            "tmm" => Fusion::TheoreticalMinMax { vector_weight: self.vector_weight },
             other => anyhow::bail!("the saved index names an unknown fusion method {other}"),
         })
     }
@@ -263,6 +255,7 @@ impl From<&SavedAdaptive> for AdaptiveWeights {
         }
     }
 }
+
 
 impl From<&IndexConfig> for SavedConfig {
     fn from(cfg: &IndexConfig) -> Self {
@@ -530,23 +523,17 @@ pub fn is_readable(dir: &Path) -> bool {
         return false;
     };
     let g = generation_dir(dir, generation);
-    [
-        "store.bin",
-        "vectors.bin",
-        "config.bin",
-        "graph.bin",
-        "lexical.bin",
-    ]
-    .iter()
-    .all(|name| {
-        File::open(g.join(name))
-            .ok()
-            .map(|f| {
-                let mut r = BufReader::new(f);
-                check_header_version(&mut r).is_ok()
-            })
-            .unwrap_or(false)
-    })
+    ["store.bin", "vectors.bin", "config.bin", "graph.bin", "lexical.bin"]
+        .iter()
+        .all(|name| {
+            File::open(g.join(name))
+                .ok()
+                .map(|f| {
+                    let mut r = BufReader::new(f);
+                    check_header_version(&mut r).is_ok()
+                })
+                .unwrap_or(false)
+        })
 }
 
 /// Reads every file of one generation directory into an index.
@@ -679,9 +666,7 @@ fn read_section(r: &mut impl Read) -> Result<Vec<u8>> {
     let length = u64::from_le_bytes(length);
     const CEILING: u64 = 1 << 40;
     if length > CEILING {
-        anyhow::bail!(
-            "index section claims {length} bytes, which is not a length this build reads"
-        );
+        anyhow::bail!("index section claims {length} bytes, which is not a length this build reads");
     }
     let mut bytes = vec![0u8; length as usize];
     r.read_exact(&mut bytes).context("reading a section")?;
@@ -696,11 +681,7 @@ mod tests {
     use crate::store::ChunkInput;
 
     fn small_index() -> Index {
-        let mut index = Index::new(IndexConfig {
-            dims: 16,
-            quantized: true,
-            ..Default::default()
-        });
+        let mut index = Index::new(IndexConfig { dims: 16, quantized: true, ..Default::default() });
         let chunks: Vec<ChunkInput> = (0..200)
             .map(|i| ChunkInput {
                 source: if i % 3 == 0 { "slack" } else { "confluence" }.into(),
@@ -723,9 +704,7 @@ mod tests {
             .collect();
         let vectors: Vec<Vec<f32>> = (0..200)
             .map(|i| {
-                let mut v: Vec<f32> = (0..16)
-                    .map(|d| ((i * 16 + d) as f32 * 0.07).sin())
-                    .collect();
+                let mut v: Vec<f32> = (0..16).map(|d| ((i * 16 + d) as f32 * 0.07).sin()).collect();
                 normalize(&mut v);
                 v
             })
@@ -737,10 +716,7 @@ mod tests {
 
     fn temp_dir(name: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!(
-            "inillucent-persist-test-{name}-{}",
-            std::process::id()
-        ));
+        p.push(format!("inillucent-persist-test-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&p);
         p
     }
@@ -771,16 +747,8 @@ mod tests {
             .collect();
         assert_eq!(a, b, "the graph did not survive the round trip");
 
-        let la: Vec<u32> = original
-            .lexical_search("offer eligibility", &f_orig, 10)
-            .iter()
-            .map(|h| h.chunk)
-            .collect();
-        let lb: Vec<u32> = loaded
-            .lexical_search("offer eligibility", &f_load, 10)
-            .iter()
-            .map(|h| h.chunk)
-            .collect();
+        let la: Vec<u32> = original.lexical_search("offer eligibility", &f_orig, 10).iter().map(|h| h.chunk).collect();
+        let lb: Vec<u32> = loaded.lexical_search("offer eligibility", &f_load, 10).iter().map(|h| h.chunk).collect();
         assert_eq!(la, lb, "the lexical index did not survive the round trip");
 
         fs::remove_dir_all(&dir).ok();
@@ -795,18 +763,9 @@ mod tests {
 
         for filter in [
             Filter::source("slack"),
-            Filter {
-                labels: Some(vec!["design".into()]),
-                ..Default::default()
-            },
-            Filter {
-                author: Some("Ada".into()),
-                ..Default::default()
-            },
-            Filter {
-                updated_after: Some(1100),
-                ..Default::default()
-            },
+            Filter { labels: Some(vec!["design".into()]), ..Default::default() },
+            Filter { author: Some("Ada".into()), ..Default::default() },
+            Filter { updated_after: Some(1100), ..Default::default() },
         ] {
             let a = original.compile(&filter).pass_count();
             let b = loaded.compile(&filter).pass_count();
@@ -821,23 +780,10 @@ mod tests {
         let original = small_index();
         save(&original, &dir).unwrap();
         let loaded = load(&dir).unwrap();
-        let deleted_before = original
-            .store()
-            .documents
-            .iter()
-            .filter(|d| d.deleted)
-            .count();
-        let deleted_after = loaded
-            .store()
-            .documents
-            .iter()
-            .filter(|d| d.deleted)
-            .count();
+        let deleted_before = original.store().documents.iter().filter(|d| d.deleted).count();
+        let deleted_after = loaded.store().documents.iter().filter(|d| d.deleted).count();
         assert_eq!(deleted_before, deleted_after);
-        assert!(
-            deleted_after > 0,
-            "the fixture should contain a deleted document"
-        );
+        assert!(deleted_after > 0, "the fixture should contain a deleted document");
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -881,9 +827,7 @@ mod tests {
     fn every_ranking_setting_survives_the_round_trip() {
         let dir = temp_dir("ranking-config");
         let mut original = small_index();
-        original.set_fusion(Fusion::TheoreticalMinMax {
-            vector_weight: 0.62,
-        });
+        original.set_fusion(Fusion::TheoreticalMinMax { vector_weight: 0.62 });
         original.set_lexical_coverage(2.25);
         original.set_lexical_proximity(0.4);
         original.set_lexical_prefix(true);
@@ -934,9 +878,7 @@ mod tests {
     fn a_non_default_index_answers_identically_after_reopening() {
         let dir = temp_dir("ranking-answers");
         let mut original = small_index();
-        original.set_fusion(Fusion::TheoreticalMinMax {
-            vector_weight: 0.62,
-        });
+        original.set_fusion(Fusion::TheoreticalMinMax { vector_weight: 0.62 });
         original.set_lexical_coverage(2.25);
         original.set_lexical_proximity(0.4);
         original.set_lexical_tier(true);
@@ -963,6 +905,7 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+
     #[test]
     fn a_save_publishes_a_new_generation_rather_than_overwriting_the_old_one() {
         let dir = temp_dir("generations");
@@ -972,10 +915,7 @@ mod tests {
         save(&index, &dir).unwrap();
         let second = read_current(&dir).unwrap();
 
-        assert!(
-            second > first,
-            "the pointer did not move: {first} then {second}"
-        );
+        assert!(second > first, "the pointer did not move: {first} then {second}");
         assert!(
             generation_dir(&dir, first).join("store.bin").exists(),
             "the superseded generation was removed while a reader could still hold it"
@@ -1020,18 +960,12 @@ mod tests {
         fs::write(dir.join("current.tmp"), format!("g{:012}", live + 1)).unwrap();
         fs::rename(dir.join("current.tmp"), dir.join("current")).unwrap();
         assert!(!vanished.exists());
-        assert!(
-            load(&dir).is_err(),
-            "a pointer to nothing has nothing to fall back to"
-        );
+        assert!(load(&dir).is_err(), "a pointer to nothing has nothing to fall back to");
 
         // With the pointer naming a generation that is there, the read succeeds.
         fs::write(dir.join("current.tmp"), format!("g{live:012}")).unwrap();
         fs::rename(dir.join("current.tmp"), dir.join("current")).unwrap();
-        assert_eq!(
-            load(&dir).unwrap().store().n_chunks(),
-            index.store().n_chunks()
-        );
+        assert_eq!(load(&dir).unwrap().store().n_chunks(), index.store().n_chunks());
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -1102,15 +1036,8 @@ mod tests {
             let right = loaded.lexical_search(query, &b, 20);
             assert_eq!(left.len(), right.len(), "{query} returned different counts");
             for (l, r) in left.iter().zip(right.iter()) {
-                assert_eq!(
-                    l.chunk, r.chunk,
-                    "{query} ranked differently after reloading"
-                );
-                assert_eq!(
-                    l.score.to_bits(),
-                    r.score.to_bits(),
-                    "{query} scored differently"
-                );
+                assert_eq!(l.chunk, r.chunk, "{query} ranked differently after reloading");
+                assert_eq!(l.score.to_bits(), r.score.to_bits(), "{query} scored differently");
                 assert_eq!(l.matched_terms, r.matched_terms);
             }
         }
@@ -1153,28 +1080,21 @@ mod tests {
         let mut loaded = load(&dir).unwrap();
 
         assert_eq!(loaded.store().live_chunks, original.store().live_chunks);
-        assert_eq!(
-            loaded.store().deleted_chunks,
-            original.store().deleted_chunks
-        );
+        assert_eq!(loaded.store().deleted_chunks, original.store().deleted_chunks);
         assert!(loaded.store().flag_bit("has_attachment").is_some());
-        assert_eq!(
-            loaded.store().chunk_external_id(0),
-            original.store().chunk_external_id(0)
-        );
+        assert_eq!(loaded.store().chunk_external_id(0), original.store().chunk_external_id(0));
         assert!(loaded.store().attribute_dictionary("participant").is_some());
 
         // The filters that read those columns must behave identically.
-        let with_attachment = loaded.compile(&Filter::default().with_flag("has_attachment", true));
+        let with_attachment =
+            loaded.compile(&Filter::default().with_flag("has_attachment", true));
         assert_eq!(with_attachment.pass_count(), 1);
-        let by_participant = loaded.compile(&Filter::default().with_attribute(
-            crate::filter::AttributeFilter::containing("participant", "jason@"),
-        ));
+        let by_participant = loaded.compile(
+            &Filter::default()
+                .with_attribute(crate::filter::AttributeFilter::containing("participant", "jason@")),
+        );
         assert_eq!(by_participant.pass_count(), 1);
-        let before = loaded.compile(&Filter {
-            updated_before: Some(4242),
-            ..Default::default()
-        });
+        let before = loaded.compile(&Filter { updated_before: Some(4242), ..Default::default() });
         assert!(before.pass_count() > 0);
 
         // And the document lookup rebuilds over live documents only, so a
