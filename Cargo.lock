@@ -672,6 +672,7 @@ dependencies = [
  "inillucent-exec",
  "inillucent-ext",
  "inillucent-pool",
+ "inillucent-search",
  "inillucent-sql",
  "inillucent-sqlite-reader",
  "inillucent-tree",
