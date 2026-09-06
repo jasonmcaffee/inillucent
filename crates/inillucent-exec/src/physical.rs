@@ -3350,6 +3350,13 @@ fn translate(
                 },
             }
         }
+        BoundExpr::Json { func, arguments } => Expr::Json {
+            func: *func,
+            arguments: arguments
+                .iter()
+                .map(|expr| translate(expr, space, params, frame))
+                .collect::<DbResult<Vec<Expr>>>()?,
+        },
         BoundExpr::Function {
             func,
             arguments,

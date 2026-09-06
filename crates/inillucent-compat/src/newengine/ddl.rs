@@ -610,12 +610,21 @@ impl ImportedDatabase {
         }
         let (columns, layout) = index_shape(&owner, &index, root);
         let key_columns = columns.len();
+        let scanned = std::time::Instant::now();
         let rows = self.index_entries(&owner, &index)?;
+        let scan = scanned.elapsed().as_nanos();
+        let sorted = std::time::Instant::now();
         let rows = in_key_order(rows, &columns, key_columns);
+        let sort = sorted.elapsed().as_nanos();
+        let checked = std::time::Instant::now();
         if unique {
             refuse_duplicates(&rows, &owner, &index, key_columns)?;
         }
+        let uniqueness = checked.elapsed().as_nanos();
+        let packed = std::time::Instant::now();
         let page = self.build_tree_from(root, columns, key_columns, layout, &rows)?;
+        self.index_stages
+            .set((scan, sort, uniqueness, packed.elapsed().as_nanos()));
         self.record(
             root,
             SchemaEntry {
@@ -677,19 +686,39 @@ impl ImportedDatabase {
         let rowid = layout
             .rowid
             .ok_or_else(|| misuse("an index on a table with no rowid"))?;
+        let width = sources.len().saturating_add(1);
         let mut rows: Vec<Vec<OwnedDatum>> = Vec::with_capacity(tree.row_count() as usize);
         tree.visit_leaves(self.database.pool(), &mut |leaf| {
-            // `live` is what merges the delta area and skips the tombstones, so
-            // an index built over a table that has been written to since it was
-            // packed indexes what is there rather than what was.
-            for row in leaf.live()? {
-                let mut entry: Vec<OwnedDatum> = Vec::with_capacity(sources.len().saturating_add(1));
+            // **A clean leaf is read column by column, not row by row.** `live`
+            // is what merges the delta area and skips the tombstones, and it
+            // pays for that by building a `Vec` per row holding *every* column
+            // - where an index reads two of them. On a hundred thousand rows
+            // that was three allocations and a copy of every column per row, to
+            // keep two values.
+            //
+            // A leaf that has not been written to has no delta area and no
+            // tombstones, so there is nothing to merge and the values can be
+            // read straight out of the mini-columns. A leaf that has been
+            // written to still goes through `live`, because merging is exactly
+            // what it is for.
+            if leaf.has_writes() {
+                for row in leaf.live()? {
+                    let mut entry: Vec<OwnedDatum> = Vec::with_capacity(width);
+                    for slot in sources.iter().chain(std::iter::once(&rowid)) {
+                        entry.push(
+                            row.get(*slot)
+                                .map(OwnedDatum::from_datum)
+                                .unwrap_or(OwnedDatum::Null),
+                        );
+                    }
+                    rows.push(entry);
+                }
+                return Ok(true);
+            }
+            for row in 0..leaf.row_count() {
+                let mut entry: Vec<OwnedDatum> = Vec::with_capacity(width);
                 for slot in sources.iter().chain(std::iter::once(&rowid)) {
-                    entry.push(
-                        row.get(*slot)
-                            .map(OwnedDatum::from_datum)
-                            .unwrap_or(OwnedDatum::Null),
-                    );
+                    entry.push(OwnedDatum::from_datum(&leaf.value(row, *slot)?));
                 }
                 rows.push(entry);
             }

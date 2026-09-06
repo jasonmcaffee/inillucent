@@ -679,6 +679,7 @@ version = "0.1.0"
 dependencies = [
  "inillucent-base",
  "inillucent-catalog",
+ "inillucent-scalar",
  "inillucent-sql",
  "inillucent-storage",
  "inillucent-transaction",

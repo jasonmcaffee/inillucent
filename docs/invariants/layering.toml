@@ -309,6 +309,12 @@ may_depend_on = [
   "inillucent-transaction",
   "inillucent-sql",
   "inillucent-catalog",
+  # The JSON built-ins moved down into `inillucent-scalar` in task-1833, for the
+  # same reason `substr` did in Phase 2: the TDD's Phase 4 puts them on the new
+  # executor's expression path, and `inillucent-exec` sits below this crate. This
+  # edge is what `inillucent_ext::json` re-exports across, so every path a caller
+  # wrote still resolves.
+  "inillucent-scalar",
 ]
 
 [[crate]]

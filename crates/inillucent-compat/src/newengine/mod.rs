@@ -70,7 +70,6 @@ use inillucent_sql::parser::parse_next_statement;
 use inillucent_sql::plan::{plan_select_with, Levers, PhysicalPlan};
 use inillucent_sqlite_reader::SqliteFile;
 use inillucent_tree::datum::{Datum, OwnedDatum};
-use inillucent_tree::paged::KeyEncoding;
 use inillucent_tree::types::{ColumnSpec, PhysicalType};
 use inillucent_tree::write::TreeLog;
 use inillucent_tree::PagedTree;
@@ -168,6 +167,13 @@ pub struct ImportedDatabase {
     busy_timeout_ms: u64,
     /// Whether `PRAGMA foreign_keys` is on.
     foreign_keys: bool,
+    /// Where the last `CREATE INDEX` spent its time, in nanoseconds.
+    ///
+    /// Scan, sort, uniqueness check, pack. On the harness's own type, in a
+    /// test-only crate, and nothing in the engine consults it - the same shape
+    /// as the write path's `execute_timed`, and for the same reason: `schema`
+    /// is a gate this project has already been wrong about the cause of once.
+    index_stages: std::cell::Cell<(u128, u128, u128, u128)>,
     /// How many times the catalog has changed.
     ///
     /// A plan compiled at one generation is not run at another: `execute_ddl`
@@ -537,6 +543,7 @@ impl ImportedDatabase {
             next_root: FIRST_CREATED_ROOT,
             busy_timeout_ms: 0,
             foreign_keys: false,
+            index_stages: std::cell::Cell::new((0, 0, 0, 0)),
             catalog_generation: 0,
         })
     }
@@ -840,6 +847,20 @@ impl ImportedDatabase {
             Cached::Update(..) => Ok(vec!["an update".to_string()]),
             Cached::Delete(..) => Ok(vec!["a delete".to_string()]),
         }
+    }
+
+    /// Returns where the last `CREATE INDEX` spent its time.
+    ///
+    /// Microseconds per stage, rendered for a report.
+    pub fn build_stages(&self) -> String {
+        let (scan, sort, unique, pack) = self.index_stages.get();
+        format!(
+            "scan {:.1} ms, sort {:.1} ms, unique {:.1} ms, pack {:.1} ms",
+            scan as f64 / 1e6,
+            sort as f64 / 1e6,
+            unique as f64 / 1e6,
+            pack as f64 / 1e6
+        )
     }
 
     /// Returns the log, so a caller can read its counters.
@@ -1580,25 +1601,41 @@ fn in_key_order(
     columns: &[ColumnSpec],
     key_columns: usize,
 ) -> Vec<Vec<OwnedDatum>> {
-    let encoding = KeyEncoding::choose(columns, key_columns);
     let collations: Vec<Collation> = columns
         .iter()
         .take(key_columns)
         .map(|spec| spec.collation)
         .collect();
-    let mut keyed: Vec<(Vec<u8>, Vec<OwnedDatum>)> = rows
-        .into_iter()
-        .map(|row| {
-            let key: Vec<Datum<'_>> = row
-                .iter()
-                .take(key_columns)
-                .map(OwnedDatum::borrow)
-                .collect();
-            (encoding.encode_under(&key, &collations), row)
-        })
-        .collect();
-    keyed.sort_by(|left, right| left.0.cmp(&right.0));
-    keyed.into_iter().map(|(_, row)| row).collect()
+    // **Sorted by comparing the values, not by encoding a key per row.**
+    //
+    // The version this replaces built a `Vec<u8>` key for every row, sorted the
+    // pairs by memcmp and then rebuilt the vector - two moves of every row and
+    // one allocation per row, to reproduce an order the values already have.
+    // `compare_rows` is the comparison the tree's own search and its integrity
+    // checker use, so sorting by it is what the tree will be read by, and the
+    // encoded form is derived from the same order rather than defining it.
+    //
+    // It is a stable sort because a `sort_unstable` here would reorder rows
+    // whose whole key is equal, and a bulk build's input is compared against
+    // SQLite's index page for page.
+    let mut rows = rows;
+    rows.sort_by(|left, right| {
+        for column in 0..key_columns {
+            let (Some(one), Some(two)) = (left.get(column), right.get(column)) else {
+                continue;
+            };
+            let order = inillucent_tree::types::compare_under(
+                &one.borrow(),
+                &two.borrow(),
+                collations.get(column).copied().unwrap_or(Collation::Binary),
+            );
+            if order != std::cmp::Ordering::Equal {
+                return order;
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+    rows
 }
 
 /// Returns a built tree's shape as the catalog records it.
