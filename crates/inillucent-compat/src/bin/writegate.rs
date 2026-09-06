@@ -335,12 +335,26 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
             passed = false;
             continue;
         }
+        // **Every workload counts once.** Pooling the raw rounds lets a workload
+        // with a hundred times the absolute time decide the family on its own,
+        // and it mixes two statistics: the point estimate is a median of log
+        // ratios and the interval bootstraps their mean, which over a
+        // heterogeneous pool can put the estimate outside its own interval. The
+        // first medium run printed `write` at ratio 0.38x with a lower bound of
+        // 0.40x, which is not a number anybody can act on.
+        //
+        // So the family is the geometric mean of the per-workload ratios, and
+        // the interval is the bootstrap of the same quantity - one statistic,
+        // one weighting, and a line that agrees with itself.
         let rolled = Paired {
             workload: family.to_string(),
             family: family.to_string(),
             pairs: members
                 .iter()
-                .flat_map(|entry| entry.pairs.iter().copied())
+                .map(|entry| {
+                    let (ours, theirs) = entry.medians();
+                    (ours, theirs)
+                })
                 .collect(),
             agreed: true,
             disagreement: String::new(),
@@ -455,6 +469,12 @@ fn time_one(
     // which is what SQLite's arm does too: it resets, re-binds and steps a
     // program compiled once. What must not differ is the *work*, and the work
     // is one statement per iteration on both sides.
+    // The compile happens **before the clock starts**, which is where SQLite's
+    // `sqlite3_prepare_v2` already is. What is inside the timed region on both
+    // arms is the same thing: bind, step, and the transaction boundaries.
+    let statement = database
+        .prepare_statement(&workload.sql)
+        .map_err(|error| why(&error))?;
     let mut changed = 0u64;
     let started = Instant::now();
     if workload.grouping != Grouping::Autocommit {
@@ -469,15 +489,21 @@ fn time_one(
                 .collect(),
         );
         let outcome = database
-            .execute_any(&workload.sql, &params)
+            .execute_statement(&statement, &params)
             .map_err(|error| why(&error))?;
         changed = changed.saturating_add(outcome.changes.rows as u64);
-        // The grouping decides where the commits are, on both arms. An
-        // autocommit statement has already committed itself.
+        // The grouping decides where the commits are, and the rule is
+        // `sqlite_bench.c`'s, clause for clause: commit on the boundary, and
+        // open the next transaction only if there is another iteration to put
+        // in it. Opening one anyway left an empty transaction to be committed
+        // at the end - one commit record and one fsync the other arm does not
+        // pay.
         if let Grouping::Every(every) = workload.grouping {
             if every > 0 && iteration.saturating_add(1) % every == 0 {
                 database.commit_batch().map_err(|error| why(&error))?;
-                database.begin_batch();
+                if iteration.saturating_add(1) < workload.repeat {
+                    database.begin_batch();
+                }
             }
         }
     }
