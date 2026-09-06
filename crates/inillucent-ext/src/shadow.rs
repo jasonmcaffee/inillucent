@@ -21,6 +21,27 @@ use inillucent_value::{record, TextEncoding, Value};
 
 use crate::vtab::{Context, ModuleArguments};
 
+/// Returns the pager one database's shadow tables live behind.
+///
+/// The old engine's arm of every method below. A host that has no pager reaches
+/// its rows through [`Context::store`] and never gets here, so arriving with
+/// neither a store nor a pager is a caller that built a `Context` for no engine
+/// at all.
+///
+/// @param context - the call's context
+fn pager_of<'c>(context: &'c mut Context<'_>) -> DbResult<&'c mut inillucent_storage::Pager> {
+    let database = context.database;
+    context
+        .host
+        .pager_set()
+        .ok_or_else(|| {
+            error::misuse(
+                "this host has no pager; a module reaches its shadow tables through the store",
+            )
+        })?
+        .pager(database)
+}
+
 /// The root pages of one module's shadow tables, by the suffix that names them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ShadowTables {
@@ -92,7 +113,7 @@ impl ShadowTables {
         }
         let root = self.root(suffix)?;
         let limits = context.limits.clone();
-        let pager = context.host.pager(context.database)?;
+        let pager = pager_of(context)?;
         let mut cursor = BTreeCursor::table(root);
         if !cursor.seek_rowid(pager, rowid, SeekBias::AtOrAfter)? || cursor.rowid()? != rowid {
             return Ok(None);
@@ -128,7 +149,7 @@ impl ShadowTables {
             *first = Value::Null;
         }
         let payload = record::encode_record(&stored, TextEncoding::Utf8, 4)?;
-        let pager = context.host.pager(context.database)?;
+        let pager = pager_of(context)?;
         mutate::insert_row(pager, root, rowid, &payload)
     }
 
@@ -143,7 +164,7 @@ impl ShadowTables {
             return store.delete_row(self.root_id(suffix)?, rowid);
         }
         let root = self.root(suffix)?;
-        let pager = context.host.pager(context.database)?;
+        let pager = pager_of(context)?;
         mutate::delete_row(pager, root, rowid)?;
         Ok(())
     }
@@ -159,7 +180,7 @@ impl ShadowTables {
             return store.max_rowid(self.root_id(suffix)?);
         }
         let root = self.root(suffix)?;
-        let pager = context.host.pager(context.database)?;
+        let pager = pager_of(context)?;
         let mut cursor = BTreeCursor::table(root);
         if !cursor.last(pager)? {
             return Ok(0);
@@ -180,7 +201,7 @@ impl ShadowTables {
         }
         let root = self.root(suffix)?;
         let limits = context.limits.clone();
-        let pager = context.host.pager(context.database)?;
+        let pager = pager_of(context)?;
         let mut cursor = BTreeCursor::table(root);
         if !cursor.first(pager)? {
             return Ok(());
@@ -220,7 +241,7 @@ impl ShadowTables {
         let root = self.root(suffix)?;
         let info = key_info(key.len());
         let limits = context.limits.clone();
-        let pager = context.host.pager(context.database)?;
+        let pager = pager_of(context)?;
         let mut cursor = BTreeCursor::index(root, info);
         if !cursor.seek_index(pager, key, SeekBias::AtOrAfter)? {
             return Ok(None);
@@ -268,7 +289,7 @@ impl ShadowTables {
         let root = self.root(suffix)?;
         let payload = record::encode_record(values, TextEncoding::Utf8, 4)?;
         let info = key_info(key_columns);
-        let pager = context.host.pager(context.database)?;
+        let pager = pager_of(context)?;
         mutate::insert_entry(pager, root, &info, &payload)?;
         Ok(())
     }
@@ -290,7 +311,7 @@ impl ShadowTables {
         let root = self.root(suffix)?;
         let payload = record::encode_record(&existing, TextEncoding::Utf8, 4)?;
         let info = key_info(key.len());
-        let pager = context.host.pager(context.database)?;
+        let pager = pager_of(context)?;
         mutate::delete_entry(pager, root, &info, &payload)?;
         Ok(())
     }
@@ -310,7 +331,7 @@ impl ShadowTables {
         let root = self.root(suffix)?;
         let info = key_info(key_columns);
         let limits = context.limits.clone();
-        let pager = context.host.pager(context.database)?;
+        let pager = pager_of(context)?;
         let mut cursor = BTreeCursor::index(root, info);
         if !cursor.first(pager)? {
             return Ok(());

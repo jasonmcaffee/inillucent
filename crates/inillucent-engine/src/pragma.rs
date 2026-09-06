@@ -31,7 +31,7 @@
 
 use inillucent_base::error::misuse;
 use inillucent_base::DbResult;
-use inillucent_session::pragma::{argument_boolean, argument_integer, argument_text};
+use inillucent_sql::declare::{argument_boolean, argument_integer, argument_text};
 use inillucent_sql::directive::PragmaArgument;
 use inillucent_tree::datum::OwnedDatum;
 use inillucent_wal::Synchronous;

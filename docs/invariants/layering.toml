@@ -332,6 +332,40 @@ may_depend_on = [
   "inillucent-ext",
 ]
 
+# `inillucent-engine` is the rearchitected engine as a database: the pool, the
+# trees, the log, the catalog, DDL, the pragma set, the statement path and the
+# virtual-table host, assembled into something a caller can open.
+#
+# It sits at layer 8, beside `inillucent-session` rather than above or below it,
+# because it is the crate that replaces it. The two do not depend on each other
+# and must not: while both exist there are two engines in this workspace, and an
+# edge either way would make one of them the other's implementation detail.
+#
+# Its whole point is what is *absent* from `may_depend_on`: no `inillucent-storage`,
+# no `inillucent-transaction`, no `inillucent-vm`. Phases 1 to 4 built this code
+# inside `inillucent-compat`, where that separation was true by accident - a test
+# crate depends on everything - and task-1834 lifted it out so the separation is
+# checked. When the old engine is deleted this entry loses nothing and
+# `inillucent-session`'s goes.
+[[crate]]
+name = "inillucent-engine"
+kind = "production"
+layer = 8
+may_depend_on = [
+  "inillucent-base",
+  "inillucent-value",
+  "inillucent-vfs",
+  "inillucent-sql",
+  "inillucent-catalog",
+  "inillucent-ext",
+  "inillucent-pool",
+  "inillucent-tree",
+  "inillucent-wal",
+  "inillucent-txn",
+  "inillucent-exec",
+  "inillucent-sqlite-reader",
+]
+
 # The edge from `inillucent-session` down to `inillucent-search` is where the retrieval
 # engine becomes a first-party module, and task-1790 put it here rather than one
 # layer up for a concrete reason. `Registry::with_builtins` lives in
@@ -447,6 +481,11 @@ may_depend_on = [
   # `inillucent-exec` still cannot reach this crate: the module runs on the
   # harness's side of `TreeCatalog` and only its rows cross.
   "inillucent-ext",
+  # task-1834: Phase 5 built that layer, so the harness no longer stands in for
+  # it - it *uses* it. `inillucent_compat::newengine` is now a re-export of
+  # `inillucent-engine`, which is where the code above this line moved to, so every
+  # gate and campaign written against the old path still names the same engine.
+  "inillucent-engine",
   "inillucent",
   "inillucent-pool",
   "inillucent-tree",

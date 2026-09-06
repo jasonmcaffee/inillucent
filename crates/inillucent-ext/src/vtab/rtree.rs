@@ -518,9 +518,15 @@ fn node_size(context: &mut Context<'_>, shadows: &ShadowTables, cell: usize) -> 
             return node.len();
         }
     }
+    // The old engine's page size when there is a pager to ask, and the
+    // fallback otherwise - which is the same answer a host with no pager
+    // already got, because the call returned an error and `unwrap_or` took
+    // this branch.
+    let database = context.database;
     let page = context
         .host
-        .pager(context.database)
+        .pager_set()
+        .and_then(|pagers| pagers.pager(database).ok())
         .map(|pager| pager.page_size().bytes() as usize)
         .unwrap_or(4096);
     let usable = page.saturating_sub(64);

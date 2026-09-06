@@ -290,16 +290,6 @@ mod tests {
 
     impl crate::vtab::Host for NoPagers {}
 
-    impl inillucent_storage::PagerSet for NoPagers {
-        fn pager(&mut self, _database: usize) -> DbResult<&mut inillucent_storage::Pager> {
-            Err(inillucent_base::error::misuse("no databases"))
-        }
-
-        fn count(&self) -> usize {
-            0
-        }
-    }
-
     /// The ordinary ascending series.
     #[test]
     fn an_ascending_series_counts_up() {

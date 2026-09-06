@@ -1098,7 +1098,7 @@ impl ImportedDatabase {
             let declaration = connected.table.declaration();
             table.kind = inillucent_sql::catalog_view::TableKind::Virtual;
             table.without_rowid = declaration.without_rowid;
-            table.columns = inillucent_session::vtab::declared_columns(declaration);
+            table.columns = inillucent_sql::declare::declared_columns(declaration);
             table.module = Some(inillucent_sql::vtab::ModuleRef {
                 name: connected.arguments.module.clone(),
                 folded: connected.arguments.module.to_ascii_lowercase(),

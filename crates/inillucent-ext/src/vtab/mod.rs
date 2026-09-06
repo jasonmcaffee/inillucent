@@ -70,12 +70,20 @@ pub struct Context<'host> {
 
 /// What a module may ask the connection for.
 ///
-/// `PagerSet` is a supertrait, so a module that only wants to read its own
-/// shadow tables uses this exactly as it would use a pager set. The one thing
-/// on top is the pragma register, because the `pragma_*` table-valued functions
-/// are a module whose rows *are* a pragma's answer - and there must be one
-/// implementation of that answer, not two.
-pub trait Host: PagerSet {
+/// The pragma register, because the `pragma_*` table-valued functions are a
+/// module whose rows *are* a pragma's answer - and there must be one
+/// implementation of that answer, not two - and, for the old engine only, the
+/// pager set its shadow tables live behind.
+///
+/// **`PagerSet` was a supertrait and is now an optional accessor.** A host that
+/// has no pager could not be written while it was a supertrait: the new engine's
+/// pages are behind a buffer pool and its rows behind a tree, so its host had to
+/// implement `PagerSet` and return an error from every method - a trait
+/// implemented in order to refuse it. That also made `inillucent-ext`'s dependency
+/// on `inillucent-storage` structural rather than incidental. Now a host that
+/// reaches its rows through [`Context::store`] says so by not answering, which
+/// is what it means, and the arm below it goes when the old engine does.
+pub trait Host {
     /// Answers a pragma that only reads, or `None` when there is no such thing.
     ///
     /// The default refuses everything, which is what a host with no connection
@@ -88,10 +96,24 @@ pub trait Host: PagerSet {
     ) -> DbResult<Option<Vec<Vec<Value<'static>>>>> {
         Ok(None)
     }
+
+    /// The pagers this host's shadow tables live behind, when it has any.
+    ///
+    /// The default is `None`, which is the honest answer for a host whose rows
+    /// are in the new engine's trees: it reaches them through
+    /// [`Context::store`] instead, and a pager it does not have is not
+    /// something it should have to write a refusal for.
+    fn pager_set(&mut self) -> Option<&mut dyn PagerSet> {
+        None
+    }
 }
 
 /// A pager on its own is a host with no pragmas.
-impl Host for inillucent_storage::Pager {}
+impl Host for inillucent_storage::Pager {
+    fn pager_set(&mut self) -> Option<&mut dyn PagerSet> {
+        Some(self)
+    }
+}
 
 /// A registered virtual-table module.
 pub trait Module: Send + Sync {

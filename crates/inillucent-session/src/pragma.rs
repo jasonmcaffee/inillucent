@@ -245,13 +245,7 @@ pub fn columns(name: &[u8]) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// Reads a pragma argument as text.
-pub fn argument_text(argument: &PragmaArgument) -> String {
-    match argument {
-        PragmaArgument::Name(name) => String::from_utf8_lossy(name).into_owned(),
-        PragmaArgument::Value(expr) => expression_text(expr),
-    }
-}
+pub use inillucent_sql::declare::{argument_boolean, argument_integer, argument_text};
 
 /// Returns the text a bound pragma argument spells.
 ///
@@ -273,27 +267,7 @@ fn expression_text(expr: &inillucent_sql::bind::BoundExpr) -> String {
     }
 }
 
-/// Reads a pragma argument as the boolean SQLite accepts.
-///
-/// SQLite reads `on`, `yes` and `true` as one and everything else it cannot
-/// parse as zero, which is why `PRAGMA foreign_keys = maybe` turns them off.
-pub fn argument_boolean(argument: &PragmaArgument) -> bool {
-    let text = argument_text(argument);
-    let folded = text.trim().to_ascii_lowercase();
-    match folded.as_str() {
-        "on" | "yes" | "true" => true,
-        "off" | "no" | "false" => false,
-        _ => folded
-            .parse::<i64>()
-            .map(|value| value != 0)
-            .unwrap_or(false),
-    }
-}
 
-/// Reads a pragma argument as an integer.
-pub fn argument_integer(argument: &PragmaArgument) -> i64 {
-    argument_text(argument).trim().parse().unwrap_or(0)
-}
 
 /// Returns the columns a view's `SELECT` produces.
 ///
