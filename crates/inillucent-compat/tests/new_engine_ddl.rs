@@ -151,7 +151,10 @@ impl Pair {
             .engine
             .execute_any(CATALOG, &Params::new())
             .unwrap_or_else(|error| {
-                panic!("the new engine could not read its catalog: {:?}", error.detail())
+                panic!(
+                    "the new engine could not read its catalog: {:?}",
+                    error.detail()
+                )
             });
         let mine: Vec<Vec<TaggedValue>> = ours.rows.iter().map(|row| render(row)).collect();
         assert_eq!(

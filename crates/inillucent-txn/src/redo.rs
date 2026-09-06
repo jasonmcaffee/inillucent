@@ -265,6 +265,25 @@ impl TreeRows {
     }
 }
 
+/// Reports whether a logged row holds an out-of-line reference.
+///
+/// @param bytes - the record's bytes
+/// @param columns - how many values the row holds
+fn holds_extent(bytes: &[u8], columns: usize) -> DbResult<bool> {
+    let mut at = 0usize;
+    for _ in 0..columns {
+        let rest = bytes.get(at..).unwrap_or(&[]);
+        if rest.is_empty() {
+            break;
+        }
+        if Datum::tag_of(rest)? == inillucent_tree::datum::tag::EXTENT {
+            return Ok(true);
+        }
+        at = at.saturating_add(Datum::tagged_span(rest)?);
+    }
+    Ok(false)
+}
+
 /// Decodes a run of tagged values.
 ///
 /// @param bytes - the record's bytes
@@ -350,8 +369,13 @@ impl RowRedo for TreeRows {
         lsn: u64,
     ) -> DbResult<()> {
         let shape = self.shape(tree)?.clone();
-        let values = decode_all(row, shape.columns.len())?;
-        let key: Vec<Datum<'_>> = values.iter().copied().take(shape.key_columns).collect();
+        // **Only the key is decoded.** A row's later columns can hold an
+        // out-of-line reference, which is not a value a `Datum` carries - and
+        // the replay does not need one, because it writes the record's bytes
+        // back verbatim. Key columns are never written out of line, so the
+        // front of the record always decodes.
+        let key = decode_all(row, shape.key_columns)?;
+        let spilled = holds_extent(row, shape.columns.len())?;
         database.pool().modify(page, |bytes| {
             let mut leaf = LeafMut::new(bytes)?;
             // An insert replaces, exactly as the write path's does: whatever the
@@ -365,7 +389,7 @@ impl RowRedo for TreeRows {
                 Located::Delta(index) => leaf.remove_delta(index)?,
                 Located::Absent => {}
             }
-            if leaf.insert_delta(&shape.columns, &values)? == Applied::NoRoom {
+            if leaf.insert_delta_encoded(row)? == Applied::NoRoom {
                 // The leaf had room when the record was written, so it has room
                 // now unless the page in the file is not the page the record was
                 // written against. Reporting it is the only honest answer; the
@@ -374,6 +398,9 @@ impl RowRedo for TreeRows {
                     "replaying InsertRow at {lsn} found no room in leaf {}",
                     page.0
                 )));
+            }
+            if spilled {
+                leaf.mark_extents()?;
             }
             leaf.set_lsn(lsn)
         })

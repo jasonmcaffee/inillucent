@@ -117,11 +117,7 @@ impl ImportedDatabase {
             // rather than refused, because refusing would break a caller that
             // asked for *more* durability than the engine can distinguish.
             "3" | "extra" => Synchronous::Full,
-            other => {
-                return Err(misuse(format!(
-                    "no such synchronous setting: {other}"
-                )))
-            }
+            other => return Err(misuse(format!("no such synchronous setting: {other}"))),
         };
         self.set_synchronous(policy);
         Ok(Outcome::empty())
@@ -215,12 +211,7 @@ impl ImportedDatabase {
     fn pragma_wal_checkpoint(&mut self) -> DbResult<Outcome> {
         let before = self.database.pool().stats().writes;
         self.checkpoint()?;
-        let moved = self
-            .database
-            .pool()
-            .stats()
-            .writes
-            .saturating_sub(before) as i64;
+        let moved = self.database.pool().stats().writes.saturating_sub(before) as i64;
         Ok(Outcome {
             rows: vec![vec![
                 OwnedDatum::Int(0),
@@ -254,9 +245,7 @@ impl ImportedDatabase {
                     // `primary_key_position` is already one-based, which is
                     // what SQLite's `pk` column holds, and zero for a column
                     // that is not in the key.
-                    OwnedDatum::Int(
-                        column.primary_key_position.map(i64::from).unwrap_or(0),
-                    ),
+                    OwnedDatum::Int(column.primary_key_position.map(i64::from).unwrap_or(0)),
                 ]
             })
             .collect();
@@ -291,7 +280,11 @@ impl ImportedDatabase {
                     OwnedDatum::Int(seq as i64),
                     OwnedDatum::Text(index.name.clone()),
                     OwnedDatum::Int(i64::from(index.unique)),
-                    OwnedDatum::Text(if automatic { b"pk".to_vec() } else { b"c".to_vec() }),
+                    OwnedDatum::Text(if automatic {
+                        b"pk".to_vec()
+                    } else {
+                        b"c".to_vec()
+                    }),
                     OwnedDatum::Int(0),
                 ]
             })
@@ -385,14 +378,13 @@ impl ImportedDatabase {
     ) -> Option<&inillucent_sql::catalog_view::TableInfo> {
         let argument = argument?;
         let wanted = argument_text(argument).to_ascii_lowercase().into_bytes();
-        self.tables
-            .iter()
-            .find(|table| table.folded == wanted)
-            .or(if wanted == b"sqlite_schema" || wanted == b"sqlite_master" {
+        self.tables.iter().find(|table| table.folded == wanted).or(
+            if wanted == b"sqlite_schema" || wanted == b"sqlite_master" {
                 Some(&self.schema_info)
             } else {
                 None
-            })
+            },
+        )
     }
 }
 

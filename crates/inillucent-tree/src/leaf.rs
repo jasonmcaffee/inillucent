@@ -360,8 +360,15 @@ impl<'p> LeafRef<'p> {
         // clear is read as mini-columns, so a leaf holding an out-of-line value
         // without saying so would have its sixteen-byte reference read as
         // though it were the value.
+        //
+        // Either region can hold one, so the flag is the union: a leaf that has
+        // taken a wide row since its last compaction has the reference in the
+        // delta area and nothing in a class array says so.
+        let seen_extent = seen_extent || self.any_delta_extent_unchecked()?;
         if seen_extent != self.has_extents() {
-            return Err(corrupt("the extent flag disagrees with the class arrays"));
+            return Err(corrupt(
+                "the extent flag disagrees with what the leaf holds",
+            ));
         }
         for row in 0..self.row_count {
             for column in 0..self.column_count {
@@ -705,10 +712,15 @@ impl<'p> LeafRef<'p> {
                 .ok_or_else(|| corrupt("delta row runs past the page"))?;
             let mut cursor = 0usize;
             for column in 0..self.column_count {
-                let (_, used) =
-                    Datum::decode_tagged(row.get(cursor..).unwrap_or(&[])).map_err(|_| {
-                        corrupt(format!("delta row {index} column {column} is corrupt"))
-                    })?;
+                let rest = row.get(cursor..).unwrap_or(&[]);
+                let used = Datum::tagged_span(rest).map_err(|_| {
+                    corrupt(format!("delta row {index} column {column} is corrupt"))
+                })?;
+                // An out-of-line delta value is checked the way the sorted
+                // region's are: the reference has to decode and name a page.
+                if Datum::tag_of(rest)? == crate::datum::tag::EXTENT {
+                    ExtentRef::decode(rest.get(1..).unwrap_or(&[]))?;
+                }
                 cursor = cursor.saturating_add(used);
             }
             if cursor != length {
@@ -719,6 +731,81 @@ impl<'p> LeafRef<'p> {
             at = end;
         }
         Ok(())
+    }
+
+    /// Returns the out-of-line reference a delta value names, if it names one.
+    ///
+    /// @param index - the row's position in the delta area
+    /// @param column - which column
+    pub fn delta_extent_at(&self, index: usize, column: usize) -> DbResult<Option<ExtentRef>> {
+        let row = self.delta_row(index)?;
+        let mut cursor = 0usize;
+        for position in 0..=column {
+            let rest = row.get(cursor..).unwrap_or(&[]);
+            if position == column {
+                if Datum::tag_of(rest)? != crate::datum::tag::EXTENT {
+                    return Ok(None);
+                }
+                return ExtentRef::decode(rest.get(1..).unwrap_or(&[])).map(Some);
+            }
+            cursor = cursor.saturating_add(Datum::tagged_span(rest)?);
+        }
+        Err(unreachable_branch("an inclusive range ran to its end"))
+    }
+
+    /// Reports whether any delta row holds an out-of-line value.
+    ///
+    /// The cheap half of the question `read_extents` asks: a leaf whose flag is
+    /// set may have spilled only in its sorted region, and walking the delta
+    /// area is a page walk this saves when it can.
+    pub fn any_delta_extent(&self) -> DbResult<bool> {
+        if !self.has_extents() {
+            return Ok(false);
+        }
+        self.any_delta_extent_unchecked()
+    }
+
+    /// The same, without believing the flag.
+    ///
+    /// For [`crate::mutate::LeafMut::remove_delta`], which is deciding what the
+    /// flag should say and so cannot start from what it does say.
+    pub fn any_delta_extent_unchecked_pub(&self) -> DbResult<bool> {
+        self.any_delta_extent_unchecked()
+    }
+
+    /// Reports whether one delta row holds an out-of-line value.
+    ///
+    /// @param index - the row's position in the delta area
+    pub fn delta_extents_in(&self, index: usize) -> DbResult<bool> {
+        let row = self.delta_row(index)?;
+        let mut cursor = 0usize;
+        while cursor < row.len() {
+            let rest = row.get(cursor..).unwrap_or(&[]);
+            if Datum::tag_of(rest)? == crate::datum::tag::EXTENT {
+                return Ok(true);
+            }
+            cursor = cursor.saturating_add(Datum::tagged_span(rest)?);
+        }
+        Ok(false)
+    }
+
+    /// The same, without believing the flag.
+    ///
+    /// The integrity check asks it, because what it is checking *is* the flag:
+    /// a reader that trusted it would agree with itself and find nothing.
+    fn any_delta_extent_unchecked(&self) -> DbResult<bool> {
+        for index in 0..self.delta_count {
+            let row = self.delta_row(index)?;
+            let mut cursor = 0usize;
+            while cursor < row.len() {
+                let rest = row.get(cursor..).unwrap_or(&[]);
+                if Datum::tag_of(rest)? == crate::datum::tag::EXTENT {
+                    return Ok(true);
+                }
+                cursor = cursor.saturating_add(Datum::tagged_span(rest)?);
+            }
+        }
+        Ok(false)
     }
 
     /// Returns the bytes of one delta row.
@@ -748,11 +835,32 @@ impl<'p> LeafRef<'p> {
         let row = self.delta_row(index)?;
         let mut cursor = 0usize;
         for position in 0..=column {
-            let (value, used) = Datum::decode_tagged(row.get(cursor..).unwrap_or(&[]))?;
+            let rest = row.get(cursor..).unwrap_or(&[]);
             if position == column {
+                // **An out-of-line delta value is answered from the resolved
+                // values, or refused.** The seventeen bytes here are a page
+                // number and a length; handing them back as a blob would be a
+                // wrong answer that looked like a right one, which is the same
+                // rule the sorted region's `MiniColumn::value` follows.
+                if Datum::tag_of(rest)? == crate::datum::tag::EXTENT {
+                    let bytes = self
+                        .extents
+                        .and_then(|held| held.get_delta(index, column))
+                        .ok_or_else(|| {
+                            misuse(concat!(
+                                "this value is stored out of line; read the leaf's extents ",
+                                "through the tree first"
+                            ))
+                        })?;
+                    return Ok(match self.column(column)?.physical {
+                        PhysicalType::Blob => Datum::Blob(bytes),
+                        _ => Datum::Text(bytes),
+                    });
+                }
+                let (value, _) = Datum::decode_tagged(rest)?;
                 return Ok(value);
             }
-            cursor = cursor.saturating_add(used);
+            cursor = cursor.saturating_add(Datum::tagged_span(rest)?);
         }
         // Unreachable: the loop runs `0..=column` and returns when `position`
         // reaches `column`, so it can only fall out of the bottom if the range
@@ -1598,10 +1706,7 @@ impl<'p> MiniColumn<'p> {
             // not the value, and handing them back as a blob would be a wrong
             // answer that looked like a right one. `PagedTree::read_extents` is
             // what a caller reads them with; it has the pool and this does not.
-            ValueClass::Extent => match self
-                .extents
-                .and_then(|held| held.get(row, self.index))
-            {
+            ValueClass::Extent => match self.extents.and_then(|held| held.get(row, self.index)) {
                 Some(bytes) if self.physical == PhysicalType::Blob => Ok(Datum::Blob(bytes)),
                 Some(bytes) => Ok(Datum::Text(bytes)),
                 None => Err(misuse(concat!(
@@ -1727,6 +1832,12 @@ pub struct LeafBuilder {
 pub struct Extents {
     /// `(row, column, bytes)`, in the order the leaf holds them.
     values: Vec<(usize, usize, Vec<u8>)>,
+    /// The same, for rows in the delta area, keyed by delta index.
+    ///
+    /// **A delta index is not a row number**, so the two cannot share a table:
+    /// delta row 0 and sorted row 0 are different rows, and a lookup that
+    /// confused them would answer one row's value for another's.
+    delta: Vec<(usize, usize, Vec<u8>)>,
 }
 
 impl Extents {
@@ -1750,10 +1861,39 @@ impl Extents {
             .map(|(_, _, bytes)| bytes.as_slice())
     }
 
+    /// Records one resolved value of a delta row.
+    ///
+    /// @param index - the row's position in the delta area
+    /// @param column - which column
+    /// @param bytes - the value
+    pub fn push_delta(&mut self, index: usize, column: usize, bytes: Vec<u8>) {
+        self.delta.push((index, column, bytes));
+    }
+
+    /// Returns one resolved delta value, when it was read.
+    ///
+    /// @param index - the row's position in the delta area
+    /// @param column - which column
+    pub fn get_delta(&self, index: usize, column: usize) -> Option<&[u8]> {
+        self.delta
+            .iter()
+            .find(|(held, held_column, _)| *held == index && *held_column == column)
+            .map(|(_, _, bytes)| bytes.as_slice())
+    }
+
     /// Reports whether anything was read.
     pub fn is_empty(&self) -> bool {
-        self.values.is_empty()
+        self.values.is_empty() && self.delta.is_empty()
     }
+}
+
+/// Writes the tagged form a delta row holds for an out-of-line value.
+///
+/// @param out - the buffer the row is being encoded into
+/// @param reference - where the value was written
+pub fn encode_extent_tagged(out: &mut Vec<u8>, reference: ExtentRef) {
+    out.push(crate::datum::tag::EXTENT);
+    out.extend_from_slice(&reference.encode());
 }
 
 /// Where a value too large for a leaf is written.
@@ -1881,8 +2021,11 @@ impl LeafBuilder {
             let mut row_heap = 0usize;
             for (index, column) in self.columns.iter().enumerate() {
                 let value = row.get(index).copied().unwrap_or(Datum::Null);
-                row_heap = row_heap
-                    .saturating_add(heap_cost_at(column.physical, &value, self.threshold(index, spill.is_some())));
+                row_heap = row_heap.saturating_add(heap_cost_at(
+                    column.physical,
+                    &value,
+                    self.threshold(index, spill.is_some()),
+                ));
             }
             let next = placed.saturating_add(1);
             let size = self
@@ -1898,10 +2041,7 @@ impl LeafBuilder {
             return Ok(Packed::RowTooLarge);
         }
         let page = self.encode_with(rows.get(..placed).unwrap_or(&[]), spill)?;
-        Ok(Packed::Filled {
-            page,
-            rows: placed,
-        })
+        Ok(Packed::Filled { page, rows: placed })
     }
 
     /// Returns the longest value one column keeps in the leaf.
@@ -1945,7 +2085,6 @@ impl LeafBuilder {
         }
         fixed
     }
-
 
     /// Encodes the rows into a page.
     ///
@@ -2652,9 +2791,14 @@ mod tests {
                 assert!(packed > 0 && packed < 500, "packed {packed}");
                 let leaf = LeafRef::parse(&page).unwrap();
                 assert_eq!(leaf.row_count(), packed);
-                // Adding one more row must not have fit inside the budget.
-                let bigger = builder.encoded_size(&rows[..packed + 1]).unwrap().unwrap();
-                assert!(bigger > (8192.0 * 0.9) as usize, "{bigger}");
+                // Adding one more row must not have fit inside the budget:
+                // packing the prefix that includes it stops at the same row.
+                match builder.pack(&rows[..packed + 1], 0.9).unwrap() {
+                    Packed::Filled { rows: again, .. } => {
+                        assert_eq!(again, packed, "one more row fit after all");
+                    }
+                    Packed::RowTooLarge => panic!("these rows fit"),
+                }
             }
             Packed::RowTooLarge => panic!("these rows fit"),
         }

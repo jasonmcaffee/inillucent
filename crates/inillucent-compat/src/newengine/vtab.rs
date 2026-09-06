@@ -597,7 +597,10 @@ impl ImportedDatabase {
         // constraint is dropped from the residual only when the module promises
         // `omit`, and `omit` is the module promising rather than the engine
         // assuming.
-        let AccessPath::VirtualScan { offer, order_by, .. } = path else {
+        let AccessPath::VirtualScan {
+            offer, order_by, ..
+        } = path
+        else {
             return Ok(None);
         };
         let specs: Vec<inillucent_sql::vtab::ConstraintSpec> =
@@ -667,8 +670,7 @@ impl ImportedDatabase {
             if promised {
                 continue;
             }
-            let wanted =
-                inillucent_exec::physical::literal_value(&constraint.value, params)?;
+            let wanted = inillucent_exec::physical::literal_value(&constraint.value, params)?;
             // A negative column is the rowid, which a materialised row does not
             // carry: the module's declared columns are all a row holds. Such a
             // constraint has to have been the module's to apply.

@@ -1029,9 +1029,7 @@ impl ImportedDatabase {
             let root = self
                 .entries
                 .iter()
-                .find(|held| {
-                    held.entry.kind == entry.kind && held.entry.name == entry.name
-                })
+                .find(|held| held.entry.kind == entry.kind && held.entry.name == entry.name)
                 .map(|held| held.root)
                 .unwrap_or(0);
             if entry.root.is_none() || root == 0 {
@@ -1943,9 +1941,7 @@ fn import_keyed_table(
 /// `primary_key_position` is what says so.
 ///
 /// @param info - the table's declaration
-fn keyed_table_shape(
-    info: &TableInfo,
-) -> DbResult<(Vec<ColumnSpec>, usize, SourceLayout)> {
+fn keyed_table_shape(info: &TableInfo) -> DbResult<(Vec<ColumnSpec>, usize, SourceLayout)> {
     let width = info.columns.len();
     // The record's field order: primary-key columns in their key order, then
     // every other column in declaration order.

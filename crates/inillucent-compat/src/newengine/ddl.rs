@@ -57,7 +57,7 @@ use inillucent_tree::types::ColumnSpec;
 use inillucent_tree::PagedTree;
 
 use super::{
-    index_shape, in_key_order, keyed_table_shape, table_shape, ImportedDatabase, Outcome, Recorded,
+    in_key_order, index_shape, keyed_table_shape, table_shape, ImportedDatabase, Outcome, Recorded,
     WalLog, SCHEMA_VIEW_ROOT,
 };
 
@@ -453,8 +453,10 @@ impl ImportedDatabase {
         }
         let txn = self.next_txn.get();
         self.next_txn.set(txn.saturating_add(1));
-        self.wal
-            .append(txn, inillucent_wal::record::Body::CatalogChange { delta: &[] })?;
+        self.wal.append(
+            txn,
+            inillucent_wal::record::Body::CatalogChange { delta: &[] },
+        )?;
         self.wal.commit(txn, txn)?;
         self.database
             .pool()
@@ -617,9 +619,7 @@ impl ImportedDatabase {
             .tables
             .iter()
             .position(|held| held.folded == folded)
-            .ok_or_else(|| {
-                misuse(format!("no such table: {}", String::from_utf8_lossy(table)))
-            })?;
+            .ok_or_else(|| misuse(format!("no such table: {}", String::from_utf8_lossy(table))))?;
         let owner = self
             .tables
             .get(position)
@@ -940,8 +940,7 @@ impl ImportedDatabase {
                     .entries
                     .iter()
                     .filter(|held| {
-                        held.entry.kind == wanted
-                            && held.entry.name.to_ascii_lowercase() == folded
+                        held.entry.kind == wanted && held.entry.name.to_ascii_lowercase() == folded
                     })
                     .map(|held| held.rowid)
                     .collect();
@@ -1043,8 +1042,7 @@ impl ImportedDatabase {
                         .unwrap_or_default()
                         .to_vec();
                     let mut moved = entry.clone();
-                    moved.sql =
-                        rename::reparsed(rename::add_column(&entry.sql, &definition)?)?;
+                    moved.sql = rename::reparsed(rename::add_column(&entry.sql, &definition)?)?;
                     moved
                 }
                 AlterKind::DropColumn { position, .. } => {
@@ -1052,10 +1050,8 @@ impl ImportedDatabase {
                         continue;
                     }
                     let mut moved = entry.clone();
-                    moved.sql = rename::reparsed(rename::drop_column(
-                        &entry.sql,
-                        usize::from(*position),
-                    )?)?;
+                    moved.sql =
+                        rename::reparsed(rename::drop_column(&entry.sql, usize::from(*position))?)?;
                     moved
                 }
             };
@@ -1085,11 +1081,8 @@ impl ImportedDatabase {
     /// view has to be derived again. The identifiers are carried across by name
     /// so the trees a plan will read stay the trees they were.
     pub(super) fn rebuild_tables(&mut self) -> DbResult<()> {
-        let entries: Vec<inillucent_catalog::paged::SchemaEntry> = self
-            .entries
-            .iter()
-            .map(|held| held.entry.clone())
-            .collect();
+        let entries: Vec<inillucent_catalog::paged::SchemaEntry> =
+            self.entries.iter().map(|held| held.entry.clone()).collect();
         let roots: Vec<u32> = self.entries.iter().map(|held| held.root).collect();
         let mut rebuilt = tables_from_entries(&entries, &roots, 0)?;
         // **A virtual table's columns come from its module, not its text.**

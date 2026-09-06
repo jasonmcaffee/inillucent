@@ -244,6 +244,23 @@ impl<'p> LeafMut<'p> {
         self.plan_encoded(encoded)
     }
 
+    /// Writes one already-encoded row into the delta area, as it was logged.
+    ///
+    /// **Recovery replays the bytes, not the values.** A delta row can hold an
+    /// out-of-line reference, which is not a value a `Datum` can carry, so a
+    /// replay that decoded and re-encoded would have to invent one. Writing
+    /// what the record holds is also the more faithful replay: the page ends up
+    /// byte-identical to the one the write path produced.
+    ///
+    /// @param encoded - the row's tagged bytes, as the log record carries them
+    pub fn insert_delta_encoded(&mut self, encoded: &[u8]) -> DbResult<Applied> {
+        let Some(plan) = self.plan_encoded(encoded.to_vec())? else {
+            return Ok(Applied::NoRoom);
+        };
+        self.apply_delta(&plan)?;
+        Ok(Applied::Yes)
+    }
+
     /// Costs a delta insert whose row is already in its tagged form.
     ///
     /// **The encoding is the expensive half and it does not depend on the
@@ -389,7 +406,26 @@ impl<'p> LeafMut<'p> {
             .filter(|position| *position != index)
             .map(|position| leaf.delta_row(position).map(<[u8]>::to_vec))
             .collect::<DbResult<Vec<Vec<u8>>>>()?;
-        self.rewrite_delta(&kept)
+        // **The extent flag is the union of both regions, so removing the row
+        // that held the only reference has to clear it.** A flag left set over
+        // a leaf holding nothing out of line is what the integrity check calls
+        // a disagreement, and it would send every later reader looking for
+        // extents that are not there. Only asked when the removed row actually
+        // held one, which is rare: the scan costs nothing on an ordinary write.
+        let dropped = leaf.delta_extents_in(index)?;
+        self.rewrite_delta(&kept)?;
+        if dropped {
+            let union = {
+                let leaf = LeafRef::parse(self.page)?;
+                let mut seen = leaf.any_delta_extent_unchecked_pub()?;
+                for column in 0..leaf.column_count() {
+                    seen = seen || leaf.column(column)?.any_extent()?;
+                }
+                seen
+            };
+            self.set_flag(crate::leaf::LEAF_HAS_EXTENTS, union)?;
+        }
+        Ok(())
     }
 
     /// Replaces the whole delta area with the given rows, newest first.
@@ -572,6 +608,16 @@ impl<'p> LeafMut<'p> {
         let at = values_at.saturating_add(row.saturating_mul(spec.physical.slot_width()));
         page::write_u64(self.page, at, slot)?;
         Ok(Applied::Yes)
+    }
+
+    /// Records that the leaf holds at least one out-of-line value.
+    ///
+    /// The flag is what a reader checks before it goes looking for extents, so
+    /// a delta row that carries a reference has to set it. It is never cleared
+    /// here: a compaction rebuilds the page from scratch and sets it from what
+    /// it actually packed.
+    pub fn mark_extents(&mut self) -> DbResult<()> {
+        self.set_flag(crate::leaf::LEAF_HAS_EXTENTS, true)
     }
 
     /// Sets or clears one of the leaf's flag bits.
