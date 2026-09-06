@@ -77,6 +77,7 @@
 //! bound expression can find its vector.
 
 pub mod analyze;
+pub mod connect;
 pub mod ddl;
 pub mod pragma;
 pub mod vtab;
@@ -914,12 +915,19 @@ impl ImportedDatabase {
         trees.insert(schema_root, catalog_tree);
         catalog = catalog.with_table(schema_info.clone());
 
+        // **The log resumes where recovery ended, not at the beginning.**
+        // Opening it at `FIRST_LSN` with sequence 1 starts a second stream over
+        // the same segments: the session writes records the *next* open cannot
+        // find, because the meta page's checkpoint points into the first stream.
+        // A test caught it as a table created after an open vanishing on the
+        // one after that - `no such table: second` from a file that had just
+        // been told to make it.
         let wal = std::rc::Rc::new(Wal::open(
             std::sync::Arc::new(OsVfs::new()),
             &db_path,
             database.uuid(),
-            FIRST_LSN,
-            1,
+            outcome.next_lsn.max(FIRST_LSN),
+            outcome.sequence.max(1),
             WalOptions::default(),
         )?);
         database.pool().set_durable_lsn(wal.write_ahead_point());
