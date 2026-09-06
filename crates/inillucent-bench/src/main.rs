@@ -7,11 +7,18 @@
 //!   load         pull a corpus and its vectors out of PostgreSQL into a cache
 //!   build        build a inillucent index from the cache and report what it built
 //!   grade        run every scenario against both engines and write the score card
+//!   grade-embedding  compare two or more embedding models over the same corpus
+//!   models       write or reseal a model manifest
 
+mod arm;
 mod corpus;
 mod embedcheck;
+mod http;
+mod llamacpp;
 mod engine;
+mod gradeembed;
 mod metrics;
+mod models;
 mod queryset;
 mod report;
 mod scenarios;
@@ -46,6 +53,34 @@ struct Cli {
 
     #[arg(long, default_value = "corpus.cache", global = true)]
     cache: PathBuf,
+
+    /// Where models live, one directory per model id, each holding its weights,
+    /// its tokenizer and the `model.json` that says what it is. Defaults to
+    /// `J:/inillucent-embeddings/models`, or `INILLUCENT_MODELS` when set.
+    #[arg(long, global = true)]
+    models_root: Option<PathBuf>,
+
+    /// Where a `llama-server` arm's server listens. Never Nikaya's 8087: pointing
+    /// a corpus embedding run at the production mail service is not a benchmark.
+    #[arg(long, global = true, default_value_t = default_endpoint())]
+    endpoint: String,
+
+    /// Ceiling on `texts in a batch x longest sequence in it, squared`, which is
+    /// what bounds an attention allocation. A machine setting rather than a model
+    /// property: it is in no manifest and changing it moves no digest.
+    ///
+    /// It counts attention cells, and what a cell costs depends on the model's
+    /// head count, which the budget does not know. The default is calibrated on a
+    /// 12-head encoder, where it works out at about 2.8 GB a batch; at 16 heads
+    /// the same budget asks for 3.7 GB. Lower it for a model with more heads.
+    #[arg(long, global = true, default_value_t = 24_000_000)]
+    max_batch_cells: usize,
+}
+
+/// The default `llama-server` endpoint, spelled out so the port constant has one
+/// home.
+fn default_endpoint() -> String {
+    format!("127.0.0.1:{}", arm::DEFAULT_LLAMA_PORT)
 }
 
 #[derive(Subcommand)]
@@ -75,6 +110,8 @@ enum Command {
         corpus: PathBuf,
         #[arg(long, default_value = "~/.cache/inillucent-models/nomic-embed-text-v1.5")]
         model_dir: String,
+        /// The weights file, used only when the model directory has no
+        /// `model.json` and the directory is the baseline's.
         #[arg(long, default_value = "model.onnx")]
         model_file: String,
         /// Processors the corpus is embedded on, comma separated: `cpu`, `cuda`,
@@ -131,10 +168,13 @@ enum Command {
         #[arg(long, default_value = "index.inillucent")]
         dir: PathBuf,
     },
-    /// Check that the cache's vectors were made from the cache's text.
+    /// Check that the cache's vectors were made from the cache's text, by the
+    /// model the cache says made them.
     EmbedCheck {
-        #[arg(long, default_value = DEFAULT_MODEL_DIR)]
-        model_dir: String,
+        /// Overrides the model the cache names, and is refused when the two
+        /// disagree. Required only for a legacy cache, which names nothing.
+        #[arg(long)]
+        model_dir: Option<String>,
         #[arg(long, default_value = "model.onnx")]
         model_file: String,
         /// Processor the queries are embedded on: `cpu`, `cuda` or `cuda:N`.
@@ -290,6 +330,99 @@ enum Command {
         #[arg(long, default_value_t = false)]
         inillucent_only: bool,
     },
+    /// Compare two or more embedding models over one corpus.
+    ///
+    /// Each cache is one model's vectors for the same corpus. The run refuses
+    /// before it starts unless every cache agrees on the corpus digest, the chunk
+    /// count and the query seed table, and unless every model's manifest still
+    /// digests to what its cache was embedded against.
+    GradeEmbedding {
+        /// The caches, one per model. Two or more.
+        #[arg(long = "cache-set", num_args = 1.., required = true)]
+        cache_set: Vec<PathBuf>,
+        /// The model every other model is compared against. Defaults to the
+        /// first cache's model.
+        #[arg(long)]
+        baseline: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Queries per source for the document identity family.
+        #[arg(long, default_value_t = 40)]
+        per_source: usize,
+        /// Processor the queries are embedded on: `cpu`, `cuda` or `cuda:N`.
+        #[arg(long, default_value = "cpu")]
+        device: String,
+        #[arg(long, default_value = "embedding-scorecard.md")]
+        out: PathBuf,
+        #[arg(long, default_value = "runs")]
+        runs_dir: PathBuf,
+        #[arg(long, default_value_t = 20260901)]
+        stats_seed: u64,
+        /// Exhaustive cosine over every family: the embedding on its own.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        dense: bool,
+        /// The real pipeline with the shipped fusion, which is what an agent gets.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        hybrid: bool,
+        /// Throughput, weights on disk, tokens per chunk and truncation share.
+        /// Re-embeds a sample per model per device, so it costs minutes.
+        #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+        cost: bool,
+        /// Each model's narrowed ranking against its own full-width ranking.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        matryoshka: bool,
+        /// Distinct chunks re-embedded to time each model.
+        #[arg(long, default_value_t = 2000)]
+        cost_samples: usize,
+        /// Processors the cost lane times each model on, comma separated.
+        #[arg(long, default_value = "cpu,cuda:0")]
+        cost_devices: String,
+        /// Chunks the Matryoshka lane ranks over.
+        #[arg(long, default_value_t = 25000)]
+        matryoshka_chunks: usize,
+    },
+    /// Embed a stride sample of the corpus with one model and write the texts
+    /// and the vectors out, so another implementation can be compared against
+    /// this one.
+    ///
+    /// This is how gate G10 is measured. Parity between what the harness runs
+    /// and what the model's own framework produces cannot be checked from inside
+    /// either of them; it needs both, over the same real chunks, and this is the
+    /// side of it that speaks ONNX.
+    ExportVectors {
+        #[arg(long, default_value = "corpus.jsonl")]
+        corpus: PathBuf,
+        /// The model directory, which must hold a manifest.
+        #[arg(long)]
+        model_dir: String,
+        /// Chunks embedded, spread evenly across the whole corpus.
+        #[arg(long, default_value_t = 1000)]
+        samples: usize,
+        /// Where the texts go, one JSON object per line.
+        #[arg(long)]
+        texts_out: PathBuf,
+        /// Where the vectors go: `samples` x `dims` little endian f32.
+        #[arg(long)]
+        vectors_out: PathBuf,
+        #[arg(long, default_value = "cpu")]
+        device: String,
+        #[arg(long, default_value_t = 16)]
+        batch: usize,
+        /// Embed as queries rather than as documents, so the query prefix and the
+        /// query side of an asymmetric model are covered too.
+        #[arg(long, default_value_t = false)]
+        as_queries: bool,
+    },
+    /// Write or reseal a model's manifest, filling in the weights and tokenizer
+    /// digests from the files on disk.
+    ///
+    /// Sealing is what makes every later refusal possible: a manifest with no
+    /// digests cannot notice that its weights were replaced.
+    Models {
+        /// The model directory. Its name is the model id.
+        #[arg(long)]
+        dir: PathBuf,
+    },
 }
 
 /// Parses a comma separated device list into the devices the embedder opens a
@@ -391,6 +524,7 @@ fn expand_home(path: &str) -> Result<String> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let models_root = cli.models_root.clone().unwrap_or_else(models::default_models_root);
     match cli.command {
         Command::SynthBuild { derived, out, scale } => {
             let derived = derived.unwrap_or_else(synth::default_derived_dir);
@@ -416,7 +550,24 @@ fn main() -> Result<()> {
         Command::SynthEmbed { corpus, model_dir, model_file, batch, report_every, devices, window_batches } => {
             let dir = expand_home(&model_dir)?;
             let devices = parse_devices(&devices)?;
-            synth::embed(&corpus, &cli.cache, &dir, &model_file, batch, report_every, &devices, window_batches)?;
+            let model = models::resolve_dir(std::path::Path::new(&dir), &model_file)?;
+            model.verify_files()?;
+            synth::embed(
+                &corpus,
+                &cli.cache,
+                &model,
+                &scenarios::seeds(),
+                &arm::ArmOptions {
+                    batch_size: batch,
+                    device: devices[0],
+                    endpoint: cli.endpoint.clone(),
+                    max_batch_cells: cli.max_batch_cells,
+                    ..Default::default()
+                },
+                report_every,
+                &devices,
+                window_batches,
+            )?;
         }
         Command::SynthLoad { corpus, no_indexes } => {
             let chunks = synth::read_corpus(&corpus)?;
@@ -514,9 +665,22 @@ fn main() -> Result<()> {
             }
         }
         Command::EmbedCheck { model_dir, model_file, samples, batch, device } => {
-            let dir = expand_home(&model_dir)?;
+            let dir = model_dir.map(|d| expand_home(&d)).transpose()?;
             let c = corpus::load_cache(&cli.cache)?;
-            embedcheck::run(&c, &dir, &model_file, samples, batch, Device::parse(&device)?)?;
+            embedcheck::run(
+                &c,
+                &models_root,
+                dir.as_deref(),
+                &model_file,
+                samples,
+                &arm::ArmOptions {
+                    batch_size: batch,
+                    device: Device::parse(&device)?,
+                    endpoint: cli.endpoint.clone(),
+                    max_batch_cells: cli.max_batch_cells,
+                    ..Default::default()
+                },
+            )?;
         }
         Command::Tune {
             limit,
@@ -572,12 +736,12 @@ fn main() -> Result<()> {
                 &parse_floats(&mmrs)?,
                 &parse_adaptive(&adaptive)?,
             );
+            let model = models::resolve_dir(std::path::Path::new(&dir), &model_file)?;
             tune::run(
                 &c,
                 limit,
                 per_source,
-                &dir,
-                &model_file,
+                &model,
                 Device::parse(&device)?,
                 &settings,
                 seed_offset,
@@ -614,8 +778,13 @@ fn main() -> Result<()> {
             let options = scenarios::GradeOptions {
                 limit,
                 per_source,
-                model_dir: dir,
-                model_file: model_file.clone(),
+                arm_options: arm::ArmOptions {
+                    device: Device::parse(&device)?,
+                    endpoint: cli.endpoint.clone(),
+                    max_batch_cells: cli.max_batch_cells,
+                    ..Default::default()
+                },
+                model: models::resolve_dir(std::path::Path::new(&dir), &model_file)?,
                 database_url: cli.database_url.clone(),
                 inillucent_only,
                 device: Device::parse(&device)?,
@@ -656,6 +825,150 @@ fn main() -> Result<()> {
                 json_path.display()
             );
             report::print_summary(&card);
+        }
+        Command::GradeEmbedding {
+            cache_set,
+            baseline,
+            limit,
+            per_source,
+            device,
+            out,
+            runs_dir,
+            stats_seed,
+            dense,
+            hybrid,
+            cost,
+            matryoshka,
+            cost_samples,
+            cost_devices,
+            matryoshka_chunks,
+        } => {
+            let options = gradeembed::EmbeddingGradeOptions {
+                caches: cache_set,
+                models_root: models_root.clone(),
+                baseline,
+                limit,
+                per_source,
+                device: Device::parse(&device)?,
+                runs_dir,
+                out: out.clone(),
+                stats_seed,
+                dense,
+                hybrid,
+                cost,
+                matryoshka,
+                cost_samples,
+                cost_devices: if cost { parse_devices(&cost_devices)? } else { Vec::new() },
+                matryoshka_chunks,
+                arm_options: arm::ArmOptions {
+                    device: Device::parse(&device)?,
+                    endpoint: cli.endpoint.clone(),
+                    max_batch_cells: cli.max_batch_cells,
+                    ..Default::default()
+                },
+            };
+            let card = gradeembed::run(&options)?;
+            std::fs::write(&out, gradeembed::render(&card))?;
+            let json_path = out.with_extension("json");
+            std::fs::write(&json_path, serde_json::to_string_pretty(&card)?)?;
+            eprintln!(
+                "card written to {}, measurements to {}",
+                out.display(),
+                json_path.display()
+            );
+            gradeembed::print_summary(&card);
+        }
+        Command::ExportVectors {
+            corpus,
+            model_dir,
+            samples,
+            texts_out,
+            vectors_out,
+            device,
+            batch,
+            as_queries,
+        } => {
+            use inillucent_core::embed::Embedder;
+            let dir = expand_home(&model_dir)?;
+            let model = models::resolve_dir(std::path::Path::new(&dir), "model.onnx")?;
+            model.verify_files()?;
+            let chunks = synth::read_corpus(&corpus)?;
+            let chosen = scenarios::strided_sample(chunks.len(), samples);
+            let texts: Vec<String> = chosen
+                .iter()
+                .map(|&i| synth::sanitize_for_model(&chunks[i].content))
+                .collect();
+            eprintln!(
+                "embedding {} chunks with {} as {}",
+                texts.len(),
+                model.manifest.id,
+                if as_queries { "queries" } else { "documents" }
+            );
+            let embedder = inillucent_core::embed_onnx::OnnxEmbedder::open_manifest(
+                &model.dir,
+                &model.manifest,
+                batch,
+                Device::parse(&device)?,
+            )?;
+            let start = Instant::now();
+            let vectors = if as_queries {
+                let prefix = &model.manifest.prefixes.query;
+                let prefixed: Vec<String> =
+                    texts.iter().map(|t| format!("{prefix}{t}")).collect();
+                embedder.embed_prefixed(&prefixed)?
+            } else {
+                embedder.embed_documents(&texts)?
+            };
+            eprintln!(
+                "  {} vectors of {} dimensions in {:.1}s",
+                vectors.len(),
+                vectors.first().map(|v| v.len()).unwrap_or(0),
+                start.elapsed().as_secs_f64()
+            );
+            let facts = embedder.truncation();
+            eprintln!(
+                "  {:.1} tokens per chunk, {} of {} truncated at {}",
+                facts.tokens_per_text(),
+                facts.truncated,
+                facts.texts,
+                model.manifest.max_tokens
+            );
+
+            use std::io::Write as _;
+            let mut text_file = std::io::BufWriter::new(std::fs::File::create(&texts_out)?);
+            for (row, (&i, text)) in chosen.iter().zip(&texts).enumerate() {
+                let record = serde_json::json!({
+                    "row": row,
+                    "chunk": i,
+                    "source": chunks[i].source,
+                    "text": text,
+                });
+                writeln!(text_file, "{record}")?;
+            }
+            text_file.flush()?;
+
+            let mut vector_file = std::io::BufWriter::new(std::fs::File::create(&vectors_out)?);
+            for v in &vectors {
+                for x in v {
+                    vector_file.write_all(&x.to_le_bytes())?;
+                }
+            }
+            vector_file.flush()?;
+            eprintln!("wrote {} and {}", texts_out.display(), vectors_out.display());
+        }
+        Command::Models { dir } => {
+            let mut model = models::resolve_dir(&dir, "model.onnx")?;
+            let before = model.digest();
+            let path = model.seal()?;
+            eprintln!(
+                "sealed {} ({} -> {})",
+                path.display(),
+                corpus::short(&before),
+                corpus::short(&model.digest())
+            );
+            eprintln!("  weights   {} {}", model.manifest.model_file, model.manifest.weights_sha256);
+            eprintln!("  tokenizer tokenizer.json {}", model.manifest.tokenizer_sha256);
+            eprintln!("  manifest  {}", model.digest());
         }
     }
     Ok(())

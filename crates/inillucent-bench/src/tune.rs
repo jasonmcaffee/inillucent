@@ -99,8 +99,7 @@ const PRIMARY: &str = "passage evidence";
 /// @param corpus - the cache the engine is graded on
 /// @param limit - grade only the first N chunks, for a faster cycle
 /// @param per_source - document identity queries per source
-/// @param model_dir - directory holding the embedding weights
-/// @param model_file - the ONNX file name
+/// @param model - the resolved model, with the manifest that says what it is
 /// @param device - the processor the queries are embedded on
 /// @param settings - the arms to try, the first of which is the baseline
 /// @param seed_offset - added to the query set seeds, so the settings are chosen
@@ -111,8 +110,7 @@ pub fn run(
     corpus: &Corpus,
     limit: Option<usize>,
     per_source: usize,
-    model_dir: &str,
-    model_file: &str,
+    model: &crate::models::ResolvedModel,
     device: Device,
     settings: &[Setting],
     seed_offset: u64,
@@ -156,7 +154,10 @@ pub fn run(
     );
 
     eprintln!("embedding the query sets on {}", device.label());
-    let embedder = queryset::open_query_embedder(model_dir, model_file, device)?;
+    let embedder = queryset::open_query_embedder(
+        model,
+        &crate::arm::ArmOptions { device, ..Default::default() },
+    )?;
     let embed = |qs: &[GradedQuery]| -> Result<Vec<Vec<f32>>> {
         queryset::embed_with(&embedder, &qs.iter().map(|q| q.text.clone()).collect::<Vec<_>>())
     };

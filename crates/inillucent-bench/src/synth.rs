@@ -47,7 +47,10 @@ use anyhow::{Context, Result};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
-use inillucent_core::embed_onnx::{Device, OnnxEmbedder, OnnxOptions};
+use inillucent_core::embed_onnx::{count_truncation, Device};
+use inillucent_core::model::{Backend, ModelManifest};
+
+use crate::arm::{Arm, ArmOptions};
 use inillucent_core::store::ChunkInput;
 use serde::{Deserialize, Serialize};
 
@@ -1351,27 +1354,40 @@ pub fn default_derived_dir() -> PathBuf {
 /// N whatever ran it.
 /// @param corpus_path - the corpus JSONL produced by synth-build
 /// @param cache_path - the cache written at the end, which the harness loads
-/// @param model_dir - directory holding model.onnx and tokenizer.json
-/// @param model_file - the ONNX file name inside that directory
-/// @param batch_size - texts per inference call, per device
+/// @param model - the resolved model, with the manifest that says what it is
+/// @param seeds - the harness query seed table, digested into the header
+/// @param options - the machine settings, including the llama.cpp endpoint
 /// @param report_every - chunks between progress lines
-/// @param devices - the processors to spread the work across
+/// @param devices - the processors to spread an ONNX arm across
 /// @param window_batches - batches handed to each device between synchronisations
 pub fn embed(
     corpus_path: &Path,
     cache_path: &Path,
-    model_dir: &str,
-    model_file: &str,
-    batch_size: usize,
+    model: &crate::models::ResolvedModel,
+    seeds: &std::collections::BTreeMap<String, u64>,
+    options: &ArmOptions,
     report_every: usize,
     devices: &[Device],
     window_batches: usize,
 ) -> Result<()> {
+    let manifest = &model.manifest;
+    let model_dir = model.dir.display().to_string();
+    let model_dir = model_dir.as_str();
     let chunks = read_corpus(corpus_path)?;
     eprintln!("corpus holds {} chunks", chunks.len());
+    eprintln!(
+        "model: {} at {} dimensions, {:?} pooling, {} token bound, {:?} backend, document \
+         prefix {:?}",
+        manifest.id,
+        manifest.dims,
+        manifest.pooling,
+        manifest.max_tokens,
+        manifest.backend,
+        manifest.prefixes.document
+    );
 
     let vectors_path = cache_path.with_extension("vectors");
-    let dims = inillucent_core::embed::NOMIC_DIMS;
+    let dims = manifest.dims;
     let bytes_per = dims * 4;
 
     // How many vectors already exist, rounded down so a partly written vector from
@@ -1388,10 +1404,14 @@ pub fn embed(
     }
     if done >= chunks.len() {
         eprintln!("every chunk is already embedded");
-        return assemble_cache(&chunks, &vectors_path, cache_path, dims);
+        // A run that embedded nothing cannot report how much was truncated, so it
+        // counts with the tokenizer alone rather than writing a zero that would
+        // read as "nothing was cut".
+        let truncated = count_truncated(model_dir, manifest, &chunks)?;
+        return assemble_cache(&chunks, &vectors_path, cache_path, manifest, seeds, truncated);
     }
 
-    let embedders = open_embedders(model_dir, model_file, batch_size, devices)?;
+    let embedders = open_arms(model, options, devices)?;
 
     let mut out = std::fs::OpenOptions::new()
         .create(true)
@@ -1407,7 +1427,7 @@ pub fn embed(
     // of one batch each pays that synchronisation on every 32 chunks and the faster
     // card spends its time waiting. Measured on two 5090s at batch 32: one batch per
     // device ran 613/sec against 450 for a single card, 1.36x rather than 2x.
-    let window = batch_size * embedders.len() * window_batches.max(1);
+    let window = options.batch_size * embedders.len() * window_batches.max(1);
     while position < chunks.len() {
         let end = (position + window).min(chunks.len());
         let texts: Vec<String> = chunks[position..end]
@@ -1455,7 +1475,57 @@ pub fn embed(
     out.flush()?;
     drop(out);
 
-    assemble_cache(&chunks, &vectors_path, cache_path, dims)
+    // Summed across every session, plus a recount of whatever an earlier run had
+    // already embedded, so the share the card prints describes the whole corpus
+    // rather than the tail this process happened to reach.
+    let texts: usize = embedders.iter().map(|e| e.truncation().texts).sum();
+    let tokens: usize = embedders.iter().map(|e| e.truncation().tokens).sum();
+    let mut truncated: usize = embedders.iter().map(|e| e.truncation().truncated).sum();
+    if texts > 0 {
+        eprintln!(
+            "  {tokens} tokens over {texts} chunks ({:.1} per chunk); {truncated} ({:.2}%) hit the {} token bound",
+            tokens as f64 / texts as f64,
+            100.0 * truncated as f64 / texts as f64,
+            manifest.max_tokens
+        );
+    }
+    if done > 0 {
+        truncated += count_truncated(model_dir, manifest, &chunks[..done])?;
+    }
+
+    assemble_cache(&chunks, &vectors_path, cache_path, manifest, seeds, truncated)
+}
+
+/// How many of these chunks a model tokenizer takes past its truncation bound,
+/// counted without running the model.
+///
+/// Needed on a resumed run: the sessions this process opened only saw the chunks
+/// this process embedded, and a truncation share that silently described the tail
+/// of the corpus would be exactly the kind of number that reads as a measurement
+/// and is not one.
+/// @param model_dir - the model directory
+/// @param manifest - what the model is
+/// @param chunks - the chunks to count over
+fn count_truncated(
+    model_dir: &str,
+    manifest: &ModelManifest,
+    chunks: &[SynthChunk],
+) -> Result<usize> {
+    if manifest.backend == Backend::LlamaCpp {
+        // A served arm has no local tokenizer to count with, so a resumed run
+        // cannot recount what an earlier run truncated. Reporting a zero would
+        // be worse than reporting nothing, so this says so and the header
+        // records what this process actually saw.
+        eprintln!(
+            "  note: {} is served rather than loaded, so a resumed run cannot recount the \
+             truncation an earlier run performed",
+            manifest.id
+        );
+        return Ok(0);
+    }
+    let texts: Vec<String> =
+        chunks.iter().map(|c| sanitize_for_model(&c.content)).collect();
+    Ok(count_truncation(model_dir, manifest, &texts)?.truncated)
 }
 
 /// Opens one embedder per device.
@@ -1478,25 +1548,37 @@ pub fn embed(
 /// A GPU is the opposite case, and that reasoning does not carry over: each card
 /// holds its own copy of the weights in its own memory and shares no bandwidth with
 /// the other, so two cards really are twice the throughput.
-/// @param model_dir - directory holding the weights
-/// @param model_file - the ONNX file name
-/// @param batch_size - texts per inference call
-/// @param devices - the processors to open a session on
-fn open_embedders(
-    model_dir: &str,
-    model_file: &str,
-    batch_size: usize,
+/// @param model - the resolved model
+/// @param options - the machine settings
+/// @param devices - the processors to open an ONNX session on
+fn open_arms(
+    model: &crate::models::ResolvedModel,
+    options: &ArmOptions,
     devices: &[Device],
-) -> Result<Vec<OnnxEmbedder>> {
+) -> Result<Vec<Arm>> {
+    // A served arm is one server however many cards are named: the devices are
+    // the server's business, and opening four clients to one process would
+    // measure the queue rather than the model.
+    if model.manifest.backend == Backend::LlamaCpp {
+        let load = std::time::Instant::now();
+        let arm = Arm::open(model, options)?;
+        eprintln!(
+            "  {} ready in {:.1}s",
+            arm.backend_label(options),
+            load.elapsed().as_secs_f64()
+        );
+        return Ok(vec![arm]);
+    }
     anyhow::ensure!(!devices.is_empty(), "no devices to embed on");
     let mut embedders = Vec::with_capacity(devices.len());
     for device in devices {
         let load = std::time::Instant::now();
-        let options = OnnxOptions { batch_size, device: *device, ..Default::default() };
-        let embedder = OnnxEmbedder::open_model(model_dir, model_file, options)
-            .with_context(|| format!("opening the ONNX embedder on {}. Is ORT_DYLIB_PATH set?", device.label()))?;
+        let arm = Arm::open(model, &ArmOptions { device: *device, ..options.clone() })
+            .with_context(|| {
+                format!("opening the ONNX embedder on {}. Is ORT_DYLIB_PATH set?", device.label())
+            })?;
         eprintln!("  session ready on {} in {:.1}s", device.label(), load.elapsed().as_secs_f64());
-        embedders.push(embedder);
+        embedders.push(arm);
     }
     Ok(embedders)
 }
@@ -1515,8 +1597,7 @@ fn open_embedders(
 /// embedder it is a direct call and spawns nothing.
 /// @param embedders - one per device
 /// @param texts - the window, already sanitized, in corpus order
-fn embed_window(embedders: &[OnnxEmbedder], texts: &[String]) -> Result<Vec<Vec<f32>>> {
-    use inillucent_core::embed::Embedder;
+fn embed_window(embedders: &[Arm], texts: &[String]) -> Result<Vec<Vec<f32>>> {
     if embedders.len() == 1 {
         return embedders[0].embed_documents(texts);
     }
@@ -1568,15 +1649,25 @@ fn embed_window(embedders: &[OnnxEmbedder], texts: &[String]) -> Result<Vec<Vec<
 }
 
 
-/// Turn the corpus text and the vector file into the cache the harness loads.
+/// Turn the corpus text and the vector file into the cache the harness loads,
+/// with the header that says which corpus and which model made it.
+/// @param chunks - the corpus, in corpus order
+/// @param vectors_path - the append-only vector file the embedding run wrote
+/// @param cache_path - where the cache goes
+/// @param manifest - the model whose vectors these are
+/// @param seeds - the harness query seed table, digested into the header
+/// @param truncated - how many chunks hit the model token bound
 pub fn assemble_cache(
     chunks: &[SynthChunk],
     vectors_path: &Path,
     cache_path: &Path,
-    dims: usize,
+    manifest: &ModelManifest,
+    seeds: &std::collections::BTreeMap<String, u64>,
+    truncated: usize,
 ) -> Result<()> {
     use std::io::Read;
 
+    let dims = manifest.dims;
     let bytes_per = dims * 4;
     let size = std::fs::metadata(vectors_path)?.len() as usize;
     let have = size / bytes_per;
@@ -1599,11 +1690,19 @@ pub fn assemble_cache(
         vectors.push(v);
     }
 
-    let corpus = crate::corpus::Corpus {
-        chunks: chunks.iter().map(SynthChunk::to_input).collect(),
-        vectors,
+    let inputs: Vec<ChunkInput> = chunks.iter().map(SynthChunk::to_input).collect();
+    let header = crate::corpus::CacheHeader {
+        version: 4,
+        corpus_sha256: crate::corpus::corpus_digest(&inputs),
+        model_id: manifest.id.clone(),
+        manifest_sha256: crate::corpus::manifest_digest(manifest),
         dims,
+        max_tokens: manifest.max_tokens,
+        chunk_count: inputs.len(),
+        truncated_chunks: truncated,
+        query_seed_digest: crate::corpus::seed_digest(seeds),
     };
+    let corpus = crate::corpus::Corpus { chunks: inputs, vectors, dims, header };
     crate::corpus::save_cache(&corpus, cache_path)?;
     let bytes = std::fs::metadata(cache_path)?.len();
     eprintln!(
@@ -1612,6 +1711,7 @@ pub fn assemble_cache(
         bytes as f64 / 1e6,
         corpus.chunks.len()
     );
+    eprintln!("  header: {}", corpus.header.describe());
     Ok(())
 }
 

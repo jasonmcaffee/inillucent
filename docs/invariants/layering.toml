@@ -406,11 +406,18 @@ may_depend_on = [
   "inillucent-sqlite-reader",
 ]
 
+# The grading harness reaching `inillucent-base` is task-1818: a head-to-head
+# between two embedding models is only honest if every cache, manifest and query
+# set can state its own identity, and stating it means SHA-256. The hash already
+# lives in the leaf and is already checked against its published vectors there;
+# copying it into the harness so the harness could keep a shorter dependency list
+# would be duplicating a contract, which is the one thing that file exists to
+# prevent. The edge is downward from layer 12 to layer 0 and adds no cycle.
 [[crate]]
 name = "inillucent-bench"
 kind = "test-only"
 layer = 12
-may_depend_on = ["inillucent-core"]
+may_depend_on = ["inillucent-core", "inillucent-base"]
 
 # ---------------------------------------------------------------------------
 # Third-party crates a production crate may depend on, and where.
@@ -498,7 +505,13 @@ allowed_in = ["inillucent-core", "inillucent-bench"]
 [[external]]
 name = "tokenizers"
 category = "numeric-kernel"
-allowed_in = ["inillucent-core"]
+# Also in the harness since task-1818. The arm served by `llama-server` sizes its
+# batches by tokens, because that server fails a whole request when a batch
+# exceeds its physical batch and 64 real chunks of this corpus measured 17,029
+# tokens against an 8,192 batch. Counting through the server own /tokenize is one
+# HTTP round trip per chunk, which is 185,078 of them before a vector exists, so
+# the count is taken locally and checked against the server once at connect time.
+allowed_in = ["inillucent-core", "inillucent-bench"]
 
 # ---------------------------------------------------------------------------
 # Crates that may never appear in a production dependency graph. These are the

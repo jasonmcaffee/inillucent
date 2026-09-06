@@ -10,6 +10,7 @@ pub mod tokenize;
 pub mod quantize;
 pub mod rank;
 pub mod embed;
+pub mod model;
 pub mod index;
 pub mod persist;
 #[cfg(feature = "onnx")]

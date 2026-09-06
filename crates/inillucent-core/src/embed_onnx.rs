@@ -1,12 +1,19 @@
-//! `nomic-embed-text-v1.5` run as ONNX inside the calling process.
+//! An ONNX text embedder run inside the calling process.
 //!
 //! This is the replacement for the `llama-server` child process the baseline
 //! talks to over HTTP. Same model, no separate process, no network hop.
 //!
-//! The model file exports token vectors, not one vector per text: its single
-//! output `last_hidden_state` has shape `[batch, sequence, 768]`. Turning that
-//! into one embedding is this module's job, and the order of those steps is what
+//! The model file exports token vectors, not one vector per text: its output
+//! `last_hidden_state` has shape `[batch, sequence, hidden]`. Turning that into
+//! one embedding is this module's job, and the order of those steps is what
 //! decides whether the result matches what the baseline produced.
+//!
+//! Which steps those are is the model's business, not this module's, so every
+//! one of them - the four task prefixes, the pooling, the truncation bound, the
+//! width, whether the export takes `token_type_ids` - comes from a
+//! [`ModelManifest`](crate::model::ModelManifest). `OnnxOptions::default()`
+//! still reproduces `nomic-embed-text-v1.5` exactly, so the baseline arm is
+//! unchanged by the generalisation and the existing score card is unmoved.
 
 use std::path::{Path, PathBuf};
 
@@ -16,7 +23,8 @@ use ort::value::Value;
 use tokenizers::Tokenizer;
 
 use crate::distance::normalize;
-use crate::embed::{document_prefix, query_prefix, Embedder};
+use crate::embed::Embedder;
+use crate::model::{ModelManifest, Output, Pooling, Prefixes};
 
 /// Which processor runs the model.
 ///
@@ -59,14 +67,6 @@ impl Device {
     }
 }
 
-/// How to turn token vectors into one embedding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pooling {
-    /// Average the token vectors, weighted by the attention mask so padding
-    /// contributes nothing.
-    Mean,
-}
-
 #[derive(Debug, Clone)]
 pub struct OnnxOptions {
     /// Width to keep. 768 is the full output; 512, 256, 128 and 64 are the
@@ -85,6 +85,18 @@ pub struct OnnxOptions {
     /// staying at the same bound keeps behaviour comparable.
     pub max_tokens: usize,
     pub pooling: Pooling,
+    /// The four task prefixes, from the model's manifest. Applying the wrong
+    /// one, or applying one to a model trained without them, is measurably worse
+    /// in both directions, so it is a property of the model rather than a
+    /// convention of the harness.
+    pub prefixes: Prefixes,
+    /// Whether the export declares a `token_type_ids` input. BERT-family exports
+    /// do; ModernBERT-class and decoder exports generally do not, and feeding an
+    /// input a graph never declared fails the session outright.
+    pub token_type_ids: bool,
+    /// Which output carries the answer, and under what name.
+    pub output: Output,
+    pub output_name: String,
     /// Texts per inference call.
     pub batch_size: usize,
     /// Threads ONNX Runtime uses inside one operator. `None` leaves its default,
@@ -117,6 +129,10 @@ impl Default for OnnxOptions {
             layer_norm: false,
             max_tokens: 1900,
             pooling: Pooling::Mean,
+            prefixes: Prefixes::nomic(),
+            token_type_ids: true,
+            output: Output::TokenEmbeddings,
+            output_name: String::new(),
             batch_size: 16,
             intra_threads: None,
             device: Device::Cpu,
@@ -126,10 +142,77 @@ impl Default for OnnxOptions {
     }
 }
 
+impl OnnxOptions {
+    /// Runtime options that reproduce one model's contract.
+    ///
+    /// The manifest decides everything about what the model is; the caller keeps
+    /// deciding everything about how hard the machine is worked. Splitting them
+    /// this way is what lets one arm be swapped for another without a single
+    /// batching or device decision moving with it.
+    /// @param manifest - the model being run
+    pub fn for_model(manifest: &ModelManifest) -> OnnxOptions {
+        OnnxOptions {
+            dims: manifest.dims,
+            layer_norm: manifest.layer_norm,
+            max_tokens: manifest.max_tokens,
+            pooling: manifest.pooling,
+            prefixes: manifest.prefixes.clone(),
+            token_type_ids: manifest.token_type_ids,
+            output: manifest.output,
+            output_name: manifest.output_name.clone(),
+            ..Default::default()
+        }
+    }
+
+    /// The same, with the machine settings a caller has already chosen.
+    /// @param manifest - the model being run
+    /// @param batch_size - texts per inference call
+    /// @param device - the processor to open the session on
+    pub fn for_model_on(manifest: &ModelManifest, batch_size: usize, device: Device) -> OnnxOptions {
+        OnnxOptions { batch_size, device, ..OnnxOptions::for_model(manifest) }
+    }
+}
+
 pub struct OnnxEmbedder {
     session: std::sync::Mutex<Session>,
     tokenizer: Tokenizer,
     options: OnnxOptions,
+    /// Texts handed to the model, and how many of them were longer than
+    /// `max_tokens` and therefore embedded from a prefix of themselves.
+    ///
+    /// Counted rather than inferred, because a model whose tokenizer is more
+    /// verbose sees less of each chunk than its rivals do and would otherwise
+    /// look merely faster. The card prints the share; this is where it comes from.
+    seen: std::sync::atomic::AtomicUsize,
+    truncated: std::sync::atomic::AtomicUsize,
+    tokens: std::sync::atomic::AtomicUsize,
+}
+
+/// How much text a model actually saw, over the run so far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TruncationFacts {
+    pub texts: usize,
+    pub truncated: usize,
+    /// Total tokens after truncation, which is what the model was charged for.
+    pub tokens: usize,
+}
+
+impl TruncationFacts {
+    pub fn share(&self) -> f64 {
+        if self.texts == 0 {
+            0.0
+        } else {
+            self.truncated as f64 / self.texts as f64
+        }
+    }
+
+    pub fn tokens_per_text(&self) -> f64 {
+        if self.texts == 0 {
+            0.0
+        } else {
+            self.tokens as f64 / self.texts as f64
+        }
+    }
 }
 
 impl OnnxEmbedder {
@@ -137,6 +220,71 @@ impl OnnxEmbedder {
     /// `model_file`) plus `tokenizer.json`.
     pub fn open(dir: impl AsRef<Path>, options: OnnxOptions) -> Result<Self> {
         Self::open_model(dir, "model.onnx", options)
+    }
+
+    /// Load the model a manifest describes, from the directory holding it.
+    ///
+    /// The one entry point an arm should use: the manifest names the weights
+    /// file, so a caller cannot open one model's graph with another model's
+    /// contract by passing the file name separately.
+    /// @param dir - the model directory
+    /// @param manifest - what the model is
+    /// @param batch_size - texts per inference call
+    /// @param device - the processor to open the session on
+    pub fn open_manifest(
+        dir: impl AsRef<Path>,
+        manifest: &ModelManifest,
+        batch_size: usize,
+        device: Device,
+    ) -> Result<Self> {
+        let file = manifest.model_file.clone();
+        Self::open_model(dir, &file, OnnxOptions::for_model_on(manifest, batch_size, device))
+    }
+
+    /// The output this arm reads, resolved against what the export actually
+    /// offers.
+    ///
+    /// `optimum` names the per-token output `last_hidden_state`; some
+    /// sentence-transformers exports name it `token_embeddings`; several emit
+    /// both that and an already-pooled `sentence_embedding`. Pooling is this
+    /// module's job and has to be identical across arms, so a pooled output is
+    /// never picked up by accident - only a manifest that names it gets it, and
+    /// the card then says which arms were pooled here and which were not.
+    /// @param outputs - what the session returned
+    fn output_name(&self, outputs: &ort::session::SessionOutputs<'_>) -> Result<String> {
+        if !self.options.output_name.is_empty() {
+            let wanted = self.options.output_name.clone();
+            anyhow::ensure!(
+                outputs.get(wanted.as_str()).is_some(),
+                "the manifest names the output {wanted}, and the export offers {:?}",
+                outputs.keys().collect::<Vec<_>>()
+            );
+            return Ok(wanted);
+        }
+        let candidates: &[&str] = match self.options.output {
+            Output::TokenEmbeddings => &["last_hidden_state", "token_embeddings", "hidden_states"],
+            Output::SentenceEmbedding => &["sentence_embedding", "text_embeds", "embeddings"],
+        };
+        for wanted in candidates {
+            if outputs.get(*wanted).is_some() {
+                return Ok((*wanted).to_string());
+            }
+        }
+        anyhow::bail!(
+            "the export offers none of {candidates:?}; it named {:?}. Either re-export it or \
+             name the output in the manifest's output_name",
+            outputs.keys().collect::<Vec<_>>()
+        )
+    }
+
+    /// How much of the text handed to this session the model actually saw.
+    pub fn truncation(&self) -> TruncationFacts {
+        use std::sync::atomic::Ordering::Relaxed;
+        TruncationFacts {
+            texts: self.seen.load(Relaxed),
+            truncated: self.truncated.load(Relaxed),
+            tokens: self.tokens.load(Relaxed),
+        }
     }
 
     pub fn open_model(
@@ -180,13 +328,17 @@ impl OnnxEmbedder {
             .commit_from_file(&model_path)
             .with_context(|| format!("loading {}", model_path.display()))?;
 
-        let tokenizer = Tokenizer::from_file(&tokenizer_path)
+        let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| anyhow::anyhow!("loading {}: {e}", tokenizer_path.display()))?;
+        disarm_tokenizer(&mut tokenizer);
 
         Ok(OnnxEmbedder {
             session: std::sync::Mutex::new(session),
             tokenizer,
             options,
+            seen: std::sync::atomic::AtomicUsize::new(0),
+            truncated: std::sync::atomic::AtomicUsize::new(0),
+            tokens: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -214,6 +366,14 @@ impl OnnxEmbedder {
             .iter()
             .map(|e| e.get_ids().len().min(self.options.max_tokens).max(1))
             .collect();
+
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            let cut = encodings.iter().filter(|e| e.get_ids().len() > self.options.max_tokens).count();
+            self.seen.fetch_add(texts.len(), Relaxed);
+            self.truncated.fetch_add(cut, Relaxed);
+            self.tokens.fetch_add(lengths.iter().sum::<usize>(), Relaxed);
+        }
 
         let mut out: Vec<Vec<f32>> = vec![Vec::new(); texts.len()];
         for batch in plan_batches(&lengths, self.options.batch_size, self.options.max_batch_cells) {
@@ -271,11 +431,18 @@ impl OnnxEmbedder {
 
         for (row, encoding) in encodings.iter().enumerate() {
             let take = lengths[row];
+            let encoded = encoding.get_attention_mask();
             for col in 0..take {
                 ids[row * width + col] = encoding.get_ids()[col] as i64;
-                // Trust our own truncation rather than the encoding's mask, so a
-                // truncated tail cannot be marked as present.
-                mask[row * width + col] = 1;
+                // The encoding's own mask AND our truncation. The second half is
+                // what stops a truncated tail being marked present. The first is
+                // what stops a tokenizer that padded for itself - one of the eight
+                // models here ships that setting - having its padding attended to
+                // as though it were text. `disarm_tokenizer` clears that setting
+                // on load, and this is the belt to its braces: a mask built from
+                // a length alone cannot tell the two apart, and a wrong mask is a
+                // wrong vector that nothing downstream would notice.
+                mask[row * width + col] = i64::from(encoded.get(col).copied().unwrap_or(1) != 0);
             }
         }
 
@@ -283,18 +450,70 @@ impl OnnxEmbedder {
             .session
             .lock()
             .map_err(|_| anyhow::anyhow!("the ONNX session mutex was poisoned"))?;
-        let outputs = session
-            .run(ort::inputs![
-                "input_ids" => Value::from_array(([batch, width], ids))?,
-                "attention_mask" => Value::from_array(([batch, width], mask.clone()))?,
-                "token_type_ids" => Value::from_array(([batch, width], types))?,
-            ])
-            .with_context(|| format!("running the model on {batch} texts of {width} tokens"))?;
+        let inputs = build_inputs(&session, batch, width, ids, &mask, types)?;
+        let outputs = session.run(inputs).map_err(|e| {
+            // A batch of one is the smallest this planner can make, so when one
+            // fails there is no batching left to adjust and the only lever is the
+            // model's own truncation bound. Saying so here is the difference
+            // between a diagnosable failure and an ONNX Runtime allocation
+            // message: `qwen3-embedding-0.6b` died 46% through this corpus on a
+            // single 5,327-token chunk asking for 3.76 GB of attention scores,
+            // and the bound in its manifest was the fix.
+            let hint = if batch == 1 && width > 1024 {
+                format!(
+                    ". This was one text on its own at {width} tokens, so no batching change can \
+                     make it smaller: attention allocates one score per pair of positions per \
+                     head, which grows with the square of the width. The lever is max_tokens in \
+                     this model's manifest, currently {}. Measure how many chunks a lower bound \
+                     would truncate before choosing one",
+                    self.options.max_tokens
+                )
+            } else {
+                String::new()
+            };
+            anyhow::anyhow!("{e}").context(format!(
+                "running the model on {batch} texts of {width} tokens{hint}"
+            ))
+        })?;
 
-        let (shape, data) = outputs["last_hidden_state"]
+        let name = self.output_name(&outputs)?;
+        let (shape, data) = outputs[name.as_str()]
             .try_extract_tensor::<f32>()
-            .context("reading last_hidden_state")?;
+            .with_context(|| format!("reading {name}"))?;
         let hidden = *shape.last().context("output had no trailing dimension")? as usize;
+
+        // An export that pooled for itself hands back one vector per text, and
+        // there is nothing left for this module to pool. Only a manifest that
+        // explicitly says so reaches here; the default is the per-token output,
+        // pooled here, because pooling identically across arms is what makes two
+        // arms comparable at all.
+        if self.options.output == Output::SentenceEmbedding {
+            anyhow::ensure!(
+                shape.len() == 2 && shape[0] as usize == batch,
+                "{name} has shape {shape:?}; a pooled output must be [batch, hidden]"
+            );
+            anyhow::ensure!(
+                hidden >= self.options.dims,
+                "{name} is {hidden} wide and the manifest asks for {}",
+                self.options.dims
+            );
+            let mut result = Vec::with_capacity(batch);
+            for row in 0..batch {
+                let mut pooled = data[row * hidden..(row + 1) * hidden].to_vec();
+                if self.options.layer_norm {
+                    layer_norm(&mut pooled);
+                }
+                pooled.truncate(self.options.dims);
+                normalize(&mut pooled);
+                result.push(pooled);
+            }
+            return Ok(result);
+        }
+
+        anyhow::ensure!(
+            shape.len() == 3,
+            "{name} has shape {shape:?}; the pooling here needs [batch, sequence, hidden]"
+        );
         anyhow::ensure!(
             hidden >= self.options.dims,
             "model outputs {hidden} dimensions, cannot produce {}",
@@ -303,24 +522,42 @@ impl OnnxEmbedder {
 
         let mut result = Vec::with_capacity(batch);
         for row in 0..batch {
-            let mut pooled = vec![0f32; hidden];
-            let mut counted = 0f32;
-            for col in 0..width {
-                if mask[row * width + col] == 0 {
-                    continue;
-                }
+            let token_at = |col: usize| {
                 let start = (row * width + col) * hidden;
-                let token = &data[start..start + hidden];
-                for (acc, v) in pooled.iter_mut().zip(token) {
-                    *acc += *v;
+                &data[start..start + hidden]
+            };
+            let mut pooled = match self.options.pooling {
+                // Every unmasked position, averaged. Padding contributes nothing
+                // because the mask says it is not there.
+                Pooling::Mean => {
+                    let mut acc = vec![0f32; hidden];
+                    let mut counted = 0f32;
+                    for col in 0..width {
+                        if mask[row * width + col] == 0 {
+                            continue;
+                        }
+                        for (a, v) in acc.iter_mut().zip(token_at(col)) {
+                            *a += *v;
+                        }
+                        counted += 1.0;
+                    }
+                    if counted > 0.0 {
+                        for v in acc.iter_mut() {
+                            *v /= counted;
+                        }
+                    }
+                    acc
                 }
-                counted += 1.0;
-            }
-            if counted > 0.0 {
-                for v in pooled.iter_mut() {
-                    *v /= counted;
+                // The classification position, which these exports place first.
+                Pooling::Cls => token_at(0).to_vec(),
+                // The last position the mask admits. Left padding would put it
+                // elsewhere, and this batcher pads on the right, which is what
+                // makes the scan from the end correct.
+                Pooling::LastToken => {
+                    let last = (0..width).rev().find(|&col| mask[row * width + col] != 0);
+                    token_at(last.unwrap_or(0)).to_vec()
                 }
-            }
+            };
 
             if self.options.layer_norm {
                 layer_norm(&mut pooled);
@@ -331,6 +568,204 @@ impl OnnxEmbedder {
         }
         Ok(result)
     }
+}
+
+/// How much of a set of texts a model would truncate, without running it.
+///
+/// The tokenizer alone answers this, and answering it without a session is what
+/// lets a resumed embedding run still report a truncation share over the whole
+/// corpus rather than over the part one process happened to embed. A share that
+/// silently described a tail would read as a measurement and would not be one.
+/// @param dir - the model directory, holding `tokenizer.json`
+/// @param manifest - the model, for its document prefix and its token bound
+/// @param texts - the raw texts, before any prefix
+pub fn count_truncation(
+    dir: impl AsRef<Path>,
+    manifest: &ModelManifest,
+    texts: &[String],
+) -> Result<TruncationFacts> {
+    if texts.is_empty() {
+        return Ok(TruncationFacts::default());
+    }
+    let path = dir.as_ref().join("tokenizer.json");
+    let mut tokenizer = Tokenizer::from_file(&path)
+        .map_err(|e| anyhow::anyhow!("loading {}: {e}", path.display()))?;
+    // The same disarming `open_model` does, and for the same reason, in the
+    // second place it was needed and the first place it was forgotten. Without
+    // it this counts a tokenizer's own truncation as "nothing was truncated":
+    // `snowflake-arctic-embed-m-v2.0` caps itself at 512, so counting against an
+    // 8,192 bound through an armed tokenizer finds zero chunks over it, and the
+    // card printed 0.00% for an arm whose embedding run had counted 13.
+    disarm_tokenizer(&mut tokenizer);
+    let mut facts = TruncationFacts::default();
+    for window in texts.chunks(1024) {
+        let prefixed: Vec<String> = window
+            .iter()
+            .map(|t| format!("{}{t}", manifest.prefixes.document))
+            .collect();
+        let encoded = tokenizer
+            .encode_batch(prefixed, true)
+            .map_err(|e| anyhow::anyhow!("tokenizing to count truncation: {e}"))?;
+        for e in &encoded {
+            let len = e.get_ids().len();
+            facts.texts += 1;
+            facts.tokens += len.min(manifest.max_tokens).max(1);
+            if len > manifest.max_tokens {
+                facts.truncated += 1;
+            }
+        }
+    }
+    Ok(facts)
+}
+
+
+
+/// Take the padding and the truncation out of a tokenizer's own configuration.
+///
+/// A `tokenizer.json` may carry both, and one of the eight models compared here
+/// does: `snowflake-arctic-embed-m-v2.0` ships `padding: BatchLongest` and
+/// `truncation: max_length 512`, inherited from its sentence-transformers setup.
+/// Left in place, each of those quietly breaks a different measurement.
+///
+/// Padding, because this module pads the batch itself and marks every position it
+/// filled as present; a tokenizer that has already padded hands back an encoding
+/// whose length is the padded length, and the model then attends to padding as if
+/// it were text. Truncation, because the token count this module reads back is
+/// then the *post-truncation* count, so a chunk the tokenizer had already cut
+/// looks like a chunk that fitted, the truncation share reports zero, and the arm
+/// is graded as an 8,192-token model that never saw more than 512 tokens of
+/// anything. The first is a wrong vector; the second is a card that states the
+/// opposite of what happened, which is worse.
+///
+/// So both are cleared, here, once, for every model. Truncation is this module's
+/// decision and it is taken from the manifest, where it is recorded, digested
+/// into the cache header, and printed on the card.
+/// @param tokenizer - the loaded tokenizer, modified in place
+fn disarm_tokenizer(tokenizer: &mut Tokenizer) {
+    tokenizer.with_padding(None);
+    if let Err(e) = tokenizer.with_truncation(None) {
+        // `with_truncation(None)` cannot fail in this version, and if a later one
+        // makes it fallible the failure has to be loud: silently keeping the
+        // tokenizer's own bound is exactly the measurement error above.
+        eprintln!("warning: could not clear the tokenizer's own truncation: {e}");
+    }
+}
+
+/// Fill in exactly the inputs a graph declares, driven by the graph.
+///
+/// Encoder exports differ in what they ask for and the differences are not
+/// optional: a BERT-family export declares `token_type_ids` and a ModernBERT one
+/// does not, and handing a graph an input it never declared is a hard session
+/// error rather than a value quietly ignored. The decoder-backbone exports go
+/// further and declare `position_ids` plus a full past-key-value cache, because
+/// they were exported for generation; run once with no history, every one of
+/// those cache tensors is simply empty.
+///
+/// Reading the requirement off the session rather than off the manifest is
+/// deliberate. The graph is the authority on what the graph needs, a manifest
+/// field saying "this one also wants position ids" would be a second copy of a
+/// fact that can be looked up, and a second copy is a thing that can disagree.
+/// @param session - the loaded graph, for its declared inputs
+/// @param batch - texts in this batch
+/// @param width - padded sequence length
+/// @param ids - token ids, row major
+/// @param mask - attention mask, row major
+/// @param types - token type ids, row major, all zero
+fn build_inputs<'a>(
+    session: &Session,
+    batch: usize,
+    width: usize,
+    ids: Vec<i64>,
+    mask: &[i64],
+    types: Vec<i64>,
+) -> Result<Vec<(std::borrow::Cow<'a, str>, ort::session::SessionInputValue<'a>)>> {
+    let mut ids = Some(ids);
+    let mut types = Some(types);
+    let mut out: Vec<(std::borrow::Cow<'a, str>, ort::session::SessionInputValue<'a>)> = Vec::new();
+    for input in session.inputs() {
+        let name = input.name().to_string();
+        let value: Value = match name.as_str() {
+            "input_ids" => Value::from_array((
+                [batch, width],
+                ids.take().context("input_ids was declared twice")?,
+            ))?
+            .into(),
+            "attention_mask" => Value::from_array(([batch, width], mask.to_vec()))?.into(),
+            "token_type_ids" => Value::from_array((
+                [batch, width],
+                types.take().context("token_type_ids was declared twice")?,
+            ))?
+            .into(),
+            // Right-padded, so position i is position i for every row. A left
+            // padded batch would need the offset, and this batcher does not
+            // produce one.
+            "position_ids" => {
+                let mut positions = Vec::with_capacity(batch * width);
+                for _ in 0..batch {
+                    positions.extend((0..width as i64).map(|i| i));
+                }
+                Value::from_array(([batch, width], positions))?.into()
+            }
+            other if other.starts_with("past_key_values.") => {
+                empty_cache_tensor(input, batch).with_context(|| {
+                    format!("building the empty past-key-value tensor {other}")
+                })?
+            }
+            other => anyhow::bail!(
+                "the export declares an input this embedder does not know how to fill: {other}. \
+                 Re-export it for feature extraction, or teach build_inputs what it means - \
+                 guessing at a tensor the model will read is how an arm silently embeds noise"
+            ),
+        };
+        out.push((std::borrow::Cow::Owned(name), value.into()));
+    }
+    anyhow::ensure!(
+        ids.is_none(),
+        "the export declares no input_ids; its inputs are {:?}",
+        session.inputs().iter().map(|i| i.name()).collect::<Vec<_>>()
+    );
+    Ok(out)
+}
+
+/// A past-key-value tensor with no history in it.
+///
+/// Shape comes from the declaration: the batch dimension and the sequence
+/// dimension are dynamic, everything else - the number of key/value heads and the
+/// head width - is fixed by the model and is written into the graph. Filling in
+/// the fixed dimensions from the graph rather than from a table is what lets one
+/// implementation serve every decoder export.
+/// @param input - the declared input
+/// @param batch - texts in this batch
+fn empty_cache_tensor(input: &ort::value::Outlet, batch: usize) -> Result<Value> {
+    let ort::value::ValueType::Tensor { shape, .. } = input.dtype() else {
+        anyhow::bail!("{} is not a tensor", input.name());
+    };
+    let dims: Vec<i64> = shape.iter().copied().collect();
+    anyhow::ensure!(
+        dims.len() == 4,
+        "{} has {} dimensions; a past-key-value tensor has four",
+        input.name(),
+        dims.len()
+    );
+    // Dimension 0 is the batch and dimension 2 is the history, which is empty.
+    // Both are declared dynamic (-1); the other two are the model's own numbers.
+    let mut resolved = [0usize; 4];
+    for (i, d) in dims.iter().enumerate() {
+        resolved[i] = match i {
+            0 => batch,
+            2 => 0,
+            _ => {
+                anyhow::ensure!(
+                    *d > 0,
+                    "{} leaves dimension {i} dynamic, so there is no way to know how wide the \
+                     model's attention heads are",
+                    input.name()
+                );
+                *d as usize
+            }
+        };
+    }
+    Ok(Value::from_array((resolved, Vec::<f32>::new()))?.into())
 }
 
 /// Groups texts into batches that are cheap to run and small enough to fit.
@@ -413,12 +848,13 @@ fn layer_norm(v: &mut [f32]) {
 
 impl Embedder for OnnxEmbedder {
     fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        let prefixed: Vec<String> = texts.iter().map(|t| document_prefix(t)).collect();
+        let prefix = &self.options.prefixes.document;
+        let prefixed: Vec<String> = texts.iter().map(|t| format!("{prefix}{t}")).collect();
         self.embed_prefixed(&prefixed)
     }
 
     fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
-        let prefixed = vec![query_prefix(text)];
+        let prefixed = vec![format!("{}{text}", self.options.prefixes.query)];
         Ok(self
             .embed_prefixed(&prefixed)?
             .into_iter()
@@ -438,8 +874,17 @@ mod tests {
 
     fn model_dir() -> Option<PathBuf> {
         let dir = std::env::var("INILLUCENT_ONNX_DIR").ok().map(PathBuf::from).or_else(|| {
-            let home = std::env::var("HOME").ok()?;
-            Some(PathBuf::from(home).join(".cache/inillucent-models/nomic-embed-text-v1.5"))
+            for root in ["J:/inillucent-embeddings/models", "~/.cache/inillucent-models"] {
+                let root = match root.strip_prefix("~/") {
+                    Some(rest) => PathBuf::from(std::env::var("HOME").ok()?).join(rest),
+                    None => PathBuf::from(root),
+                };
+                let dir = root.join("nomic-embed-text-v1.5");
+                if dir.join("model.onnx").exists() {
+                    return Some(dir);
+                }
+            }
+            None
         })?;
         if dir.join("model.onnx").exists() && dir.join("tokenizer.json").exists() {
             Some(dir)
@@ -579,6 +1024,194 @@ mod tests {
                 "at {dims} dimensions layer_norm moved the vector more than expected: cosine {agreement}"
             );
         }
+    }
+
+    /// The prefixes come from the manifest, and a manifest that names the wrong
+    /// one produces a different vector for the same text.
+    ///
+    /// This is the generalisation of `the_query_prefix_and_the_document_prefix_differ`
+    /// and it is the check that matters once there are eight models: the prefix
+    /// is no longer a constant anybody can read off this file, so the only thing
+    /// standing between an arm and another arm's prefix is that the manifest
+    /// decides and the manifest is digested into the cache header.
+    #[test]
+    fn a_manifest_naming_the_wrong_query_prefix_moves_the_vector() {
+        let baseline = ModelManifest::nomic_v1_5();
+        let right = embedder_or_skip!(OnnxOptions::for_model(&baseline));
+        let wrong = embedder_or_skip!(OnnxOptions::for_model(&ModelManifest {
+            prefixes: Prefixes::query_only("query: "),
+            ..baseline.clone()
+        }));
+        let text = "how does offer eligibility work";
+        let a = right.embed_query(text).unwrap();
+        let b = wrong.embed_query(text).unwrap();
+        let agreement = dot(&a, &b);
+        assert!(
+            agreement < 0.999,
+            "the wrong query prefix produced an all but identical vector (cosine {agreement}); \
+             if a prefix cannot be detected here it cannot be detected anywhere"
+        );
+    }
+
+    /// A model asked for no prefix at all is a third case, and it must differ
+    /// from both of the above. Several of the 2025-26 encoders are trained this
+    /// way, and applying a prefix to one of them is measurably worse.
+    #[test]
+    fn a_manifest_asking_for_no_prefix_differs_from_one_that_asks_for_nomics() {
+        let baseline = ModelManifest::nomic_v1_5();
+        let prefixed = embedder_or_skip!(OnnxOptions::for_model(&baseline));
+        let bare = embedder_or_skip!(OnnxOptions::for_model(&ModelManifest {
+            prefixes: Prefixes::none(),
+            ..baseline.clone()
+        }));
+        let text = "offer eligibility rules";
+        let agreement = dot(&prefixed.embed_query(text).unwrap(), &bare.embed_query(text).unwrap());
+        assert!(agreement < 0.999, "cosine {agreement}");
+    }
+
+    /// Truncation is counted, not assumed, and a text past the bound is counted.
+    ///
+    /// The card prints a truncation share per arm, and a share that was always
+    /// zero would read as "no model truncated anything" rather than as "nobody
+    /// counted". This is the fixture that says the counter works.
+    #[test]
+    fn a_text_past_the_token_bound_is_counted_as_truncated() {
+        let manifest = ModelManifest { max_tokens: 128, ..ModelManifest::nomic_v1_5() };
+        let e = embedder_or_skip!(OnnxOptions::for_model(&manifest));
+        // Distinct words, so the tokenizer cannot collapse them: about 3,000
+        // tokens against a 128 bound.
+        let long: String =
+            (0..3000).map(|i| format!("token{i} ")).collect::<Vec<_>>().concat();
+        e.embed_documents(&["short".to_string(), long]).unwrap();
+        let facts = e.truncation();
+        assert_eq!(facts.texts, 2);
+        assert_eq!(facts.truncated, 1, "the long text was not counted as truncated");
+        assert!((facts.share() - 0.5).abs() < 1e-9);
+        // Tokens are counted after truncation, which is what the model was
+        // charged for: 128 for the long one plus a handful for the short one.
+        assert!(facts.tokens > 128 && facts.tokens < 160, "{} tokens", facts.tokens);
+    }
+
+    /// A truncated text is embedded from its prefix rather than dropped, and the
+    /// vector is still a unit vector of the right width.
+    #[test]
+    fn a_truncated_text_is_still_embedded() {
+        let manifest = ModelManifest { max_tokens: 64, ..ModelManifest::nomic_v1_5() };
+        let e = embedder_or_skip!(OnnxOptions::for_model(&manifest));
+        let long: String = (0..2000).map(|i| format!("token{i} ")).collect::<Vec<_>>().concat();
+        let v = e.embed_documents(&[long]).unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].len(), 768);
+        assert!((dot(&v[0], &v[0]) - 1.0).abs() < 1e-4);
+    }
+
+    /// Classification pooling reads a different position than mean pooling, so
+    /// the two must not produce the same vector. Without this, a manifest that
+    /// asked for the wrong pooling would be silently ignored and the arm would be
+    /// graded as a model it is not.
+    #[test]
+    fn cls_pooling_and_mean_pooling_are_not_the_same_vector() {
+        let baseline = ModelManifest::nomic_v1_5();
+        let mean = embedder_or_skip!(OnnxOptions::for_model(&baseline));
+        let cls = embedder_or_skip!(OnnxOptions::for_model(&ModelManifest {
+            pooling: Pooling::Cls,
+            ..baseline.clone()
+        }));
+        let last = embedder_or_skip!(OnnxOptions::for_model(&ModelManifest {
+            pooling: Pooling::LastToken,
+            ..baseline.clone()
+        }));
+        let text = "offer eligibility is evaluated against the member profile";
+        let m = mean.embed_documents(&[text.to_string()]).unwrap().remove(0);
+        let c = cls.embed_documents(&[text.to_string()]).unwrap().remove(0);
+        let l = last.embed_documents(&[text.to_string()]).unwrap().remove(0);
+        assert!(dot(&m, &c) < 0.999, "mean and cls agreed to {}", dot(&m, &c));
+        assert!(dot(&c, &l) < 0.999, "cls and last-token agreed to {}", dot(&c, &l));
+        for v in [&m, &c, &l] {
+            assert!((dot(v, v) - 1.0).abs() < 1e-4);
+        }
+    }
+
+    /// Last-token pooling has to find the last position the mask admits, not the
+    /// last column of the padded tensor, or every short text in a batch with a
+    /// long one would be pooled from padding.
+    #[test]
+    fn last_token_pooling_ignores_the_padding_a_longer_text_added() {
+        let e = embedder_or_skip!(OnnxOptions::for_model(&ModelManifest {
+            pooling: Pooling::LastToken,
+            ..ModelManifest::nomic_v1_5()
+        }));
+        let short = "offer".to_string();
+        let long = "offer eligibility rules ".repeat(60);
+        let together = e.embed_documents(&[short.clone(), long]).unwrap();
+        let alone = e.embed_documents(&[short]).unwrap();
+        let agreement = dot(&together[0], &alone[0]);
+        assert!(agreement > 0.9999, "padding leaked into the last token: cosine {agreement}");
+    }
+
+    /// A tokenizer that pads or truncates for itself is disarmed on load.
+    ///
+    /// This is not hypothetical. `snowflake-arctic-embed-m-v2.0` ships
+    /// `padding: BatchLongest` and `truncation: max_length 512` in its
+    /// `tokenizer.json`, and the first smoke run of that arm reported exactly
+    /// 512.0 tokens for every chunk in a corpus whose median chunk is about 240 -
+    /// the tokenizer had padded every text to the batch maximum and cut anything
+    /// past 512, and both the vectors and the truncation share were wrong.
+    #[test]
+    fn a_tokenizer_that_pads_and_truncates_for_itself_is_disarmed() {
+        let Some(dir) = model_dir() else {
+            eprintln!("skipping: no ONNX weights found");
+            return;
+        };
+        let mut armed = match Tokenizer::from_file(dir.join("tokenizer.json")) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("skipping: {e}");
+                return;
+            }
+        };
+        armed.with_padding(Some(tokenizers::PaddingParams {
+            strategy: tokenizers::PaddingStrategy::Fixed(64),
+            ..Default::default()
+        }));
+        armed
+            .with_truncation(Some(tokenizers::TruncationParams {
+                max_length: 8,
+                ..Default::default()
+            }))
+            .unwrap();
+        let texts = vec!["offer eligibility rules for a member".to_string()];
+        let before = armed.encode_batch(texts.clone(), true).unwrap();
+        // Padded up to 64 and cut down to 8: the length says nothing true.
+        assert_eq!(before[0].get_ids().len(), 64);
+
+        disarm_tokenizer(&mut armed);
+        let after = armed.encode_batch(texts, true).unwrap();
+        assert!(
+            after[0].get_ids().len() > 4 && after[0].get_ids().len() < 20,
+            "after disarming, the length is the text's own: {}",
+            after[0].get_ids().len()
+        );
+        assert!(after[0].get_attention_mask().iter().all(|m| *m == 1));
+    }
+
+    /// And the same through the whole embedder: a session opened on a tokenizer
+    /// carrying its own bounds still reports the text's real token count, so the
+    /// truncation share on the card describes the model rather than the tokenizer
+    /// configuration it happened to ship with.
+    #[test]
+    fn the_embedder_reports_the_texts_own_token_count_not_a_padded_one() {
+        let manifest = ModelManifest { max_tokens: 4096, ..ModelManifest::nomic_v1_5() };
+        let e = embedder_or_skip!(OnnxOptions::for_model(&manifest));
+        e.embed_documents(&["one two three four five six".to_string()]).unwrap();
+        let facts = e.truncation();
+        assert_eq!(facts.texts, 1);
+        assert_eq!(facts.truncated, 0);
+        assert!(
+            facts.tokens > 3 && facts.tokens < 32,
+            "a six word text tokenized to {} tokens, which is a padded count",
+            facts.tokens
+        );
     }
 
     #[test]

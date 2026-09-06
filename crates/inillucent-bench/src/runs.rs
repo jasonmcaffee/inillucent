@@ -43,6 +43,17 @@ pub struct RunManifest {
     pub corpus: CorpusFacts,
     pub model_dir: String,
     pub model_file: String,
+    /// The model's own name, which is what a card prints and what a reader
+    /// compares between two runs. The directory is only where it happened to live.
+    pub model_id: String,
+    /// The digest of the manifest that decided the prefixes, the pooling, the
+    /// width and the token bound. Two runs of "the same model" whose manifests
+    /// differ are two runs of two models.
+    pub model_manifest_sha256: String,
+    pub model_dims: usize,
+    pub model_max_tokens: usize,
+    /// What the cache said it was, verbatim.
+    pub cache_header: crate::corpus::CacheHeader,
     pub device: String,
     /// The database, with any password removed. A run manifest is a file people
     /// paste into tickets.
@@ -274,6 +285,21 @@ mod tests {
             },
             model_dir: "m".into(),
             model_file: "model.onnx".into(),
+            model_id: "nomic-embed-text-v1.5".into(),
+            model_manifest_sha256: "abc".into(),
+            model_dims: 768,
+            model_max_tokens: 1900,
+            cache_header: crate::corpus::CacheHeader {
+                version: 4,
+                corpus_sha256: "c".into(),
+                model_id: "nomic-embed-text-v1.5".into(),
+                manifest_sha256: "abc".into(),
+                dims: 768,
+                max_tokens: 1900,
+                chunk_count: 1,
+                truncated_chunks: 0,
+                query_seed_digest: "s".into(),
+            },
             device: "cpu".into(),
             database: "postgres://x/y".into(),
             seeds: BTreeMap::new(),

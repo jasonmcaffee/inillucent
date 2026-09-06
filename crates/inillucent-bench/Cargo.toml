@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 inillucent-core = { path = "../inillucent-core", features = ["onnx"] }
+inillucent-base = { path = "../inillucent-base" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -13,3 +14,6 @@ clap.workspace = true
 postgres.workspace = true
 pgvector.workspace = true
 rand.workspace = true
+# The served arm counts tokens with the model own tokenizer rather than through
+# the server one text at a time; see llamacpp.rs.
+tokenizers.workspace = true

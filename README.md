@@ -461,6 +461,117 @@ count, and grouped against `max_batch_cells`, a ceiling on `texts in the batch x
 A single text that exceeds the budget on its own is still run: refusing it would drop a chunk from
 the corpus.
 
+**The budget counts cells and does not know what a cell costs**, and what it costs is the model's
+head count. `--max-batch-cells` defaults to 24,000,000, which was calibrated on a 12-head encoder:
+ONNX Runtime's fused `MultiHeadAttention` wants roughly `cells x heads x 4 bytes x 2.4`, so the same
+budget is about 2.8 GB at 12 heads and **3.7 GB at 16**. `qwen3-embedding-0.6b` has 16 and failed
+twice on a 32 GB card at exactly that ceiling — once on one text of 5,327 tokens (28.4M cells,
+3.76 GB) and once on 29 texts of 895 tokens (23.2M cells, 3.61 GB), two batch shapes with nothing in
+common but their cell count. Lower the budget for a model with more heads than the default assumes;
+8,000,000 brings that model's worst batch to 1.1 GB.
+
+It is a flag rather than a manifest field on purpose. It describes the card, not the model, and a
+manifest field would move every manifest digest whenever somebody tuned a batch — which would make
+every cache on disk unreadable to a comparison for a reason that has nothing to do with any model.
+
+## Comparing embedding models
+
+`grade` holds the embedding constant and compares engines; it says so in its own caveats. That is
+the right design for grading an index and exactly the wrong one for grading an embedder, so
+`grade-embedding` is the other half: the engine is held constant and the model varies.
+
+A model is described by a **manifest**, `model.json` beside its weights, rather than by constants in
+the harness:
+
+```json
+{
+  "id": "nomic-embed-text-v1.5",
+  "dims": 768,
+  "mrl_widths": [64, 128, 256, 512, 768],
+  "prefixes": { "query": "search_query: ", "document": "search_document: ", ... },
+  "pooling": "mean",
+  "max_tokens": 1900,
+  "model_file": "model.onnx",
+  "token_type_ids": true,
+  "backend": "onnx",
+  "output": "token_embeddings",
+  "tokenizer_sha256": "d241a60d…",
+  "weights_sha256": "147d5aa8…"
+}
+```
+
+`inillucent-bench models --dir <d>` seals one, filling in the two file digests. Every property a
+model needs in order to be run the way its author intended lives there and nowhere else, which is
+what lets eight models share one code path: a BERT export that declares `token_type_ids`, a
+ModernBERT export that does not, a decoder export that also wants `position_ids` and an empty
+past-key-value cache, and one model that has no ONNX at all and is served by `llama-server`. The
+embedder fills in exactly the inputs the graph declares, read off the session rather than off the
+manifest, because the graph is the authority on what the graph needs.
+
+`synth-embed` writes the manifest's identity into the cache header:
+
+```
+INLCACH4  corpus 110858c33ffd  model nomic-embed-text-v1.5  manifest db59adb9504a
+          185078 chunks  768 dims  1900 max tokens  34 truncated  seeds d28c510dda24
+```
+
+Then a comparison can refuse rather than warn:
+
+```sh
+./target/release/inillucent-bench grade-embedding \
+  --cache-set caches/nomic-embed-text-v1.5.cache \
+  --cache-set caches/gte-modernbert-base.cache \
+  --baseline nomic-embed-text-v1.5 --device cuda:0 --out embedding-scorecard.md
+```
+
+It reads every cache's header — and nothing else — before loading a single vector, and stops with a
+named error if two caches disagree on the corpus digest, the chunk count or the query seed table; if
+a cache's width contradicts its manifest; if a manifest has been edited since the vectors were made;
+or if a cache carries no provenance at all. Refusing costs a few hundred bytes of reading. Finding
+out half way through costs the run.
+
+### The four lanes
+
+**Dense** is exhaustive cosine over every chunk, with no graph, no lexical side and no fusion: the
+embedding on its own. The graph reaches 0.925 recall against exhaustive cosine on this corpus, and
+letting 7.5% of the answer move for reasons unrelated to the model would be larger than the effect
+being measured.
+
+**Hybrid** is the real pipeline with the shipped ranking settings, applied identically to every arm —
+left exactly as `IndexConfig::default()` built them rather than copied into setters, because a second
+copy of a default is somewhere the two can drift. A model that wins in isolation and loses once BM25
+is fused beside it has not helped an agent.
+
+**Cost** is chunks per second on the processor and on `cuda:0`, weights on disk, tokens per chunk,
+and the share of the corpus each arm truncated. Timed on **distinct** stride-sampled chunks: a
+repeated-input embedding benchmark on this machine reports roughly three times the real rate, because
+shared prefixes collapse in the prompt cache. Truncation is printed beside throughput because a model
+that is fast for having read less of each chunk is not fast.
+
+**Matryoshka** is each model's narrowed ranking against its own full-width exact ranking, so the
+storage saving is priced per model instead of taken from a model card. A model with no Matryoshka
+training appears only at its full width, which is the honest way to show it has none.
+
+Every primary row is judged by the same paired bootstrap and randomization test `grade` uses, against
+the same 0.01 practical threshold, and per-query rows go to `runs/<id>/per-query.jsonl` with a
+`model / lane` column so a miss can be diffed model against model.
+
+### Two things this found before they became numbers
+
+`snowflake-arctic-embed-m-v2.0` ships `padding: BatchLongest` and `truncation: max_length 512` inside
+its own `tokenizer.json`. Its first run reported **exactly 512.0 tokens for every chunk** in a corpus
+whose median chunk is about 240: every text padded to the batch maximum with the padding attended to
+as though it were text, and every text cut at 512 before the harness could see its real length — so
+the arm would have been graded as an 8,192-token model with a truncation share of zero. Every
+tokenizer is now disarmed on load, so the manifest's bound is the only bound.
+
+The manifest digest covers every field, and adding one half way through an embedding run moved every
+digest and made every cache written before it unreadable to a comparison. That is the guard working,
+and the answer is not to soften the digest: `synth-embed` resumes from the vectors already on disk
+and re-stamps the header, and `embed-check` then re-embeds a sample and refuses unless the stored
+vectors are what the current manifest produces. `the_baseline_manifests_digest_is_pinned_so_a_schema_change_is_visible`
+now fails loudly on any schema change and says what to do about it.
+
 ### Building on Windows
 
 `ORT_DYLIB_PATH` points at `onnxruntime.dll` from the GPU release rather than at a Homebrew dylib.
