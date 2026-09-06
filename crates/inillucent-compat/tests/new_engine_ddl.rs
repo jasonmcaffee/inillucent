@@ -290,17 +290,36 @@ fn dropping_takes_the_object_and_its_indexes() {
     pair.answers_agree("SELECT count(*) FROM members");
 }
 
+/// A view is stored as written, and a trigger is refused rather than stored.
+///
+/// **This test used to include the trigger in the campaign**, and it passed:
+/// the engine stored the statement byte for byte as SQLite stores it, and the
+/// digest of `sqlite_schema` agreed on both sides. What the campaign could not
+/// see is that the trigger then never fired, which
+/// `new_engine_surface.rs` measured and this engine now refuses rather than
+/// pretends. Storage was never the interesting half.
+///
+/// The view stays, because a view *does* work: the binder resolves it when a
+/// statement reads through it.
 #[test]
-fn a_view_and_a_trigger_are_stored_as_written() {
+fn a_view_is_stored_as_written_and_a_trigger_is_refused() {
     let Some(mut pair) = pair("view-trigger") else {
         return no_oracle();
     };
     pair.campaign(&[
         "CREATE VIEW reds AS SELECT id, email FROM members WHERE team = 'red'",
-        "CREATE TRIGGER bump AFTER INSERT ON members BEGIN UPDATE members SET score = score + 1 WHERE id = NEW.id; END",
-        "DROP TRIGGER bump",
         "DROP VIEW reds",
     ]);
+
+    let refused = pair.engine.execute_any(
+        "CREATE TRIGGER bump AFTER INSERT ON members BEGIN          UPDATE members SET score = score + 1 WHERE id = NEW.id; END",
+        &Params::new(),
+    );
+    let error = refused.expect_err("a trigger this engine cannot fire is not stored");
+    assert!(
+        format!("{error:?}").contains("does not run triggers"),
+        "the refusal did not say why: {error:?}"
+    );
 }
 
 #[test]

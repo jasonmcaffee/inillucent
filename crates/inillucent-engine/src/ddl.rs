@@ -132,22 +132,28 @@ impl ImportedDatabase {
                 exists,
                 if_not_exists,
             ),
-            Directive::CreateTrigger {
-                name,
-                name_offset,
-                table,
-                exists,
-                ..
-            } => self.create_bodiless(
-                "CREATE TRIGGER",
-                ObjectKind::Trigger,
-                source,
-                name_offset,
-                &name,
-                &table,
-                exists,
-                false,
-            ),
+            // **Refused, because storing one would be a silent wrong answer.**
+            // This engine does not fire triggers. It used to accept
+            // `CREATE TRIGGER`, store the statement byte for byte, and list the
+            // trigger in `sqlite_schema` - and then not run it, and say
+            // nothing. A database whose triggers do not fire is one whose
+            // invariants are not being maintained, and the application finds
+            // out from its data.
+            //
+            // Every other gap in this engine is a refusal that names itself,
+            // and that consistency is worth more than accepting a statement it
+            // cannot honour. A schema that stops loading here is a schema that
+            // was already broken and did not know it.
+            //
+            // Firing them is real feature work - row triggers, `BEFORE` and
+            // `AFTER`, `WHEN` clauses, recursion limits - and is not this
+            // phase's. `crates/inillucent-compat/tests/new_engine_surface.rs`
+            // holds the line until it is.
+            Directive::CreateTrigger { name, .. } => Err(misuse(format!(
+                "the new engine does not run triggers, so it will not store one: {} \
+                 would never fire",
+                String::from_utf8_lossy(&name)
+            ))),
             Directive::CreateVirtualTable {
                 if_not_exists,
                 name,
