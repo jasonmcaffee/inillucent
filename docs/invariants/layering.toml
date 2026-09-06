@@ -364,6 +364,10 @@ may_depend_on = [
   "inillucent-txn",
   "inillucent-exec",
   "inillucent-sqlite-reader",
+  # The retrieval engine, for the reason `inillucent-session` names one entry
+  # below: `Registry::with_builtins` sits two layers under it, so a database is
+  # the first thing that both builds a registry and may know the module exists.
+  "inillucent-search",
 ]
 
 # The edge from `inillucent-session` down to `inillucent-search` is where the retrieval
