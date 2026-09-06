@@ -1613,11 +1613,11 @@ impl ImportedDatabase {
             | Cached::QueryPlan(_)
             | Cached::VirtualInsert(_)
             | Cached::Select(..)
-            | Cached::Insert(_, None) => Vec::new(),
-            Cached::Insert(_, Some((plan, prepared))) => {
+            | Cached::Insert(_, None, _) => Vec::new(),
+            Cached::Insert(_, Some((plan, prepared)), _) => {
                 physical::run_any_prepared(plan, self, prepared, params)?.0
             }
-            Cached::Update(_, plan, prepared) | Cached::Delete(_, plan, prepared) => {
+            Cached::Update(_, plan, prepared, _) | Cached::Delete(_, plan, prepared) => {
                 self.keys_of(plan, prepared, params)?
             }
         };
@@ -1639,7 +1639,7 @@ impl ImportedDatabase {
             Cached::Select(plan, prepared) => {
                 physical::run_any_prepared(plan, self, prepared, params)?;
             }
-            Cached::Insert(statement, _) => {
+            Cached::Insert(statement, ..) => {
                 self.write(params, |target, log, params| {
                     dml::insert(statement, target, log, params, &rows)
                 })?;
@@ -1708,7 +1708,7 @@ impl ImportedDatabase {
                     changes: Changes::default(),
                 })
             }
-            Cached::Insert(statement, source) => {
+            Cached::Insert(statement, source, values_hold_subquery) => {
                 let rows = match source {
                     Some((plan, prepared)) => {
                         physical::run_any_prepared(plan, self, prepared, params)?.0
@@ -1719,24 +1719,34 @@ impl ImportedDatabase {
                 // plan-shaped fold never sees it. Folded here instead, or a
                 // subquery in a value would be refused as though it were
                 // correlated - which is what an unfilled slot looks like from
-                // inside the physical pass.
-                let folded = self.fold_values(statement, params)?;
+                // inside the physical pass. The flag was decided when the
+                // statement was compiled: an insert that holds no subquery is
+                // the common case and pays nothing for this.
+                let folded = if *values_hold_subquery {
+                    self.fold_values(statement, params)?
+                } else {
+                    None
+                };
                 let params = folded.as_ref().unwrap_or(params);
                 self.write(params, |target, log, params| {
                     dml::insert(statement, target, log, params, &rows)
                 })
             }
-            Cached::Update(statement, plan, prepared) => {
+            Cached::Update(statement, plan, prepared, assignments_hold_subquery) => {
                 let keys = self.keys_of(plan, prepared, params)?;
                 // The same for an `UPDATE`'s assignments: the plan above finds
                 // the rows, and the values written into them are evaluated by
                 // the write path from expressions the plan never carried.
-                let assigned: Vec<&inillucent_sql::bind::BoundExpr> = statement
-                    .assignments
-                    .iter()
-                    .map(|assignment| &assignment.value)
-                    .collect();
-                let folded = inillucent_exec::subquery::fold_expressions(&assigned, self, params)?;
+                let folded = if *assignments_hold_subquery {
+                    let assigned: Vec<&inillucent_sql::bind::BoundExpr> = statement
+                        .assignments
+                        .iter()
+                        .map(|assignment| &assignment.value)
+                        .collect();
+                    inillucent_exec::subquery::fold_expressions(&assigned, self, params)?
+                } else {
+                    None
+                };
                 let params = folded.as_ref().unwrap_or(params);
                 self.write(params, |target, log, params| {
                     dml::update(statement, target, log, params, &keys)
@@ -1900,7 +1910,14 @@ impl ImportedDatabase {
                     }
                     inillucent_sql::dml::BoundInsertSource::Values(_) => None,
                 };
-                Ok(Cached::Insert(statement, source))
+                let values_hold_subquery = match &statement.source {
+                    inillucent_sql::dml::BoundInsertSource::Values(rows) => rows
+                        .iter()
+                        .flatten()
+                        .any(inillucent_sql::plan::expression_holds_subquery),
+                    inillucent_sql::dml::BoundInsertSource::Select(_) => false,
+                };
+                Ok(Cached::Insert(statement, source, values_hold_subquery))
             }
             BoundStatement::Update(statement) => {
                 let (plan, prepared) = self.keys_plan(
@@ -1910,10 +1927,14 @@ impl ImportedDatabase {
                     statement.limit.as_ref(),
                     statement.offset.as_ref(),
                 )?;
+                let assignments_hold_subquery = statement.assignments.iter().any(|assignment| {
+                    inillucent_sql::plan::expression_holds_subquery(&assignment.value)
+                });
                 Ok(Cached::Update(
                     statement,
                     Box::new(plan),
                     Box::new(prepared),
+                    assignments_hold_subquery,
                 ))
             }
             BoundStatement::Delete(statement) => {
@@ -2095,15 +2116,26 @@ enum Cached {
     /// A query.
     Select(Box<PhysicalPlan>, Box<physical::Prepared>),
     /// An insert, with the plan for its `SELECT` source when it has one.
+    ///
+    /// The flag says whether a `VALUES` list holds a subquery. It is decided
+    /// once, here, because the alternative is walking the value expressions on
+    /// every execution of every insert - and `BoundExpr::children` allocates a
+    /// vector per node, which is the cost this project already measured on the
+    /// read path at about 0.07 us per execution.
     Insert(
         Box<inillucent_sql::dml::BoundInsert>,
         Option<(Box<PhysicalPlan>, Box<physical::Prepared>)>,
+        bool,
     ),
     /// An update, with the plan that finds the rows it changes.
+    ///
+    /// The flag says whether an assignment holds a subquery, for the reason
+    /// above.
     Update(
         Box<inillucent_sql::dml::BoundUpdate>,
         Box<PhysicalPlan>,
         Box<physical::Prepared>,
+        bool,
     ),
     /// A delete, with the plan that finds the rows it removes.
     Delete(

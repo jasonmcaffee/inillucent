@@ -398,6 +398,29 @@ impl Params {
             .unwrap_or(OwnedDatum::Null)
     }
 
+    /// Binds one parameter by its one-based number.
+    ///
+    /// Parameters between the highest bound so far and this one become NULL,
+    /// which is what an unbound parameter already is - so binding `?3` before
+    /// `?1` leaves `?1` NULL rather than shifting it.
+    ///
+    /// @param index - the one-based parameter number
+    /// @param value - the value to bind
+    pub fn set(&mut self, index: u32, value: OwnedDatum) {
+        let at = index.saturating_sub(1) as usize;
+        if self.values.len() <= at {
+            self.values.resize(at.saturating_add(1), OwnedDatum::Null);
+        }
+        if let Some(slot) = self.values.get_mut(at) {
+            *slot = value;
+        }
+    }
+
+    /// Unbinds every parameter.
+    pub fn clear(&mut self) {
+        self.values.clear();
+    }
+
     /// Returns how many parameters are bound.
     pub fn len(&self) -> usize {
         self.values.len()

@@ -716,8 +716,14 @@ fn holds_subquery(select: &BoundSelect) -> bool {
 
 /// Returns whether an expression holds a subquery, anywhere beneath it.
 ///
+/// Public because the *write* paths need the same answer and cannot get it from
+/// a plan: a `VALUES` list and an `UPDATE`'s assignments are evaluated without
+/// one. They ask this once when the statement is compiled, for the same reason
+/// `PhysicalPlan::subqueries` is decided once - the question is about the
+/// statement, and asking it per execution walks a tree and allocates.
+///
 /// @param expr - the expression to look through
-fn expression_holds_subquery(expr: &BoundExpr) -> bool {
+pub fn expression_holds_subquery(expr: &BoundExpr) -> bool {
     matches!(expr, BoundExpr::Subquery { .. })
         || expr
             .children()
