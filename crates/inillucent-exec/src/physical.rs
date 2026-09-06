@@ -121,6 +121,39 @@ pub trait TreeCatalog {
     /// @param root - the root page id the plan named
     fn layout(&self, root: u32) -> Option<&SourceLayout>;
 
+    /// Returns the rows a virtual table produces, when the caller has one.
+    ///
+    /// **The module runs on the caller's side of this trait, and only its rows
+    /// come back.** The executor never learns what a module is: it does not know
+    /// about `best_index`, cursors, shadow tables or a module registry, and it
+    /// could not - `inillucent-exec` sits below the crate that registers
+    /// modules, deliberately, because a pipeline is built against what the
+    /// caller supplies rather than against names it resolves itself.
+    ///
+    /// It is also the shape the TDD's **batch-aware vtab contract** asks for. A
+    /// row-at-a-time cursor pulled through the operator chain would put a
+    /// virtual call between every row and every batch; handing back rows the
+    /// pipeline turns into batches puts the module's own loop inside the module,
+    /// where it can produce a run at a time. The cost is that a virtual scan
+    /// does not stream, which for the shapes a module answers - a MATCH, a
+    /// bounding box - is a result set that fits in memory by construction.
+    ///
+    /// `None` means the caller has no virtual tables at all, which is what makes
+    /// this a defaulted method rather than one every catalog has to write.
+    ///
+    /// @param term - which FROM term of the plan
+    /// @param path - the access path the planner chose for it
+    /// @param params - the values bound to `?1`, `?2`, ...
+    fn virtual_rows(
+        &self,
+        term: usize,
+        path: &AccessPath,
+        params: &Params,
+    ) -> DbResult<Option<Vec<Vec<OwnedDatum>>>> {
+        let _ = (term, path, params);
+        Ok(None)
+    }
+
     /// Returns the index trees that might cover a query over one table.
     ///
     /// Smallest tree first, so the physical pass takes the cheapest structure
@@ -957,7 +990,39 @@ fn plan_stages(
             AccessPath::Recursive { .. } | AccessPath::RecursiveSelf { .. } => {
                 return unsupported("a recursive CTE")
             }
-            AccessPath::VirtualScan { .. } => return unsupported("a virtual table"),
+            // A virtual table is a *materialised* stage: the module produces
+            // its rows on the caller's side and the pipeline reads them, which
+            // is the same shape a subquery already has.
+            AccessPath::VirtualScan { .. } => {
+                if !outermost {
+                    // A module answering once per outer row is a nested loop
+                    // into somebody else's code, and the plan the module chose
+                    // was chosen for one set of constraints. Refused by name.
+                    return unsupported("a virtual table as an inner join term");
+                }
+                let width = source.table.columns.len().max(1);
+                stages.push(PreparedStage {
+                    root: 0,
+                    kind: AccessKind::Materialised,
+                    source: source.id,
+                    term: position,
+                    is_lookup: false,
+                    offset,
+                    width,
+                    // A module's row is its own record, exactly as a
+                    // materialised subquery's is: slot `i` is column `i`, there
+                    // is no rowid, and nothing is known about the order.
+                    layout: Some(SourceLayout {
+                        tree_key: 0,
+                        slots: (0..width).map(Some).collect(),
+                        rowid: None,
+                        types: vec![StaticType::Unknown; width],
+                        width,
+                        key_columns: Vec::new(),
+                    }),
+                });
+                offset = offset.saturating_add(width);
+            }
         }
     }
     Ok(stages)
@@ -1691,6 +1756,12 @@ fn source_for<'t>(
                 .sources
                 .get(stage.term)
                 .ok_or_else(|| misuse("a stage names a FROM term the plan does not have"))?;
+            if let AccessPath::VirtualScan { .. } = &term.path {
+                let rows = catalog
+                    .virtual_rows(stage.term, &term.path, params)?
+                    .ok_or_else(|| misuse("a virtual table the caller does not have"))?;
+                return Ok((Source::Rows(rows), describe_source(prepared)));
+            }
             let AccessPath::Subquery { plan: inner, .. } = &term.path else {
                 return Err(misuse("a materialised stage over something else"));
             };
