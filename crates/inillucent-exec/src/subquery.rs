@@ -82,15 +82,16 @@ pub fn fold(
     catalog: &dyn TreeCatalog,
     params: &Params,
 ) -> DbResult<Option<Params>> {
-    if params.has_subqueries() {
+    // The cheap question first, and it is the one asked on nearly every
+    // execution: this runs inside `build_prepared`, which is the path a
+    // `point.rowid` probe takes in about 0.78 us. The planner answered it once
+    // when it compiled the statement. Asking it here instead - walking the
+    // expression tree per execution - measured at about 0.07 us on every point
+    // workload, because `BoundExpr::children` allocates a vector per node.
+    if !plan.subqueries {
         return Ok(None);
     }
-    // The cheap question first, and it is the one asked on nearly every
-    // execution. This runs inside `build_prepared`, which is the path a
-    // `point.rowid` probe takes in about a microsecond, so the answer for a
-    // statement with no subquery in it has to cost no allocation and has to
-    // stop at the first one it finds.
-    if !any_in_plan(plan) {
+    if params.has_subqueries() {
         return Ok(None);
     }
     let mut found = Vec::new();
@@ -154,16 +155,6 @@ fn gather_plan<'a>(plan: &'a PhysicalPlan, into: &mut Vec<Block<'a>>) {
     for (_op, arm) in &plan.compounds {
         gather_plan(arm, into);
     }
-}
-
-/// Returns whether a planned statement holds a subquery used as a value.
-///
-/// @param plan - the planner's output
-fn any_in_plan(plan: &PhysicalPlan) -> bool {
-    any(&plan.select)
-        || plan.residuals.iter().flatten().any(any_in)
-        || plan.constant_filter.as_ref().is_some_and(any_in)
-        || plan.compounds.iter().any(|(_op, arm)| any_in_plan(arm))
 }
 
 /// One subquery the fold has to evaluate.
@@ -246,54 +237,4 @@ fn expressions(select: &BoundSelect) -> Vec<&BoundExpr> {
         out.extend(window.order_by.iter().map(|term| &term.expr));
     }
     out
-}
-
-/// Returns whether a select holds a subquery used as a value, anywhere.
-///
-/// Separate from [`gather`] and deliberately allocation-free: it is asked on
-/// every execution of every statement, and almost every answer is `false`.
-///
-/// @param select - the query to look through
-fn any(select: &BoundSelect) -> bool {
-    each_expression(select, &mut |expr| any_in(expr))
-        || select.compounds.iter().any(|(_op, arm)| any(arm))
-        || select.sources.iter().any(|source| {
-            matches!(&source.rows, inillucent_sql::bind::SourceRows::Subquery(block) if any(block))
-        })
-}
-
-/// Returns whether an expression holds a subquery, anywhere beneath it.
-///
-/// @param expr - the expression to look through
-fn any_in(expr: &BoundExpr) -> bool {
-    matches!(expr, BoundExpr::Subquery { .. }) || expr.children().iter().any(|child| any_in(child))
-}
-
-/// Runs a test over every expression a select holds directly, stopping early.
-///
-/// @param select - the query
-/// @param test - what to ask of each expression
-fn each_expression(select: &BoundSelect, test: &mut dyn FnMut(&BoundExpr) -> bool) -> bool {
-    select.filter.iter().any(|expr| test(expr))
-        || select.group_by.iter().any(|expr| test(expr))
-        || select.having.iter().any(|expr| test(expr))
-        || select.columns.iter().any(|column| test(&column.expr))
-        || select.order_by.iter().any(|term| test(&term.expr))
-        || select.limit.iter().any(|expr| test(expr))
-        || select.offset.iter().any(|expr| test(expr))
-        || select.values.iter().flatten().any(|expr| test(expr))
-        || select
-            .aggregates
-            .iter()
-            .any(|aggregate| aggregate.arguments.iter().any(|expr| test(expr)))
-        || select.windows.iter().any(|window| {
-            window.arguments.iter().any(|expr| test(expr))
-                || window.filter.iter().any(|expr| test(expr))
-                || window.partition_by.iter().any(|expr| test(expr))
-                || window.order_by.iter().any(|term| test(&term.expr))
-        })
-        || select
-            .sources
-            .iter()
-            .any(|source| source.constraint.iter().any(|expr| test(expr)))
 }
