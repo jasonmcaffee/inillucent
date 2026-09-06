@@ -192,6 +192,9 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         -(plan.cache_size as f64) / 1024.0
     );
     println!("  fairness    : matched - one memory budget, both engines");
+    println!(
+        "  warm state  : inillucent's pool is filled before each round; SQLite's cache fills as the plan runs"
+    );
     println!("  durability  : synchronous = FULL on both arms");
     println!();
     println!("## workloads");
@@ -423,6 +426,16 @@ fn time_new_engine(
     let copy = restore(fixture, scratch, "ours")?;
     let mut database = ImportedDatabase::import_with(copy, settings.page_size, settings.frames)
         .map_err(|error| format!("import failed: {}", why(&error)))?;
+    // **The pool is filled before the clock starts, which is what the read gate
+    // does and what makes these numbers comparable to Phase 2's and Phase 3's.**
+    // It is an asymmetry and the configuration says so: SQLite's arm has no
+    // equivalent hook, and its own cache fills as the plan's earlier workloads
+    // read the same tables. The import closes and reopens the file, so without
+    // this the first workload of every round would be paying for the whole
+    // fixture's first read.
+    database
+        .warm()
+        .map_err(|error| format!("warming failed: {}", why(&error)))?;
     let mut samples = Vec::with_capacity(plan.workloads.len());
     for workload in &plan.workloads {
         // `pre` and `post` are setup, not work: `sqlite_bench.c` runs them

@@ -128,7 +128,7 @@ impl<'t> FullScan<'t> {
             // exactly the shape a `CREATE TABLE` followed by an `INSERT`
             // produces - and skipping it here made such a table read back as
             // nothing at all while the rows were in the file.
-            if leaf.row_count() == 0 && !leaf.has_writes() {
+            if leaf.row_count() == 0 && !leaf.needs_materialising() {
                 return Ok(true);
             }
             // A leaf that has been written to is merged rather than read as
@@ -137,7 +137,7 @@ impl<'t> FullScan<'t> {
             // the general vector path, which is why the test is `has_writes`
             // and not `is_clean`. Confusing the two cost the SLT corpus
             // thirty-four refusals once.
-            if leaf.has_writes() {
+            if leaf.needs_materialising() {
                 let rows = leaf.live()?;
                 return Ok(push_merged(&rows, &self.projection, downstream)? == Flow::Continue);
             }
@@ -214,7 +214,7 @@ impl<'t> SpanScan<'t> {
             high.as_deref(),
             self.high_inclusive,
             &mut |leaf, start, end| {
-                if leaf.has_writes() {
+                if leaf.needs_materialising() {
                     // The span the visitor computed is over the *sorted
                     // region*, and a written-to leaf's live rows are not that
                     // set - so the bounds are applied again to the merged rows.
@@ -302,7 +302,7 @@ impl<'t> ReverseScan<'t> {
         let mut produced = 0usize;
         self.tree
             .visit_span_reverse(pool, high.as_deref(), &mut |leaf, start, end| {
-                if leaf.has_writes() {
+                if leaf.needs_materialising() {
                     // Merged, filtered by the same upper bound the span used,
                     // and reversed - which for a materialised list is one
                     // `reverse` rather than a descending selection vector.
@@ -507,6 +507,13 @@ impl<'t> PointProbe<'t> {
                         // is the case a leaf is in until something writes to it
                         // and again after the next compaction.
                         *slot = match hit {
+                            // A leaf with an out-of-line value cannot lend its
+                            // mini-column: the slot holds a reference, not the
+                            // value. `value_at` resolves it from the extents the
+                            // tree read when it opened the leaf.
+                            Hit::Sorted(_) if leaf.has_extents() => {
+                                Vector::Const(leaf.value_at(hit, *column)?)
+                            }
                             Hit::Sorted(_) => Vector::Column(leaf.column(*column)?),
                             Hit::Delta(index) => Vector::Const(leaf.delta_value(index, *column)?),
                         };
@@ -514,6 +521,12 @@ impl<'t> PointProbe<'t> {
                 }
                 let columns = inline.get(..width).unwrap_or(&[]);
                 match hit {
+                    // Every vector is a constant when the leaf holds an
+                    // out-of-line value, so the batch is one dense row rather
+                    // than a selection over the leaf's own.
+                    Hit::Sorted(_) if leaf.has_extents() => {
+                        downstream.push(&Batch::over(1, columns))?;
+                    }
                     Hit::Sorted(row) => {
                         let selection = [row as u32];
                         let mut batch = Batch::over(leaf.row_count(), columns);
