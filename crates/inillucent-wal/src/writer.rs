@@ -407,6 +407,30 @@ impl Wal {
         }
     }
 
+    /// Returns the position a page may be written up to under the write-ahead
+    /// rule.
+    ///
+    /// **This is `durable_end` under `NORMAL` and `FULL`, and `written_end`
+    /// under `OFF`** - and the difference is what `OFF` *means*. The rule is
+    /// that a page must not reach the file before the record describing it; what
+    /// "reach" means is exactly what the sync policy sets. Under `FULL` and
+    /// `NORMAL` the record has to be on the media, so a page waits for a sync.
+    /// Under `OFF` nothing is ever synced, so a watermark taken from
+    /// `durable_end` never moves - and a checkpoint could never write a page at
+    /// all. That is not "less safe", it is "does not work": the model campaign's
+    /// `OFF` arms failed with *the checkpoint failed*, on every seed.
+    ///
+    /// Under `OFF` the log and the data file are both in the operating system's
+    /// hands and a power failure may lose either, which is the bargain `OFF`
+    /// offers. What is still guaranteed is the *order*: the record is handed to
+    /// the file system before the page is.
+    pub fn write_ahead_point(&self) -> u64 {
+        match self.synchronous() {
+            Synchronous::Off => self.written_end(),
+            Synchronous::Normal | Synchronous::Full => self.durable_end(),
+        }
+    }
+
     /// Writes everything buffered to the segment without syncing.
     pub fn flush(&self) -> DbResult<()> {
         let end = self.with_inner(|inner| inner.next_lsn);
@@ -771,6 +795,49 @@ fn open_segment(
     let existing = file
         .file_size()
         .map_err(inillucent_vfs::VfsError::into_db_error)?;
+    // **A segment this database wrote is kept, not rewritten.**
+    //
+    // The first version truncated it, on the argument that "recovery has
+    // already read everything below `first_lsn` out of it". That argument is
+    // false for a redo-only engine, and the falseness is the whole point of
+    // this phase: recovery reads records into the **buffer pool**, not into the
+    // data file. Until a checkpoint writes those pages, the log is the only
+    // place the changes exist - so truncating it at open threw away every
+    // commit since the last checkpoint, and the next crash lost them all.
+    //
+    // Nothing caught it because a single crash cannot: the run that truncates
+    // the log is the run that has the rows in memory, and it answers every
+    // question correctly. It takes a **second** crash, before any checkpoint,
+    // for the loss to become visible - which is what the model campaign's
+    // traces do and what no test in the suite did.
+    //
+    // The stale tail is not a worry: `recover::truncate_after` has already cut
+    // the file back to the last record that decoded, and `first_lsn` is where
+    // that record ended.
+    if existing >= segment::HEADER_BYTES as u64 {
+        let mut head = vec![0u8; segment::HEADER_BYTES];
+        if file.read_exact_at(0, &mut head).is_ok() {
+            if let Ok(held) = SegmentHeader::decode(&head) {
+                if held.belongs_to(uuid, sequence).is_ok() && held.first_lsn <= first_lsn {
+                    return Ok(OpenSegment {
+                        file,
+                        path,
+                        sequence,
+                        // The segment's *own* first LSN, which is what every
+                        // write offset is measured from. Using the resume
+                        // position here would put the next record at the wrong
+                        // place in a segment that already holds records.
+                        first_lsn: held.first_lsn,
+                    });
+                }
+            }
+        }
+        // A file at this sequence that this database did not write, or one
+        // whose records start above where we mean to resume, is not a log we
+        // can append to. It is replaced.
+        file.truncate(0)
+            .map_err(inillucent_vfs::VfsError::into_db_error)?;
+    }
     let header = SegmentHeader {
         sequence,
         first_lsn,
@@ -778,15 +845,6 @@ fn open_segment(
     };
     let mut image = vec![0u8; segment::HEADER_BYTES];
     header.encode(&mut image)?;
-    if existing >= segment::HEADER_BYTES as u64 {
-        // A segment file already at this sequence is a leftover from a run that
-        // was cut short. Its header is rewritten and its body truncated, which
-        // is safe precisely because recovery has already read everything below
-        // `first_lsn` out of it: the caller only opens a sequence it has
-        // finished replaying.
-        file.truncate(0)
-            .map_err(inillucent_vfs::VfsError::into_db_error)?;
-    }
     file.write_all_at(0, &image)
         .map_err(inillucent_vfs::VfsError::into_db_error)?;
     file.sync(SyncMode::Normal)

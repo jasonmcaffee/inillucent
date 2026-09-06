@@ -146,6 +146,20 @@ pub struct Recovered {
     pub last_checkpoint: Option<(u64, u64)>,
     /// True when at least one `CatalogChange` was replayed.
     pub catalog_changed: bool,
+    /// The highest transaction number any record in the scan carried.
+    ///
+    /// **A reopened database must not reuse a number the log still holds.**
+    /// Recovery decides which records to replay by transaction number, so a
+    /// number used twice in one log makes two different transactions into one:
+    /// a run that opened, wrote as transaction 3 and crashed leaves records
+    /// that the *next* run resurrects the moment its own transaction 3 commits.
+    /// The row comes back from the dead, permanently, and no later crash can
+    /// remove it.
+    ///
+    /// The engine starts its counter above this. It is reported rather than
+    /// applied here because the log has no opinion about who allocates
+    /// transaction numbers - it only knows which ones it has seen.
+    pub highest_txn: u64,
 }
 
 /// Runs recovery against a data file.
@@ -173,6 +187,7 @@ pub fn recover(
         stopped_because: analysis.stopped_because.clone(),
         last_checkpoint: analysis.last_checkpoint,
         catalog_changed: false,
+        highest_txn: analysis.highest_txn,
     };
     replay(&chain, start, &analysis, redo, &mut outcome)?;
     Ok(outcome)
@@ -336,6 +351,8 @@ struct Analysis {
     losers: u64,
     stopped_because: Option<String>,
     last_checkpoint: Option<(u64, u64)>,
+    /// The highest transaction number any record carried.
+    highest_txn: u64,
 }
 
 /// Walks the chain once, deciding which transactions committed.
@@ -348,6 +365,7 @@ fn analyse(chain: &Chain, start: RecoveryStart) -> DbResult<Analysis> {
     let mut open: BTreeMap<u64, ()> = BTreeMap::new();
     let mut latest_cts = start.cts_watermark;
     let mut scanned = 0u64;
+    let mut highest_txn = 0u64;
     let mut last_checkpoint = None;
     let mut stopped_because = None;
     let mut valid_end = start.checkpoint_lsn;
@@ -390,6 +408,7 @@ fn analyse(chain: &Chain, start: RecoveryStart) -> DbResult<Analysis> {
                         scanned,
                         stopped_because,
                         last_checkpoint,
+                        highest_txn,
                     });
                 }
             };
@@ -414,9 +433,11 @@ fn analyse(chain: &Chain, start: RecoveryStart) -> DbResult<Analysis> {
                     scanned,
                     stopped_because,
                     last_checkpoint,
+                    highest_txn,
                 });
             }
             scanned = scanned.saturating_add(1);
+            highest_txn = highest_txn.max(decoded.txn);
             match decoded.body {
                 Body::Commit { cts } => {
                     committed.insert(decoded.txn);
@@ -460,6 +481,7 @@ fn analyse(chain: &Chain, start: RecoveryStart) -> DbResult<Analysis> {
         scanned,
         stopped_because,
         last_checkpoint,
+        highest_txn,
     })
 }
 

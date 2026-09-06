@@ -30,6 +30,7 @@ members = [
     # Existing retrieval engine and its grading harness.
     "crates/inillucent-core",
     "crates/inillucent-bench",
+    "crates/inillucent-model",
     # Test-only assurance tooling.
     "crates/inillucent-compat",
 ]
@@ -67,6 +68,7 @@ inillucent-pool = { path = "crates/inillucent-pool" }
 inillucent-wal = { path = "crates/inillucent-wal" }
 inillucent-tree = { path = "crates/inillucent-tree" }
 inillucent-txn = { path = "crates/inillucent-txn" }
+inillucent-model = { path = "crates/inillucent-model" }
 inillucent-sqlite-reader = { path = "crates/inillucent-sqlite-reader" }
 inillucent-scalar = { path = "crates/inillucent-scalar" }
 inillucent-exec = { path = "crates/inillucent-exec" }

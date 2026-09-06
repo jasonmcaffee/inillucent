@@ -24,10 +24,16 @@
 //! A caller that has no tree - the recovery *report*, a log inspector - passes
 //! [`RefuseRows`] and finds out rather than being given a wrong answer.
 
+use std::collections::HashMap;
+
 use inillucent_base::error::{corrupt, misuse};
 use inillucent_base::DbResult;
 use inillucent_pool::page::{self, header};
 use inillucent_pool::{Database, PageId};
+use inillucent_tree::datum::Datum;
+use inillucent_tree::mutate::{Applied, LeafMut};
+use inillucent_tree::types::ColumnSpec;
+use inillucent_tree::write::Located;
 use inillucent_wal::record::{Body, Record};
 use inillucent_wal::Redo;
 
@@ -35,22 +41,39 @@ use inillucent_wal::Redo;
 pub trait RowRedo {
     /// Puts a row back into a leaf.
     ///
+    /// @param database - the file the leaf lives in
     /// @param tree - the tree the leaf belongs to
     /// @param page - the leaf's page number
     /// @param row - the row's encoded bytes
     /// @param lsn - the record's LSN, to stamp the page with
-    fn insert_row(&mut self, tree: u64, page: PageId, row: &[u8], lsn: u64) -> DbResult<()>;
+    fn insert_row(
+        &mut self,
+        database: &mut Database,
+        tree: u64,
+        page: PageId,
+        row: &[u8],
+        lsn: u64,
+    ) -> DbResult<()>;
 
     /// Takes a row back out of a leaf.
     ///
+    /// @param database - the file the leaf lives in
     /// @param tree - the tree the leaf belongs to
     /// @param page - the leaf's page number
     /// @param key - the row's key
     /// @param lsn - the record's LSN, to stamp the page with
-    fn delete_row(&mut self, tree: u64, page: PageId, key: &[u8], lsn: u64) -> DbResult<()>;
+    fn delete_row(
+        &mut self,
+        database: &mut Database,
+        tree: u64,
+        page: PageId,
+        key: &[u8],
+        lsn: u64,
+    ) -> DbResult<()>;
 
     /// Overwrites one fixed-width slot of one row.
     ///
+    /// @param database - the file the leaf lives in
     /// @param tree - the tree the leaf belongs to
     /// @param page - the leaf's page number
     /// @param key - the row's key
@@ -59,6 +82,7 @@ pub trait RowRedo {
     /// @param lsn - the record's LSN, to stamp the page with
     fn update_in_place(
         &mut self,
+        database: &mut Database,
         tree: u64,
         page: PageId,
         key: &[u8],
@@ -78,14 +102,28 @@ pub trait RowRedo {
 pub struct RefuseRows;
 
 impl RowRedo for RefuseRows {
-    fn insert_row(&mut self, _tree: u64, page: PageId, _row: &[u8], _lsn: u64) -> DbResult<()> {
+    fn insert_row(
+        &mut self,
+        _database: &mut Database,
+        _tree: u64,
+        page: PageId,
+        _row: &[u8],
+        _lsn: u64,
+    ) -> DbResult<()> {
         Err(misuse(format!(
             "an InsertRow record for page {} needs a tree to apply into",
             page.0
         )))
     }
 
-    fn delete_row(&mut self, _tree: u64, page: PageId, _key: &[u8], _lsn: u64) -> DbResult<()> {
+    fn delete_row(
+        &mut self,
+        _database: &mut Database,
+        _tree: u64,
+        page: PageId,
+        _key: &[u8],
+        _lsn: u64,
+    ) -> DbResult<()> {
         Err(misuse(format!(
             "a DeleteRow record for page {} needs a tree to apply into",
             page.0
@@ -94,6 +132,7 @@ impl RowRedo for RefuseRows {
 
     fn update_in_place(
         &mut self,
+        _database: &mut Database,
         _tree: u64,
         page: PageId,
         _key: &[u8],
@@ -105,6 +144,204 @@ impl RowRedo for RefuseRows {
             "an UpdateInPlace record for page {} needs a tree to apply into",
             page.0
         )))
+    }
+}
+
+/// The shape of one tree, as the replay needs to know it.
+///
+/// A leaf's page says how many columns it has and what each one's physical type
+/// is, and it deliberately does *not* say what a column's collation is - the
+/// catalog says that, and a page carrying its own could disagree with it. So
+/// the shape is handed to the replay by whoever opens the database, which is
+/// the thing that holds the schema.
+#[derive(Clone, Debug)]
+pub struct RedoTree {
+    /// The column directory, in tree-column order.
+    pub columns: Vec<ColumnSpec>,
+    /// How many leading columns form the key.
+    pub key_columns: usize,
+}
+
+/// A `RowRedo` that applies row records to the leaves they name.
+///
+/// **This is what makes a tree's writes recoverable.** The tree logs an
+/// `InsertRow`, a `DeleteRow` or an `UpdateInPlace` for every change it makes to
+/// a leaf, and until this existed the only thing that could be done with one of
+/// those records on recovery was to refuse it - so a database whose write path
+/// had run could be reopened only if a checkpoint had happened to write every
+/// leaf it touched. That is not recovery; it is a coincidence.
+///
+/// ## Idempotence
+///
+/// Nothing here is idempotent on its own: applying an `InsertRow` twice would
+/// put the row in twice. What makes the replay safe is the page-LSN rule above
+/// it - [`Applier::page_lsn`] reports the leaf's stamp, the scan skips any
+/// record at or below it, and every method here stamps the leaf with the
+/// record's LSN before it returns. A method that forgot to stamp would be
+/// replayed on every recovery, which is what the recover-twice-byte-identical
+/// test exists to catch.
+///
+/// ## Where a key comes from
+///
+/// The record's own bytes, as tagged values - the same encoding the row records
+/// use. The comparison encoding the descent uses is one way: it orders
+/// correctly and cannot be read back, so a replay holding one could not find
+/// the row it names.
+#[derive(Debug, Default)]
+pub struct TreeRows {
+    /// The shape of each tree, by tree id.
+    trees: HashMap<u64, RedoTree>,
+}
+
+impl TreeRows {
+    /// Returns an applier that knows about no trees yet.
+    pub fn new() -> TreeRows {
+        TreeRows::default()
+    }
+
+    /// Returns an applier that also knows about one tree.
+    ///
+    /// @param tree - the tree's id
+    /// @param columns - its column directory
+    /// @param key_columns - how many leading columns form its key
+    pub fn with_tree(
+        mut self,
+        tree: u64,
+        columns: Vec<ColumnSpec>,
+        key_columns: usize,
+    ) -> TreeRows {
+        self.trees.insert(
+            tree,
+            RedoTree {
+                columns,
+                key_columns,
+            },
+        );
+        self
+    }
+
+    /// Returns one tree's shape, or says the replay was never told about it.
+    ///
+    /// @param tree - the tree's id
+    fn shape(&self, tree: u64) -> DbResult<&RedoTree> {
+        self.trees.get(&tree).ok_or_else(|| {
+            misuse(format!(
+                "the log names tree {tree}, which this recovery was not told the shape of"
+            ))
+        })
+    }
+}
+
+/// Decodes a run of tagged values.
+///
+/// @param bytes - the record's bytes
+/// @param most - how many values to read at most
+fn decode_all(bytes: &[u8], most: usize) -> DbResult<Vec<Datum<'_>>> {
+    let mut values = Vec::new();
+    let mut at = 0usize;
+    while at < bytes.len() && values.len() < most {
+        let (value, width) = Datum::decode_tagged(bytes.get(at..).unwrap_or(&[]))?;
+        values.push(value);
+        at = at.saturating_add(width);
+    }
+    Ok(values)
+}
+
+impl RowRedo for TreeRows {
+    fn insert_row(
+        &mut self,
+        database: &mut Database,
+        tree: u64,
+        page: PageId,
+        row: &[u8],
+        lsn: u64,
+    ) -> DbResult<()> {
+        let shape = self.shape(tree)?.clone();
+        let values = decode_all(row, shape.columns.len())?;
+        let key: Vec<Datum<'_>> = values.iter().copied().take(shape.key_columns).collect();
+        database.pool().modify(page, |bytes| {
+            let mut leaf = LeafMut::new(bytes)?;
+            // An insert replaces, exactly as the write path's does: whatever the
+            // key already named goes first. A replay that only added would put a
+            // second row under a key the tree holds once.
+            let located = leaf.view()?.locate(&key, shape.key_columns)?;
+            match located {
+                Located::Sorted(at) => {
+                    leaf.set_tombstone(at)?;
+                }
+                Located::Delta(index) => leaf.remove_delta(index)?,
+                Located::Absent => {}
+            }
+            if leaf.insert_delta(&shape.columns, &values)? == Applied::NoRoom {
+                // The leaf had room when the record was written, so it has room
+                // now unless the page in the file is not the page the record was
+                // written against. Reporting it is the only honest answer; the
+                // alternative is a replay that silently dropped a row.
+                return Err(corrupt(format!(
+                    "replaying InsertRow at {lsn} found no room in leaf {}",
+                    page.0
+                )));
+            }
+            leaf.set_lsn(lsn)
+        })
+    }
+
+    fn delete_row(
+        &mut self,
+        database: &mut Database,
+        tree: u64,
+        page: PageId,
+        key: &[u8],
+        lsn: u64,
+    ) -> DbResult<()> {
+        let shape = self.shape(tree)?.clone();
+        let values = decode_all(key, shape.key_columns)?;
+        database.pool().modify(page, |bytes| {
+            let mut leaf = LeafMut::new(bytes)?;
+            match leaf.view()?.locate(&values, shape.key_columns)? {
+                Located::Sorted(at) => {
+                    leaf.set_tombstone(at)?;
+                }
+                Located::Delta(index) => leaf.remove_delta(index)?,
+                // The row is already gone, which is what a replay onto a page
+                // that was checkpointed after the delete looks like. The page
+                // LSN would normally have skipped this record; reaching here
+                // means the leaf was rewritten with a lower stamp, and putting
+                // the tombstone back is not possible when there is no row.
+                Located::Absent => {}
+            }
+            leaf.set_lsn(lsn)
+        })
+    }
+
+    fn update_in_place(
+        &mut self,
+        database: &mut Database,
+        tree: u64,
+        page: PageId,
+        key: &[u8],
+        column: u32,
+        value: &[u8],
+        lsn: u64,
+    ) -> DbResult<()> {
+        let shape = self.shape(tree)?.clone();
+        let values = decode_all(key, shape.key_columns)?;
+        let (new_value, _) = Datum::decode_tagged(value)?;
+        database.pool().modify(page, |bytes| {
+            let mut leaf = LeafMut::new(bytes)?;
+            let Located::Sorted(row) = leaf.view()?.locate(&values, shape.key_columns)? else {
+                // An in-place update is only ever logged against a row in the
+                // sorted region - that is the condition the write path checks
+                // before it takes this path at all - so anything else means the
+                // page is not the one the record was written against.
+                return Err(corrupt(format!(
+                    "replaying UpdateInPlace at {lsn} found no sorted row in leaf {}",
+                    page.0
+                )));
+            };
+            leaf.update_slot(column as usize, row, &new_value)?;
+            leaf.set_lsn(lsn)
+        })
     }
 }
 
@@ -237,11 +474,13 @@ impl<R: RowRedo> Redo for Applier<'_, R> {
                 }
             }
             Body::InsertRow { tree, page, row } => {
-                self.rows.insert_row(tree, PageId(page), row, lsn)?;
+                self.rows
+                    .insert_row(self.database, tree, PageId(page), row, lsn)?;
                 self.stats.rows = self.stats.rows.saturating_add(1);
             }
             Body::DeleteRow { tree, page, key } => {
-                self.rows.delete_row(tree, PageId(page), key, lsn)?;
+                self.rows
+                    .delete_row(self.database, tree, PageId(page), key, lsn)?;
                 self.stats.rows = self.stats.rows.saturating_add(1);
             }
             Body::UpdateInPlace {
@@ -251,8 +490,15 @@ impl<R: RowRedo> Redo for Applier<'_, R> {
                 column,
                 value,
             } => {
-                self.rows
-                    .update_in_place(tree, PageId(page), key, column, value, lsn)?;
+                self.rows.update_in_place(
+                    self.database,
+                    tree,
+                    PageId(page),
+                    key,
+                    column,
+                    value,
+                    lsn,
+                )?;
                 self.stats.rows = self.stats.rows.saturating_add(1);
             }
             Body::AllocPage { page } => {

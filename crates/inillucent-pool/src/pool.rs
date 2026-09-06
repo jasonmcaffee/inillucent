@@ -45,6 +45,8 @@
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::{HashMap, VecDeque};
 use std::ops::Deref;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use inillucent_base::error::{corrupt, misuse, no_mem};
 use inillucent_base::rng::Rng;
@@ -115,6 +117,12 @@ struct FrameMeta {
     state: FrameState,
     /// Whether the frame differs from the file.
     dirty: bool,
+    /// Where recovery has to start to rebuild this page, when it is dirty.
+    ///
+    /// The LSN the page carried when it first became dirty after its last
+    /// writeback, and `u64::MAX` when it is clean. See `Pool::note_dirty_from`
+    /// for why a checkpoint cannot do without it.
+    rec_lsn: u64,
     /// The parent frame, the *page* that frame held, and the byte offset of
     /// the swip that points here.
     ///
@@ -137,6 +145,7 @@ impl FrameMeta {
             page: PageId::NONE,
             state: FrameState::Free,
             dirty: false,
+            rec_lsn: u64::MAX,
             parent: None,
         }
     }
@@ -312,6 +321,21 @@ pub struct Pool {
     /// every sync, and [`Pool::writeback`] refuses a page the log has not
     /// caught up with.
     durable_lsn: Cell<u64>,
+    /// The LSN at or above which a page's change belongs to a transaction that
+    /// has not committed.
+    ///
+    /// No-steal: such a page does not go to the file, because recovery is
+    /// redo-only and a page written before its commit can never be taken back
+    /// out. `u64::MAX` means no transaction is open, which is the state between
+    /// transactions and the state of a database with no log at all.
+    ///
+    /// Shared rather than owned, so that the transaction manager can move the
+    /// watermark **while the file is mutably borrowed** - which is exactly when
+    /// it needs to, because a transaction's first log record is written from
+    /// inside the tree mutation that is holding the file. A `Cell` here meant
+    /// reaching the pool through the file, and reaching the file was the one
+    /// thing that could not be done at that moment.
+    uncommitted_lsn: Arc<AtomicU64>,
 }
 
 /// The pool's counters, one cell each.
@@ -333,6 +357,8 @@ struct Counters {
     writes: Cell<u64>,
     /// Swips translated back to page ids on writeback.
     translated: Cell<u64>,
+    /// Writebacks skipped because an open transaction had changed the page.
+    held_back: Cell<u64>,
 }
 
 impl Counters {
@@ -403,6 +429,8 @@ impl Pool {
             // bulk build and a read-only open both run this way, and both are
             // correct to: a page cannot be ahead of a log that does not exist.
             durable_lsn: Cell::new(u64::MAX),
+            // Nothing is uncommitted until a transaction says so.
+            uncommitted_lsn: Arc::new(AtomicU64::new(u64::MAX)),
         })
     }
 
@@ -974,6 +1002,13 @@ impl Pool {
         // checkpointer's flush, an eviction, a manual flush - so a page cannot
         // reach the data file by a route that skips it.
         self.refuse_if_ahead_of_the_log(frame, page)?;
+        // No-steal: a page an open transaction has changed does not go to the
+        // file. It stays dirty, so a later checkpoint - after the transaction
+        // ends either way - writes it then.
+        if self.holds_uncommitted(frame, page)? {
+            Counters::add(&self.counters.held_back, 1);
+            return Ok(());
+        }
         let mut image = {
             let bytes = self
                 .buffers
@@ -991,6 +1026,7 @@ impl Pool {
         let mut state = self.state.borrow_mut();
         if let Some(meta) = state.frames.get_mut(frame as usize) {
             meta.dirty = false;
+            meta.rec_lsn = u64::MAX;
         }
         drop(state);
         Counters::add(&self.counters.writes, 1);
@@ -1007,6 +1043,84 @@ impl Pool {
     /// media, and writing it would mean a crash could leave the data file ahead
     /// of the log with no way back.
     ///
+    /// Reports whether a page holds a change no transaction has committed.
+    ///
+    /// **This is no-steal, and it is a condition rather than a convention.** The
+    /// checkpointer's whole correctness argument is that an open transaction's
+    /// pages are not in the file: recovery is redo-only, so a page written
+    /// before its transaction committed can never be taken back out - replaying
+    /// from an earlier point does not *undo* anything, it only re-applies.
+    ///
+    /// Until this existed the argument was written down and nothing enforced
+    /// it. A checkpoint taken while a transaction was open wrote that
+    /// transaction's dirty pages, the crash that followed rolled it back
+    /// everywhere except the data file, and the row was still there afterwards.
+    /// The model campaign found it on its second seed: "(0, 12) is there and
+    /// should not be".
+    ///
+    /// A page above the watermark is **skipped**, not refused. A checkpoint
+    /// with a writer open is an ordinary thing to do and has to succeed; what
+    /// it must not do is advance the recovery point past the pages it skipped,
+    /// which is why the caller sets `recovery_from` no higher than the oldest
+    /// open transaction's first record.
+    ///
+    /// @param frame - the frame about to be written
+    /// @param page - the page it holds
+    fn holds_uncommitted(&self, frame: u32, page: PageId) -> DbResult<bool> {
+        let uncommitted = self.uncommitted_lsn.load(Ordering::SeqCst);
+        if uncommitted == u64::MAX {
+            return Ok(false);
+        }
+        let _ = page;
+        let lsn = self.lsn_of(frame)?;
+        Ok(lsn >= uncommitted)
+    }
+
+    /// Returns the LSN stamped on a frame's page.
+    ///
+    /// @param frame - the frame
+    fn lsn_of(&self, frame: u32) -> DbResult<u64> {
+        let bytes = self
+            .buffers
+            .get(frame as usize)
+            .ok_or_else(|| misuse("frame index out of range"))?
+            .try_borrow()
+            .map_err(|_| misuse("a frame chosen for writeback was mutably borrowed"))?;
+        page::read_u64(&bytes, page::header::LSN)
+    }
+
+    /// Sets the LSN at or above which a page's change is uncommitted.
+    ///
+    /// `u64::MAX` means nothing is uncommitted, which is the state between
+    /// transactions and the state of a database with no log at all.
+    ///
+    /// @param lsn - the open writer's first record, or `u64::MAX` for none
+    pub fn set_uncommitted_lsn(&self, lsn: u64) {
+        self.uncommitted_lsn.store(lsn, Ordering::SeqCst);
+    }
+
+    /// Returns how many writebacks no-steal has held back.
+    pub fn held_back(&self) -> u64 {
+        self.counters.held_back.get()
+    }
+
+    /// Returns the LSN at or above which a page's change is uncommitted.
+    pub fn uncommitted_lsn(&self) -> u64 {
+        self.uncommitted_lsn.load(Ordering::SeqCst)
+    }
+
+    /// Returns a handle to the watermark, for a caller that has to move it
+    /// while the file is borrowed.
+    ///
+    /// The transaction manager takes one at assembly and keeps it. A
+    /// transaction's first log record is written from inside the tree mutation
+    /// that holds the file mutably, so reaching the pool through the file at
+    /// that moment is not possible - and setting the watermark afterwards would
+    /// leave a window in which an eviction could steal the page.
+    pub fn uncommitted_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.uncommitted_lsn)
+    }
+
     /// @param frame - the frame about to be written
     /// @param page - the page it holds, for the message
     fn refuse_if_ahead_of_the_log(&self, frame: u32, page: PageId) -> DbResult<()> {
@@ -1134,6 +1248,9 @@ impl Pool {
                 frame
             }
         };
+        // Before the bytes change, so the recovery point is the LSN the file's
+        // copy of this page still carries.
+        self.note_dirty_from(frame);
         {
             let mut bytes = self
                 .buffers
@@ -1158,12 +1275,67 @@ impl Pool {
     ///
     /// @param page - the page to change
     /// @param change - what to do to its bytes
+    /// Records where recovery has to start for a page that is about to change.
+    ///
+    /// **The LSN the page carried *before* the change**, kept from the moment a
+    /// clean frame first becomes dirty until it is written. This is ARIES's
+    /// `recLSN` and it exists because the obvious alternative is wrong: a
+    /// checkpoint cannot start recovery at "the oldest open transaction",
+    /// because a page held out of the file for an open transaction may *also*
+    /// carry an older committed change that is not in the file either. Starting
+    /// above that change loses it, and the model campaign found exactly that -
+    /// a committed row missing from a recovery that had nothing left to replay
+    /// it from.
+    ///
+    /// Taking the LSN from before the change rather than after it is
+    /// deliberately conservative: recovery may re-apply a record the page
+    /// already has, and the page-LSN rule makes that a no-op.
+    ///
+    /// @param frame - the frame about to change
+    fn note_dirty_from(&self, frame: u32) {
+        let already = {
+            let state = self.state.borrow();
+            state
+                .frames
+                .get(frame as usize)
+                .is_some_and(|meta| meta.dirty)
+        };
+        if already {
+            return;
+        }
+        let lsn = self.lsn_of(frame).unwrap_or(0);
+        let mut state = self.state.borrow_mut();
+        if let Some(meta) = state.frames.get_mut(frame as usize) {
+            meta.rec_lsn = lsn;
+        }
+    }
+
+    /// Returns the lowest LSN recovery must start at to rebuild every dirty page.
+    ///
+    /// `u64::MAX` when nothing is dirty, which is what lets a checkpoint that
+    /// wrote everything advance the recovery point to the log's durable end.
+    pub fn oldest_dirty_lsn(&self) -> u64 {
+        let state = self.state.borrow();
+        state
+            .frames
+            .iter()
+            .filter(|meta| meta.dirty && meta.state != FrameState::Free)
+            .map(|meta| meta.rec_lsn)
+            .min()
+            .unwrap_or(u64::MAX)
+    }
+
+    /// Applies a change to a resident page and marks the frame dirty.
+    ///
+    /// @param page - the page to change
+    /// @param change - what to do to its bytes
     pub fn modify<R>(
         &self,
         page: PageId,
         change: impl FnOnce(&mut [u8]) -> DbResult<R>,
     ) -> DbResult<R> {
         let frame = self.resolve(page)?;
+        self.note_dirty_from(frame);
         let outcome = {
             let mut bytes = self
                 .buffers

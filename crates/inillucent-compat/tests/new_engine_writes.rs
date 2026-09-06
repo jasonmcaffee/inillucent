@@ -575,3 +575,343 @@ fn a_scalar_subquery_in_a_where_is_refused_by_name() {
         );
     }
 }
+
+/// Compares one query's answer against SQLite's, in order.
+///
+/// @param pair - the two engines over the same data
+/// @param sql - the query
+/// @param failures - where a difference is recorded
+fn compare(pair: &mut Pair, sql: &str, failures: &mut Vec<String>) {
+    let reference = pair
+        .oracle
+        .send(&Op::Query(sql.to_string()))
+        .expect("the oracle answers");
+    if !reference.ok {
+        failures.push(format!("{sql}\n  sqlite refused it: {}", reference.message));
+        return;
+    }
+    let ours = match pair.engine.execute_any(sql, &Params::new()) {
+        Ok(outcome) => outcome.rows,
+        Err(error) => {
+            failures.push(format!(
+                "{sql}\n  the new engine refused: {}",
+                error.detail().unwrap_or("no detail")
+            ));
+            return;
+        }
+    };
+    let rendered: Vec<Vec<TaggedValue>> = ours.iter().map(|row| render(row)).collect();
+    if !same(&reference.rows, &rendered) {
+        failures.push(format!(
+            "{sql}\n  sqlite {:?}\n  ours   {rendered:?}",
+            reference.rows
+        ));
+    }
+}
+
+/// The four set operators answer what SQLite answers.
+///
+/// A compound is the last of the three Phase 2 gaps this ticket names. It is
+/// swept rather than sampled: every operator against every operator, because
+/// `EXCEPT` and `INTERSECT` have to see their right arm before they can judge a
+/// left row and the two unions do not, and a chain mixes the two rules.
+///
+/// Every query carries a total `ORDER BY`. A compound's row order is otherwise
+/// unspecified, and a strict comparison of an unspecified order reports
+/// differences that are not differences.
+#[test]
+fn the_four_set_operators_answer_what_sqlite_answers() {
+    let Some(mut pair) = pair("compound") else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+
+    let arms = [
+        "SELECT team FROM members WHERE score >= 20",
+        "SELECT team FROM members WHERE alias IS NOT NULL",
+        "SELECT team FROM members WHERE id < 3",
+    ];
+    let operators = ["UNION", "UNION ALL", "EXCEPT", "INTERSECT"];
+
+    let mut failures = Vec::new();
+    for left in arms {
+        for right in arms {
+            for op in operators {
+                compare(
+                    &mut pair,
+                    &format!("{left} {op} {right} ORDER BY 1"),
+                    &mut failures,
+                );
+            }
+        }
+    }
+    // A chain of three arms, so the fold is exercised rather than one step of
+    // it - and mixing the operators is what makes the fold's order matter.
+    for first in operators {
+        for second in operators {
+            compare(
+                &mut pair,
+                &format!(
+                    "{} {first} {} {second} {} ORDER BY 1",
+                    arms[0], arms[1], arms[2]
+                ),
+                &mut failures,
+            );
+        }
+    }
+    // The compound's own `ORDER BY`, `LIMIT` and `OFFSET`, which belong to the
+    // whole and not to the last arm.
+    for tail in [
+        "ORDER BY 1 LIMIT 2",
+        "ORDER BY 1 DESC LIMIT 2",
+        "ORDER BY 1 LIMIT 2 OFFSET 1",
+        "ORDER BY 1 LIMIT -1",
+    ] {
+        compare(
+            &mut pair,
+            &format!("{} UNION {} {tail}", arms[0], arms[1]),
+            &mut failures,
+        );
+        compare(
+            &mut pair,
+            &format!("{} UNION ALL {} {tail}", arms[0], arms[1]),
+            &mut failures,
+        );
+    }
+    // Multi-column arms, so the set comparison is over whole rows rather than
+    // over one value.
+    for op in operators {
+        compare(
+            &mut pair,
+            &format!(
+                "SELECT team, score FROM members WHERE id <= 3 {op} \
+                 SELECT team, score FROM members WHERE id >= 3 ORDER BY 1, 2"
+            ),
+            &mut failures,
+        );
+    }
+    assert!(
+        failures.is_empty(),
+        "a compound query answered differently from SQLite:\n{}",
+        failures.join("\n\n")
+    );
+}
+
+/// The window functions answer what SQLite answers.
+///
+/// The last of the three Phase 2 gaps this ticket names. It is swept across the
+/// eleven functions that only exist in a window, the aggregates over a frame,
+/// and the frame specifications themselves - because a frame is where the peer
+/// rules live, and `RANGE` and `ROWS` differ exactly when there are peers.
+///
+/// Every query carries a total `ORDER BY` on its output. A window's *input*
+/// order is fixed by its own `ORDER BY`, but the order the rows come *out* in
+/// is not, and comparing an unspecified order reports differences that are not
+/// differences.
+#[test]
+fn the_window_functions_answer_what_sqlite_answers() {
+    let Some(mut pair) = pair("window") else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+
+    let mut failures = Vec::new();
+
+    // The eleven that only exist in a window, over one window.
+    for call in [
+        "row_number()",
+        "rank()",
+        "dense_rank()",
+        "percent_rank()",
+        "cume_dist()",
+        "ntile(2)",
+        "lag(score)",
+        "lead(score)",
+        "first_value(score)",
+        "last_value(score)",
+        "nth_value(score, 2)",
+    ] {
+        compare(
+            &mut pair,
+            &format!("SELECT id, {call} OVER (ORDER BY score, id) AS w FROM members ORDER BY id"),
+            &mut failures,
+        );
+        compare(
+            &mut pair,
+            &format!(
+                "SELECT id, {call} OVER (PARTITION BY team ORDER BY score, id) AS w \
+                 FROM members ORDER BY id"
+            ),
+            &mut failures,
+        );
+    }
+
+    // The aggregates over a frame.
+    for call in [
+        "count(*)",
+        "count(score)",
+        "sum(score)",
+        "total(score)",
+        "avg(score)",
+        "min(score)",
+        "max(score)",
+        "group_concat(email)",
+    ] {
+        compare(
+            &mut pair,
+            &format!(
+                "SELECT id, {call} OVER (PARTITION BY team ORDER BY id) AS w \
+                 FROM members ORDER BY id"
+            ),
+            &mut failures,
+        );
+    }
+
+    // The frames, in two groups, because the two groups need opposite orderings
+    // to be *questions with one right answer*.
+    //
+    // A `ROWS` frame counts rows, so which of two peers is the earlier row
+    // decides its answer - and which that is, is unspecified. These are asked
+    // over `(score, id)`, a total order, so the frame is graded and the tie is
+    // not.
+    for frame in [
+        "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+        "ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING",
+        "ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING",
+        "ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING",
+        "ROWS BETWEEN 2 PRECEDING AND CURRENT ROW",
+    ] {
+        compare(
+            &mut pair,
+            &format!(
+                "SELECT id, sum(score) OVER (ORDER BY score, id {frame}) AS w \
+                 FROM members ORDER BY id"
+            ),
+            &mut failures,
+        );
+    }
+    // A `RANGE` or `GROUPS` frame takes whole peer groups, so its answer is
+    // decided even when two rows tie - and a tie is exactly what makes it
+    // different from `ROWS`. These are asked over `score` alone, deliberately,
+    // because the two rows at 20 are the case being graded.
+    for frame in [
+        "RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+        "RANGE BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING",
+        "RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING",
+        "GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING",
+        "GROUPS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW",
+    ] {
+        compare(
+            &mut pair,
+            &format!(
+                "SELECT id, sum(score) OVER (ORDER BY score {frame}) AS w \
+                 FROM members ORDER BY id"
+            ),
+            &mut failures,
+        );
+    }
+
+    // Two calls sharing one window, an expression over a window value, a
+    // descending window ordering, and the statement's own ORDER BY and LIMIT
+    // over the result.
+    for sql in [
+        "SELECT id, row_number() OVER (ORDER BY score, id), rank() OVER (ORDER BY score, id) \
+         FROM members ORDER BY id",
+        "SELECT id, row_number() OVER (ORDER BY score, id) * 10 FROM members ORDER BY id",
+        "SELECT id, row_number() OVER (ORDER BY score DESC, id) FROM members ORDER BY id",
+        "SELECT id, row_number() OVER (PARTITION BY team) FROM members ORDER BY id",
+        "SELECT id, row_number() OVER (ORDER BY score, id) AS w FROM members ORDER BY w DESC",
+        "SELECT id, row_number() OVER (ORDER BY score, id) AS w FROM members \
+         ORDER BY id LIMIT 3",
+        "SELECT team, row_number() OVER (PARTITION BY team ORDER BY id) FROM members \
+         WHERE score >= 20 ORDER BY team, 2",
+    ] {
+        compare(&mut pair, sql, &mut failures);
+    }
+
+    assert!(
+        failures.is_empty(),
+        "a window function answered differently from SQLite:\n{}",
+        failures.join("\n\n")
+    );
+}
+
+/// Two different windows in one statement are refused by name.
+///
+/// One buffer can only be sorted one way, and the operator computes each call's
+/// peer groups over a sequence it assumes is sorted by that call's ordering.
+/// Two windows are two passes and two sorts - a real feature, and one this
+/// phase does not build. It is refused rather than answered wrongly, which is
+/// the physical pass's whole stance.
+#[test]
+fn two_different_windows_in_one_statement_are_refused_by_name() {
+    let Some(mut pair) = pair("twowindows") else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+    let sql = "SELECT row_number() OVER (ORDER BY id), row_number() OVER (ORDER BY score) \
+               FROM members";
+    let error = pair
+        .engine
+        .execute_any(sql, &Params::new())
+        .err()
+        .unwrap_or_else(|| panic!("{sql} was accepted and the refusal is what is asserted"));
+    let detail = error.detail().unwrap_or("no detail");
+    assert!(
+        detail.contains("two windows"),
+        "the refusal did not name the construct: {detail}"
+    );
+}
+
+/// An `ORDER BY` over a descending index comes back in the right order.
+///
+/// The third face of the same root cause as the import order and the range
+/// bounds. The planner reads the *catalog*, where `members_score` is
+/// `(score DESC, email)`, and concludes that scanning that index forwards gives
+/// `ORDER BY score DESC` and backwards gives `ORDER BY score`. Our tree stores
+/// it ascending, so both conclusions are inverted - and the query comes back in
+/// exactly the wrong order, with no error anywhere.
+///
+/// It is a **read**-path wrong answer, reachable from a plain `SELECT` with no
+/// write involved. It was found by the window sweep, whose inner query is
+/// `SELECT score, id ... ORDER BY score` - a projection the descending index
+/// covers, which is what made the planner reach for it.
+#[test]
+fn an_order_by_over_a_descending_index_is_not_reversed() {
+    let Some(mut pair) = pair("descorder") else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+    // Every ordering is total. Two rows share a score, and which of them comes
+    // first under `ORDER BY score` alone is unspecified - so a query without a
+    // tiebreak would report a difference that is not one, and would say nothing
+    // about the direction, which is what this test is for.
+    let mut failures = Vec::new();
+    for sql in [
+        "SELECT score, id FROM members ORDER BY score, id",
+        "SELECT score, id FROM members ORDER BY score DESC, id",
+        "SELECT score, id FROM members ORDER BY score, id DESC",
+        "SELECT score, id FROM members ORDER BY score DESC, id DESC",
+        "SELECT score, email FROM members ORDER BY score, email",
+        "SELECT score, email FROM members ORDER BY score DESC, email",
+        "SELECT score, email FROM members ORDER BY score, email DESC",
+        "SELECT score, email FROM members ORDER BY score DESC, email DESC",
+        "SELECT score, id FROM members WHERE score >= 20 ORDER BY score, id",
+        "SELECT score, id FROM members WHERE score < 30 ORDER BY score, id",
+        "SELECT score, id FROM members ORDER BY score, id LIMIT 2",
+        "SELECT score, id FROM members ORDER BY score DESC, id LIMIT 2",
+        // The count is direction-blind, so it grades the *bound* on its own:
+        // this is the query that returned three where SQLite returned four.
+        "SELECT count(*) FROM members WHERE score >= 20",
+        "SELECT count(*) FROM members WHERE score > 20",
+        "SELECT count(*) FROM members WHERE score <= 20",
+        "SELECT count(*) FROM members WHERE score BETWEEN 15 AND 35",
+    ] {
+        compare(&mut pair, sql, &mut failures);
+    }
+    assert!(
+        failures.is_empty(),
+        "an ordering over a descending index came back wrong:\n{}",
+        failures.join("\n\n")
+    );
+}

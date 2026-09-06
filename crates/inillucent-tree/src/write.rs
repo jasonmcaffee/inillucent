@@ -243,10 +243,22 @@ impl PagedTree {
                 return self.delete(database, log, key);
             }
         }
+        // The key goes into the record as **tagged values**, not as the
+        // comparison encoding the descent uses. The comparison encoding is one
+        // way: it orders correctly and it cannot be read back, so a recovery
+        // holding one could not find the row it names. The row records already
+        // carried tagged values for the same reason, and having the two records
+        // disagree about how a key is written was the difference between a
+        // database that recovers and one that only recovers if a checkpoint
+        // happened to have written the leaf.
+        let mut tagged_key = Vec::new();
+        for value in key.iter().take(self.key_columns()) {
+            value.encode_tagged(&mut tagged_key);
+        }
         let lsn = log.log(Body::DeleteRow {
             tree: self.tree_id(),
             page: page.0,
-            key: &encoded_key,
+            key: &tagged_key,
         })?;
         let located = self.locate(database.pool(), page, key)?;
         database.pool().modify(page, |bytes| {
@@ -320,10 +332,14 @@ impl PagedTree {
         }
         let mut slot = Vec::new();
         value.encode_tagged(&mut slot);
+        let mut tagged_key = Vec::new();
+        for value in key.iter().take(self.key_columns()) {
+            value.encode_tagged(&mut tagged_key);
+        }
         let lsn = log.log(Body::UpdateInPlace {
             tree: self.tree_id(),
             page: page.0,
-            key: &encoded_key,
+            key: &tagged_key,
             column: column as u32,
             value: &slot,
         })?;
@@ -821,17 +837,7 @@ impl PagedTree {
     pub fn locate(&self, pool: &Pool, page: PageId, key: &[Datum<'_>]) -> DbResult<Located> {
         let guard = pool.fetch(page)?;
         let leaf = LeafRef::parse(&guard)?.with_collations(self.collations());
-        if let Ok(row) = leaf.search(key)? {
-            if !leaf.is_tombstoned(row)? {
-                return Ok(Located::Sorted(row));
-            }
-        }
-        for index in 0..leaf.delta_count() {
-            if self.delta_key_matches(&leaf, index, key)? {
-                return Ok(Located::Delta(index));
-            }
-        }
-        Ok(Located::Absent)
+        leaf.locate(key, self.key_columns())
     }
 
     /// Reports whether one delta row's key equals a probe.
@@ -894,17 +900,7 @@ impl PagedTree {
     /// @param leaf - the leaf
     /// @param key - the key
     fn locate_in(&self, leaf: &LeafRef<'_>, key: &[Datum<'_>]) -> DbResult<Located> {
-        if let Ok(row) = leaf.search(key)? {
-            if !leaf.is_tombstoned(row)? {
-                return Ok(Located::Sorted(row));
-            }
-        }
-        for index in 0..leaf.delta_count() {
-            if self.delta_key_matches(leaf, index, key)? {
-                return Ok(Located::Delta(index));
-            }
-        }
-        Ok(Located::Absent)
+        leaf.locate(key, self.key_columns())
     }
 
     /// Returns one leaf's live rows, sorted, copied out.
