@@ -56,9 +56,13 @@ pub fn resolve_dir(dir: &Path, fallback_model_file: &str) -> Result<ResolvedMode
     if path.exists() {
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let manifest: ModelManifest = serde_json::from_str(&text)
-            .with_context(|| format!("parsing {}", path.display()))?;
-        return Ok(ResolvedModel { dir: dir.to_path_buf(), manifest, manifest_on_disk: true });
+        let manifest: ModelManifest =
+            serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        return Ok(ResolvedModel {
+            dir: dir.to_path_buf(),
+            manifest,
+            manifest_on_disk: true,
+        });
     }
 
     let name = dir
@@ -76,7 +80,10 @@ pub fn resolve_dir(dir: &Path, fallback_model_file: &str) -> Result<ResolvedMode
     );
     Ok(ResolvedModel {
         dir: dir.to_path_buf(),
-        manifest: ModelManifest { model_file: fallback_model_file.to_string(), ..baseline },
+        manifest: ModelManifest {
+            model_file: fallback_model_file.to_string(),
+            ..baseline
+        },
         manifest_on_disk: false,
     })
 }
@@ -130,8 +137,16 @@ impl ResolvedModel {
     /// `models seal` impossible to run for the first time.
     pub fn verify_files(&self) -> Result<()> {
         for (label, name, declared) in [
-            ("weights", self.manifest.model_file.as_str(), self.manifest.weights_sha256.as_str()),
-            ("tokenizer", "tokenizer.json", self.manifest.tokenizer_sha256.as_str()),
+            (
+                "weights",
+                self.manifest.model_file.as_str(),
+                self.manifest.weights_sha256.as_str(),
+            ),
+            (
+                "tokenizer",
+                "tokenizer.json",
+                self.manifest.tokenizer_sha256.as_str(),
+            ),
         ] {
             if declared.is_empty() {
                 continue;
@@ -176,8 +191,8 @@ mod tests {
     use inillucent_core::model::{Pooling, Prefixes};
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("inillucent-models-{}-{name}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("inillucent-models-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -222,7 +237,9 @@ mod tests {
         let root = scratch("unmanifested");
         let dir = root.join("gte-modernbert-base");
         std::fs::create_dir_all(&dir).unwrap();
-        let err = resolve_id(&root, "gte-modernbert-base").unwrap_err().to_string();
+        let err = resolve_id(&root, "gte-modernbert-base")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("has no model.json"), "{err}");
         std::fs::remove_dir_all(&root).ok();
     }
@@ -252,7 +269,9 @@ mod tests {
             serde_json::to_string_pretty(&manifest).unwrap(),
         )
         .unwrap();
-        let err = resolve_id(&root, "granite-embedding-english-r2").unwrap_err().to_string();
+        let err = resolve_id(&root, "granite-embedding-english-r2")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("whose id is"), "{err}");
         std::fs::remove_dir_all(&root).ok();
     }
@@ -266,7 +285,10 @@ mod tests {
         std::fs::write(dir.join("tokenizer.json"), b"{}").unwrap();
         let mut resolved = ResolvedModel {
             dir: dir.clone(),
-            manifest: ModelManifest { id: "some-model".into(), ..ModelManifest::nomic_v1_5() },
+            manifest: ModelManifest {
+                id: "some-model".into(),
+                ..ModelManifest::nomic_v1_5()
+            },
             manifest_on_disk: false,
         };
         resolved.seal().unwrap();
@@ -285,7 +307,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let resolved = ResolvedModel {
             dir,
-            manifest: ModelManifest { id: "some-model".into(), ..ModelManifest::nomic_v1_5() },
+            manifest: ModelManifest {
+                id: "some-model".into(),
+                ..ModelManifest::nomic_v1_5()
+            },
             manifest_on_disk: false,
         };
         // No files at all, and no declared digests: nothing to contradict.
@@ -347,11 +372,14 @@ mod arms {
             if !dir.is_dir() || !dir.join(MANIFEST_FILE).exists() {
                 continue;
             }
-            let Ok(model) = resolve_dir(&dir, "model.onnx") else { continue };
+            let Ok(model) = resolve_dir(&dir, "model.onnx") else {
+                continue;
+            };
             if model.manifest.backend != Backend::Onnx {
                 continue;
             }
-            if !dir.join(&model.manifest.model_file).exists() || !dir.join("tokenizer.json").exists()
+            if !dir.join(&model.manifest.model_file).exists()
+                || !dir.join("tokenizer.json").exists()
             {
                 continue;
             }
@@ -493,7 +521,8 @@ mod arms {
         }
         for model in &models {
             let Some(e) = open(model) else { continue };
-            e.embed_documents(&["one two three four five six".to_string()]).unwrap();
+            e.embed_documents(&["one two three four five six".to_string()])
+                .unwrap();
             let facts = e.truncation();
             assert_eq!(facts.texts, 1, "{}", model.manifest.id);
             assert_eq!(facts.truncated, 0, "{}", model.manifest.id);

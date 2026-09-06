@@ -131,7 +131,11 @@ pub fn run(
         resolved.dir.display(),
         manifest.model_file,
         manifest.id,
-        if resolved.manifest_on_disk { "" } else { ", manifest assumed from the baseline constants" }
+        if resolved.manifest_on_disk {
+            ""
+        } else {
+            ", manifest assumed from the baseline constants"
+        }
     );
 
     // The manifest the cache was written against, against the manifest on disk
@@ -197,7 +201,9 @@ pub fn run(
         .iter()
         .map(|&i| crate::synth::sanitize_for_model(&corpus.chunks[i].content))
         .collect();
-    let fresh = embedder.embed_documents(&texts).context("re-embedding the sample")?;
+    let fresh = embedder
+        .embed_documents(&texts)
+        .context("re-embedding the sample")?;
 
     let mut agreements = Vec::with_capacity(chosen.len());
     let mut mismatched = Vec::new();
@@ -262,8 +268,10 @@ mod tests {
     use inillucent_core::store::ChunkInput;
 
     fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir()
-            .join(format!("inillucent-embedcheck-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "inillucent-embedcheck-{}-{name}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -326,7 +334,12 @@ mod tests {
                 v
             })
             .collect();
-        Corpus { chunks, vectors, dims: 8, header }
+        Corpus {
+            chunks,
+            vectors,
+            dims: 8,
+            header,
+        }
     }
 
     fn header_naming(model: &ModelManifest) -> CacheHeader {
@@ -365,7 +378,10 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("the cache says it was embedded with model-a"), "{err}");
+        assert!(
+            err.contains("the cache says it was embedded with model-a"),
+            "{err}"
+        );
         assert!(err.contains("model-b"), "{err}");
         std::fs::remove_dir_all(&root).ok();
     }

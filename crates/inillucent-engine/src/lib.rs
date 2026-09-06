@@ -276,6 +276,34 @@ impl ImportedDatabase {
         page_size: usize,
         frames: usize,
     ) -> DbResult<ImportedDatabase> {
+        let target = target_path(&path, page_size, frames);
+        ImportedDatabase::import_into(path, target, page_size, frames)
+    }
+
+    /// Imports a SQLite file into a target the caller names.
+    ///
+    /// The same import, with the destination stated rather than derived. A
+    /// measurement wants the derived name - the page size and frame count are
+    /// in it so a sweep does not overwrite a file it still has open - and a
+    /// **migration** wants to choose, because it stages into a uniquely named
+    /// file beside the destination and publishes by renaming. A half-written
+    /// database must never sit at the path an application opens, and that is a
+    /// property of *where* it is written.
+    ///
+    /// The target is removed first if it exists, so a caller that stages into a
+    /// fresh name gets a fresh file and one that reuses a name gets a rebuild
+    /// rather than a merge.
+    ///
+    /// @param path - the SQLite database to read
+    /// @param target - the file to build
+    /// @param page_size - the page size to build the new trees at
+    /// @param frames - how many frames the buffer pool holds
+    pub fn import_into(
+        path: PathBuf,
+        target: PathBuf,
+        page_size: usize,
+        frames: usize,
+    ) -> DbResult<ImportedDatabase> {
         let mut file = SqliteFile::open(path.clone())?;
         // One schema reader, not two: `inillucent-catalog`'s loader parses every
         // CREATE TABLE and CREATE INDEX and attaches each index to its table
@@ -324,7 +352,6 @@ impl ImportedDatabase {
         let mut identifiers: Vec<u32> = Vec::new();
 
         let vfs = OsVfs::new();
-        let target = target_path(&path, page_size, frames);
         let _ = std::fs::remove_file(&target);
         let db_path = DbPath::new(target.to_string_lossy().as_ref());
         let mut database = Database::create(
@@ -598,6 +625,235 @@ impl ImportedDatabase {
             index_stages: std::cell::Cell::new((0, 0, 0, 0)),
             catalog_generation: 0,
         })
+    }
+
+    /// Opens a database this engine wrote, reading its schema from the file.
+    ///
+    /// **This is the engine's own open path, and it is a different thing from
+    /// [`ImportedDatabase::reopen`].** `reopen` closes and reopens a handle this
+    /// process already has, and it carries that handle's column specifications
+    /// and tree numbering across - which is correct for what it is for, proving
+    /// that a checkpointed file reads back, but it cannot open a file this
+    /// process did not write. Its own comment says so: "a genuine open would
+    /// number them itself" and "the engine's own open path is Phase 5's consumer
+    /// story".
+    ///
+    /// This is that path. Nothing comes from memory: the catalog tree is
+    /// attached from the meta page's root, every row is read out of it, and each
+    /// object's shape is derived from the `CREATE` text the row carries, by the
+    /// same `table_shape` / `keyed_table_shape` / `index_shape` the import uses.
+    /// One derivation, so a file that opens differently from the way it was
+    /// built is a bug in one function rather than a disagreement between two.
+    ///
+    /// The per-tree statistics come from the catalog row rather than from a walk
+    /// - which is what `TreeStats` is in the file for, and what makes opening a
+    /// large database cost a catalog read instead of a scan of every leaf.
+    ///
+    /// @param path - the database file to open
+    /// @param page_size - the page size the file was built at
+    /// @param frames - how many frames the buffer pool holds
+    pub fn open(path: PathBuf, page_size: usize, frames: usize) -> DbResult<ImportedDatabase> {
+        let vfs = OsVfs::new();
+        let db_path = DbPath::new(path.to_string_lossy().as_ref());
+        let database = Database::open(&vfs, &db_path, frames.max(64))?;
+
+        let catalog_tree = attach_catalog(database.pool(), database.catalog_root())?;
+        let stored = read_catalog(database.pool(), &catalog_tree)?;
+
+        let mut catalog = StaticCatalog::default();
+        let mut trees: HashMap<u32, PagedTree> = HashMap::new();
+        let mut layouts: HashMap<u32, SourceLayout> = HashMap::new();
+        let mut covering: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut entries: Vec<SchemaEntry> = Vec::new();
+        let mut identifiers: Vec<u32> = Vec::new();
+        let mut skipped: Vec<String> = Vec::new();
+        // The identifier a tree is registered under is this process's
+        // bookkeeping and is deliberately not in the file - two processes that
+        // opened the same database would otherwise have to agree about it. They
+        // are handed out in catalog order, starting above nothing and staying
+        // below `FIRST_CREATED_ROOT` so a `CREATE TABLE` after this open cannot
+        // collide with one.
+        let mut next_identifier = 1u32;
+        // Every table by folded name, because an index's shape is derived
+        // against its table's declaration and the catalog does not order tables
+        // before their indexes.
+        let mut infos: HashMap<Vec<u8>, (u32, TableInfo)> = HashMap::new();
+
+        for entry in &stored {
+            if entry.kind != ObjectKind::Table {
+                continue;
+            }
+            let identifier = next_identifier;
+            next_identifier = next_identifier.saturating_add(1);
+            let mut info = match table_from_create_sql(&entry.sql, 0, identifier) {
+                Ok(info) => info,
+                Err(_) => {
+                    skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
+                    continue;
+                }
+            };
+            info.root = identifier;
+            let (columns, key_columns, layout) = if info.without_rowid {
+                match keyed_table_shape(&info) {
+                    Ok((columns, key_columns, layout)) => (columns, key_columns, layout),
+                    Err(_) => {
+                        skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
+                        continue;
+                    }
+                }
+            } else {
+                let (columns, layout) = table_shape(&info);
+                (columns, 1, layout)
+            };
+            let tree = PagedTree::attach(
+                database.pool(),
+                u64::from(identifier),
+                entry.root,
+                columns,
+                key_columns,
+                entry.stats.first_leaf,
+                entry.stats.leaf_count,
+                entry.stats.row_count,
+            )?;
+            trees.insert(identifier, tree);
+            layouts.insert(identifier, layout);
+            infos.insert(info.folded.clone(), (identifier, info.clone()));
+            entries.push(entry.clone());
+            identifiers.push(identifier);
+        }
+
+        for entry in &stored {
+            if entry.kind != ObjectKind::Index {
+                continue;
+            }
+            let folded = entry.table.to_ascii_lowercase();
+            let Some((table_root, table_info)) = infos.get(&folded).cloned() else {
+                skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
+                continue;
+            };
+            let identifier = next_identifier;
+            next_identifier = next_identifier.saturating_add(1);
+            let index = match inillucent_catalog::load::index_from_create_sql(
+                &entry.sql,
+                &table_info,
+                identifier,
+            ) {
+                Ok(index) => index,
+                Err(_) => {
+                    skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
+                    continue;
+                }
+            };
+            let (columns, layout) = index_shape(&table_info, &index, identifier);
+            let key_columns = columns.len();
+            let tree = PagedTree::attach(
+                database.pool(),
+                u64::from(identifier),
+                entry.root,
+                columns,
+                key_columns,
+                entry.stats.first_leaf,
+                entry.stats.leaf_count,
+                entry.stats.row_count,
+            )?;
+            trees.insert(identifier, tree);
+            layouts.insert(identifier, layout);
+            covering.entry(table_root).or_default().push(identifier);
+            // The index joins its table's declaration, so the binder offers it
+            // to the planner exactly as the import does.
+            if let Some((_, info)) = infos.get_mut(&folded) {
+                info.indexes.push(index);
+            }
+            entries.push(entry.clone());
+            identifiers.push(identifier);
+        }
+
+        for (_, (_, info)) in infos.iter() {
+            catalog = catalog.with_table(info.clone());
+        }
+
+        // `sqlite_schema` over the catalog tree, exactly as the import builds
+        // it: one root number no object can have, and the ordinary scan path.
+        let schema_root = SCHEMA_VIEW_ROOT;
+        let schema_info = table_from_create_sql(schema_create_sql(), 0, schema_root)?;
+        layouts.insert(
+            schema_root,
+            SourceLayout {
+                tree_key: schema_root,
+                slots: (1..=5).map(Some).collect(),
+                rowid: Some(0),
+                types: vec![
+                    StaticType::Int,
+                    StaticType::Text,
+                    StaticType::Text,
+                    StaticType::Text,
+                    StaticType::Int,
+                    StaticType::Text,
+                ],
+                width: 6,
+                key_columns: vec![0],
+            },
+        );
+        trees.insert(schema_root, catalog_tree);
+        catalog = catalog.with_table(schema_info.clone());
+
+        let wal = Wal::open(
+            std::sync::Arc::new(OsVfs::new()),
+            &db_path,
+            database.uuid(),
+            FIRST_LSN,
+            1,
+            WalOptions::default(),
+        )?;
+        database.pool().set_durable_lsn(wal.write_ahead_point());
+
+        for roots in covering.values_mut() {
+            roots.sort_by_key(|root| {
+                trees
+                    .get(root)
+                    .map(PagedTree::byte_size)
+                    .unwrap_or(usize::MAX)
+            });
+        }
+
+        let mut opened = ImportedDatabase {
+            catalog,
+            database,
+            trees,
+            layouts,
+            covering,
+            page_size,
+            frames,
+            path,
+            skipped,
+            limits: Limits::default(),
+            wal,
+            next_txn: std::cell::Cell::new(1),
+            statements: std::cell::RefCell::new(HashMap::new()),
+            batch: std::cell::Cell::new(None),
+            entries: entries
+                .into_iter()
+                .zip(identifiers)
+                .enumerate()
+                .map(|(nth, (entry, root))| Recorded {
+                    rowid: nth.saturating_add(1) as i64,
+                    root,
+                    entry,
+                })
+                .collect(),
+            tables: Vec::new(),
+            schema_info,
+            next_root: FIRST_CREATED_ROOT,
+            busy_timeout_ms: 0,
+            foreign_keys: false,
+            registry: inillucent_ext::registry::Registry::with_builtins(),
+            virtual_tables: HashMap::new(),
+            index_stages: std::cell::Cell::new((0, 0, 0, 0)),
+            catalog_generation: 0,
+        };
+        opened.rebuild_tables()?;
+        opened.refresh_catalog();
+        Ok(opened)
     }
 
     /// Returns the tables the import could not take.
@@ -1792,6 +2048,108 @@ fn target_path(fixture: &std::path::Path, page_size: usize, frames: usize) -> Pa
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     directory.join(format!("{stem}-p{page_size}-f{frames}.rdb"))
+}
+
+/// Returns how a table's stored rows map onto the columns a query sees.
+///
+/// **One derivation, exposed rather than copied.** The import turns SQLite's
+/// storage shape into the engine's - dropping the rowid-alias record field,
+/// putting the rowid in the key column, reordering a `WITHOUT ROWID` table's
+/// record into declared order - and `inillucent-migrate` has to perform the
+/// identical transform to compare a source table against a migrated one. A
+/// second implementation of it in the migration tool is the exact shape of bug
+/// this workspace keeps paying for: two readers that agree until the first
+/// table with a primary key declared after another column.
+///
+/// @param info - the table's declaration, as the catalog loader parsed it
+pub fn source_layout_of(info: &TableInfo) -> DbResult<SourceLayout> {
+    if info.without_rowid {
+        Ok(keyed_table_shape(info)?.2)
+    } else {
+        Ok(table_shape(info).1)
+    }
+}
+
+/// Returns one stored row as the columns a `SELECT *` produces.
+///
+/// The stored row is what `inillucent-sqlite-reader` hands back: for a rowid
+/// table `[rowid] ++ record fields`, with the alias field NULL because SQLite
+/// keeps the rowid in the cell key rather than in the record; for a
+/// `WITHOUT ROWID` table, the record in SQLite's own field order.
+///
+/// @param info - the table's declaration
+/// @param layout - the layout `source_layout_of` returned for it
+/// @param stored - one row as the reader produced it
+pub fn logical_row(
+    info: &TableInfo,
+    layout: &SourceLayout,
+    stored: &[OwnedDatum],
+) -> Vec<OwnedDatum> {
+    // The tree row first, which is the shape the import builds.
+    let tree: Vec<OwnedDatum> = if info.without_rowid {
+        stored.to_vec()
+    } else {
+        let alias = info.rowid_alias.map(usize::from);
+        let mut out = Vec::with_capacity(layout.width);
+        out.push(stored.first().cloned().unwrap_or(OwnedDatum::Null));
+        for slot in 0..info.columns.len() {
+            if Some(slot) == alias {
+                continue;
+            }
+            out.push(
+                stored
+                    .get(slot.saturating_add(1))
+                    .cloned()
+                    .unwrap_or(OwnedDatum::Null),
+            );
+        }
+        out
+    };
+    // Then the declared order, which is what a query sees. `slots` is the map
+    // the physical pass reads a column through, so using it here is using the
+    // same answer.
+    layout
+        .slots
+        .iter()
+        .enumerate()
+        .map(|(declared, slot)| {
+            let value = slot
+                .and_then(|index| tree.get(index).cloned())
+                .unwrap_or(OwnedDatum::Null);
+            let physical = info
+                .columns
+                .get(declared)
+                .map(|column| physical_for(column.affinity).0)
+                .unwrap_or(PhysicalType::Any);
+            stored_as(physical, value)
+        })
+        .collect()
+}
+
+/// Returns what a column of a given layout hands back for a value put into it.
+///
+/// **One conversion, and it is the dialect's.** `leaf::classify_at` excepts
+/// every mismatched value into the heap and returns it unchanged, with a single
+/// deliberate exception: an integer in a column whose affinity is REAL is
+/// *converted*, because that is what REAL affinity means - SQLite stores 7 in a
+/// REAL column as 7.0 - and because excepting it would take such a column off
+/// the vectorised path one whole-numbered row at a time.
+///
+/// So a migration that read `Int(7)` out of a SQLite record and compared it
+/// against the `Real(7.0)` the new engine hands back would call a correct copy
+/// wrong. This is that one rule, written where the comparison needs it.
+///
+/// It is guarded by measurement rather than by comment: the migration
+/// acceptance runs every task-1781 fixture, and its digests fail the moment
+/// this and `classify_at` disagree about any value in any of them.
+///
+/// @param physical - the column's layout
+/// @param value - the value as the source held it
+pub fn stored_as(physical: PhysicalType, value: OwnedDatum) -> OwnedDatum {
+    match (physical, &value) {
+        (PhysicalType::Float64, OwnedDatum::Int(number)) => OwnedDatum::Real(*number as f64),
+        _ => value,
+    }
 }
 
 /// Imports one table into a rowid-clustered PAX tree.

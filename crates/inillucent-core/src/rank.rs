@@ -305,7 +305,13 @@ pub fn fuse(
     vectors: Option<&crate::vectors::VectorSet>,
     params: FusionParams,
 ) -> Vec<FusedHit> {
-    let FusionParams { fusion, top_k, per_doc_cap, bounds, mmr_lambda } = params;
+    let FusionParams {
+        fusion,
+        top_k,
+        per_doc_cap,
+        bounds,
+        mmr_lambda,
+    } = params;
     let mut scores: HashMap<u32, (f32, HitOrigin)> = HashMap::new();
     // Confidence, on absolute bounds, whatever fusion is about to order the list.
     let confidence = absolute_confidence(vector_hits, lexical_hits, weight_of(fusion), bounds);
@@ -416,7 +422,9 @@ pub fn fuse(
     });
 
     match vectors {
-        Some(v) if mmr_lambda < 1.0 => select_diverse(&all, store, v, top_k, per_doc_cap, mmr_lambda),
+        Some(v) if mmr_lambda < 1.0 => {
+            select_diverse(&all, store, v, top_k, per_doc_cap, mmr_lambda)
+        }
         _ => select_by_score(&all, store, top_k, per_doc_cap),
     }
 }
@@ -457,7 +465,11 @@ fn absolute_confidence(
     }
     let ceiling = bounds.lexical_ceiling;
     for h in lexical_hits {
-        let s = if ceiling > f32::EPSILON { (h.score / ceiling).clamp(0.0, 1.0) } else { 0.0 };
+        let s = if ceiling > f32::EPSILON {
+            (h.score / ceiling).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         *out.entry(h.chunk).or_insert(0.0) += (1.0 - vector_weight) * s;
     }
     out
@@ -544,7 +556,9 @@ fn select_diverse(
         let Some((chosen, _)) = best else { break };
         taken[chosen] = true;
         let hit = all[chosen];
-        *per_doc.entry(store.chunks[hit.chunk as usize].doc).or_insert(0) += 1;
+        *per_doc
+            .entry(store.chunks[hit.chunk as usize].doc)
+            .or_insert(0) += 1;
         out.push(hit);
         for (i, other) in all.iter().enumerate() {
             if taken[i] {
@@ -578,13 +592,23 @@ mod tests {
             lexical_hits,
             store,
             None,
-            FusionParams { fusion, top_k, per_doc_cap, ..Default::default() },
+            FusionParams {
+                fusion,
+                top_k,
+                per_doc_cap,
+                ..Default::default()
+            },
         )
     }
 
     /// A lexical hit with the coverage fields the ranking tests do not exercise.
     fn lex(chunk: u32, score: f32) -> LexicalHit {
-        LexicalHit { chunk, score, coverage: 1.0, matched_terms: 1 }
+        LexicalHit {
+            chunk,
+            score,
+            coverage: 1.0,
+            matched_terms: 1,
+        }
     }
     use crate::store::ChunkInput;
 
@@ -622,7 +646,10 @@ mod tests {
         chunks
             .iter()
             .enumerate()
-            .map(|(i, c)| Neighbour { chunk: *c, distance: i as f32 * 0.01 })
+            .map(|(i, c)| Neighbour {
+                chunk: *c,
+                distance: i as f32 * 0.01,
+            })
             .collect()
     }
 
@@ -637,15 +664,32 @@ mod tests {
     #[test]
     fn a_chunk_in_both_lists_outranks_one_in_a_single_list() {
         let s = store_of(10, 1);
-        let fused = fuse6(&v(&[0, 1, 2]), &l(&[2, 3, 4]), &s, Fusion::default(), 10, 99);
-        assert_eq!(fused[0].chunk, 2, "the chunk both lists agree on should lead");
+        let fused = fuse6(
+            &v(&[0, 1, 2]),
+            &l(&[2, 3, 4]),
+            &s,
+            Fusion::default(),
+            10,
+            99,
+        );
+        assert_eq!(
+            fused[0].chunk, 2,
+            "the chunk both lists agree on should lead"
+        );
         assert_eq!(fused[0].origin, HitOrigin::Both);
     }
 
     #[test]
     fn reciprocal_rank_fusion_matches_the_baseline_formula() {
         let s = store_of(10, 1);
-        let fused = fuse6(&v(&[0]), &l(&[1]), &s, Fusion::ReciprocalRank { k: 60.0 }, 10, 99);
+        let fused = fuse6(
+            &v(&[0]),
+            &l(&[1]),
+            &s,
+            Fusion::ReciprocalRank { k: 60.0 },
+            10,
+            99,
+        );
         let expected = 1.0 / 61.0;
         for h in &fused {
             assert!((h.score - expected).abs() < 1e-6, "got {}", h.score);
@@ -675,8 +719,14 @@ mod tests {
     #[test]
     fn one_empty_list_still_produces_a_ranking() {
         let s = store_of(10, 1);
-        assert_eq!(fuse6(&v(&[0, 1]), &[], &s, Fusion::default(), 10, 99).len(), 2);
-        assert_eq!(fuse6(&[], &l(&[3, 4]), &s, Fusion::default(), 10, 99).len(), 2);
+        assert_eq!(
+            fuse6(&v(&[0, 1]), &[], &s, Fusion::default(), 10, 99).len(),
+            2
+        );
+        assert_eq!(
+            fuse6(&[], &l(&[3, 4]), &s, Fusion::default(), 10, 99).len(),
+            2
+        );
     }
 
     #[test]
@@ -714,8 +764,20 @@ mod tests {
     fn normalized_score_fusion_survives_a_flat_list() {
         let s = store_of(10, 1);
         // Every distance identical, so the span is zero.
-        let flat: Vec<Neighbour> = (0..3).map(|c| Neighbour { chunk: c, distance: 0.5 }).collect();
-        let fused = fuse6(&flat, &[], &s, Fusion::NormalizedScore { vector_weight: 1.0 }, 10, 99);
+        let flat: Vec<Neighbour> = (0..3)
+            .map(|c| Neighbour {
+                chunk: c,
+                distance: 0.5,
+            })
+            .collect();
+        let fused = fuse6(
+            &flat,
+            &[],
+            &s,
+            Fusion::NormalizedScore { vector_weight: 1.0 },
+            10,
+            99,
+        );
         assert_eq!(fused.len(), 3);
         assert!(fused.iter().all(|h| h.score.is_finite()));
     }
@@ -723,8 +785,22 @@ mod tests {
     #[test]
     fn fusion_is_deterministic() {
         let s = store_of(10, 2);
-        let a = fuse6(&v(&[0, 1, 2, 3]), &l(&[3, 2, 1, 0]), &s, Fusion::default(), 10, 2);
-        let b = fuse6(&v(&[0, 1, 2, 3]), &l(&[3, 2, 1, 0]), &s, Fusion::default(), 10, 2);
+        let a = fuse6(
+            &v(&[0, 1, 2, 3]),
+            &l(&[3, 2, 1, 0]),
+            &s,
+            Fusion::default(),
+            10,
+            2,
+        );
+        let b = fuse6(
+            &v(&[0, 1, 2, 3]),
+            &l(&[3, 2, 1, 0]),
+            &s,
+            Fusion::default(),
+            10,
+            2,
+        );
         assert_eq!(
             a.iter().map(|h| h.chunk).collect::<Vec<_>>(),
             b.iter().map(|h| h.chunk).collect::<Vec<_>>()
@@ -749,12 +825,33 @@ mod tests {
         let s = store_of(10, 1);
         // Similarities 1.00, 0.99, 0.98: three nearly equally good hits.
         let vector = v(&[0, 1, 2]);
-        let convex = fuse6(&vector, &[], &s, Fusion::Convex { vector_weight: 1.0 }, 10, 99);
-        let min_max = fuse6(&vector, &[], &s, Fusion::NormalizedScore { vector_weight: 1.0 }, 10, 99);
-        let score_of = |hits: &[FusedHit], chunk: u32| hits.iter().find(|h| h.chunk == chunk).unwrap().score;
+        let convex = fuse6(
+            &vector,
+            &[],
+            &s,
+            Fusion::Convex { vector_weight: 1.0 },
+            10,
+            99,
+        );
+        let min_max = fuse6(
+            &vector,
+            &[],
+            &s,
+            Fusion::NormalizedScore { vector_weight: 1.0 },
+            10,
+            99,
+        );
+        let score_of =
+            |hits: &[FusedHit], chunk: u32| hits.iter().find(|h| h.chunk == chunk).unwrap().score;
 
-        assert!((score_of(&convex, 1) - 0.99).abs() < 1e-3, "convex keeps the middle hit near its own value");
-        assert!((score_of(&min_max, 1) - 0.5).abs() < 1e-3, "min-max pushes it to the middle of the range");
+        assert!(
+            (score_of(&convex, 1) - 0.99).abs() < 1e-3,
+            "convex keeps the middle hit near its own value"
+        );
+        assert!(
+            (score_of(&min_max, 1) - 0.5).abs() < 1e-3,
+            "min-max pushes it to the middle of the range"
+        );
         // Both agree on the order; only the distances between them change.
         assert_eq!(
             convex.iter().map(|h| h.chunk).collect::<Vec<_>>(),
@@ -768,7 +865,14 @@ mod tests {
     fn convex_fusion_survives_an_all_zero_list() {
         let s = store_of(10, 1);
         let zeros = vec![lex(3, 0.0), lex(4, 0.0)];
-        let fused = fuse6(&v(&[0, 1]), &zeros, &s, Fusion::Convex { vector_weight: 0.5 }, 10, 99);
+        let fused = fuse6(
+            &v(&[0, 1]),
+            &zeros,
+            &s,
+            Fusion::Convex { vector_weight: 0.5 },
+            10,
+            99,
+        );
         assert_eq!(fused.len(), 4);
         assert!(fused.iter().all(|h| h.score.is_finite()));
     }
@@ -783,7 +887,9 @@ mod tests {
         // A ceiling of 20 with a best hit of 1.0: the query could have scored
         // twenty times better than anything the corpus offered.
         let weak = vec![lex(5, 1.0), lex(6, 0.5)];
-        let bounds = ScoreBounds { lexical_ceiling: 20.0 };
+        let bounds = ScoreBounds {
+            lexical_ceiling: 20.0,
+        };
         let tmm = fuse(
             &[],
             &weak,
@@ -797,10 +903,27 @@ mod tests {
                 mmr_lambda: 1.0,
             },
         );
-        let min_max = fuse6(&[], &weak, &s, Fusion::NormalizedScore { vector_weight: 0.0 }, 10, 99);
-        assert!((min_max[0].score - 1.0).abs() < 1e-6, "min-max always crowns its leader");
-        assert!(tmm[0].score < 0.1, "a hit at a twentieth of the ceiling should stay small: {}", tmm[0].score);
-        assert_eq!(tmm[0].chunk, 5, "the order is unchanged, only the magnitude");
+        let min_max = fuse6(
+            &[],
+            &weak,
+            &s,
+            Fusion::NormalizedScore { vector_weight: 0.0 },
+            10,
+            99,
+        );
+        assert!(
+            (min_max[0].score - 1.0).abs() < 1e-6,
+            "min-max always crowns its leader"
+        );
+        assert!(
+            tmm[0].score < 0.1,
+            "a hit at a twentieth of the ceiling should stay small: {}",
+            tmm[0].score
+        );
+        assert_eq!(
+            tmm[0].chunk, 5,
+            "the order is unchanged, only the magnitude"
+        );
     }
 
     /// A query holding no dictionary term has a ceiling of zero. Dividing by it
@@ -817,7 +940,9 @@ mod tests {
                 fusion: Fusion::TheoreticalMinMax { vector_weight: 0.5 },
                 top_k: 10,
                 per_doc_cap: 99,
-                bounds: ScoreBounds { lexical_ceiling: 0.0 },
+                bounds: ScoreBounds {
+                    lexical_ceiling: 0.0,
+                },
                 mmr_lambda: 1.0,
             },
         );
@@ -829,7 +954,10 @@ mod tests {
     /// adaptive fusion on could never be judged against leaving it off.
     #[test]
     fn adaptive_weighting_with_no_gains_is_the_base_weight() {
-        let rule = AdaptiveWeights { base: 0.35, ..Default::default() };
+        let rule = AdaptiveWeights {
+            base: 0.35,
+            ..Default::default()
+        };
         assert!(rule.is_fixed());
         let signals = QuerySignals {
             identifier_share: 1.0,
@@ -850,10 +978,22 @@ mod tests {
             ..Default::default()
         };
         assert!(!rule.is_fixed());
-        let identifier = QuerySignals { identifier_share: 1.0, ..Default::default() };
-        let unknown = QuerySignals { out_of_vocabulary_share: 1.0, ..Default::default() };
-        assert!(rule.weight_for(&identifier) < 0.5, "an identifier query should lean lexical");
-        assert!(rule.weight_for(&unknown) > 0.5, "a query of unknown words has only the vector side");
+        let identifier = QuerySignals {
+            identifier_share: 1.0,
+            ..Default::default()
+        };
+        let unknown = QuerySignals {
+            out_of_vocabulary_share: 1.0,
+            ..Default::default()
+        };
+        assert!(
+            rule.weight_for(&identifier) < 0.5,
+            "an identifier query should lean lexical"
+        );
+        assert!(
+            rule.weight_for(&unknown) > 0.5,
+            "a query of unknown words has only the vector side"
+        );
     }
 
     #[test]
@@ -866,8 +1006,14 @@ mod tests {
             ceiling: 0.95,
             ..Default::default()
         };
-        let all_identifier = QuerySignals { identifier_share: 1.0, ..Default::default() };
-        let all_unknown = QuerySignals { out_of_vocabulary_share: 1.0, ..Default::default() };
+        let all_identifier = QuerySignals {
+            identifier_share: 1.0,
+            ..Default::default()
+        };
+        let all_unknown = QuerySignals {
+            out_of_vocabulary_share: 1.0,
+            ..Default::default()
+        };
         assert!((rule.weight_for(&all_identifier) - 0.05).abs() < 1e-6);
         assert!((rule.weight_for(&all_unknown) - 0.95).abs() < 1e-6);
     }
@@ -876,8 +1022,16 @@ mod tests {
     fn separation_is_zero_for_a_flat_list_and_high_for_a_clear_leader() {
         assert_eq!(separation(&[1.0, 1.0, 1.0]), 0.0);
         assert!(separation(&[1.0, 0.01, 0.01]) > 0.9);
-        assert_eq!(separation(&[5.0]), 0.0, "one candidate says nothing about separation");
-        assert_eq!(separation(&[0.0, 0.0]), 0.0, "a list of zeros must not divide by zero");
+        assert_eq!(
+            separation(&[5.0]),
+            0.0,
+            "one candidate says nothing about separation"
+        );
+        assert_eq!(
+            separation(&[0.0, 0.0]),
+            0.0,
+            "a list of zeros must not divide by zero"
+        );
     }
 
     /// Diversity selection has to prefer a slightly worse hit that says something
@@ -890,14 +1044,35 @@ mod tests {
         vectors.push(&[1.0, 0.001]);
         vectors.push(&[0.0, 1.0]);
         let all = vec![
-            FusedHit { chunk: 0, score: 1.00, origin: HitOrigin::Vector, confidence: 0.0 },
-            FusedHit { chunk: 1, score: 0.99, origin: HitOrigin::Vector, confidence: 0.0 },
-            FusedHit { chunk: 2, score: 0.90, origin: HitOrigin::Vector, confidence: 0.0 },
+            FusedHit {
+                chunk: 0,
+                score: 1.00,
+                origin: HitOrigin::Vector,
+                confidence: 0.0,
+            },
+            FusedHit {
+                chunk: 1,
+                score: 0.99,
+                origin: HitOrigin::Vector,
+                confidence: 0.0,
+            },
+            FusedHit {
+                chunk: 2,
+                score: 0.90,
+                origin: HitOrigin::Vector,
+                confidence: 0.0,
+            },
         ];
         let by_score = select_by_score(&all, &s, 2, 99);
-        assert_eq!(by_score.iter().map(|h| h.chunk).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(
+            by_score.iter().map(|h| h.chunk).collect::<Vec<_>>(),
+            vec![0, 1]
+        );
         let diverse = select_diverse(&all, &s, &vectors, 2, 99, 0.5);
-        assert_eq!(diverse.iter().map(|h| h.chunk).collect::<Vec<_>>(), vec![0, 2]);
+        assert_eq!(
+            diverse.iter().map(|h| h.chunk).collect::<Vec<_>>(),
+            vec![0, 2]
+        );
     }
 
     /// Lambda 1 is pure score, so it must be exactly the selection that ignores
@@ -910,11 +1085,22 @@ mod tests {
             vectors.push(&[1.0, i as f32 * 0.01]);
         }
         let all: Vec<FusedHit> = (0..6u32)
-            .map(|c| FusedHit { chunk: c, score: 1.0 - c as f32 * 0.1, origin: HitOrigin::Vector, confidence: 0.0 })
+            .map(|c| FusedHit {
+                chunk: c,
+                score: 1.0 - c as f32 * 0.1,
+                origin: HitOrigin::Vector,
+                confidence: 0.0,
+            })
             .collect();
         assert_eq!(
-            select_diverse(&all, &s, &vectors, 4, 99, 1.0).iter().map(|h| h.chunk).collect::<Vec<_>>(),
-            select_by_score(&all, &s, 4, 99).iter().map(|h| h.chunk).collect::<Vec<_>>()
+            select_diverse(&all, &s, &vectors, 4, 99, 1.0)
+                .iter()
+                .map(|h| h.chunk)
+                .collect::<Vec<_>>(),
+            select_by_score(&all, &s, 4, 99)
+                .iter()
+                .map(|h| h.chunk)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -926,13 +1112,20 @@ mod tests {
             vectors.push(&[1.0, i as f32 * 0.001]);
         }
         let all: Vec<FusedHit> = (0..10u32)
-            .map(|c| FusedHit { chunk: c, score: 1.0 - c as f32 * 0.01, origin: HitOrigin::Vector, confidence: 0.0 })
+            .map(|c| FusedHit {
+                chunk: c,
+                score: 1.0 - c as f32 * 0.01,
+                origin: HitOrigin::Vector,
+                confidence: 0.0,
+            })
             .collect();
         let picked = select_diverse(&all, &s, &vectors, 10, PER_DOC_CAP, 0.5);
         for doc in 0..2u32 {
-            let n = picked.iter().filter(|h| s.chunks[h.chunk as usize].doc == doc).count();
+            let n = picked
+                .iter()
+                .filter(|h| s.chunks[h.chunk as usize].doc == doc)
+                .count();
             assert!(n <= PER_DOC_CAP, "document {doc} contributed {n}");
         }
     }
-
 }

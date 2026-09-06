@@ -247,28 +247,6 @@ pub fn columns(name: &[u8]) -> Vec<Vec<u8>> {
 
 pub use inillucent_sql::declare::{argument_boolean, argument_integer, argument_text};
 
-/// Returns the text a bound pragma argument spells.
-///
-/// `PRAGMA cache_size = -4000` is a unary minus over a literal rather than a
-/// negative literal, because that is what the grammar has. Reading only the
-/// literal made every negative setting read as zero.
-fn expression_text(expr: &inillucent_sql::bind::BoundExpr) -> String {
-    use inillucent_sql::bind::BoundExpr;
-    match expr {
-        BoundExpr::Text(text) => String::from_utf8_lossy(text).into_owned(),
-        BoundExpr::Integer(value) => value.to_string(),
-        BoundExpr::Real(value) => value.to_string(),
-        BoundExpr::Unary { op, operand } => match op {
-            inillucent_sql::ast::UnaryOp::Negate => format!("-{}", expression_text(operand)),
-            inillucent_sql::ast::UnaryOp::Identity => expression_text(operand),
-            _ => String::new(),
-        },
-        _ => String::new(),
-    }
-}
-
-
-
 /// Returns the columns a view's `SELECT` produces.
 ///
 /// The body is bound against the same catalog a statement naming the view would

@@ -231,8 +231,12 @@ impl ModelManifest {
     /// The widths a Matryoshka lane should report, always ascending and always
     /// ending at the model's full width even when the manifest forgot to say so.
     pub fn widths(&self) -> Vec<usize> {
-        let mut widths: Vec<usize> =
-            self.mrl_widths.iter().copied().filter(|w| *w > 0 && *w <= self.dims).collect();
+        let mut widths: Vec<usize> = self
+            .mrl_widths
+            .iter()
+            .copied()
+            .filter(|w| *w > 0 && *w <= self.dims)
+            .collect();
         if !widths.contains(&self.dims) {
             widths.push(self.dims);
         }
@@ -259,7 +263,14 @@ impl ModelManifest {
             };
             field(&self.id);
             field(&self.dims.to_string());
-            field(&self.mrl_widths.iter().map(|w| w.to_string()).collect::<Vec<_>>().join(","));
+            field(
+                &self
+                    .mrl_widths
+                    .iter()
+                    .map(|w| w.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
             field(&self.prefixes.query);
             field(&self.prefixes.document);
             field(&self.prefixes.clustering);

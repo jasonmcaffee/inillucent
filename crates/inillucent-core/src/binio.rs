@@ -55,8 +55,7 @@ pub fn read_str(r: &mut impl Read) -> std::io::Result<String> {
     let len = read_u32(r)? as usize;
     let mut bytes = vec![0u8; len];
     r.read_exact(&mut bytes)?;
-    String::from_utf8(bytes)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 /// A `u32` array as a count and one contiguous little-endian block.
@@ -99,6 +98,5 @@ pub fn read_text(r: &mut impl Read) -> std::io::Result<String> {
     let len = read_u64(r)? as usize;
     let mut bytes = vec![0u8; len];
     r.read_exact(&mut bytes)?;
-    String::from_utf8(bytes)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }

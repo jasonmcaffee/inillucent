@@ -223,11 +223,19 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         -(plan.cache_size as f64) / 1024.0
     );
     println!("  fairness    : matched - one memory budget, both engines");
-    println!("  plan cache  : declared, and it is a inillucent design feature rather than less work");
-    println!("                inillucent keeps a prepared plan per statement text. The harness prepares");
-    println!("                identical text on every iteration, so both engines do the same logical");
+    println!(
+        "  plan cache  : declared, and it is a inillucent design feature rather than less work"
+    );
+    println!(
+        "                inillucent keeps a prepared plan per statement text. The harness prepares"
+    );
+    println!(
+        "                identical text on every iteration, so both engines do the same logical"
+    );
     println!("                work; SQLite has no equivalent inside the library. The open.prepare");
-    println!("                family re-prepares inside the timed region (prepare: each), which is");
+    println!(
+        "                family re-prepares inside the timed region (prepare: each), which is"
+    );
     println!("                where the cache is measured rather than assumed.");
     println!(
         "  warm state  : inillucent's pool is filled before each round; SQLite's cache fills as the plan runs"

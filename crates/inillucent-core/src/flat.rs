@@ -63,7 +63,10 @@ pub fn search_with<S: Scorer + Sync>(
     }
     let trivial = filter.is_trivial();
     let n = store.n_chunks();
-    let score = |chunk: u32| Neighbour { chunk, distance: scorer.distance(chunk, query) };
+    let score = |chunk: u32| Neighbour {
+        chunk,
+        distance: scorer.distance(chunk, query),
+    };
 
     // When the predicate names sources, the store can list their chunks, so the
     // scan visits those instead of testing every chunk in the corpus. The
@@ -149,7 +152,12 @@ fn nearer(a: &Neighbour, b: &Neighbour) -> std::cmp::Ordering {
 
 impl TopK {
     fn new(k: usize) -> TopK {
-        TopK { k, buffer: Vec::with_capacity(2 * k.max(1)), cutoff: f32::INFINITY, full: false }
+        TopK {
+            k,
+            buffer: Vec::with_capacity(2 * k.max(1)),
+            cutoff: f32::INFINITY,
+            full: false,
+        }
     }
 
     fn push(&mut self, n: Neighbour) {
@@ -197,7 +205,6 @@ impl TopK {
         self.buffer
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -258,8 +265,10 @@ mod tests {
         let hits = search(&vs, &store, &f, &query, 10);
         assert!(!hits.is_empty());
         for h in &hits {
-            assert_eq!(store.documents[store.chunks[h.chunk as usize].doc as usize].source,
-                       store.sources.get("slack").unwrap());
+            assert_eq!(
+                store.documents[store.chunks[h.chunk as usize].doc as usize].source,
+                store.sources.get("slack").unwrap()
+            );
         }
     }
 
@@ -297,7 +306,10 @@ mod tests {
         assert_eq!(parallel.len(), 50);
         // Recompute the same answer the slow, obvious way.
         let mut expected: Vec<Neighbour> = (0..vs.len() as u32)
-            .map(|chunk| Neighbour { chunk, distance: vs.distance(chunk, &query) })
+            .map(|chunk| Neighbour {
+                chunk,
+                distance: vs.distance(chunk, &query),
+            })
             .collect();
         expected.sort_by(|a, b| {
             a.distance
@@ -332,14 +344,20 @@ mod tests {
         let (vs, store) = fixture(6_000);
         for source in ["slack", "confluence"] {
             let f = CompiledFilter::compile(&Filter::source(source), &store);
-            assert!(f.candidate_chunks(&store).is_some(), "expected a narrowed scan");
+            assert!(
+                f.candidate_chunks(&store).is_some(),
+                "expected a narrowed scan"
+            );
             let q = vs.get(29).to_vec();
             let narrowed = search(&vs, &store, &f, &q, 30);
 
             // The same answer computed without the narrowing.
             let mut expected: Vec<Neighbour> = (0..vs.len() as u32)
                 .filter(|c| f.passes(*c, &store))
-                .map(|chunk| Neighbour { chunk, distance: vs.distance(chunk, &q) })
+                .map(|chunk| Neighbour {
+                    chunk,
+                    distance: vs.distance(chunk, &q),
+                })
                 .collect();
             expected.sort_by(|a, b| {
                 a.distance
@@ -361,7 +379,11 @@ mod tests {
     fn a_narrowed_scan_still_applies_the_rest_of_the_predicate() {
         let (vs, store) = fixture(6_000);
         let f = CompiledFilter::compile(
-            &Filter { source: Some("slack".into()), updated_after: Some(3_000), ..Default::default() },
+            &Filter {
+                source: Some("slack".into()),
+                updated_after: Some(3_000),
+                ..Default::default()
+            },
             &store,
         );
         let hits = search(&vs, &store, &f, &vs.get(1).to_vec(), 100);
@@ -422,7 +444,10 @@ mod tests {
             for n in [0usize, 1, 5, 300, 5000] {
                 // Distances drawn from a small set, so ties are common rather than rare.
                 let candidates: Vec<Neighbour> = (0..n as u32)
-                    .map(|chunk| Neighbour { chunk, distance: rng.gen_range(0..7) as f32 * 0.25 })
+                    .map(|chunk| Neighbour {
+                        chunk,
+                        distance: rng.gen_range(0..7) as f32 * 0.25,
+                    })
                     .collect();
 
                 let mut sorted = candidates.clone();
@@ -443,7 +468,10 @@ mod tests {
     #[test]
     fn merging_two_partial_results_matches_one_pass() {
         let candidates: Vec<Neighbour> = (0..200u32)
-            .map(|chunk| Neighbour { chunk, distance: ((chunk * 37) % 100) as f32 / 100.0 })
+            .map(|chunk| Neighbour {
+                chunk,
+                distance: ((chunk * 37) % 100) as f32 / 100.0,
+            })
             .collect();
         let k = 10;
         let mut whole = TopK::new(k);
