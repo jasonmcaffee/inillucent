@@ -1572,6 +1572,50 @@ phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
 status = "pass"
 tests = ["inillucent-compat::the_policy_pragmas_are_flags"]
 
+# ---------------------------------------------------------------------------
+# The rearchitecture's re-profiled PRAGMA set (task-1833, the TDD's Phase 4).
+#
+# The TDD keeps the pragmas that mean something on the new engine and asks that
+# the rest be *documented* rather than silently absent. These three rows are
+# that documentation, and each one cites the test that checks it - so "the set
+# was re-profiled" is a claim the suite can fail rather than a sentence in a
+# design document.
+#
+# The split is three ways and the distinction that matters is the last two:
+#
+#   honoured - it does what it says;
+#   fixed    - the engine has exactly one setting, the pragma reports it, and
+#              any other setting is REFUSED, because accepting one it cannot
+#              honour would be answering wrongly rather than answering nothing;
+#   silent   - no rows and no error, which is SQLite's own answer to a pragma it
+#              has never heard of, so a caller for whom the pragma was a hint
+#              keeps working and the statement after it runs.
+# ---------------------------------------------------------------------------
+
+[[capability]]
+id = "pragma.rearchitecture.honoured"
+source = "https://sqlite.org/pragma.html"
+profile = "default"
+phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
+status = "pass"
+tests = ["inillucent-compat::the_schema_pragmas_describe_the_new_engine_s_schema", "inillucent-compat::the_pager_pragmas_describe_the_new_engine_s_file", "inillucent-compat::the_policy_pragmas_are_honoured_flags", "inillucent-compat::the_integrity_check_walks_every_new_engine_tree"]
+
+[[capability]]
+id = "pragma.rearchitecture.fixed"
+source = "https://sqlite.org/pragma.html"
+profile = "default"
+phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
+status = "pass"
+tests = ["inillucent-compat::a_pragma_with_one_setting_reports_it_and_refuses_any_other"]
+
+[[capability]]
+id = "pragma.rearchitecture.silent"
+source = "https://sqlite.org/pragma.html"
+profile = "default"
+phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
+status = "pass"
+tests = ["inillucent-compat::an_unknown_pragma_is_silent_on_the_new_engine"]
+
 [[capability]]
 id = "vtab.contract"
 source = "https://sqlite.org/vtab.html"
