@@ -819,7 +819,7 @@ impl<'a> Binder<'a> {
             let source = BoundSource {
                 id: self.sources.len(),
                 rows: crate::bind::SourceRows::Subquery(Box::new(inner)),
-                table: table.clone(),
+                table: std::rc::Rc::new(table.clone()),
                 alias,
                 join: ast::JoinKind::Comma,
                 constraint: None,
@@ -934,7 +934,7 @@ impl<'a> Binder<'a> {
         self.sources.push(BoundSource {
             id,
             rows: crate::bind::SourceRows::Table,
-            table,
+            table: std::rc::Rc::new(table),
             alias,
             join: ast::JoinKind::Comma,
             constraint: None,

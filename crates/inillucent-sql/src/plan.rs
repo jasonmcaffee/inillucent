@@ -561,7 +561,7 @@ pub fn plan_select_with(select: BoundSelect, levers: Levers) -> PhysicalPlan {
             cost,
             rows,
             id: source.id,
-            table: source.table.clone(),
+            table: (*source.table).clone(),
             alias: source.alias.clone(),
             path,
             join: source.join,
@@ -1602,7 +1602,7 @@ pub fn write_path_with(
     let source = BoundSource {
         id: source_id,
         rows: SourceRows::Table,
-        table: table.clone(),
+        table: std::rc::Rc::new(table.clone()),
         alias: table.name.clone(),
         join: JoinKind::Inner,
         constraint: None,

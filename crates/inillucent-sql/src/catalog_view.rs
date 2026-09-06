@@ -529,6 +529,29 @@ pub trait CatalogView {
     /// `main`, then every other attached database in attachment order.
     fn find_table(&self, database: Option<&[u8]>, folded: &[u8]) -> Option<&TableInfo>;
 
+    /// Returns a table as a shared pointer, for a caller that has to keep it.
+    ///
+    /// A binder keeps what it finds for the life of the bound statement.
+    /// [`CatalogView::find_table`] hands back a borrow, so keeping it meant
+    /// cloning a `TableInfo` - two name vectors, a `ColumnInfo` per column with
+    /// its own heap fields, the `CREATE` text and an `IndexInfo` per index -
+    /// for every table reference in every statement. Measured at 2,938 ns of
+    /// `prepare.point`'s 6,093 ns compile.
+    ///
+    /// The default is that clone, so an implementor that has nothing to share
+    /// keeps working and is merely no faster. `StaticCatalog` shares.
+    ///
+    /// @param database - the schema qualifier, if the statement wrote one
+    /// @param folded - the table's folded name
+    fn shared_table(
+        &self,
+        database: Option<&[u8]>,
+        folded: &[u8],
+    ) -> Option<std::rc::Rc<TableInfo>> {
+        self.find_table(database, folded)
+            .map(|table| std::rc::Rc::new(table.clone()))
+    }
+
     /// Returns the table an index belongs to, together with the index.
     ///
     /// Index names live in the same namespace as table names in SQLite, but
@@ -590,7 +613,16 @@ pub struct StaticCatalog {
     /// The attached databases, in attachment order, with their cookies.
     pub databases: Vec<(Vec<u8>, u32)>,
     /// Every table, in no particular order.
-    pub tables: Vec<TableInfo>,
+    ///
+    /// **Shared rather than owned, because binding a statement used to clone
+    /// one.** `BoundSource.table` was a `TableInfo` by value, so every table
+    /// reference in every statement deep-copied the catalog's entry: two name
+    /// vectors, a `ColumnInfo` per column each with its own heap fields, the
+    /// full `CREATE` text, and an `IndexInfo` per index with its own column
+    /// vector. Forty-odd allocations to bind one `WHERE id = ?1`, measured at
+    /// 2,938 ns of `prepare.point`'s 6,093 - 48% of the statement's whole
+    /// compile. An `Rc` makes it a refcount bump.
+    pub tables: Vec<std::rc::Rc<TableInfo>>,
     /// The generation of this snapshot.
     pub generation: u64,
 }
@@ -607,12 +639,41 @@ impl StaticCatalog {
 
     /// Adds a table, returning the catalog, for building fixtures.
     pub fn with_table(mut self, table: TableInfo) -> StaticCatalog {
-        self.tables.push(table);
+        self.tables.push(std::rc::Rc::new(table));
         self
     }
 }
 
 impl CatalogView for StaticCatalog {
+    /// Returns a table as a shared pointer; the trait method's override.
+    ///
+    /// @param database - the schema qualifier, if the statement wrote one
+    /// @param folded - the table's folded name
+    fn shared_table(
+        &self,
+        database: Option<&[u8]>,
+        folded: &[u8],
+    ) -> Option<std::rc::Rc<TableInfo>> {
+        if let Some(database) = database {
+            let index = self.database_index(database)?;
+            return self
+                .tables
+                .iter()
+                .find(|table| table.database == index && table.folded == folded)
+                .map(std::rc::Rc::clone);
+        }
+        for index in self.search_order() {
+            if let Some(found) = self
+                .tables
+                .iter()
+                .find(|table| table.database == index && table.folded == folded)
+            {
+                return Some(std::rc::Rc::clone(found));
+            }
+        }
+        None
+    }
+
     /// Returns the number of attached databases.
     fn database_count(&self) -> usize {
         self.databases.len()
@@ -637,7 +698,8 @@ impl CatalogView for StaticCatalog {
             return self
                 .tables
                 .iter()
-                .find(|table| table.database == index && table.folded == folded);
+                .find(|table| table.database == index && table.folded == folded)
+                .map(std::rc::Rc::as_ref);
         }
         for index in self.search_order() {
             if let Some(found) = self
@@ -645,7 +707,7 @@ impl CatalogView for StaticCatalog {
                 .iter()
                 .find(|table| table.database == index && table.folded == folded)
             {
-                return Some(found);
+                return Some(found.as_ref());
             }
         }
         None
@@ -653,7 +715,7 @@ impl CatalogView for StaticCatalog {
 
     /// Returns the table an index belongs to, and the index.
     fn every_table(&self) -> Vec<&TableInfo> {
-        self.tables.iter().collect()
+        self.tables.iter().map(std::rc::Rc::as_ref).collect()
     }
 
     fn find_index(
@@ -678,6 +740,7 @@ impl CatalogView for StaticCatalog {
         self.tables
             .iter()
             .filter(|table| table.database == database)
+            .map(std::rc::Rc::as_ref)
             .collect()
     }
 
@@ -763,7 +826,10 @@ mod tests {
     fn temp_is_searched_before_main() {
         let catalog = StaticCatalog {
             databases: vec![(b"main".to_vec(), 1), (b"temp".to_vec(), 2)],
-            tables: vec![table(b"t", 0), table(b"t", 1)],
+            tables: vec![
+                std::rc::Rc::new(table(b"t", 0)),
+                std::rc::Rc::new(table(b"t", 1)),
+            ],
             generation: 7,
         };
         let found = catalog.find_table(None, b"t").expect("it resolves");

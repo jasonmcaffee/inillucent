@@ -270,7 +270,7 @@ pub fn keys_query(
         sources: vec![BoundSource {
             id: source,
             rows: SourceRows::Table,
-            table: table.clone(),
+            table: std::rc::Rc::new(table.clone()),
             alias: table.name.clone(),
             join: SqlJoinKind::Inner,
             constraint: None,
