@@ -100,6 +100,7 @@ fn run(arguments: &[String], fixture: &str) -> Result<(), String> {
 
     probe_stages(&database, rows)?;
     build_against_run(&database, &plan.workloads, rows)?;
+    compile_stages(&database, &plan.workloads, rows)?;
     index_probe_stages(&database)?;
     decompose(&database, rows)?;
     Ok(())
@@ -598,6 +599,112 @@ fn build_against_run(
             (total - build) / 1000.0,
             total / 1000.0,
             100.0 * build / total.max(1.0)
+        );
+    }
+    Ok(())
+}
+
+/// Prints where compiling a statement goes, for the workloads the plan marks
+/// `prepare: each`.
+///
+/// **The build-against-run table above cannot answer this**, because it hoists
+/// `plan` and `prepare` out of the loop - which is right for a workload that
+/// prepares once, and is exactly wrong for `open.prepare`, whose whole subject
+/// is the compile. `prepare.trivial` is 0.32x on this engine and Phase 1's
+/// analysis of the same workload was about the *old* engine's per-statement
+/// read transaction, so it does not carry over. This is the split that
+/// replaces guessing about it.
+///
+/// Note what is *not* here: the plan cache. `ImportedDatabase::plan` parses,
+/// binds and plans on every call, so this is the compile the gate times and
+/// the cache is in neither.
+///
+/// @param database - the imported fixture
+/// @param workloads - the plan's workloads
+/// @param rows - how many rows the base table holds
+fn compile_stages(
+    database: &ImportedDatabase,
+    workloads: &[Workload],
+    rows: u32,
+) -> Result<(), String> {
+    println!();
+    println!("## compiling a statement, stage by stage   (nanoseconds)");
+    println!(
+        "  {:<18} {:>8} {:>8} {:>8} {:>10} {:>8} {:>8}",
+        "workload", "parse", "+bind", "+plan", "+physical", "+build", "+run"
+    );
+    for workload in workloads {
+        if !workload.prepare_each || workload.mutates {
+            continue;
+        }
+        let params = Params::from_values(
+            workload
+                .binds
+                .iter()
+                .map(|bind| bind_value(*bind, 1, rows))
+                .collect(),
+        );
+        if database.plan(&workload.sql).is_err() {
+            continue;
+        }
+        // The three stages inside `plan`, because "the plan is 64% of it" is
+        // not yet a thing anybody can act on. The arena the TDD names as the
+        // remedy would sit under whichever of these is the allocation.
+        let limits = inillucent_base::limits::Limits::default();
+        let parsed = per(2_000, || {
+            let _ =
+                inillucent_sql::parser::parse_next_statement(workload.sql.as_bytes(), 0, &limits)
+                    .map_err(|error| format!("{error:?}"))?;
+            Ok(())
+        })?;
+        let bound = per(2_000, || {
+            let parsed =
+                inillucent_sql::parser::parse_next_statement(workload.sql.as_bytes(), 0, &limits)
+                    .map_err(|error| format!("{error:?}"))?;
+            let authorizer = inillucent_sql::bind::AllowAll;
+            let mut binder = inillucent_sql::bind::Binder::new(
+                database.catalog_view(),
+                &parsed.ast,
+                &authorizer,
+            )
+            .with_source(workload.sql.as_bytes());
+            let _ = binder
+                .bind_statement(&parsed.statement)
+                .map_err(|error| format!("{error:?}"))?;
+            Ok(())
+        })?;
+        let planned = per(2_000, || {
+            let _ = database.plan(&workload.sql).map_err(|error| why(&error))?;
+            Ok(())
+        })?;
+        let physical = per(2_000, || {
+            let plan = database.plan(&workload.sql).map_err(|error| why(&error))?;
+            let _ = database.prepare(&plan).map_err(|error| why(&error))?;
+            Ok(())
+        })?;
+        let built = per(2_000, || {
+            let plan = database.plan(&workload.sql).map_err(|error| why(&error))?;
+            let prepared = database.prepare(&plan).map_err(|error| why(&error))?;
+            let sink = Box::new(Counting { rows: 0 });
+            let built = database
+                .pipeline(&plan, &prepared, &params, sink)
+                .map_err(|error| why(&error))?;
+            drop(built);
+            Ok(())
+        })?;
+        let whole = per(2_000, || {
+            let plan = database.plan(&workload.sql).map_err(|error| why(&error))?;
+            let prepared = database.prepare(&plan).map_err(|error| why(&error))?;
+            let sink = Box::new(Counting { rows: 0 });
+            let (mut pipeline, _) = database
+                .pipeline(&plan, &prepared, &params, sink)
+                .map_err(|error| why(&error))?;
+            pipeline.run().map_err(|error| why(&error))?;
+            Ok(())
+        })?;
+        println!(
+            "  {:<18} {parsed:>8.1} {bound:>8.1} {planned:>8.1} {physical:>10.1} {built:>8.1} {whole:>8.1}",
+            workload.name
         );
     }
     Ok(())
