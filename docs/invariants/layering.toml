@@ -424,6 +424,16 @@ may_depend_on = [
   "inillucent-core",
   "inillucent-search",
   "inillucent",
+  # task-1834: the SQLite-file source and the new target. The tool depends on
+  # both engines while both exist, which is the one place in the workspace that
+  # is meant to - migrating *from* one *to* the other is what it is for - and
+  # the edge to inillucent goes when the old engine does. inillucent-tree is
+  # named because a digest is computed over OwnedDatums, and
+  # inillucent-sqlite-reader because the source is read through it.
+  "inillucent-engine",
+  "inillucent-sqlite-reader",
+  "inillucent-tree",
+  "inillucent-catalog",
 ]
 
 [[crate]]
@@ -486,6 +496,11 @@ may_depend_on = [
   # `inillucent-engine`, which is where the code above this line moved to, so every
   # gate and campaign written against the old path still names the same engine.
   "inillucent-engine",
+  # And `inillucent-migrate`, because the migration acceptance is a test: every
+  # task-1781 fixture through the tool, checked against the pinned SQLite shell
+  # reading the same source file. The oracle is what makes it a test rather than
+  # the tool agreeing with itself, and the oracle lives here.
+  "inillucent-migrate",
   "inillucent",
   "inillucent-pool",
   "inillucent-tree",

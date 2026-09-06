@@ -104,7 +104,10 @@ pub fn document_identity_queries(
             continue;
         }
         let key = (c.source.clone(), c.external_doc_id.clone());
-        chunks_of_doc.entry(key.clone()).or_default().push(keys[i].clone());
+        chunks_of_doc
+            .entry(key.clone())
+            .or_default()
+            .push(keys[i].clone());
         title_of_doc.insert(key, c.title.clone());
     }
 
@@ -142,13 +145,16 @@ pub fn document_identity_queries(
         if correct.is_empty() {
             continue;
         }
-        by_source.entry(key.0.clone()).or_default().push(GradedQuery::binary(
-            format!("identity-{}-{}", key.0, key.1),
-            trimmed.to_string(),
-            correct,
-            key.0.clone(),
-            "document identity",
-        ));
+        by_source
+            .entry(key.0.clone())
+            .or_default()
+            .push(GradedQuery::binary(
+                format!("identity-{}-{}", key.0, key.1),
+                trimmed.to_string(),
+                correct,
+                key.0.clone(),
+                "document identity",
+            ));
     }
 
     let mut out = Vec::new();
@@ -252,7 +258,10 @@ pub fn heading_queries(
         if leaf.split_whitespace().count() < 3 {
             continue;
         }
-        by_heading.entry(leaf.to_string()).or_default().push(keys[i].clone());
+        by_heading
+            .entry(leaf.to_string())
+            .or_default()
+            .push(keys[i].clone());
         source_of.insert(leaf.to_string(), c.source.clone());
     }
 
@@ -268,7 +277,10 @@ pub fn heading_queries(
     for _ in 0..take {
         let i = rng.gen_range(0..candidates.len());
         let (heading, chunks) = candidates.swap_remove(i);
-        let source = source_of.get(&heading).cloned().unwrap_or_else(|| "any".into());
+        let source = source_of
+            .get(&heading)
+            .cloned()
+            .unwrap_or_else(|| "any".into());
         out.push(GradedQuery::binary(
             format!("heading-{source}-{heading}"),
             heading.clone(),
@@ -300,8 +312,8 @@ pub const GRADE_SUPPORTING: u8 = 2;
 /// of words whose presence or absence in a query changes nothing about which
 /// chunk answers it. The tokenizer has its own stopword handling for indexing.
 const FUNCTION_WORDS: &[&str] = &[
-    "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "can", "could", "did",
-    "do", "does", "for", "from", "had", "has", "have", "he", "her", "his", "how", "i", "if", "in",
+    "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "can", "could", "did", "do",
+    "does", "for", "from", "had", "has", "have", "he", "her", "his", "how", "i", "if", "in",
     "into", "is", "it", "its", "may", "might", "more", "most", "must", "no", "not", "of", "on",
     "one", "or", "other", "our", "out", "over", "she", "should", "so", "some", "such", "than",
     "that", "the", "their", "them", "then", "there", "these", "they", "this", "those", "to", "two",
@@ -315,7 +327,8 @@ fn is_function_word(word: &str) -> bool {
 
 /// A word reduced to its comparable form: lowercase, outer punctuation removed.
 fn normalized(word: &str) -> String {
-    word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase()
+    word.trim_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase()
 }
 
 /// How many chunks each lowercase word appears in, over the slice being graded.
@@ -367,7 +380,10 @@ fn sentences(text: &str) -> Vec<&str> {
     for i in 0..bytes.len() {
         let c = bytes[i] as char;
         if (c == '.' || c == '?' || c == '!')
-            && bytes.get(i + 1).map(|n| (*n as char).is_whitespace()).unwrap_or(i + 1 == bytes.len())
+            && bytes
+                .get(i + 1)
+                .map(|n| (*n as char).is_whitespace())
+                .unwrap_or(i + 1 == bytes.len())
         {
             let piece = text[start..=i].trim();
             if !piece.is_empty() {
@@ -386,8 +402,8 @@ fn sentences(text: &str) -> Vec<&str> {
 /// Words that appear in the chunk's breadcrumb, which a query must not reuse.
 fn breadcrumb_words(chunk: &ChunkInput) -> HashSet<String> {
     let mut out = HashSet::new();
-    for part in std::iter::once(chunk.title.as_str())
-        .chain(chunk.heading_path.iter().map(|h| h.as_str()))
+    for part in
+        std::iter::once(chunk.title.as_str()).chain(chunk.heading_path.iter().map(|h| h.as_str()))
     {
         for raw in part.split_whitespace() {
             let w = normalized(raw);
@@ -455,7 +471,9 @@ pub fn passage_evidence_queries(
         if c.deleted {
             continue;
         }
-        let Some(text) = passage_query_from(c, df) else { continue };
+        let Some(text) = passage_query_from(c, df) else {
+            continue;
+        };
         let siblings = chunks_of_doc
             .get(&(c.source.as_str(), c.external_doc_id.as_str()))
             .cloned()
@@ -466,15 +484,18 @@ pub fn passage_evidence_queries(
                 graded.push((keys[s].clone(), GRADE_SUPPORTING));
             }
         }
-        by_source.entry(c.source.clone()).or_default().push(GradedQuery {
-            id: format!("passage-{}", keys[i]),
-            text,
-            correct: vec![keys[i].clone()],
-            graded,
-            source: c.source.clone(),
-            family: "passage evidence".to_string(),
-            answerable: true,
-        });
+        by_source
+            .entry(c.source.clone())
+            .or_default()
+            .push(GradedQuery {
+                id: format!("passage-{}", keys[i]),
+                text,
+                correct: vec![keys[i].clone()],
+                graded,
+                source: c.source.clone(),
+                family: "passage evidence".to_string(),
+                answerable: true,
+            });
     }
     sample_per_source(by_source, per_source, seed)
 }
@@ -524,7 +545,9 @@ fn passage_query_from(chunk: &ChunkInput, df: &HashMap<String, u32>) -> Option<S
             .map(|(_, raw)| *raw)
             .collect();
         let text = kept.join(" ");
-        let trimmed = text.trim_matches(|c: char| !c.is_alphanumeric()).to_string();
+        let trimmed = text
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_string();
         if trimmed.split_whitespace().count() < 8 {
             continue;
         }
@@ -570,7 +593,9 @@ pub fn perturbed_queries(
 ) -> Vec<GradedQuery> {
     let mut out = Vec::new();
     for q in base {
-        let Some(text) = perturb(&q.text, how, df) else { continue };
+        let Some(text) = perturb(&q.text, how, df) else {
+            continue;
+        };
         out.push(GradedQuery {
             id: format!("{}-{}", how.label(), q.id),
             text,
@@ -603,9 +628,7 @@ fn perturb(text: &str, how: Perturbation, df: &HashMap<String, u32>) -> Option<S
             let (at, rarest) = words
                 .iter()
                 .enumerate()
-                .filter(|(_, w)| {
-                    w.chars().all(|c| c.is_alphanumeric()) && w.chars().count() >= 6
-                })
+                .filter(|(_, w)| w.chars().all(|c| c.is_alphanumeric()) && w.chars().count() >= 6)
                 .min_by_key(|(_, w)| df.get(&normalized(w)).copied().unwrap_or(0))?;
             let chars: Vec<char> = rarest.chars().collect();
             if chars.len() < 6 {
@@ -710,10 +733,10 @@ pub fn unanswerable_queries(
         }
         words.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
         words.truncate(4);
-        per_source
-            .entry(c.source.clone())
-            .or_default()
-            .push((c.external_doc_id.clone(), words.into_iter().map(|(w, _)| w).collect()));
+        per_source.entry(c.source.clone()).or_default().push((
+            c.external_doc_id.clone(),
+            words.into_iter().map(|(w, _)| w).collect(),
+        ));
     }
 
     let mut sources: Vec<String> = per_source.keys().cloned().collect();
@@ -809,7 +832,10 @@ pub fn multi_source_queries(
         if chunk_keys.len() > 4 {
             continue;
         }
-        per_source.entry(source).or_default().push((heading, chunk_keys));
+        per_source
+            .entry(source)
+            .or_default()
+            .push((heading, chunk_keys));
     }
     let mut sources: Vec<String> = per_source.keys().cloned().collect();
     sources.sort();
@@ -921,7 +947,10 @@ pub fn open_query_embedder(
 ) -> Result<crate::arm::Arm> {
     crate::arm::Arm::open(
         model,
-        &crate::arm::ArmOptions { batch_size: DEFAULT_QUERY_BATCH, ..options.clone() },
+        &crate::arm::ArmOptions {
+            batch_size: DEFAULT_QUERY_BATCH,
+            ..options.clone()
+        },
     )
     .context("opening the embedder for the query set. Is ORT_DYLIB_PATH set?")
 }
@@ -948,7 +977,9 @@ pub fn embed_with(embedder: &crate::arm::Arm, texts: &[String]) -> Result<Vec<Ve
     // rather than here. Using the wrong prefix measurably degrades retrieval, and
     // using one model's prefix on another model is worse than using none.
     let sanitized: Vec<String> = texts.iter().map(|t| sanitize(t)).collect();
-    embedder.embed_queries(&sanitized).context("embedding a query set")
+    embedder
+        .embed_queries(&sanitized)
+        .context("embedding a query set")
 }
 
 /// Drop control characters and quotes. Downloaded text carries the occasional
@@ -965,7 +996,13 @@ mod tests {
     use super::*;
     use inillucent_core::store::ChunkInput;
 
-    fn chunk(source: &str, doc: &str, title: &str, content: &str, heading: Option<&str>) -> ChunkInput {
+    fn chunk(
+        source: &str,
+        doc: &str,
+        title: &str,
+        content: &str,
+        heading: Option<&str>,
+    ) -> ChunkInput {
         ChunkInput {
             source: source.into(),
             external_doc_id: doc.into(),
@@ -994,8 +1031,20 @@ mod tests {
     #[test]
     fn document_identity_queries_use_the_title_and_mark_every_chunk_correct() {
         let (c, keys) = corpus_of(vec![
-            chunk("confluence", "d1", "Offer eligibility rules for members", "a", None),
-            chunk("confluence", "d1", "Offer eligibility rules for members", "b", None),
+            chunk(
+                "confluence",
+                "d1",
+                "Offer eligibility rules for members",
+                "a",
+                None,
+            ),
+            chunk(
+                "confluence",
+                "d1",
+                "Offer eligibility rules for members",
+                "b",
+                None,
+            ),
         ]);
         let qs = document_identity_queries(&c, &keys, 10, 1);
         assert_eq!(qs.len(), 1);
@@ -1006,8 +1055,20 @@ mod tests {
     #[test]
     fn a_title_shared_by_two_documents_is_skipped_because_correct_is_ambiguous() {
         let (c, keys) = corpus_of(vec![
-            chunk("confluence", "d1", "Weekly engineering sync notes", "a", None),
-            chunk("confluence", "d2", "Weekly engineering sync notes", "b", None),
+            chunk(
+                "confluence",
+                "d1",
+                "Weekly engineering sync notes",
+                "a",
+                None,
+            ),
+            chunk(
+                "confluence",
+                "d2",
+                "Weekly engineering sync notes",
+                "b",
+                None,
+            ),
         ]);
         assert!(document_identity_queries(&c, &keys, 10, 1).is_empty());
     }
@@ -1023,7 +1084,13 @@ mod tests {
 
     #[test]
     fn deleted_chunks_never_become_ground_truth() {
-        let mut c1 = chunk("confluence", "d1", "Offer eligibility rules here", "a", None);
+        let mut c1 = chunk(
+            "confluence",
+            "d1",
+            "Offer eligibility rules here",
+            "a",
+            None,
+        );
         c1.deleted = true;
         let (c, keys) = corpus_of(vec![c1]);
         assert!(document_identity_queries(&c, &keys, 10, 1).is_empty());
@@ -1056,21 +1123,42 @@ mod tests {
         let mut chunks = Vec::new();
         // A common identifier, in many chunks.
         for i in 0..20 {
-            chunks.push(chunk("github", &format!("d{i}"), "t", "common-id-42 appears everywhere", None));
+            chunks.push(chunk(
+                "github",
+                &format!("d{i}"),
+                "t",
+                "common-id-42 appears everywhere",
+                None,
+            ));
         }
         // A rare one, in a single chunk.
-        chunks.push(chunk("github", "rare", "t", "the token ENX-1932 appears once", None));
+        chunks.push(chunk(
+            "github",
+            "rare",
+            "t",
+            "the token ENX-1932 appears once",
+            None,
+        ));
         let (c, keys) = corpus_of(chunks);
         let qs = identifier_queries(&c, &keys, 50, 5);
         let texts: Vec<&str> = qs.iter().map(|q| q.text.as_str()).collect();
         assert!(texts.contains(&"ENX-1932"), "got {texts:?}");
-        assert!(!texts.contains(&"common-id-42"), "a common token must not be used");
+        assert!(
+            !texts.contains(&"common-id-42"),
+            "a common token must not be used"
+        );
     }
 
     #[test]
     fn heading_queries_need_a_multi_word_heading() {
         let (c, keys) = corpus_of(vec![
-            chunk("confluence", "d1", "t", "body", Some("How offer eligibility is evaluated")),
+            chunk(
+                "confluence",
+                "d1",
+                "t",
+                "body",
+                Some("How offer eligibility is evaluated"),
+            ),
             chunk("confluence", "d2", "t2", "body", Some("Notes")),
         ]);
         let qs = heading_queries(&c, &keys, 10, 1);

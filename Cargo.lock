@@ -631,6 +631,7 @@ dependencies = [
  "inillucent-engine",
  "inillucent-exec",
  "inillucent-ext",
+ "inillucent-migrate",
  "inillucent-pool",
  "inillucent-session",
  "inillucent-sim",
@@ -712,8 +713,12 @@ version = "0.1.0"
 dependencies = [
  "inillucent",
  "inillucent-base",
+ "inillucent-catalog",
  "inillucent-core",
+ "inillucent-engine",
  "inillucent-search",
+ "inillucent-sqlite-reader",
+ "inillucent-tree",
  "inillucent-value",
 ]
 

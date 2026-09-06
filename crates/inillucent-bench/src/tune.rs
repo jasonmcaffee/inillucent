@@ -122,7 +122,8 @@ pub fn run(
     let (index, keys, stats, seconds) = build_index(corpus, limit, true)?;
     eprintln!("  {} chunks in {seconds:.1}s", stats.chunks);
 
-    let mut engine = InillucentEngine::new(index, keys.clone(), "inillucent".to_string(), Some(128));
+    let mut engine =
+        InillucentEngine::new(index, keys.clone(), "inillucent".to_string(), Some(128));
 
     // Generated from the same slice of the corpus the index holds, exactly as the
     // graded run does, so a number here is comparable with a number on the card.
@@ -139,8 +140,7 @@ pub fn run(
     let unanswerable =
         queryset::unanswerable_queries(chunks, &df, per_source * 2, 15 + seed_offset);
     let multi = queryset::multi_source_queries(chunks, &keys, per_source * 2, 16 + seed_offset);
-    let calibration =
-        queryset::heading_queries(chunks, &keys, per_source * 2, 1012 + seed_offset);
+    let calibration = queryset::heading_queries(chunks, &keys, per_source * 2, 1012 + seed_offset);
     eprintln!(
         "  {} identity, {} heading, {} identifier, {} passage, {} typo, {} shorthand, {} multi-source, {} unanswerable",
         identity.len(),
@@ -156,10 +156,16 @@ pub fn run(
     eprintln!("embedding the query sets on {}", device.label());
     let embedder = queryset::open_query_embedder(
         model,
-        &crate::arm::ArmOptions { device, ..Default::default() },
+        &crate::arm::ArmOptions {
+            device,
+            ..Default::default()
+        },
     )?;
     let embed = |qs: &[GradedQuery]| -> Result<Vec<Vec<f32>>> {
-        queryset::embed_with(&embedder, &qs.iter().map(|q| q.text.clone()).collect::<Vec<_>>())
+        queryset::embed_with(
+            &embedder,
+            &qs.iter().map(|q| q.text.clone()).collect::<Vec<_>>(),
+        )
     };
     let identity_vectors = embed(&identity)?;
     let heading_vectors = embed(&headings)?;
@@ -179,9 +185,19 @@ pub fn run(
             &engine,
             setting,
             &[
-                ("passage evidence", &passage, &passage_vectors, Grading::Graded),
+                (
+                    "passage evidence",
+                    &passage,
+                    &passage_vectors,
+                    Grading::Graded,
+                ),
                 ("passage, transposed", &typo, &typo_vectors, Grading::Graded),
-                ("passage, keywords", &shorthand, &shorthand_vectors, Grading::Graded),
+                (
+                    "passage, keywords",
+                    &shorthand,
+                    &shorthand_vectors,
+                    Grading::Graded,
+                ),
                 ("multi-source", &multi, &multi_vectors, Grading::AllEvidence),
                 ("heading", &headings, &heading_vectors, Grading::Binary),
                 ("identity", &identity, &identity_vectors, Grading::Binary),
@@ -210,7 +226,9 @@ fn apply(engine: &mut InillucentEngine, setting: &Setting) {
     engine.index.set_mmr_lambda(setting.mmr_lambda);
     match setting.adaptive {
         Some(a) => engine.index.set_adaptive_fusion(true, a),
-        None => engine.index.set_adaptive_fusion(false, AdaptiveWeights::default()),
+        None => engine
+            .index
+            .set_adaptive_fusion(false, AdaptiveWeights::default()),
     }
 }
 
@@ -246,9 +264,13 @@ fn score_arm(
     for (name, queries, vectors, grading) in families {
         let mut values: Vec<f64> = Vec::new();
         for (q, v) in queries.iter().zip(vectors.iter()) {
-            let hits = engine.index.hybrid_search(&q.text, v, &compiled, 10, engine.ef_search);
-            let keys: Vec<String> =
-                hits.iter().map(|h| engine.keys[h.chunk as usize].clone()).collect();
+            let hits = engine
+                .index
+                .hybrid_search(&q.text, v, &compiled, 10, engine.ef_search);
+            let keys: Vec<String> = hits
+                .iter()
+                .map(|h| engine.keys[h.chunk as usize].clone())
+                .collect();
             let mut space = KeySpace::new();
             let correct = space.set_of(&q.correct);
             let grades = q.grades(&mut space);
@@ -269,7 +291,10 @@ fn score_arm(
     let mut identifier_mrr: Vec<f64> = Vec::new();
     for q in identifiers {
         let hits = engine.index.lexical_search(&q.text, &compiled, 50);
-        let keys: Vec<String> = hits.iter().map(|h| engine.keys[h.chunk as usize].clone()).collect();
+        let keys: Vec<String> = hits
+            .iter()
+            .map(|h| engine.keys[h.chunk as usize].clone())
+            .collect();
         let mut space = KeySpace::new();
         let correct = space.set_of(&q.correct);
         let got = space.ids_of(&keys);
@@ -311,9 +336,13 @@ fn score_arm(
     let mut hits_at_10: Vec<f64> = Vec::new();
     if let Some((_, queries, vectors, _)) = families.first() {
         for (q, v) in queries.iter().zip(vectors.iter()) {
-            let hits = engine.index.hybrid_search(&q.text, v, &compiled, 10, engine.ef_search);
-            let keys: Vec<String> =
-                hits.iter().map(|h| engine.keys[h.chunk as usize].clone()).collect();
+            let hits = engine
+                .index
+                .hybrid_search(&q.text, v, &compiled, 10, engine.ef_search);
+            let keys: Vec<String> = hits
+                .iter()
+                .map(|h| engine.keys[h.chunk as usize].clone())
+                .collect();
             let mut space = KeySpace::new();
             let correct = space.set_of(&q.correct);
             let got = space.ids_of(&keys);
@@ -322,7 +351,11 @@ fn score_arm(
     }
     means.insert("passage success@10".to_string(), mean_of(&hits_at_10));
 
-    ArmScores { label: setting.label.clone(), means, series }
+    ArmScores {
+        label: setting.label.clone(),
+        means,
+        series,
+    }
 }
 
 fn mean_of(values: &[f64]) -> f64 {
@@ -337,7 +370,9 @@ fn mean_of(values: &[f64]) -> f64 {
 fn print_table(arms: &[ArmScores]) {
     let mut order: Vec<&ArmScores> = arms.iter().collect();
     order.sort_by(|a, b| {
-        b.mean(PRIMARY).partial_cmp(&a.mean(PRIMARY)).unwrap_or(std::cmp::Ordering::Equal)
+        b.mean(PRIMARY)
+            .partial_cmp(&a.mean(PRIMARY))
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     println!("## Every arm\n");
@@ -377,7 +412,9 @@ fn print_comparison(arms: &[ArmScores], stats_seed: u64) {
 
     let mut order: Vec<&ArmScores> = arms.iter().skip(1).collect();
     order.sort_by(|a, b| {
-        b.mean(PRIMARY).partial_cmp(&a.mean(PRIMARY)).unwrap_or(std::cmp::Ordering::Equal)
+        b.mean(PRIMARY)
+            .partial_cmp(&a.mean(PRIMARY))
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     for arm in order {
@@ -453,7 +490,9 @@ pub fn build_settings(
                             for &mmr in mmrs {
                                 for rule in &adaptive_options {
                                     for &w in weights {
-                                        let Some(fusion) = fusion_named(name, w) else { continue };
+                                        let Some(fusion) = fusion_named(name, w) else {
+                                            continue;
+                                        };
                                         // Reciprocal rank fusion has no weight, so
                                         // sweeping one would repeat the same arm
                                         // once per weight.
@@ -497,7 +536,9 @@ pub fn build_settings(
 /// A fusion by the name the command line uses.
 pub fn fusion_named(name: &str, vector_weight: f32) -> Option<Fusion> {
     match name.trim().to_ascii_lowercase().as_str() {
-        "rrf" => Some(Fusion::ReciprocalRank { k: inillucent_core::rank::RRF_K }),
+        "rrf" => Some(Fusion::ReciprocalRank {
+            k: inillucent_core::rank::RRF_K,
+        }),
         "minmax" => Some(Fusion::NormalizedScore { vector_weight }),
         "convex" => Some(Fusion::Convex { vector_weight }),
         "tmm" => Some(Fusion::TheoreticalMinMax { vector_weight }),
@@ -558,7 +599,9 @@ mod tests {
             prefix: false,
             tier: false,
             phrase: 0.0,
-            fusion: Fusion::NormalizedScore { vector_weight: 0.35 },
+            fusion: Fusion::NormalizedScore {
+                vector_weight: 0.35,
+            },
             adaptive: None,
             mmr_lambda: 1.0,
         }
@@ -606,7 +649,10 @@ mod tests {
     /// off, or it cannot show that turning it on helped.
     #[test]
     fn an_adaptive_sweep_still_contains_the_fixed_weight_arm() {
-        let rule = AdaptiveWeights { identifier_gain: 0.3, ..Default::default() };
+        let rule = AdaptiveWeights {
+            identifier_gain: 0.3,
+            ..Default::default()
+        };
         let settings = build_settings(
             baseline(),
             &[3.0],
@@ -619,7 +665,9 @@ mod tests {
             &[1.0],
             &[rule],
         );
-        assert!(settings.iter().any(|s| s.adaptive.is_none() && s.label != "baseline"));
+        assert!(settings
+            .iter()
+            .any(|s| s.adaptive.is_none() && s.label != "baseline"));
         assert!(settings.iter().any(|s| s.adaptive.is_some()));
     }
 
@@ -627,7 +675,11 @@ mod tests {
     /// with every gain at zero is exactly the fixed arm beside it.
     #[test]
     fn an_adaptive_arm_takes_its_base_from_the_weight_being_swept() {
-        let rule = AdaptiveWeights { identifier_gain: 0.3, base: 0.0, ..Default::default() };
+        let rule = AdaptiveWeights {
+            identifier_gain: 0.3,
+            base: 0.0,
+            ..Default::default()
+        };
         let settings = build_settings(
             baseline(),
             &[3.0],
@@ -663,7 +715,10 @@ mod tests {
             "tmm",
             0.42,
             0.8,
-            &Some(AdaptiveWeights { identifier_gain: 0.3, ..Default::default() }),
+            &Some(AdaptiveWeights {
+                identifier_gain: 0.3,
+                ..Default::default()
+            }),
         );
         assert!(label.contains("cov 2.00"));
         assert!(label.contains("prefix"));

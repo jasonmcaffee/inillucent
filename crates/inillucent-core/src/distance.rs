@@ -76,10 +76,7 @@ mod tests {
             let b: Vec<f32> = (0..n).map(|i| (i as f32 * 0.11).cos()).collect();
             let naive: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
             let got = dot(&a, &b);
-            assert!(
-                (naive - got).abs() < 1e-4,
-                "n={n} naive={naive} got={got}"
-            );
+            assert!((naive - got).abs() < 1e-4, "n={n} naive={naive} got={got}");
         }
     }
 

@@ -55,6 +55,7 @@ pub mod copy;
 pub mod index;
 pub mod manifest;
 pub mod source;
+pub mod sqlite;
 pub mod verify;
 
 use std::path::{Path, PathBuf};
@@ -419,7 +420,9 @@ fn scalar_text(connection: &inillucent::Connection, sql: &str) -> Result<String,
     }
     Ok(match statement.row().first() {
         Some(inillucent::Value::Integer(number)) => number.to_string(),
-        Some(inillucent::Value::Text(text)) => String::from_utf8_lossy(&text.utf8_bytes()).into_owned(),
+        Some(inillucent::Value::Text(text)) => {
+            String::from_utf8_lossy(&text.utf8_bytes()).into_owned()
+        }
         _ => String::new(),
     })
 }

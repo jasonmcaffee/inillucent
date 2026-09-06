@@ -153,8 +153,9 @@ impl LlamaCppEmbedder {
             let body = serde_json::json!({ "content": text }).to_string();
             let reply =
                 http::post_json(&self.host, self.port, "/tokenize", &body, REQUEST_TIMEOUT)?;
-            let parsed: serde_json::Value = serde_json::from_str(&reply)
-                .with_context(|| format!("parsing /tokenize: {}", &reply[..reply.len().min(200)]))?;
+            let parsed: serde_json::Value = serde_json::from_str(&reply).with_context(|| {
+                format!("parsing /tokenize: {}", &reply[..reply.len().min(200)])
+            })?;
             let served = parsed["tokens"]
                 .as_array()
                 .context("the /tokenize reply carried no tokens array")?
@@ -298,7 +299,8 @@ impl LlamaCppEmbedder {
                 let cost = counts[end].min(bound).max(1);
                 // A single text over the whole budget still goes on its own: the
                 // alternative is dropping a chunk from the corpus.
-                if end > start && (budget + cost > self.token_budget || end - start >= self.max_texts)
+                if end > start
+                    && (budget + cost > self.token_budget || end - start >= self.max_texts)
                 {
                     break;
                 }
@@ -320,8 +322,14 @@ impl LlamaCppEmbedder {
     /// One `/v1/embeddings` request.
     fn request(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         let body = serde_json::json!({ "input": texts }).to_string();
-        let reply = http::post_json(&self.host, self.port, "/v1/embeddings", &body, REQUEST_TIMEOUT)
-            .with_context(|| format!("embedding {} texts", texts.len()))?;
+        let reply = http::post_json(
+            &self.host,
+            self.port,
+            "/v1/embeddings",
+            &body,
+            REQUEST_TIMEOUT,
+        )
+        .with_context(|| format!("embedding {} texts", texts.len()))?;
         let parsed: serde_json::Value = serde_json::from_str(&reply)
             .with_context(|| format!("parsing the reply: {}", &reply[..reply.len().min(300)]))?;
         let data = parsed["data"]
@@ -340,7 +348,11 @@ impl LlamaCppEmbedder {
         let mut out = vec![Vec::new(); texts.len()];
         for row in data {
             let index = row["index"].as_u64().context("a row carried no index")? as usize;
-            anyhow::ensure!(index < texts.len(), "the reply indexed row {index} of {}", texts.len());
+            anyhow::ensure!(
+                index < texts.len(),
+                "the reply indexed row {index} of {}",
+                texts.len()
+            );
             let values = row["embedding"]
                 .as_array()
                 .context("a row carried no embedding")?;
@@ -365,7 +377,6 @@ impl LlamaCppEmbedder {
         );
         Ok(out)
     }
-
 }
 
 impl Embedder for LlamaCppEmbedder {

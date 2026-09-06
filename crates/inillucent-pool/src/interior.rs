@@ -318,10 +318,10 @@ impl<'p> InteriorRef<'p> {
 
     /// Returns a slot in `low..high` to examine next, by proportion.
     ///
-    /// The arithmetic half of [`InteriorRef::interpolate`], taking the two end
-    /// values rather than reading them, so a search that already knows them
-    /// does not pay for them again. Always inside the window, so the search
-    /// that calls it terminates whatever the separators look like.
+    /// Always inside the window, so the search that calls it terminates
+    /// whatever the separators look like, and it takes the two end values
+    /// rather than reading them - a search that already knows them does not pay
+    /// for them twice, which is the whole of why it is written this way.
     ///
     /// @param low - the first slot still in the window
     /// @param high - one past the last slot still in the window
@@ -341,21 +341,6 @@ impl<'p> InteriorRef<'p> {
         let width = u128::try_from(last.saturating_sub(low)).unwrap_or(0);
         let offset = usize::try_from(into.saturating_mul(width) / span.max(1)).unwrap_or(0);
         low.saturating_add(offset.min(last.saturating_sub(low)))
-    }
-
-    /// Returns a slot in `low..high` to examine next, by proportion.
-    ///
-    /// Always inside the window, so the search that calls it terminates
-    /// whatever the separators look like.
-    ///
-    /// @param low - the first slot still in the window
-    /// @param high - one past the last slot still in the window
-    /// @param target - the probe's leading eight bytes as a number
-    fn interpolate(&self, low: usize, high: usize, target: u64) -> DbResult<usize> {
-        let last = high.saturating_sub(1);
-        let low_value = leading_u64(self.key(low)?);
-        let high_value = leading_u64(self.key(last)?);
-        Ok(Self::place(low, high, target, low_value, high_value))
     }
 
     /// Returns every byte offset in this page that holds a swip.

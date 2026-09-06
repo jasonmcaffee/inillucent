@@ -159,7 +159,9 @@ fn split_endpoint(endpoint: &str) -> Result<(String, u16)> {
     let (host, port) = endpoint
         .rsplit_once(':')
         .with_context(|| format!("{endpoint} is not host:port"))?;
-    let port: u16 = port.parse().with_context(|| format!("{port} is not a port"))?;
+    let port: u16 = port
+        .parse()
+        .with_context(|| format!("{port} is not a port"))?;
     anyhow::ensure!(!host.is_empty(), "{endpoint} names no host");
     Ok((host.to_string(), port))
 }
@@ -170,8 +172,14 @@ mod tests {
 
     #[test]
     fn an_endpoint_splits_into_a_host_and_a_port() {
-        assert_eq!(split_endpoint("127.0.0.1:8189").unwrap(), ("127.0.0.1".into(), 8189));
-        assert_eq!(split_endpoint("localhost:1").unwrap(), ("localhost".into(), 1));
+        assert_eq!(
+            split_endpoint("127.0.0.1:8189").unwrap(),
+            ("127.0.0.1".into(), 8189)
+        );
+        assert_eq!(
+            split_endpoint("localhost:1").unwrap(),
+            ("localhost".into(), 1)
+        );
     }
 
     #[test]
@@ -187,7 +195,9 @@ mod tests {
     #[test]
     fn the_default_llama_port_is_not_nikayas() {
         assert_ne!(DEFAULT_LLAMA_PORT, 8087);
-        assert!(ArmOptions::default().endpoint.ends_with(&DEFAULT_LLAMA_PORT.to_string()));
+        assert!(ArmOptions::default()
+            .endpoint
+            .ends_with(&DEFAULT_LLAMA_PORT.to_string()));
     }
 
     #[test]

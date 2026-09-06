@@ -55,6 +55,22 @@ pub struct Check {
 
 impl Check {
     /// Returns a passing check.
+    ///
+    /// @param name - the check's name, as the manifest records it
+    /// @param detail - what it found
+    pub fn passed(name: &str, detail: impl Into<String>) -> Check {
+        Check::pass(name, detail)
+    }
+
+    /// Returns a failing check.
+    ///
+    /// @param name - the check's name, as the manifest records it
+    /// @param detail - what it found
+    pub fn failed(name: &str, detail: impl Into<String>) -> Check {
+        Check::fail(name, detail)
+    }
+
+    /// Returns a passing check.
     fn pass(name: &str, detail: impl Into<String>) -> Check {
         Check {
             name: name.to_string(),
@@ -968,7 +984,11 @@ fn integers(connection: &Connection, sql: &str) -> Result<Vec<i64>, String> {
         .step()
         .map_err(|error| format!("{sql}: {}", error.message()))?
     {
-        if let Some(value) = statement.row().first().and_then(inillucent::Value::as_integer) {
+        if let Some(value) = statement
+            .row()
+            .first()
+            .and_then(inillucent::Value::as_integer)
+        {
             rows.push(value);
         }
     }

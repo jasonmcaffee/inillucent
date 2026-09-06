@@ -20,7 +20,7 @@ use inillucent_catalog::snapshot::CatalogSnapshot;
 use inillucent_ext::registry::Registry;
 use inillucent_ext::vtab::{Context, VirtualCursor, VirtualTable};
 use inillucent_sql::catalog_view::{ColumnInfo, TableInfo, TableKind};
-use inillucent_sql::vtab::{Declaration, ModuleArguments, ModuleRef, ShadowRoot};
+use inillucent_sql::vtab::{ModuleArguments, ModuleRef, ShadowRoot};
 use inillucent_vm::program::VirtualRef;
 
 /// How a connected virtual table is found again.

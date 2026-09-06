@@ -44,11 +44,11 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use inillucent_core::embed_onnx::{count_truncation, Device};
+use inillucent_core::model::{Backend, ModelManifest};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
-use inillucent_core::embed_onnx::{count_truncation, Device};
-use inillucent_core::model::{Backend, ModelManifest};
 
 use crate::arm::{Arm, ArmOptions};
 use inillucent_core::store::ChunkInput;
@@ -262,8 +262,12 @@ struct RawIssue {
 }
 
 fn read_jsonl<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Vec<T>> {
-    let file = File::open(path)
-        .with_context(|| format!("opening {}. Run the fetch and extract scripts first", path.display()))?;
+    let file = File::open(path).with_context(|| {
+        format!(
+            "opening {}. Run the fetch and extract scripts first",
+            path.display()
+        )
+    })?;
     let mut out = Vec::new();
     for line in BufReader::new(file).lines() {
         let line = line?;
@@ -381,9 +385,7 @@ fn split_prose(text: &str, target: usize, want: usize) -> Vec<String> {
                     let candidate = i + 1;
                     let better = match found {
                         None => true,
-                        Some(current) => {
-                            candidate.abs_diff(ideal) < current.abs_diff(ideal)
-                        }
+                        Some(current) => candidate.abs_diff(ideal) < current.abs_diff(ideal),
                     };
                     if better {
                         found = Some(candidate);
@@ -470,29 +472,75 @@ fn split_threads(text: &str, headings: &[String]) -> Vec<(String, String)> {
 /// carries no real person's name, and there are enough combinations that the
 /// largest source's 473 authors are all distinct.
 const GIVEN: &[&str] = &[
-    "Ada", "Bo", "Cai", "Dara", "Eli", "Fen", "Gita", "Hale", "Ines", "Jo", "Kian", "Lore",
-    "Mira", "Nils", "Oona", "Pav", "Quill", "Rune", "Sena", "Tov", "Uma", "Vero", "Wren",
-    "Xan", "Yara", "Zev", "Anwen", "Bram", "Cleo", "Dov", "Esme", "Faro", "Gwen",
+    "Ada", "Bo", "Cai", "Dara", "Eli", "Fen", "Gita", "Hale", "Ines", "Jo", "Kian", "Lore", "Mira",
+    "Nils", "Oona", "Pav", "Quill", "Rune", "Sena", "Tov", "Uma", "Vero", "Wren", "Xan", "Yara",
+    "Zev", "Anwen", "Bram", "Cleo", "Dov", "Esme", "Faro", "Gwen",
 ];
 const FAMILY: &[&str] = &[
-    "Almeida", "Bergstrom", "Calder", "Dunne", "Eriksen", "Falk", "Grieve", "Halloran",
-    "Ibarra", "Jarosz", "Keller", "Lindqvist", "Moreau", "Nakhle", "Ostrand", "Pereira",
-    "Quintero", "Rasmussen", "Sandoval", "Thorne", "Ueda", "Vasquez", "Whitlock", "Ximenes",
-    "Yoshida", "Zabala", "Aldridge", "Boone", "Cortese", "Delgado",
+    "Almeida",
+    "Bergstrom",
+    "Calder",
+    "Dunne",
+    "Eriksen",
+    "Falk",
+    "Grieve",
+    "Halloran",
+    "Ibarra",
+    "Jarosz",
+    "Keller",
+    "Lindqvist",
+    "Moreau",
+    "Nakhle",
+    "Ostrand",
+    "Pereira",
+    "Quintero",
+    "Rasmussen",
+    "Sandoval",
+    "Thorne",
+    "Ueda",
+    "Vasquez",
+    "Whitlock",
+    "Ximenes",
+    "Yoshida",
+    "Zabala",
+    "Aldridge",
+    "Boone",
+    "Cortese",
+    "Delgado",
 ];
 
 /// Space names per source, used where a source shares a fixed set of spaces.
 /// A repository name stands in for a space in the code shaped source, a channel
 /// name in the message shaped source and a project key in the ticket shaped one.
 const CHANNELS: &[&str] = &[
-    "general", "engineering", "platform-team", "release-notes", "incident-response",
-    "design-review", "data-eng", "search-quality", "onboarding", "infra", "security",
-    "product", "analytics", "mobile", "web", "api-design", "billing", "support",
-    "docs", "tooling", "performance", "testing", "hiring", "random",
+    "general",
+    "engineering",
+    "platform-team",
+    "release-notes",
+    "incident-response",
+    "design-review",
+    "data-eng",
+    "search-quality",
+    "onboarding",
+    "infra",
+    "security",
+    "product",
+    "analytics",
+    "mobile",
+    "web",
+    "api-design",
+    "billing",
+    "support",
+    "docs",
+    "tooling",
+    "performance",
+    "testing",
+    "hiring",
+    "random",
 ];
 const PROJECTS: &[&str] = &[
-    "PLAT", "SRCH", "DATA", "INFRA", "WEB", "MOB", "API", "BILL", "SUP", "DOC", "TOOL",
-    "PERF", "SEC", "ANL", "REL", "DES", "ONB", "QA", "OPS", "ML", "CORE", "EXP",
+    "PLAT", "SRCH", "DATA", "INFRA", "WEB", "MOB", "API", "BILL", "SUP", "DOC", "TOOL", "PERF",
+    "SEC", "ANL", "REL", "DES", "ONB", "QA", "OPS", "ML", "CORE", "EXP",
 ];
 
 /// A deterministic author list of the requested size.
@@ -524,10 +572,32 @@ fn authors_for(name: &str, count: usize) -> Vec<(String, String)> {
 /// Label vocabulary. Labels are filtered on by one scenario, so they need a
 /// realistic distribution: a few common ones and a long tail.
 const LABELS: &[&str] = &[
-    "reference", "runbook", "decision-record", "postmortem", "how-to", "architecture",
-    "onboarding", "deprecated", "draft", "reviewed", "external", "internal", "roadmap",
-    "spike", "migration", "performance", "security", "accessibility", "analytics",
-    "experiment", "retired", "template", "faq", "glossary", "policy", "meeting-notes",
+    "reference",
+    "runbook",
+    "decision-record",
+    "postmortem",
+    "how-to",
+    "architecture",
+    "onboarding",
+    "deprecated",
+    "draft",
+    "reviewed",
+    "external",
+    "internal",
+    "roadmap",
+    "spike",
+    "migration",
+    "performance",
+    "security",
+    "accessibility",
+    "analytics",
+    "experiment",
+    "retired",
+    "template",
+    "faq",
+    "glossary",
+    "policy",
+    "meeting-notes",
 ];
 
 fn labels_for(rng: &mut StdRng, mean: f64, extra: &[String]) -> Vec<String> {
@@ -547,7 +617,13 @@ fn labels_for(rng: &mut StdRng, mean: f64, extra: &[String]) -> Vec<String> {
     for e in extra.iter().take(2) {
         let cleaned: String = e
             .chars()
-            .map(|c| if c.is_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+            .map(|c| {
+                if c.is_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
             .collect();
         let cleaned = cleaned.trim_matches('-').to_string();
         if !cleaned.is_empty() && cleaned.len() <= 40 && !out.contains(&cleaned) {
@@ -738,7 +814,12 @@ fn allocate_articles(
 
     let mut needs: Vec<Need> = plans
         .iter()
-        .filter(|p| matches!(p.material, Material::Articles | Material::DesignFiles | Material::Boards))
+        .filter(|p| {
+            matches!(
+                p.material,
+                Material::Articles | Material::DesignFiles | Material::Boards
+            )
+        })
         .map(|p| Need {
             name: p.name,
             documents_left: p.documents,
@@ -771,7 +852,9 @@ fn allocate_articles(
         let Some(i) = pick else { break };
         needs[i].documents_left -= 1;
         needs[i].chars_left = (needs[i].chars_left - article.text.len() as f64).max(0.0);
-        out.get_mut(needs[i].name).expect("allocated above").push(article);
+        out.get_mut(needs[i].name)
+            .expect("allocated above")
+            .push(article);
     }
     out
 }
@@ -828,7 +911,10 @@ fn build_source(plan: &SourcePlan, pools: &mut Pools, rng: &mut StdRng) -> Resul
             Material::Articles | Material::DesignFiles | Material::Boards => {
                 // This source's own slice of the article pool, longest first, paired
                 // rank for rank with documents ordered by how much text they need.
-                let slice = pools.articles.get_mut(plan.name).expect("every article source is allocated a slice");
+                let slice = pools
+                    .articles
+                    .get_mut(plan.name)
+                    .expect("every article source is allocated a slice");
                 let a = match slice.pop() {
                     Some(a) => a,
                     None => break, // Slice exhausted; the caller reports the shortfall.
@@ -838,7 +924,9 @@ fn build_source(plan: &SourcePlan, pools: &mut Pools, rng: &mut StdRng) -> Resul
                 // Capping here rather than skipping keeps the document, which is what
                 // makes the document count reachable.
                 let available = ((a.text.len() as f64) * expansion(plan.material)) as usize;
-                want = want.min((available / plan.mean_chars).max(plan.per_doc.0)).max(1);
+                want = want
+                    .min((available / plan.mean_chars).max(plan.per_doc.0))
+                    .max(1);
                 let space = match plan.spaces {
                     Spaces::Shared(1) => Some("ENG".to_string()),
                     Spaces::Shared(n) => Some(format!("SPACE{:02}", rng.gen_range(0..n))),
@@ -884,17 +972,27 @@ fn build_source(plan: &SourcePlan, pools: &mut Pools, rng: &mut StdRng) -> Resul
                 let title = if heading.trim().is_empty() {
                     t.title.clone()
                 } else {
-                    format!("{}: {}", t.title.trim_start_matches("Talk:"), heading.trim())
+                    format!(
+                        "{}: {}",
+                        t.title.trim_start_matches("Talk:"),
+                        heading.trim()
+                    )
                 };
-                let channel = CHANNELS[rng.gen_range(0..CHANNELS.len().min(match plan.spaces {
-                    Spaces::Shared(n) => n,
-                    Spaces::PerDocument => CHANNELS.len(),
-                }))];
+                let channel = CHANNELS[rng.gen_range(
+                    0..CHANNELS.len().min(match plan.spaces {
+                        Spaces::Shared(n) => n,
+                        Spaces::PerDocument => CHANNELS.len(),
+                    }),
+                )];
                 let space = Some(channel.to_string());
                 let url = format!("https://example.invalid/{}/{}", plan.name, rng.gen::<u32>());
                 (
                     title,
-                    if heading.trim().is_empty() { vec![t.title.clone()] } else { vec![heading] },
+                    if heading.trim().is_empty() {
+                        vec![t.title.clone()]
+                    } else {
+                        vec![heading]
+                    },
                     Vec::new(),
                     t.timestamp.clone(),
                     body,
@@ -922,18 +1020,31 @@ fn build_source(plan: &SourcePlan, pools: &mut Pools, rng: &mut StdRng) -> Resul
                             .collect()
                     })
                     .unwrap_or_default();
-                let url = format!("https://example.invalid/{}/{}/{}", plan.name, c.repo, c.path);
-                (title, dirs, vec![c.repo.clone()], None, c.text.clone(), Some(c.repo.clone()), url)
+                let url = format!(
+                    "https://example.invalid/{}/{}/{}",
+                    plan.name, c.repo, c.path
+                );
+                (
+                    title,
+                    dirs,
+                    vec![c.repo.clone()],
+                    None,
+                    c.text.clone(),
+                    Some(c.repo.clone()),
+                    url,
+                )
             }
             Material::Issues => {
                 let i = match pools.issues.pop() {
                     Some(i) => i,
                     None => break,
                 };
-                let project = PROJECTS[rng.gen_range(0..PROJECTS.len().min(match plan.spaces {
-                    Spaces::Shared(n) => n,
-                    Spaces::PerDocument => PROJECTS.len(),
-                }))];
+                let project = PROJECTS[rng.gen_range(
+                    0..PROJECTS.len().min(match plan.spaces {
+                        Spaces::Shared(n) => n,
+                        Spaces::PerDocument => PROJECTS.len(),
+                    }),
+                )];
                 // A ticket key of its own, so the ticket shaped source reads like a
                 // tracker and its keys are searchable literals.
                 let key = format!("{project}-{}", 1000 + (i.number % 9000));
@@ -944,7 +1055,11 @@ fn build_source(plan: &SourcePlan, pools: &mut Pools, rng: &mut StdRng) -> Resul
                 categories.extend(i.labels.iter().cloned());
                 (
                     title,
-                    vec!["Description".to_string(), "Steps to reproduce".to_string(), "Acceptance".to_string()],
+                    vec![
+                        "Description".to_string(),
+                        "Steps to reproduce".to_string(),
+                        "Acceptance".to_string(),
+                    ],
                     categories,
                     i.updated_at.clone(),
                     i.body.clone(),
@@ -1037,7 +1152,10 @@ fn as_design_file(title: &str, headings: &[String], text: &str) -> String {
             continue;
         }
         if i % 6 == 0 {
-            let name = headings.get(frame % headings.len().max(1)).map(String::as_str).unwrap_or("Frame");
+            let name = headings
+                .get(frame % headings.len().max(1))
+                .map(String::as_str)
+                .unwrap_or("Frame");
             out.push_str(&format!("\nFrame {}: {}\n", frame + 1, name));
             frame += 1;
         }
@@ -1172,7 +1290,10 @@ pub fn build(derived: &Path, out: &Path, scale: f64) -> Result<BuildReport> {
     // real one.
     articles.sort_by_key(|a| {
         let t = a.title.trim();
-        let words = t.split_whitespace().filter(|w| w.chars().any(char::is_alphanumeric)).count();
+        let words = t
+            .split_whitespace()
+            .filter(|w| w.chars().any(char::is_alphanumeric))
+            .count();
         let usable = t.chars().count() >= 12 && t.chars().count() <= 160 && words >= 2;
         // Longest usable titles first, so the largest documents also get gradeable
         // titles rather than the pool's leftovers.
@@ -1186,7 +1307,12 @@ pub fn build(derived: &Path, out: &Path, scale: f64) -> Result<BuildReport> {
     for slice in allocated.values_mut() {
         slice.reverse();
     }
-    let mut pools = Pools { articles: allocated, talk, code, issues };
+    let mut pools = Pools {
+        articles: allocated,
+        talk,
+        code,
+        issues,
+    };
     // Popped from the back, so the order is made deliberate rather than incidental.
     pools.talk.sort_by_key(|t| t.text.len());
     pools.code.sort_by_key(|c| c.text.len());
@@ -1274,14 +1400,22 @@ pub fn build(derived: &Path, out: &Path, scale: f64) -> Result<BuildReport> {
             **n == 1
                 && t.chars().count() >= 12
                 && t.chars().count() <= 160
-                && t.split_whitespace().filter(|w| w.chars().any(char::is_alphanumeric)).count() >= 2
+                && t.split_whitespace()
+                    .filter(|w| w.chars().any(char::is_alphanumeric))
+                    .count()
+                    >= 2
         })
         .count();
 
     let mut rows: Vec<(String, usize, usize, usize)> = per_source
         .into_iter()
         .map(|(s, (docs, chunks, chars))| {
-            (s.to_string(), docs, chunks, if chunks > 0 { chars / chunks } else { 0 })
+            (
+                s.to_string(),
+                docs,
+                chunks,
+                if chunks > 0 { chars / chunks } else { 0 },
+            )
         })
         .collect();
     rows.sort_by(|a, b| b.2.cmp(&a.2));
@@ -1397,9 +1531,14 @@ pub fn embed(
         Err(_) => 0,
     };
     if done > 0 {
-        eprintln!("resuming: {done} vectors already written to {}", vectors_path.display());
+        eprintln!(
+            "resuming: {done} vectors already written to {}",
+            vectors_path.display()
+        );
         // Discard any partial trailing vector.
-        let file = std::fs::OpenOptions::new().write(true).open(&vectors_path)?;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&vectors_path)?;
         file.set_len((done * bytes_per) as u64)?;
     }
     if done >= chunks.len() {
@@ -1408,7 +1547,14 @@ pub fn embed(
         // counts with the tokenizer alone rather than writing a zero that would
         // read as "nothing was cut".
         let truncated = count_truncated(model_dir, manifest, &chunks)?;
-        return assemble_cache(&chunks, &vectors_path, cache_path, manifest, seeds, truncated);
+        return assemble_cache(
+            &chunks,
+            &vectors_path,
+            cache_path,
+            manifest,
+            seeds,
+            truncated,
+        );
     }
 
     let embedders = open_arms(model, options, devices)?;
@@ -1446,7 +1592,11 @@ pub fn embed(
         // resume above depends on that, and so does every vector belonging to the
         // right chunk.
         for v in &vectors {
-            anyhow::ensure!(v.len() == dims, "the embedder returned {} dimensions", v.len());
+            anyhow::ensure!(
+                v.len() == dims,
+                "the embedder returned {} dimensions",
+                v.len()
+            );
             for x in v {
                 out.write_all(&x.to_le_bytes())?;
             }
@@ -1493,7 +1643,14 @@ pub fn embed(
         truncated += count_truncated(model_dir, manifest, &chunks[..done])?;
     }
 
-    assemble_cache(&chunks, &vectors_path, cache_path, manifest, seeds, truncated)
+    assemble_cache(
+        &chunks,
+        &vectors_path,
+        cache_path,
+        manifest,
+        seeds,
+        truncated,
+    )
 }
 
 /// How many of these chunks a model tokenizer takes past its truncation bound,
@@ -1523,8 +1680,10 @@ fn count_truncated(
         );
         return Ok(0);
     }
-    let texts: Vec<String> =
-        chunks.iter().map(|c| sanitize_for_model(&c.content)).collect();
+    let texts: Vec<String> = chunks
+        .iter()
+        .map(|c| sanitize_for_model(&c.content))
+        .collect();
     Ok(count_truncation(model_dir, manifest, &texts)?.truncated)
 }
 
@@ -1573,11 +1732,24 @@ fn open_arms(
     let mut embedders = Vec::with_capacity(devices.len());
     for device in devices {
         let load = std::time::Instant::now();
-        let arm = Arm::open(model, &ArmOptions { device: *device, ..options.clone() })
-            .with_context(|| {
-                format!("opening the ONNX embedder on {}. Is ORT_DYLIB_PATH set?", device.label())
-            })?;
-        eprintln!("  session ready on {} in {:.1}s", device.label(), load.elapsed().as_secs_f64());
+        let arm = Arm::open(
+            model,
+            &ArmOptions {
+                device: *device,
+                ..options.clone()
+            },
+        )
+        .with_context(|| {
+            format!(
+                "opening the ONNX embedder on {}. Is ORT_DYLIB_PATH set?",
+                device.label()
+            )
+        })?;
+        eprintln!(
+            "  session ready on {} in {:.1}s",
+            device.label(),
+            load.elapsed().as_secs_f64()
+        );
         embedders.push(arm);
     }
     Ok(embedders)
@@ -1633,21 +1805,28 @@ fn embed_window(embedders: &[Arm], texts: &[String]) -> Result<Vec<Vec<f32>>> {
             .collect();
         handles
             .into_iter()
-            .map(|h| h.join().unwrap_or_else(|_| Err(anyhow::anyhow!("an embedding thread panicked"))))
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("an embedding thread panicked")))
+            })
             .collect()
     });
 
     let mut out: Vec<Vec<f32>> = vec![Vec::new(); texts.len()];
     for (ids, result) in assigned.iter().zip(results) {
         let vectors = result?;
-        anyhow::ensure!(vectors.len() == ids.len(), "a device returned {} vectors for {} texts", vectors.len(), ids.len());
+        anyhow::ensure!(
+            vectors.len() == ids.len(),
+            "a device returned {} vectors for {} texts",
+            vectors.len(),
+            ids.len()
+        );
         for (&i, v) in ids.iter().zip(vectors) {
             out[i] = v;
         }
     }
     Ok(out)
 }
-
 
 /// Turn the corpus text and the vector file into the cache the harness loads,
 /// with the header that says which corpus and which model made it.
@@ -1702,7 +1881,12 @@ pub fn assemble_cache(
         truncated_chunks: truncated,
         query_seed_digest: crate::corpus::seed_digest(seeds),
     };
-    let corpus = crate::corpus::Corpus { chunks: inputs, vectors, dims, header };
+    let corpus = crate::corpus::Corpus {
+        chunks: inputs,
+        vectors,
+        dims,
+        header,
+    };
     crate::corpus::save_cache(&corpus, cache_path)?;
     let bytes = std::fs::metadata(cache_path)?.len();
     eprintln!(
@@ -1803,7 +1987,10 @@ const INDEXES: &[(&str, &str)] = &[
 /// So the failure is only fatal when the type really is absent.
 /// @param client - a connection to the database being loaded
 fn ensure_pgvector(client: &mut postgres::Client) -> Result<()> {
-    if client.batch_execute("CREATE EXTENSION IF NOT EXISTS vector").is_ok() {
+    if client
+        .batch_execute("CREATE EXTENSION IF NOT EXISTS vector")
+        .is_ok()
+    {
         return Ok(());
     }
     let row = client
@@ -1844,7 +2031,9 @@ pub fn load_postgres(
 
     eprintln!("creating the schema");
     ensure_pgvector(&mut client)?;
-    client.batch_execute(SCHEMA).context("creating the schema")?;
+    client
+        .batch_execute(SCHEMA)
+        .context("creating the schema")?;
 
     // One row per document, taken from the first chunk that mentions it.
     eprintln!("inserting documents");
@@ -1862,9 +2051,9 @@ pub fn load_postgres(
             if seen.insert(c.doc_id, ()).is_some() {
                 continue;
             }
-            let updated = c.updated_at.map(|s| {
-                std::time::UNIX_EPOCH + std::time::Duration::from_secs(s.max(0) as u64)
-            });
+            let updated = c
+                .updated_at
+                .map(|s| std::time::UNIX_EPOCH + std::time::Duration::from_secs(s.max(0) as u64));
             // A soft deleted document carries a deletion time, which is what every
             // filter excludes on.
             let deleted_at = if c.deleted {
@@ -1937,7 +2126,9 @@ pub fn load_postgres(
         for (name, sql) in INDEXES {
             let start = std::time::Instant::now();
             eprintln!("building {name}");
-            client.batch_execute(sql).with_context(|| format!("building {name}"))?;
+            client
+                .batch_execute(sql)
+                .with_context(|| format!("building {name}"))?;
             eprintln!("  {name} in {:.1}s", start.elapsed().as_secs_f64());
         }
         client.batch_execute("ANALYZE documents; ANALYZE chunks;")?;
@@ -1974,13 +2165,17 @@ mod tests {
         assert_eq!(pieces.len(), 5);
         for p in &pieces {
             let n = p.chars().count();
-            assert!(n > 400 && n < 1200, "chunk of {n} characters is not near 800");
+            assert!(
+                n > 400 && n < 1200,
+                "chunk of {n} characters is not near 800"
+            );
         }
     }
 
     #[test]
     fn prose_chunking_does_not_split_inside_a_word() {
-        let text = "Alpha beta gamma. Delta epsilon zeta. Eta theta iota. Kappa lambda mu. ".repeat(40);
+        let text =
+            "Alpha beta gamma. Delta epsilon zeta. Eta theta iota. Kappa lambda mu. ".repeat(40);
         for piece in split_prose(&text, 200, 6) {
             let trimmed = piece.trim();
             assert!(!trimmed.is_empty());
@@ -2002,7 +2197,9 @@ mod tests {
     #[test]
     fn code_chunks_break_on_line_boundaries() {
         let code = (0..200)
-            .map(|i| format!("fn handler_{i}(request: Request) -> Response {{ dispatch(request) }}"))
+            .map(|i| {
+                format!("fn handler_{i}(request: Request) -> Response {{ dispatch(request) }}")
+            })
             .collect::<Vec<_>>()
             .join("\n");
         let pieces = split_code(&code, 400, 6);
@@ -2021,7 +2218,10 @@ mod tests {
     fn threads_split_at_headings_and_keep_the_heading() {
         let text = "Preamble text here. Why is this slow? Because the scan is exhaustive. \
                     What about the cache? It only helps the second call.";
-        let headings = vec!["Why is this slow?".to_string(), "What about the cache?".to_string()];
+        let headings = vec![
+            "Why is this slow?".to_string(),
+            "What about the cache?".to_string(),
+        ];
         let threads = split_threads(text, &headings);
         assert_eq!(threads.len(), 1, "only bodies of 120+ characters are kept");
         let long = "x".repeat(200);
@@ -2081,7 +2281,10 @@ mod tests {
             let path = heading_path(depth, &headings, 1, 9);
             assert!(!path.is_empty() && path.len() <= depth);
             for element in &path {
-                assert!(headings.contains(element), "invented a heading: {element:?}");
+                assert!(
+                    headings.contains(element),
+                    "invented a heading: {element:?}"
+                );
             }
             // A repeated element would make the leaf ambiguous as a query.
             let unique: std::collections::HashSet<&String> = path.iter().collect();
@@ -2101,7 +2304,9 @@ mod tests {
             .collect();
         assert_eq!(
             leaves,
-            vec!["First", "First", "First", "Second", "Second", "Second", "Third", "Third", "Third"]
+            vec![
+                "First", "First", "First", "Second", "Second", "Second", "Third", "Third", "Third"
+            ]
         );
         // The leaf advances through the document and never goes backwards.
         let mut positions: Vec<usize> = leaves
@@ -2171,7 +2376,9 @@ mod tests {
             ) {
                 continue;
             }
-            let got = allocated.get(plan.name).expect("an article source was not allocated");
+            let got = allocated
+                .get(plan.name)
+                .expect("an article source was not allocated");
             assert_eq!(
                 got.len(),
                 plan.documents,
@@ -2181,7 +2388,8 @@ mod tests {
                 plan.documents
             );
             let have: usize = got.iter().map(|a| a.text.len()).sum();
-            let need = (plan.chunks as f64 * plan.mean_chars as f64 / expansion(plan.material)) as usize;
+            let need =
+                (plan.chunks as f64 * plan.mean_chars as f64 / expansion(plan.material)) as usize;
             assert!(
                 have >= need,
                 "{} was allocated {have} characters but needs {need}",
@@ -2217,7 +2425,11 @@ mod tests {
         for (full, part) in plans(1.0).iter().zip(&half) {
             assert_eq!(part.name, full.name);
             let ratio = part.chunks as f64 / full.chunks as f64;
-            assert!((ratio - 0.5).abs() < 0.01, "{} scaled to {ratio}", part.name);
+            assert!(
+                (ratio - 0.5).abs() < 0.01,
+                "{} scaled to {ratio}",
+                part.name
+            );
         }
     }
 
@@ -2236,7 +2448,10 @@ mod tests {
         let share = carrying as f64 / 4_000.0;
         // Rare enough that a token appears in only a few chunks, which is what the
         // identifier scenario requires, but common enough to supply candidates.
-        assert!(share > 0.03 && share < 0.15, "{share} of chunks carried an identifier");
+        assert!(
+            share > 0.03 && share < 0.15,
+            "{share} of chunks carried an identifier"
+        );
     }
 
     #[test]
@@ -2246,7 +2461,9 @@ mod tests {
             let key = ticket_key(&mut rng);
             let (project, number) = key.split_once('-').expect("a ticket key has a dash");
             assert!(PROJECTS.contains(&project), "unknown project {project}");
-            let n: u32 = number.parse().expect("the tail of a ticket key is a number");
+            let n: u32 = number
+                .parse()
+                .expect("the tail of a ticket key is a number");
             assert!((100..9999).contains(&n));
             // The identifier scenario only considers tokens of six characters or
             // more that mix letters with digits or a separator.
@@ -2329,7 +2546,9 @@ mod tests {
         let headings = vec!["A fairly long section heading".to_string()];
         let shares = [0.084, 0.475, 0.347, 0.094];
         let estimate = breadcrumb_estimate("A document title", &headings, &shares);
-        let actual = breadcrumbed("A document title", &headings[..1], "").chars().count();
+        let actual = breadcrumbed("A document title", &headings[..1], "")
+            .chars()
+            .count();
         // The estimate is an average over the depth distribution, so it lands within
         // a heading's length of a single realised breadcrumb rather than exactly on it.
         assert!(
@@ -2396,7 +2615,10 @@ pub fn check(corpus_path: &Path, per_source: usize) -> Result<()> {
     // Keys have to be unique, or two different chunks would be the same answer.
     let unique: std::collections::HashSet<&String> = keys.iter().collect();
     println!("  distinct keys: {} of {}", unique.len(), keys.len());
-    anyhow::ensure!(unique.len() == keys.len(), "the corpus contains duplicate keys");
+    anyhow::ensure!(
+        unique.len() == keys.len(),
+        "the corpus contains duplicate keys"
+    );
 
     // Chunk order against source. The scenarios sample with a stride precisely
     // because a prefix is one source, so that property is asserted, not assumed.
@@ -2538,7 +2760,11 @@ pub fn check(corpus_path: &Path, per_source: usize) -> Result<()> {
             total += 1;
             answerable += usize::from(reachable);
         }
-        let share = if total == 0 { 0.0 } else { answerable as f64 / total as f64 };
+        let share = if total == 0 {
+            0.0
+        } else {
+            answerable as f64 / total as f64
+        };
         println!("  {label:<26} {answerable}/{total} have a correct chunk containing the query text ({:.1}%)", share * 100.0);
         anyhow::ensure!(
             share >= floor,
@@ -2556,12 +2782,18 @@ pub fn check(corpus_path: &Path, per_source: usize) -> Result<()> {
     let mut with_heading = 0usize;
     let mut heading_bearing = 0usize;
     for c in &chunks {
-        if c.content.to_lowercase().contains(&c.title.trim().to_lowercase()) {
+        if c.content
+            .to_lowercase()
+            .contains(&c.title.trim().to_lowercase())
+        {
             with_title += 1;
         }
         if let Some(leaf) = c.heading_path.last() {
             heading_bearing += 1;
-            if c.content.to_lowercase().contains(&leaf.trim().to_lowercase()) {
+            if c.content
+                .to_lowercase()
+                .contains(&leaf.trim().to_lowercase())
+            {
                 with_heading += 1;
             }
         }
@@ -2591,7 +2823,10 @@ pub fn check(corpus_path: &Path, per_source: usize) -> Result<()> {
     // test rather than passing quietly.
     let deleted = chunks.iter().filter(|c| c.deleted).count();
     println!("\n  soft deleted chunks: {deleted}");
-    anyhow::ensure!(deleted > 0, "no soft deleted documents, so no scenario can catch a filter that forgets them");
+    anyhow::ensure!(
+        deleted > 0,
+        "no soft deleted documents, so no scenario can catch a filter that forgets them"
+    );
 
     println!("\nthe corpus supports every graded scenario");
     Ok(())

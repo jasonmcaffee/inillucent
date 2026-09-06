@@ -442,7 +442,11 @@ fn bind(
 }
 
 /// Binds one text value.
-fn bind_text(statement: &mut inillucent::Statement<'_>, index: u32, value: &str) -> Result<(), String> {
+fn bind_text(
+    statement: &mut inillucent::Statement<'_>,
+    index: u32,
+    value: &str,
+) -> Result<(), String> {
     statement
         .bind_text(index, value)
         .map_err(|error| error.message().to_string())
