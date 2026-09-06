@@ -293,14 +293,6 @@ fn collect(directory: &Path, into: &mut Vec<PathBuf>) {
     }
 }
 
-/// Returns the pinned SQLite shell, when it has been built.
-fn sqlite_shell() -> Option<PathBuf> {
-    let path = repository()
-        .join(".sqlite-ref/3.53.4/shell")
-        .join(format!("sqlite3{}", std::env::consts::EXE_SUFFIX));
-    path.is_file().then_some(path)
-}
-
 /// An index of the repository's own prose migrates, and every check passes.
 #[test]
 fn a_release_sized_index_migrates_and_every_check_passes() {
@@ -310,7 +302,6 @@ fn a_release_sized_index_migrates_and_every_check_passes() {
     let before = tree_digest(&source_dir);
 
     let mut plan = Plan::new(&source_dir, root.join("corpus.db"));
-    plan.sqlite = sqlite_shell();
     let outcome = migrate(&plan).expect("the migration runs");
 
     let failed: Vec<String> = outcome

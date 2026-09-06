@@ -98,9 +98,9 @@ fn vector(ordinal: usize) -> Vec<f32> {
 fn open_sql(root: &Path, dims: usize) -> SqlIndex {
     let path = root.join("corpus.db");
     {
-        let database = inillucent::Database::open(&path).expect("the database opens");
-        let connection = database.connect().expect("it connects");
-        copy::create_schema(&connection, dims).expect("the schema builds");
+        let database =
+            inillucent_engine::connect::Database::open(&path).expect("the database opens");
+        copy::create_schema(&database.connect(), dims).expect("the schema builds");
     }
     SqlIndex::open(&path, copy::SEARCH_TABLE).expect("the search table opens")
 }

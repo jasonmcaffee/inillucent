@@ -269,24 +269,25 @@ fn a_modules_rowid_and_rank_are_answered() {
     ] {
         pair.answers_agree(probe);
     }
-    // **A rowid off a virtual table is refused, and refusing is the point.**
-    // A materialised virtual scan hands the pipeline the module's declared
-    // columns and nothing else, so there is no slot a rowid could come from;
-    // the plan says so rather than answering NULL. It predates this phase - the
-    // same message is raised by the same line at the commit before it - and it
-    // is asserted here because the column mask above is exactly the kind of
-    // change that could turn a refusal into a wrong answer without anyone
-    // noticing.
-    for refused in [
-        "SELECT rowid FROM documents WHERE documents MATCH 'lorem'",
-        "SELECT rowid, title FROM documents WHERE documents MATCH 'lorem'",
+    // **A rowid off a virtual table used to be refused, and now it answers.**
+    // A materialised virtual scan handed the pipeline the module's declared
+    // columns and nothing else, so there was no slot a rowid could come from
+    // and the plan said so rather than answering NULL. That refusal was
+    // asserted here, deliberately, because turning it into a *wrong* answer was
+    // the failure worth guarding against.
+    //
+    // It is answered now: the module has always had the value - `rowid` is on
+    // the `VirtualCursor` trait - and a materialised scan carries it beside the
+    // columns when the query reads one. So the guard becomes the stronger
+    // thing it was standing in for: the answer is compared against SQLite's.
+    // `SELECT rowid FROM t WHERE t MATCH ...` is the shape every search adapter
+    // is written in, which is how the gap was found.
+    for probe in [
+        "SELECT rowid FROM documents WHERE documents MATCH 'lorem' ORDER BY rowid",
+        "SELECT rowid, title FROM documents WHERE documents MATCH 'lorem' ORDER BY rowid",
         "SELECT title FROM documents WHERE documents MATCH 'lorem' ORDER BY rowid",
     ] {
-        let answer = pair.engine.execute_any(refused, &Params::new());
-        assert!(
-            answer.is_err(),
-            "{refused}: answered instead of refusing, which means a rowid came from somewhere"
-        );
+        pair.answers_agree(probe);
     }
 }
 

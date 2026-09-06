@@ -10,7 +10,6 @@ inillucent-base = { workspace = true }
 inillucent-value = { workspace = true }
 inillucent-core = { workspace = true }
 inillucent-search = { workspace = true }
-inillucent = { workspace = true }
 inillucent-engine = { workspace = true }
 inillucent-sqlite-reader = { workspace = true }
 inillucent-tree = { workspace = true }

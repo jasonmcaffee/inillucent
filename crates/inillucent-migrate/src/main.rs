@@ -9,7 +9,7 @@
 //! Two sources, named by which one is given:
 //!
 //! ```text
-//! inillucent-migrate <source-index-dir> <destination.db> [--no-publish] [--sqlite <path>]
+//! inillucent-migrate <source-index-dir> <destination.db> [--no-publish]
 //! inillucent-migrate --sqlite-file <source.db> <destination.rdb>
 //! ```
 //!
@@ -39,7 +39,7 @@ fn main() -> ExitCode {
     // as the source and the tool refused to overwrite the file it had just been
     // asked to read. Skipping the word after a flag that takes one is what
     // makes the two forms parse the same way.
-    let takes_a_value = ["--sqlite", "--sqlite-file"];
+    let takes_a_value = ["--sqlite-file"];
     let mut positional: Vec<&String> = Vec::new();
     let mut skip = false;
     for argument in &arguments {
@@ -67,13 +67,12 @@ fn main() -> ExitCode {
     let (Some(source), Some(destination)) = (positional.first(), positional.get(1)) else {
         eprintln!(
             "usage: inillucent-migrate <source-index-dir> <destination.db> [--no-publish] \
-             [--sqlite <path>]"
+"
         );
         return ExitCode::FAILURE;
     };
     let mut plan = Plan::new(source, destination);
     plan.publish = !arguments.iter().any(|argument| argument == "--no-publish");
-    plan.sqlite = flag(&arguments, "--sqlite");
     match migrate(&plan) {
         Ok(outcome) => {
             println!(

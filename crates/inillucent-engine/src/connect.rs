@@ -112,7 +112,7 @@ pub struct Connection<'d> {
     database: &'d Database,
 }
 
-impl Connection<'_> {
+impl<'d> Connection<'d> {
     /// Runs one or more statements for their effect.
     ///
     /// @param sql - the statements, separated by semicolons
@@ -148,7 +148,7 @@ impl Connection<'_> {
     /// Compiles a statement to be bound and stepped.
     ///
     /// @param sql - the statement
-    pub fn prepare(&self, sql: &str) -> DbResult<Statement<'_>> {
+    pub fn prepare(&self, sql: &str) -> DbResult<Statement<'d>> {
         let compiled = self.database.engine.borrow().prepare_statement(sql)?;
         Ok(Statement {
             database: self.database,

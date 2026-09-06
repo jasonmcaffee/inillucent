@@ -23,7 +23,8 @@
 //! legacy default is join to `document` and drop the deleted ones, and there is
 //! a check for exactly that below.
 
-use inillucent::Connection;
+use inillucent_engine::connect::Connection;
+use inillucent_tree::datum::OwnedDatum;
 use inillucent_base::hash::Sha256;
 use inillucent_core::filter::Filter;
 use inillucent_core::index::{Branches, Index};
@@ -109,17 +110,17 @@ impl Check {
 pub fn run(source: &Index, sql: &mut SqlIndex) -> Vec<Check> {
     let store = source.store();
     let mut checks = Vec::new();
-    checks.extend(counts(sql.connection(), store));
-    checks.push(chunk_digest(sql.connection(), store));
-    checks.push(document_digest(sql.connection(), store));
-    checks.push(tombstones(sql.connection(), store));
-    checks.push(dictionaries(sql.connection(), store));
+    checks.extend(counts(&sql.connection(), store));
+    checks.push(chunk_digest(&sql.connection(), store));
+    checks.push(document_digest(&sql.connection(), store));
+    checks.push(tombstones(&sql.connection(), store));
+    checks.push(dictionaries(&sql.connection(), store));
     checks.extend(retrieval(source, sql));
     checks
 }
 
 /// Compares the row counts of every copied table.
-fn counts(connection: &Connection, store: &Store) -> Vec<Check> {
+fn counts(connection: &Connection<'_>, store: &Store) -> Vec<Check> {
     let mut labels = 0u64;
     let mut attributes = 0u64;
     let mut flags = 0u64;
@@ -171,7 +172,7 @@ fn counts(connection: &Connection, store: &Store) -> Vec<Check> {
 }
 
 /// Compares an ordered digest of every chunk.
-fn chunk_digest(connection: &Connection, store: &Store) -> Check {
+fn chunk_digest(connection: &Connection<'_>, store: &Store) -> Check {
     let mut hasher = Sha256::new();
     for ordinal in 0..store.n_chunks() {
         let Some(chunk) = store.chunks.get(ordinal) else {
@@ -202,7 +203,7 @@ fn chunk_digest(connection: &Connection, store: &Store) -> Check {
 }
 
 /// Compares an ordered digest of every document.
-fn document_digest(connection: &Connection, store: &Store) -> Check {
+fn document_digest(connection: &Connection<'_>, store: &Store) -> Check {
     let mut hasher = Sha256::new();
     for ordinal in 0..store.n_documents() {
         let Some(document) = store.documents.get(ordinal) else {
@@ -253,7 +254,7 @@ fn document_digest(connection: &Connection, store: &Store) -> Check {
 }
 
 /// Compares the set of tombstoned documents.
-fn tombstones(connection: &Connection, store: &Store) -> Check {
+fn tombstones(connection: &Connection<'_>, store: &Store) -> Check {
     let wanted: Vec<i64> = (0..store.n_documents())
         .filter(|ordinal| {
             store
@@ -284,7 +285,7 @@ fn tombstones(connection: &Connection, store: &Store) -> Check {
 }
 
 /// Compares the values every dictionary interned, as they come back as text.
-fn dictionaries(connection: &Connection, store: &Store) -> Check {
+fn dictionaries(connection: &Connection<'_>, store: &Store) -> Check {
     let mut problems = Vec::new();
     let mut referenced_sources: Vec<String> = Vec::new();
     for ordinal in 0..store.n_documents() {
@@ -376,12 +377,12 @@ fn retrieval(source: &Index, sql: &mut SqlIndex) -> Vec<Check> {
     // truncates, so the destination has to be asked for the same depth or the
     // two would be capping different lists.
     let wide = source.config().candidates.max(PROBE_K);
-    let documents = match chunk_documents(sql.connection()) {
+    let documents = match chunk_documents(&sql.connection()) {
         Ok(map) => map,
         Err(failure) => return vec![Check::fail("retrieval", failure)],
     };
     let deleted = match integers(
-        sql.connection(),
+        &sql.connection(),
         "SELECT id FROM chunk WHERE document IN (SELECT id FROM document WHERE deleted = 1) \
          ORDER BY id",
     ) {
@@ -788,7 +789,7 @@ fn ranked(
             limit,
             recall: None,
         })
-        .map_err(|error| error.message().to_string())?;
+        .map_err(|error| error.detail().unwrap_or_else(|| error.message()).to_string())?;
     Ok(hits
         .iter()
         .filter_map(|hit| hit.id.parse::<i64>().ok())
@@ -817,7 +818,7 @@ fn ranked_hits(
 }
 
 /// Returns which document each chunk belongs to, read once from the copy.
-fn chunk_documents(connection: &Connection) -> Result<Vec<(i64, i64)>, String> {
+fn chunk_documents(connection: &Connection<'_>) -> Result<Vec<(i64, i64)>, String> {
     let mut statement = connection
         .prepare("SELECT id, document FROM chunk ORDER BY id")
         .map_err(|error| error.message().to_string())?;
@@ -828,8 +829,8 @@ fn chunk_documents(connection: &Connection) -> Result<Vec<(i64, i64)>, String> {
     {
         let row = statement.row();
         if let (Some(chunk), Some(document)) = (
-            row.first().and_then(inillucent::Value::as_integer),
-            row.get(1).and_then(inillucent::Value::as_integer),
+            row.first().and_then(as_integer),
+            row.get(1).and_then(as_integer),
         ) {
             rows.push((chunk, document));
         }
@@ -957,7 +958,7 @@ fn optional(hasher: &mut Sha256, value: Option<&str>) {
 }
 
 /// Returns one integer from a query.
-fn scalar(connection: &Connection, sql: &str) -> Result<i64, String> {
+fn scalar(connection: &Connection<'_>, sql: &str) -> Result<i64, String> {
     let mut statement = connection
         .prepare(sql)
         .map_err(|error| format!("{sql}: {}", error.message()))?;
@@ -970,12 +971,12 @@ fn scalar(connection: &Connection, sql: &str) -> Result<i64, String> {
     Ok(statement
         .row()
         .first()
-        .and_then(inillucent::Value::as_integer)
+        .and_then(as_integer)
         .unwrap_or(0))
 }
 
 /// Returns the first column of every row as integers.
-fn integers(connection: &Connection, sql: &str) -> Result<Vec<i64>, String> {
+fn integers(connection: &Connection<'_>, sql: &str) -> Result<Vec<i64>, String> {
     let mut statement = connection
         .prepare(sql)
         .map_err(|error| format!("{sql}: {}", error.message()))?;
@@ -987,7 +988,7 @@ fn integers(connection: &Connection, sql: &str) -> Result<Vec<i64>, String> {
         if let Some(value) = statement
             .row()
             .first()
-            .and_then(inillucent::Value::as_integer)
+            .and_then(as_integer)
         {
             rows.push(value);
         }
@@ -996,7 +997,7 @@ fn integers(connection: &Connection, sql: &str) -> Result<Vec<i64>, String> {
 }
 
 /// Returns the first column of every row as text.
-fn strings(connection: &Connection, sql: &str) -> Result<Vec<String>, String> {
+fn strings(connection: &Connection<'_>, sql: &str) -> Result<Vec<String>, String> {
     let mut statement = connection
         .prepare(sql)
         .map_err(|error| format!("{sql}: {}", error.message()))?;
@@ -1005,8 +1006,8 @@ fn strings(connection: &Connection, sql: &str) -> Result<Vec<String>, String> {
         .step()
         .map_err(|error| format!("{sql}: {}", error.message()))?
     {
-        if let Some(inillucent::Value::Text(value)) = statement.row().first() {
-            rows.push(String::from_utf8_lossy(&value.utf8_bytes()).into_owned());
+        if let Some(OwnedDatum::Text(value)) = statement.row().first() {
+            rows.push(String::from_utf8_lossy(value).into_owned());
         }
     }
     Ok(rows)
@@ -1034,5 +1035,15 @@ mod tests {
             Check::pass("counts.chunk", "12 rows").line(),
             "counts.chunk ok 12 rows"
         );
+    }
+}
+
+/// Returns a datum's integer value, when it holds one.
+///
+/// @param value - the datum
+fn as_integer(value: &OwnedDatum) -> Option<i64> {
+    match value {
+        OwnedDatum::Int(number) => Some(*number),
+        _ => None,
     }
 }
