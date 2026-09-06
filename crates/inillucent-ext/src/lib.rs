@@ -29,7 +29,17 @@
     )
 )]
 
-pub mod json;
+/// The JSON built-ins, which now live in `inillucent-scalar`.
+///
+/// **Moved rather than copied.** The TDD's Phase 4 puts the JSON functions on
+/// the new executor's expression path, and `inillucent-exec` sits *below* this
+/// crate - it never resolves a name, so it cannot depend on the crate that
+/// registers modules. The same move `inillucent-scalar` was created for in Phase 2
+/// applies unchanged here: one implementation of `json_extract`, in a crate both
+/// executors depend on, rather than two that agree until the next fix.
+///
+/// Every path a caller wrote against `inillucent_ext::json` still resolves.
+pub use inillucent_scalar::json;
 pub mod registry;
 pub mod shadow;
 pub mod vtab;

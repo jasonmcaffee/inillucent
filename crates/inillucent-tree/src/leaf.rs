@@ -1624,30 +1624,59 @@ impl LeafBuilder {
     /// @param fill - the fraction of the page to fill, 0.0..=1.0
     pub fn pack(&self, rows: &[Vec<Datum<'_>>], fill: f64) -> DbResult<Packed> {
         let budget = ((self.page_size as f64) * fill.clamp(0.05, 1.0)) as usize;
-        // Binary search for the largest prefix that fits: the encoded size is
-        // monotone in the row count, so this is log(n) encodes rather than n.
-        let mut low = 0usize;
-        let mut high = rows.len();
-        while low < high {
-            let middle = low.saturating_add(high.saturating_sub(low).saturating_add(1) / 2);
-            match self.encoded_size(rows.get(..middle).unwrap_or(&[]))? {
-                Some(size) if size <= budget => low = middle,
-                _ => high = middle.saturating_sub(1),
+        // **One forward pass over the rows it places, not a binary search over
+        // the rows it does not.**
+        //
+        // The size of a prefix is a closed form in the count plus a prefix sum
+        // over the rows' heap costs, so a running total answers "does the next
+        // row still fit" in the cost of that one row. The version this replaces
+        // bisected `0..rows.len()` and re-measured a whole prefix per probe -
+        // correct, and quadratic in the wrong argument: a bulk build hands the
+        // *entire remaining input* to every pack, so filling the first leaf of
+        // a hundred thousand rows measured about fifty thousand rows seventeen
+        // times to place a hundred and forty-five.
+        //
+        // It cost 96 ms of a 155 ms `CREATE INDEX` and it was not the first
+        // guess. The first guess was the write-ahead log, which a measurement
+        // with the log switched off showed costs nothing at all.
+        let mut heap = 0usize;
+        let mut placed = 0usize;
+        for row in rows {
+            let mut row_heap = 0usize;
+            for (index, column) in self.columns.iter().enumerate() {
+                let value = row.get(index).copied().unwrap_or(Datum::Null);
+                row_heap = row_heap.saturating_add(heap_cost(column.physical, &value));
             }
+            let next = placed.saturating_add(1);
+            let size = self
+                .fixed_size(next)
+                .saturating_add(heap.saturating_add(row_heap));
+            if size > budget {
+                break;
+            }
+            heap = heap.saturating_add(row_heap);
+            placed = next;
         }
-        if low == 0 {
+        if placed == 0 {
             return Ok(Packed::RowTooLarge);
         }
-        let page = self.encode(rows.get(..low).unwrap_or(&[]))?;
-        Ok(Packed::Filled { page, rows: low })
+        let page = self.encode(rows.get(..placed).unwrap_or(&[]))?;
+        Ok(Packed::Filled {
+            page,
+            rows: placed,
+        })
     }
 
-    /// Returns the bytes the given rows would occupy, or `None` if they cannot
-    /// be laid out at all.
+    /// Returns the bytes a leaf of `count` rows spends before its heap.
     ///
-    /// @param rows - the rows to measure
-    fn encoded_size(&self, rows: &[Vec<Datum<'_>>]) -> DbResult<Option<usize>> {
-        let count = rows.len();
+    /// The header, the directory, and each mini-column's class array and inline
+    /// slots. It depends on the row count and not on the values, which is what
+    /// makes the size of a prefix a closed form plus a prefix sum - and that is
+    /// what lets [`LeafBuilder::pack`] answer "does one more row fit" in the
+    /// cost of one row.
+    ///
+    /// @param count - how many rows
+    fn fixed_size(&self, count: usize) -> usize {
         let mut fixed = leaf_header::DIRECTORY
             .saturating_add(self.columns.len().saturating_mul(DIRECTORY_ENTRY));
         for column in &self.columns {
@@ -1659,6 +1688,15 @@ impl LeafBuilder {
             // an `Any` array of an odd row count is not.
             fixed = align8(fixed);
         }
+        fixed
+    }
+
+    /// Returns the bytes the given rows would occupy, or `None` if they cannot
+    /// be laid out at all.
+    ///
+    /// @param rows - the rows to measure
+    fn encoded_size(&self, rows: &[Vec<Datum<'_>>]) -> DbResult<Option<usize>> {
+        let fixed = self.fixed_size(rows.len());
         let mut heap = 0usize;
         for row in rows {
             for (index, column) in self.columns.iter().enumerate() {

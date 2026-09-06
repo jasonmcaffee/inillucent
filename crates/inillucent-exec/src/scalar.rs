@@ -31,9 +31,9 @@
 
 use inillucent_base::error::misuse;
 use inillucent_base::DbResult;
-use inillucent_scalar::{builtin, datetime, eval, mathfn, pattern};
+use inillucent_scalar::{builtin, datetime, eval, json, mathfn, pattern};
 use inillucent_sql::ast::{BinaryOp, UnaryOp};
-use inillucent_sql::function::{MathFunc, ScalarFunc, TimeFunc};
+use inillucent_sql::function::{JsonFunc, MathFunc, ScalarFunc, TimeFunc};
 use inillucent_tree::datum::{Datum, OwnedDatum};
 use inillucent_value::affinity::Affinity;
 use inillucent_value::collation::Collation;
@@ -114,6 +114,178 @@ impl Eval for ScalarCall {
         let answer = builtin::call(self.func, &values, self.collation, ENCODING);
         Ok(Computed::Owned(from_value(answer)))
     }
+}
+
+/// A call to one of the JSON built-ins.
+///
+/// **The document is parsed once and kept**, which is the TDD's Phase 4 line
+/// about JSON "over a binary form, parsed once rather than per call". The cache
+/// is keyed by the first argument's bytes, because that is the document every
+/// one of these functions reads and it is the argument that is constant in the
+/// shapes that matter: a `WHERE json_extract(body, '$.k') = ?` over a scan reads
+/// a different document per row and gains nothing, while
+/// `SELECT json_extract('{...}', '$.b.c')` reads one document however many times
+/// it is called.
+///
+/// The cached form is the **JSONB blob**, not the parsed tree. Two reasons, and
+/// the second is the load-bearing one: a blob is what `jsonb()` hands an
+/// application and what a column holds, so caching it means the cached path and
+/// the stored path are the same path; and `json::call` takes values, so a cache
+/// of trees would need a second entry point into the function set that could
+/// disagree with the first.
+///
+/// The cache is one entry deep. A second entry would need an eviction policy and
+/// a hash, to answer a question - "is this the same document as last time" - that
+/// one comparison answers for every shape this is for.
+///
+/// Behind a `Mutex` rather than a `RefCell` because an `Eval` is `Sync`: the
+/// pipeline is single-threaded today and the trait does not promise it will stay
+/// that way. An uncontended lock is tens of nanoseconds against a parse of
+/// microseconds, and it is taken only on the path that would otherwise parse.
+///
+/// ## Why a nested JSON call is not an ordinary argument
+///
+/// A JSON function's answer carries a **subtype**: whether the value *is* JSON
+/// or merely looks like it. `json_object('k', json_extract(body, '$.b'))` has to
+/// answer an object nested inside an object, and it can only do that if it is
+/// told its second argument is a document rather than a string that happens to
+/// spell one. Told nothing, it quotes the string - which is what this did until
+/// the differential probe asked it.
+///
+/// The subtype is a runtime fact: `json_extract` marks its answer only when what
+/// it extracted is a container. So it cannot be settled by looking at the tree,
+/// and the JSON subtree evaluates *itself* - a nested call is held as a
+/// `JsonCall` rather than as a `dyn Eval`, and the mark travels with the value
+/// to whichever call consumes it. Outside the subtree the mark is gone, which is
+/// correct: a `Computed` has nowhere to put one, and a value that leaves the
+/// JSON functions is an ordinary SQL value.
+pub struct JsonCall {
+    /// Which function.
+    func: JsonFunc,
+    /// The compiled arguments.
+    arguments: Vec<JsonOperand>,
+    /// The last document seen, and its binary form.
+    cached: std::sync::Mutex<Option<(Vec<u8>, Vec<u8>)>>,
+}
+
+/// One argument of a JSON call.
+enum JsonOperand {
+    /// Another JSON call, whose answer carries its own subtype.
+    Nested(Box<JsonCall>),
+    /// Any other expression, whose answer is a plain SQL value.
+    Plain(Box<dyn Eval>),
+}
+
+impl JsonCall {
+    /// Returns a call over operands that may themselves be JSON calls.
+    ///
+    /// @param func - which JSON function
+    /// @param arguments - the operands, in order
+    fn over(func: JsonFunc, arguments: Vec<JsonOperand>) -> JsonCall {
+        JsonCall {
+            func,
+            arguments,
+            cached: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Returns the document argument as JSONB, parsing it only if it is new.
+    ///
+    /// `None` when there is nothing to cache - a NULL document, a number, or a
+    /// document that is already a blob, which is JSONB and needs no parse.
+    ///
+    /// @param first - the first argument's value
+    fn binary(&self, first: &Value<'static>) -> Option<Value<'static>> {
+        let Value::Text(text) = first else {
+            return None;
+        };
+        let source = text.utf8_bytes().into_owned();
+        if let Ok(held) = self.cached.lock() {
+            if let Some((seen, blob)) = held.as_ref() {
+                if *seen == source {
+                    return Value::owned_blob(blob).ok();
+                }
+            }
+        }
+        let node = json::document(&json::Argument::plain(first)).ok()??;
+        let mut blob = Vec::new();
+        json::binary::encode(&node, &mut blob);
+        let answer = Value::owned_blob(&blob).ok()?;
+        if let Ok(mut held) = self.cached.lock() {
+            *held = Some((source, blob));
+        }
+        Some(answer)
+    }
+
+    /// Evaluates the call, keeping the subtype its answer carries.
+    ///
+    /// @param batch - the batch being evaluated
+    /// @param nth - the position among the batch's live rows
+    fn answer(&self, batch: &Batch<'_>, nth: usize) -> DbResult<json::Answer> {
+        let mut values: Vec<Value<'static>> = Vec::with_capacity(self.arguments.len());
+        let mut marks: Vec<bool> = Vec::with_capacity(self.arguments.len());
+        for operand in &self.arguments {
+            match operand {
+                JsonOperand::Nested(call) => {
+                    let answer = call.answer(batch, nth)?;
+                    values.push(answer.value);
+                    marks.push(answer.json);
+                }
+                JsonOperand::Plain(eval) => {
+                    values.push(to_value(eval.value(batch, nth)?.get()));
+                    marks.push(false);
+                }
+            }
+        }
+        // Only the *document* is cached, and only when it arrived as unmarked
+        // text. A later argument is read as a value rather than as a document,
+        // so swapping one of those for a blob would change the answer.
+        if marks.first() == Some(&false) {
+            let replacement = values.first().and_then(|first| self.binary(first));
+            if let (Some(blob), Some(slot)) = (replacement, values.first_mut()) {
+                *slot = blob;
+            }
+        }
+        let arguments: Vec<json::Argument<'_>> = values
+            .iter()
+            .zip(marks.iter())
+            .map(|(value, json)| json::Argument { value, json: *json })
+            .collect();
+        json::call(self.func, &arguments)
+    }
+}
+
+impl Eval for JsonCall {
+    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
+        Ok(Computed::Owned(from_value(self.answer(batch, nth)?.value)))
+    }
+}
+
+/// Compiles one JSON call and its arguments, keeping the nesting.
+///
+/// The recursion is what carries the subtype: an argument that is itself a JSON
+/// call is compiled as one rather than as a `dyn Eval`, so its answer's mark
+/// reaches the call above it.
+///
+/// @param func - which JSON function
+/// @param arguments - the argument expressions
+/// @param types - the static type of each input column
+pub fn compile_json(
+    func: JsonFunc,
+    arguments: &[crate::expr::Expr],
+    types: &[crate::expr::StaticType],
+) -> DbResult<JsonCall> {
+    let mut operands = Vec::with_capacity(arguments.len());
+    for argument in arguments {
+        operands.push(match argument {
+            crate::expr::Expr::Json {
+                func: inner,
+                arguments: nested,
+            } => JsonOperand::Nested(Box::new(compile_json(*inner, nested, types)?)),
+            other => JsonOperand::Plain(crate::expr::compile(other, types)?),
+        });
+    }
+    Ok(JsonCall::over(func, operands))
 }
 
 /// A call to one of the math functions.

@@ -30,7 +30,7 @@
 
 use inillucent_base::DbResult;
 use inillucent_sql::ast::{BinaryOp, UnaryOp};
-use inillucent_sql::function::{MathFunc, ScalarFunc, TimeFunc};
+use inillucent_sql::function::{JsonFunc, MathFunc, ScalarFunc, TimeFunc};
 use inillucent_tree::datum::{Datum, OwnedDatum};
 use inillucent_value::affinity::{self, Affinity};
 use inillucent_value::collation::Collation;
@@ -218,6 +218,19 @@ pub enum Expr {
         left: Box<Expr>,
         /// The right operand.
         right: Box<Expr>,
+    },
+    /// A call to one of the JSON built-ins, or `->` / `->>`.
+    ///
+    /// Its own variant rather than a `Call`, for the reason `JsonFunc` is its
+    /// own enum in the binder: a JSON function's answer carries a *subtype* -
+    /// whether the value is JSON - and the plain function path has nowhere to
+    /// put one. The subtype decides whether `json_extract(json_object(...))`
+    /// re-parses its argument as text or reads it as a document.
+    Json {
+        /// Which function.
+        func: JsonFunc,
+        /// The arguments.
+        arguments: Vec<Expr>,
     },
     /// A unary operator.
     Unary {
@@ -466,6 +479,9 @@ pub fn compile(expr: &Expr, types: &[StaticType]) -> DbResult<Box<dyn Eval>> {
             arguments: compile_all(arguments, types)?,
             collation: *collation,
         }),
+        Expr::Json { func, arguments } => {
+            Box::new(crate::scalar::compile_json(*func, arguments, types)?)
+        }
         Expr::Math { func, arguments } => Box::new(crate::scalar::MathCall {
             func: *func,
             arguments: compile_all(arguments, types)?,
@@ -620,6 +636,7 @@ pub fn static_type(expr: &Expr, types: &[StaticType]) -> StaticType {
         // compiler cannot check. `Unknown` costs a generic node; a wrong claim
         // costs a wrong answer.
         Expr::Call { .. }
+        | Expr::Json { .. }
         | Expr::Math { .. }
         | Expr::Time { .. }
         | Expr::General { .. }

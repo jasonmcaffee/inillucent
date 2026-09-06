@@ -605,6 +605,7 @@ mod tests {
                 root: PageId(4),
                 sql: b"CREATE TABLE people(id INTEGER PRIMARY KEY, team TEXT COLLATE NOCASE)"
                     .to_vec(),
+                stats: TreeStats::default(),
             },
             SchemaEntry {
                 kind: ObjectKind::Index,
@@ -612,6 +613,7 @@ mod tests {
                 table: b"people".to_vec(),
                 root: PageId(9),
                 sql: b"CREATE INDEX people_by_team ON people(team)".to_vec(),
+                stats: TreeStats::default(),
             },
             SchemaEntry {
                 kind: ObjectKind::Table,
@@ -619,6 +621,7 @@ mod tests {
                 table: SCHEMA_TABLE.to_vec(),
                 root: PageId(2),
                 sql: schema_create_sql().to_vec(),
+                stats: TreeStats::default(),
             },
         ]
     }
@@ -744,6 +747,7 @@ mod tests {
             table: b"gone".to_vec(),
             root: PageId(3),
             sql: b"CREATE INDEX orphan ON gone(x)".to_vec(),
+            stats: TreeStats::default(),
         }];
         let refusal = tables_from_catalog(&orphan, 0).expect_err("it is refused");
         assert!(
