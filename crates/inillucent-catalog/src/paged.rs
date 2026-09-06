@@ -111,6 +111,23 @@ pub struct SchemaEntry {
     pub root: PageId,
     /// The `CREATE` text.
     pub sql: Vec<u8>,
+    /// The identifier this object's tree is known by, in the log and here.
+    ///
+    /// **Persisted, because the log refers to it and the log outlives the
+    /// process that wrote it.** Every logical row record carries
+    /// `tree: self.tree_id()`, and a `tree_id` was this process's own
+    /// bookkeeping: the import numbered trees by the *source* file's SQLite
+    /// root pages, DDL numbered them from a counter that restarted at every
+    /// open, and a reader that opened the file numbered them again in catalog
+    /// order. Three numberings, none of them in the file.
+    ///
+    /// That was harmless for exactly as long as nothing durable referred to
+    /// one. The write-ahead log does, so recovery would have handed a row
+    /// record to whichever tree happened to hold the writer's number in the
+    /// reader's numbering - a wrong answer rather than a refusal. task-1834
+    /// put the identifier in the file so that every process derives the same
+    /// one from the same bytes.
+    pub tree_id: u64,
     /// What the tree's shape is, so opening the file does not have to walk it.
     pub stats: TreeStats,
 }
@@ -166,11 +183,15 @@ pub fn schema_layout() -> Vec<ColumnSpec> {
         ColumnSpec::new(PhysicalType::Int64),
         ColumnSpec::new(PhysicalType::Int64),
         ColumnSpec::new(PhysicalType::Int64),
+        // The tree identifier, which the log refers to. It is last so that the
+        // five columns `sqlite_schema` shows keep mapping onto tree columns one
+        // to five: a column added at the end is a column no query can name.
+        ColumnSpec::new(PhysicalType::Int64),
     ]
 }
 
 /// How many columns the catalog tree has, the rowid key included.
-pub const CATALOG_WIDTH: usize = 9;
+pub const CATALOG_WIDTH: usize = 10;
 
 /// How many of them `sqlite_schema` shows, the rowid key included.
 pub const SCHEMA_VIEW_WIDTH: usize = 6;
@@ -301,6 +322,7 @@ pub fn catalog_row(rowid: i64, entry: &SchemaEntry) -> Vec<OwnedDatum> {
         OwnedDatum::Int(entry.stats.first_leaf.0 as i64),
         OwnedDatum::Int(entry.stats.leaf_count as i64),
         OwnedDatum::Int(entry.stats.row_count as i64),
+        OwnedDatum::Int(entry.tree_id as i64),
     ]
 }
 
@@ -371,6 +393,7 @@ fn entry_of(row: &[Datum<'_>]) -> DbResult<SchemaEntry> {
             leaf_count: counter_at(row, 7)? as u64,
             row_count: counter_at(row, 8)? as u64,
         },
+        tree_id: counter_at(row, 9)? as u64,
     })
 }
 
@@ -606,6 +629,7 @@ mod tests {
                 sql: b"CREATE TABLE people(id INTEGER PRIMARY KEY, team TEXT COLLATE NOCASE)"
                     .to_vec(),
                 stats: TreeStats::default(),
+                tree_id: 101,
             },
             SchemaEntry {
                 kind: ObjectKind::Index,
@@ -614,6 +638,7 @@ mod tests {
                 root: PageId(9),
                 sql: b"CREATE INDEX people_by_team ON people(team)".to_vec(),
                 stats: TreeStats::default(),
+                tree_id: 102,
             },
             SchemaEntry {
                 kind: ObjectKind::Table,
@@ -622,6 +647,7 @@ mod tests {
                 root: PageId(2),
                 sql: schema_create_sql().to_vec(),
                 stats: TreeStats::default(),
+                tree_id: 103,
             },
         ]
     }
@@ -748,6 +774,7 @@ mod tests {
             root: PageId(3),
             sql: b"CREATE INDEX orphan ON gone(x)".to_vec(),
             stats: TreeStats::default(),
+            tree_id: 104,
         }];
         let refusal = tables_from_catalog(&orphan, 0).expect_err("it is refused");
         assert!(

@@ -521,6 +521,8 @@ impl ImportedDatabase {
                 root: inillucent_pool::PageId::NONE,
                 sql,
                 stats: Default::default(),
+                // Filled by `record` from the identifier it is given.
+                tree_id: 0,
             },
         )?;
         self.rebuild_tables()?;

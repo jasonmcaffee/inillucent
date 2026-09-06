@@ -240,6 +240,12 @@ impl ImportedDatabase {
         // The statistics come off the tree that was just built rather than from
         // the caller, so there is one place they can be wrong instead of four.
         entry.stats = self.tree_stats(root);
+        // And the identifier, for the same reason and from the same argument.
+        // The log refers to a tree by this number, so a caller that filled it in
+        // itself would be a fifth place it could disagree with the tree it
+        // describes - and a catalog naming the wrong tree would send recovery's
+        // row records somewhere else.
+        entry.tree_id = u64::from(root);
         let txn = self.current_txn();
         {
             let mut log = WalLog {
@@ -526,6 +532,8 @@ impl ImportedDatabase {
                 root: page,
                 sql,
                 stats: Default::default(),
+                // Filled by `record` from the identifier it is given.
+                tree_id: 0,
             },
         )?;
 
@@ -563,6 +571,8 @@ impl ImportedDatabase {
                     root: page,
                     sql: Vec::new(),
                     stats: Default::default(),
+                    // Filled by `record` from the identifier it is given.
+                    tree_id: 0,
                 },
             )?;
             self.covering.entry(root).or_default().push(index_root);
@@ -664,6 +674,8 @@ impl ImportedDatabase {
                 root: page,
                 sql,
                 stats: Default::default(),
+                // Filled by `record` from the identifier it is given.
+                tree_id: 0,
             },
         )?;
         self.covering.entry(owner.root).or_default().push(root);
@@ -816,6 +828,8 @@ impl ImportedDatabase {
                 root: PageId::NONE,
                 sql,
                 stats: Default::default(),
+                // Filled by `record` from the identifier it is given.
+                tree_id: 0,
             },
         )?;
         self.rebuild_tables()?;
