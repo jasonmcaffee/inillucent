@@ -122,7 +122,13 @@ impl<'t> FullScan<'t> {
     /// @param downstream - the head of the operator chain
     pub fn run(&self, pool: &Pool, downstream: &mut dyn Sink) -> DbResult<()> {
         self.tree.visit_leaves(pool, &mut |leaf| {
-            if leaf.row_count() == 0 {
+            // **The empty test is `has no live rows`, not `has no packed
+            // rows`.** A leaf built empty and then written to holds every one of
+            // its rows in the delta area with `row_count` still zero, which is
+            // exactly the shape a `CREATE TABLE` followed by an `INSERT`
+            // produces - and skipping it here made such a table read back as
+            // nothing at all while the rows were in the file.
+            if leaf.row_count() == 0 && !leaf.has_writes() {
                 return Ok(true);
             }
             // A leaf that has been written to is merged rather than read as

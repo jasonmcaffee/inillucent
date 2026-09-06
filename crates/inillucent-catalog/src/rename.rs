@@ -36,7 +36,16 @@ pub enum Rename {
 /// that the caller's re-parse then rejects, rather than a silent corruption.
 pub fn rewrite(sql: &[u8], kind: Rename, from: &[u8], to: &[u8]) -> DbResult<Vec<u8>> {
     let folded = from.to_ascii_lowercase();
-    let replacement = quote_if_needed(to);
+    // **A table is written quoted and a column is written as typed.** SQLite's
+    // `ALTER TABLE` substitutes `"%w"` for a new *table* name unconditionally,
+    // so `RENAME TO people` leaves `CREATE TABLE "people" (...)`; a new *column*
+    // name goes in as the author wrote it, so `RENAME COLUMN email TO address`
+    // leaves `address` bare. The two are compared against SQLite byte for byte,
+    // so the asymmetry is copied rather than tidied away.
+    let replacement = match kind {
+        Rename::Table => quoted(to),
+        Rename::Column => quote_if_needed(to),
+    };
     let mut edits: Vec<Span> = Vec::new();
     let mut lexer = Lexer::at(sql, 0);
     let mut previous: Option<Vec<u8>> = None;
@@ -143,11 +152,33 @@ fn unquoted(raw: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Returns a name quoted when it needs to be to survive a re-parse.
+/// Returns a slice with its leading and trailing ASCII whitespace removed.
 ///
-/// A new name that is a keyword, holds a space, or does not start with a letter
-/// has to be written quoted - otherwise the rewritten schema parses as
-/// something else, or does not parse at all.
+/// @param bytes - the slice
+fn trimmed(bytes: &[u8]) -> &[u8] {
+    let mut start = 0usize;
+    let mut end = bytes.len();
+    while bytes.get(start).is_some_and(u8::is_ascii_whitespace) {
+        start = start.saturating_add(1);
+    }
+    while end > start
+        && bytes
+            .get(end.saturating_sub(1))
+            .is_some_and(u8::is_ascii_whitespace)
+    {
+        end = end.saturating_sub(1);
+    }
+    bytes.get(start..end).unwrap_or(&[])
+}
+
+/// Returns a name quoted only when it needs to be to survive a re-parse.
+///
+/// A name that is a keyword, holds a space, or does not start with a letter has
+/// to be written quoted - otherwise the rewritten schema parses as something
+/// else, or does not parse at all. Anything else goes in bare, which is what
+/// SQLite writes for a renamed column.
+///
+/// @param name - the name to write
 pub fn quote_if_needed(name: &[u8]) -> Vec<u8> {
     let plain = name
         .first()
@@ -159,6 +190,25 @@ pub fn quote_if_needed(name: &[u8]) -> Vec<u8> {
     if plain {
         return name.to_vec();
     }
+    quoted(name)
+}
+
+/// Returns a name written as a quoted identifier.
+///
+/// **Always quoted, even when the name would parse bare.** SQLite's own
+/// `ALTER TABLE` substitutes `"%w"` for the new name without asking whether it
+/// needs the quotes, so `ALTER TABLE t RENAME TO people` leaves
+/// `CREATE TABLE "people" (...)` in `sqlite_schema`. Quoting only when the name
+/// demands it produces text that means the same thing and is not the same
+/// bytes - and the stored `CREATE` text is compared byte for byte against
+/// SQLite's, because it is what a reader re-parses to learn what the table is.
+///
+/// The quoting rules the old version applied are still what makes the *escape*
+/// correct: a keyword, a space, a leading digit or an embedded quote all have
+/// to survive the re-parse, and doubling an interior `"` is what does it.
+///
+/// @param name - the name to write
+pub fn quoted(name: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(name.len().saturating_add(2));
     out.push(b'"');
     for byte in name {
@@ -206,6 +256,12 @@ pub fn add_column(sql: &[u8], definition: &[u8]) -> DbResult<Vec<u8>> {
     let Some(at) = column_list_end(sql) else {
         return Err(error::corrupt("a CREATE TABLE with no column list"));
     };
+    // **Trimmed, because the separator is written here.** The definition is a
+    // slice of the statement's own source and the span the binder recorded
+    // starts at the whitespace after `ADD COLUMN`, so appending it after a
+    // literal `", "` left `..., INTEGER,  joined TEXT` - two spaces where
+    // SQLite writes one, and the stored text is compared byte for byte.
+    let definition = trimmed(definition);
     let mut out = Vec::with_capacity(sql.len().saturating_add(definition.len()).saturating_add(2));
     out.extend_from_slice(sql.get(..at).unwrap_or(&[]));
     out.extend_from_slice(b", ");
@@ -333,7 +389,8 @@ mod tests {
         let out = rewrite(sql, Rename::Table, b"t", b"u").expect("it rewrites");
         assert_eq!(
             String::from_utf8_lossy(&out),
-            "CREATE TABLE u (t TEXT DEFAULT 't', ts INTEGER, note TEXT DEFAULT 'about t')"
+            // Quoted, because SQLite quotes a renamed table unconditionally.
+            "CREATE TABLE \"u\" (t TEXT DEFAULT 't', ts INTEGER, note TEXT DEFAULT 'about t')"
         );
     }
 
@@ -345,7 +402,7 @@ mod tests {
         let out = rewrite(sql, Rename::Table, b"t", b"u").expect("it rewrites");
         assert_eq!(
             String::from_utf8_lossy(&out),
-            "CREATE INDEX t_name ON u (name)"
+            "CREATE INDEX t_name ON \"u\" (name)"
         );
     }
 
@@ -353,10 +410,12 @@ mod tests {
     /// would parse as the keyword.
     #[test]
     fn a_keyword_name_is_quoted() {
-        assert_eq!(quote_if_needed(b"order"), b"\"order\"".to_vec());
-        assert_eq!(quote_if_needed(b"two words"), b"\"two words\"".to_vec());
-        assert_eq!(quote_if_needed(b"plain"), b"plain".to_vec());
-        assert_eq!(quote_if_needed(b"a\"b"), b"\"a\"\"b\"".to_vec());
+        assert_eq!(quoted(b"order"), b"\"order\"".to_vec());
+        assert_eq!(quoted(b"two words"), b"\"two words\"".to_vec());
+        // Quoted even when it would have parsed bare, which is what SQLite
+        // writes and what the stored text is compared against.
+        assert_eq!(quoted(b"plain"), b"\"plain\"".to_vec());
+        assert_eq!(quoted(b"a\"b"), b"\"a\"\"b\"".to_vec());
     }
 
     /// A column is added inside the list rather than after whatever closes the

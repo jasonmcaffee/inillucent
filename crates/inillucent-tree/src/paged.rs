@@ -136,6 +136,39 @@ impl KeyEncoding {
     }
 }
 
+/// Describes one bulk-built page in the log, then installs it.
+///
+/// Two records rather than one: the allocation and the contents are separate
+/// facts and recovery needs both. `AllocPage` is what stops a later allocation
+/// handing the same page out twice after a crash; `WritePage` is what puts the
+/// bytes back. The image is stamped with the write's LSN before it is
+/// installed, so the page-LSN rule holds for a bulk-built page exactly as it
+/// does for one a split wrote.
+///
+/// With no log the image is installed unstamped, which is the byte-for-byte
+/// behaviour the unlogged builder has always had.
+///
+/// @param log - where the records go, when there is one
+/// @param database - the file the page is installed in
+/// @param id - the page, already allocated
+/// @param image - the page bytes, stamped in place with the LSN
+fn log_built_page(
+    log: &mut Option<&mut dyn crate::write::TreeLog>,
+    database: &mut Database,
+    id: PageId,
+    image: &mut [u8],
+) -> DbResult<()> {
+    if let Some(log) = log.as_mut() {
+        log.log(inillucent_wal::record::Body::AllocPage { page: id.0 })?;
+        let lsn = log.log(inillucent_wal::record::Body::WritePage {
+            page: id.0,
+            image,
+        })?;
+        page::write_u64(image, page::header::LSN, lsn)?;
+    }
+    database.install(id, image)
+}
+
 /// Returns the collation of each key column.
 ///
 /// @param columns - the column directory
@@ -314,6 +347,43 @@ impl PagedTree {
         key_columns: usize,
         rows: &[Vec<Datum<'_>>],
     ) -> DbResult<PagedTree> {
+        PagedTree::bulk_build_logged(database, None, tree_id, columns, key_columns, rows)
+    }
+
+    /// Builds a tree bottom-up, describing every page in the log first.
+    ///
+    /// The same builder as [`PagedTree::bulk_build`], with the write-ahead rule
+    /// applied to it: every page it allocates is an `AllocPage` record and every
+    /// page it packs is a `WritePage` record carrying the whole image, so redo
+    /// is a copy and a `CREATE INDEX` that crashed half-way is either wholly
+    /// there after recovery or wholly absent.
+    ///
+    /// A whole-image record per page is the right record here and a small one
+    /// would be wrong. The logical-redo argument that made a compaction
+    /// twenty-four bytes in Phase 3 relies on the page already being in the
+    /// state the operation started from; a bulk build's pages did not exist
+    /// before it, so there is no such state and the image *is* the instruction.
+    ///
+    /// `None` for the log is the import's case: it builds into a file nothing
+    /// has read, checkpoints it, and reopens it, so there is no window in which
+    /// a log would be consulted. Passing `None` writes the same bytes the
+    /// unlogged builder always wrote, LSN field included, which is what keeps
+    /// the import's byte-for-byte round-trip check meaningful.
+    ///
+    /// @param database - the file the pages are allocated and installed in
+    /// @param log - where the records go, when the build is inside a transaction
+    /// @param tree_id - the identifier stamped into every page
+    /// @param columns - the column directory, key columns first
+    /// @param key_columns - how many leading columns form the key
+    /// @param rows - the rows, already sorted by the key columns
+    pub fn bulk_build_logged(
+        database: &mut Database,
+        mut log: Option<&mut dyn crate::write::TreeLog>,
+        tree_id: u64,
+        columns: Vec<ColumnSpec>,
+        key_columns: usize,
+        rows: &[Vec<Datum<'_>>],
+    ) -> DbResult<PagedTree> {
         let page_size = database.page_size();
         let encoding = KeyEncoding::choose(&columns, key_columns);
         let collations = collations_of(&columns, key_columns);
@@ -365,7 +435,7 @@ impl PagedTree {
                 PageId::NONE
             };
             page::set_right(image, right)?;
-            database.install(id, image)?;
+            log_built_page(&mut log, database, id, image)?;
             leaves.push(id);
         }
 
@@ -403,9 +473,9 @@ impl PagedTree {
                     .iter()
                     .map(|key| key.as_slice())
                     .collect();
-                let image = interior.build(&group_separators, &group)?;
+                let mut image = interior.build(&group_separators, &group)?;
                 let id = database.allocate(1)?;
-                database.install(id, &image)?;
+                log_built_page(&mut log, database, id, &mut image)?;
                 parents.push(id);
                 parent_keys.push(child_keys.get(cursor).cloned().unwrap_or_default());
                 cursor = cursor.saturating_add(fit);
@@ -1161,11 +1231,29 @@ impl PagedTree {
             };
             let end = end.min(rows);
             if begin >= end {
-                // Nothing in this leaf. Two different reasons, and they have
-                // opposite answers: the lower bound skipped the whole leaf, so
-                // the run is further right; or the upper bound cut it short, so
-                // there is nothing further right.
-                return Ok(begin >= rows && end >= rows);
+                // **An empty span over a written leaf says nothing.** `begin`
+                // and `end` are partition points of the *sorted region*, and a
+                // leaf that has been written to holds live rows that are not in
+                // it - so a key inserted after the leaf was packed sorts past
+                // every packed key, `lower_bound` returns `rows`, and the leaf
+                // is skipped with the row still in it. `WHERE score = 99` came
+                // back empty after `UPDATE ... SET score = 99` while a scan of
+                // the same index listed the row.
+                //
+                // The visitor already knows what to do: every consumer of this
+                // walk re-derives its rows from `live_between` when the leaf has
+                // writes. It just has to be *called*.
+                if !leaf.has_writes() {
+                    // Nothing in this leaf. Two different reasons, and they have
+                    // opposite answers: the lower bound skipped the whole leaf,
+                    // so the run is further right; or the upper bound cut it
+                    // short, so there is nothing further right.
+                    return Ok(begin >= rows && end >= rows);
+                }
+                if !visit(leaf, begin, begin)? {
+                    return Ok(false);
+                }
+                return Ok(end >= rows);
             }
             if !visit(leaf, begin, end)? {
                 return Ok(false);
@@ -1252,6 +1340,12 @@ impl PagedTree {
         let rows = leaf.row_count();
         let (begin, end) = leaf.equal_run(key, scan_cap)?;
         if begin >= end {
+            // A written leaf is visited even with an empty *sorted* run, for
+            // the reason `visit_span` gives: the run is computed over the packed
+            // region and the live rows are not that set. The consumer merges.
+            if leaf.has_writes() && !visit(leaf, begin, begin)? {
+                return Ok(None);
+            }
             // Either the key sorts after everything here - so the run, if there
             // is one, starts in the next leaf - or it is simply not present and
             // everything after it is greater.
@@ -1302,7 +1396,7 @@ impl PagedTree {
             };
             first = false;
             let end = end.min(rows);
-            if end == 0 {
+            if end == 0 && !leaf.has_writes() {
                 return Ok(true);
             }
             visit(leaf, 0, end)
@@ -1628,9 +1722,19 @@ impl PagedTree {
         // been written to - so a clean tree pays one comparison against zero
         // per probe and nothing else, which is what keeps `point.rowid` where
         // task-1819 left it.
+        // **As many columns as the probe supplied, not as many as the key has.**
+        // A probe may be a *prefix*: an equality on the leading column of a
+        // two-column index is one value against a key of `(score, rowid)`, and
+        // the sorted search above compares exactly the columns it was given.
+        // Comparing `key_columns` here instead filled the missing positions with
+        // NULL and compared the delta row's rowid against it - so a row that had
+        // been written since the leaf was packed was never found, and
+        // `WHERE score = 99` came back empty after `UPDATE ... SET score = 99`
+        // while a scan of the same index showed the row.
+        let compared = probe.len().min(self.key_columns);
         for entry in 0..leaf.delta_count() {
             let mut matches = true;
-            for column in 0..self.key_columns {
+            for column in 0..compared {
                 let held = leaf.delta_value(entry, column)?;
                 let wanted = probe.get(column).copied().unwrap_or(Datum::Null);
                 if crate::types::compare_under(&held, &wanted, leaf.collation_of(column))
@@ -1739,6 +1843,42 @@ impl PagedTree {
         }
         self.check_subtree(pool, self.root, self.height)?;
         Ok(())
+    }
+
+    /// Returns every page the tree occupies, interior pages and leaves.
+    ///
+    /// For `DROP`, which gives them back to the free map. It walks the interior
+    /// levels rather than following the sibling chain, because the chain only
+    /// reaches the leaves and a dropped tree that left its interior pages behind
+    /// would leak a page per fanout for the life of the file.
+    ///
+    /// The walk is level-order from the root, and a page that appears twice -
+    /// which a corrupt file could produce - is returned once, because handing
+    /// the same page to the free map twice is worse than leaking it.
+    ///
+    /// @param pool - the buffer pool the file is open through
+    pub fn pages(&self, pool: &Pool) -> DbResult<Vec<PageId>> {
+        let mut seen: Vec<PageId> = Vec::new();
+        let mut frontier: Vec<PageId> = vec![self.root];
+        while let Some(page) = frontier.pop() {
+            if page.is_none() || seen.contains(&page) {
+                continue;
+            }
+            seen.push(page);
+            let image = {
+                let guard = pool.fetch(page)?;
+                guard.bytes().to_vec()
+            };
+            if page::kind_of(&image)? == PageKind::Leaf {
+                continue;
+            }
+            let interior = InteriorRef::parse(&image)?;
+            for child in 0..interior.children() {
+                let swip = interior.swip(child)?;
+                frontier.push(pool.page_of_swip(swip)?);
+            }
+        }
+        Ok(seen)
     }
 
     /// Checks one subtree's separators against its children's first keys.
