@@ -16,7 +16,8 @@
 
 use std::path::{Path, PathBuf};
 
-use inillucent::{Database, Value};
+use inillucent_compat::facade::Database;
+use inillucent_value::Value;
 use inillucent_compat::oracle::{Driver, Op, TaggedValue};
 use inillucent_compat::workspace_root;
 
@@ -176,7 +177,7 @@ fn render_tagged(value: &TaggedValue) -> String {
 }
 
 /// Runs a statement through inillucent, returning its rows or its failure.
-fn inillucent_rows(connection: &inillucent::Connection, sql: &str) -> Result<Vec<String>, String> {
+fn inillucent_rows(connection: &inillucent_compat::facade::Connection, sql: &str) -> Result<Vec<String>, String> {
     let mut statement = match connection.prepare(sql) {
         Ok(statement) => statement,
         Err(reason) => return Err(format!("{reason:?}")),
@@ -230,7 +231,7 @@ fn ordered_statements_match_the_oracle() {
         eprintln!("the pinned SQLite oracle is not built; skipping");
         return;
     };
-    let handle = Database::open_with_busy_timeout(&database, std::time::Duration::from_secs(5))
+    let handle = Database::import_with_busy_timeout(&database, std::time::Duration::from_secs(5))
         .expect("the fixture opens");
     let connection = handle.connect().expect("the connection opens");
     let mut failures = Vec::new();
@@ -293,7 +294,7 @@ fn the_sort_is_skipped_exactly_where_the_walk_answers_the_order() {
         eprintln!("the pinned SQLite oracle is not built; skipping");
         return;
     };
-    let handle = Database::open_with_busy_timeout(&database, std::time::Duration::from_secs(5))
+    let handle = Database::import_with_busy_timeout(&database, std::time::Duration::from_secs(5))
         .expect("the fixture opens");
     let connection = handle.connect().expect("the connection opens");
 

@@ -14,7 +14,8 @@
 
 use std::path::PathBuf;
 
-use inillucent::{Database, Value};
+use inillucent_compat::facade::Database;
+use inillucent_value::Value;
 use inillucent_compat::oracle::{Driver, Op, TaggedValue};
 use inillucent_compat::workspace_root;
 
@@ -57,7 +58,7 @@ fn render(value: &Value<'static>) -> String {
 }
 
 /// Runs a statement through inillucent, returning its rows or its failure.
-fn run(connection: &inillucent::Connection, sql: &str) -> Result<Vec<String>, String> {
+fn run(connection: &inillucent_compat::facade::Connection, sql: &str) -> Result<Vec<String>, String> {
     let mut statement = match connection.prepare(sql) {
         Ok(statement) => statement,
         Err(reason) => return Err(reason.message().to_string()),
@@ -81,14 +82,14 @@ fn run(connection: &inillucent::Connection, sql: &str) -> Result<Vec<String>, St
 }
 
 /// Runs a script, asserting every statement succeeds.
-fn run_all(connection: &inillucent::Connection, script: &[&str]) {
+fn run_all(connection: &inillucent_compat::facade::Connection, script: &[&str]) {
     for sql in script {
         run(connection, sql).unwrap_or_else(|reason| panic!("{sql}: {reason}"));
     }
 }
 
 /// Returns the `EXPLAIN QUERY PLAN` detail lines for a statement.
-fn plan(connection: &inillucent::Connection, sql: &str) -> Vec<String> {
+fn plan(connection: &inillucent_compat::facade::Connection, sql: &str) -> Vec<String> {
     let explained = format!("EXPLAIN QUERY PLAN {sql}");
     run(connection, &explained)
         .unwrap_or_else(|reason| panic!("{explained}: {reason}"))
@@ -103,7 +104,7 @@ fn plan(connection: &inillucent::Connection, sql: &str) -> Vec<String> {
 
 /// Builds a skewed two-table schema: one row of `small` for every hundred of
 /// `large`, so the two join orders differ by two orders of magnitude.
-fn build(connection: &inillucent::Connection) {
+fn build(connection: &inillucent_compat::facade::Connection) {
     run_all(
         connection,
         &[

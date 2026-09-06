@@ -79,6 +79,44 @@ impl Database {
         })
     }
 
+    /// Imports a SQLite file into a new database beside it, and opens that.
+    ///
+    /// **The only way a SQLite fixture reaches this engine.** File-format
+    /// compatibility is not a goal of the rearchitecture, so a `.db` SQLite
+    /// wrote is not a file this engine opens - `open` on one reports that
+    /// neither meta page is readable, which is true and is what it should say.
+    /// The differential corpus and the qualification suites build their
+    /// fixtures through the pinned SQLite and then compare *logical* answers,
+    /// so the fixture is read once through `inillucent-sqlite-reader` and
+    /// rebuilt as PAX trees. Same rows, different bytes.
+    ///
+    /// The rebuilt file sits beside the source with `.rdb` appended, so a
+    /// fixture and its import are both inspectable after a failure and the
+    /// source is never written to.
+    ///
+    /// @param path - the SQLite database to read
+    pub fn import(path: impl AsRef<Path>) -> DbResult<Database> {
+        Database::import_with(path, DEFAULT_FRAMES)
+    }
+
+    /// Imports a SQLite file with the pool size stated.
+    ///
+    /// @param path - the SQLite database to read
+    /// @param frames - how many frames the buffer pool holds
+    pub fn import_with(path: impl AsRef<Path>, frames: usize) -> DbResult<Database> {
+        let source = path.as_ref().to_path_buf();
+        let mut target = source.clone().into_os_string();
+        target.push(".rdb");
+        let target = PathBuf::from(target);
+        let engine =
+            ImportedDatabase::import_into(source, target.clone(), PAGE_SIZE, frames)?;
+        Ok(Database {
+            engine: RefCell::new(engine),
+            path: target,
+            changes: std::cell::Cell::new(0),
+        })
+    }
+
     /// Returns a connection to this database.
     pub fn connect(&self) -> Connection<'_> {
         Connection { database: self }
@@ -174,6 +212,40 @@ impl<'d> Connection<'d> {
         Ok(outcome.rows)
     }
 
+    /// Compiles the first statement of a script, and says how much it used.
+    ///
+    /// **The count includes the terminating semicolon and the trivia after it**,
+    /// which is what makes a caller's `&sql[consumed..]` the next statement
+    /// rather than a leading space. It is the parser's own count, so a script
+    /// walked this way is split by the grammar rather than by a scan for `;`.
+    ///
+    /// @param sql - the script, positioned at the statement to compile
+    pub fn prepare_with_tail(&self, sql: &str) -> DbResult<(Statement<'d>, usize)> {
+        let consumed = self.database.engine.borrow().statement_length(sql)?;
+        let head = sql.get(..consumed).unwrap_or(sql);
+        Ok((self.prepare(head)?, consumed))
+    }
+
+    /// Describes how a statement would be run.
+    ///
+    /// The operator chain, which is what `EXPLAIN QUERY PLAN` answers. There is
+    /// no bytecode listing because there is no bytecode.
+    ///
+    /// @param sql - the statement
+    pub fn explain(&self, sql: &str) -> DbResult<Vec<String>> {
+        Ok(self.database.engine.borrow().plan(sql)?.describe())
+    }
+
+    /// Rereads the schema from the file.
+    pub fn reload_schema(&self) -> DbResult<()> {
+        self.database.engine.borrow_mut().reload_catalog()
+    }
+
+    /// Returns the schema's generation, which changes when the schema does.
+    pub fn schema_cookie(&self) -> u64 {
+        self.database.engine.borrow().schema_generation()
+    }
+
     /// Compiles a statement to be bound and stepped.
     ///
     /// @param sql - the statement
@@ -191,9 +263,34 @@ impl<'d> Connection<'d> {
         })
     }
 
+    /// Runs one statement for its effect and returns how many rows it changed.
+    ///
+    /// @param sql - the statement
+    pub fn execute(&self, sql: &str) -> DbResult<i64> {
+        self.query(sql)?;
+        Ok(self.changes())
+    }
+
     /// Returns how many rows the last statement on this database changed.
     pub fn changes(&self) -> i64 {
         self.database.changes.get()
+    }
+
+    /// Returns how many rows every statement so far has changed.
+    pub fn total_changes(&self) -> i64 {
+        self.database.engine.borrow().total_changes()
+    }
+
+    /// Returns the rowid the last `INSERT` assigned.
+    pub fn last_insert_rowid(&self) -> i64 {
+        self.database.engine.borrow().last_insert_rowid()
+    }
+
+    /// Returns whether every statement is its own transaction.
+    ///
+    /// `false` between a `BEGIN` and its `COMMIT`.
+    pub fn autocommit(&self) -> bool {
+        self.database.engine.borrow().autocommit()
     }
 }
 

@@ -7,7 +7,8 @@
 
 use std::path::PathBuf;
 
-use inillucent::{Database, Value};
+use inillucent_compat::facade::Database;
+use inillucent_value::Value;
 use inillucent_compat::oracle::{Driver, Op, TaggedValue};
 use inillucent_compat::workspace_root;
 
@@ -67,7 +68,7 @@ fn render_tagged(value: &TaggedValue) -> String {
 }
 
 /// Runs a statement through inillucent, returning its rows or its failure.
-fn run(connection: &inillucent::Connection, sql: &str) -> Result<Vec<String>, String> {
+fn run(connection: &inillucent_compat::facade::Connection, sql: &str) -> Result<Vec<String>, String> {
     let mut statement = match connection.prepare(sql) {
         Ok(statement) => statement,
         Err(reason) => return Err(reason.message().to_string()),
@@ -91,7 +92,7 @@ fn run(connection: &inillucent::Connection, sql: &str) -> Result<Vec<String>, St
 }
 
 /// Runs a script through inillucent, asserting every statement succeeds.
-fn run_all(connection: &inillucent::Connection, script: &[&str]) {
+fn run_all(connection: &inillucent_compat::facade::Connection, script: &[&str]) {
     for sql in script {
         run(connection, sql).unwrap_or_else(|reason| panic!("{sql}: {reason}"));
     }

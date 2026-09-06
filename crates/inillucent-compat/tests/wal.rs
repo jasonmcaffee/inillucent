@@ -9,7 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use inillucent::{Database, Value};
+use inillucent_compat::facade::Database;
+use inillucent_value::Value;
 use inillucent_compat::workspace_root;
 
 /// Returns the pinned SQLite shell, or `None` when it has not been downloaded.
@@ -63,13 +64,13 @@ fn shell(path: &Path, statements: &[&str]) -> Option<String> {
 }
 
 /// Opens a inillucent connection on a path.
-fn connect(path: &Path) -> inillucent::Connection {
+fn connect(path: &Path) -> inillucent_compat::facade::Connection {
     let database = Database::open(path).expect("the database opens");
     database.connect().expect("the connection opens")
 }
 
 /// Returns the single integer a query reports.
-fn integer(connection: &inillucent::Connection, sql: &str) -> i64 {
+fn integer(connection: &inillucent_compat::facade::Connection, sql: &str) -> i64 {
     let rows = connection.query(sql).expect("the query runs");
     match rows.first().and_then(|row| row.first()) {
         Some(Value::Integer(value)) => *value,
@@ -78,7 +79,7 @@ fn integer(connection: &inillucent::Connection, sql: &str) -> i64 {
 }
 
 /// Returns the text a query reports.
-fn text(connection: &inillucent::Connection, sql: &str) -> String {
+fn text(connection: &inillucent_compat::facade::Connection, sql: &str) -> String {
     let rows = connection.query(sql).expect("the query runs");
     match rows.first().and_then(|row| row.first()) {
         Some(Value::Text(value)) => String::from_utf8_lossy(&value.utf8_bytes()).to_string(),
@@ -579,7 +580,7 @@ fn a_full_checkpoint_reports_a_reader_it_cannot_wait_out() {
 }
 
 /// Runs a checkpoint and returns what it reported.
-fn checkpoint(connection: &inillucent::Connection, mode: &str) -> (i64, i64, i64) {
+fn checkpoint(connection: &inillucent_compat::facade::Connection, mode: &str) -> (i64, i64, i64) {
     let rows = connection
         .query(&format!("PRAGMA wal_checkpoint({mode})"))
         .expect("the checkpoint runs");

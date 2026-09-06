@@ -12,7 +12,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use inillucent::{Database, Value};
+use inillucent_compat::facade::Database;
+use inillucent_value::Value;
 use inillucent_compat::workspace_root;
 
 /// Returns the pinned SQLite shell, or `None` when it has not been downloaded.
@@ -65,7 +66,7 @@ fn run(path: &Path, script: &str) -> String {
 }
 
 /// Runs a script on an open connection and reports what it said.
-fn report(connection: &inillucent::Connection, script: &str) -> String {
+fn report(connection: &inillucent_compat::facade::Connection, script: &str) -> String {
     let mut out = String::new();
     let mut rest = script;
     while !rest.trim().is_empty() {
@@ -247,7 +248,7 @@ fn each_connection_has_its_own_temporary_database() {
     second
         .execute_batch("CREATE TEMP TABLE scratch(a); INSERT INTO scratch VALUES (2),(3)")
         .expect("the second writes its own");
-    let count = |connection: &inillucent::Connection| {
+    let count = |connection: &inillucent_compat::facade::Connection| {
         connection
             .query("SELECT count(*) FROM scratch")
             .expect("the query runs")
