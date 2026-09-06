@@ -1654,6 +1654,28 @@ impl PagedTree {
     ///
     /// @param pool - the buffer pool
     /// @param probe - the key, one value per key column
+    /// Reports whether a key is in the tree, without copying its row.
+    ///
+    /// The uniqueness check a write does before it writes, which asks only
+    /// whether something is there. `point` answers the same question and copies
+    /// every column of the row to do it, allocating per text and per blob - on
+    /// `main_table` that is five columns, a text and a blob, per insert, thrown
+    /// away.
+    ///
+    /// @param pool - the buffer pool
+    /// @param probe - the key, one value per key column
+    pub fn contains(&self, pool: &Pool, probe: &[Datum<'_>]) -> DbResult<bool> {
+        Ok(self.probe(pool, probe, |_, _| Ok(()))?.is_some())
+    }
+
+    /// Returns one row by key, copying it out.
+    ///
+    /// The allocating path, for tests and for the model comparison. The
+    /// executor uses [`PagedTree::probe`], and a caller that only wants to know
+    /// whether the key is there uses [`PagedTree::contains`].
+    ///
+    /// @param pool - the buffer pool
+    /// @param probe - the key, one value per key column
     pub fn point(&self, pool: &Pool, probe: &[Datum<'_>]) -> DbResult<Option<Vec<OwnedDatum>>> {
         self.probe(pool, probe, |leaf, hit| {
             let mut values = Vec::with_capacity(leaf.column_count());

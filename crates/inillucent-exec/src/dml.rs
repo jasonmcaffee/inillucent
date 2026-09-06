@@ -644,7 +644,10 @@ fn write_one(
         match resolution(statement) {
             Resolution::Skip => return Ok(None),
             Resolution::Replace => {
-                remove_row(table, layout, target, log, &clash.key)?;
+                let Some(held) = read_row(table, target, &clash.key)? else {
+                    return Ok(None);
+                };
+                remove_row(table, layout, target, log, &clash.key, &held)?;
             }
             Resolution::Update => {
                 let updated = upsert_row(table, layout, space, plan, target, log, &clash, &row)?;
@@ -719,7 +722,7 @@ fn conflicting_row(
     row: &[OwnedDatum],
 ) -> DbResult<Option<Conflict>> {
     let key = key_of(layout, row);
-    if !key.is_empty() && read_row(table, target, &key)?.is_some() {
+    if !key.is_empty() && row_exists(table, target, &key)? {
         let (code, message) = rowid_message(table);
         return Ok(Some(Conflict {
             key,
@@ -861,7 +864,10 @@ pub fn update(
                 match statement.on_conflict {
                     Some(ConflictAction::Ignore) => continue,
                     Some(ConflictAction::Replace) => {
-                        remove_row(table, &layout, target, log, &clash.key)?;
+                        let Some(held) = read_row(table, target, &clash.key)? else {
+                            continue;
+                        };
+                        remove_row(table, &layout, target, log, &clash.key, &held)?;
                     }
                     _ => return Err(clash.error),
                 }
@@ -916,7 +922,10 @@ pub fn delete(
             }
             changes.returned.push(out);
         }
-        remove_row(table, &layout, target, log, key)?;
+        // The row was read a moment ago for `RETURNING` and for the index
+        // entries; reading it again inside the removal was a second descent per
+        // delete, on the workload the gate measures two thousand of.
+        remove_row(table, &layout, target, log, key, &row)?;
         changes.rows = changes.rows.saturating_add(1);
     }
     Ok(changes)
@@ -941,7 +950,7 @@ fn replace_row(
     if key_of(layout, after) != key_of(layout, before) {
         // The row moved, so the old one is a delete and the new one an insert.
         // Doing it as an in-place replace would leave the old key behind.
-        remove_row(table, layout, target, log, &key_of(layout, before))?;
+        remove_row(table, layout, target, log, &key_of(layout, before), before)?;
         return place_row(table, layout, target, log, None, after);
     }
     place_row(table, layout, target, log, Some(before), after)
@@ -963,18 +972,35 @@ fn place_row(
     before: Option<&[OwnedDatum]>,
     row: &[OwnedDatum],
 ) -> DbResult<()> {
-    // Old entries before new ones: an update that leaves an indexed column
-    // alone then removes and re-adds the same entry, rather than leaving two.
-    if let Some(before) = before {
-        maintain_indexes(table, layout, target, log, before, false)?;
+    // **An index whose entry did not change is not touched at all.**
+    //
+    // The first version removed every entry and added every entry, which is
+    // correct - the bytes going back are the bytes that came out - and it is two
+    // tree writes and two log records per index for a statement that changed
+    // nothing in it. `UPDATE side_table SET note = ?2 WHERE id = ?1` does not
+    // touch `owner`, so `side_owner` was being rewritten on every one of the
+    // gate's two thousand updates: two thirds of the tree writes, for nothing.
+    // SQLite does not touch such an index either.
+    //
+    // Old before new *within* an index, still, so an entry that did change
+    // leaves and comes back rather than briefly existing twice.
+    for index in maintained(table) {
+        let after = index_entry(index, layout, row);
+        let previous = before.map(|held| index_entry(index, layout, held));
+        if previous.as_deref() == Some(after.as_slice()) {
+            continue;
+        }
+        if let Some(previous) = previous {
+            write_index_entry(index, target, log, &previous, false)?;
+        }
+        write_index_entry(index, target, log, &after, true)?;
     }
-    maintain_indexes(table, layout, target, log, row, true)?;
     let (database, trees) = target.parts();
     let tree = trees
         .get_mut(table.root)
         .ok_or_else(|| missing_tree(table))?;
     let borrowed: Vec<Datum<'_>> = row.iter().map(OwnedDatum::borrow).collect();
-    tree.insert(database, log, &borrowed)?;
+    tree.put(database, log, &borrowed)?;
     Ok(())
 }
 
@@ -985,17 +1011,19 @@ fn place_row(
 /// @param target - the file and its trees
 /// @param log - where the records go
 /// @param key - the row's key
+/// @param row - the row as it stands, which the caller has already read
 fn remove_row(
     table: &TableInfo,
     layout: &SourceLayout,
     target: &mut dyn WriteTarget,
     log: &mut dyn TreeLog,
     key: &[OwnedDatum],
+    row: &[OwnedDatum],
 ) -> DbResult<()> {
-    let Some(row) = read_row(table, target, key)? else {
-        return Ok(());
-    };
-    maintain_indexes(table, layout, target, log, &row, false)?;
+    for index in maintained(table) {
+        let entry = index_entry(index, layout, row);
+        write_index_entry(index, target, log, &entry, false)?;
+    }
     let (database, trees) = target.parts();
     let tree = trees
         .get_mut(table.root)
@@ -1005,45 +1033,48 @@ fn remove_row(
     Ok(())
 }
 
-/// Adds or removes one row's entry in every index over its table.
+/// Returns the indexes of a table that the write path maintains.
 ///
-/// This is the index maintenance the acceptance asks a differential test to
-/// prove. It is one function rather than one per caller, because an index an
-/// insert maintains and a delete forgets is a tree that disagrees with its
-/// table and answers a covering query wrongly while every other query is fine.
+/// A `WITHOUT ROWID` table's primary-key index *is* the table: one b-tree,
+/// reported at the table's own root. Maintaining it separately would write
+/// every row twice.
 ///
-/// @param table - the table being written
-/// @param layout - the table tree's layout
+/// @param table - the table
+fn maintained(table: &TableInfo) -> impl Iterator<Item = &IndexInfo> {
+    table
+        .indexes
+        .iter()
+        .filter(|index| index.root != 0 && index.root != table.root)
+}
+
+/// Adds or removes one entry in one index.
+///
+/// **This is the index maintenance the acceptance asks a differential test to
+/// prove.** It is one function rather than one per caller, because an index an
+/// insert maintains and a delete forgets is a tree that disagrees with its table
+/// and answers a covering query wrongly while every other query is fine.
+///
+/// @param index - the index
 /// @param target - the file and its trees
 /// @param log - where the records go
-/// @param row - the table row, in tree-column order
-/// @param adding - true to add the entries, false to remove them
-fn maintain_indexes(
-    table: &TableInfo,
-    layout: &SourceLayout,
+/// @param entry - the entry: the keys, then the rowid
+/// @param adding - true to add it, false to remove it
+fn write_index_entry(
+    index: &IndexInfo,
     target: &mut dyn WriteTarget,
     log: &mut dyn TreeLog,
-    row: &[OwnedDatum],
+    entry: &[OwnedDatum],
     adding: bool,
 ) -> DbResult<()> {
-    for index in &table.indexes {
-        // A `WITHOUT ROWID` table's primary-key index *is* the table: one
-        // b-tree, reported at the table's own root. Maintaining it separately
-        // would write every row twice.
-        if index.root == 0 || index.root == table.root {
-            continue;
-        }
-        let entry = index_entry(index, layout, row);
-        let (database, trees) = target.parts();
-        let Some(tree) = trees.get_mut(index.root) else {
-            continue;
-        };
-        let borrowed: Vec<Datum<'_>> = entry.iter().map(OwnedDatum::borrow).collect();
-        if adding {
-            tree.insert(database, log, &borrowed)?;
-        } else {
-            tree.delete(database, log, &borrowed)?;
-        }
+    let (database, trees) = target.parts();
+    let Some(tree) = trees.get_mut(index.root) else {
+        return Ok(());
+    };
+    let borrowed: Vec<Datum<'_>> = entry.iter().map(OwnedDatum::borrow).collect();
+    if adding {
+        tree.put(database, log, &borrowed)?;
+    } else {
+        tree.delete(database, log, &borrowed)?;
     }
     Ok(())
 }
@@ -1108,6 +1139,30 @@ fn key_of(layout: &SourceLayout, row: &[OwnedDatum]) -> Vec<OwnedDatum> {
         .iter()
         .filter_map(|column| row.get(*column).cloned())
         .collect()
+}
+
+/// Reports whether a table holds a row under one key.
+///
+/// **The uniqueness check asks only whether something is there**, and reading
+/// the row to find out copies every column of it. On the gate's `wide` table -
+/// two columns, one of them a four-kilobyte body - that copy was about fifteen
+/// microseconds of a seventeen-microsecond upsert, allocated and thrown away on
+/// every statement.
+///
+/// @param table - the table
+/// @param target - the file and its trees
+/// @param key - the row's key
+fn row_exists(
+    table: &TableInfo,
+    target: &mut dyn WriteTarget,
+    key: &[OwnedDatum],
+) -> DbResult<bool> {
+    let (database, trees) = target.parts();
+    let Some(tree) = trees.get(table.root) else {
+        return Ok(false);
+    };
+    let borrowed: Vec<Datum<'_>> = key.iter().map(OwnedDatum::borrow).collect();
+    tree.contains(database.pool(), &borrowed)
 }
 
 /// Reads one row of a table by key, in tree-column order.
