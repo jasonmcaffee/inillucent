@@ -52,6 +52,7 @@ pub mod scalar;
 pub mod scan;
 pub mod setop;
 pub mod subquery;
+pub mod trigger;
 pub mod window;
 
 pub use aggregate::{Accumulator, AggregateKind};

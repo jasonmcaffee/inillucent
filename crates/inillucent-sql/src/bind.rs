@@ -603,6 +603,107 @@ impl BoundExpr {
         }
     }
 
+    /// Returns every sub-expression one expression holds, mutably.
+    ///
+    /// The mirror of [`BoundExpr::children`], and exhaustive for the same
+    /// reason: a variant added later is a compilation error here rather than a
+    /// subtree some rewrite silently skips. `crate::rewrite` is the only caller
+    /// and the trigger firing point is why it exists - a body's `OLD` and `NEW`
+    /// reads are replaced by the values the row actually holds, and one missed
+    /// subtree there is a trigger that reads a NULL where a value was.
+    ///
+    /// A subquery's *block* is not a child here either, for the reason it is
+    /// not one there: it is a query of its own. `crate::rewrite` descends into
+    /// it separately, because a correlated block is exactly where a foreign
+    /// key's `NOT EXISTS (SELECT 1 FROM parent WHERE p.k = NEW.c)` keeps its
+    /// `NEW`.
+    pub fn children_mut(&mut self) -> Vec<&mut BoundExpr> {
+        match self {
+            BoundExpr::Null
+            | BoundExpr::Integer(_)
+            | BoundExpr::Real(_)
+            | BoundExpr::Text(_)
+            | BoundExpr::Blob(_)
+            | BoundExpr::Parameter(_)
+            | BoundExpr::Raise { .. }
+            | BoundExpr::Column { .. }
+            | BoundExpr::Rowid { .. }
+            | BoundExpr::WindowRef { .. }
+            | BoundExpr::Aggregate { .. }
+            | BoundExpr::SorterColumn { .. } => Vec::new(),
+            BoundExpr::Unary { operand, .. }
+            | BoundExpr::Not(operand)
+            | BoundExpr::IsNull { operand, .. }
+            | BoundExpr::Collate { operand, .. }
+            | BoundExpr::Cast { operand, .. } => vec![operand],
+            BoundExpr::Arithmetic { left, right, .. }
+            | BoundExpr::Compare { left, right, .. }
+            | BoundExpr::Is { left, right, .. }
+            | BoundExpr::And(left, right)
+            | BoundExpr::Or(left, right) => vec![left, right],
+            BoundExpr::Between {
+                operand, low, high, ..
+            } => vec![operand, low, high],
+            BoundExpr::InList { operand, list, .. } => {
+                let mut found: Vec<&mut BoundExpr> = vec![operand];
+                found.extend(list.iter_mut());
+                found
+            }
+            BoundExpr::Case {
+                operand,
+                branches,
+                otherwise,
+                ..
+            } => {
+                let mut found: Vec<&mut BoundExpr> = Vec::new();
+                if let Some(operand) = operand {
+                    found.push(operand);
+                }
+                for (when, then) in branches {
+                    found.push(when);
+                    found.push(then);
+                }
+                if let Some(otherwise) = otherwise {
+                    found.push(otherwise);
+                }
+                found
+            }
+            BoundExpr::Pattern {
+                operand,
+                pattern,
+                escape,
+                ..
+            } => {
+                let mut found: Vec<&mut BoundExpr> = vec![operand, pattern];
+                if let Some(escape) = escape {
+                    found.push(escape);
+                }
+                found
+            }
+            BoundExpr::External { arguments, .. }
+            | BoundExpr::VirtualFunction { arguments, .. }
+            | BoundExpr::Function { arguments, .. }
+            | BoundExpr::Math { arguments, .. }
+            | BoundExpr::Json { arguments, .. }
+            | BoundExpr::Time { arguments, .. } => arguments.iter_mut().collect(),
+            BoundExpr::Subquery { operand, .. } => {
+                operand.iter_mut().map(|held| &mut **held).collect()
+            }
+        }
+    }
+
+    /// Returns the block a subquery expression holds, when it is one.
+    ///
+    /// Separate from [`BoundExpr::children_mut`] because a block is not a
+    /// sub-expression: it is a query, with its own FROM terms and its own
+    /// scope. A rewrite that treats it as one would run over the wrong tree.
+    pub fn block_mut(&mut self) -> Option<&mut BoundSelect> {
+        match self {
+            BoundExpr::Subquery { block, .. } => Some(block),
+            _ => None,
+        }
+    }
+
     /// Records which of one FROM term's columns this expression reads.
     ///
     /// A correlated subquery makes the answer unknowable from here - the block

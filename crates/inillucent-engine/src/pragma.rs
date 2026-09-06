@@ -53,6 +53,9 @@ impl ImportedDatabase {
             b"synchronous" => self.pragma_synchronous(argument),
             b"busy_timeout" => self.pragma_busy_timeout(argument),
             b"foreign_keys" => self.pragma_flag(argument),
+            b"defer_foreign_keys" => self.pragma_defer(argument),
+            b"foreign_key_list" => self.pragma_foreign_key_list(argument),
+            b"foreign_key_check" => self.pragma_foreign_key_check(argument),
             b"journal_mode" => self.pragma_fixed_word(argument, b"wal"),
             b"encoding" => self.pragma_fixed_word(argument, b"UTF-8"),
             b"locking_mode" => self.pragma_fixed_word(argument, b"exclusive"),
@@ -139,10 +142,143 @@ impl ImportedDatabase {
         match argument {
             None => Ok(one_integer(i64::from(self.foreign_keys))),
             Some(argument) => {
-                self.foreign_keys = argument_boolean(argument);
+                let asked = argument_boolean(argument);
+                // **The compiled statements go with it.** Whether keys are
+                // enforced is decided by the binder, once, when a statement is
+                // compiled - so a statement compiled while the setting was off
+                // carries no key checks and would keep carrying none after the
+                // pragma turned them on. Which is exactly the shape of bug this
+                // pragma exists to avoid, since the symptom is a write that is
+                // accepted rather than an error that is reported.
+                if asked != self.foreign_keys {
+                    self.forget_compiled_statements();
+                }
+                self.foreign_keys = asked;
                 Ok(Outcome::empty())
             }
         }
+    }
+
+    /// Reads or sets whether every immediate key check waits for the commit.
+    ///
+    /// It is a transaction's setting rather than a connection's - SQLite clears
+    /// it at each commit or rollback - and it is read at bind time like
+    /// `foreign_keys`, so the compiled statements go with it.
+    ///
+    /// @param argument - the value it was given, when it was given one
+    fn pragma_defer(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+        match argument {
+            None => Ok(one_integer(i64::from(self.defer_foreign_keys))),
+            Some(argument) => {
+                let asked = argument_boolean(argument);
+                if asked != self.defer_foreign_keys {
+                    self.forget_compiled_statements();
+                }
+                self.defer_foreign_keys = asked;
+                Ok(Outcome::empty())
+            }
+        }
+    }
+
+    /// Reports the foreign keys one table declares, in SQLite's own columns.
+    ///
+    /// One row per key column rather than per key: a composite key reports its
+    /// columns in `seq` order under one `id`, which is how an application
+    /// reconstructs the pair.
+    ///
+    /// @param argument - the table named in the pragma
+    fn pragma_foreign_key_list(&self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+        let names = vec![
+            "id".into(),
+            "seq".into(),
+            "table".into(),
+            "from".into(),
+            "to".into(),
+            "on_update".into(),
+            "on_delete".into(),
+            "match".into(),
+        ];
+        let Some(table) = self.named_table(argument) else {
+            return Ok(Outcome {
+                rows: Vec::new(),
+                names,
+                changes: Default::default(),
+            });
+        };
+        let mut rows = Vec::new();
+        for key in &table.foreign_keys {
+            let parent = self
+                .tables
+                .iter()
+                .find(|candidate| candidate.folded == key.parent_folded);
+            let targets = parent
+                .and_then(|parent| inillucent_sql::foreign_key::parent_columns(key, parent))
+                .unwrap_or_default();
+            for (position, column) in key.columns.iter().enumerate() {
+                let from = table
+                    .columns
+                    .get(usize::from(*column))
+                    .map(|info| info.name.clone())
+                    .unwrap_or_default();
+                rows.push(vec![
+                    OwnedDatum::Int(i64::from(key.id)),
+                    OwnedDatum::Int(position as i64),
+                    OwnedDatum::Text(key.parent.clone()),
+                    OwnedDatum::Text(from),
+                    match targets.get(position) {
+                        Some(name) => OwnedDatum::Text(name.clone()),
+                        None => OwnedDatum::Null,
+                    },
+                    OwnedDatum::Text(action_name(key.on_update).as_bytes().to_vec()),
+                    OwnedDatum::Text(action_name(key.on_delete).as_bytes().to_vec()),
+                    OwnedDatum::Text(if key.match_clause.is_empty() {
+                        b"NONE".to_vec()
+                    } else {
+                        key.match_clause.clone()
+                    }),
+                ]);
+            }
+        }
+        Ok(Outcome {
+            rows,
+            names,
+            changes: Default::default(),
+        })
+    }
+
+    /// Reports every row whose foreign key has no parent.
+    ///
+    /// **It is a query, not a scan written by hand**, so it uses the planner
+    /// and the indexes an ordinary query would: a check over a million-row
+    /// child with an index on its key is a lookup per row rather than a second
+    /// scan. `inillucent-sql`'s `violation_query` builds it, which is the same
+    /// text a deferred constraint is tested with at commit - so the pragma and
+    /// the commit cannot disagree about what a violation is.
+    ///
+    /// @param argument - one table to check, or none for every table
+    fn pragma_foreign_key_check(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+        let only = argument.map(|argument| argument_text(argument).to_ascii_lowercase());
+        let mut rows = Vec::new();
+        for query in self.violation_queries(only.as_deref())? {
+            for row in self.query_internally(&query.sql)? {
+                rows.push(vec![
+                    OwnedDatum::Text(query.child.clone()),
+                    row.first().cloned().unwrap_or(OwnedDatum::Null),
+                    OwnedDatum::Text(query.parent.clone()),
+                    OwnedDatum::Int(i64::from(query.key)),
+                ]);
+            }
+        }
+        Ok(Outcome {
+            rows,
+            names: vec![
+                "table".into(),
+                "rowid".into(),
+                "parent".into(),
+                "fkid".into(),
+            ],
+            changes: Default::default(),
+        })
     }
 
     /// Answers a pragma the engine has exactly one setting for.
@@ -396,5 +532,19 @@ fn one_integer(value: i64) -> Outcome {
         rows: vec![vec![OwnedDatum::Int(value)]],
         names: vec!["value".into()],
         changes: Default::default(),
+    }
+}
+
+/// Returns the spelling `PRAGMA foreign_key_list` reports for an action.
+///
+/// @param action - the referential action the key declared
+fn action_name(action: inillucent_sql::ast::ReferentialAction) -> &'static str {
+    use inillucent_sql::ast::ReferentialAction;
+    match action {
+        ReferentialAction::NoAction => "NO ACTION",
+        ReferentialAction::Restrict => "RESTRICT",
+        ReferentialAction::SetNull => "SET NULL",
+        ReferentialAction::SetDefault => "SET DEFAULT",
+        ReferentialAction::Cascade => "CASCADE",
     }
 }

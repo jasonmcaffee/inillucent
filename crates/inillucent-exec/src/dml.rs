@@ -53,7 +53,7 @@ use std::collections::{BTreeMap, HashMap};
 use inillucent_base::error::misuse;
 use inillucent_base::{DbError, DbResult, ExtendedCode};
 use inillucent_pool::{Database, Pool};
-use inillucent_sql::ast::{ConflictAction, JoinKind as SqlJoinKind};
+use inillucent_sql::ast::{ConflictAction, JoinKind as SqlJoinKind, TriggerTime};
 use inillucent_sql::bind::{
     BoundExpr, BoundResultColumn, BoundSelect, BoundSource, SourceRows, EXCLUDED_SOURCE,
     NEW_SOURCE, OLD_SOURCE,
@@ -72,6 +72,7 @@ use inillucent_value::collation::Collation;
 use crate::batch::{Batch, Vector};
 use crate::expr::{compile, Eval};
 use crate::physical::{translate_scan, AccessKind, HeldSpace, Params, PreparedStage, SourceLayout};
+use crate::trigger::{self, Depth};
 
 /// One row in a tree's own column order.
 ///
@@ -141,10 +142,22 @@ pub trait WriteTarget {
     /// Returns the file and its trees, both mutably and at the same time.
     fn parts(&mut self) -> (&mut Database, &mut dyn Trees);
 
-    /// Returns a tree's layout: which record slot each tree column holds.
+    /// Returns a tree's layout: which tree column each declared column holds.
     ///
     /// @param root - the root page id the catalog names the tree by
     fn layout(&self, root: u32) -> Option<&SourceLayout>;
+
+    /// Returns this target as the catalog a planned query reads.
+    ///
+    /// **A write can have to run a query, and a trigger is why.** The body of
+    /// `CREATE TRIGGER ... BEGIN DELETE FROM child WHERE parent_id = OLD.id;
+    /// END` is a statement that has to find rows, and it fires in the middle of
+    /// the write that is holding this target. Handing the same view back as a
+    /// [`crate::physical::TreeCatalog`] is what lets the body reach the
+    /// ordinary planner - so that `DELETE` gets the same index probe the same
+    /// `DELETE` typed by hand would, rather than a scan written a second time
+    /// inside the write path.
+    fn catalog(&self) -> &dyn crate::physical::TreeCatalog;
 }
 
 /// The synthetic column space a write's expressions are translated against.
@@ -438,6 +451,30 @@ pub fn insert(
     params: &Params,
     supplied: &[Row],
 ) -> DbResult<Changes> {
+    insert_at(statement, target, log, params, supplied, Depth::default())
+}
+
+/// Applies an `INSERT` that is already some triggers deep.
+///
+/// The depth is what the recursion cap counts, and it is a parameter rather
+/// than a global because a trigger's body is a statement like any other: the
+/// count has to describe this chain of fires rather than everything the process
+/// has ever fired.
+///
+/// @param statement - the bound insert
+/// @param target - the file and its trees
+/// @param log - where the records go
+/// @param params - the bound parameters
+/// @param supplied - the rows a `SELECT` source produced, empty for `VALUES`
+/// @param depth - how many triggers deep this write already is
+pub fn insert_at(
+    statement: &BoundInsert,
+    target: &mut dyn WriteTarget,
+    log: &mut dyn TreeLog,
+    params: &Params,
+    supplied: &[Row],
+    depth: Depth,
+) -> DbResult<Changes> {
     let table = &statement.table;
     let layout = layout_of(target, table)?;
     // `excluded` only exists inside an `ON CONFLICT ... DO UPDATE`, so a plain
@@ -475,9 +512,58 @@ pub fn insert(
         let image = plan.build_row(supplied_row, &space, &mut next_rowid, || {
             highest_rowid(&mut Borrowed(target), table)
         })?;
-        let Some(stored) = write_one(statement, &layout, &space, &plan, target, log, image)? else {
+        // **`BEFORE` fires on the row as it will be written**, which is where
+        // every foreign-key check on the child's side lives: the binder turns
+        // `REFERENCES p(id)` into `BEFORE INSERT ... SELECT RAISE(ABORT, ...)
+        // WHERE NOT EXISTS (SELECT 1 FROM p WHERE ...)`, so a missing parent is
+        // refused here, before anything is written and before the constraint
+        // checks below.
+        //
+        // SQLite leaves `NEW.rowid` undefined in a `BEFORE INSERT` body when
+        // the statement supplied no key. This engine hands the allocated one,
+        // because the row image is built before it is written and there is no
+        // second image to hand instead; a body that reads it therefore sees the
+        // number the row is about to get rather than a NULL.
+        if trigger::fire(
+            &statement.triggers,
+            TriggerTime::Before,
+            trigger::TriggerRows {
+                old: None,
+                new: Some(image.as_slice()),
+            },
+            &layout.slots,
+            layout.rowid,
+            target,
+            log,
+            params,
+            depth,
+        )? == trigger::Fired::SkipRow
+        {
+            continue;
+        }
+        let Some(stored) = write_one(
+            statement, &layout, &space, &plan, target, log, image, params, depth,
+        )?
+        else {
             continue;
         };
+        if trigger::fire(
+            &statement.triggers,
+            TriggerTime::After,
+            trigger::TriggerRows {
+                old: None,
+                new: Some(stored.as_slice()),
+            },
+            &layout.slots,
+            layout.rowid,
+            target,
+            log,
+            params,
+            depth,
+        )? == trigger::Fired::SkipRow
+        {
+            continue;
+        }
         changes.rows = changes.rows.saturating_add(1);
         if let Some(OwnedDatum::Int(assigned)) = layout.rowid.and_then(|at| stored.get(at)) {
             changes.last_rowid = Some(*assigned);
@@ -698,6 +784,8 @@ fn write_one(
     target: &mut dyn WriteTarget,
     log: &mut dyn TreeLog,
     row: Row,
+    params: &Params,
+    depth: Depth,
 ) -> DbResult<Option<Row>> {
     let table = &statement.table;
     // **The common insert asks the table once.**
@@ -731,7 +819,22 @@ fn write_one(
                 let Some(held) = read_row(table, target, &clash.key)? else {
                     return Ok(None);
                 };
-                remove_row(table, layout, target, log, &clash.key, &held)?;
+                // **A `REPLACE` that removes a row is a delete, and the keys
+                // pointing at that row have to be told.** Written `DELETE`
+                // triggers are not fired - that is SQLite's rule with its
+                // default `recursive_triggers = off` - so the binder fills
+                // these separately and they are only the ones a key implies.
+                remove_with_triggers(
+                    table,
+                    layout,
+                    target,
+                    log,
+                    &clash.key,
+                    &held,
+                    &statement.replace_triggers,
+                    params,
+                    depth,
+                )?;
             }
             Resolution::Update => {
                 let updated = upsert_row(
@@ -968,6 +1071,25 @@ pub fn update(
     params: &Params,
     keys: &[Row],
 ) -> DbResult<Changes> {
+    update_at(statement, target, log, params, keys, Depth::default())
+}
+
+/// Applies an `UPDATE` that is already some triggers deep.
+///
+/// @param statement - the bound update
+/// @param target - the file and its trees
+/// @param log - where the records go
+/// @param params - the bound parameters
+/// @param keys - the key of each row the `WHERE` selected
+/// @param depth - how many triggers deep this write already is
+pub fn update_at(
+    statement: &BoundUpdate,
+    target: &mut dyn WriteTarget,
+    log: &mut dyn TreeLog,
+    params: &Params,
+    keys: &[Row],
+    depth: Depth,
+) -> DbResult<Changes> {
     let table = &statement.table;
     let layout = layout_of(target, table)?;
     // **Only the images the statement can actually read.** A row space costs a
@@ -1026,8 +1148,48 @@ pub fn update(
                 }
             }
         }
-        replace_row(table, &layout, target, log, &before, &after)?;
+        if trigger::fire(
+            &statement.triggers,
+            TriggerTime::Before,
+            trigger::TriggerRows {
+                old: Some(before.as_slice()),
+                new: Some(after.as_slice()),
+            },
+            &layout.slots,
+            layout.rowid,
+            target,
+            log,
+            params,
+            depth,
+        )? == trigger::Fired::SkipRow
+        {
+            continue;
+        }
+        // The row may have moved under a `BEFORE` body that wrote the same
+        // table, so it is read again rather than assumed: applying the stale
+        // image would put back a row another statement had already changed.
+        let Some(current) = read_row(table, target, key)? else {
+            continue;
+        };
+        replace_row(table, &layout, target, log, &current, &after)?;
         changes.rows = changes.rows.saturating_add(1);
+        if trigger::fire(
+            &statement.triggers,
+            TriggerTime::After,
+            trigger::TriggerRows {
+                old: Some(before.as_slice()),
+                new: Some(after.as_slice()),
+            },
+            &layout.slots,
+            layout.rowid,
+            target,
+            log,
+            params,
+            depth,
+        )? == trigger::Fired::SkipRow
+        {
+            continue;
+        }
         if !projected.is_empty() {
             let mut out = Vec::with_capacity(projected.len());
             for eval in &projected {
@@ -1052,6 +1214,25 @@ pub fn delete(
     log: &mut dyn TreeLog,
     params: &Params,
     keys: &[Row],
+) -> DbResult<Changes> {
+    delete_at(statement, target, log, params, keys, Depth::default())
+}
+
+/// Applies a `DELETE` that is already some triggers deep.
+///
+/// @param statement - the bound delete
+/// @param target - the file and its trees
+/// @param log - where the records go
+/// @param params - the bound parameters
+/// @param keys - the key of each row the `WHERE` selected
+/// @param depth - how many triggers deep this write already is
+pub fn delete_at(
+    statement: &BoundDelete,
+    target: &mut dyn WriteTarget,
+    log: &mut dyn TreeLog,
+    params: &Params,
+    keys: &[Row],
+    depth: Depth,
 ) -> DbResult<Changes> {
     let table = &statement.table;
     let layout = layout_of(target, table)?;
@@ -1078,10 +1259,93 @@ pub fn delete(
         // The row was read a moment ago for `RETURNING` and for the index
         // entries; reading it again inside the removal was a second descent per
         // delete, on the workload the gate measures two thousand of.
-        remove_row(table, &layout, target, log, key, &row)?;
-        changes.rows = changes.rows.saturating_add(1);
+        if remove_with_triggers(
+            table,
+            &layout,
+            target,
+            log,
+            key,
+            &row,
+            &statement.triggers,
+            params,
+            depth,
+        )? {
+            changes.rows = changes.rows.saturating_add(1);
+        }
     }
     Ok(changes)
+}
+
+/// Removes one row, firing the `BEFORE` and `AFTER` triggers around it.
+///
+/// Returns whether the row was actually removed: a `RAISE(IGNORE)` in a
+/// `BEFORE` body abandons it, which is not a failure and not a change.
+///
+/// The one place a delete happens with triggers around it, so a `DELETE`
+/// statement and the delete a `REPLACE` performs to make room cannot fire
+/// different things - which they would the moment there were two copies of
+/// this.
+///
+/// @param table - the table being written
+/// @param layout - the table tree's layout
+/// @param target - the file and its trees
+/// @param log - where the records go
+/// @param key - the row's key
+/// @param row - the row as it is
+/// @param triggers - the triggers this delete fires
+/// @param params - the bound parameters
+/// @param depth - how many triggers deep this write already is
+#[allow(clippy::too_many_arguments)]
+fn remove_with_triggers(
+    table: &TableInfo,
+    layout: &SourceLayout,
+    target: &mut dyn WriteTarget,
+    log: &mut dyn TreeLog,
+    key: &[OwnedDatum],
+    row: &[OwnedDatum],
+    triggers: &[inillucent_sql::dml::BoundTrigger],
+    params: &Params,
+    depth: Depth,
+) -> DbResult<bool> {
+    if trigger::fire(
+        triggers,
+        TriggerTime::Before,
+        trigger::TriggerRows {
+            old: Some(row),
+            new: None,
+        },
+        &layout.slots,
+        layout.rowid,
+        target,
+        log,
+        params,
+        depth,
+    )? == trigger::Fired::SkipRow
+    {
+        return Ok(false);
+    }
+    // A `BEFORE` body may have removed the row itself - `ON DELETE CASCADE` on
+    // a self-referencing key does exactly that - so the removal is skipped
+    // rather than repeated when it is already gone.
+    if !row_exists(table, target, key)? {
+        return Ok(false);
+    }
+    remove_row(table, layout, target, log, key, row)?;
+    trigger::fire(
+        triggers,
+        TriggerTime::After,
+        trigger::TriggerRows {
+            old: Some(row),
+            new: None,
+        },
+        &layout.slots,
+        layout.rowid,
+        target,
+        log,
+        params,
+        depth,
+    )?;
+    Ok(true)
 }
 
 /// Replaces one row and every index entry that changed with it.
@@ -1410,6 +1674,10 @@ impl WriteTarget for Borrowed<'_> {
 
     fn layout(&self, root: u32) -> Option<&SourceLayout> {
         self.0.layout(root)
+    }
+
+    fn catalog(&self) -> &dyn crate::physical::TreeCatalog {
+        self.0.catalog()
     }
 }
 
