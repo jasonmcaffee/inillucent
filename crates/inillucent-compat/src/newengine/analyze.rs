@@ -130,11 +130,8 @@ impl ImportedDatabase {
         let mut entries = 0i64;
         tree.visit_leaves(self.database.pool(), &mut |leaf| {
             for row in leaf.live()? {
-                let current: Vec<OwnedDatum> = row
-                    .iter()
-                    .take(width)
-                    .map(OwnedDatum::from_datum)
-                    .collect();
+                let current: Vec<OwnedDatum> =
+                    row.iter().take(width).map(OwnedDatum::from_datum).collect();
                 entries = entries.saturating_add(1);
                 match &previous {
                     None => {

@@ -38,9 +38,9 @@
 
 use inillucent_base::error::{corrupt, misuse};
 use inillucent_base::DbResult;
+use inillucent_pool::extent::ExtentRef;
 use inillucent_pool::interior::{InteriorBuilder, InteriorRef};
 use inillucent_pool::page;
-use inillucent_pool::extent::ExtentRef;
 use inillucent_pool::{Database, PageId, Pool, Swip};
 use inillucent_wal::record::{Body, Structural};
 
@@ -136,6 +136,8 @@ fn underflows(leaf: &LeafRef<'_>) -> DbResult<bool> {
 /// ones that would pay for it.
 pub const COMPACT_FILL: f64 = 0.75;
 
+/// TEMPORARY counters for the extension profile: wide placements, room-makings,
+/// and the encoded size of every row an insert offered.
 /// How full each half of a split is packed.
 ///
 /// A half-full page is what makes the "compact, then split, then insert" path
@@ -338,6 +340,36 @@ impl PagedTree {
         }
         let key: Vec<Datum<'_>> = row.iter().copied().take(self.key_columns()).collect();
         let encoded_key = self.encode_key(&key);
+        // **A value too large for a leaf is written out of line before the row
+        // is placed, not instead of placing it.**
+        //
+        // The first version repacked the whole leaf around such a row, because
+        // the builder is where the spiller is. That made a two-kilobyte value
+        // cost a page rewrite and a full-page log record: on the gate's
+        // `extension.fts.build`, three thousand of FTS5's segment blocks fall
+        // between the threshold and what a leaf holds, and the repacks were
+        // 111 ms of a 250 ms workload - more than half of it.
+        //
+        // Spilling first turns the row into one a delta area can hold: the
+        // seventeen tagged bytes of a reference in place of the value. From
+        // there it is an ordinary write, with an ordinary short log record, and
+        // the leaf is repacked when it fills rather than once per wide row.
+        //
+        // Spilled once, outside the loop, because a retry after a compaction
+        // must reuse the run rather than write a second and leak the first.
+        let mut spilled = false;
+        let mut encoded_row = Vec::new();
+        for (column, value) in row.iter().enumerate() {
+            match self.out_of_line(column, value) {
+                Some(bytes) => {
+                    let reference =
+                        crate::paged::write_extent(database, log, self.tree_id(), bytes)?;
+                    crate::leaf::encode_extent_tagged(&mut encoded_row, reference);
+                    spilled = true;
+                }
+                None => value.encode_tagged(&mut encoded_row),
+            }
+        }
 
         // Two attempts at most: the first may find the leaf full, and the
         // compaction or split that follows leaves a page that has room for one
@@ -367,6 +399,9 @@ impl PagedTree {
                 let held = match (want_previous, located) {
                     (true, Located::Sorted(row)) => {
                         self.read_extents_row(database.pool(), &leaf, row)?
+                    }
+                    (true, Located::Delta(index)) => {
+                        self.read_extents_delta(database.pool(), &leaf, index)?
                     }
                     _ => crate::leaf::Extents::default(),
                 };
@@ -400,32 +435,6 @@ impl PagedTree {
             if !replace && previous.is_some() {
                 return Ok(previous);
             }
-            // **A row with a value too large for a leaf never goes into the
-            // delta area.** The delta holds tagged values *inline*, so a
-            // four-kilobyte body would want more room than a compaction leaves,
-            // the retry would find the same, and the second attempt would fail
-            // with "a leaf had no room for one row after being compacted and
-            // split" - which is exactly what `large.write` did. Such a row is
-            // placed by repacking the leaf around it, because the builder is
-            // where the spiller is.
-            if self.oversized(row) {
-                self.place_wide(database, log, page, &path, row, &key)?;
-                let mut stats = self.stats.get();
-                stats.inserted = stats.inserted.saturating_add(1);
-                self.stats.set(stats);
-                if previous.is_none() {
-                    self.note_rows(1);
-                }
-                return Ok(previous);
-            }
-            // Encoded once, here, and used three times: to find out whether it
-            // fits, to write the log record, and to place it. It was encoded
-            // three times before, which on a four-kilobyte row is three copies
-            // of four kilobytes per write.
-            let mut encoded_row = Vec::new();
-            for value in row {
-                value.encode_tagged(&mut encoded_row);
-            }
             let planned = {
                 let pool = database.pool();
                 pool.modify(page, |bytes| {
@@ -442,6 +451,24 @@ impl PagedTree {
                 continue;
             }
 
+            // A delta row that is about to be removed may own out-of-line
+            // pages, and nothing else names them: a tombstoned *sorted* row's
+            // reference is still on the page for the next repack to free, but a
+            // removed delta row's is not. Read before the write, freed after.
+            let orphaned = match located {
+                Located::Delta(index) => {
+                    let guard = database.pool().fetch(page)?;
+                    let leaf = LeafRef::parse(&guard)?;
+                    let mut refs = Vec::new();
+                    for column in 0..leaf.column_count() {
+                        if let Some(reference) = leaf.delta_extent_at(index, column)? {
+                            refs.push(reference);
+                        }
+                    }
+                    refs
+                }
+                _ => Vec::new(),
+            };
             let lsn = log.log(Body::InsertRow {
                 tree: self.tree_id(),
                 page: page.0,
@@ -457,11 +484,20 @@ impl PagedTree {
                     Located::Absent => {}
                 }
                 let plan = leaf
-                    .plan_encoded(encoded_row)?
+                    // Taken rather than cloned: the loop only retries
+                    // above this point, and the attempt that reaches here
+                    // returns.
+                    .plan_encoded(std::mem::take(&mut encoded_row))?
                     .ok_or_else(|| corrupt("a leaf that had room lost it before the write"))?;
                 leaf.apply_delta(&plan)?;
+                if spilled {
+                    leaf.mark_extents()?;
+                }
                 leaf.set_lsn(lsn)
             })?;
+            for reference in orphaned {
+                crate::paged::free_extent(database, log, reference)?;
+            }
             let mut stats = self.stats.get();
             stats.inserted = stats.inserted.saturating_add(1);
             self.stats.set(stats);
@@ -473,110 +509,34 @@ impl PagedTree {
         Err(corrupt("an insert did not converge"))
     }
 
-    /// Reports whether a row holds a value that will be stored out of line.
+    /// Returns the bytes of a value that has to be written out of line.
     ///
-    /// The same threshold the builder uses, asked one level up so the write path
-    /// can choose where to put the row before it encodes anything.
+    /// **A key column is never spilled**, because a descent compares keys and a
+    /// comparison that had to read other pages would turn every search into a
+    /// chain of them. The threshold is the same one the builder packs to, so a
+    /// value spilled here is one a repack would have spilled anyway.
     ///
-    /// @param row - the row about to be written
-    fn oversized(&self, row: &[Datum<'_>]) -> bool {
-        let threshold = self.page_size() / crate::leaf::EXTENT_DIVISOR;
-        row.iter()
-            .enumerate()
-            .skip(self.key_columns())
-            .any(|(index, value)| {
-                let physical = self
-                    .columns()
-                    .get(index)
-                    .map(|column| column.physical)
-                    .unwrap_or(crate::types::PhysicalType::Any);
-                match (physical, value) {
-                    (crate::types::PhysicalType::Text, Datum::Text(bytes)) => {
-                        bytes.len() > threshold
-                    }
-                    (crate::types::PhysicalType::Blob, Datum::Blob(bytes)) => {
-                        bytes.len() > threshold
-                    }
-                    _ => false,
-                }
-            })
-    }
-
-    /// Writes a row whose value goes out of line, by repacking its leaf.
-    ///
-    /// The leaf's live rows are read whole - out-of-line values included - the
-    /// arriving row replaces or joins them in key order, and the whole set is
-    /// packed with a spiller. So the new row's oversized value is written to a
-    /// fresh run and every value that was already out of line is moved to one,
-    /// which is what makes the old runs safe to free afterwards.
-    ///
-    /// @param database - the file
-    /// @param log - where the records go
-    /// @param page - the leaf the key belongs in
-    /// @param path - the interior pages above it, root first
-    /// @param row - the row to write
-    /// @param key - its key columns
-    fn place_wide(
-        &mut self,
-        database: &mut Database,
-        log: &mut dyn TreeLog,
-        page: PageId,
-        path: &[PageId],
-        row: &[Datum<'_>],
-        key: &[Datum<'_>],
-    ) -> DbResult<()> {
-        let (mut rows, mut carried) = self.rows_to_repack(database.pool(), page)?;
-        // The arriving row replaces one of the same key. Dropped by index rather
-        // than by `retain`, because the carried table has to lose the same entry
-        // and the two are aligned by position.
-        let replacing = rows.iter().position(|held| {
-            let head: Vec<Datum<'_>> = held
-                .iter()
-                .take(self.key_columns())
-                .map(OwnedDatum::borrow)
-                .collect();
-            crate::leaf::compare_rows(&head, key, self.key_columns()) == std::cmp::Ordering::Equal
-        });
-        if let Some(at) = replacing {
-            rows.remove(at);
-            carried.remove(at);
+    /// @param column - which column the value is in
+    /// @param value - the value
+    fn out_of_line<'v>(&self, column: usize, value: &Datum<'v>) -> Option<&'v [u8]> {
+        if column < self.key_columns() {
+            return None;
         }
-        let arriving: Vec<OwnedDatum> = row.iter().map(OwnedDatum::from_datum).collect();
-        // The new row's own values are new, so none of them is carried: whatever
-        // is over the threshold is written to a fresh run by the spiller.
-        carried.push(vec![None; arriving.len()]);
-        rows.push(arriving);
-        let collations = self.collations().to_vec();
-        let key_columns = self.key_columns();
-        // Sorted as pairs, so a row and its carried references stay together.
-        let mut paired: Vec<(Vec<OwnedDatum>, Vec<Option<ExtentRef>>)> =
-            rows.into_iter().zip(carried).collect();
-        paired.sort_by(|left, right| {
-            for column in 0..key_columns {
-                let (Some(one), Some(two)) = (left.0.get(column), right.0.get(column)) else {
-                    continue;
-                };
-                let order = crate::types::compare_under(
-                    &one.borrow(),
-                    &two.borrow(),
-                    collations
-                        .get(column)
-                        .copied()
-                        .unwrap_or(inillucent_value::collation::Collation::Binary),
-                );
-                if order != std::cmp::Ordering::Equal {
-                    return order;
-                }
+        let threshold = self.page_size() / crate::leaf::EXTENT_DIVISOR;
+        let physical = self
+            .columns()
+            .get(column)
+            .map(|spec| spec.physical)
+            .unwrap_or(crate::types::PhysicalType::Any);
+        match (physical, value) {
+            (crate::types::PhysicalType::Text, Datum::Text(bytes))
+            | (crate::types::PhysicalType::Blob, Datum::Blob(bytes))
+                if bytes.len() > threshold =>
+            {
+                Some(bytes)
             }
-            std::cmp::Ordering::Equal
-        });
-        let (rows, carried): (Vec<Vec<OwnedDatum>>, Vec<Vec<Option<ExtentRef>>>) =
-            paired.into_iter().unzip();
-        let borrowed: Vec<Vec<Datum<'_>>> = rows
-            .iter()
-            .map(|held| held.iter().map(OwnedDatum::borrow).collect())
-            .collect();
-        self.repack(database, log, page, path, &borrowed, &carried, false)
+            _ => None,
+        }
     }
 
     /// Deletes one row by key, returning what was there.
@@ -624,6 +584,23 @@ impl PagedTree {
             key: &tagged_key,
         })?;
         let located = self.locate(database.pool(), page, key)?;
+        // A delta row's out-of-line pages are nobody's once the row is gone: a
+        // tombstoned sorted row still names its extent for the next repack to
+        // free, and a removed delta row names nothing at all.
+        let orphaned = match located {
+            Located::Delta(index) => {
+                let guard = database.pool().fetch(page)?;
+                let leaf = LeafRef::parse(&guard)?;
+                let mut refs = Vec::new();
+                for column in 0..leaf.column_count() {
+                    if let Some(reference) = leaf.delta_extent_at(index, column)? {
+                        refs.push(reference);
+                    }
+                }
+                refs
+            }
+            _ => Vec::new(),
+        };
         database.pool().modify(page, |bytes| {
             let mut leaf = LeafMut::new(bytes)?;
             match located {
@@ -641,6 +618,9 @@ impl PagedTree {
             }
             leaf.set_lsn(lsn)
         })?;
+        for reference in orphaned {
+            crate::paged::free_extent(database, log, reference)?;
+        }
         let mut stats = self.stats.get();
         stats.deleted = stats.deleted.saturating_add(1);
         self.stats.set(stats);
@@ -1521,6 +1501,8 @@ impl PagedTree {
                 Ok(Some(values))
             }
             Located::Delta(index) => {
+                let held = self.read_extents_delta(pool, &leaf, index)?;
+                let leaf = leaf.with_extents(&held);
                 let mut values = Vec::with_capacity(leaf.column_count());
                 for column in 0..leaf.column_count() {
                     values.push(OwnedDatum::from_datum(&leaf.delta_value(index, column)?));
@@ -1575,8 +1557,8 @@ impl PagedTree {
         }
         // A leaf with extents is read row by row rather than through `live`,
         // because `live` would resolve them - which is the read this exists to
-        // avoid. Such a leaf has no delta area: a row with an out-of-line value
-        // never goes into one, so its live rows are its untombstoned sorted ones.
+        // avoid. Both regions can hold one: the sorted region says so in its
+        // class array, a delta row says so with a tag.
         let mut rows = Vec::with_capacity(leaf.row_count());
         let mut carried = Vec::with_capacity(leaf.row_count());
         for row in 0..leaf.row_count() {
@@ -1615,8 +1597,24 @@ impl PagedTree {
         // process built may not have.
         for index in 0..leaf.delta_count() {
             let mut values = Vec::with_capacity(leaf.column_count());
+            let mut refs = Vec::with_capacity(leaf.column_count());
             for column in 0..leaf.column_count() {
+                if let Some(reference) = leaf.delta_extent_at(index, column)? {
+                    let blob = matches!(
+                        self.columns().get(column).map(|spec| spec.physical),
+                        Some(crate::types::PhysicalType::Blob)
+                    );
+                    let filler = vec![0u8; reference.length as usize];
+                    values.push(if blob {
+                        OwnedDatum::Blob(filler)
+                    } else {
+                        OwnedDatum::Text(filler)
+                    });
+                    refs.push(Some(reference));
+                    continue;
+                }
                 values.push(OwnedDatum::from_datum(&leaf.delta_value(index, column)?));
+                refs.push(None);
             }
             let head: Vec<Datum<'_>> = values
                 .iter()
@@ -1638,14 +1636,15 @@ impl PagedTree {
                         *slot = values;
                     }
                     if let Some(slot) = carried.get_mut(at) {
-                        // The delta row's values are inline, so nothing about it
-                        // is carried - including the extent the sorted row it
-                        // replaces was in, which the caller then frees.
-                        *slot = vec![None; slot.len()];
+                        // The delta row's own references, which are not the
+                        // sorted row's: whatever extent the row it shadows was
+                        // in is no longer named by anything, and the caller
+                        // frees exactly what the repack did not keep.
+                        *slot = refs;
                     }
                 }
                 None => {
-                    carried.push(vec![None; values.len()]);
+                    carried.push(refs);
                     rows.push(values);
                 }
             }

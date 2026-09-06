@@ -50,8 +50,8 @@ use inillucent_sql::bind::{
     BoundExpr, BoundFrameBound, BoundOrderTerm, BoundResultColumn, BoundSelect, BoundWindow,
     WindowCall as BoundWindowCall,
 };
-use inillucent_sql::function::{AggregateFunc, ScalarFunc};
 use inillucent_sql::catalog_view::TableInfo;
+use inillucent_sql::function::{AggregateFunc, ScalarFunc};
 use inillucent_sql::plan::{
     plan_select_with, AccessPath, AggregationMode, BoundKind, Levers, PhysicalPlan, RangeBound,
 };

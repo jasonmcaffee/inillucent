@@ -109,16 +109,26 @@ fn the_schema_pragmas_describe_the_new_engine_s_schema() {
     assert_eq!(columns.len(), 3, "{columns:?}");
     assert_eq!(
         columns.first().map(|row| row.as_slice()),
-        Some(["0", "id", "INTEGER", "0", "null", "1"].map(str::to_string).as_slice()),
+        Some(
+            ["0", "id", "INTEGER", "0", "null", "1"]
+                .map(str::to_string)
+                .as_slice()
+        ),
         "{columns:?}"
     );
     assert_eq!(
-        columns.get(1).and_then(|row| row.get(3)).map(String::as_str),
+        columns
+            .get(1)
+            .and_then(|row| row.get(3))
+            .map(String::as_str),
         Some("1"),
         "name is NOT NULL: {columns:?}"
     );
     assert_eq!(
-        columns.get(2).and_then(|row| row.get(4)).map(String::as_str),
+        columns
+            .get(2)
+            .and_then(|row| row.get(4))
+            .map(String::as_str),
         Some("0.0"),
         "price has a default: {columns:?}"
     );
@@ -126,7 +136,10 @@ fn the_schema_pragmas_describe_the_new_engine_s_schema() {
     let indexes = ask(&mut engine, "PRAGMA index_list(items)");
     assert_eq!(indexes.len(), 1, "{indexes:?}");
     assert_eq!(
-        indexes.first().and_then(|row| row.get(1)).map(String::as_str),
+        indexes
+            .first()
+            .and_then(|row| row.get(1))
+            .map(String::as_str),
         Some("items_name")
     );
     let key = ask(&mut engine, "PRAGMA index_info(items_name)");
@@ -171,7 +184,10 @@ fn the_pager_pragmas_describe_the_new_engine_s_file() {
         .and_then(|row| row.first())
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
-    assert!(cache < 0, "cache_size should be stated in kibibytes: {cache}");
+    assert!(
+        cache < 0,
+        "cache_size should be stated in kibibytes: {cache}"
+    );
     assert!(
         ask(&mut engine, "PRAGMA database_list")
             .first()
@@ -333,7 +349,10 @@ fn the_integrity_check_walks_every_new_engine_tree() {
     // there is one writer and it is the caller.
     let checkpoint = ask(&mut engine, "PRAGMA wal_checkpoint");
     assert_eq!(
-        checkpoint.first().and_then(|row| row.first()).map(String::as_str),
+        checkpoint
+            .first()
+            .and_then(|row| row.first())
+            .map(String::as_str),
         Some("0"),
         "{checkpoint:?}"
     );

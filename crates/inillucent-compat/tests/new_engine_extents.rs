@@ -89,10 +89,11 @@ fn pair(tag: &str, rows: usize) -> Option<Pair> {
         } else {
             format!("{nth}:{}", "x".repeat(2_048))
         };
-        let sql = format!("INSERT INTO wide VALUES ({nth}, 'tag{}', '{body}')", nth % 7);
-        let observed = oracle
-            .send(&Op::Exec(sql))
-            .expect("the insert runs");
+        let sql = format!(
+            "INSERT INTO wide VALUES ({nth}, 'tag{}', '{body}')",
+            nth % 7
+        );
+        let observed = oracle.send(&Op::Exec(sql)).expect("the insert runs");
         assert!(observed.ok, "the seed did not insert: {}", observed.message);
     }
     let engine = ImportedDatabase::import_with(path, PAGE_SIZE, 4_096)
@@ -264,7 +265,10 @@ fn out_of_line_values_survive_closing_and_reopening_the_file() {
     pair.both("INSERT INTO wide VALUES (101, 'tag5', 'a')");
     let before = pair
         .engine
-        .execute_any("SELECT id, length(body) FROM wide ORDER BY id", &Params::new())
+        .execute_any(
+            "SELECT id, length(body) FROM wide ORDER BY id",
+            &Params::new(),
+        )
         .expect("the lengths read")
         .rows;
 
@@ -273,7 +277,10 @@ fn out_of_line_values_survive_closing_and_reopening_the_file() {
     pair.is_intact("a reopen");
     let after = pair
         .engine
-        .execute_any("SELECT id, length(body) FROM wide ORDER BY id", &Params::new())
+        .execute_any(
+            "SELECT id, length(body) FROM wide ORDER BY id",
+            &Params::new(),
+        )
         .expect("the lengths read again")
         .rows;
     assert_eq!(before, after, "the lengths changed across a reopen");

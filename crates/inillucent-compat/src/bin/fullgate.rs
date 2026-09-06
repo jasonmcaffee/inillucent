@@ -161,8 +161,12 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
 
     let mut plan = plan_for(&settings.scale);
     plan.setup.clear();
-    plan.workloads
-        .retain(|workload| settings.families.iter().any(|name| *name == workload.family));
+    plan.workloads.retain(|workload| {
+        settings
+            .families
+            .iter()
+            .any(|name| *name == workload.family)
+    });
     if let Some(repeat) = settings.repeat_override {
         for workload in &mut plan.workloads {
             workload.repeat = repeat;
@@ -205,7 +209,11 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
             workload.family,
             workload.repeat,
             workload.grouping.name(),
-            if workload.prepare_each { "each" } else { "once" }
+            if workload.prepare_each {
+                "each"
+            } else {
+                "once"
+            }
         );
     }
 
@@ -249,8 +257,9 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         if our_state != their_state {
             for entry in &mut measured {
                 entry.agreed = false;
-                entry.disagreement =
-                    format!("round {round}: inillucent {our_state:?} against sqlite {their_state:?}");
+                entry.disagreement = format!(
+                    "round {round}: inillucent {our_state:?} against sqlite {their_state:?}"
+                );
             }
             break;
         }
@@ -263,7 +272,9 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
                 slot.disagreement = "the new engine produced no sample".to_string();
                 continue;
             };
-            let Some(reference) = theirs.iter().find(|sample| sample.workload == workload.name)
+            let Some(reference) = theirs
+                .iter()
+                .find(|sample| sample.workload == workload.name)
             else {
                 return Err(format!("{}: sqlite produced no sample", workload.name));
             };
@@ -271,8 +282,7 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
             // produces no rows on either arm, so comparing the digests of two
             // empty result sets proves nothing - what those are compared by is
             // the state questions above, at the end of the round.
-            if !workload.mutates
-                && (mine.digest != reference.digest || mine.rows != reference.rows)
+            if !workload.mutates && (mine.digest != reference.digest || mine.rows != reference.rows)
             {
                 slot.agreed = false;
                 slot.disagreement = format!(

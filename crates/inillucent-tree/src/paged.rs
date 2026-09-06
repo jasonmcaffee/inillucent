@@ -46,9 +46,9 @@ use std::cell::RefCell;
 
 use inillucent_base::error::{corrupt, misuse};
 use inillucent_base::DbResult;
+use inillucent_pool::extent::{self, ExtentRef};
 use inillucent_pool::interior::{InteriorBuilder, InteriorRef};
 use inillucent_pool::page::{self, PageKind};
-use inillucent_pool::extent::{self, ExtentRef};
 use inillucent_pool::{Database, PageGuard, PageId, Pool, Swip};
 
 use inillucent_value::collation::Collation;
@@ -156,7 +156,9 @@ pub fn read_extent(pool: &Pool, reference: ExtentRef) -> DbResult<Vec<u8>> {
         page = next;
         pages = pages.saturating_add(1);
         if out.len() as u64 > reference.length {
-            return Err(corrupt("an extent holds more bytes than its reference says"));
+            return Err(corrupt(
+                "an extent holds more bytes than its reference says",
+            ));
         }
         // A chain that loops would otherwise read for ever. The bound is the
         // most pages the declared length could possibly need, plus one for the
@@ -305,10 +307,7 @@ fn log_built_page(
 ) -> DbResult<()> {
     if let Some(log) = log.as_mut() {
         log.log(inillucent_wal::record::Body::AllocPage { page: id.0 })?;
-        let lsn = log.log(inillucent_wal::record::Body::WritePage {
-            page: id.0,
-            image,
-        })?;
+        let lsn = log.log(inillucent_wal::record::Body::WritePage { page: id.0, image })?;
         page::write_u64(image, page::header::LSN, lsn)?;
     }
     database.install(id, image)
@@ -1897,10 +1896,10 @@ impl PagedTree {
         };
         let held = match hit {
             Hit::Sorted(row) => self.read_extents_row(pool, &leaf, row)?,
-            // A row in the delta area never holds an out-of-line value: the
-            // write path repacks the leaf around such a row rather than putting
-            // it there, because the delta holds its values inline.
-            Hit::Delta(_) => crate::leaf::Extents::default(),
+            // A delta row can hold one too, as a tagged reference: the write
+            // path spills the value and puts the reference in the delta rather
+            // than repacking the leaf around it.
+            Hit::Delta(index) => self.read_extents_delta(pool, &leaf, index)?,
         };
         let leaf = leaf.with_extents(&held);
         Ok(Some(read(&leaf, hit)?))
@@ -2073,7 +2072,35 @@ impl PagedTree {
             if leaf.column(column)?.class_at(row)? != crate::types::ValueClass::Extent {
                 continue;
             }
-            held.push(row, column, read_extent(pool, leaf.extent_at(row, column)?)?);
+            held.push(
+                row,
+                column,
+                read_extent(pool, leaf.extent_at(row, column)?)?,
+            );
+        }
+        Ok(held)
+    }
+
+    /// Resolves the out-of-line values of one delta row, and only that row.
+    ///
+    /// @param pool - the buffer pool the extent pages come from
+    /// @param leaf - the leaf the row is in
+    /// @param index - the row's position in the delta area
+    pub fn read_extents_delta(
+        &self,
+        pool: &Pool,
+        leaf: &LeafRef<'_>,
+        index: usize,
+    ) -> DbResult<Extents> {
+        let mut held = Extents::default();
+        if !leaf.has_extents() {
+            return Ok(held);
+        }
+        for column in 0..leaf.column_count() {
+            let Some(reference) = leaf.delta_extent_at(index, column)? else {
+                continue;
+            };
+            held.push_delta(index, column, read_extent(pool, reference)?);
         }
         Ok(held)
     }
@@ -2133,7 +2160,22 @@ impl PagedTree {
                 if leaf.column(column)?.class_at(row)? != crate::types::ValueClass::Extent {
                     continue;
                 }
-                held.push(row, column, read_extent(pool, leaf.extent_at(row, column)?)?);
+                held.push(
+                    row,
+                    column,
+                    read_extent(pool, leaf.extent_at(row, column)?)?,
+                );
+            }
+        }
+        // The delta area holds its own out-of-line values, tagged rather than
+        // classed. A leaf that has taken a wide row since its last compaction
+        // has them here and nowhere else.
+        for index in 0..leaf.delta_count() {
+            for column in 0..leaf.column_count() {
+                let Some(reference) = leaf.delta_extent_at(index, column)? else {
+                    continue;
+                };
+                held.push_delta(index, column, read_extent(pool, reference)?);
             }
         }
         Ok(held)
@@ -2157,6 +2199,13 @@ impl PagedTree {
                     continue;
                 }
                 refs.push(leaf.extent_at(row, column)?);
+            }
+        }
+        for index in 0..leaf.delta_count() {
+            for column in 0..leaf.column_count() {
+                if let Some(reference) = leaf.delta_extent_at(index, column)? {
+                    refs.push(reference);
+                }
             }
         }
         Ok(refs)

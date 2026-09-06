@@ -44,7 +44,19 @@ pub mod tag {
     pub const TEXT: u8 = 3;
     /// A `u32` length then that many bytes.
     pub const BLOB: u8 = 4;
+    /// A reference to the run of pages holding the value: the same sixteen
+    /// bytes the sorted region's heap holds. Whether it reads back as text or
+    /// as a blob comes from the column's spec, exactly as it does there.
+    ///
+    /// **Only a delta row carries one.** The sorted region says a value is out
+    /// of line in its class array, where the two bits cost nothing; a delta row
+    /// has no class array, so the tag has to say it. A key column is never
+    /// spilled, so a tag byte in a key position is always one of the four above.
+    pub const EXTENT: u8 = 5;
 }
+
+/// How many bytes a tagged extent reference occupies.
+pub const EXTENT_TAG_BYTES: usize = 17;
 
 impl<'p> Datum<'p> {
     /// Returns the rank the class sorts at.
@@ -192,8 +204,59 @@ impl<'p> Datum<'p> {
                 };
                 Ok((value, 5usize.saturating_add(length)))
             }
+            tag::EXTENT => Err(corrupt(concat!(
+                "this delta value is stored out of line; read the leaf's ",
+                "extents through the tree first"
+            ))),
             other => Err(corrupt(format!("tag byte {other} is not a value"))),
         }
+    }
+
+    /// Returns how many bytes the tagged value at the front of a buffer occupies.
+    ///
+    /// **The one reader that walks past a value without wanting it.** Decoding
+    /// refuses an out-of-line value, because a `Datum` borrows bytes and the
+    /// bytes of that one are on other pages - but a reader looking for column
+    /// four still has to step over columns one to three whatever they hold.
+    ///
+    /// @param bytes - the buffer to measure from
+    pub fn tagged_span(bytes: &[u8]) -> DbResult<usize> {
+        let (&kind, rest) = bytes
+            .split_first()
+            .ok_or_else(|| corrupt("tagged value has no tag byte"))?;
+        match kind {
+            tag::NULL => Ok(1),
+            tag::INT | tag::REAL => Ok(9),
+            tag::EXTENT => {
+                if rest.len() < EXTENT_TAG_BYTES - 1 {
+                    return Err(corrupt("tagged extent runs past the buffer"));
+                }
+                Ok(EXTENT_TAG_BYTES)
+            }
+            tag::TEXT | tag::BLOB => {
+                let length_bytes = rest
+                    .get(..4)
+                    .ok_or_else(|| corrupt("tagged string has no length"))?;
+                let mut raw = [0u8; 4];
+                raw.copy_from_slice(length_bytes);
+                let length = u32::from_le_bytes(raw) as usize;
+                if rest.len() < 4usize.saturating_add(length) {
+                    return Err(corrupt("tagged string runs past the buffer"));
+                }
+                Ok(5usize.saturating_add(length))
+            }
+            other => Err(corrupt(format!("tag byte {other} is not a value"))),
+        }
+    }
+
+    /// Returns the tag byte at the front of a buffer.
+    ///
+    /// @param bytes - the buffer to read from
+    pub fn tag_of(bytes: &[u8]) -> DbResult<u8> {
+        bytes
+            .first()
+            .copied()
+            .ok_or_else(|| corrupt("tagged value has no tag byte"))
     }
 }
 
