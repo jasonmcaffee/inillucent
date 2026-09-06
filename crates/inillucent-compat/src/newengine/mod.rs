@@ -45,6 +45,10 @@
 //! and [`SourceLayout`] records which record slot became which tree column so a
 //! bound expression can find its vector.
 
+pub mod analyze;
+pub mod ddl;
+pub mod pragma;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -129,6 +133,48 @@ pub struct ImportedDatabase {
     /// `transaction` family is exactly the question of what a commit costs, and
     /// a harness that could only run one grouping could not ask it.
     batch: std::cell::Cell<Option<u64>>,
+    /// The catalog tree's rows, with what each one needs beside it.
+    ///
+    /// Held beside the tree rather than read back out of it on every DDL
+    /// statement. The tree is the authority - it is what the file describes
+    /// itself with, and `import_with` compares the two after the checkpoint -
+    /// but a `DROP` has to find a row by name and the tree is keyed by rowid,
+    /// so the alternative is a full scan per statement.
+    entries: Vec<Recorded>,
+    /// The tables the binder resolves names against, `sqlite_schema` excepted.
+    ///
+    /// **Derived from `entries`, always**, by `rebuild_tables`. Nothing adds a
+    /// table here directly: a schema is one thing, and deriving it twice - once
+    /// when a statement runs and once when the catalog is read back - is how the
+    /// two come to disagree.
+    tables: Vec<TableInfo>,
+    /// `sqlite_schema`'s own declaration, re-registered on every rebuild.
+    schema_info: TableInfo,
+    /// The identifier the next tree a DDL statement creates is registered under.
+    ///
+    /// Roots here are *identifiers*, not page numbers - the physical root is in
+    /// the catalog row - and the imported ones are the fixture's SQLite page
+    /// numbers, which start at 1 and count pages. So a DDL-created tree takes a
+    /// number from the top half of the range, where no imported table can be,
+    /// and `sqlite_schema` keeps `u32::MAX`.
+    next_root: u32,
+    /// How long a writer waits for the writer slot, in milliseconds.
+    ///
+    /// `PRAGMA busy_timeout` reads and writes it. The value is carried here
+    /// rather than in `inillucent-txn` because this harness holds the log
+    /// directly and never takes the writer slot - so what it can honestly do
+    /// with the setting is remember it and report it, which is what the pragma
+    /// is asked for far more often than it is relied on.
+    busy_timeout_ms: u64,
+    /// Whether `PRAGMA foreign_keys` is on.
+    foreign_keys: bool,
+    /// How many times the catalog has changed.
+    ///
+    /// A plan compiled at one generation is not run at another: `execute_ddl`
+    /// bumps this and empties the statement cache in the same breath, which is
+    /// the TDD's "every plan cache is invalidated" made into two lines that
+    /// cannot get out of step.
+    catalog_generation: u64,
 }
 
 impl TreeCatalog for ImportedDatabase {
@@ -200,6 +246,9 @@ impl ImportedDatabase {
             })
             .collect();
         let mut catalog = StaticCatalog::empty();
+        // The same `TableInfo`s the catalog is built from, kept so that DDL can
+        // rebuild it after a `DROP` removes one.
+        let mut tables: Vec<TableInfo> = Vec::new();
         let mut layouts = HashMap::new();
         let mut covering: HashMap<u32, Vec<u32>> = HashMap::new();
         let mut shapes: HashMap<u32, TreeShape> = HashMap::new();
@@ -213,6 +262,10 @@ impl ImportedDatabase {
         // been written - which is the whole difference between this catalog and
         // the one it was imported from.
         let mut entries: Vec<SchemaEntry> = Vec::new();
+        // The identifier each row's tree is registered under, in the same order
+        // as `entries`. For an imported object that is the fixture's SQLite root
+        // page, which is not the page the row's `rootpage` column names.
+        let mut identifiers: Vec<u32> = Vec::new();
 
         let vfs = OsVfs::new();
         let target = target_path(&path, page_size, frames);
@@ -259,7 +312,9 @@ impl ImportedDatabase {
                 table: info.name.clone(),
                 root: shape.root,
                 sql: info.create_sql.clone(),
+                stats: stats_of(&shape),
             });
+            identifiers.push(info.root);
             shapes.insert(info.root, shape);
             layouts.insert(info.root, layout);
             // The indexes the new engine can hold. A descending one is dropped,
@@ -313,7 +368,9 @@ impl ImportedDatabase {
                         ))
                         .map(|sql| sql.as_bytes().to_vec())
                         .unwrap_or_default(),
+                    stats: stats_of(&shape),
                 });
+                identifiers.push(index.root);
                 shapes.insert(index.root, shape);
                 layouts.insert(index.root, layout);
                 covering
@@ -321,6 +378,7 @@ impl ImportedDatabase {
                     .or_insert_with(Vec::new)
                     .push(index.root);
             }
+            tables.push(info.clone());
             catalog = catalog.with_table(info.clone());
         }
 
@@ -421,7 +479,7 @@ impl ImportedDatabase {
                 catalog_shape.row_count,
             )?,
         );
-        catalog = catalog.with_table(schema_info);
+        catalog = catalog.with_table(schema_info.clone());
 
         // The log the write path describes every change in, opened on a file
         // that has just been checkpointed - so it starts empty, at the first
@@ -464,6 +522,22 @@ impl ImportedDatabase {
             next_txn: std::cell::Cell::new(1),
             statements: std::cell::RefCell::new(HashMap::new()),
             batch: std::cell::Cell::new(None),
+            entries: entries
+                .into_iter()
+                .zip(identifiers)
+                .enumerate()
+                .map(|(nth, (entry, root))| Recorded {
+                    rowid: nth.saturating_add(1) as i64,
+                    root,
+                    entry,
+                })
+                .collect(),
+            tables,
+            schema_info,
+            next_root: FIRST_CREATED_ROOT,
+            busy_timeout_ms: 0,
+            foreign_keys: false,
+            catalog_generation: 0,
         })
     }
 
@@ -749,6 +823,25 @@ impl ImportedDatabase {
         Ok(self.plan(sql)?.describe())
     }
 
+    /// Returns the physical operators a statement runs **through the cache**.
+    ///
+    /// The difference from [`ImportedDatabase::describe`] is the whole point of
+    /// it: that one plans afresh every time, so it could not tell a live cache
+    /// from an invalidated one. This asks for the compiled statement the next
+    /// execution would get, which is the object a DDL statement has to throw
+    /// away.
+    ///
+    /// @param sql - the statement text
+    pub fn describe_cached(&self, sql: &str) -> DbResult<Vec<String>> {
+        match &*self.compiled(sql)? {
+            Cached::Select(_, prepared) => Ok(prepared.describe()),
+            Cached::Ddl(_) => Ok(vec!["a directive".to_string()]),
+            Cached::Insert(..) => Ok(vec!["an insert".to_string()]),
+            Cached::Update(..) => Ok(vec!["an update".to_string()]),
+            Cached::Delete(..) => Ok(vec!["a delete".to_string()]),
+        }
+    }
+
     /// Returns the log, so a caller can read its counters.
     pub fn wal(&self) -> &Wal {
         &self.wal
@@ -829,6 +922,15 @@ impl ImportedDatabase {
     /// the log has already described durably. The other order is the durability
     /// mutant the Phase 3 gate exists to kill.
     pub fn checkpoint(&mut self) -> DbResult<()> {
+        // **The catalog's statistics are made honest first, and inside the
+        // transaction the checkpoint is about to make durable.** A tree's shape
+        // changes on every split and every insert, and rewriting a catalog row
+        // that often would put a catalog write on the write path. A checkpoint
+        // is the moment it is cheap: the file is being flushed anyway, and what
+        // the next open reads is the shape as of the last checkpoint - which is
+        // exactly what the next open needs, because everything after it is in
+        // the log for recovery to replay.
+        self.refresh_statistics()?;
         self.wal.sync()?;
         let durable = self.wal.write_ahead_point();
         self.database.pool().set_durable_lsn(durable);
@@ -839,6 +941,98 @@ impl ImportedDatabase {
         self.database
             .pool()
             .set_durable_lsn(self.wal.write_ahead_point());
+        Ok(())
+    }
+
+    /// Closes the file and opens it again, from the catalog alone.
+    ///
+    /// **The test that makes the persisted statistics load-bearing.** Every tree
+    /// handle is rebuilt from the catalog row's leftmost leaf, leaf count and
+    /// row count rather than from anything this process remembers, so a file
+    /// whose statistics were wrong answers differently after a reopen - which is
+    /// the failure the numbers exist to prevent, made visible.
+    ///
+    /// It is on the harness rather than in the engine because the engine's own
+    /// open path is Phase 5's consumer story. What this proves is that the
+    /// *format* carries what an open needs, which is the part Phase 4 owes.
+    pub fn reopen(&mut self) -> DbResult<()> {
+        self.checkpoint()?;
+        let path = self.path.clone();
+        let frames = self.frames;
+        let vfs = OsVfs::new();
+        let db_path = DbPath::new(path.to_string_lossy().as_ref());
+        // The old handle's file is closed before the new one opens it, because
+        // two `Database`s over one path is two page caches over one file.
+        let database = {
+            let replacement = Database::open(&vfs, &db_path, frames.max(64))?;
+            std::mem::replace(&mut self.database, replacement)
+        };
+        drop(database);
+
+        let stored = read_catalog(
+            self.database.pool(),
+            &attach_catalog(self.database.pool(), self.database.catalog_root())?,
+        )?;
+        let mut trees = HashMap::new();
+        let mut entries: Vec<Recorded> = Vec::new();
+        for (position, entry) in stored.into_iter().enumerate() {
+            let rowid = position.saturating_add(1) as i64;
+            // The identifier a tree was registered under is this process's own
+            // bookkeeping and is not in the file; a genuine open would number
+            // them itself. Carrying the old numbering across keeps the plans and
+            // the layouts this harness already holds pointing at the same trees.
+            let root = self
+                .entries
+                .iter()
+                .find(|held| {
+                    held.entry.kind == entry.kind && held.entry.name == entry.name
+                })
+                .map(|held| held.root)
+                .unwrap_or(0);
+            if entry.root.is_none() || root == 0 {
+                entries.push(Recorded { rowid, root, entry });
+                continue;
+            }
+            let Some(columns) = self.trees.get(&root).map(|tree| tree.columns().to_vec()) else {
+                entries.push(Recorded { rowid, root, entry });
+                continue;
+            };
+            let key_columns = self
+                .trees
+                .get(&root)
+                .map(PagedTree::key_columns)
+                .unwrap_or(1);
+            let tree = PagedTree::attach(
+                self.database.pool(),
+                u64::from(root),
+                entry.root,
+                columns,
+                key_columns,
+                entry.stats.first_leaf,
+                entry.stats.leaf_count,
+                entry.stats.row_count,
+            )?;
+            trees.insert(root, tree);
+            entries.push(Recorded { rowid, root, entry });
+        }
+        // The catalog itself, which the meta page points at rather than a row.
+        let catalog_tree = attach_catalog(self.database.pool(), self.database.catalog_root())?;
+        trees.insert(SCHEMA_VIEW_ROOT, catalog_tree);
+        self.trees = trees;
+        self.entries = entries;
+        self.wal = Wal::open(
+            std::sync::Arc::new(OsVfs::new()),
+            &db_path,
+            self.database.uuid(),
+            FIRST_LSN,
+            1,
+            WalOptions::default(),
+        )?;
+        self.database
+            .pool()
+            .set_durable_lsn(self.wal.write_ahead_point());
+        self.rebuild_tables()?;
+        self.refresh_catalog();
         Ok(())
     }
 
@@ -919,7 +1113,7 @@ impl ImportedDatabase {
         let cached = std::rc::Rc::clone(&statement.0);
         let found = std::time::Instant::now();
         let rows = match &*cached {
-            Cached::Select(..) | Cached::Insert(_, None) => Vec::new(),
+            Cached::Ddl(_) | Cached::Select(..) | Cached::Insert(_, None) => Vec::new(),
             Cached::Insert(_, Some((plan, prepared))) => {
                 physical::run_any_prepared(plan, self, prepared, params)?.0
             }
@@ -930,6 +1124,10 @@ impl ImportedDatabase {
         let find = found.elapsed().as_nanos();
         let applied = std::time::Instant::now();
         match &*cached {
+            Cached::Ddl(sql) => {
+                let sql = sql.clone();
+                self.execute_ddl(&sql)?;
+            }
             Cached::Select(plan, prepared) => {
                 physical::run_any_prepared(plan, self, prepared, params)?;
             }
@@ -985,6 +1183,10 @@ impl ImportedDatabase {
         params: &Params,
     ) -> DbResult<Outcome> {
         match &**cached {
+            Cached::Ddl(sql) => {
+                let sql = sql.clone();
+                self.execute_ddl(&sql)
+            }
             Cached::Select(plan, prepared) => {
                 let (rows, shape) = physical::run_any_prepared(plan, self, prepared, params)?;
                 Ok(Outcome {
@@ -1086,6 +1288,13 @@ impl ImportedDatabase {
                     Box::new(prepared),
                 ))
             }
+            // A directive is *not* cached as a compiled thing: it changes the
+            // catalog the next statement will be bound against, and the whole
+            // point of `refresh_catalog` is that what was compiled before a DDL
+            // statement is not run after it. So the entry holds the text, and
+            // the execution re-binds against the schema as it is at that
+            // moment.
+            BoundStatement::Directive(_) => Ok(Cached::Ddl(sql.to_string())),
             other => Err(misuse(format!(
                 "{sql} binds to {}, which the new engine does not run yet",
                 describe_statement(&other)
@@ -1193,6 +1402,11 @@ pub struct Statement(std::rc::Rc<Cached>);
 /// `WHERE id = ?1` reaches the same point probe on the second execution as on
 /// the first.
 enum Cached {
+    /// A statement the session carries out itself, held as its own text.
+    ///
+    /// Re-bound on every execution, because binding a `DROP TABLE` resolves
+    /// whether the table is there and the answer changes when it runs.
+    Ddl(String),
     /// A query.
     Select(Box<PhysicalPlan>, Box<physical::Prepared>),
     /// An insert, with the plan for its `SELECT` source when it has one.
@@ -1236,6 +1450,33 @@ fn describe_statement(statement: &BoundStatement) -> &'static str {
         BoundStatement::Delete(_) => "a delete",
         BoundStatement::Directive(_) => "a directive",
         BoundStatement::Empty => "nothing",
+    }
+}
+
+/// Names the kind of directive a refusal is about.
+///
+/// @param directive - the bound directive
+fn describe_directive(directive: &inillucent_sql::directive::Directive) -> &'static str {
+    use inillucent_sql::directive::Directive;
+    match directive {
+        Directive::Begin(_) => "BEGIN",
+        Directive::Commit => "COMMIT",
+        Directive::Rollback { .. } => "ROLLBACK",
+        Directive::Savepoint(_) => "SAVEPOINT",
+        Directive::Release(_) => "RELEASE",
+        Directive::CreateTable { .. } => "CREATE TABLE",
+        Directive::CreateVirtualTable { .. } => "CREATE VIRTUAL TABLE",
+        Directive::CreateView { .. } => "CREATE VIEW",
+        Directive::CreateTrigger { .. } => "CREATE TRIGGER",
+        Directive::CreateIndex { .. } => "CREATE INDEX",
+        Directive::Drop { .. } => "DROP",
+        Directive::Alter { .. } => "ALTER TABLE",
+        Directive::Reindex { .. } => "REINDEX",
+        Directive::Vacuum { .. } => "VACUUM",
+        Directive::Attach { .. } => "ATTACH",
+        Directive::Detach { .. } => "DETACH",
+        Directive::Analyze { .. } => "ANALYZE",
+        Directive::Pragma { .. } => "PRAGMA",
     }
 }
 
@@ -1360,6 +1601,33 @@ fn in_key_order(
     keyed.into_iter().map(|(_, row)| row).collect()
 }
 
+/// Returns a built tree's shape as the catalog records it.
+///
+/// @param shape - what the build produced
+fn stats_of(shape: &TreeShape) -> inillucent_catalog::paged::TreeStats {
+    inillucent_catalog::paged::TreeStats {
+        first_leaf: shape.first_leaf,
+        leaf_count: shape.leaf_count,
+        row_count: shape.row_count,
+    }
+}
+
+/// One catalog row, with the identifier of the tree it describes.
+///
+/// The row is what the file holds; the identifier is what the `trees` and
+/// `layouts` maps are keyed by. They are different numbers - see the module
+/// documentation on `newengine::ddl` - and carrying them together is what lets a
+/// rename change the row without the tree it names moving.
+#[derive(Clone, Debug)]
+struct Recorded {
+    /// The rowid the catalog tree stores it under.
+    rowid: i64,
+    /// The identifier its tree is registered under, zero when it has no tree.
+    root: u32,
+    /// The row itself.
+    entry: SchemaEntry,
+}
+
 /// The shape of one built tree, kept so it can be re-attached after the file is
 /// closed and reopened.
 ///
@@ -1384,6 +1652,14 @@ struct TreeShape {
 /// roots start at 1 and count pages, so a number at the top of the range is
 /// free by construction.
 const SCHEMA_VIEW_ROOT: u32 = u32::MAX;
+
+/// The identifier the first DDL-created tree is registered under.
+///
+/// Imported trees are keyed by the fixture's SQLite root *page*, which counts
+/// pages from one, so a fixture would have to be eight terabytes at the default
+/// page size before it reached this. Counting up from here keeps every created
+/// tree's identifier distinct from every imported one without a search.
+const FIRST_CREATED_ROOT: u32 = 0x8000_0000;
 
 /// Returns the path the imported database is written to.
 ///
@@ -1421,17 +1697,8 @@ fn import_table(
     // NULL in every SQLite record, so it is dropped and the rowid takes its
     // place as the tree's key column.
     let alias = info.rowid_alias.map(usize::from);
-    let mut slots: Vec<Option<usize>> = Vec::with_capacity(record_width);
-    let mut next = 1usize;
-    for slot in 0..record_width {
-        if Some(slot) == alias {
-            slots.push(Some(0));
-        } else {
-            slots.push(Some(next));
-            next = next.saturating_add(1);
-        }
-    }
-    let width = next;
+    let (columns, layout) = table_shape(info);
+    let width = layout.width;
 
     let mut rows: Vec<Vec<OwnedDatum>> = Vec::with_capacity(raw.len());
     for row in raw {
@@ -1448,30 +1715,6 @@ fn import_table(
             );
         }
         rows.push(out);
-    }
-
-    // The physical type of each tree column, from the declared affinity. This
-    // is a claim, not a guarantee - a column declared INTEGER may hold a string
-    // - which is exactly what the leaf's exception class is for.
-    let mut columns = vec![ColumnSpec::key(PhysicalType::Int64)];
-    let mut types = vec![StaticType::Int];
-    for slot in 0..record_width {
-        if Some(slot) == alias {
-            continue;
-        }
-        let (physical, static_type) = match info.columns.get(slot) {
-            Some(column) => physical_for(column.affinity),
-            None => (PhysicalType::Any, StaticType::Unknown),
-        };
-        columns.push(
-            ColumnSpec::new(physical).with_collation(
-                info.columns
-                    .get(slot)
-                    .map(|column| collation_of(&column.collation))
-                    .unwrap_or(Collation::Binary),
-            ),
-        );
-        types.push(static_type);
     }
 
     let borrowed: Vec<Vec<Datum<'_>>> = rows
@@ -1494,6 +1737,58 @@ fn import_table(
             leaf_count: tree.leaf_count(),
             row_count: tree.row_count(),
         },
+        layout,
+    ))
+}
+
+/// Returns the column directory and the layout a rowid table's tree has.
+///
+/// **Derived from the declaration alone**, which is what lets `CREATE TABLE`
+/// and the fixture import agree by construction rather than by two people
+/// writing the same rule twice. The import supplies rows read out of a SQLite
+/// file and the DDL path supplies none; neither supplies a shape.
+///
+/// The physical type of each tree column comes from the declared affinity, and
+/// that is a claim rather than a guarantee - a column declared `INTEGER` may
+/// hold a string - which is exactly what the leaf's exception class is for.
+///
+/// @param info - the table's declaration
+fn table_shape(info: &TableInfo) -> (Vec<ColumnSpec>, SourceLayout) {
+    let record_width = info.columns.len();
+    let alias = info.rowid_alias.map(usize::from);
+    let mut slots: Vec<Option<usize>> = Vec::with_capacity(record_width);
+    let mut next = 1usize;
+    for slot in 0..record_width {
+        if Some(slot) == alias {
+            slots.push(Some(0));
+        } else {
+            slots.push(Some(next));
+            next = next.saturating_add(1);
+        }
+    }
+    let width = next;
+    let mut columns = vec![ColumnSpec::key(PhysicalType::Int64)];
+    let mut types = vec![StaticType::Int];
+    for slot in 0..record_width {
+        if Some(slot) == alias {
+            continue;
+        }
+        let (physical, static_type) = match info.columns.get(slot) {
+            Some(column) => physical_for(column.affinity),
+            None => (PhysicalType::Any, StaticType::Unknown),
+        };
+        columns.push(
+            ColumnSpec::new(physical).with_collation(
+                info.columns
+                    .get(slot)
+                    .map(|column| collation_of(&column.collation))
+                    .unwrap_or(Collation::Binary),
+            ),
+        );
+        types.push(static_type);
+    }
+    (
+        columns,
         SourceLayout {
             tree_key: info.root,
             slots,
@@ -1503,7 +1798,7 @@ fn import_table(
             // A rowid-clustered tree is ordered by its rowid, which is column 0.
             key_columns: vec![0],
         },
-    ))
+    )
 }
 
 /// Imports one `WITHOUT ROWID` table into a key-ordered PAX tree.
@@ -1530,6 +1825,45 @@ fn import_keyed_table(
     info: &TableInfo,
 ) -> DbResult<(TreeShape, SourceLayout)> {
     let width = info.columns.len();
+    let (columns, key_columns, layout) = keyed_table_shape(info)?;
+    let rows = file.read_index(info.root, width)?;
+    let rows = in_key_order(rows, &columns, key_columns);
+    let borrowed: Vec<Vec<Datum<'_>>> = rows
+        .iter()
+        .map(|row| row.iter().map(OwnedDatum::borrow).collect())
+        .collect();
+    let tree = PagedTree::bulk_build(
+        database,
+        u64::from(info.root),
+        columns.clone(),
+        key_columns,
+        &borrowed,
+    )?;
+    Ok((
+        TreeShape {
+            root: tree.root(),
+            columns,
+            key_columns,
+            first_leaf: tree.first_leaf(),
+            leaf_count: tree.leaf_count(),
+            row_count: tree.row_count(),
+        },
+        layout,
+    ))
+}
+
+/// Returns the column directory, key width and layout of a `WITHOUT ROWID`
+/// table's tree.
+///
+/// **The field order is SQLite's, not the declaration's.** For
+/// `CREATE TABLE t(a, b, PRIMARY KEY(b))` the record is `(b, a)`, and
+/// `primary_key_position` is what says so.
+///
+/// @param info - the table's declaration
+fn keyed_table_shape(
+    info: &TableInfo,
+) -> DbResult<(Vec<ColumnSpec>, usize, SourceLayout)> {
+    let width = info.columns.len();
     // The record's field order: primary-key columns in their key order, then
     // every other column in declaration order.
     let mut order: Vec<usize> = Vec::with_capacity(width);
@@ -1552,8 +1886,6 @@ fn import_keyed_table(
             order.push(slot);
         }
     }
-
-    let rows = file.read_index(info.root, width)?;
     let mut columns = Vec::with_capacity(width);
     let mut types = Vec::with_capacity(width);
     // `slots[declared] = tree column`, which is the inverse of `order`.
@@ -1579,35 +1911,16 @@ fn import_keyed_table(
             *slot = Some(position);
         }
     }
-
-    let rows = in_key_order(rows, &columns, key_columns);
-    let borrowed: Vec<Vec<Datum<'_>>> = rows
-        .iter()
-        .map(|row| row.iter().map(OwnedDatum::borrow).collect())
-        .collect();
-    let tree = PagedTree::bulk_build(
-        database,
-        u64::from(info.root),
-        columns.clone(),
-        key_columns,
-        &borrowed,
-    )?;
     // A non-binary collation means the tree is *seekable* but not "already
     // sorted" for an ORDER BY that did not name the same collation, which is
-    // the same disqualification `import_index` makes and for the same reason.
+    // the same disqualification `index_shape` makes and for the same reason.
     let ordered = columns
         .iter()
         .take(key_columns)
         .all(|spec| spec.collation == Collation::Binary);
     Ok((
-        TreeShape {
-            root: tree.root(),
-            columns,
-            key_columns,
-            first_leaf: tree.first_leaf(),
-            leaf_count: tree.leaf_count(),
-            row_count: tree.row_count(),
-        },
+        columns,
+        key_columns,
         SourceLayout {
             tree_key: info.root,
             slots,
@@ -1644,7 +1957,43 @@ fn import_index(
 ) -> DbResult<(TreeShape, SourceLayout)> {
     let key_columns = index.columns.len().saturating_add(1);
     let rows = file.read_index(root, key_columns)?;
+    let (columns, layout) = index_shape(table, index, root);
+    let rows = in_key_order(rows, &columns, key_columns);
+    let borrowed: Vec<Vec<Datum<'_>>> = rows
+        .iter()
+        .map(|row| row.iter().map(OwnedDatum::borrow).collect())
+        .collect();
+    let tree = PagedTree::bulk_build(
+        database,
+        u64::from(root),
+        columns.clone(),
+        key_columns,
+        &borrowed,
+    )?;
+    Ok((
+        TreeShape {
+            root: tree.root(),
+            columns,
+            key_columns,
+            first_leaf: tree.first_leaf(),
+            leaf_count: tree.leaf_count(),
+            row_count: tree.row_count(),
+        },
+        layout,
+    ))
+}
 
+/// Returns the column directory and the layout an index tree is built with.
+///
+/// Shared by the fixture import, which fills the tree from SQLite's own index
+/// pages, and by `CREATE INDEX`, which fills it from the table tree. The shape
+/// is the same question in both cases and is answered in one place.
+///
+/// @param table - the table the index is on
+/// @param index - the index's declaration
+/// @param root - the identifier the tree is registered under
+fn index_shape(table: &TableInfo, index: &IndexInfo, root: u32) -> (Vec<ColumnSpec>, SourceLayout) {
+    let key_columns = index.columns.len().saturating_add(1);
     let mut columns = Vec::with_capacity(key_columns);
     let mut types = Vec::with_capacity(key_columns);
     let mut slots: Vec<Option<usize>> = vec![None; table.columns.len()];
@@ -1707,27 +2056,8 @@ fn import_index(
         }
     }
 
-    let rows = in_key_order(rows, &columns, key_columns);
-    let borrowed: Vec<Vec<Datum<'_>>> = rows
-        .iter()
-        .map(|row| row.iter().map(OwnedDatum::borrow).collect())
-        .collect();
-    let tree = PagedTree::bulk_build(
-        database,
-        u64::from(root),
-        columns.clone(),
-        key_columns,
-        &borrowed,
-    )?;
-    Ok((
-        TreeShape {
-            root: tree.root(),
-            columns,
-            key_columns,
-            first_leaf: tree.first_leaf(),
-            leaf_count: tree.leaf_count(),
-            row_count: tree.row_count(),
-        },
+    (
+        columns,
         SourceLayout {
             tree_key: root,
             slots,
@@ -1743,7 +2073,7 @@ fn import_index(
                 Vec::new()
             },
         },
-    ))
+    )
 }
 
 /// Returns the collation a folded name refers to.

@@ -38,6 +38,7 @@ use inillucent_sql::catalog_view::TableInfo;
 use inillucent_tree::datum::{Datum, OwnedDatum};
 use inillucent_tree::paged::PagedTree;
 use inillucent_tree::types::{ColumnSpec, PhysicalType};
+use inillucent_tree::write::TreeLog;
 
 use crate::load::{index_from_create_sql, table_from_create_sql};
 
@@ -110,6 +111,36 @@ pub struct SchemaEntry {
     pub root: PageId,
     /// The `CREATE` text.
     pub sql: Vec<u8>,
+    /// What the tree's shape is, so opening the file does not have to walk it.
+    pub stats: TreeStats,
+}
+
+/// The per-tree statistics the catalog carries beside a root page.
+///
+/// **Persisted, because otherwise opening a database means walking every tree.**
+/// A `PagedTree` handle needs its leftmost leaf, its leaf count and its row
+/// count, and none of the three can be read off the root page: the leaf count is
+/// the length of the sibling chain and the row count is the sum over it. Phase 2
+/// carried them from the build, which works only for a file this process just
+/// wrote - task-1817 named that as the gap and this closes it.
+///
+/// They are also what the planner will read for cardinality once `ANALYZE`
+/// exists, which is the second reason the TDD puts them here rather than in a
+/// side table: the catalog row is already the thing a plan is built against.
+///
+/// **Three integers rather than the TDD's "stats blob".** They are fixed-width
+/// and the leaf layout stores a fixed-width column as a typed mini-column with
+/// no heap slot at all; a blob of the same twenty-four bytes would be a heap
+/// allocation per catalog row to hold three integers, and nothing would be able
+/// to read one of them without decoding all three.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TreeStats {
+    /// The leftmost leaf, where a full scan starts.
+    pub first_leaf: PageId,
+    /// How many leaves the sibling chain holds.
+    pub leaf_count: u64,
+    /// How many rows the tree holds.
+    pub row_count: u64,
 }
 
 /// Returns the column directory a catalog tree is built with.
@@ -126,8 +157,23 @@ pub fn schema_layout() -> Vec<ColumnSpec> {
         ColumnSpec::new(PhysicalType::Text),
         ColumnSpec::new(PhysicalType::Int64),
         ColumnSpec::new(PhysicalType::Text),
+        // The three statistics columns, which `sqlite_schema` does not declare
+        // and no query can name. The TDD's catalog row is wider than
+        // `sqlite_schema`'s and `sqlite_schema` is the *view* over it; a layout
+        // that maps the five declared columns onto tree columns one to five is
+        // what makes that true without any view machinery, because a tree
+        // column nothing projects is a tree column nothing reads.
+        ColumnSpec::new(PhysicalType::Int64),
+        ColumnSpec::new(PhysicalType::Int64),
+        ColumnSpec::new(PhysicalType::Int64),
     ]
 }
+
+/// How many columns the catalog tree has, the rowid key included.
+pub const CATALOG_WIDTH: usize = 9;
+
+/// How many of them `sqlite_schema` shows, the rowid key included.
+pub const SCHEMA_VIEW_WIDTH: usize = 6;
 
 /// Returns the `CREATE TABLE` text the catalog tree describes itself with.
 ///
@@ -150,14 +196,7 @@ pub fn schema_create_sql() -> &'static [u8] {
 pub fn write_catalog(database: &mut Database, entries: &[SchemaEntry]) -> DbResult<PagedTree> {
     let mut owned: Vec<Vec<OwnedDatum>> = Vec::with_capacity(entries.len());
     for (nth, entry) in entries.iter().enumerate() {
-        owned.push(vec![
-            OwnedDatum::Int(nth.saturating_add(1) as i64),
-            OwnedDatum::Text(entry.kind.as_text().to_vec()),
-            OwnedDatum::Text(entry.name.clone()),
-            OwnedDatum::Text(entry.table.clone()),
-            OwnedDatum::Int(entry.root.0 as i64),
-            OwnedDatum::Text(entry.sql.clone()),
-        ]);
+        owned.push(catalog_row(nth.saturating_add(1) as i64, entry));
     }
     let rows: Vec<Vec<Datum<'_>>> = owned
         .iter()
@@ -186,12 +225,41 @@ pub fn attach_catalog(pool: &Pool, root: PageId) -> DbResult<PagedTree> {
 /// @param pool - the buffer pool the file is open through
 /// @param tree - the catalog tree
 pub fn read_catalog(pool: &Pool, tree: &PagedTree) -> DbResult<Vec<SchemaEntry>> {
+    Ok(read_catalog_rows(pool, tree)?
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .collect())
+}
+
+/// Reads every row of a catalog tree, with the rowid each is stored under.
+///
+/// DDL needs the rowid and a reader does not, but there is one walk rather than
+/// two: a catalog read that missed a row would be a schema missing an object,
+/// and two walks is two chances to miss it differently.
+///
+/// **`live` rather than the packed rows.** A `CREATE TABLE` puts its catalog row
+/// in the leaf's delta area like any other insert, so a walk over
+/// `0..row_count()` reads the catalog as it was when the tree was last packed.
+/// Reopening a file after a `CREATE TABLE` then produced a schema without the
+/// table in it while `SELECT * FROM sqlite_schema` - which goes through the
+/// ordinary scan, which merges - listed it.
+///
+/// @param pool - the buffer pool the file is open through
+/// @param tree - the catalog tree
+pub fn read_catalog_rows(pool: &Pool, tree: &PagedTree) -> DbResult<Vec<(i64, SchemaEntry)>> {
     let mut entries = Vec::new();
     let mut failure: Option<DbError> = None;
     tree.visit_leaves(pool, &mut |leaf: &inillucent_tree::leaf::LeafRef<'_>| {
-        for row in 0..leaf.row_count() {
-            match entry_of(leaf, row) {
-                Ok(entry) => entries.push(entry),
+        for row in leaf.live()? {
+            let rowid = match row.first() {
+                Some(Datum::Int(number)) => *number,
+                _ => {
+                    failure = Some(error::corrupt("a catalog row's key is not a rowid"));
+                    return Ok(false);
+                }
+            };
+            match entry_of(&row) {
+                Ok(entry) => entries.push((rowid, entry)),
                 Err(error) => {
                     // The walk stops at the first bad row rather than carrying
                     // on: a catalog that cannot be read is not a catalog with
@@ -209,17 +277,83 @@ pub fn read_catalog(pool: &Pool, tree: &PagedTree) -> DbResult<Vec<SchemaEntry>>
     }
 }
 
-/// Reads one catalog row out of a leaf.
+/// Returns one catalog row as the values the tree holds.
 ///
-/// @param leaf - the leaf the row is in
-/// @param row - which row
-fn entry_of(leaf: &inillucent_tree::leaf::LeafRef<'_>, row: usize) -> DbResult<SchemaEntry> {
-    let kind = ObjectKind::from_text(&text_at(leaf, row, 1)?).ok_or_else(|| {
+/// @param rowid - the key the row is stored under
+/// @param entry - the object it describes
+pub fn catalog_row(rowid: i64, entry: &SchemaEntry) -> Vec<OwnedDatum> {
+    vec![
+        OwnedDatum::Int(rowid),
+        OwnedDatum::Text(entry.kind.as_text().to_vec()),
+        OwnedDatum::Text(entry.name.clone()),
+        OwnedDatum::Text(entry.table.clone()),
+        OwnedDatum::Int(entry.root.0 as i64),
+        // **An automatic index's statement is NULL, not empty text.** SQLite
+        // writes NULL for an index a constraint produced, because there is no
+        // statement the user wrote; a reader tells the two apart by asking
+        // whether the column is null, and `SELECT sql FROM sqlite_schema` shows
+        // the difference. An empty string here is a different answer to the
+        // same query.
+        match entry.sql.is_empty() {
+            true => OwnedDatum::Null,
+            false => OwnedDatum::Text(entry.sql.clone()),
+        },
+        OwnedDatum::Int(entry.stats.first_leaf.0 as i64),
+        OwnedDatum::Int(entry.stats.leaf_count as i64),
+        OwnedDatum::Int(entry.stats.row_count as i64),
+    ]
+}
+
+/// Adds one object to the catalog tree.
+///
+/// The row goes in through the ordinary write path, which means it is logged,
+/// it is undone by the same rollback that undoes an `INSERT`, and there is no
+/// second way to write a catalog row that could disagree with the first.
+///
+/// @param database - the file
+/// @param tree - the catalog tree
+/// @param log - where the record goes
+/// @param rowid - the key to store it under
+/// @param entry - the object to record
+pub fn insert_entry(
+    database: &mut Database,
+    tree: &mut PagedTree,
+    log: &mut dyn TreeLog,
+    rowid: i64,
+    entry: &SchemaEntry,
+) -> DbResult<()> {
+    let owned = catalog_row(rowid, entry);
+    let row: Vec<Datum<'_>> = owned.iter().map(OwnedDatum::borrow).collect();
+    tree.insert(database, log, &row)?;
+    Ok(())
+}
+
+/// Removes one object from the catalog tree.
+///
+/// @param database - the file
+/// @param tree - the catalog tree
+/// @param log - where the record goes
+/// @param rowid - the key it is stored under
+pub fn delete_entry(
+    database: &mut Database,
+    tree: &mut PagedTree,
+    log: &mut dyn TreeLog,
+    rowid: i64,
+) -> DbResult<bool> {
+    let key = [Datum::Int(rowid)];
+    Ok(tree.delete(database, log, &key)?.is_some())
+}
+
+/// Reads one catalog row out of the values a leaf holds.
+///
+/// @param row - the row's values, rowid first
+fn entry_of(row: &[Datum<'_>]) -> DbResult<SchemaEntry> {
+    let kind = ObjectKind::from_text(&text_at(row, 1)?).ok_or_else(|| {
         error::corrupt("a catalog row's type is not one of table, index, view or trigger")
     })?;
-    let root = match leaf.value(row, 4)? {
-        Datum::Int(page) if page >= 0 => PageId(page as u64),
-        Datum::Null => PageId::NONE,
+    let root = match row.get(4) {
+        Some(Datum::Int(page)) if *page >= 0 => PageId(*page as u64),
+        Some(Datum::Null) | None => PageId::NONE,
         _ => {
             return Err(error::corrupt(
                 "a catalog row's rootpage is not a page number",
@@ -228,26 +362,45 @@ fn entry_of(leaf: &inillucent_tree::leaf::LeafRef<'_>, row: usize) -> DbResult<S
     };
     Ok(SchemaEntry {
         kind,
-        name: text_at(leaf, row, 2)?,
-        table: text_at(leaf, row, 3)?,
+        name: text_at(row, 2)?,
+        table: text_at(row, 3)?,
         root,
-        sql: text_at(leaf, row, 5)?,
+        sql: text_at(row, 5)?,
+        stats: TreeStats {
+            first_leaf: PageId(counter_at(row, 6)? as u64),
+            leaf_count: counter_at(row, 7)? as u64,
+            row_count: counter_at(row, 8)? as u64,
+        },
     })
+}
+
+/// Reads one statistics column, refusing anything that is not a count.
+///
+/// A row written before the statistics existed has six columns rather than
+/// nine, so the seventh is absent and reads as zero - which is the same thing
+/// "unknown" has always meant here: a caller that gets zero leaves rescans the
+/// tree.
+///
+/// @param row - the row's values
+/// @param column - which column
+fn counter_at(row: &[Datum<'_>], column: usize) -> DbResult<i64> {
+    match row.get(column) {
+        Some(Datum::Int(number)) if *number >= 0 => Ok(*number),
+        Some(Datum::Null) | None => Ok(0),
+        _ => Err(error::corrupt(
+            "a catalog row's statistics column is not a count",
+        )),
+    }
 }
 
 /// Reads one text column of one row, refusing anything that is not text.
 ///
-/// @param leaf - the leaf the row is in
-/// @param row - which row
+/// @param row - the row's values
 /// @param column - which column
-fn text_at(
-    leaf: &inillucent_tree::leaf::LeafRef<'_>,
-    row: usize,
-    column: usize,
-) -> DbResult<Vec<u8>> {
-    match leaf.value(row, column)? {
-        Datum::Text(bytes) => Ok(bytes.to_vec()),
-        Datum::Null => Ok(Vec::new()),
+fn text_at(row: &[Datum<'_>], column: usize) -> DbResult<Vec<u8>> {
+    match row.get(column) {
+        Some(Datum::Text(bytes)) => Ok(bytes.to_vec()),
+        Some(Datum::Null) | None => Ok(Vec::new()),
         _ => Err(error::corrupt("a catalog row's text column is not text")),
     }
 }
@@ -262,12 +415,46 @@ fn text_at(
 /// @param entries - the catalog rows
 /// @param database - which attached database these belong to
 pub fn tables_from_catalog(entries: &[SchemaEntry], database: usize) -> DbResult<Vec<TableInfo>> {
+    let roots = entries
+        .iter()
+        .map(root_as_u32)
+        .collect::<DbResult<Vec<u32>>>()?;
+    tables_from_entries(entries, &roots, database)
+}
+
+/// Builds the binder's table list from catalog rows and the identifiers their
+/// trees are registered under.
+///
+/// **Two arrays rather than one**, because the identifier a tree is registered
+/// under is not the page its root sits on. A file the engine built for itself
+/// can use the page for both - which is what [`tables_from_catalog`] does - but
+/// a fixture imported from SQLite registers its trees under the *fixture's* root
+/// pages, and DDL registers a created tree under a number chosen before the
+/// tree exists. The catalog row is the same row in all three cases; only the
+/// identifier differs, so it is passed alongside.
+///
+/// Views and triggers are derived here too, which is the difference between a
+/// catalog a reader can query and one it can only list: a `DROP TRIGGER` has to
+/// find the trigger, and it finds it on the table it is attached to.
+///
+/// @param entries - the catalog rows
+/// @param roots - the identifier for each row's tree, in the same order
+/// @param database - which attached database these belong to
+pub fn tables_from_entries(
+    entries: &[SchemaEntry],
+    roots: &[u32],
+    database: usize,
+) -> DbResult<Vec<TableInfo>> {
     let mut tables: Vec<TableInfo> = Vec::new();
-    for entry in entries {
+    for (position, entry) in entries.iter().enumerate() {
+        if entry.kind == ObjectKind::View {
+            tables.push(view_info(entry, database)?);
+            continue;
+        }
         if entry.kind != ObjectKind::Table {
             continue;
         }
-        let root = root_as_u32(entry)?;
+        let root = roots.get(position).copied().unwrap_or(0);
         let mut info = table_from_create_sql(&entry.sql, database, root)
             .map_err(|error| error.with_detail(format!("in table {}", name_of(entry))))?;
         // The declared name wins over whatever the CREATE text spelled, because
@@ -276,11 +463,11 @@ pub fn tables_from_catalog(entries: &[SchemaEntry], database: usize) -> DbResult
         info.folded = entry.name.to_ascii_lowercase();
         tables.push(info);
     }
-    for entry in entries {
+    for (position, entry) in entries.iter().enumerate() {
         if entry.kind != ObjectKind::Index {
             continue;
         }
-        let root = root_as_u32(entry)?;
+        let root = roots.get(position).copied().unwrap_or(0);
         let folded = entry.table.to_ascii_lowercase();
         let Some(table) = tables.iter_mut().find(|table| table.folded == folded) else {
             // An index whose table is not here describes a table this file does
@@ -309,7 +496,59 @@ pub fn tables_from_catalog(entries: &[SchemaEntry], database: usize) -> DbResult
             .map_err(|error| error.with_detail(format!("in index {}", name_of(entry))))?;
         table.indexes.push(index);
     }
+    for entry in entries {
+        if entry.kind != ObjectKind::Trigger {
+            continue;
+        }
+        let folded = entry.table.to_ascii_lowercase();
+        let Some(table) = tables.iter_mut().find(|table| table.folded == folded) else {
+            // A trigger whose table is gone is dropped with it, so a row that
+            // outlived its table is a catalog that is mid-drop rather than one
+            // to refuse. Leaving it unattached is what the old loader does with
+            // the same shape.
+            continue;
+        };
+        let trigger = crate::load::trigger_from_create_sql(&entry.sql)
+            .map_err(|error| error.with_detail(format!("in trigger {}", name_of(entry))))?;
+        table.triggers.push(trigger);
+    }
     Ok(tables)
+}
+
+/// Builds a view's entry in the binder's table list.
+///
+/// A view is a table with no tree and a parsed body. The body is parsed here,
+/// once, and kept, so a view named twice in one statement is two binds of one
+/// arena rather than two parses.
+///
+/// @param entry - the catalog row
+/// @param database - which attached database it belongs to
+fn view_info(entry: &SchemaEntry, database: usize) -> DbResult<TableInfo> {
+    let body = crate::load::view_from_create_sql(&entry.sql)
+        .map_err(|error| error.with_detail(format!("in view {}", name_of(entry))))?;
+    Ok(TableInfo {
+        name: entry.name.clone(),
+        folded: entry.name.to_ascii_lowercase(),
+        database,
+        // A view has no tree, and zero is the root a table with no b-tree
+        // carries everywhere else in this workspace.
+        root: 0,
+        columns: Vec::new(),
+        rowid_alias: None,
+        without_rowid: false,
+        strict: false,
+        autoincrement: false,
+        kind: inillucent_sql::catalog_view::TableKind::View,
+        create_sql: entry.sql.clone(),
+        view: Some(Box::new(body)),
+        triggers: Vec::new(),
+        analysed_rows: None,
+        indexes: Vec::new(),
+        checks: Vec::new(),
+        foreign_keys: Vec::new(),
+        foreign_key_triggers: Vec::new(),
+        module: None,
+    })
 }
 
 /// Returns a catalog row's root page as the `u32` the binder's tables hold.
