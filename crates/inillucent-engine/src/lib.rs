@@ -173,6 +173,15 @@ pub struct ImportedDatabase {
     undo: Vec<Before>,
     /// Named savepoints, and where each one sits in `undo`.
     marks: Vec<(Vec<u8>, usize)>,
+    /// The rowid the last `INSERT` assigned, for `last_insert_rowid`.
+    ///
+    /// **Deliberately not restored by a rollback.** SQLite documents the value
+    /// as the last rowid *attempted*, and `faults.rs` pins that: an insert that
+    /// is rolled back still moves it. Restoring it would be a different answer
+    /// wearing the same name.
+    last_rowid: std::cell::Cell<i64>,
+    /// Every row every statement on this database has changed.
+    changed_ever: std::cell::Cell<i64>,
 
     /// The catalog tree's rows, with what each one needs beside it.
     ///
@@ -619,6 +628,8 @@ impl ImportedDatabase {
             limits: Limits::default(),
             wal,
             next_txn: std::cell::Cell::new(1),
+            last_rowid: std::cell::Cell::new(0),
+            changed_ever: std::cell::Cell::new(0),
             statements: std::cell::RefCell::new(HashMap::new()),
             batch: std::cell::Cell::new(None),
             undo: Vec::new(),
@@ -1010,6 +1021,8 @@ impl ImportedDatabase {
             limits: Limits::default(),
             wal,
             next_txn: std::cell::Cell::new(1),
+            last_rowid: std::cell::Cell::new(0),
+            changed_ever: std::cell::Cell::new(0),
             statements: std::cell::RefCell::new(HashMap::new()),
             batch: std::cell::Cell::new(None),
             undo: Vec::new(),
@@ -1399,6 +1412,53 @@ impl ImportedDatabase {
     /// Returns the log, so a caller can read its counters.
     pub fn wal(&self) -> &Wal {
         &self.wal
+    }
+
+    /// Returns how many bytes of a script the first statement uses.
+    ///
+    /// The parser's own count, including the terminating semicolon and the
+    /// trivia after it, so a caller stepping a script lands on the next
+    /// statement rather than on the space before it.
+    ///
+    /// @param sql - the script, positioned at the statement to measure
+    pub fn statement_length(&self, sql: &str) -> DbResult<usize> {
+        let parsed = parse_next_statement(sql.as_bytes(), 0, &self.limits)
+            .map_err(|error| misuse(error.message()))?;
+        Ok(parsed.consumed)
+    }
+
+    /// Returns the schema's generation, which changes when the schema does.
+    pub fn schema_generation(&self) -> u64 {
+        self.catalog_generation
+    }
+
+    /// Rereads the schema from the file, discarding compiled statements.
+    ///
+    /// The catalog is a snapshot and a plan is compiled against one, so a
+    /// reload is a new generation and an empty statement cache - not an edit of
+    /// the snapshot the held plans are still reading.
+    pub fn reload_catalog(&mut self) -> DbResult<()> {
+        self.reload_entries()?;
+        Ok(())
+    }
+
+    /// Returns whether every statement is its own transaction.
+    ///
+    /// `false` between a `BEGIN` and its `COMMIT`, which is what
+    /// `sqlite3_get_autocommit` answers and what the differential harness
+    /// compares after every step.
+    pub fn autocommit(&self) -> bool {
+        self.batch.get().is_none()
+    }
+
+    /// Returns the rowid the last `INSERT` assigned on this database.
+    pub fn last_insert_rowid(&self) -> i64 {
+        self.last_rowid.get()
+    }
+
+    /// Returns how many rows every statement so far has changed.
+    pub fn total_changes(&self) -> i64 {
+        self.changed_ever.get()
     }
 
     /// Opens a transaction that the statements after it all join.
@@ -2014,6 +2074,7 @@ impl ImportedDatabase {
                     changes: Changes {
                         rows: changed,
                         returned: Vec::new(),
+                        last_rowid: None,
                     },
                 })
             }
@@ -2312,6 +2373,11 @@ impl ImportedDatabase {
             };
             apply(&mut view, &mut log, params)?
         };
+        if let Some(assigned) = changes.last_rowid {
+            self.last_rowid.set(assigned);
+        }
+        self.changed_ever
+            .set(self.changed_ever.get().saturating_add(changes.rows as i64));
         if autocommit {
             self.wal.commit(txn, txn)?;
             self.database

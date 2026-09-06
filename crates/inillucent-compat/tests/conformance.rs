@@ -10,7 +10,8 @@
 
 use std::path::PathBuf;
 
-use inillucent::{Database, Value};
+use inillucent_compat::facade::Database;
+use inillucent_value::Value;
 use inillucent_compat::slt::{self, Record, TestFile};
 use inillucent_compat::workspace_root;
 
@@ -33,10 +34,9 @@ fn test_files() -> Vec<PathBuf> {
 }
 
 /// Opens the corpus database the files were recorded against.
-fn connect() -> inillucent::Connection {
+fn connect() -> inillucent_compat::facade::Connection {
     let path = workspace_root().join("compat/fixtures/select-corpus.db");
-    let database = Database::open_with_busy_timeout(&path, std::time::Duration::from_secs(5))
-        .expect("the corpus fixture opens");
+    let database = Database::import_staged(&path, "conformance").expect("the corpus fixture opens");
     database.connect().expect("the connection opens")
 }
 

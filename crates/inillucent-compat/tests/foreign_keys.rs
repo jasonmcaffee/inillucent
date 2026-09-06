@@ -14,7 +14,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use inillucent::{Database, Value};
+use inillucent_compat::facade::Database;
+use inillucent_value::Value;
 use inillucent_compat::workspace_root;
 
 /// Returns the pinned SQLite shell, or `None` when it has not been downloaded.
@@ -68,7 +69,7 @@ fn shell(path: &Path, script: &str) -> Option<String> {
 }
 
 /// Opens a inillucent connection on a path.
-fn connect(path: &Path) -> inillucent::Connection {
+fn connect(path: &Path) -> inillucent_compat::facade::Connection {
     let database = Database::open(path).expect("the database opens");
     database.connect().expect("the connection opens")
 }
@@ -78,7 +79,7 @@ fn connect(path: &Path) -> inillucent::Connection {
 /// The shape mirrors the shell's: one line per row, and a line beginning
 /// `Error:` where a statement was refused. That is what makes the two
 /// comparable at all.
-fn run(connection: &inillucent::Connection, script: &str) -> String {
+fn run(connection: &inillucent_compat::facade::Connection, script: &str) -> String {
     let mut out = String::new();
     let mut rest = script;
     // The script is split by the parser rather than on semicolons: a

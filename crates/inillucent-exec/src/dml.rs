@@ -88,6 +88,13 @@ pub struct Changes {
     pub rows: usize,
     /// The rows `RETURNING` asked for, when the statement asked for any.
     pub returned: Vec<Row>,
+    /// The rowid of the last row an `INSERT` stored, when the table has one.
+    ///
+    /// `sqlite3_last_insert_rowid` reads this, and a caller asks the connection
+    /// for it after the statement is gone - so it is reported out of the write
+    /// rather than dug back out of the tree, which is the only place the value
+    /// is known without paying a second descent for it.
+    pub last_rowid: Option<i64>,
 }
 
 /// A map from root page to tree, whichever map the caller happens to hold.
@@ -472,6 +479,9 @@ pub fn insert(
             continue;
         };
         changes.rows = changes.rows.saturating_add(1);
+        if let Some(OwnedDatum::Int(assigned)) = layout.rowid.and_then(|at| stored.get(at)) {
+            changes.last_rowid = Some(*assigned);
+        }
         if !plan.returning.is_empty() {
             let mut out = Vec::with_capacity(plan.returning.len());
             for eval in &plan.returning {
