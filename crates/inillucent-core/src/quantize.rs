@@ -196,10 +196,7 @@ mod tests {
 
         let want: std::collections::HashSet<u32> = exact[..10].iter().copied().collect();
         let overlap = approx[..10].iter().filter(|c| want.contains(c)).count();
-        assert!(
-            overlap >= 9,
-            "only {overlap} of the top 10 survived quantization"
-        );
+        assert!(overlap >= 9, "only {overlap} of the top 10 survived quantization");
     }
 
     #[test]

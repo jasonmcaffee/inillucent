@@ -88,11 +88,7 @@ impl VectorSet {
     /// normalizing twice would be a second rounding step for no gain.
     pub fn from_raw(dims: usize, data: Vec<f32>) -> Self {
         assert!(dims > 0, "a vector set needs a positive width");
-        assert_eq!(
-            data.len() % dims,
-            0,
-            "buffer length is not a multiple of the width"
-        );
+        assert_eq!(data.len() % dims, 0, "buffer length is not a multiple of the width");
         VectorSet { dims, data }
     }
 }

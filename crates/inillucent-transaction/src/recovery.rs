@@ -164,10 +164,7 @@ fn open_from_log(
 /// A log too short for a header, or one whose header does not verify, is not a
 /// log: SQLite starts again from an unreadable header rather than reporting
 /// it, so there is nothing here that could rescue a database either.
-fn log_page_size(
-    vfs: &dyn Vfs,
-    path: &DbPath,
-) -> DbResult<Option<inillucent_base::page::PageSize>> {
+fn log_page_size(vfs: &dyn Vfs, path: &DbPath) -> DbResult<Option<inillucent_base::page::PageSize>> {
     let log = path.wal();
     if !vfs.access(&log, AccessMode::Exists)? {
         return Ok(None);

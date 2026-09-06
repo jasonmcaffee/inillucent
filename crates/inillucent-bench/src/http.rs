@@ -31,8 +31,8 @@ pub fn post_json(
     body: &str,
     timeout: Duration,
 ) -> Result<String> {
-    let mut stream =
-        TcpStream::connect((host, port)).with_context(|| format!("connecting to {host}:{port}"))?;
+    let mut stream = TcpStream::connect((host, port))
+        .with_context(|| format!("connecting to {host}:{port}"))?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
     stream.set_nodelay(true)?;
@@ -48,9 +48,7 @@ pub fn post_json(
 
     let mut reader = BufReader::new(stream);
     let mut status_line = String::new();
-    reader
-        .read_line(&mut status_line)
-        .context("reading the status line")?;
+    reader.read_line(&mut status_line).context("reading the status line")?;
     let status: u16 = status_line
         .split_whitespace()
         .nth(1)
@@ -136,8 +134,8 @@ fn read_chunked(reader: &mut BufReader<TcpStream>) -> Result<Vec<u8>> {
 /// @param path - the request path
 /// @param timeout - how long to wait
 pub fn get(host: &str, port: u16, path: &str, timeout: Duration) -> Result<String> {
-    let mut stream =
-        TcpStream::connect((host, port)).with_context(|| format!("connecting to {host}:{port}"))?;
+    let mut stream = TcpStream::connect((host, port))
+        .with_context(|| format!("connecting to {host}:{port}"))?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
     let request =
@@ -189,14 +187,8 @@ mod tests {
         let port = serve_once(
             b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 17\r\n\r\n{\"data\":[1,2,3]}\n",
         );
-        let got = post_json(
-            "127.0.0.1",
-            port,
-            "/v1/embeddings",
-            "{}",
-            Duration::from_secs(5),
-        )
-        .unwrap();
+        let got =
+            post_json("127.0.0.1", port, "/v1/embeddings", "{}", Duration::from_secs(5)).unwrap();
         assert_eq!(got, "{\"data\":[1,2,3]}\n");
     }
 
@@ -209,14 +201,8 @@ mod tests {
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n\
               9\r\n{\"data\":[\r\n7\r\n1,2,3]}\r\n0\r\n\r\n",
         );
-        let got = post_json(
-            "127.0.0.1",
-            port,
-            "/v1/embeddings",
-            "{}",
-            Duration::from_secs(5),
-        )
-        .unwrap();
+        let got =
+            post_json("127.0.0.1", port, "/v1/embeddings", "{}", Duration::from_secs(5)).unwrap();
         assert_eq!(got, "{\"data\":[1,2,3]}");
     }
 
@@ -229,15 +215,9 @@ mod tests {
             b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 53\r\n\r\n\
               {\"error\":{\"message\":\"input is too large to process\"}}",
         );
-        let err = post_json(
-            "127.0.0.1",
-            port,
-            "/v1/embeddings",
-            "{}",
-            Duration::from_secs(5),
-        )
-        .unwrap_err()
-        .to_string();
+        let err = post_json("127.0.0.1", port, "/v1/embeddings", "{}", Duration::from_secs(5))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("answered 500"), "{err}");
         assert!(err.contains("too large to process"), "{err}");
     }

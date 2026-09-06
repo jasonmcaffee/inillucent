@@ -15,7 +15,7 @@ use std::process::Command;
 use inillucent_compat::workspace_root;
 
 /// The crates the policy applies to.
-const GOVERNED: [&str; 22] = [
+const GOVERNED: [&str; 23] = [
     "inillucent-base",
     "inillucent-vfs",
     "inillucent-sim",
@@ -30,6 +30,13 @@ const GOVERNED: [&str; 22] = [
     "inillucent-txn",
     "inillucent-scalar",
     "inillucent-exec",
+    // task-1834: the engine as a database, lifted out of `inillucent-compat`. It
+    // is governed for the reason the comment above gives - a crate that is
+    // exempt while it is being written is a crate that is exempt - and because
+    // the code was already held to this standard while it lived inside a
+    // governed crate. Leaving it out would have been a relaxation performed by
+    // moving a file.
+    "inillucent-engine",
     "inillucent-sqlite-reader",
     "inillucent-storage",
     "inillucent-sql",
