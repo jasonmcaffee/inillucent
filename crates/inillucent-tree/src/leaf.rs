@@ -432,6 +432,20 @@ impl<'p> LeafRef<'p> {
         self.flags & LEAF_HAS_TOMBSTONES != 0
     }
 
+    /// Returns where the delta area begins.
+    ///
+    /// Exposed for [`crate::mutate`], which grows the area downwards and needs
+    /// to know where it currently starts. A reader has no use for it - every
+    /// delta accessor takes an index.
+    pub fn delta_start(&self) -> usize {
+        self.delta_start
+    }
+
+    /// Returns where the heap begins, which is where the delta area ends.
+    pub fn heap_start(&self) -> usize {
+        self.heap_start
+    }
+
     /// Reports whether the leaf is on the vectorised fast path.
     ///
     /// A leaf with no exceptions, no tombstones and no delta rows yields column
@@ -1102,8 +1116,18 @@ impl<'p> LeafRef<'p> {
 
     /// Materialises every live row, sorted region merged with the delta.
     ///
-    /// This is what compaction, the property tests and the slow scan path all
-    /// need, and it is deliberately the one place the merge is written.
+    /// This is what compaction, the property tests and every read path over a
+    /// leaf that has been written to all need, and it is deliberately the one
+    /// place the merge is written. A leaf that has *not* been written to never
+    /// comes here: [`LeafRef::has_writes`] is false and the caller takes the
+    /// vectorised path, which is the whole design.
+    ///
+    /// **A key the delta area holds twice keeps the newest.** The delta area
+    /// grows downwards, so index 0 is the most recent insert; the merge below
+    /// walks it in order and the first entry for a key wins. The write path
+    /// removes the old entry rather than shadowing it, so this is a belt on top
+    /// of braces - and it is the belt that makes `live()` correct on a page
+    /// recovery replayed rather than on one this process built.
     pub fn live(&self) -> DbResult<Vec<Vec<Datum<'p>>>> {
         let mut rows: Vec<Vec<Datum<'p>>> =
             Vec::with_capacity(self.row_count.saturating_add(self.delta_count));
@@ -1117,17 +1141,141 @@ impl<'p> LeafRef<'p> {
             }
             rows.push(values);
         }
+        let sorted_rows = rows.len();
         for index in 0..self.delta_count {
             let mut values = Vec::with_capacity(self.column_count);
             for column in 0..self.column_count {
                 values.push(self.delta_value(index, column)?);
             }
-            rows.push(values);
+            // The newest wins, and "newest" is the *lowest* delta index. A
+            // shadowed entry is dropped here rather than sorted and deduped
+            // afterwards, because a stable sort would keep whichever the
+            // comparison happened to leave first.
+            let duplicate = rows
+                .get(sorted_rows..)
+                .unwrap_or(&[])
+                .iter()
+                .any(|held| self.compare_keys(held, &values) == std::cmp::Ordering::Equal);
+            if !duplicate {
+                rows.push(values);
+            }
         }
-        let key_columns = self.key_columns;
-        rows.sort_by(|left, right| compare_rows(left, right, key_columns));
+        rows.sort_by(|left, right| self.compare_keys(left, right));
         Ok(rows)
     }
+
+    /// Materialises the live rows inside a key range.
+    ///
+    /// The merged counterpart of the sorted region's `lower_bound`/`upper_bound`
+    /// pair, for a leaf that has been written to. The bounds are compared under
+    /// the leaf's own collations, which is what keeps a range over a `NOCASE`
+    /// column agreeing with the order the tree is stored in.
+    ///
+    /// @param low - the lower bound, or `None` for the start
+    /// @param low_inclusive - whether a key equal to `low` is in the range
+    /// @param high - the upper bound, or `None` for the end
+    /// @param high_inclusive - whether a key equal to `high` is in the range
+    pub fn live_between(
+        &self,
+        low: Option<&[Datum<'_>]>,
+        low_inclusive: bool,
+        high: Option<&[Datum<'_>]>,
+        high_inclusive: bool,
+    ) -> DbResult<Vec<Vec<Datum<'p>>>> {
+        let mut rows = self.live()?;
+        rows.retain(|row| {
+            if let Some(bound) = low {
+                let order = self.compare_prefix(row, bound);
+                let inside = if low_inclusive {
+                    order != std::cmp::Ordering::Less
+                } else {
+                    order == std::cmp::Ordering::Greater
+                };
+                if !inside {
+                    return false;
+                }
+            }
+            if let Some(bound) = high {
+                let order = self.compare_prefix(row, bound);
+                let inside = if high_inclusive {
+                    order != std::cmp::Ordering::Greater
+                } else {
+                    order == std::cmp::Ordering::Less
+                };
+                if !inside {
+                    return false;
+                }
+            }
+            true
+        });
+        Ok(rows)
+    }
+
+    /// Compares two materialised rows on their key columns, under the leaf's
+    /// collations.
+    ///
+    /// @param left - one row
+    /// @param right - the other row
+    fn compare_keys(&self, left: &[Datum<'_>], right: &[Datum<'_>]) -> std::cmp::Ordering {
+        for index in 0..self.key_columns {
+            let (Some(a), Some(b)) = (left.get(index), right.get(index)) else {
+                return std::cmp::Ordering::Equal;
+            };
+            let order = crate::types::compare_under(a, b, self.collation_of(index));
+            if order != std::cmp::Ordering::Equal {
+                return order;
+            }
+        }
+        std::cmp::Ordering::Equal
+    }
+
+    /// Compares a row against a probe that may be shorter than the key.
+    ///
+    /// A probe of two columns against a three-column key matches a *run*, so
+    /// only the columns the probe names are compared - which is the same rule
+    /// `lower_bound` and `upper_bound` follow over the sorted region, and the
+    /// reason a prefix bound returns three rows rather than one.
+    ///
+    /// @param row - the row
+    /// @param probe - the bound, one value per column it names
+    fn compare_prefix(&self, row: &[Datum<'_>], probe: &[Datum<'_>]) -> std::cmp::Ordering {
+        for (index, wanted) in probe.iter().enumerate() {
+            let Some(held) = row.get(index) else {
+                return std::cmp::Ordering::Less;
+            };
+            let order = crate::types::compare_under(held, wanted, self.collation_of(index));
+            if order != std::cmp::Ordering::Equal {
+                return order;
+            }
+        }
+        std::cmp::Ordering::Equal
+    }
+
+    /// Returns one value of a row wherever it lives.
+    ///
+    /// The sorted region and the delta area are read differently - one is a
+    /// mini-column, the other a tagged row - and a caller that has been handed a
+    /// [`Hit`] should not have to know which. Every probe path goes through
+    /// this, so a delta row and a sorted row cannot be read by two rules that
+    /// drift apart.
+    ///
+    /// @param hit - where the row is
+    /// @param column - which column to read
+    pub fn value_at(&self, hit: Hit, column: usize) -> DbResult<Datum<'p>> {
+        match hit {
+            Hit::Sorted(row) => self.value(row, column),
+            Hit::Delta(index) => self.delta_value(index, column),
+        }
+    }
+}
+
+/// Where a row a probe found actually lives.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Hit {
+    /// In the sorted region, at this row.
+    Sorted(usize),
+    /// In the delta area, at this index.
+    Delta(usize),
 }
 
 /// Compares two materialised rows on their leading key columns.

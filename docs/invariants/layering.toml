@@ -111,7 +111,12 @@ may_test_with = ["inillucent-sim"]
 name = "inillucent-tree"
 kind = "production"
 layer = 3
-may_depend_on = ["inillucent-base", "inillucent-pool", "inillucent-value"]
+# `inillucent-wal` arrived with Phase 3's write path. A tree mutation *is* a log
+# record - a delta insert, a compaction, a split - and the crate that emits one
+# has to name it. The edge points at layer 2, which the log occupies precisely so
+# that the things which write pages can depend on it and it can depend on
+# neither of them.
+may_depend_on = ["inillucent-base", "inillucent-pool", "inillucent-value", "inillucent-wal"]
 
 # `inillucent-txn` is the TDD's Phase 3 transaction manager: snapshots, the writer
 # slot, undo buffers, the version log and its garbage collection, savepoints and

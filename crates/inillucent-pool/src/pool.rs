@@ -824,6 +824,36 @@ impl Pool {
         Ok(moved)
     }
 
+    /// Forgets every back-reference that points into a page being rewritten.
+    ///
+    /// A child records *where in its parent* its swip lives, so that eviction
+    /// can put a page id back there. That offset is only meaningful for the
+    /// layout the parent had when the child was swizzled - and a split rewrites
+    /// its parent with one more separator and one more child, which moves every
+    /// slot after the insertion point.
+    ///
+    /// The existing guard checks that the parent's *frame* still holds the
+    /// parent's *page*, which is true throughout: it is the same page, rewritten
+    /// in place. So without this, evicting a child after a split writes eight
+    /// bytes of page id into whatever the new layout put at the old offset. The
+    /// symptom was an interior page whose seventh key claimed to start at byte
+    /// 23, which is inside the header.
+    ///
+    /// Called only for interior pages, because only an interior page is ever a
+    /// parent - so the bulk builder's leaf installs do not pay for the sweep.
+    ///
+    /// @param page - the page whose layout is about to change
+    fn forget_children_of(&self, page: PageId) {
+        let mut state = self.state.borrow_mut();
+        for meta in state.frames.iter_mut() {
+            if let Some((_, parent_page, _)) = meta.parent {
+                if parent_page == page {
+                    meta.parent = None;
+                }
+            }
+        }
+    }
+
     /// Puts a page id back into the parent's swip, so the child can be reused.
     ///
     /// Returns false when the parent could not be written, which leaves the
@@ -846,6 +876,15 @@ impl Pool {
         // one any more - the parent's own writeback translated the swip on its
         // way out - so there is nothing to put back, and writing into that
         // frame would corrupt whatever page it holds now.
+        //
+        // The page check is necessary and, on its own, **not sufficient**: it
+        // catches a frame reused for a different page and misses the same page
+        // rewritten with a different layout, where `at` now points at some other
+        // field. A split does exactly that to a parent, and the symptom was a
+        // page id appearing where an interior page's key offset should be -
+        // `interior key 7 starts at 23, before the heap`. What closes it is
+        // [`Pool::forget_children_of`], called from `install`, which is the one
+        // operation that replaces a whole page image.
         if self.page_in_frame(parent) != Some(parent_page) {
             return Ok(true);
         }
@@ -1072,6 +1111,11 @@ impl Pool {
                 image.len(),
                 self.page_size
             )));
+        }
+        // An interior page being replaced invalidates every child's record of
+        // where its swip sits inside it. See `forget_children_of`.
+        if page::kind_of(image).ok() == Some(PageKind::Interior) {
+            self.forget_children_of(page);
         }
         let frame = match self.lookup(page) {
             Some(frame) => frame,

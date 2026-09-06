@@ -795,6 +795,7 @@ dependencies = [
  "inillucent-pool",
  "inillucent-value",
  "inillucent-vfs",
+ "inillucent-wal",
 ]
 
 [[package]]

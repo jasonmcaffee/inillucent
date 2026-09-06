@@ -19,6 +19,7 @@
 //! torn-write campaigns arrive with the log in Phase 3, and the simulator's
 //! `MediaModel` and `CrashSnapshot` are already wired to this VFS for them.
 
+use inillucent_pool::interior::InteriorRef;
 use inillucent_pool::page::{self, PageKind};
 use inillucent_pool::{Database, Options, PageId, Pool};
 use inillucent_sim::failpoint::{Failure, Policy, Site};
@@ -152,6 +153,119 @@ fn failing_each_read_in_turn_never_corrupts_the_pool() {
     }
 }
 
+/// Rewriting an interior page does not leave a child pointing into it.
+///
+/// **The guard that existed checked the wrong half of the question.** A child
+/// records where inside its parent its swip lives, so eviction can put a page id
+/// back there, and `unswizzle_from_parent` checks that the parent's *frame* still
+/// holds the parent's *page*. That catches a frame reused for a different page
+/// and misses the same page rewritten with a different layout - which is exactly
+/// what a B+tree split does to a parent, moving every slot after the insertion
+/// point.
+///
+/// The failure has no error attached: eight bytes of page id land wherever the
+/// new layout put the old offset. Found by a Phase 3 split campaign, where the
+/// symptom was an interior page whose seventh key claimed to start at byte 23.
+///
+/// **The arms matter.** The pool's cooling clock is seeded deterministically, so
+/// one arrangement gives one eviction order - and the first version of this test
+/// used an arrangement where the *parent* was evicted first, which makes the
+/// existing page check fire correctly and the bug invisible. Varying how many
+/// pages are resident before the parent is installed varies which frame it lands
+/// in and therefore the order, and some of those orders cool the child while the
+/// parent is still in its frame. That is the order the bug needs.
+#[test]
+fn rewriting_an_interior_page_forgets_its_children() {
+    use inillucent_pool::interior::InteriorBuilder;
+    use inillucent_pool::Swip;
+
+    let builder = InteriorBuilder::new(512, 1, 1).expect("a builder");
+    let two = builder
+        .build(
+            &[b"kk"],
+            &[Swip::unswizzled(PageId(10)), Swip::unswizzled(PageId(11))],
+        )
+        .expect("two children");
+    // Three children rather than two, which is what a split leaves behind: the
+    // new separator goes in the middle, so every slot after it moves.
+    let three = builder
+        .build(
+            &[b"gg", b"kk"],
+            &[
+                Swip::unswizzled(PageId(10)),
+                Swip::unswizzled(PageId(12)),
+                Swip::unswizzled(PageId(11)),
+            ],
+        )
+        .expect("three children");
+
+    let mut evicted_arms = 0usize;
+    for spacer in 0..8u64 {
+        let (vfs, path) = populated(512, 60);
+        let pool = pool_over(&vfs, &path, 512, 8, 60);
+        for page in 40..(40 + spacer) {
+            let _ = pool.fetch(PageId(page)).expect("a spacer read");
+        }
+        pool.install(PageId(5), &two).expect("the parent installs");
+
+        // Swizzle child 11 into the parent, the way a descent does.
+        let (parent_frame, at) = {
+            let guard = pool.fetch(PageId(5)).expect("the parent");
+            let interior = InteriorRef::parse(&guard).expect("an interior");
+            (guard.frame(), interior.swip_offset(1).expect("an offset"))
+        };
+        let child_frame = {
+            let guard = pool.fetch(PageId(11)).expect("the child");
+            guard.frame()
+        };
+        pool.note_parent(child_frame, parent_frame, PageId(5), at);
+        pool.swizzle_into(parent_frame, PageId(5), at, Swip::swizzled(child_frame))
+            .expect("the swizzle lands");
+
+        // The parent is rewritten with a layout that moves that slot.
+        pool.install(PageId(5), &three)
+            .expect("the rewrite installs");
+
+        // Enough distinct pages to push the child out. Fetching is what drives
+        // eviction: `claim_frame` cools and evicts and then *uses* the frame it
+        // freed, so calling `evict_one` directly and dropping its answer leaks
+        // the frame - which is what the first version of this test did, and the
+        // pool ran out of frames with nothing resident.
+        for page in 20..38u64 {
+            let _ = pool.fetch(PageId(page)).expect("a clean read");
+        }
+        if !pool.is_resident(PageId(11)) {
+            evicted_arms = evicted_arms.saturating_add(1);
+        }
+
+        let guard = pool.fetch(PageId(5)).expect("the parent still reads");
+        let interior = InteriorRef::parse(&guard)
+            .unwrap_or_else(|error| panic!("spacer {spacer}: the parent is damaged: {error:?}"));
+        interior.validate().unwrap_or_else(|error| {
+            panic!("spacer {spacer}: the parent's slot array is damaged: {error:?}")
+        });
+        assert_eq!(
+            interior.count(),
+            2,
+            "spacer {spacer}: the rewrite's separators are gone"
+        );
+        assert_eq!(
+            interior.key(0).expect("a key"),
+            b"gg",
+            "spacer {spacer}: an evicted child overwrote the parent's first key"
+        );
+        assert_eq!(
+            interior.key(1).expect("a key"),
+            b"kk",
+            "spacer {spacer}: an evicted child overwrote the parent's second key"
+        );
+    }
+    assert!(
+        evicted_arms > 0,
+        "no arm ever evicted the child, so none of them exercised the unswizzle"
+    );
+}
+
 /// A pool that has seen more failed reads than it has frames still works.
 ///
 /// **The leak this catches has the wrong error message, which is why it went
@@ -183,7 +297,9 @@ fn a_pool_survives_more_failed_reads_than_it_has_frames() {
             outcome.is_err(),
             "page {page} came back while every read was failing"
         );
-        let detail = outcome.err().and_then(|error| error.detail().map(str::to_string));
+        let detail = outcome
+            .err()
+            .and_then(|error| error.detail().map(str::to_string));
         assert!(
             !detail
                 .clone()

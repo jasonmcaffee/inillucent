@@ -1,7 +1,7 @@
 //! Recovery, and the campaigns that are the only honest way to test it.
 //!
-//! Invariant these tests hold: **every assertion is against an artefact**, not
-//! against a status. A campaign that crashed at call 47 and then asked recovery
+//! Invariant: **every assertion here is against an artefact**, not against a
+//! status. A campaign that crashed at call 47 and then asked recovery
 //! whether it had succeeded would be asking the code under test to grade itself.
 //! Each campaign here recovers into a page store and then compares that store
 //! against a list of commits the *workload* recorded as acknowledged - a list
@@ -18,8 +18,8 @@ use inillucent_base::DbResult;
 use inillucent_sim::{CrashSnapshot, Failure, Policy, SimConfig, SimVfs, Site};
 use inillucent_vfs::{DbPath, MemoryVfs, Vfs};
 use inillucent_wal::record::{Body, Record};
-use inillucent_wal::segment::{self, SegmentHeader};
 use inillucent_wal::recover::{self, RecoveryStart, Redo};
+use inillucent_wal::segment::{self, SegmentHeader};
 use inillucent_wal::writer::{Wal, WalOptions};
 use inillucent_wal::{Synchronous, FIRST_LSN};
 
@@ -137,12 +137,16 @@ impl Redo for PageStore {
     fn redo(&mut self, record: &Record<'_>, wanted: &[bool]) -> DbResult<()> {
         let lsn = record.lsn;
         match record.body {
-            Body::InsertRow { page, row, .. } => {
-                self.note(page, format!("insert {}", String::from_utf8_lossy(row)), lsn)
-            }
-            Body::DeleteRow { page, key, .. } => {
-                self.note(page, format!("delete {}", String::from_utf8_lossy(key)), lsn)
-            }
+            Body::InsertRow { page, row, .. } => self.note(
+                page,
+                format!("insert {}", String::from_utf8_lossy(row)),
+                lsn,
+            ),
+            Body::DeleteRow { page, key, .. } => self.note(
+                page,
+                format!("delete {}", String::from_utf8_lossy(key)),
+                lsn,
+            ),
             Body::UpdateInPlace {
                 page, key, column, ..
             } => self.note(page, format!("update {column} of {key:?}"), lsn),
@@ -292,11 +296,7 @@ fn write_workload(wal: &Wal, count: u64) -> Vec<u64> {
 /// @param store - the recovered store
 /// @param acknowledged - the commits the workload was told had succeeded
 /// @param context - what to say when it fails
-fn assert_durable_atomic_and_prefixed(
-    store: &PageStore,
-    acknowledged: &[u64],
-    context: &str,
-) {
+fn assert_durable_atomic_and_prefixed(store: &PageStore, acknowledged: &[u64], context: &str) {
     assert_atomic_and_prefixed(store, context);
     for txn in acknowledged {
         assert!(
@@ -356,8 +356,8 @@ fn assert_atomic_and_prefixed(store: &PageStore, context: &str) {
 /// @param path - the database path
 fn recover_into(vfs: &dyn Vfs, path: &DbPath) -> (PageStore, inillucent_wal::Recovered) {
     let mut store = PageStore::default();
-    let outcome = recover::recover(vfs, path, RecoveryStart::fresh(UUID), &mut store)
-        .expect("recovery runs");
+    let outcome =
+        recover::recover(vfs, path, RecoveryStart::fresh(UUID), &mut store).expect("recovery runs");
     (store, outcome)
 }
 
@@ -411,7 +411,8 @@ fn recovering_twice_produces_the_same_file() {
     wal.append(2, Body::Abort).unwrap();
     wal.flush().unwrap();
 
-    wal.append(3, Body::CatalogChange { delta: b"a table" }).unwrap();
+    wal.append(3, Body::CatalogChange { delta: b"a table" })
+        .unwrap();
     wal.append(
         3,
         Body::CompactLeaf {
@@ -493,7 +494,10 @@ fn a_torn_tail_stops_the_scan_and_keeps_the_prefix() {
         1,
     );
     let file = vfs
-        .open(&segment, inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal))
+        .open(
+            &segment,
+            inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal),
+        )
         .unwrap();
     let size = file.file_size().unwrap();
     file.write_all_at(size - 4, &[0xFF; 4]).unwrap();
@@ -579,7 +583,8 @@ fn truncation_removes_the_tail_and_the_later_segments() {
         outcome.sequence + 1,
     );
     assert_eq!(
-        vfs.access(&past, inillucent_vfs::AccessMode::Exists).unwrap(),
+        vfs.access(&past, inillucent_vfs::AccessMode::Exists)
+            .unwrap(),
         false,
         "a segment past the recovered prefix was left behind"
     );
@@ -675,11 +680,7 @@ fn crashing_at_every_sync_leaves_the_committed_prefix() {
             &mut store,
         )
         .expect("recovery runs after a crash");
-        assert_durable_atomic_and_prefixed(
-            &store,
-            &acknowledged,
-            &format!("crash at sync {nth}"),
-        );
+        assert_durable_atomic_and_prefixed(&store, &acknowledged, &format!("crash at sync {nth}"));
     }
     assert!(arms >= 10, "the campaign only ran {arms} arms");
 }
@@ -763,7 +764,10 @@ fn a_corrupt_log_never_panics() {
         1,
     );
     let file = vfs
-        .open(&segment, inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal))
+        .open(
+            &segment,
+            inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal),
+        )
         .unwrap();
     let size = file.file_size().unwrap() as usize;
     let mut original = vec![0u8; size];
@@ -778,7 +782,10 @@ fn a_corrupt_log_never_panics() {
             damaged += 1;
             let fresh: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
             let handle = fresh
-                .open(&segment, inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal))
+                .open(
+                    &segment,
+                    inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal),
+                )
                 .unwrap();
             handle.write_all_at(0, &bytes).unwrap();
             drop(handle);
@@ -790,7 +797,10 @@ fn a_corrupt_log_never_panics() {
     for cut in 0..original.len() {
         let fresh: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
         let handle = fresh
-            .open(&segment, inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal))
+            .open(
+                &segment,
+                inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal),
+            )
             .unwrap();
         handle.write_all_at(0, &original[..cut]).unwrap();
         drop(handle);
@@ -832,7 +842,10 @@ fn a_gap_in_the_chain_ends_the_scan() {
         1,
     );
     let file = vfs
-        .open(&first, inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal))
+        .open(
+            &first,
+            inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal),
+        )
         .unwrap();
     file.truncate(segment::HEADER_BYTES as u64 + 64).unwrap();
     drop(file);
@@ -879,7 +892,10 @@ fn a_record_that_is_not_where_it_says_it_is_ends_the_scan() {
     .encode(&mut stale)
     .unwrap();
     let file = vfs
-        .open(&segment_path, inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal))
+        .open(
+            &segment_path,
+            inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal),
+        )
         .unwrap();
     let size = file.file_size().unwrap();
     file.write_all_at(size, &stale).unwrap();
@@ -930,7 +946,10 @@ fn a_segment_shorter_than_its_header_ends_the_chain() {
         1,
     );
     let file = vfs
-        .open(&segment_path, inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal))
+        .open(
+            &segment_path,
+            inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal),
+        )
         .unwrap();
     file.truncate(16).unwrap();
     drop(file);
@@ -964,7 +983,10 @@ fn records_belonging_to_no_transaction_are_replayed() {
     let (store, outcome) = recover_into(vfs.as_ref(), &path);
     assert_eq!(outcome.committed, 0, "no transaction committed");
     assert_eq!(outcome.scanned, 3);
-    assert_eq!(outcome.applied, 3, "a record with no transaction was skipped");
+    assert_eq!(
+        outcome.applied, 3,
+        "a record with no transaction was skipped"
+    );
     assert!(store.pages.contains_key(&30));
     assert!(store.free.contains(&30) || !store.free.contains(&30));
     assert_eq!(store.latest_cts, 4);
@@ -992,8 +1014,11 @@ fn a_checkpoint_retires_the_segments_below_it() {
     assert!(current >= 3, "the workload did not roll twice");
     for sequence in 1..current {
         assert!(
-            vfs.access(&wal.segment_path(sequence), inillucent_vfs::AccessMode::Exists)
-                .unwrap(),
+            vfs.access(
+                &wal.segment_path(sequence),
+                inillucent_vfs::AccessMode::Exists
+            )
+            .unwrap(),
             "segment {sequence} should still be there before the checkpoint"
         );
     }
@@ -1004,14 +1029,20 @@ fn a_checkpoint_retires_the_segments_below_it() {
     assert!(retired > 0, "no segment was retired");
     for sequence in 1..current {
         assert!(
-            !vfs.access(&wal.segment_path(sequence), inillucent_vfs::AccessMode::Exists)
-                .unwrap(),
+            !vfs.access(
+                &wal.segment_path(sequence),
+                inillucent_vfs::AccessMode::Exists
+            )
+            .unwrap(),
             "segment {sequence} survived a checkpoint past its end"
         );
     }
     // The segment being written is never retired, whatever the LSN says.
     assert!(vfs
-        .access(&wal.segment_path(current), inillucent_vfs::AccessMode::Exists)
+        .access(
+            &wal.segment_path(current),
+            inillucent_vfs::AccessMode::Exists
+        )
         .unwrap());
     // Retiring again is a no-op rather than an error.
     assert_eq!(wal.retire_segments_below(wal.durable_end()).unwrap(), 0);
@@ -1081,7 +1112,10 @@ fn retirement_keeps_a_segment_the_checkpoint_has_not_passed() {
     assert_eq!(wal.retire_segments_below(FIRST_LSN).unwrap(), 0);
     for sequence in 1..wal.sequence() {
         assert!(vfs
-            .access(&wal.segment_path(sequence), inillucent_vfs::AccessMode::Exists)
+            .access(
+                &wal.segment_path(sequence),
+                inillucent_vfs::AccessMode::Exists
+            )
             .unwrap());
     }
 
@@ -1192,7 +1226,10 @@ fn a_segment_that_cannot_be_deleted_does_not_fail_the_checkpoint() {
         .retire_segments_below(wal.durable_end())
         .expect("a segment that will not unlink is not an outage");
     vfs.failpoints().set(Site::Delete, Policy::Off);
-    assert_eq!(retired, 0, "a delete that failed was counted as a retirement");
+    assert_eq!(
+        retired, 0,
+        "a delete that failed was counted as a retirement"
+    );
     assert!(
         vfs.access(&wal.segment_path(1), inillucent_vfs::AccessMode::Exists)
             .unwrap(),
@@ -1223,13 +1260,17 @@ fn retirement_leaves_a_segment_whose_header_is_damaged() {
     assert!(wal.sequence() >= 3);
     let first = wal.segment_path(1);
     let file = vfs
-        .open(&first, inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal))
+        .open(
+            &first,
+            inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal),
+        )
         .unwrap();
     file.write_all_at(0, &[0xEEu8; 8]).unwrap();
     drop(file);
     let retired = wal.retire_segments_below(wal.durable_end()).unwrap();
     assert!(
-        vfs.access(&first, inillucent_vfs::AccessMode::Exists).unwrap(),
+        vfs.access(&first, inillucent_vfs::AccessMode::Exists)
+            .unwrap(),
         "a segment nobody could read was deleted anyway"
     );
     assert!(retired < 2);
@@ -1276,7 +1317,10 @@ fn truncating_a_log_whose_header_is_damaged_is_not_an_error() {
         outcome.sequence,
     );
     let file = vfs
-        .open(&segment_path, inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal))
+        .open(
+            &segment_path,
+            inillucent_vfs::OpenOptions::of_kind(inillucent_vfs::FileKind::Wal),
+        )
         .unwrap();
     file.write_all_at(0, &[0xEEu8; 8]).unwrap();
     drop(file);

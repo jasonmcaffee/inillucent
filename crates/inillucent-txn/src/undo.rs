@@ -1,7 +1,7 @@
 //! The undo buffer and savepoints.
 //!
-//! Invariant (the TDD's ninth): **rollback restores every modified page to a
-//! byte-for-byte equal live-row set as before the transaction.** Equal *rows*,
+//! Invariant: **rollback restores every modified page to a byte-for-byte equal
+//! live-row set as before the transaction.** That is the TDD's ninth. Equal *rows*,
 //! not equal bytes: a leaf that was compacted on the way through holds the same
 //! rows in a different layout afterwards, and requiring the layout back would
 //! mean keeping the whole page rather than the rows that changed.
@@ -195,13 +195,19 @@ mod tests {
         buffer.record(1, b"b".to_vec(), Some(b"middle-b".to_vec()));
         let undone = buffer.take_all();
         assert_eq!(undone.len(), 4);
-        assert_eq!(undone.first().map(|undo| undo.key.clone()), Some(b"b".to_vec()));
+        assert_eq!(
+            undone.first().map(|undo| undo.key.clone()),
+            Some(b"b".to_vec())
+        );
         assert_eq!(
             undone.first().and_then(|undo| undo.before.clone()),
             Some(b"middle-b".to_vec()),
             "the newest image is undone first"
         );
-        assert_eq!(undone.last().map(|undo| undo.key.clone()), Some(b"a".to_vec()));
+        assert_eq!(
+            undone.last().map(|undo| undo.key.clone()),
+            Some(b"a".to_vec())
+        );
         assert!(buffer.is_empty());
     }
 
@@ -216,8 +222,14 @@ mod tests {
 
         let undone = buffer.rollback_to("one").unwrap();
         assert_eq!(undone.len(), 2);
-        assert_eq!(undone.first().map(|undo| undo.key.clone()), Some(b"later".to_vec()));
-        assert_eq!(undone.last().map(|undo| undo.key.clone()), Some(b"after".to_vec()));
+        assert_eq!(
+            undone.first().map(|undo| undo.key.clone()),
+            Some(b"later".to_vec())
+        );
+        assert_eq!(
+            undone.last().map(|undo| undo.key.clone()),
+            Some(b"after".to_vec())
+        );
         assert_eq!(buffer.len(), 1, "what came before the savepoint stayed");
         assert_eq!(
             buffer.savepoints(),
@@ -297,8 +309,14 @@ mod tests {
         let mut buffer = buffer_with_three();
         let published = buffer.take_for_publication();
         assert_eq!(published.len(), 3);
-        assert_eq!(published.first().map(|entry| entry.1.clone()), Some(b"a".to_vec()));
-        assert_eq!(published.last().map(|entry| entry.1.clone()), Some(b"c".to_vec()));
+        assert_eq!(
+            published.first().map(|entry| entry.1.clone()),
+            Some(b"a".to_vec())
+        );
+        assert_eq!(
+            published.last().map(|entry| entry.1.clone()),
+            Some(b"c".to_vec())
+        );
         assert!(buffer.is_empty());
         assert_eq!(buffer.high_water(), 3, "the high water mark survives");
     }

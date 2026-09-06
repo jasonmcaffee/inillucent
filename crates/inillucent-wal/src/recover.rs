@@ -1,8 +1,8 @@
 //! Recovery: turning a log and a data file into the committed prefix.
 //!
-//! Invariant (the TDD's twelfth): **recovery after a crash at any point yields
-//! exactly the committed prefix** - every acknowledged commit present, no
-//! unacknowledged one visible. Two properties carry it, and both are structural
+//! Invariant: **recovery after a crash at any point yields exactly the
+//! committed prefix** - every acknowledged commit present, no unacknowledged one
+//! visible. That is the TDD's twelfth invariant. Two properties carry it, and both are structural
 //! rather than careful:
 //!
 //! 1. **Redo is idempotent by page LSN.** A record is applied to a page only
@@ -193,8 +193,8 @@ pub fn truncate_after(vfs: &dyn Vfs, base: &DbPath, outcome: &Recovered) -> DbRe
     let path = segment_path(&name, directory.as_deref(), outcome.sequence);
     if let Ok(file) = vfs.open(&path, OpenOptions::of_kind(FileKind::Wal)) {
         if let Ok(header) = read_header(file.as_ref()) {
-            let keep = segment::HEADER_BYTES as u64
-                + outcome.next_lsn.saturating_sub(header.first_lsn);
+            let keep =
+                segment::HEADER_BYTES as u64 + outcome.next_lsn.saturating_sub(header.first_lsn);
             file.truncate(keep)
                 .map_err(inillucent_vfs::VfsError::into_db_error)?;
             file.sync(inillucent_vfs::SyncMode::Normal)

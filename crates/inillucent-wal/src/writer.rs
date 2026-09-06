@@ -485,7 +485,9 @@ impl Wal {
                 continue;
             };
             let next_first = self.first_lsn_of(sequence.saturating_add(1)).unwrap_or(lsn);
-            if decoded.first_lsn < lsn && next_first <= lsn && self.shared.vfs.delete(&path, false).is_ok()
+            if decoded.first_lsn < lsn
+                && next_first <= lsn
+                && self.shared.vfs.delete(&path, false).is_ok()
             {
                 removed = removed.saturating_add(1);
             }
@@ -620,8 +622,7 @@ impl Wal {
                         inner.durable_end = inner.written_end;
                         inner.unsynced = 0;
                     } else {
-                        inner.unsynced =
-                            unsynced_before.saturating_add(payload.len() as u64);
+                        inner.unsynced = unsynced_before.saturating_add(payload.len() as u64);
                     }
                     // The buffer is reused rather than reallocated: a commit
                     // path that allocated a fresh buffer per group would be an
@@ -663,9 +664,9 @@ impl Wal {
         let mut writes = 0u64;
         if !payload.is_empty() {
             let offset = segment::HEADER_BYTES as u64
-                + start.checked_sub(segment.first_lsn).ok_or_else(|| {
-                    misuse("a log drain would write before the segment it is in")
-                })?;
+                + start
+                    .checked_sub(segment.first_lsn)
+                    .ok_or_else(|| misuse("a log drain would write before the segment it is in"))?;
             segment
                 .file
                 .write_all_at(offset, payload)
@@ -742,9 +743,7 @@ pub fn segment_path(base: &str, directory: Option<&std::path::Path>, sequence: u
         .unwrap_or_else(|| base.to_string());
     let name = segment::segment_name(&stem, sequence);
     match directory {
-        Some(directory) if !directory.as_os_str().is_empty() => {
-            DbPath::new(directory.join(name))
-        }
+        Some(directory) if !directory.as_os_str().is_empty() => DbPath::new(directory.join(name)),
         _ => DbPath::new(&name),
     }
 }

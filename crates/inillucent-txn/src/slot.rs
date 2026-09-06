@@ -244,7 +244,10 @@ mod tests {
         let waited = started.elapsed();
         assert_eq!(refused.code(), PrimaryCode::Busy);
         assert!(
-            refused.detail().unwrap_or_default().contains("busy_timeout"),
+            refused
+                .detail()
+                .unwrap_or_default()
+                .contains("busy_timeout"),
             "the refusal must say what to change: {refused:?}"
         );
         assert!(

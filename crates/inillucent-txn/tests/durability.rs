@@ -1,8 +1,8 @@
 //! Crash campaigns through the whole engine: a database file, a log, and the
 //! transactions over both.
 //!
-//! Invariant these tests hold: **the oracle is built before the crash and from
-//! the other side of the interface.** A campaign asks the engine to commit, and
+//! Invariant: **the oracle is built before the crash and from the other side of
+//! the interface.** A campaign asks the engine to commit, and
 //! records which commits *returned* - then crashes, reopens, and compares what
 //! the reopened engine holds against that list. Nothing here asks the engine
 //! whether it recovered correctly.
@@ -196,12 +196,8 @@ fn crashing_at_every_write_leaves_the_acknowledged_prefix() {
 
         let recovered_vfs: Arc<dyn Vfs> =
             Arc::new(SimVfs::recovered(SimConfig::default(), &snapshot));
-        let Ok(engine) = Engine::open(
-            recovered_vfs,
-            &path,
-            options(Synchronous::Full),
-            RefuseRows,
-        ) else {
+        let Ok(engine) = Engine::open(recovered_vfs, &path, options(Synchronous::Full), RefuseRows)
+        else {
             // A crash during the very first writes can leave a file with no
             // readable meta page at all, which is a database that never
             // existed rather than one that lost data. There is nothing to
@@ -249,12 +245,8 @@ fn crashing_at_every_sync_leaves_the_acknowledged_prefix() {
         arms += 1;
         let recovered_vfs: Arc<dyn Vfs> =
             Arc::new(SimVfs::recovered(SimConfig::default(), &snapshot));
-        let Ok(engine) = Engine::open(
-            recovered_vfs,
-            &path,
-            options(Synchronous::Full),
-            RefuseRows,
-        ) else {
+        let Ok(engine) = Engine::open(recovered_vfs, &path, options(Synchronous::Full), RefuseRows)
+        else {
             assert!(
                 acknowledged.is_empty(),
                 "crash at sync {nth}: {} commits were acknowledged and the database \
@@ -298,12 +290,8 @@ fn crashing_during_a_checkpoint_leaves_the_acknowledged_prefix() {
         arms += 1;
         let recovered_vfs: Arc<dyn Vfs> =
             Arc::new(SimVfs::recovered(SimConfig::default(), &snapshot));
-        let Ok(engine) = Engine::open(
-            recovered_vfs,
-            &path,
-            options(Synchronous::Full),
-            RefuseRows,
-        ) else {
+        let Ok(engine) = Engine::open(recovered_vfs, &path, options(Synchronous::Full), RefuseRows)
+        else {
             assert!(
                 acknowledged.is_empty(),
                 "crash at write {nth} with checkpoints: {} commits were acknowledged \
@@ -360,7 +348,11 @@ fn failing_the_nth_call_is_reported_and_leaves_no_torn_transaction() {
                 );
                 continue;
             };
-            assert_recovered(&engine, &acknowledged, &format!("{failure:?} at call {nth}"));
+            assert_recovered(
+                &engine,
+                &acknowledged,
+                &format!("{failure:?} at call {nth}"),
+            );
         }
     }
 }
@@ -419,8 +411,8 @@ fn recovering_checkpointing_and_recovering_again_is_the_same_database() {
     let vfs: Arc<dyn Vfs> = Arc::new(inillucent_vfs::MemoryVfs::new());
     let path = DbPath::new("idempotent.rdb");
     let acknowledged = {
-        let engine = Engine::create(Arc::clone(&vfs), &path, options(Synchronous::Full))
-            .expect("an engine");
+        let engine =
+            Engine::create(Arc::clone(&vfs), &path, options(Synchronous::Full)).expect("an engine");
         workload(&engine, 10, 0)
     };
 
@@ -434,7 +426,9 @@ fn recovering_checkpointing_and_recovering_again_is_the_same_database() {
         .expect("the first reopen");
         assert_recovered(&engine, &acknowledged, "the first reopen");
         engine.checkpoint().expect("a checkpoint");
-        (1..=10u64).map(|round| fields_of(&engine, PageId(8 + round))).collect()
+        (1..=10u64)
+            .map(|round| fields_of(&engine, PageId(8 + round)))
+            .collect()
     };
 
     let second: Vec<Option<(u64, u64)>> = {
@@ -458,7 +452,9 @@ fn recovering_checkpointing_and_recovering_again_is_the_same_database() {
             "the second reopen replayed records the checkpoint had already put in the file"
         );
         assert!(outcome.last_checkpoint.is_some());
-        (1..=10u64).map(|round| fields_of(&engine, PageId(8 + round))).collect()
+        (1..=10u64)
+            .map(|round| fields_of(&engine, PageId(8 + round)))
+            .collect()
     };
 
     assert_eq!(first, second, "the two reopens disagree about the database");
@@ -470,8 +466,8 @@ fn a_foreign_log_is_not_applied() {
     let vfs: Arc<dyn Vfs> = Arc::new(inillucent_vfs::MemoryVfs::new());
     let path = DbPath::new("foreign.rdb");
     {
-        let engine = Engine::create(Arc::clone(&vfs), &path, options(Synchronous::Full))
-            .expect("an engine");
+        let engine =
+            Engine::create(Arc::clone(&vfs), &path, options(Synchronous::Full)).expect("an engine");
         workload(&engine, 4, 0);
     }
     // A fresh database at the same path has a fresh uuid, and the segments
