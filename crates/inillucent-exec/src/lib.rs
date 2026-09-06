@@ -51,6 +51,7 @@ pub mod physical;
 pub mod scalar;
 pub mod scan;
 pub mod setop;
+pub mod subquery;
 pub mod window;
 
 pub use aggregate::{Accumulator, AggregateKind};

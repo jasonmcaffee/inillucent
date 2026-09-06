@@ -146,24 +146,28 @@ const SURFACE: &[(&str, &str, Answers)] = &[
     ("pragma.journal_mode", "PRAGMA journal_mode", Yes),
     ("pragma.table_info", "PRAGMA table_info(t)", Yes),
     ("pragma.foreign_keys", "PRAGMA foreign_keys=ON", Yes),
-    // The refusals. Each of these stands between Phase 5 and Part 4.
-    (
-        "subquery.scalar",
-        "SELECT (SELECT max(b) FROM t) AS m",
-        NotYet,
-    ),
+    // Subqueries used as values. Uncorrelated ones are folded once per
+    // execution; `crates/inillucent-compat/tests/new_engine_subquery.rs` is
+    // where their answers are checked against SQLite's.
+    ("subquery.scalar", "SELECT (SELECT max(b) FROM t) AS m", Yes),
     (
         "subquery.where",
         "SELECT a FROM t WHERE b = (SELECT max(b) FROM t)",
-        NotYet,
+        Yes,
     ),
     (
         "subquery.in",
         "SELECT a FROM t WHERE id IN (SELECT id FROM t)",
-        NotYet,
+        Yes,
     ),
     (
         "subquery.exists",
+        "SELECT a FROM t WHERE EXISTS (SELECT 1 FROM t WHERE id = 1)",
+        Yes,
+    ),
+    // The refusals. Each of these stands between Phase 5 and Part 4.
+    (
+        "subquery.correlated",
         "SELECT a FROM t WHERE EXISTS (SELECT 1 FROM t AS u WHERE u.id = t.id)",
         NotYet,
     ),

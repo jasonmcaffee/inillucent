@@ -1,0 +1,338 @@
+//! Nested queries used as values, answered by the new engine.
+//!
+//! Invariant: **an uncorrelated subquery answers the question the data asks at
+//! the moment it is asked.** The reduction that makes it cheap - evaluate it
+//! once, before the chain is built - is only sound if "once" means once per
+//! execution and not once per compile, because statements are cached by their
+//! text and the data underneath them moves.
+//!
+//! The cases here are chosen for the ways that reduction could be wrong rather
+//! than to enumerate syntax: a value that goes stale after a write, a `NOT IN`
+//! against a set holding NULL, a subquery that reads a bound parameter, one
+//! nested inside another, and a correlated one that must still be refused
+//! rather than answered with the uncorrelated reading.
+//!
+//! Expected values are written out rather than compared against the engine's
+//! own other path, because a test that asks one engine to check itself agrees
+//! with whatever it does.
+
+use inillucent_compat::workspace_root;
+use inillucent_engine::connect::{Connection, Database};
+use inillucent_exec::physical::Params;
+use inillucent_tree::datum::OwnedDatum;
+
+/// Returns a database holding the fixture this file asks about.
+///
+/// `part` is deliberately NULL for one row, because the three-valued rule that
+/// `NOT IN` follows is the case a folded set is most likely to get wrong.
+///
+/// @param name - the test's name, which names its file
+fn fixture(name: &str) -> Database {
+    let area = workspace_root().join("target/scratch/task-1834/subquery");
+    let _ = std::fs::create_dir_all(&area);
+    let path = area.join(format!("{name}.rdb"));
+    let _ = std::fs::remove_file(&path);
+    let database = Database::open(&path).expect("a fresh database opens");
+    {
+        let connection = database.connect();
+        connection
+            .execute_batch(
+                "CREATE TABLE item (id INTEGER PRIMARY KEY, name TEXT, price INTEGER); \
+                 CREATE TABLE part (id INTEGER PRIMARY KEY, item_id INTEGER); \
+                 INSERT INTO item(id, name, price) VALUES (1, 'anvil', 100); \
+                 INSERT INTO item(id, name, price) VALUES (2, 'bell', 250); \
+                 INSERT INTO item(id, name, price) VALUES (3, 'cog', 250); \
+                 INSERT INTO item(id, name, price) VALUES (4, 'drum', 50); \
+                 INSERT INTO part(id, item_id) VALUES (10, 2); \
+                 INSERT INTO part(id, item_id) VALUES (11, 3); \
+                 INSERT INTO part(id, item_id) VALUES (12, NULL)",
+            )
+            .expect("the fixture loads");
+    }
+    database
+}
+
+/// Returns the first column of every row, as integers.
+///
+/// @param connection - the connection to ask
+/// @param sql - the query
+fn integers(connection: &Connection<'_>, sql: &str) -> Vec<i64> {
+    connection
+        .query(sql)
+        .unwrap_or_else(|error| panic!("{sql}: {error:?}"))
+        .iter()
+        .map(|row| match row.first() {
+            Some(OwnedDatum::Int(number)) => *number,
+            Some(OwnedDatum::Null) => i64::MIN,
+            other => panic!("{sql} answered {other:?}"),
+        })
+        .collect()
+}
+
+/// A scalar subquery answers with the block's first value, in both positions.
+#[test]
+fn a_scalar_subquery_answers_in_a_projection_and_in_a_filter() {
+    let database = fixture("scalar");
+    let connection = database.connect();
+
+    assert_eq!(
+        integers(&connection, "SELECT (SELECT max(price) FROM item)"),
+        vec![250],
+        "a scalar subquery in the select list"
+    );
+    assert_eq!(
+        integers(
+            &connection,
+            "SELECT id FROM item WHERE price = (SELECT max(price) FROM item) ORDER BY id"
+        ),
+        vec![2, 3],
+        "a scalar subquery as the right side of a comparison"
+    );
+    assert_eq!(
+        integers(
+            &connection,
+            "SELECT id FROM item WHERE price > (SELECT min(price) FROM item) ORDER BY id"
+        ),
+        vec![1, 2, 3]
+    );
+    // A block that produces nothing is NULL, not an error and not zero.
+    assert_eq!(
+        connection
+            .query("SELECT (SELECT price FROM item WHERE id = 99)")
+            .expect("an empty block is not an error"),
+        vec![vec![OwnedDatum::Null]],
+        "a scalar subquery over no rows is NULL"
+    );
+}
+
+/// `IN` and `NOT IN` follow the three-valued rule, NULL in the set included.
+///
+/// The case that matters is `NOT IN` against a set holding NULL: SQLite answers
+/// no rows, because "not equal to every member" cannot be established when one
+/// member is unknown. A folded set that dropped the NULL would answer three.
+#[test]
+fn in_and_not_in_follow_the_three_valued_rule() {
+    let database = fixture("in");
+    let connection = database.connect();
+
+    assert_eq!(
+        integers(
+            &connection,
+            "SELECT id FROM item WHERE id IN (SELECT item_id FROM part) ORDER BY id"
+        ),
+        vec![2, 3],
+        "the NULL member matches nothing but does not remove the matches"
+    );
+    assert_eq!(
+        integers(
+            &connection,
+            "SELECT id FROM item WHERE id NOT IN (SELECT item_id FROM part) ORDER BY id"
+        ),
+        Vec::<i64>::new(),
+        "NOT IN against a set holding NULL is unknown for every row"
+    );
+    // The same query with the NULL excluded, which is the control: if this also
+    // answered nothing, the rule above would be passing for the wrong reason.
+    assert_eq!(
+        integers(
+            &connection,
+            "SELECT id FROM item WHERE id NOT IN \
+             (SELECT item_id FROM part WHERE item_id IS NOT NULL) ORDER BY id"
+        ),
+        vec![1, 4],
+        "with no NULL in the set, NOT IN answers the complement"
+    );
+    assert_eq!(
+        integers(
+            &connection,
+            "SELECT id FROM item WHERE id IN (SELECT id FROM item WHERE price > 200) ORDER BY id"
+        ),
+        vec![2, 3]
+    );
+}
+
+/// `EXISTS` and `NOT EXISTS` answer from whether the block produced a row.
+#[test]
+fn exists_answers_from_whether_the_block_produced_a_row() {
+    let database = fixture("exists");
+    let connection = database.connect();
+
+    assert_eq!(
+        integers(
+            &connection,
+            "SELECT id FROM item WHERE EXISTS (SELECT 1 FROM part WHERE id = 10) ORDER BY id"
+        ),
+        vec![1, 2, 3, 4],
+        "a block that produces a row lets every outer row through"
+    );
+    assert_eq!(
+        integers(
+            &connection,
+            "SELECT id FROM item WHERE EXISTS (SELECT 1 FROM part WHERE id = 99) ORDER BY id"
+        ),
+        Vec::<i64>::new(),
+        "a block that produces nothing lets none through"
+    );
+    assert_eq!(
+        integers(
+            &connection,
+            "SELECT id FROM item WHERE NOT EXISTS (SELECT 1 FROM part WHERE id = 99) ORDER BY id"
+        ),
+        vec![1, 2, 3, 4],
+        "NOT EXISTS is the negation and not a second reading of the same thing"
+    );
+}
+
+/// The value is read again after the data it came from changes.
+///
+/// **The case the fold exists to get right.** Statements are cached by their
+/// text, so a subquery folded into the cached plan would answer the second
+/// execution with the first execution's data. The same connection runs the same
+/// statement text on either side of an insert here for exactly that reason.
+#[test]
+fn a_folded_subquery_is_read_again_after_a_write() {
+    let database = fixture("stale");
+    let connection = database.connect();
+
+    let query = "SELECT (SELECT count(*) FROM item)";
+    assert_eq!(integers(&connection, query), vec![4]);
+
+    connection
+        .execute_batch("INSERT INTO item(id, name, price) VALUES (5, 'edge', 10)")
+        .expect("the insert applies");
+
+    assert_eq!(
+        integers(&connection, query),
+        vec![5],
+        "the same statement text answered with the count from before the insert"
+    );
+
+    // And the same for a set, which takes the other path through the fold.
+    let membership = "SELECT id FROM item WHERE id IN (SELECT item_id FROM part) ORDER BY id";
+    assert_eq!(integers(&connection, membership), vec![2, 3]);
+    connection
+        .execute_batch("INSERT INTO part(id, item_id) VALUES (13, 4)")
+        .expect("the insert applies");
+    assert_eq!(
+        integers(&connection, membership),
+        vec![2, 3, 4],
+        "a folded IN set answered with the membership from before the insert"
+    );
+}
+
+/// A subquery reads the parameters the outer statement was bound with.
+#[test]
+fn a_subquery_sees_the_statement_s_parameters() {
+    let database = fixture("params");
+    let connection = database.connect();
+
+    let rows = connection
+        .query_with(
+            "SELECT id FROM item WHERE price = (SELECT max(price) FROM item WHERE price < ?1) \
+             ORDER BY id",
+            &Params::from_values(vec![OwnedDatum::Int(250)]),
+        )
+        .expect("the query runs");
+    let ids: Vec<i64> = rows
+        .iter()
+        .filter_map(|row| match row.first() {
+            Some(OwnedDatum::Int(number)) => Some(*number),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ids,
+        vec![1],
+        "the block did not see the binding the outer statement was given"
+    );
+}
+
+/// A subquery inside a subquery is answered innermost first.
+#[test]
+fn a_nested_subquery_is_answered_from_the_inside_out() {
+    let database = fixture("nested");
+    let connection = database.connect();
+
+    assert_eq!(
+        integers(
+            &connection,
+            "SELECT id FROM item WHERE price = \
+             (SELECT max(price) FROM item WHERE price < (SELECT max(price) FROM item)) \
+             ORDER BY id"
+        ),
+        vec![1],
+        "the inner block has to be answered before the outer one can run"
+    );
+}
+
+/// A correlated subquery is refused by name rather than answered wrongly.
+///
+/// It reads a column of the row being tested, so it has no single value and the
+/// fold cannot stand in for it. Answering it as though it were uncorrelated
+/// would be a wrong answer rather than a missing feature, which is the one
+/// outcome worth writing a test to prevent.
+#[test]
+fn a_correlated_subquery_is_refused_and_says_so() {
+    let database = fixture("correlated");
+    let connection = database.connect();
+
+    let refused = connection.query(
+        "SELECT id FROM item WHERE EXISTS (SELECT 1 FROM part WHERE part.item_id = item.id)",
+    );
+    let error = format!(
+        "{:?}",
+        refused.expect_err("a correlated subquery is refused")
+    );
+    assert!(
+        error.contains("correlated subquery"),
+        "the refusal did not name what it refused: {error}"
+    );
+}
+
+/// A subquery inside a compound arm is folded like any other.
+///
+/// A compound runs each arm through its own build, so this checks the table is
+/// filled for the whole statement rather than for the arm that happened to be
+/// built first - the arms share one numbering, and an arm whose slot was still
+/// empty would be refused as though it were correlated.
+#[test]
+fn a_subquery_in_a_compound_arm_is_folded_too() {
+    let database = fixture("compound");
+    let connection = database.connect();
+
+    assert_eq!(
+        integers(
+            &connection,
+            "SELECT id FROM item WHERE id IN (SELECT item_id FROM part)              UNION              SELECT id FROM item WHERE price = (SELECT min(price) FROM item)              ORDER BY id"
+        ),
+        vec![2, 3, 4],
+        "one arm's subquery was not folded"
+    );
+}
+
+/// An `IN` over a subquery answers the same as the `IN` over the same literals.
+///
+/// The planner chooses the access path before the fold happens, so a subquery
+/// in a `WHERE` is a residual predicate to it and the scan is not narrowed by
+/// the folded set. That is a missing optimization rather than a wrong answer,
+/// and this pins the answer so the optimization can be added later against a
+/// test that already says what it must not change.
+#[test]
+fn a_folded_in_answers_the_same_as_the_literal_in() {
+    let database = fixture("aslist");
+    let connection = database.connect();
+
+    let folded = integers(
+        &connection,
+        "SELECT id FROM item WHERE id IN (SELECT item_id FROM part) ORDER BY id",
+    );
+    let literal = integers(
+        &connection,
+        "SELECT id FROM item WHERE id IN (2, 3, NULL) ORDER BY id",
+    );
+    assert_eq!(
+        folded, literal,
+        "the folded set is not the list it stands for"
+    );
+    assert_eq!(folded, vec![2, 3]);
+}

@@ -48,7 +48,7 @@ use inillucent_pool::Pool;
 use inillucent_sql::ast::{BinaryOp, NullOrder, PatternOp, SortOrder, UnaryOp};
 use inillucent_sql::bind::{
     BoundExpr, BoundFrameBound, BoundOrderTerm, BoundResultColumn, BoundSelect, BoundWindow,
-    WindowCall as BoundWindowCall,
+    SubqueryKind, WindowCall as BoundWindowCall,
 };
 use inillucent_sql::catalog_view::TableInfo;
 use inillucent_sql::function::{AggregateFunc, ScalarFunc};
@@ -291,6 +291,18 @@ pub struct Params {
     /// while everything except the source is built, nothing except the source
     /// read one.
     reads: std::cell::Cell<u64>,
+    /// What each uncorrelated subquery in this statement answered.
+    ///
+    /// Indexed by the statement-wide number the binder gave the subquery, and
+    /// empty when the statement has none. It rides here rather than in the plan
+    /// because a folded subquery is true only of the data it was read from, and
+    /// plans are cached by their text: a value baked into the plan would answer
+    /// `SELECT (SELECT count(*) FROM t)` with the count from whenever the
+    /// statement was first compiled.
+    ///
+    /// An entry is `None` when the subquery is correlated, which is the one
+    /// case that has no single value. The physical pass refuses those by name.
+    subqueries: Vec<Option<crate::subquery::Subvalue>>,
 }
 
 impl Params {
@@ -299,6 +311,7 @@ impl Params {
         Params {
             values: Vec::new(),
             reads: std::cell::Cell::new(0),
+            subqueries: Vec::new(),
         }
     }
 
@@ -309,7 +322,49 @@ impl Params {
         Params {
             values,
             reads: std::cell::Cell::new(0),
+            subqueries: Vec::new(),
         }
+    }
+
+    /// Returns this set with room for a statement's folded subqueries.
+    ///
+    /// The bound values are carried over, because a subquery's own block may
+    /// read `?1` and has to see the same binding the outer statement did.
+    ///
+    /// @param subqueries - one slot per subquery, by the binder's numbering
+    pub fn with_subqueries(&self, subqueries: Vec<Option<crate::subquery::Subvalue>>) -> Params {
+        Params {
+            values: self.values.clone(),
+            reads: std::cell::Cell::new(self.reads.get()),
+            subqueries,
+        }
+    }
+
+    /// Records what one subquery answered.
+    ///
+    /// @param id - the binder's number for the subquery
+    /// @param value - the rows it produced, read as one column
+    pub fn set_subquery(&mut self, id: usize, value: crate::subquery::Subvalue) {
+        if let Some(slot) = self.subqueries.get_mut(id) {
+            *slot = Some(value);
+        }
+    }
+
+    /// Returns whether this execution's subqueries have been folded already.
+    pub fn has_subqueries(&self) -> bool {
+        !self.subqueries.is_empty()
+    }
+
+    /// Returns what one subquery answered, or `None` when it is correlated.
+    ///
+    /// Counted as a parameter read for the same reason a `?1` is: a chain that
+    /// baked this value in must not be re-run against a later state of the
+    /// table, and the read counter is what already decides that.
+    ///
+    /// @param id - the binder's number for the subquery
+    pub fn subquery(&self, id: usize) -> Option<&crate::subquery::Subvalue> {
+        self.reads.set(self.reads.get().saturating_add(1));
+        self.subqueries.get(id).and_then(|slot| slot.as_ref())
     }
 
     /// Returns how many parameter reads this set has answered.
@@ -1176,6 +1231,10 @@ pub fn build_prepared<'t>(
     params: &Params,
     sink: Box<dyn Sink>,
 ) -> DbResult<(Pipeline<'t>, Shape)> {
+    // Every uncorrelated subquery is answered once, here, before anything is
+    // built over it. See `crate::subquery` for why it is per execution.
+    let folded = crate::subquery::fold(plan, catalog, params)?;
+    let params = folded.as_ref().unwrap_or(params);
     let held = space_of(catalog, prepared)?;
     let space = held.view(&prepared.stages);
     let chain = build_chain(plan, catalog, prepared, &space, params, sink)?;
@@ -1700,6 +1759,10 @@ pub fn build_statement<'t>(
     params: &Params,
     sink: Box<dyn Sink>,
 ) -> DbResult<Statement<'t>> {
+    // Every uncorrelated subquery is answered once, here, before anything is
+    // built over it. See `crate::subquery` for why it is per execution.
+    let folded = crate::subquery::fold(plan, catalog, params)?;
+    let params = folded.as_ref().unwrap_or(params);
     let prepared = prepared.clone();
     let held = space_of(catalog, &prepared)?;
     // The reads the chain makes are the parameters it bakes in. The source's
@@ -2495,6 +2558,10 @@ pub fn run_compound(
     catalog: &dyn TreeCatalog,
     params: &Params,
 ) -> DbResult<(Vec<Vec<OwnedDatum>>, Shape)> {
+    // Every uncorrelated subquery is answered once, here, before anything is
+    // built over it. See `crate::subquery` for why it is per execution.
+    let folded = crate::subquery::fold(plan, catalog, params)?;
+    let params = folded.as_ref().unwrap_or(params);
     let collations: Vec<Collation> = plan
         .select
         .columns
@@ -2798,6 +2865,10 @@ pub fn run_windowed(
     catalog: &dyn TreeCatalog,
     params: &Params,
 ) -> DbResult<(Vec<Vec<OwnedDatum>>, Shape)> {
+    // Every uncorrelated subquery is answered once, here, before anything is
+    // built over it. See `crate::subquery` for why it is per execution.
+    let folded = crate::subquery::fold(plan, catalog, params)?;
+    let params = folded.as_ref().unwrap_or(params);
     let select = &plan.select;
     if !select.aggregates.is_empty() || !select.group_by.is_empty() {
         return unsupported("a window function beside an aggregate");
@@ -3505,6 +3576,46 @@ fn translate(
             // per row in the node.
             now: inillucent_scalar::datetime::julian_now(),
         },
+        BoundExpr::Subquery {
+            id,
+            kind,
+            negated,
+            operand,
+            affinity,
+            collation,
+            ..
+        } => {
+            // Folded before the chain was built, by `subquery::fold`. A slot
+            // that is empty is a correlated subquery, which has no single
+            // value because it reads a column of the row being tested.
+            let Some(value) = params.subquery(*id) else {
+                return unsupported("a correlated subquery used as a value");
+            };
+            match kind {
+                SubqueryKind::Exists => {
+                    Expr::Literal(OwnedDatum::Int(i64::from(value.exists() != *negated)))
+                }
+                SubqueryKind::Scalar => Expr::Literal(value.scalar()),
+                // An `IN` over a folded block is an `IN` over a list of
+                // literals, which already carries SQLite's three-valued NULL
+                // rule and the affinity and collation the binder attached.
+                SubqueryKind::In => Expr::InList {
+                    negated: *negated,
+                    operand: Box::new(match operand {
+                        Some(held) => translate(held, space, params, frame)?,
+                        None => return unsupported("an IN with no left operand"),
+                    }),
+                    list: value
+                        .column
+                        .iter()
+                        .cloned()
+                        .map(Expr::Literal)
+                        .collect::<Vec<Expr>>(),
+                    affinity: *affinity,
+                    collation: *collation,
+                },
+            }
+        }
         other => return unsupported(&format!("the expression {}", name_of(other))),
     })
 }

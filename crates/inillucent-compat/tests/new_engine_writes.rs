@@ -544,36 +544,76 @@ fn the_two_engines_agree_before_anything_is_written() {
     );
 }
 
-/// A scalar subquery in a `WHERE` is refused by name, on reads and on writes.
+/// A subquery in a `WHERE` changes the same rows SQLite changes.
 ///
-/// It is a **read**-path gap rather than a write one: nothing in the physical
-/// pass translates a `BoundExpr::Subquery` in an expression position, so a
-/// query with one is refused whether or not a write is attached to it. It is
-/// recorded here because the write path is where it was met, and because the
-/// refusal has to name the construct rather than fail as a misuse - which is
-/// the whole invariant `inillucent-exec`'s physical pass is written to.
+/// It was a **read**-path gap rather than a write one - nothing in the physical
+/// pass translated a `BoundExpr::Subquery` in an expression position, so a
+/// query carrying one was refused whether or not a write was attached. This
+/// test was that refusal; it is now the answer, because the fold in
+/// `inillucent-exec`'s `subquery` module evaluates an uncorrelated block once
+/// per execution and hands the operator chain a literal.
+///
+/// It stays on the write path because that is where the gap was met, and
+/// because a write is the sharper question: the two engines have to agree about
+/// *which rows changed*, not just about what a `SELECT` answered. The three
+/// statements run in sequence on both sides, so the `DELETE` moves the maximum
+/// the `UPDATE` then looks up.
 #[test]
-fn a_scalar_subquery_in_a_where_is_refused_by_name() {
+fn a_subquery_in_a_where_changes_the_rows_sqlite_changes() {
     let Some(mut pair) = pair("subquery") else {
         eprintln!("the pinned SQLite oracle is not built; nothing was compared");
         return;
     };
-    for sql in [
+    let mut failures = Vec::new();
+
+    compare(
+        &mut pair,
         "SELECT id FROM members WHERE id = (SELECT max(id) FROM members)",
+        &mut failures,
+    );
+    compare(
+        &mut pair,
+        "SELECT id FROM members WHERE id IN (SELECT id FROM members WHERE score >= 20)          ORDER BY id",
+        &mut failures,
+    );
+
+    for statement in [
         "DELETE FROM members WHERE id = (SELECT max(id) FROM members)",
         "UPDATE members SET score = 0 WHERE id = (SELECT max(id) FROM members)",
     ] {
-        let error = pair
-            .engine
-            .execute_any(sql, &Params::new())
-            .err()
-            .unwrap_or_else(|| panic!("{sql} was accepted and the refusal is what is asserted"));
-        let detail = error.detail().unwrap_or("no detail").to_ascii_lowercase();
-        assert!(
-            detail.contains("subquery"),
-            "{sql} was refused without naming the construct: {detail}"
+        let reference = pair
+            .oracle
+            .send(&Op::Query(statement.to_string()))
+            .expect("the oracle answers");
+        assert!(reference.ok, "{statement}: sqlite refused it");
+        if let Err(error) = pair.engine.execute_any(statement, &Params::new()) {
+            failures.push(format!(
+                "{statement}
+  the new engine refused: {}",
+                error.detail().unwrap_or("no detail")
+            ));
+            continue;
+        }
+        // What the write actually did, which is the part a row count would not
+        // catch: a subquery read against the wrong snapshot changes the wrong
+        // row and still reports one change.
+        compare(
+            &mut pair,
+            "SELECT id, score FROM members ORDER BY id",
+            &mut failures,
         );
     }
+
+    assert!(
+        failures.is_empty(),
+        "the engines disagree about a subquery in a WHERE:
+{}",
+        failures.join(
+            "
+
+"
+        )
+    );
 }
 
 /// Compares one query's answer against SQLite's, in order.
