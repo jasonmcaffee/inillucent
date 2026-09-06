@@ -377,17 +377,23 @@ impl VirtualTable for Fts5Table {
                     return Ok(None);
                 }
                 let key = match rowid.as_integer() {
-                    Some(key) => key,
-                    None => self
-                        .shadows
-                        .max_rowid(context, b"content")?
-                        .saturating_add(1),
+                    Some(key) => {
+                        // A rowid the caller named may collide, so it is asked
+                        // about; and it moves the mark, so the next allocated
+                        // one is above it.
+                        if self.shadows.read_row(context, b"content", key)?.is_some() {
+                            return Err(constraint(
+                                "UNIQUE constraint failed: the rowid is already in the index",
+                            ));
+                        }
+                        note_content_rowid(&self.pending, key);
+                        key
+                    }
+                    // Allocated, so it is one past everything - which is both
+                    // the number and the answer to whether it is taken. See
+                    // `Pending::content_highest`.
+                    None => next_content_rowid(context, &self.shadows, &self.pending)?,
                 };
-                if self.shadows.read_row(context, b"content", key)?.is_some() {
-                    return Err(constraint(
-                        "UNIQUE constraint failed: the rowid is already in the index",
-                    ));
-                }
                 self.add(context, key, values)?;
                 Ok(Some(key))
             }
@@ -420,6 +426,12 @@ impl VirtualTable for Fts5Table {
     /// wrote it, and a reader inside the transaction sees it because the
     /// cursors share the same handle.
     fn sync(&mut self, context: &mut Context<'_>) -> DbResult<()> {
+        // The rowid mark is the transaction's, not the connection's: a rowid a
+        // later transaction's delete frees is reused, exactly as SQLite reuses
+        // it, and only a mark that ends here can be.
+        if let Ok(mut held) = self.pending.lock() {
+            held.content_highest = None;
+        }
         flush_doclists(context, &self.shadows, &self.pending)
     }
 
@@ -748,6 +760,41 @@ fn get_totals(context: &mut Context<'_>, shadows: &ShadowTables, columns: usize)
     Totals::decode(blob.raw())
 }
 
+/// Returns the totals, from the buffer when this transaction has them.
+///
+/// @param context - the host
+/// @param shadows - the table's shadow tables
+/// @param buffer - the staged rows
+/// @param columns - how many columns the table has
+fn buffered_totals(
+    context: &mut Context<'_>,
+    shadows: &ShadowTables,
+    buffer: &Buffer,
+    columns: usize,
+) -> Totals {
+    if let Ok(held) = buffer.lock() {
+        if let Some(totals) = held.totals.as_ref() {
+            return totals.clone();
+        }
+    }
+    let totals = get_totals(context, shadows, columns);
+    if let Ok(mut held) = buffer.lock() {
+        held.totals = Some(totals.clone());
+    }
+    totals
+}
+
+/// Stages the totals, to be written when the transaction flushes.
+///
+/// @param buffer - the staged rows
+/// @param totals - the totals as they now stand
+fn stage_totals(buffer: &Buffer, totals: Totals) {
+    if let Ok(mut held) = buffer.lock() {
+        held.totals = Some(totals);
+        held.totals_dirty = true;
+    }
+}
+
 /// Writes the totals row.
 fn put_totals(context: &mut Context<'_>, shadows: &ShadowTables, totals: &Totals) -> DbResult<()> {
     shadows.write_row(
@@ -774,7 +821,7 @@ fn put_totals(context: &mut Context<'_>, shadows: &ShadowTables, totals: &Totals
 #[derive(Default)]
 pub struct Pending {
     /// The `%_data` page a doclist belongs in, and the doclist.
-    doclists: BTreeMap<i64, Vec<u8>>,
+    doclists: BTreeMap<i64, Staged>,
     /// How many bytes the doclists hold, so the buffer can be bounded.
     bytes: usize,
     /// The highest `%_data` page handed out, staged rows included.
@@ -793,6 +840,56 @@ pub struct Pending {
     /// same function, which is what would otherwise have to invalidate a
     /// remembered absence.
     terms: BTreeMap<Vec<u8>, i64>,
+    /// The totals row, read once and written once per transaction.
+    ///
+    /// **One `%_data` row, and it was being rewritten per document.** `add`
+    /// finishes by reading row 1, adding this document's counts and writing it
+    /// back, so a bulk load of five hundred documents read and wrote the same
+    /// row five hundred times - and each of those is a descent, a log record
+    /// and a page image on a row that nothing reads until a query asks for a
+    /// score. `fts.build` measured 0.10x against SQLite with 22.6 of its 23.7
+    /// ms inside the module, and this is the part of it that is pure repetition.
+    ///
+    /// `None` means "not read yet this transaction", which is different from
+    /// "there are no totals": an empty index has a totals row of zeroes.
+    totals: Option<Totals>,
+    /// Whether the buffered totals differ from what `%_data` holds.
+    totals_dirty: bool,
+    /// The highest `%_content` rowid this transaction has handed out.
+    ///
+    /// **Two tree descents per document, for a number the module already
+    /// knows.** An insert that names no rowid asked `max_rowid` for one - a
+    /// descent to the rightmost leaf - and then asked `read_row` whether that
+    /// rowid was taken, which is a second descent for a question whose answer
+    /// is no by construction. Together they were half the descents a document
+    /// costs, and `fts.build` is five hundred documents in one transaction.
+    ///
+    /// It is cleared at `sync`, which is the transaction boundary, so a rowid
+    /// freed by a delete in a *later* transaction is reused exactly as SQLite
+    /// reuses it. Within one transaction the number only rises, which is the
+    /// same rule a rowid table follows for rows it has just written.
+    content_highest: Option<i64>,
+}
+
+/// One staged doclist, and the rowid it currently ends at.
+///
+/// **The rowid is remembered because finding it costs a walk of the whole
+/// list.** A doclist is a run of varints with no length prefix and no index, so
+/// the only way to read the last entry is to decode every entry before it -
+/// and an append has to know it, because entries are stored as deltas.
+///
+/// That made appending O(the list so far), and a bulk load appends to the same
+/// term once per document: five hundred documents over a ten-word vocabulary
+/// walked about a hundred and twenty thousand entries to add five thousand.
+/// `merge_term`'s own doc comment records the identical shape being fixed for
+/// the *unbuffered* path, by appending instead of decoding; the buffered path
+/// it introduced brought the walk back one level down.
+#[derive(Default)]
+struct Staged {
+    /// The doclist as `%_data` will hold it.
+    bytes: Vec<u8>,
+    /// The rowid the last entry names, when there is one.
+    last: Option<i64>,
 }
 
 /// A handle on the buffer, shared by a table and the cursors it opens.
@@ -804,6 +901,42 @@ pub type Buffer = Arc<Mutex<Pending>>;
 /// corpus would hold the whole index in memory. Flushing early costs a rewrite
 /// of what is held, which is what the unbuffered path paid per document.
 const PENDING_BUDGET: usize = 8 * 1024 * 1024;
+
+/// Returns the rowid an insert that named none is given.
+///
+/// The table is asked once per transaction and the mark rises from there.
+///
+/// @param context - the host
+/// @param shadows - the table's shadow tables
+/// @param buffer - the staged rows
+fn next_content_rowid(
+    context: &mut Context<'_>,
+    shadows: &ShadowTables,
+    buffer: &Buffer,
+) -> DbResult<i64> {
+    if let Ok(mut held) = buffer.lock() {
+        if let Some(highest) = held.content_highest {
+            let next = highest.saturating_add(1);
+            held.content_highest = Some(next);
+            return Ok(next);
+        }
+    }
+    let next = shadows.max_rowid(context, b"content")?.saturating_add(1);
+    if let Ok(mut held) = buffer.lock() {
+        held.content_highest = Some(next);
+    }
+    Ok(next)
+}
+
+/// Records that a rowid the caller named is now in the table.
+///
+/// @param buffer - the staged rows
+/// @param rowid - the rowid that was written
+fn note_content_rowid(buffer: &Buffer, rowid: i64) {
+    if let Ok(mut held) = buffer.lock() {
+        held.content_highest = Some(held.content_highest.unwrap_or(0).max(rowid));
+    }
+}
 
 /// Returns a term's doclist, from the buffer when it is staged there.
 ///
@@ -818,8 +951,8 @@ fn read_doclist(
     page: i64,
 ) -> DbResult<Option<Vec<u8>>> {
     if let Ok(held) = buffer.lock() {
-        if let Some(bytes) = held.doclists.get(&page) {
-            return Ok(Some(bytes.clone()));
+        if let Some(staged) = held.doclists.get(&page) {
+            return Ok(Some(staged.bytes.clone()));
         }
     }
     Ok(shadows.read_row(context, b"data", page)?.and_then(|row| {
@@ -848,18 +981,20 @@ fn append_staged(buffer: &Buffer, page: i64, entry: &DocEntry) -> bool {
     let Ok(mut held) = buffer.lock() else {
         return false;
     };
-    let Some(bytes) = held.doclists.get_mut(&page) else {
+    let Some(staged) = held.doclists.get_mut(&page) else {
         return false;
     };
-    let Some(last) = last_doclist_rowid(bytes) else {
+    // The remembered end, rather than a walk to find it. See `Staged`.
+    let Some(last) = staged.last else {
         return false;
     };
     if entry.rowid <= last {
         return false;
     }
-    let was = bytes.len();
-    append_doclist_entry(bytes, entry.rowid.wrapping_sub(last), entry);
-    let grew = bytes.len().saturating_sub(was);
+    let was = staged.bytes.len();
+    append_doclist_entry(&mut staged.bytes, entry.rowid.wrapping_sub(last), entry);
+    staged.last = Some(entry.rowid);
+    let grew = staged.bytes.len().saturating_sub(was);
     held.bytes = held.bytes.saturating_add(grew);
     true
 }
@@ -870,10 +1005,18 @@ fn append_staged(buffer: &Buffer, page: i64, entry: &DocEntry) -> bool {
 /// @param page - the `%_data` row it belongs in
 /// @param bytes - the whole doclist
 fn stage_doclist(buffer: &Buffer, page: i64, bytes: Vec<u8>) {
+    // The walk happens here, once per whole-list rewrite, rather than on every
+    // append: this is the path a list reaches when it is read back or built
+    // from scratch, and it is the only place the end is not already known.
+    let last = last_doclist_rowid(&bytes);
     if let Ok(mut held) = buffer.lock() {
-        let was = held.doclists.get(&page).map(Vec::len).unwrap_or(0);
+        let was = held
+            .doclists
+            .get(&page)
+            .map(|staged| staged.bytes.len())
+            .unwrap_or(0);
         held.bytes = held.bytes.saturating_sub(was).saturating_add(bytes.len());
-        held.doclists.insert(page, bytes);
+        held.doclists.insert(page, Staged { bytes, last });
     }
 }
 
@@ -883,8 +1026,8 @@ fn stage_doclist(buffer: &Buffer, page: i64, bytes: Vec<u8>) {
 /// @param page - the `%_data` row
 fn forget_doclist(buffer: &Buffer, page: i64) {
     if let Ok(mut held) = buffer.lock() {
-        if let Some(bytes) = held.doclists.remove(&page) {
-            held.bytes = held.bytes.saturating_sub(bytes.len());
+        if let Some(staged) = held.doclists.remove(&page) {
+            held.bytes = held.bytes.saturating_sub(staged.bytes.len());
         }
     }
 }
@@ -909,20 +1052,33 @@ fn flush_doclists(
     shadows: &ShadowTables,
     buffer: &Buffer,
 ) -> DbResult<()> {
-    let staged: Vec<(i64, Vec<u8>)> = match buffer.lock() {
+    let staged: Vec<(i64, Staged)> = match buffer.lock() {
         Ok(mut held) => {
             held.bytes = 0;
             core::mem::take(&mut held.doclists).into_iter().collect()
         }
         Err(_) => return Ok(()),
     };
-    for (page, bytes) in staged {
+    for (page, doclist) in staged {
         shadows.write_row(
             context,
             b"data",
             page,
-            &[Value::Null, Value::owned_blob(&bytes)?],
+            &[Value::Null, Value::owned_blob(&doclist.bytes)?],
         )?;
+    }
+    // The totals go out with them, once, rather than once per document. The
+    // buffered copy is kept: a reader inside the same transaction has to see
+    // what the transaction wrote, which is what makes this a buffer.
+    let totals = match buffer.lock() {
+        Ok(mut held) if held.totals_dirty => {
+            held.totals_dirty = false;
+            held.totals.clone()
+        }
+        _ => None,
+    };
+    if let Some(totals) = totals {
+        put_totals(context, shadows, &totals)?;
     }
     Ok(())
 }
@@ -1163,7 +1319,7 @@ impl Fts5Table {
             self.merge_term(context, &term, DocEntry { rowid, columns })?;
         }
 
-        let mut totals = get_totals(context, &self.shadows, width);
+        let mut totals = buffered_totals(context, &self.shadows, &self.pending, width);
         totals.rows = totals.rows.saturating_add(1);
         totals.tokens.resize(width, 0);
         for (index, size) in sizes.iter().enumerate() {
@@ -1171,7 +1327,8 @@ impl Fts5Table {
                 *total = total.saturating_add(*size);
             }
         }
-        put_totals(context, &self.shadows, &totals)
+        stage_totals(&self.pending, totals);
+        Ok(())
     }
 
     /// Adds one entry to a term's doclist, keeping it in rowid order.
@@ -1294,7 +1451,7 @@ impl Fts5Table {
         };
         self.shadows.delete_row(context, b"docsize", rowid)?;
         self.shadows.delete_row(context, b"content", rowid)?;
-        let mut totals = get_totals(context, &self.shadows, width);
+        let mut totals = buffered_totals(context, &self.shadows, &self.pending, width);
         totals.rows = (totals.rows - 1).max(0);
         totals.tokens.resize(width, 0);
         for (index, size) in sizes.iter().enumerate() {
@@ -1302,7 +1459,8 @@ impl Fts5Table {
                 *total = (*total - size).max(0);
             }
         }
-        put_totals(context, &self.shadows, &totals)
+        stage_totals(&self.pending, totals);
+        Ok(())
     }
 }
 
@@ -1434,7 +1592,12 @@ impl VirtualCursor for Fts5Cursor {
         };
         self.pattern = pattern.clone();
         let query = Query::parse(&pattern, &self.tokenizer, &self.names)?;
-        let totals = get_totals(context, &self.shadows, self.columns);
+        // **The buffered totals, not the row.** A score is computed from the
+        // document count and the token totals, and those are staged rather than
+        // written per document - so a query inside the same transaction that
+        // read `%_data` directly would score against the state the transaction
+        // started from. That is what a buffer has to be transparent about.
+        let totals = buffered_totals(context, &self.shadows, &self.pending, self.columns);
         let ranked = plan.index_number & PLAN_RANKED != 0;
         // **A ranked plan needs the positions, and most plans do not.** The
         // cheap walk answers `None` for the queries whose answer depends on

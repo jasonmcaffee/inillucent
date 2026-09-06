@@ -2139,8 +2139,7 @@ impl ImportedDatabase {
         let applied = std::time::Instant::now();
         match &*cached {
             Cached::Ddl(sql) => {
-                let sql = sql.clone();
-                self.execute_ddl(&sql)?;
+                self.execute_ddl(sql)?;
             }
             // Rendered when it was compiled, so there is nothing to apply and
             // nothing to time. It is here to be exhaustive rather than to be
@@ -2150,8 +2149,7 @@ impl ImportedDatabase {
             // costs is the module's business and not the engine's.
             Cached::VirtualDelete(..) => {}
             Cached::VirtualInsert(statement) => {
-                let statement = statement.clone();
-                self.insert_into_module(&statement, params)?;
+                self.insert_into_module(statement, params)?;
             }
             Cached::Select(plan, prepared) => {
                 physical::run_any_prepared(plan, self, prepared, params)?;
@@ -2579,15 +2577,14 @@ impl ImportedDatabase {
         params: &Params,
     ) -> DbResult<Outcome> {
         match &**cached {
-            Cached::Ddl(sql) => {
-                let sql = sql.clone();
-                self.execute_ddl(&sql)
-            }
+            // **Borrowed, not cloned.** `cached` is an `Rc` the caller already
+            // holds, so the statement outlives anything this does to `self` -
+            // including the DDL path emptying the plan cache. Cloning it was a
+            // whole bound statement copied per execution, and for a module
+            // insert that is once per row.
+            Cached::Ddl(sql) => self.execute_ddl(sql),
             Cached::QueryPlan(lines) => Ok(query_plan_rows(lines)),
-            Cached::VirtualInsert(statement) => {
-                let statement = statement.clone();
-                self.insert_into_module(&statement, params)
-            }
+            Cached::VirtualInsert(statement) => self.insert_into_module(statement, params),
             Cached::Select(plan, prepared) => {
                 let (rows, shape) = physical::run_any_prepared(plan, self, prepared, params)?;
                 Ok(Outcome {
