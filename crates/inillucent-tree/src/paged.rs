@@ -1585,16 +1585,35 @@ impl PagedTree {
     pub fn visit_span_reverse(
         &self,
         pool: &Pool,
+        low: Option<&[Datum<'_>]>,
+        low_inclusive: bool,
         high: Option<&[Datum<'_>]>,
+        high_inclusive: bool,
         visit: &mut dyn FnMut(&LeafRef<'_>, usize, usize) -> DbResult<bool>,
     ) -> DbResult<()> {
         let from = high.map(|values| self.encode_key(values));
         let mut first = true;
         self.visit_reverse(pool, from.as_deref(), &mut |leaf| {
             let rows = leaf.row_count();
+            // **Both bounds, on every leaf, exactly as the forward walk applies
+            // them.** This used to take an upper bound alone, apply it to the
+            // first leaf only, and walk to the start of the tree - so
+            // `WHERE id >= 3 ORDER BY id DESC` returned rows 2 and 1 as well,
+            // `WHERE id < 5 ORDER BY id DESC` returned 5, and
+            // `WHERE grp = 2 ORDER BY k DESC` returned the other groups too.
+            // Every one of those is a *wrong answer* rather than a refusal, and
+            // it was reachable only through the descending-order path, which is
+            // why a forward walk of the same range was right all along.
+            //
+            // The upper bound is a partition point of the sorted region like
+            // the lower one is: inclusive means past the run equal to it,
+            // exclusive means before it - which is `upper_bound` and
+            // `lower_bound` respectively, the same pair the forward walk uses
+            // and in the same roles.
             let end = if first {
                 match high {
-                    Some(values) => upper_bound(leaf, values)?,
+                    Some(values) if high_inclusive => upper_bound(leaf, values)?,
+                    Some(values) => lower_bound(leaf, values)?,
                     None => rows,
                 }
             } else {
@@ -1602,10 +1621,32 @@ impl PagedTree {
             };
             first = false;
             let end = end.min(rows);
-            if end == 0 && !leaf.has_writes() {
-                return Ok(true);
+            // An exclusive lower bound starts past the run equal to it, so it
+            // is an upper bound on the same key.
+            let begin = match low {
+                Some(values) if low_inclusive => lower_bound(leaf, values)?,
+                Some(values) => upper_bound(leaf, values)?,
+                None => 0,
+            };
+            if begin >= end {
+                // A leaf that has been written to holds live rows that are not
+                // in the sorted region, so an empty span over one says nothing
+                // and the visitor re-derives its rows from `live_between`. The
+                // walk stops when the lower bound cut the leaf short, because
+                // everything further left is below it.
+                if !leaf.has_writes() {
+                    return Ok(begin == 0 && end == 0);
+                }
+                if !visit(leaf, begin, begin)? {
+                    return Ok(false);
+                }
+                return Ok(begin == 0);
             }
-            visit(leaf, 0, end)
+            if !visit(leaf, begin, end)? {
+                return Ok(false);
+            }
+            // A leaf that did not reach its own start reached the lower bound.
+            Ok(begin == 0)
         })
     }
 
@@ -2975,30 +3016,44 @@ mod tests {
         let (database, tree, _) = build(3_000, 512);
         let pool = database.pool();
         let mut seen: Vec<i64> = Vec::new();
-        tree.visit_span_reverse(pool, Some(&[Datum::Int(2_000)]), &mut |leaf, start, end| {
-            for row in (start..end).rev() {
-                seen.push(leaf.value(row, 0)?.as_int().unwrap_or(-1));
-                if seen.len() >= 50 {
-                    return Ok(false);
+        tree.visit_span_reverse(
+            pool,
+            None,
+            true,
+            Some(&[Datum::Int(2_000)]),
+            true,
+            &mut |leaf: &LeafRef<'_>, start, end| {
+                for row in (start..end).rev() {
+                    seen.push(leaf.value(row, 0)?.as_int().unwrap_or(-1));
+                    if seen.len() >= 50 {
+                        return Ok(false);
+                    }
                 }
-            }
-            Ok(true)
-        })
+                Ok(true)
+            },
+        )
         .unwrap();
         let wanted: Vec<i64> = (1_951..=2_000).rev().collect();
         assert_eq!(seen, wanted);
 
         // From the end of the tree.
         let mut seen: Vec<i64> = Vec::new();
-        tree.visit_span_reverse(pool, None, &mut |leaf, start, end| {
-            for row in (start..end).rev() {
-                seen.push(leaf.value(row, 0)?.as_int().unwrap_or(-1));
-                if seen.len() >= 3 {
-                    return Ok(false);
+        tree.visit_span_reverse(
+            pool,
+            None,
+            true,
+            None,
+            true,
+            &mut |leaf: &LeafRef<'_>, start, end| {
+                for row in (start..end).rev() {
+                    seen.push(leaf.value(row, 0)?.as_int().unwrap_or(-1));
+                    if seen.len() >= 3 {
+                        return Ok(false);
+                    }
                 }
-            }
-            Ok(true)
-        })
+                Ok(true)
+            },
+        )
         .unwrap();
         assert_eq!(seen, vec![2_999, 2_998, 2_997]);
     }

@@ -294,10 +294,33 @@ pub enum JoinKind {
     Inner,
     /// Every probe row, null-extended when it matches nothing.
     Left,
+    /// Every *build* row, null-extended when it matches nothing.
+    ///
+    /// Only [`NestedLoopJoin`] answers this one, and the reason is the shape of
+    /// that operator rather than a gap: it holds the build side as a
+    /// materialised vector, so it can remember which of those rows matched and
+    /// emit the rest when the input ends. An operator that sees the build side
+    /// one tree descent at a time has nothing to keep that mark on.
+    Right,
+    /// Every probe row and every build row, each null-extended when it matched
+    /// nothing.
+    Full,
     /// One probe row per probe row that matched, with no build columns.
     Semi,
     /// One probe row per probe row that matched nothing, with no build columns.
     Anti,
+}
+
+impl JoinKind {
+    /// Reports whether unmatched *probe* rows are kept, null-extended.
+    pub fn keeps_probe(self) -> bool {
+        matches!(self, JoinKind::Left | JoinKind::Full)
+    }
+
+    /// Reports whether unmatched *build* rows are kept, null-extended.
+    pub fn keeps_build(self) -> bool {
+        matches!(self, JoinKind::Right | JoinKind::Full)
+    }
 }
 
 /// Builds a hash table from one side, then probes it with the other.
@@ -306,6 +329,11 @@ pub enum JoinKind {
 /// operator is an ordinary sink and every batch pushed into it is a probe.
 pub struct HashJoin<'s> {
     kind: JoinKind,
+    /// How wide the probe side is, learned from the first batch.
+    ///
+    /// Read at `finish`, where a RIGHT or FULL join null-extends the build rows
+    /// nothing matched and there is no batch left to ask.
+    probe_width: usize,
     /// The build side's key expressions, over the build row's columns.
     build_keys: Vec<Box<dyn Eval>>,
     /// The probe side's key expressions, over the probe batch's columns.
@@ -332,6 +360,7 @@ impl<'s> HashJoin<'s> {
     ) -> HashJoin<'s> {
         HashJoin {
             kind,
+            probe_width: 0,
             build_keys,
             probe_keys,
             table: HashTable::new(),
@@ -366,6 +395,7 @@ impl Sink for HashJoin<'_> {
     fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
         let HashJoin {
             kind,
+            probe_width,
             probe_keys,
             table,
             downstream,
@@ -373,6 +403,7 @@ impl Sink for HashJoin<'_> {
             ..
         } = self;
         let width = batch.columns.len();
+        *probe_width = width;
         let build_width = table.rows.first().map(Vec::len).unwrap_or(0);
         let mut produced: Vec<Vec<OwnedDatum>> = Vec::new();
         for nth in 0..batch.live() {
@@ -399,9 +430,9 @@ impl Sink for HashJoin<'_> {
                         produced.push(materialise(batch, nth, width)?);
                     }
                 }
-                JoinKind::Inner | JoinKind::Left => {
+                JoinKind::Inner | JoinKind::Left | JoinKind::Right | JoinKind::Full => {
                     if matches.is_empty() {
-                        if *kind == JoinKind::Left {
+                        if kind.keeps_probe() {
                             let mut row = materialise(batch, nth, width)?;
                             row.extend(std::iter::repeat(OwnedDatum::Null).take(build_width));
                             produced.push(row);
@@ -428,6 +459,24 @@ impl Sink for HashJoin<'_> {
     }
 
     fn finish(&mut self) -> DbResult<()> {
+        // The build rows nothing matched, which only a RIGHT or FULL join
+        // keeps and which only the end of the probe side can identify.
+        if self.kind.keeps_build() {
+            let mut produced: Vec<Vec<OwnedDatum>> = Vec::new();
+            for (position, build) in self.table.rows.iter().enumerate() {
+                if self.table.matched.get(position).copied().unwrap_or(false) {
+                    continue;
+                }
+                let mut row: Vec<OwnedDatum> = std::iter::repeat(OwnedDatum::Null)
+                    .take(self.probe_width)
+                    .collect();
+                row.extend(build.iter().cloned());
+                produced.push(row);
+            }
+            if !produced.is_empty() {
+                emit_rows(&produced, self.downstream.as_mut())?;
+            }
+        }
         self.downstream.finish()
     }
 
@@ -435,6 +484,7 @@ impl Sink for HashJoin<'_> {
     fn reset(&mut self) -> DbResult<()> {
         self.table.clear();
         self.scratch.clear();
+        self.probe_width = 0;
         self.downstream.reset()
     }
 }
@@ -901,6 +951,19 @@ fn push_outer(
 pub struct NestedLoopJoin<'s> {
     kind: JoinKind,
     inner: Vec<Vec<OwnedDatum>>,
+    /// Which inner rows have matched something, for a `RIGHT` or `FULL` join.
+    ///
+    /// Empty for every other kind, which is what makes those pay nothing for
+    /// it. A `RIGHT` join's answer cannot be decided per probe batch - an inner
+    /// row is unmatched only once the *whole* outer side has gone past - so the
+    /// mark accumulates here and `finish` emits what is left.
+    matched: Vec<bool>,
+    /// How wide the outer side is, learned from the first batch.
+    ///
+    /// Needed at `finish`, where there is no batch to read it from and the
+    /// unmatched inner rows still have to be null-extended to the width every
+    /// other row of this join has.
+    outer_width: usize,
     /// The join condition over the concatenated row, or `None` for a cross
     /// product.
     condition: Option<Box<dyn Eval>>,
@@ -921,8 +984,14 @@ impl<'s> NestedLoopJoin<'s> {
         downstream: Box<dyn Sink + 's>,
     ) -> NestedLoopJoin<'s> {
         NestedLoopJoin {
+            matched: if kind.keeps_build() {
+                vec![false; inner.len()]
+            } else {
+                Vec::new()
+            },
             kind,
             inner,
+            outer_width: 0,
             condition,
             downstream,
         }
@@ -932,27 +1001,33 @@ impl<'s> NestedLoopJoin<'s> {
 impl Sink for NestedLoopJoin<'_> {
     fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
         let width = batch.columns.len();
+        self.outer_width = width;
         let inner_width = self.inner.first().map(Vec::len).unwrap_or(0);
         let mut produced: Vec<Vec<OwnedDatum>> = Vec::new();
         for nth in 0..batch.live() {
             let outer = materialise(batch, nth, width)?;
             let mut matched = 0usize;
-            for inner in &self.inner {
+            for (position, inner) in self.inner.iter().enumerate() {
                 let mut joined = outer.clone();
                 joined.extend(inner.iter().cloned());
-                if !self.keeps(&joined)? {
+                if !keeps(self.condition.as_deref(), &joined)? {
                     continue;
                 }
                 matched = matched.saturating_add(1);
+                if let Some(mark) = self.matched.get_mut(position) {
+                    *mark = true;
+                }
                 match self.kind {
-                    JoinKind::Inner | JoinKind::Left => produced.push(joined),
+                    JoinKind::Inner | JoinKind::Left | JoinKind::Right | JoinKind::Full => {
+                        produced.push(joined)
+                    }
                     JoinKind::Semi | JoinKind::Anti => break,
                 }
             }
             match self.kind {
                 JoinKind::Semi if matched > 0 => produced.push(outer),
                 JoinKind::Anti if matched == 0 => produced.push(outer),
-                JoinKind::Left if matched == 0 => {
+                _ if self.kind.keeps_probe() && matched == 0 => {
                     let mut row = outer;
                     row.extend(std::iter::repeat(OwnedDatum::Null).take(inner_width));
                     produced.push(row);
@@ -967,21 +1042,49 @@ impl Sink for NestedLoopJoin<'_> {
     }
 
     fn finish(&mut self) -> DbResult<()> {
+        // **The RIGHT half of the join happens here and nowhere else.** An
+        // inner row is unmatched only once the whole outer side has gone past,
+        // so this is the first moment the answer is known - and it is why a
+        // RIGHT join needs the build side materialised rather than probed.
+        if self.kind.keeps_build() {
+            let mut produced: Vec<Vec<OwnedDatum>> = Vec::new();
+            for (position, inner) in self.inner.iter().enumerate() {
+                if self.matched.get(position).copied().unwrap_or(false) {
+                    continue;
+                }
+                let mut row: Vec<OwnedDatum> = std::iter::repeat(OwnedDatum::Null)
+                    .take(self.outer_width)
+                    .collect();
+                row.extend(inner.iter().cloned());
+                produced.push(row);
+            }
+            if !produced.is_empty() {
+                emit_rows(&produced, self.downstream.as_mut())?;
+            }
+        }
         self.downstream.finish()
     }
 
     /// Returns this operator and everything below it to its pre-input state.
     fn reset(&mut self) -> DbResult<()> {
+        for mark in &mut self.matched {
+            *mark = false;
+        }
+        self.outer_width = 0;
         self.downstream.reset()
     }
 }
 
-impl NestedLoopJoin<'_> {
-    /// Reports whether a concatenated row satisfies the join condition.
-    ///
-    /// @param joined - the outer row followed by the inner row
-    fn keeps(&self, joined: &[OwnedDatum]) -> DbResult<bool> {
-        let Some(condition) = &self.condition else {
+/// Reports whether a concatenated row satisfies a join condition.
+///
+/// A free function rather than a method, so the loop above can hold the build
+/// side and the condition at the same time without borrowing all of `self`.
+///
+/// @param condition - the join condition, or `None` for a cross product
+/// @param joined - the outer row followed by the inner row
+fn keeps(condition: Option<&dyn Eval>, joined: &[OwnedDatum]) -> DbResult<bool> {
+    {
+        let Some(condition) = condition else {
             return Ok(true);
         };
         let borrowed: Vec<Datum<'_>> = joined.iter().map(OwnedDatum::borrow).collect();

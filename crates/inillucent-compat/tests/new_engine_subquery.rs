@@ -265,27 +265,59 @@ fn a_nested_subquery_is_answered_from_the_inside_out() {
     );
 }
 
-/// A correlated subquery is refused by name rather than answered wrongly.
+/// A correlated subquery is answered per row, not folded and not refused.
 ///
 /// It reads a column of the row being tested, so it has no single value and the
-/// fold cannot stand in for it. Answering it as though it were uncorrelated
-/// would be a wrong answer rather than a missing feature, which is the one
-/// outcome worth writing a test to prevent.
+/// fold cannot stand in for it - which is why it was refused by name until
+/// task-1838. `inillucent-exec`'s `correlate` computes it beside the row, one
+/// column per block: the block is planned **once** with its outer references
+/// rewritten into parameters, and each row binds them and runs it.
+///
+/// Both directions are asserted, because a correlated `EXISTS` that answered
+/// the same thing for every row would look right on a fixture where every row
+/// matches.
 #[test]
-fn a_correlated_subquery_is_refused_and_says_so() {
+fn a_correlated_subquery_is_answered_per_row() {
     let database = fixture("correlated");
     let connection = database.connect();
 
-    let refused = connection.query(
-        "SELECT id FROM item WHERE EXISTS (SELECT 1 FROM part WHERE part.item_id = item.id)",
+    assert_eq!(
+        integers(
+            &connection,
+            "SELECT id FROM item WHERE EXISTS (SELECT 1 FROM part WHERE part.item_id = item.id) \
+             ORDER BY id",
+        ),
+        integers(
+            &connection,
+            "SELECT DISTINCT item_id FROM part WHERE item_id IS NOT NULL ORDER BY item_id",
+        ),
+        "EXISTS answered a different set from the one the parts name"
     );
-    let error = format!(
-        "{:?}",
-        refused.expect_err("a correlated subquery is refused")
+    assert_eq!(
+        integers(
+            &connection,
+            "SELECT id FROM item WHERE NOT EXISTS (SELECT 1 FROM part WHERE part.item_id = item.id) \
+             ORDER BY id",
+        ),
+        integers(
+            &connection,
+            // `NOT IN` over a list holding a NULL is never true, which is
+            // SQL's own rule and not this engine's - so the comparison excludes
+            // it rather than comparing two different questions. The rule itself
+            // is asserted below.
+            "SELECT id FROM item WHERE id NOT IN              (SELECT item_id FROM part WHERE item_id IS NOT NULL) ORDER BY id",
+        ),
+        "NOT EXISTS and NOT IN disagreed about the same question"
     );
-    assert!(
-        error.contains("correlated subquery"),
-        "the refusal did not name what it refused: {error}"
+    // And the three-valued rule the exclusion above steps around: a `NOT IN`
+    // whose list holds a NULL answers nothing at all.
+    assert_eq!(
+        integers(
+            &connection,
+            "SELECT id FROM item WHERE id NOT IN (SELECT item_id FROM part) ORDER BY id",
+        ),
+        Vec::<i64>::new(),
+        "NOT IN over a list holding NULL answered something"
     );
 }
 

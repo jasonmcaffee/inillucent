@@ -876,30 +876,44 @@ fn the_window_functions_answer_what_sqlite_answers() {
     );
 }
 
-/// Two different windows in one statement are refused by name.
+/// Two different windows in one statement are two passes, and both are right.
 ///
 /// One buffer can only be sorted one way, and the operator computes each call's
-/// peer groups over a sequence it assumes is sorted by that call's ordering.
-/// Two windows are two passes and two sorts - a real feature, and one this
-/// phase does not build. It is refused rather than answered wrongly, which is
-/// the physical pass's whole stance.
+/// peer groups over a sequence it assumes is sorted by that call's ordering -
+/// so two windows with different frames were refused by name until task-1838,
+/// which groups the calls by frame and runs one pass per group. The answers are
+/// scattered back into the slot the binder numbered each call, which is what
+/// keeps a two-pass statement's projection reading the same columns a one-pass
+/// statement's does.
+///
+/// Graded against the pinned shell, because the interesting half is that the
+/// *second* pass is right: a first pass that answered both calls would produce
+/// plausible numbers in the wrong order.
 #[test]
-fn two_different_windows_in_one_statement_are_refused_by_name() {
+fn two_different_windows_in_one_statement_are_both_computed() {
     let Some(mut pair) = pair("twowindows") else {
         eprintln!("the pinned SQLite oracle is not built; nothing was compared");
         return;
     };
-    let sql = "SELECT row_number() OVER (ORDER BY id), row_number() OVER (ORDER BY score) \
-               FROM members";
-    let error = pair
-        .engine
-        .execute_any(sql, &Params::new())
-        .err()
-        .unwrap_or_else(|| panic!("{sql} was accepted and the refusal is what is asserted"));
-    let detail = error.detail().unwrap_or("no detail");
+    let mut failures = Vec::new();
+    compare(
+        &mut pair,
+        "SELECT id, row_number() OVER (ORDER BY id), row_number() OVER (ORDER BY score, id)          FROM members ORDER BY id",
+        &mut failures,
+    );
+    compare(
+        &mut pair,
+        "SELECT id, count(*) OVER (PARTITION BY team), sum(score) OVER (ORDER BY id)          FROM members ORDER BY id",
+        &mut failures,
+    );
     assert!(
-        detail.contains("two windows"),
-        "the refusal did not name the construct: {detail}"
+        failures.is_empty(),
+        "{}",
+        failures.join(
+            "
+
+"
+        )
     );
 }
 

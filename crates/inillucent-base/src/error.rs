@@ -178,6 +178,22 @@ struct ErrorContext {
     database: Option<DatabaseName>,
     /// Diagnostic text that never leaves the process.
     detail: Option<String>,
+    /// The construct the engine has not implemented, when that is why it
+    /// refused.
+    ///
+    /// **A fact the engine already knows, carried rather than re-derived.**
+    /// `inillucent-exec`'s physical pass and `inillucent-sql`'s binder each
+    /// have a single `unsupported` helper, and both used to be flattened into
+    /// an ordinary `SQLITE_MISUSE` whose only distinguishing mark was the
+    /// wording of its sentence. A caller that wanted to tell "this engine
+    /// cannot do that yet" from "you typed it wrong" therefore had to match on
+    /// prose, which works until somebody improves the prose. This field is that
+    /// caller's answer, and it is set at the same two places the sentence is
+    /// written so the two cannot disagree.
+    ///
+    /// It changes no code and no message: an error carrying it reports the same
+    /// `SQLITE_MISUSE` and the same text it always did.
+    unsupported: Option<String>,
 }
 
 /// A inillucent error: a stable code plus the context a caller may safely see.
@@ -200,6 +216,7 @@ impl PartialEq for DbError {
             && self.sql_offset() == other.sql_offset()
             && self.database() == other.database()
             && self.detail() == other.detail()
+            && self.unsupported() == other.unsupported()
     }
 }
 
@@ -237,6 +254,17 @@ impl DbError {
     /// Attaches diagnostic text that stays inside the process.
     pub fn with_detail(mut self, detail: impl Into<String>) -> DbError {
         self.context_mut().detail = Some(detail.into());
+        self
+    }
+
+    /// Records that this refusal is a construct the engine has not implemented.
+    ///
+    /// Unlike a message, this is safe to show a caller and is meant to be: it
+    /// names a SQL construct and never a path or a bound value.
+    ///
+    /// @param what - the construct, in the words the refusal already uses
+    pub fn with_unsupported(mut self, what: impl Into<String>) -> DbError {
+        self.context_mut().unsupported = Some(what.into());
         self
     }
 
@@ -282,6 +310,17 @@ impl DbError {
         self.context
             .as_ref()
             .and_then(|context| context.detail.as_deref())
+    }
+
+    /// Returns the construct the engine has not implemented, when that is why
+    /// it refused.
+    ///
+    /// `None` for every other failure, including a statement that is simply
+    /// wrong - which is the distinction it exists to make.
+    pub fn unsupported(&self) -> Option<&str> {
+        self.context
+            .as_ref()
+            .and_then(|context| context.unsupported.as_deref())
     }
 
     /// Returns the SQL byte offset, if the error has one.

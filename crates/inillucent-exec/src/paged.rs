@@ -264,27 +264,44 @@ impl<'t> SpanScan<'t> {
 pub struct ReverseScan<'t> {
     tree: &'t PagedTree,
     projection: Projection,
+    /// The lower bound, or `None` for the first row.
+    low: Option<Vec<OwnedDatum>>,
+    /// Whether a key equal to the lower bound is in the range.
+    low_inclusive: bool,
+    /// The upper bound, or `None` for the last row.
     high: Option<Vec<OwnedDatum>>,
+    /// Whether a key equal to the upper bound is in the range.
+    high_inclusive: bool,
     limit: Option<usize>,
 }
 
 impl<'t> ReverseScan<'t> {
-    /// Returns a reverse scan.
+    /// Returns a reverse scan over a bounded range.
+    ///
+    /// **Both bounds, because a descending walk of a range is the same range.**
+    /// This used to take the upper bound alone, on the reasoning that a
+    /// backward walk starts at the top and a `LIMIT` stops it - which is true of
+    /// `ORDER BY id DESC LIMIT 1` and of nothing else. `WHERE id >= 3 ORDER BY
+    /// id DESC` walked past 3 to the start of the tree, and the predicate had
+    /// been consumed by the range so no residual re-tested it.
     ///
     /// @param tree - the tree to read
     /// @param projection - which tree columns to expose, in output order
-    /// @param high - the inclusive upper bound, or `None` for the last row
+    /// @param bounds - the range, with the inclusivity of each end
     /// @param limit - how many rows are wanted at most, when the plan says
     pub fn new(
         tree: &'t PagedTree,
         projection: Projection,
-        high: Option<Vec<OwnedDatum>>,
+        bounds: crate::physical::SpanBounds,
         limit: Option<usize>,
     ) -> ReverseScan<'t> {
         ReverseScan {
             tree,
             projection,
-            high,
+            low: bounds.low,
+            low_inclusive: bounds.low_inclusive,
+            high: bounds.high,
+            high_inclusive: bounds.high_inclusive,
             limit,
         }
     }
@@ -294,25 +311,48 @@ impl<'t> ReverseScan<'t> {
     /// @param pool - the buffer pool
     /// @param downstream - the head of the operator chain
     pub fn run(&self, pool: &Pool, downstream: &mut dyn Sink) -> DbResult<()> {
+        let low: Option<Vec<Datum<'_>>> = self
+            .low
+            .as_ref()
+            .map(|values| values.iter().map(OwnedDatum::borrow).collect());
         let high: Option<Vec<Datum<'_>>> = self
             .high
             .as_ref()
             .map(|values| values.iter().map(OwnedDatum::borrow).collect());
         let mut selection: Vec<u32> = Vec::new();
         let mut produced = 0usize;
-        self.tree
-            .visit_span_reverse(pool, high.as_deref(), &mut |leaf, start, end| {
+        self.tree.visit_span_reverse(
+            pool,
+            low.as_deref(),
+            self.low_inclusive,
+            high.as_deref(),
+            self.high_inclusive,
+            &mut |leaf, start, end| {
                 if leaf.needs_materialising() {
-                    // Merged, filtered by the same upper bound the span used,
-                    // and reversed - which for a materialised list is one
-                    // `reverse` rather than a descending selection vector.
-                    let mut rows = leaf.live_between(None, true, high.as_deref(), true)?;
+                    // Merged, filtered by the same bounds the span used, and
+                    // reversed - which for a materialised list is one `reverse`
+                    // rather than a descending selection vector.
+                    let mut rows = leaf.live_between(
+                        low.as_deref(),
+                        self.low_inclusive,
+                        high.as_deref(),
+                        self.high_inclusive,
+                    )?;
                     rows.reverse();
                     if let Some(limit) = self.limit {
+                        if produced >= limit {
+                            return Ok(false);
+                        }
                         rows.truncate(limit.saturating_sub(produced));
                     }
+                    // **An empty leaf is not the end of the range.** It used to
+                    // be read as one, which was true while the only bound was
+                    // the upper one and a backward walk therefore ran to the
+                    // start of the tree. With a lower bound the walk stops
+                    // where the *tree* says it does, and a leaf the bounds
+                    // emptied is one to step past.
                     if rows.is_empty() {
-                        return Ok(false);
+                        return Ok(true);
                     }
                     produced = produced.saturating_add(rows.len());
                     if push_merged(&rows, &self.projection, downstream)? == Flow::Stop {
@@ -329,11 +369,14 @@ impl<'t> ReverseScan<'t> {
                 selection.clear();
                 let mut wanted = end.saturating_sub(start);
                 if let Some(limit) = self.limit {
+                    if produced >= limit {
+                        return Ok(false);
+                    }
                     wanted = wanted.min(limit.saturating_sub(produced));
                 }
                 selection.extend((start..end).rev().take(wanted).map(|row| row as u32));
                 if selection.is_empty() {
-                    return Ok(false);
+                    return Ok(true);
                 }
                 produced = produced.saturating_add(selection.len());
                 let mut batch = Batch::new(leaf.row_count(), vectors(leaf, &self.projection)?);
@@ -347,7 +390,8 @@ impl<'t> ReverseScan<'t> {
                     }
                 }
                 Ok(true)
-            })?;
+            },
+        )?;
         downstream.finish()
     }
 }
@@ -657,7 +701,12 @@ mod tests {
         ReverseScan::new(
             &tree,
             Projection(vec![0]),
-            Some(vec![OwnedDatum::Int(1_500)]),
+            crate::physical::SpanBounds {
+                low: None,
+                low_inclusive: true,
+                high: Some(vec![OwnedDatum::Int(1_500)]),
+                high_inclusive: true,
+            },
             Some(50),
         )
         .run(database.pool(), into.as_mut())
@@ -781,9 +830,14 @@ mod tests {
 
         let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         let mut into = Box::new(crate::ops::CollectInto::new(std::rc::Rc::clone(&collected)));
-        ReverseScan::new(&tree, Projection::all(3), None, Some(5))
-            .run(pool, into.as_mut())
-            .unwrap();
+        ReverseScan::new(
+            &tree,
+            Projection::all(3),
+            crate::physical::SpanBounds::default(),
+            Some(5),
+        )
+        .run(pool, into.as_mut())
+        .unwrap();
         assert!(collected.borrow().is_empty());
 
         let probe = PointProbe::new(&tree, Projection::all(3));

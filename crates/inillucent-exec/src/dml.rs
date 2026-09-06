@@ -176,6 +176,13 @@ pub struct RowSpace {
     width: usize,
     /// Which column of an image holds its rowid.
     rowid: Option<usize>,
+    /// Which cell each correlated subquery's answer sits in.
+    ///
+    /// Appended after every row image, which is why they are numbered from the
+    /// end of the concatenated space rather than inside any one image. Empty
+    /// for every statement with no correlated subquery in it - which is every
+    /// statement the gate measures, and the reason this costs them nothing.
+    correlations: Vec<(usize, usize)>,
 }
 
 impl RowSpace {
@@ -213,7 +220,37 @@ impl RowSpace {
             },
             width: layout.width,
             rowid: layout.rowid,
+            correlations: Vec::new(),
         }
+    }
+
+    /// Adds one cell per correlated subquery, after every row image.
+    ///
+    /// An `UPDATE a SET tag = (SELECT tag FROM b WHERE b.id = a.id)` reads the
+    /// row it is writing, so its value is not a constant for the statement and
+    /// cannot be folded the way an uncorrelated one is. It is computed per row
+    /// by the same operator a `SELECT` uses and handed in beside the images -
+    /// so there is one implementation of what a correlated block means rather
+    /// than a second one in the write path.
+    ///
+    /// @param ids - the binder's number for each block, in the order the write
+    ///   path will supply their answers
+    pub fn with_correlations(mut self, ids: &[usize]) -> RowSpace {
+        let base = self.stages.len().saturating_mul(self.width);
+        self.correlations = ids
+            .iter()
+            .enumerate()
+            .map(|(position, id)| (*id, base.saturating_add(position)))
+            .collect();
+        self.held
+            .types
+            .extend(std::iter::repeat(crate::expr::StaticType::Unknown).take(ids.len()));
+        self
+    }
+
+    /// Returns the binder's number for each correlated block, in cell order.
+    pub fn correlation_ids(&self) -> Vec<usize> {
+        self.correlations.iter().map(|(id, _)| *id).collect()
     }
 
     /// Compiles one bound expression against this space.
@@ -221,7 +258,7 @@ impl RowSpace {
     /// @param expr - the bound expression
     /// @param params - the bound parameters
     pub fn compile(&self, expr: &BoundExpr, params: &Params) -> DbResult<Box<dyn Eval>> {
-        let space = self.held.view(&self.stages);
+        let space = self.held.view_with(&self.stages, &self.correlations);
         let translated = translate_scan(expr, &space, params)?;
         compile(&translated, &self.held.types)
     }
@@ -236,8 +273,26 @@ impl RowSpace {
     /// @param eval - the compiled expression
     /// @param images - one row per stage, concatenated into a one-row batch
     pub fn evaluate(&self, eval: &dyn Eval, images: &[&[OwnedDatum]]) -> DbResult<OwnedDatum> {
-        let mut cells: Vec<[Datum<'_>; 1]> =
-            Vec::with_capacity(self.stages.len().saturating_mul(self.width));
+        self.evaluate_with(eval, images, &[])
+    }
+
+    /// Evaluates a compiled expression with the correlated answers beside it.
+    ///
+    /// @param eval - the compiled expression
+    /// @param images - one row per stage, concatenated into a one-row batch
+    /// @param correlated - one answer per correlated block, in cell order
+    pub fn evaluate_with(
+        &self,
+        eval: &dyn Eval,
+        images: &[&[OwnedDatum]],
+        correlated: &[OwnedDatum],
+    ) -> DbResult<OwnedDatum> {
+        let mut cells: Vec<[Datum<'_>; 1]> = Vec::with_capacity(
+            self.stages
+                .len()
+                .saturating_mul(self.width)
+                .saturating_add(correlated.len()),
+        );
         for stage in 0..self.stages.len() {
             let image = images.get(stage).copied().unwrap_or(&[]);
             for column in 0..self.width {
@@ -246,6 +301,9 @@ impl RowSpace {
                     .map(OwnedDatum::borrow)
                     .unwrap_or(Datum::Null)]);
             }
+        }
+        for value in correlated {
+            cells.push([value.borrow()]);
         }
         let vectors: Vec<Vector<'_>> = cells
             .iter()
@@ -1097,7 +1155,20 @@ pub fn update_at(
     // with no triggers can reach neither `OLD` nor `NEW` - so building them was
     // three times the allocation for one image's worth of use. The gate's
     // `txn.large` is forty of these in one transaction and pays for every one.
-    let space = RowSpace::new(&sources_for(statement.source, &statement.triggers), &layout);
+    // **A correlated block in an assignment reads the row being written**, so
+    // it is not a constant for the statement and cannot be folded the way an
+    // uncorrelated one is. It is prepared once here and answered per row by
+    // `crate::correlate` - the same operator a `SELECT` uses, so there is one
+    // implementation of what a correlated block means rather than a second in
+    // the write path.
+    let correlated = update_correlations(statement, &layout)?;
+    let space = RowSpace::new(&sources_for(statement.source, &statement.triggers), &layout)
+        .with_correlations(
+            &correlated
+                .iter()
+                .map(|held| held.id)
+                .collect::<Vec<usize>>(),
+        );
     let mut assignments = Vec::with_capacity(statement.assignments.len());
     for assignment in &statement.assignments {
         let Some(slot) = layout
@@ -1122,11 +1193,12 @@ pub fn update_at(
         let Some(before) = read_row(table, target, key)? else {
             continue;
         };
+        let answers = answer_correlations(&correlated, target, params, &before)?;
         let mut after = before.clone();
         for (slot, eval) in &assignments {
             // Every assignment reads the *before* image, so `SET a = b, b = a`
             // swaps the two rather than making them equal.
-            let value = space.evaluate(eval.as_ref(), &[before.as_slice()])?;
+            let value = space.evaluate_with(eval.as_ref(), &[before.as_slice()], &answers)?;
             if let Some(cell) = after.get_mut(*slot) {
                 *cell = value;
             }
@@ -1193,12 +1265,72 @@ pub fn update_at(
         if !projected.is_empty() {
             let mut out = Vec::with_capacity(projected.len());
             for eval in &projected {
-                out.push(space.evaluate(eval.as_ref(), &[after.as_slice()])?);
+                out.push(space.evaluate_with(eval.as_ref(), &[after.as_slice()], &answers)?);
             }
             changes.returned.push(out);
         }
     }
     Ok(changes)
+}
+
+/// Prepares the correlated blocks an `UPDATE`'s expressions hold.
+///
+/// @param statement - the bound update
+/// @param layout - the table tree's layout
+fn update_correlations(
+    statement: &BoundUpdate,
+    layout: &SourceLayout,
+) -> DbResult<Vec<crate::correlate::Correlation>> {
+    let mut exprs: Vec<&BoundExpr> = statement
+        .assignments
+        .iter()
+        .map(|assignment| &assignment.value)
+        .collect();
+    exprs.extend(statement.returning.iter().map(|column| &column.expr));
+    crate::correlate::correlations_in(&exprs, &row_resolver(statement.source, layout))
+}
+
+/// Returns how an outer reference maps onto one row image's tree columns.
+///
+/// The write path's row space is one image of the target table, so a `NEW.x` or
+/// an `a.x` in a correlated block is the tree column the layout puts `x` in.
+///
+/// @param source - the statement-wide number of the target's FROM term
+/// @param layout - the table tree's layout
+fn row_resolver(source: usize, layout: &SourceLayout) -> impl Fn(&BoundExpr) -> Option<usize> + '_ {
+    move |expr: &BoundExpr| match expr {
+        BoundExpr::Column {
+            source: held,
+            column,
+            ..
+        } if *held == source => layout.slots.get(usize::from(*column)).copied().flatten(),
+        BoundExpr::Rowid { source: held } if *held == source => layout.rowid,
+        _ => None,
+    }
+}
+
+/// Answers every prepared correlated block against one row image.
+///
+/// @param correlated - the prepared blocks
+/// @param target - the file and its trees
+/// @param params - the bound parameters
+/// @param row - the row image, in tree-column order
+fn answer_correlations(
+    correlated: &[crate::correlate::Correlation],
+    target: &dyn WriteTarget,
+    params: &Params,
+    row: &[OwnedDatum],
+) -> DbResult<Vec<OwnedDatum>> {
+    if correlated.is_empty() {
+        return Ok(Vec::new());
+    }
+    let catalog = target.catalog();
+    let bare = params.without_subqueries();
+    let mut answers = Vec::with_capacity(correlated.len());
+    for correlation in correlated {
+        answers.push(correlation.answer(catalog, &bare, row)?);
+    }
+    Ok(answers)
 }
 
 /// Applies a `DELETE` to rows a query has already selected.
