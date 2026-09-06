@@ -45,6 +45,12 @@ pub struct Database {
     engine: RefCell<ImportedDatabase>,
     /// The file, kept so it can be reported.
     path: PathBuf,
+    /// How many rows the last statement changed.
+    ///
+    /// On the database rather than the statement because that is where
+    /// `sqlite3_changes` reads it from: a caller asks the connection what the
+    /// last statement did, having already dropped the statement.
+    changes: std::cell::Cell<i64>,
 }
 
 impl Database {
@@ -69,6 +75,7 @@ impl Database {
         Ok(Database {
             engine: RefCell::new(engine),
             path,
+            changes: std::cell::Cell::new(0),
         })
     }
 
@@ -111,10 +118,12 @@ impl Connection<'_> {
     /// @param sql - the statements, separated by semicolons
     pub fn execute_batch(&self, sql: &str) -> DbResult<()> {
         for statement in split_statements(sql) {
-            self.database
+            let outcome = self
+                .database
                 .engine
                 .borrow_mut()
                 .execute_any(&statement, &Params::new())?;
+            self.database.changes.set(outcome.changes.rows as i64);
         }
         Ok(())
     }
@@ -123,12 +132,7 @@ impl Connection<'_> {
     ///
     /// @param sql - the statement
     pub fn query(&self, sql: &str) -> DbResult<Vec<Vec<OwnedDatum>>> {
-        Ok(self
-            .database
-            .engine
-            .borrow_mut()
-            .execute_any(sql, &Params::new())?
-            .rows)
+        self.query_with(sql, &Params::new())
     }
 
     /// Runs one statement with bound parameters and returns its rows.
@@ -136,12 +140,160 @@ impl Connection<'_> {
     /// @param sql - the statement
     /// @param params - the values bound to `?1`, `?2`, ...
     pub fn query_with(&self, sql: &str, params: &Params) -> DbResult<Vec<Vec<OwnedDatum>>> {
-        Ok(self
-            .database
-            .engine
-            .borrow_mut()
-            .execute_any(sql, params)?
-            .rows)
+        let outcome = self.database.engine.borrow_mut().execute_any(sql, params)?;
+        self.database.changes.set(outcome.changes.rows as i64);
+        Ok(outcome.rows)
+    }
+
+    /// Compiles a statement to be bound and stepped.
+    ///
+    /// @param sql - the statement
+    pub fn prepare(&self, sql: &str) -> DbResult<Statement<'_>> {
+        let compiled = self.database.engine.borrow().prepare_statement(sql)?;
+        Ok(Statement {
+            database: self.database,
+            compiled,
+            params: Params::new(),
+            rows: Vec::new(),
+            names: Vec::new(),
+            at: 0,
+            run: false,
+            changed: 0,
+        })
+    }
+
+    /// Returns how many rows the last statement on this database changed.
+    pub fn changes(&self) -> i64 {
+        self.database.changes.get()
+    }
+}
+
+/// A statement compiled once, bound, and stepped for its rows.
+///
+/// **It materialises.** `step` runs the whole statement on its first call and
+/// then walks the rows it produced, where SQLite's `sqlite3_step` produces one
+/// row at a time. The shape is the same to a caller and the memory is not, so a
+/// query over a large table costs what the result costs rather than what one row
+/// costs. The engine's executor is batch-at-a-time and its sinks collect, so a
+/// row-at-a-time `step` would be a different executor rather than a different
+/// wrapper - it is on the list beside the rest of the connection surface, and
+/// this is written so that the callers being moved read the same.
+pub struct Statement<'d> {
+    /// The database the statement runs against.
+    database: &'d Database,
+    /// The engine's compiled handle, reused across executions.
+    compiled: crate::Statement,
+    /// The values bound so far.
+    params: Params,
+    /// The rows the last execution produced.
+    rows: Vec<Vec<OwnedDatum>>,
+    /// The result column names.
+    names: Vec<String>,
+    /// How many rows have been stepped over.
+    at: usize,
+    /// Whether this binding has been executed yet.
+    run: bool,
+    /// How many rows the last execution changed.
+    changed: usize,
+}
+
+impl Statement<'_> {
+    /// Binds one parameter.
+    ///
+    /// @param index - the one-based parameter number
+    /// @param value - the value
+    pub fn bind(&mut self, index: u32, value: OwnedDatum) -> DbResult<()> {
+        self.params.set(index, value);
+        self.run = false;
+        Ok(())
+    }
+
+    /// Binds an integer.
+    ///
+    /// @param index - the one-based parameter number
+    /// @param value - the value
+    pub fn bind_integer(&mut self, index: u32, value: i64) -> DbResult<()> {
+        self.bind(index, OwnedDatum::Int(value))
+    }
+
+    /// Binds text.
+    ///
+    /// @param index - the one-based parameter number
+    /// @param value - the value
+    pub fn bind_text(&mut self, index: u32, value: &str) -> DbResult<()> {
+        self.bind(index, OwnedDatum::Text(value.as_bytes().to_vec()))
+    }
+
+    /// Binds a blob.
+    ///
+    /// @param index - the one-based parameter number
+    /// @param value - the bytes
+    pub fn bind_blob(&mut self, index: u32, value: &[u8]) -> DbResult<()> {
+        self.bind(index, OwnedDatum::Blob(value.to_vec()))
+    }
+
+    /// Binds NULL.
+    ///
+    /// @param index - the one-based parameter number
+    pub fn bind_null(&mut self, index: u32) -> DbResult<()> {
+        self.bind(index, OwnedDatum::Null)
+    }
+
+    /// Unbinds every parameter.
+    pub fn clear_bindings(&mut self) {
+        self.params.clear();
+        self.run = false;
+    }
+
+    /// Runs the statement if it has not run, then advances to the next row.
+    ///
+    /// Returns whether a row is available to [`Statement::row`].
+    pub fn step(&mut self) -> DbResult<bool> {
+        if !self.run {
+            let outcome = self
+                .database
+                .engine
+                .borrow_mut()
+                .execute_statement(&self.compiled, &self.params)?;
+            self.changed = outcome.changes.rows;
+            self.database.changes.set(self.changed as i64);
+            self.names = outcome.names;
+            self.rows = outcome.rows;
+            self.at = 0;
+            self.run = true;
+        }
+        if self.at < self.rows.len() {
+            self.at = self.at.saturating_add(1);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Returns the row the last [`Statement::step`] arrived at.
+    ///
+    /// Empty before the first successful step, which is what a caller that
+    /// ignored `step`'s answer would otherwise read past.
+    pub fn row(&self) -> &[OwnedDatum] {
+        match self.at.checked_sub(1).and_then(|nth| self.rows.get(nth)) {
+            Some(row) => row,
+            None => &[],
+        }
+    }
+
+    /// Returns the result column names.
+    pub fn columns(&self) -> &[String] {
+        &self.names
+    }
+
+    /// Returns how many rows the last execution changed.
+    pub fn changes(&self) -> usize {
+        self.changed
+    }
+
+    /// Runs the statement again with the parameters bound since the last run.
+    pub fn reset(&mut self) {
+        self.run = false;
+        self.at = 0;
     }
 }
 
