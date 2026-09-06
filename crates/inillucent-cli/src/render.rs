@@ -11,7 +11,7 @@
 //! kept anyway, because a script written against `sqlite3` and pointed at this
 //! shell has to see the same bytes.
 
-use inillucent::Value;
+use inillucent_value::Value;
 
 /// How rows are laid out.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -192,10 +192,10 @@ fn printable(bytes: &[u8]) -> String {
 
 /// Returns the text the engine writes a number as.
 fn number_text(value: &Value<'static>) -> String {
-    let cast = inillucent::cast::cast_value(
+    let cast = inillucent_value::cast::cast_value(
         value.clone(),
-        inillucent::Affinity::Text,
-        inillucent::TextEncoding::Utf8,
+        inillucent_value::Affinity::Text,
+        inillucent_value::TextEncoding::Utf8,
     );
     match cast {
         Ok(Value::Text(text)) => String::from_utf8_lossy(text.raw()).into_owned(),

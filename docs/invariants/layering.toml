@@ -427,13 +427,15 @@ may_depend_on = [
   "inillucent-value",
   "inillucent-core",
   "inillucent-search",
-  "inillucent",
   # task-1834: the SQLite-file source and the new target. The tool depends on
   # both engines while both exist, which is the one place in the workspace that
-  # is meant to - migrating *from* one *to* the other is what it is for - and
-  # the edge to inillucent goes when the old engine does. inillucent-tree is
-  # named because a digest is computed over OwnedDatums, and
+  # is meant to - migrating *from* one *to* the other is what it is for.
+  # inillucent-tree is named because a digest is computed over OwnedDatums, and
   # inillucent-sqlite-reader because the source is read through it.
+  #
+  # The edge to `inillucent` is **gone**: the legacy path was moved onto the new
+  # engine once the TDD's non-goal on file-format compatibility settled what the
+  # staged file should be.
   "inillucent-engine",
   "inillucent-sqlite-reader",
   "inillucent-tree",
@@ -446,11 +448,21 @@ kind = "production"
 layer = 10
 may_depend_on = ["inillucent"]
 
+# task-1834: the shell runs on the new engine. It reaches `inillucent-engine`
+# for the connection, `inillucent-tree` because a row is a vector of
+# `OwnedDatum`, and `inillucent-value` because that is where `Value` and the
+# affinity rules the renderer formats against live. The edge to `inillucent` is
+# gone - the shell used four of the facade's methods and now uses none of them.
 [[crate]]
 name = "inillucent-cli"
 kind = "production"
 layer = 10
-may_depend_on = ["inillucent"]
+may_depend_on = [
+  "inillucent-base",
+  "inillucent-value",
+  "inillucent-engine",
+  "inillucent-tree",
+]
 
 [[crate]]
 name = "inillucent-core"

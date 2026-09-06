@@ -14,6 +14,7 @@
 
 use crate::render::{literal, Layout};
 use crate::shell::{drive, mode_named, Shell, MODE_NAMES};
+use inillucent_value::Value;
 
 /// Runs one dot command.
 pub fn run(shell: &mut Shell, line: &str) {
@@ -180,10 +181,10 @@ fn databases(shell: &mut Shell) {
 }
 
 /// Returns a value as plain text.
-fn text_of(value: Option<&inillucent::Value<'static>>) -> String {
+fn text_of(value: Option<&Value<'static>>) -> String {
     match value {
-        Some(inillucent::Value::Text(text)) => String::from_utf8_lossy(text.raw()).into_owned(),
-        Some(inillucent::Value::Null) | None => String::new(),
+        Some(Value::Text(text)) => String::from_utf8_lossy(text.raw()).into_owned(),
+        Some(Value::Null) | None => String::new(),
         Some(other) => literal(other),
     }
 }
@@ -381,11 +382,10 @@ fn backup(shell: &mut Shell, arguments: &[&str]) {
         shell.complain("Error: .backup requires a file name");
         return;
     };
-    let outcome = inillucent::Database::open(path)
-        .and_then(|destination| destination.connect())
-        .and_then(|destination| shell.connection().backup_into(&destination));
-    if let Err(error) = outcome {
-        shell.complain(&format!("Error: {}", error.message()));
+    // A checkpoint and a file copy, which is what a backup of this format is:
+    // one file is one database, and there is no second writer to race.
+    if let Err(message) = shell.backup_to(path) {
+        shell.complain(&format!("Error: {message}"));
     }
 }
 
@@ -396,11 +396,13 @@ fn restore(shell: &mut Shell, arguments: &[&str]) {
         shell.complain("Error: .restore requires a file name");
         return;
     };
-    let outcome = inillucent::Database::open(path)
-        .and_then(|source| source.connect())
-        .and_then(|source| source.backup_into(shell.connection()));
-    if let Err(error) = outcome {
-        shell.complain(&format!("Error: {}", error.message()));
+    // **Restoring is opening the other file, not copying it over this one.**
+    // The old engine's restore wrote the source's pages into the open database
+    // in place. This engine's databases are whole files, so the honest restore
+    // is to point the shell at the file the caller named - which is also what a
+    // person means by it, and it does not destroy the database they were in.
+    if let Err(message) = shell.reopen(path) {
+        shell.complain(&format!("Error: {message}"));
     }
 }
 

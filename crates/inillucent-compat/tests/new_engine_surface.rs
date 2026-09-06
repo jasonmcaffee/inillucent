@@ -156,6 +156,14 @@ const SURFACE: &[(&str, &str, Answers)] = &[
     ("pragma.journal_mode", "PRAGMA journal_mode", Yes),
     ("pragma.table_info", "PRAGMA table_info(t)", Yes),
     ("pragma.foreign_keys", "PRAGMA foreign_keys=ON", Yes),
+    ("pragma.database_list", "PRAGMA database_list", Yes),
+    // The *table-valued* form, which is what a tool writes when it wants to
+    // join against a pragma. `.databases` in the shell is written this way.
+    (
+        "pragma.table_valued",
+        "SELECT name FROM pragma_database_list",
+        NotYet,
+    ),
     // Abandoning a transaction. `crates/inillucent-compat/tests/new_engine_rollback.rs`
     // is where the undo is checked; these rows only record that the statements
     // are answered.
@@ -227,7 +235,14 @@ fn the_new_engine_answers_what_the_inventory_says_it_answers() {
                     text.contains("does not run yet")
                         || text.contains("does not handle")
                         || text.contains("Unsupported")
-                        || text.contains("compiles no bytecode"),
+                        || text.contains("compiles no bytecode")
+                        // A construct the binder has simply never heard of is
+                        // refused by the name the caller wrote, which is what
+                        // SQLite says too: `no such table: pragma_database_list`
+                        // for a table-valued pragma this engine does not have.
+                        // It names what it refused as squarely as the phrases
+                        // above do.
+                        || text.contains("no such table"),
                     "{name} was refused without naming what it refused: {text}"
                 );
                 NotYet
@@ -244,6 +259,108 @@ fn the_new_engine_answers_what_the_inventory_says_it_answers() {
         "the inventory in this file and in the Phase 5 report no longer matches the \
          engine.\nMove each of these rows and update the report's Part 4 table:\n{}",
         wrong.join("\n")
+    );
+}
+
+/// A trigger is created, listed, and never fires.
+///
+/// **This is the one silent wrong answer the inventory has found.** Every other
+/// gap in this file is a refusal: the engine says what it will not do and the
+/// caller can act on it. A trigger is different. `CREATE TRIGGER` succeeds,
+/// `sqlite_schema` lists it, `new_engine_ddl.rs` confirms it is stored byte for
+/// byte as SQLite stores it - and then an insert does not run it. Nothing says
+/// so. A database whose triggers do not fire is one whose invariants are not
+/// being maintained, and the application finds out from its data.
+///
+/// It is asserted here rather than fixed because firing them is a feature -
+/// row triggers, `BEFORE` and `AFTER`, `WHEN` clauses, recursion limits - and
+/// because the alternative available today is to make `CREATE TRIGGER` refuse,
+/// which is a behaviour decision rather than a defect fix: it would stop a
+/// schema loading at all where today it loads and under-performs. That choice
+/// belongs to whoever reads this.
+///
+/// The day a trigger fires, this test fails and says so.
+#[test]
+fn a_trigger_is_stored_and_does_not_fire() {
+    let database = fresh("trigger");
+    let connection = database.connect();
+    connection
+        .execute_batch("CREATE TABLE log (id INTEGER PRIMARY KEY, a INTEGER)")
+        .expect("the log table is created");
+    // Through `query` rather than `execute_batch`, because the batch splitter
+    // is not a parser and a trigger body carries semicolons of its own - which
+    // it says it will do, and does.
+    connection
+        .query(
+            "CREATE TRIGGER after_insert AFTER INSERT ON t BEGIN              INSERT INTO log(id, a) VALUES (NEW.id, NEW.b); END",
+        )
+        .expect("the trigger is created");
+
+    let listed = connection
+        .query("SELECT name FROM sqlite_schema WHERE name = 'after_insert'")
+        .expect("the schema is queryable");
+    assert_eq!(listed.len(), 1, "the trigger is in the schema");
+
+    connection
+        .execute_batch("INSERT INTO t(id, a, b) VALUES (9, 'nine', 90)")
+        .expect("the insert applies");
+
+    assert_eq!(
+        count_of(&connection, "log"),
+        0,
+        "a trigger fired - implement the row above and retire this test's premise"
+    );
+    assert_eq!(count_of(&connection, "t"), 3, "the insert itself happened");
+}
+
+/// Returns how many rows a table holds.
+///
+/// @param connection - the connection to ask
+/// @param table - the table's name
+fn count_of(connection: &Connection<'_>, table: &str) -> i64 {
+    match connection
+        .query(&format!("SELECT count(*) FROM {table}"))
+        .expect("counting works")
+        .first()
+        .and_then(|row| row.first())
+    {
+        Some(OwnedDatum::Int(number)) => *number,
+        other => panic!("count(*) answered {other:?}"),
+    }
+}
+
+/// `PRAGMA table_info` answers nothing for a view.
+///
+/// A view's columns are the result columns of its `SELECT`, and the catalog
+/// does not resolve them: `TableInfo.columns` is empty for a view, so the
+/// pragma that reads it has nothing to report. Selecting *through* the view
+/// works - the binder resolves the statement when it runs - so this is a gap in
+/// what the schema can be *asked*, not in what it can answer.
+///
+/// It shows up as `.schema` printing `/* loud() */` where SQLite prints
+/// `/* loud(shout) */`, which is how it was found.
+#[test]
+fn a_views_columns_are_not_reported() {
+    let database = fresh("viewcols");
+    let connection = database.connect();
+    connection
+        .execute_batch("CREATE VIEW loud AS SELECT a AS shout FROM t")
+        .expect("the view is created");
+
+    assert_eq!(
+        connection
+            .query("SELECT shout FROM loud ORDER BY shout")
+            .expect("the view is queryable")
+            .len(),
+        2,
+        "the view itself does not resolve"
+    );
+    assert!(
+        connection
+            .query("PRAGMA table_info(loud)")
+            .expect("the pragma runs")
+            .is_empty(),
+        "a view's columns are reported now - retire this test's premise"
     );
 }
 

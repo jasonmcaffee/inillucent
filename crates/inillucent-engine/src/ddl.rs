@@ -251,6 +251,7 @@ impl ImportedDatabase {
             catalog = catalog.with_table(table.clone());
         }
         catalog = catalog.with_table(self.schema_info.clone());
+        catalog = catalog.with_table(super::schema_alias_of(&self.schema_info));
         self.catalog = catalog;
         self.statements.borrow_mut().clear();
         self.catalog_generation = self.catalog_generation.saturating_add(1);

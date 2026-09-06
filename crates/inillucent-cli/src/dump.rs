@@ -7,7 +7,7 @@
 //! whose parent is three statements later. That is SQLite's dump format, and a
 //! dump that could not be fed back in is not a dump.
 
-use inillucent::Value;
+use inillucent_value::Value;
 
 use crate::render::literal;
 use crate::shell::Shell;

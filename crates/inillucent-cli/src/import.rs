@@ -74,7 +74,7 @@ fn insert(shell: &mut Shell, table: &str, rows: &[Vec<String>], path: &str) {
         shell.complain(&format!("Error: {message}"));
         return;
     }
-    let failure = fill(shell.connection(), &sql, rows);
+    let failure = fill(&shell.connection(), &sql, rows);
     match failure {
         None => {
             if let Err(message) = shell.execute("COMMIT") {
@@ -94,7 +94,7 @@ fn insert(shell: &mut Shell, table: &str, rows: &[Vec<String>], path: &str) {
 /// than complains: the shell cannot be borrowed mutably while a statement it
 /// prepared is alive.
 fn fill(
-    connection: &inillucent::Connection,
+    connection: &inillucent_engine::connect::Connection<'_>,
     sql: &str,
     rows: &[Vec<String>],
 ) -> Option<(usize, String)> {
@@ -103,21 +103,17 @@ fn fill(
         Err(error) => return Some((0, error.message().to_string())),
     };
     for (index, row) in rows.iter().enumerate() {
-        if let Err(error) = statement.reset() {
-            return Some((index + 1, error.message().to_string()));
-        }
+        // Every row starts from nothing bound, so a row shorter than the one
+        // before it does not inherit the tail of that one.
+        statement.clear_bindings();
         for (position, field) in row.iter().enumerate() {
             if let Err(error) = statement.bind_text(position as u32 + 1, field) {
                 return Some((index + 1, error.message().to_string()));
             }
         }
         // A row shorter than the first one leaves the rest NULL, which is what
-        // an `INSERT` with fewer values would have done.
-        for position in row.len()..statement.parameter_count() as usize {
-            if let Err(error) = statement.bind_null(position as u32 + 1) {
-                return Some((index + 1, error.message().to_string()));
-            }
-        }
+        // an `INSERT` with fewer values would have done - and what an unbound
+        // parameter already is, so there is nothing to write for them.
         loop {
             match statement.step() {
                 Ok(true) => continue,
