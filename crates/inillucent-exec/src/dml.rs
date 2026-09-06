@@ -637,9 +637,30 @@ fn write_one(
     row: Row,
 ) -> DbResult<Option<Row>> {
     let table = &statement.table;
-    // Every uniqueness check happens before anything is written. A constraint
-    // checked afterwards is one that has already corrupted the tree it was
-    // protecting.
+    // **The common insert asks the table once.**
+    //
+    // Every uniqueness check still happens before anything is written - a
+    // constraint checked afterwards is one that has already corrupted the tree
+    // it was protecting - but for the ordinary case the check and the write are
+    // the same descent. `PagedTree::put_absent` finds the key, and if it is
+    // there it stops without writing; the constraint message is then built from
+    // a second probe, on the path that is about to fail anyway.
+    //
+    // It applies when the statement raises on a conflict and the table's only
+    // uniqueness is its own key. A table with a secondary `UNIQUE` index needs
+    // those probed too, and an `ON CONFLICT` clause needs to know *which* row
+    // it collided with, so both take the general path below.
+    if resolution(statement) == Resolution::Raise && unique_indexes(table).next().is_none() {
+        if place_row_absent(table, layout, target, log, &row)? {
+            return Ok(Some(row));
+        }
+        return Err(conflicting_row(table, layout, target, &row)?
+            .map(|clash| clash.error)
+            .unwrap_or_else(|| {
+                let (code, message) = rowid_message(table);
+                DbError::new(ExtendedCode(code)).with_message(message)
+            }));
+    }
     if let Some(clash) = conflicting_row(table, layout, target, &row)? {
         match resolution(statement) {
             Resolution::Skip => return Ok(None),
@@ -650,7 +671,9 @@ fn write_one(
                 remove_row(table, layout, target, log, &clash.key, &held)?;
             }
             Resolution::Update => {
-                let updated = upsert_row(table, layout, space, plan, target, log, &clash, &row)?;
+                let updated = upsert_row(
+                    statement, table, layout, space, plan, target, log, &clash, &row,
+                )?;
                 return Ok(Some(updated));
             }
             // `ABORT`, `FAIL` and `ROLLBACK` all raise here and differ only in
@@ -779,6 +802,7 @@ fn conflicting_row(
 /// @param excluded - the row that was being inserted
 #[allow(clippy::too_many_arguments)]
 fn upsert_row(
+    statement: &BoundInsert,
     table: &TableInfo,
     layout: &SourceLayout,
     space: &RowSpace,
@@ -788,8 +812,27 @@ fn upsert_row(
     clash: &Conflict,
     excluded: &[OwnedDatum],
 ) -> DbResult<Row> {
-    let before = read_row(table, target, &clash.key)?
-        .ok_or_else(|| misuse("the conflicting row vanished between the probe and the update"))?;
+    // **The row that is there is read only when something needs it.** An upsert
+    // that assigns every column but the key, over a table with no index, and
+    // whose assignments read only `excluded`, is a row the statement already
+    // holds - and reading it copies every column. On the gate's `wide` table
+    // that is a four-kilobyte body materialised and thrown away per statement.
+    let needed = needs_before(table, layout, statement, plan);
+    let before = if needed {
+        read_row(table, target, &clash.key)?.ok_or_else(|| {
+            misuse("the conflicting row vanished between the probe and the update")
+        })?
+    } else {
+        let mut blank = vec![OwnedDatum::Null; space.width];
+        for (at, value) in clash.key.iter().enumerate() {
+            if let Some(column) = layout.key_columns.get(at).copied() {
+                if let Some(cell) = blank.get_mut(column) {
+                    *cell = value.clone();
+                }
+            }
+        }
+        blank
+    };
     let mut after = before.clone();
     for (slot, eval) in &plan.upsert {
         let value = space.evaluate(eval.as_ref(), &[before.as_slice(), excluded])?;
@@ -797,8 +840,55 @@ fn upsert_row(
             *cell = value;
         }
     }
-    replace_row(table, layout, target, log, &before, &after)?;
+    if needed {
+        replace_row(table, layout, target, log, &before, &after)?;
+    } else {
+        place_row(table, layout, target, log, None, &after)?;
+    }
     Ok(after)
+}
+
+/// Reports whether an upsert has to read the row it is replacing.
+///
+/// It does when any of three things is true, and each is a reason on its own:
+/// the table has an index, whose entry has to be compared against the old one;
+/// a column is not assigned, so its old value has to be carried forward; or an
+/// assignment reads the target row rather than `excluded`.
+///
+/// When none of them is, the new row is the key plus the assignments and the
+/// old one is never looked at.
+///
+/// @param table - the table being written
+/// @param layout - the table tree's layout
+/// @param statement - the bound insert, for its assignments
+/// @param plan - the compiled statement, for which columns are assigned
+fn needs_before(
+    table: &TableInfo,
+    layout: &SourceLayout,
+    statement: &BoundInsert,
+    plan: &InsertPlan,
+) -> bool {
+    if maintained(table).next().is_some() {
+        return true;
+    }
+    for column in 0..layout.width {
+        if Some(column) == layout.rowid {
+            continue;
+        }
+        if !plan.upsert.iter().any(|(slot, _)| *slot == column) {
+            return true;
+        }
+    }
+    let Some(clause) = &statement.upsert else {
+        return true;
+    };
+    clause.assignments.iter().any(|assignment| {
+        let mut used = inillucent_sql::bind::ColumnUse::default();
+        assignment
+            .value
+            .columns_read(statement.target_source, &mut used);
+        used.opaque || !used.columns.is_empty()
+    })
 }
 
 /// Applies an `UPDATE` to rows a query has already selected.
@@ -954,6 +1044,43 @@ fn replace_row(
         return place_row(table, layout, target, log, None, after);
     }
     place_row(table, layout, target, log, Some(before), after)
+}
+
+/// Writes one row only if its key is free, and maintains its index entries.
+///
+/// Returns false, having written nothing, when the key was taken. The index
+/// entries go first as everywhere else, so a failure part-way leaves an entry
+/// pointing at a row that is not there - which the integrity checker names -
+/// rather than a row no index can find.
+///
+/// @param table - the table being written
+/// @param layout - the table tree's layout
+/// @param target - the file and its trees
+/// @param log - where the records go
+/// @param row - the row to write
+fn place_row_absent(
+    table: &TableInfo,
+    layout: &SourceLayout,
+    target: &mut dyn WriteTarget,
+    log: &mut dyn TreeLog,
+    row: &[OwnedDatum],
+) -> DbResult<bool> {
+    let placed = {
+        let (database, trees) = target.parts();
+        let tree = trees
+            .get_mut(table.root)
+            .ok_or_else(|| missing_tree(table))?;
+        let borrowed: Vec<Datum<'_>> = row.iter().map(OwnedDatum::borrow).collect();
+        tree.put_absent(database, log, &borrowed)?
+    };
+    if !placed {
+        return Ok(false);
+    }
+    for index in maintained(table) {
+        let entry = index_entry(index, layout, row);
+        write_index_entry(index, target, log, &entry, true)?;
+    }
+    Ok(true)
 }
 
 /// Writes one row and adds its index entries, removing the previous ones.

@@ -193,6 +193,56 @@ impl<'p> LeafMut<'p> {
                 columns.len()
             )));
         }
+        let mut encoded = Vec::new();
+        for value in row {
+            value.encode_tagged(&mut encoded);
+        }
+        self.plan_encoded(encoded)
+    }
+
+    /// Costs a delta insert whose row is already in its tagged form.
+    ///
+    /// **The encoding is the expensive half and it does not depend on the
+    /// page.** A write costs the insert once to find out whether it fits, logs
+    /// the row, and then costs it again after displacing whatever was under the
+    /// key - and the first version encoded the row inside each of those *and*
+    /// once more for the log record. Three copies of every row, and on the
+    /// gate's `wide` table a row is four kilobytes.
+    ///
+    /// The plan cannot simply be carried across the log call instead: it holds
+    /// the page's delta offsets, and displacing the old row moves them. So the
+    /// *encoding* is what is carried, and the offsets are recomputed - which is
+    /// arithmetic over four fields.
+    ///
+    /// @param encoded - the row's tagged bytes
+    pub fn plan_encoded(&self, encoded: Vec<u8>) -> DbResult<Option<DeltaPlan>> {
+        let Some(offsets) = self.delta_offsets(encoded.len())? else {
+            return Ok(None);
+        };
+        Ok(Some(DeltaPlan {
+            encoded,
+            new_delta_start: offsets.0,
+            old_delta_start: offsets.1,
+            bitmap: offsets.2,
+            delta_count: offsets.3,
+        }))
+    }
+
+    /// Reports whether a row of this size would fit the delta area.
+    ///
+    /// The room check, which needs the row's *length* and not its bytes. The
+    /// caller has the bytes and would otherwise have to hand over a copy of
+    /// them to be told no.
+    ///
+    /// @param encoded_len - how many bytes the row's tagged form occupies
+    pub fn fits_delta(&self, encoded_len: usize) -> DbResult<bool> {
+        Ok(self.delta_offsets(encoded_len)?.is_some())
+    }
+
+    /// Returns where a row of this size would land, or `None` if it would not.
+    ///
+    /// @param encoded_len - how many bytes the row's tagged form occupies
+    fn delta_offsets(&self, encoded_len: usize) -> DbResult<Option<(usize, usize, usize, usize)>> {
         // Every field this needs is copied out and the view is dropped, because
         // the writes below take a mutable borrow of the same bytes. Keeping the
         // view alive and reaching around it is what the borrow checker is for.
@@ -208,11 +258,7 @@ impl<'p> LeafMut<'p> {
         if delta_count >= DELTA_LIMIT {
             return Ok(None);
         }
-        let mut encoded = Vec::new();
-        for value in row {
-            value.encode_tagged(&mut encoded);
-        }
-        if encoded.len() > u16::MAX as usize {
+        if encoded_len > u16::MAX as usize {
             return Ok(None);
         }
         let bitmap = if has_tombstones {
@@ -220,7 +266,7 @@ impl<'p> LeafMut<'p> {
         } else {
             0
         };
-        let entry = encoded.len().saturating_add(2);
+        let entry = encoded_len.saturating_add(2);
         let Some(new_delta_start) = delta_start.checked_sub(entry) else {
             return Ok(None);
         };
@@ -228,13 +274,7 @@ impl<'p> LeafMut<'p> {
         if new_delta_start.saturating_sub(bitmap) < floor {
             return Ok(None);
         }
-        Ok(Some(DeltaPlan {
-            encoded,
-            new_delta_start,
-            old_delta_start: delta_start,
-            bitmap,
-            delta_count,
-        }))
+        Ok(Some((new_delta_start, delta_start, bitmap, delta_count)))
     }
 
     /// Performs a delta insert that [`LeafMut::plan_delta`] costed.

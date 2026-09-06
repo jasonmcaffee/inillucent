@@ -175,7 +175,7 @@ impl PagedTree {
         log: &mut dyn TreeLog,
         row: &[Datum<'_>],
     ) -> DbResult<Option<Vec<OwnedDatum>>> {
-        self.write_row(database, log, row, true)
+        self.write_row(database, log, row, true, true)
     }
 
     /// Inserts or replaces one row without copying out what was there.
@@ -199,7 +199,34 @@ impl PagedTree {
         log: &mut dyn TreeLog,
         row: &[Datum<'_>],
     ) -> DbResult<bool> {
-        Ok(self.write_row(database, log, row, false)?.is_some())
+        Ok(self.write_row(database, log, row, false, true)?.is_some())
+    }
+
+    /// Inserts one row only if its key is not already there.
+    ///
+    /// Returns false, having written nothing, when the key is present.
+    ///
+    /// **This is one descent where the caller would otherwise make two.** An
+    /// insert that must refuse a duplicate has to know whether the key is there
+    /// *before* it writes, and the obvious way is to probe and then insert - two
+    /// descents, two page parses and two locates of the same key. Finding it
+    /// once and stopping is the same guarantee for half the work, and it is the
+    /// shape SQLite's insert has: seek, and write where the seek landed.
+    ///
+    /// The caller still builds its constraint message from a second probe, and
+    /// that is the right place for it: the message is only needed when the
+    /// insert is about to fail.
+    ///
+    /// @param database - the file, for allocating pages a split needs
+    /// @param log - where the record goes
+    /// @param row - the row, one value per column, key columns first
+    pub fn put_absent(
+        &mut self,
+        database: &mut Database,
+        log: &mut dyn TreeLog,
+        row: &[Datum<'_>],
+    ) -> DbResult<bool> {
+        Ok(self.write_row(database, log, row, false, false)?.is_none())
     }
 
     /// The body of `insert` and `put`.
@@ -208,12 +235,14 @@ impl PagedTree {
     /// @param log - where the record goes
     /// @param row - the row
     /// @param want_previous - whether to copy out the row that was there
+    /// @param replace - whether a key already there is overwritten or left alone
     fn write_row(
         &mut self,
         database: &mut Database,
         log: &mut dyn TreeLog,
         row: &[Datum<'_>],
         want_previous: bool,
+        replace: bool,
     ) -> DbResult<Option<Vec<OwnedDatum>>> {
         if row.len() != self.columns().len() {
             return Err(misuse(format!(
@@ -271,11 +300,24 @@ impl PagedTree {
                 };
                 (located, previous)
             };
+            // A caller that refuses a duplicate is told so before anything is
+            // written, which is the whole point of asking.
+            if !replace && previous.is_some() {
+                return Ok(previous);
+            }
+            // Encoded once, here, and used three times: to find out whether it
+            // fits, to write the log record, and to place it. It was encoded
+            // three times before, which on a four-kilobyte row is three copies
+            // of four kilobytes per write.
+            let mut encoded_row = Vec::new();
+            for value in row {
+                value.encode_tagged(&mut encoded_row);
+            }
             let planned = {
                 let pool = database.pool();
                 pool.modify(page, |bytes| {
                     let leaf = LeafMut::new(bytes)?;
-                    let ready = leaf.plan_delta(self.columns(), row)?.is_some();
+                    let ready = leaf.fits_delta(encoded_row.len())?;
                     let room = leaf.has_room_for_a_tombstone()?;
                     Ok(ready && room)
                 })?
@@ -290,10 +332,6 @@ impl PagedTree {
                 continue;
             }
 
-            let mut encoded_row = Vec::new();
-            for value in row {
-                value.encode_tagged(&mut encoded_row);
-            }
             let lsn = log.log(Body::InsertRow {
                 tree: self.tree_id(),
                 page: page.0,
@@ -309,7 +347,7 @@ impl PagedTree {
                     Located::Absent => {}
                 }
                 let plan = leaf
-                    .plan_delta(self.columns(), row)?
+                    .plan_encoded(encoded_row)?
                     .ok_or_else(|| corrupt("a leaf that had room lost it before the write"))?;
                 leaf.apply_delta(&plan)?;
                 leaf.set_lsn(lsn)
