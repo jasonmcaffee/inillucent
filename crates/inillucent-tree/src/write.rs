@@ -1608,16 +1608,92 @@ impl PagedTree {
             carried.push(refs);
         }
         // The delta area, which cannot hold an out-of-line value but can hold
-        // ordinary ones written since the leaf was packed.
+        // ordinary ones written since the leaf was packed. A delta row whose key
+        // is already here shadows the sorted one, which is what `live` does and
+        // is the belt on top of the write path's braces: the write removes the
+        // entry it shadows, and a page recovery replayed rather than this
+        // process built may not have.
         for index in 0..leaf.delta_count() {
             let mut values = Vec::with_capacity(leaf.column_count());
             for column in 0..leaf.column_count() {
                 values.push(OwnedDatum::from_datum(&leaf.delta_value(index, column)?));
             }
-            carried.push(vec![None; values.len()]);
-            rows.push(values);
+            let head: Vec<Datum<'_>> = values
+                .iter()
+                .take(self.key_columns())
+                .map(OwnedDatum::borrow)
+                .collect();
+            let shadowed = rows.iter().position(|held| {
+                let other: Vec<Datum<'_>> = held
+                    .iter()
+                    .take(self.key_columns())
+                    .map(OwnedDatum::borrow)
+                    .collect();
+                crate::leaf::compare_rows(&other, &head, self.key_columns())
+                    == std::cmp::Ordering::Equal
+            });
+            match shadowed {
+                Some(at) => {
+                    if let Some(slot) = rows.get_mut(at) {
+                        *slot = values;
+                    }
+                    if let Some(slot) = carried.get_mut(at) {
+                        // The delta row's values are inline, so nothing about it
+                        // is carried - including the extent the sorted row it
+                        // replaces was in, which the caller then frees.
+                        *slot = vec![None; slot.len()];
+                    }
+                }
+                None => {
+                    carried.push(vec![None; values.len()]);
+                    rows.push(values);
+                }
+            }
         }
+        // **Sorted, because the builder packs and does not sort.** `live` sorts
+        // its merge and the fast path relies on it; this reader is the merge for
+        // a leaf with extents and has to do the same. A repack that handed the
+        // builder a delta row after the sorted rows it sorts before produced a
+        // leaf whose keys did not increase - which every later descent then
+        // missed, so an upsert inserted a duplicate rather than replacing, and
+        // `wide` ended a write campaign with 791 rows where SQLite had 500.
+        self.in_key_order(&mut rows, &mut carried);
         Ok((rows, carried))
+    }
+
+    /// Sorts rows and their carried references together, by key.
+    ///
+    /// @param rows - the rows
+    /// @param carried - the reference each already-out-of-line value is in
+    fn in_key_order(
+        &self,
+        rows: &mut Vec<Vec<OwnedDatum>>,
+        carried: &mut Vec<Vec<Option<ExtentRef>>>,
+    ) {
+        let key_columns = self.key_columns();
+        let mut paired: Vec<(Vec<OwnedDatum>, Vec<Option<ExtentRef>>)> = std::mem::take(rows)
+            .into_iter()
+            .zip(std::mem::take(carried))
+            .collect();
+        paired.sort_by(|left, right| {
+            let one: Vec<Datum<'_>> = left
+                .0
+                .iter()
+                .take(key_columns)
+                .map(OwnedDatum::borrow)
+                .collect();
+            let two: Vec<Datum<'_>> = right
+                .0
+                .iter()
+                .take(key_columns)
+                .map(OwnedDatum::borrow)
+                .collect();
+            crate::leaf::compare_rows(&one, &two, key_columns)
+        });
+        for (row, refs) in paired {
+            rows.push(row);
+            carried.push(refs);
+        }
     }
 
     /// Returns the references every out-of-line value in a leaf names.
