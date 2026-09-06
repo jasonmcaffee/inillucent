@@ -114,12 +114,28 @@ pub struct EmbeddingGradeOptions {
     pub hybrid: bool,
     pub cost: bool,
     pub matryoshka: bool,
+    /// The lane gate G4 is read from: how often each model answers confidently
+    /// when nothing in the corpus answers the question.
+    pub abstention: bool,
     /// Chunks re-embedded to time each model. Distinct chunks, spread across the
     /// corpus: timing a model on repeated text measures a cache rather than a
     /// model, which is a mistake this box has already made once.
     pub cost_samples: usize,
     /// Processors the cost lane times each model on.
     pub cost_devices: Vec<Device>,
+    /// How many times each model is timed, each pass over a slice of chunks no
+    /// earlier pass has shown it.
+    ///
+    /// One timing is not a measurement. The same model, the same binary and the
+    /// same machine produced 3.1, 11.3 and 8.3 chunks a second on CPU in Phase 0,
+    /// and a gate read off any one of those would have been read off noise. The
+    /// slices are disjoint because repeating the text would let a served arm's
+    /// prompt cache answer the second pass, which is how a benchmark on this box
+    /// once reported 300 chunks a second against a real 85.
+    ///
+    /// A machine setting, like `max_batch_cells`: it is in no manifest and
+    /// changing it moves no digest.
+    pub cost_repeats: usize,
     /// Chunks the Matryoshka lane ranks over. The full corpus would cost an
     /// exhaustive pass per width per model for a number that a stride sample
     /// answers to three decimals.
@@ -155,8 +171,11 @@ pub struct ArmFacts {
     pub truncation_share: f64,
     pub model_bytes: u64,
     pub source: Option<String>,
-    /// Filled by the cost lane: device label to chunks per second.
+    /// Filled by the cost lane: device label to the median chunks per second.
     pub chunks_per_second: BTreeMap<String, f64>,
+    /// Every timing behind that median, so the card can print how far apart the
+    /// repeats were rather than only their middle.
+    pub chunks_per_second_runs: BTreeMap<String, Vec<f64>>,
     /// Filled by the cost lane, on distinct sampled chunks.
     pub tokens_per_chunk: Option<f64>,
     pub sample_truncation_share: Option<f64>,
@@ -487,7 +506,17 @@ fn score_family(
 struct Families {
     named: Vec<(String, Vec<GradedQuery>)>,
     counts: BTreeMap<String, usize>,
+    /// The two families the abstention lane uses, kept out of `named` so they
+    /// cannot reach the ranking lanes or the composite. Unanswerable queries
+    /// carry no positive grades, and an nDCG over an empty reference set is not
+    /// a low score - it is a meaningless one.
+    abstention: Vec<(String, Vec<GradedQuery>)>,
 }
+
+/// The answerable family the threshold is fitted on.
+const CALIBRATION: &str = "abstention calibration (not scored)";
+/// The family the confident-answer rate is measured on.
+const UNANSWERABLE: &str = "unanswerable";
 
 /// Build the query families. Identical for every arm by construction: they are
 /// generated from the chunks, and the refusal above has already established that
@@ -518,6 +547,19 @@ fn build_families(corpus: &Corpus, keys: &[String], per_source: usize, n: usize)
         scenarios::seed("multi_source"),
     );
 
+    // Built here rather than in the lane so they are generated once from the
+    // shared corpus, like every other family, and are byte-identical per arm.
+    let unanswerable = queryset::unanswerable_queries(
+        sliced,
+        &df,
+        per_source * 2,
+        scenarios::seed("unanswerable"),
+    );
+    // Answerable questions the lane never scores: they exist only to place each
+    // model's own threshold, from a seed deliberately far from the rest.
+    let calibration =
+        queryset::heading_queries(sliced, keys, per_source * 2, scenarios::seed("calibration"));
+
     let named = vec![
         ("document identity".to_string(), identity),
         ("heading".to_string(), headings),
@@ -526,8 +568,19 @@ fn build_families(corpus: &Corpus, keys: &[String], per_source: usize, n: usize)
         ("passage evidence, shorthand".to_string(), shorthand),
         ("multi-source".to_string(), multi_source),
     ];
-    let counts = named.iter().map(|(name, qs)| (name.clone(), qs.len())).collect();
-    Families { named, counts }
+    let abstention = vec![
+        (CALIBRATION.to_string(), calibration),
+        (UNANSWERABLE.to_string(), unanswerable),
+    ];
+    // The abstention families are counted too, so the card says how many
+    // unanswerable questions its G4 rate is over rather than leaving a reader to
+    // infer it from a percentage.
+    let counts = named
+        .iter()
+        .chain(abstention.iter())
+        .map(|(name, qs)| (name.clone(), qs.len()))
+        .collect();
+    Families { named, counts, abstention }
 }
 
 /// The per-query composite: every family's scores concatenated in a fixed order.
@@ -607,10 +660,14 @@ pub fn run(options: &EmbeddingGradeOptions) -> Result<EmbeddingCard> {
     );
     // The sample the cost and Matryoshka lanes use, chosen from the shared corpus
     // so every arm is timed and narrowed over the same chunks.
-    let cost_texts: Vec<String> = scenarios::strided_sample(n, options.cost_samples)
-        .into_iter()
-        .map(|i| crate::synth::sanitize_for_model(&first.chunks[i].content))
-        .collect();
+    // Enough for every repeat to get its own slice: a repeat that reused the
+    // previous repeat's text would be timing a cache on a served arm.
+    let cost_repeats = options.cost_repeats.max(1);
+    let cost_texts: Vec<String> =
+        scenarios::strided_sample(n, options.cost_samples * cost_repeats)
+            .into_iter()
+            .map(|i| crate::synth::sanitize_for_model(&first.chunks[i].content))
+            .collect();
     let matryoshka_rows = scenarios::strided_sample(n, options.matryoshka_chunks);
     drop(first);
 
@@ -619,6 +676,8 @@ pub fn run(options: &EmbeddingGradeOptions) -> Result<EmbeddingCard> {
     let mut dense: BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<f64>>>> = BTreeMap::new();
     let mut hybrid: BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<f64>>>> = BTreeMap::new();
     let mut mrl: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+    // model -> family -> the top result's confidence on each of its queries.
+    let mut confidences: BTreeMap<String, BTreeMap<String, Vec<f64>>> = BTreeMap::new();
 
     for arm in &arms {
         let id = arm.header.model_id.clone();
@@ -674,6 +733,7 @@ pub fn run(options: &EmbeddingGradeOptions) -> Result<EmbeddingCard> {
             model_bytes: weights_bytes(&arm.model.dir, &arm.model.manifest.model_file),
             source: arm.model.manifest.source.clone(),
             chunks_per_second: BTreeMap::new(),
+            chunks_per_second_runs: BTreeMap::new(),
             tokens_per_chunk: None,
             sample_truncation_share: None,
             bytes_per_vector: arm
@@ -815,6 +875,41 @@ pub fn run(options: &EmbeddingGradeOptions) -> Result<EmbeddingCard> {
             }
         }
 
+        // ---- abstention lane ----
+        //
+        // Dense cosine rather than the engine's fused score, and deliberately.
+        // Fusion normalises out of the candidate list, so the top hit of every
+        // query maps to the top of the scale whether the list is good or
+        // hopeless and no threshold on it exists. A cosine is computed against a
+        // bound the results had no say in, so one query's value means the same
+        // as the next one's - which is the whole premise of a threshold.
+        if options.abstention {
+            for (name, qs) in &families.abstention {
+                let texts: Vec<String> = qs.iter().map(|q| q.text.clone()).collect();
+                let vectors = queryset::embed_with(&embedder, &texts)
+                    .with_context(|| format!("embedding the {name} family with {id}"))?;
+                let vectors_slice = &corpus.vectors[..n];
+                let tops: Vec<f64> = vectors
+                    .iter()
+                    .map(|q| {
+                        exhaustive_top_k(vectors_slice, q, 1)
+                            .first()
+                            .map(|i| f64::from(dot(&vectors_slice[*i], q).clamp(0.0, 1.0)))
+                            .unwrap_or(0.0)
+                    })
+                    .collect();
+                eprintln!(
+                    "  abstention lane, {name}: {} queries, mean top confidence {:.4}",
+                    tops.len(),
+                    if tops.is_empty() { 0.0 } else { tops.iter().sum::<f64>() / tops.len() as f64 }
+                );
+                confidences
+                    .entry(id.clone())
+                    .or_default()
+                    .insert(name.clone(), tops);
+            }
+        }
+
         // ---- cost lane ----
         if options.cost {
             // A served arm runs wherever its server runs, and `--device` says
@@ -828,19 +923,31 @@ pub fn run(options: &EmbeddingGradeOptions) -> Result<EmbeddingCard> {
                 inillucent_core::model::Backend::Onnx => options.cost_devices.clone(),
             };
             for device in &devices {
-                match time_model(&arm.model, &cost_texts, *device, &options.arm_options) {
-                    Ok((rate, tokens, share)) => {
+                match time_model(
+                    &arm.model,
+                    &cost_texts,
+                    cost_repeats,
+                    *device,
+                    &options.arm_options,
+                ) {
+                    Ok((rates, tokens, share)) => {
                         let label = match arm.model.manifest.backend {
                             inillucent_core::model::Backend::LlamaCpp => {
                                 format!("llama.cpp at {}", options.arm_options.endpoint)
                             }
                             inillucent_core::model::Backend::Onnx => device.label(),
                         };
+                        let middle = median(&rates);
+                        let printed: Vec<String> =
+                            rates.iter().map(|r| format!("{r:.1}")).collect();
                         eprintln!(
-                            "  cost lane on {label}: {rate:.1} chunks/s, {tokens:.1} tokens per chunk, {:.2}% truncated",
+                            "  cost lane on {label}: {middle:.1} chunks/s median of [{}], \
+                             {tokens:.1} tokens per chunk, {:.2}% truncated",
+                            printed.join(", "),
                             100.0 * share
                         );
-                        facts.chunks_per_second.insert(label, rate);
+                        facts.chunks_per_second.insert(label.clone(), middle);
+                        facts.chunks_per_second_runs.insert(label, rates);
                         facts.tokens_per_chunk = Some(tokens);
                         facts.sample_truncation_share = Some(share);
                     }
@@ -879,6 +986,9 @@ pub fn run(options: &EmbeddingGradeOptions) -> Result<EmbeddingCard> {
     }
     if options.matryoshka && !mrl.is_empty() {
         lanes.push(matryoshka_lane(&mrl, &arm_facts));
+    }
+    if options.abstention {
+        lanes.push(abstention_lane(&confidences));
     }
     if options.cost {
         lanes.push(cost_lane(&arm_facts));
@@ -1035,41 +1145,88 @@ fn top_k_of(vectors: &[&Vec<f32>], query: &[f32], k: usize) -> Vec<usize> {
     scored.into_iter().map(|(_, i)| i).collect()
 }
 
-/// Time one model over distinct chunks.
+/// The middle value of a set of timings.
+///
+/// The median rather than the mean: a single stalled pass - a driver waking up,
+/// another process taking the card - moves a mean of three and does not move
+/// their middle.
+/// @param values - the timings, in any order
+fn median(values: &[f64]) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    match sorted.len() {
+        0 => 0.0,
+        n if n % 2 == 1 => sorted[n / 2],
+        n => 0.5 * (sorted[n / 2 - 1] + sorted[n / 2]),
+    }
+}
+
+/// The half-open range of `texts` a timed pass reads.
+///
+/// Disjoint by construction: pass `p` reads `[p*slice, (p+1)*slice)` and every
+/// pass takes the same count, so no chunk is timed twice and a served arm's prompt
+/// cache never gets to answer a pass. The leftover when the sample does not divide
+/// evenly is dropped rather than given to the last pass, because a pass over more
+/// chunks is not comparable with the passes beside it.
+/// @param texts - how many sampled chunks there are
+/// @param repeats - how many timed passes to run
+/// @param pass - which pass, from zero
+fn timing_range(texts: usize, repeats: usize, pass: usize) -> Result<std::ops::Range<usize>> {
+    let repeats = repeats.max(1);
+    let slice = texts / repeats;
+    if slice == 0 {
+        anyhow::bail!("{texts} chunks cannot be split into {repeats} disjoint timing slices");
+    }
+    Ok(pass * slice..(pass + 1) * slice)
+}
+
+/// Time one model over distinct chunks, several times over disjoint slices.
 ///
 /// Distinct, and that word is doing work. A benchmark on repeated or
 /// shared-prefix text on this box measures a prefix cache: the same measurement
 /// reported 300 chunks a second against a real 85-134. These are stride-sampled
 /// from across the corpus, so no two share a document, let alone a prefix.
+/// The model is opened once and every repeat runs through that one session, so
+/// the spread describes the machine rather than the cost of loading a graph.
 /// @param model - the arm being timed
-/// @param texts - distinct chunk bodies, already sanitized
+/// @param texts - distinct chunk bodies, already sanitized, `repeats` slices worth
+/// @param repeats - how many timed passes to run
 /// @param device - the processor to time on
 fn time_model(
     model: &ResolvedModel,
     texts: &[String],
+    repeats: usize,
     device: Device,
     options: &crate::arm::ArmOptions,
-) -> Result<(f64, f64, f64)> {
+) -> Result<(Vec<f64>, f64, f64)> {
     let embedder = crate::arm::Arm::open(
         model,
         &crate::arm::ArmOptions { batch_size: 16, device, ..options.clone() },
     )?;
-    // One warm-up batch, outside the timing, so the number describes steady-state
-    // throughput rather than the first allocation of the arena.
-    let warm = texts.len().min(16);
-    embedder.embed_documents(&texts[..warm])?;
+    let repeats = repeats.max(1);
+    // Checked before the warm-up, so a sample too small to split fails without
+    // having spent a forward pass on it.
+    timing_range(texts.len(), repeats, 0)?;
+    // One warm-up batch, outside every timing, so the numbers describe
+    // steady-state throughput rather than the first allocation of the arena.
+    embedder.embed_documents(&texts[..texts.len().min(16)])?;
     let before = embedder.truncation();
 
-    let started = Instant::now();
-    embedder.embed_documents(texts)?;
-    let seconds = started.elapsed().as_secs_f64();
+    let mut rates = Vec::with_capacity(repeats);
+    for pass in 0..repeats {
+        // Disjoint: this pass gets chunks no earlier pass has shown the model.
+        let batch = &texts[timing_range(texts.len(), repeats, pass)?];
+        let started = Instant::now();
+        embedder.embed_documents(batch)?;
+        rates.push(batch.len() as f64 / started.elapsed().as_secs_f64().max(1e-9));
+    }
 
     let after = embedder.truncation();
     let counted = after.texts - before.texts;
     let truncated = after.truncated - before.truncated;
     let tokens = after.tokens - before.tokens;
     Ok((
-        texts.len() as f64 / seconds.max(1e-9),
+        rates,
         tokens as f64 / counted.max(1) as f64,
         truncated as f64 / counted.max(1) as f64,
     ))
@@ -1208,6 +1365,101 @@ fn matryoshka_lane(mrl: &BTreeMap<String, BTreeMap<String, f64>>, arms: &[ArmFac
     }
 }
 
+/// The value at a percentile of an already sorted series.
+///
+/// Nearest-rank rather than interpolated, so the threshold is always a score
+/// some calibration query actually produced.
+/// @param sorted - the series, ascending
+/// @param p - the percentile, from zero to one
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let rank = ((sorted.len() - 1) as f64 * p).round() as usize;
+    sorted[rank.min(sorted.len() - 1)]
+}
+
+/// Gate G4: how often each model answers confidently when nothing answers.
+///
+/// Each model is judged against its own threshold, because a cosine from one
+/// model and a cosine from another are not the same number - a model whose
+/// vectors sit in a narrower cone scores every pair higher, and a shared
+/// threshold would grade that geometry rather than the behaviour. The threshold
+/// is the fifth percentile of the model's own top-result confidence over
+/// answerable calibration queries this lane never scores.
+/// @param confidences - model to family to per-query top confidence
+fn abstention_lane(confidences: &BTreeMap<String, BTreeMap<String, Vec<f64>>>) -> Lane {
+    let mut rates = BTreeMap::new();
+    let mut series = BTreeMap::new();
+    let mut thresholds = BTreeMap::new();
+    let mut gaps = BTreeMap::new();
+
+    for (model, by_family) in confidences {
+        let (Some(calibration), Some(negative)) =
+            (by_family.get(CALIBRATION), by_family.get(UNANSWERABLE))
+        else {
+            continue;
+        };
+        if calibration.is_empty() || negative.is_empty() {
+            continue;
+        }
+        let mut sorted = calibration.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let threshold = percentile(&sorted, 0.05);
+        // One value per query, so this row can be tested pairwise like every
+        // other primary row rather than compared as two summary numbers.
+        let flags: Vec<f64> =
+            negative.iter().map(|s| if *s >= threshold { 1.0 } else { 0.0 }).collect();
+        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+        rates.insert(model.clone(), mean(&flags));
+        series.insert(model.clone(), flags);
+        thresholds.insert(model.clone(), threshold);
+        gaps.insert(model.clone(), mean(calibration) - mean(negative));
+    }
+
+    let rows = vec![
+        EmbeddingRow {
+            family: "questions with no answer in the corpus".to_string(),
+            metric: "confident answer rate at the model's own threshold".to_string(),
+            higher_is_better: false,
+            role: Role::Primary,
+            values: rates,
+            series,
+        },
+        EmbeddingRow {
+            family: "calibration queries, 5th percentile of the top result".to_string(),
+            metric: "the model's own abstention threshold".to_string(),
+            higher_is_better: true,
+            role: Role::Diagnostic,
+            values: thresholds,
+            series: BTreeMap::new(),
+        },
+        EmbeddingRow {
+            family: "answerable minus unanswerable".to_string(),
+            metric: "mean top result confidence gap".to_string(),
+            higher_is_better: true,
+            role: Role::Diagnostic,
+            values: gaps,
+            series: BTreeMap::new(),
+        },
+    ];
+
+    Lane {
+        name: "abstention".to_string(),
+        rationale:
+            "Gate G4. Queries built by mixing the distinctive words of two documents \
+             from two sources the corpus builder draws from disjoint pools, so no chunk \
+             holds material from both and the question sounds entirely plausible with no \
+             answer. This is the failure that does not announce itself: ten confident \
+             looking passages about nothing. Each model is calibrated on its own scale - \
+             the threshold is the fifth percentile of its own top result confidence over \
+             answerable queries this lane never scores - so the comparison needs no \
+             assumption that two models' cosines mean the same thing. Lower is better."
+                .to_string(),
+        rows,
+    }
+}
+
 fn cost_lane(arms: &[ArmFacts]) -> Lane {
     let mut rows = Vec::new();
     let mut devices: Vec<String> =
@@ -1217,7 +1469,7 @@ fn cost_lane(arms: &[ArmFacts]) -> Lane {
     for device in devices {
         rows.push(EmbeddingRow {
             family: format!("throughput on {device}"),
-            metric: "chunks per second".to_string(),
+            metric: "chunks per second, median".to_string(),
             higher_is_better: true,
             role: Role::Diagnostic,
             values: arms
@@ -1226,6 +1478,33 @@ fn cost_lane(arms: &[ArmFacts]) -> Lane {
                 .collect(),
             series: BTreeMap::new(),
         });
+        // The spread beside the median, because a reader cannot tell whether a
+        // gap between two arms is real without knowing how far apart two runs of
+        // one arm land. Printed as a share of the median so arms of very
+        // different speeds can be compared on it.
+        let spreads: BTreeMap<String, f64> = arms
+            .iter()
+            .filter_map(|a| {
+                let runs = a.chunks_per_second_runs.get(&device)?;
+                if runs.len() < 2 {
+                    return None;
+                }
+                let low = runs.iter().cloned().fold(f64::INFINITY, f64::min);
+                let high = runs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let middle = median(runs);
+                Some((a.model_id.clone(), 100.0 * (high - low) / middle.max(1e-9)))
+            })
+            .collect();
+        if !spreads.is_empty() {
+            rows.push(EmbeddingRow {
+                family: format!("throughput on {device}"),
+                metric: "spread across repeats, % of median".to_string(),
+                higher_is_better: false,
+                role: Role::Diagnostic,
+                values: spreads,
+                series: BTreeMap::new(),
+            });
+        }
     }
     for (label, metric, higher, pick) in [
         (
@@ -1285,11 +1564,25 @@ fn judge(lanes: &[Lane], baseline: &str, seed: u64) -> Vec<ArmJudgement> {
             }
             let Some(base_series) = row.series.get(baseline) else { continue };
             let base_value = row.values.get(baseline).copied().unwrap_or(0.0);
+            // Oriented so that a positive delta always means the candidate is
+            // better. `stats::verdict` reads the interval's sign and has no idea
+            // which way a metric runs; the abstention lane is the first primary
+            // row where lower is better, and without this its verdicts would come
+            // out exactly backwards. `candidate_value` and `baseline_value` stay
+            // in the row's own units.
+            let orient = |v: &Vec<f64>| -> Vec<f64> {
+                if row.higher_is_better {
+                    v.clone()
+                } else {
+                    v.iter().map(|x| -x).collect()
+                }
+            };
+            let base_oriented = orient(base_series);
             for (model, series) in &row.series {
                 if model == baseline {
                     continue;
                 }
-                let paired = stats::compare(series, base_series, seed);
+                let paired = stats::compare(&orient(series), &base_oriented, seed);
                 let verdict = paired
                     .as_ref()
                     .map(|p| stats::verdict(p, RANKING_THRESHOLD))
@@ -1488,6 +1781,34 @@ mod tests {
         dir
     }
 
+    fn arm_facts_for(id: &str) -> ArmFacts {
+        ArmFacts {
+            model_id: id.to_string(),
+            dims: 768,
+            max_tokens: 512,
+            mrl_widths: vec![768],
+            pooling: "mean".into(),
+            query_prefix: String::new(),
+            document_prefix: String::new(),
+            manifest_sha256: "m".into(),
+            weights_sha256: "w".into(),
+            tokenizer_sha256: "t".into(),
+            manifest_on_disk: true,
+            cache_path: "c".into(),
+            cache_bytes: 0,
+            chunks: 0,
+            truncated_chunks: 0,
+            truncation_share: 0.0,
+            model_bytes: 0,
+            source: None,
+            chunks_per_second: BTreeMap::new(),
+            chunks_per_second_runs: BTreeMap::new(),
+            tokens_per_chunk: None,
+            sample_truncation_share: None,
+            bytes_per_vector: BTreeMap::new(),
+        }
+    }
+
     fn chunk(i: usize) -> inillucent_core::store::ChunkInput {
         inillucent_core::store::ChunkInput {
             source: "confluence".into(),
@@ -1584,8 +1905,10 @@ mod tests {
             hybrid: false,
             cost: false,
             matryoshka: false,
+            abstention: false,
             cost_samples: 8,
             cost_devices: vec![],
+            cost_repeats: 3,
             matryoshka_chunks: 8,
             arm_options: crate::arm::ArmOptions::default(),
         }
@@ -1832,6 +2155,151 @@ mod tests {
                 exhaustive_top_k(&vectors, query, K).into_iter().map(|i| keys[i].clone()).collect();
             assert_eq!(card_ranking, lane_ranking, "probe {probe}");
         }
+    }
+
+    #[test]
+    fn every_timing_pass_reads_chunks_no_earlier_pass_read() {
+        let texts = 2000;
+        let repeats = 3;
+        let mut seen: Vec<usize> = Vec::new();
+        for pass in 0..repeats {
+            let range = timing_range(texts, repeats, pass).unwrap();
+            assert_eq!(range.len(), 666, "pass {pass} is a different size from the others");
+            for i in range {
+                assert!(!seen.contains(&i), "chunk {i} was timed twice");
+                seen.push(i);
+            }
+        }
+        // The leftover two chunks are dropped rather than lengthening the last
+        // pass: a pass over more text is not comparable with the ones beside it.
+        assert_eq!(seen.len(), 1998);
+    }
+
+    #[test]
+    fn a_sample_too_small_to_split_is_refused_rather_than_timed_twice() {
+        // Two chunks and three passes cannot be disjoint, and the honest failure
+        // is to say so. Silently reusing text here is exactly the mistake that
+        // made a benchmark on this box report 300 chunks a second against a real
+        // 85: the second pass was answered from a cache.
+        let err = timing_range(2, 3, 0).unwrap_err().to_string();
+        assert!(err.contains("disjoint"), "{err}");
+        // One pass over two chunks is fine.
+        assert_eq!(timing_range(2, 1, 0).unwrap(), 0..2);
+    }
+
+    #[test]
+    fn the_median_reports_the_middle_rather_than_the_average() {
+        // Phase 0's three CPU timings of one model, in the order they happened.
+        // Their mean is 7.6 and their middle is 8.3; the mean is dragged by the
+        // one run where something else had the machine.
+        assert!((median(&[3.1, 11.3, 8.3]) - 8.3).abs() < 1e-9);
+        assert!((median(&[3.1, 11.3]) - 7.2).abs() < 1e-9);
+        assert_eq!(median(&[]), 0.0);
+        assert!((median(&[4.0]) - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_spread_row_appears_only_when_there_is_more_than_one_timing() {
+        let mut one = arm_facts_for("one");
+        one.chunks_per_second.insert("cpu".into(), 10.0);
+        one.chunks_per_second_runs.insert("cpu".into(), vec![10.0]);
+        let lane = cost_lane(&[one.clone()]);
+        assert!(
+            !lane.rows.iter().any(|r| r.metric.contains("spread")),
+            "a single timing has no spread to report"
+        );
+
+        let mut many = arm_facts_for("many");
+        many.chunks_per_second.insert("cpu".into(), 8.3);
+        many.chunks_per_second_runs.insert("cpu".into(), vec![3.1, 11.3, 8.3]);
+        let lane = cost_lane(&[many]);
+        let row = lane
+            .rows
+            .iter()
+            .find(|r| r.metric.contains("spread"))
+            .expect("a lane with three timings reports their spread");
+        // (11.3 - 3.1) / 8.3 = 98.8% of the median, which is the number that says
+        // this column cannot decide a gate.
+        assert!((row.values["many"] - 98.795).abs() < 0.01, "{:?}", row.values);
+    }
+
+    #[test]
+    fn each_model_is_calibrated_on_its_own_scale() {
+        // Two models that behave identically and differ only in geometry: the
+        // second one's vectors sit in a narrower cone, so every cosine it produces
+        // is 0.2 higher. Under one shared threshold it would look far worse at
+        // abstaining while doing exactly the same thing, which is why G4 says
+        // "each model on its own calibrated threshold".
+        let mut confidences: BTreeMap<String, BTreeMap<String, Vec<f64>>> = BTreeMap::new();
+        let calibration: Vec<f64> = (0..20).map(|i| 0.50 + i as f64 * 0.01).collect();
+        let negative: Vec<f64> = (0..20).map(|i| 0.40 + i as f64 * 0.01).collect();
+        confidences.insert(
+            "wide".into(),
+            [(CALIBRATION.to_string(), calibration.clone()), (UNANSWERABLE.to_string(), negative.clone())]
+                .into_iter()
+                .collect(),
+        );
+        confidences.insert(
+            "narrow".into(),
+            [
+                (CALIBRATION.to_string(), calibration.iter().map(|v| v + 0.2).collect()),
+                (UNANSWERABLE.to_string(), negative.iter().map(|v| v + 0.2).collect()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        let lane = abstention_lane(&confidences);
+        let rate = &lane.rows[0];
+        assert!(rate.role == Role::Primary, "the confident-answer rate is the row G4 is read from");
+        assert!(!rate.higher_is_better, "a confident answer to an unanswerable question is bad");
+        assert!(
+            (rate.values["wide"] - rate.values["narrow"]).abs() < 1e-12,
+            "two models with the same behaviour and different scales scored differently: {:?}",
+            rate.values
+        );
+        // And the thresholds themselves show the geometry the rates hide.
+        let threshold = &lane.rows[1];
+        assert!((threshold.values["narrow"] - threshold.values["wide"] - 0.2).abs() < 1e-9);
+        // One value per query, so the row can be tested pairwise like any other.
+        assert_eq!(rate.series["wide"].len(), 20);
+    }
+
+    #[test]
+    fn the_threshold_is_a_score_some_calibration_query_actually_produced() {
+        let sorted: Vec<f64> = (0..20).map(|i| i as f64).collect();
+        // Nearest rank, not interpolated: 5% of 19 is 0.95, which rounds to 1.
+        assert_eq!(percentile(&sorted, 0.05), 1.0);
+        assert_eq!(percentile(&sorted, 0.0), 0.0);
+        assert_eq!(percentile(&sorted, 1.0), 19.0);
+        assert_eq!(percentile(&[], 0.05), 0.0);
+    }
+
+    #[test]
+    fn a_primary_row_where_lower_is_better_is_judged_in_its_own_direction() {
+        // The candidate answers confidently on a tenth of the unanswerable
+        // questions and the baseline on nine tenths. That is a large improvement,
+        // and before the orientation fix it was reported as `worse`.
+        let candidate: Vec<f64> = (0..40).map(|i| if i % 10 == 0 { 1.0 } else { 0.0 }).collect();
+        let baseline: Vec<f64> = (0..40).map(|i| if i % 10 == 0 { 0.0 } else { 1.0 }).collect();
+        let row = EmbeddingRow {
+            family: "questions with no answer in the corpus".into(),
+            metric: "confident answer rate at the model's own threshold".into(),
+            higher_is_better: false,
+            role: Role::Primary,
+            values: [("new".to_string(), 0.1), ("v1.5".to_string(), 0.9)].into_iter().collect(),
+            series: [("new".to_string(), candidate), ("v1.5".to_string(), baseline)]
+                .into_iter()
+                .collect(),
+        };
+        let lane = Lane { name: "abstention".into(), rationale: String::new(), rows: vec![row] };
+        let judged = judge(&[lane], "v1.5", 7);
+        assert_eq!(judged.len(), 1);
+        assert_eq!(judged[0].verdict, Verdict::Better, "{:?}", judged[0].paired);
+        // The printed values stay in the metric's own units - the orientation is
+        // only for the interval, not for the numbers a reader sees.
+        assert!((judged[0].candidate_value - 0.1).abs() < 1e-12);
+        assert!((judged[0].baseline_value - 0.9).abs() < 1e-12);
     }
 
     #[test]
