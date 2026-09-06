@@ -99,7 +99,10 @@ fn the_read_only_subset_is_green_on_the_new_engine() {
         .unwrap_or_else(|error| panic!("the corpus did not import: {:?}", error.detail()));
 
     let mut accepted = 0usize;
-    let mut refused: BTreeMap<String, usize> = BTreeMap::new();
+    // The count *and* one example, because a refusal reason with no query
+    // behind it is a line nobody can act on - and the work list this test
+    // exists to produce is a list of queries.
+    let mut refused: BTreeMap<String, (usize, String)> = BTreeMap::new();
     let mut failures: Vec<String> = Vec::new();
 
     for path in &files {
@@ -121,9 +124,10 @@ fn the_read_only_subset_is_green_on_the_new_engine() {
             let plan = match database.plan(sql) {
                 Ok(plan) => plan,
                 Err(error) => {
-                    *refused
+                    let entry = refused
                         .entry(reason_of(error.detail().unwrap_or("no detail")))
-                        .or_insert(0) += 1;
+                        .or_insert_with(|| (0, sql.clone()));
+                    entry.0 += 1;
                     continue;
                 }
             };
@@ -131,9 +135,10 @@ fn the_read_only_subset_is_green_on_the_new_engine() {
             let (rows, _) = match outcome {
                 Ok(answer) => answer,
                 Err(error) => {
-                    *refused
+                    let entry = refused
                         .entry(reason_of(error.detail().unwrap_or("no detail")))
-                        .or_insert(0) += 1;
+                        .or_insert_with(|| (0, sql.clone()));
+                    entry.0 += 1;
                     continue;
                 }
             };
@@ -150,10 +155,15 @@ fn the_read_only_subset_is_green_on_the_new_engine() {
     }
 
     // The refusals, so the gap between the subset and the corpus is visible.
-    let refused_total: usize = refused.values().sum();
+    let refused_total: usize = refused.values().map(|(count, _)| *count).sum();
     let mut summary: Vec<String> = refused
         .iter()
-        .map(|(reason, count)| format!("  {count:>4}  {reason}"))
+        .map(|(reason, (count, example))| {
+            format!(
+                "  {count:>4}  {reason}
+          e.g. {example}"
+            )
+        })
         .collect();
     summary.sort();
     println!(

@@ -45,7 +45,7 @@
 use inillucent_base::error::misuse;
 use inillucent_base::DbResult;
 use inillucent_pool::Pool;
-use inillucent_sql::ast::{BinaryOp, NullOrder, PatternOp, SortOrder};
+use inillucent_sql::ast::{BinaryOp, NullOrder, PatternOp, SortOrder, UnaryOp};
 use inillucent_sql::bind::{BoundExpr, BoundSelect};
 use inillucent_sql::function::{AggregateFunc, ScalarFunc};
 use inillucent_sql::plan::{AccessPath, AggregationMode, BoundKind, PhysicalPlan, RangeBound};
@@ -55,6 +55,7 @@ use inillucent_value::affinity::Affinity;
 use inillucent_value::collation::Collation;
 
 use crate::aggregate::AggregateKind;
+use crate::batch::Batch;
 use crate::expr::{compile, ArithOp, CompareOp, Expr, StaticType};
 use crate::join::{IndexNestedLoopJoin, JoinKind};
 use crate::ops::{
@@ -324,6 +325,15 @@ pub enum AccessKind {
     Point,
     /// A probe of this tree once per row of the stage before it.
     Nested,
+    /// The rows a nested query produced, materialised once before the pipeline
+    /// runs.
+    ///
+    /// A `FROM (SELECT ...)` term reads no tree, so this stage's `root` names
+    /// nothing and its layout is carried on the stage rather than looked up.
+    /// Materialising rather than streaming is what a push executor can do
+    /// without a coroutine: the inner pipeline runs to completion into a buffer
+    /// and the buffer drives the outer one.
+    Materialised,
 }
 
 impl AccessKind {
@@ -336,6 +346,7 @@ impl AccessKind {
             AccessKind::Skip => "SKIP SCAN",
             AccessKind::Point => "POINT PROBE",
             AccessKind::Nested => "INDEX NESTED LOOP",
+            AccessKind::Materialised => "SCAN SUBQUERY",
         }
     }
 }
@@ -347,14 +358,36 @@ pub struct PreparedStage {
     pub root: u32,
     /// How it reads it.
     pub kind: AccessKind,
-    /// Which planner FROM term this stage belongs to.
+    /// The **statement-wide** id every bound expression refers to this FROM
+    /// term by.
+    ///
+    /// Not its position in `plan.sources`, and the two are different exactly
+    /// when the planner reorders the join - which is the case this got wrong.
+    /// A bound `Column { source, slot }` carries the binder's id, so matching it
+    /// against a position silently resolved every column of a reordered join to
+    /// the wrong stage: `SELECT people.name, teams.region FROM people JOIN
+    /// teams` returned no rows while `FROM teams JOIN people` returned the
+    /// right nine, because only the second one has position equal to id.
     pub source: usize,
+    /// This stage's position in `plan.sources`, which is the visit order.
+    ///
+    /// The other half of the same distinction: the *plan's* own arrays are
+    /// indexed by visit order, so a stage needs both numbers and conflating
+    /// them is a wrong answer rather than an error.
+    pub term: usize,
     /// Whether this stage is the table fetch behind a non-covering index seek.
     pub is_lookup: bool,
     /// The first column index this stage contributes to the joined row.
     pub offset: usize,
     /// How many columns it contributes.
     pub width: usize,
+    /// The layout of a stage that reads no tree.
+    ///
+    /// `None` for every stage that reads one, whose layout the catalog holds.
+    /// A materialised subquery has no entry in the catalog to hold it, and
+    /// synthesising one *here* rather than registering it in the catalog is
+    /// what keeps the catalog a description of the file.
+    pub layout: Option<SourceLayout>,
 }
 
 /// What a statement's physical choices are, decided once.
@@ -444,6 +477,20 @@ pub enum Source<'t> {
     Skip(SkipScan<'t>),
     /// One row by key.
     Point(PointProbe<'t>, Vec<OwnedDatum>),
+    /// Rows a nested query produced, already materialised.
+    Rows(Vec<Vec<OwnedDatum>>),
+    /// A fixed number of rows of no columns at all.
+    ///
+    /// What drives `SELECT 1`, `SELECT date('now')` and every other query with
+    /// no FROM term: there is exactly one row, it has no columns, and the whole
+    /// answer comes out of the projection's constant expressions. A batch of one
+    /// row and zero vectors is a perfectly ordinary batch - `Batch::live`
+    /// returns the row count and every consumer's fast path is over the columns
+    /// it was asked for, of which there are none.
+    ///
+    /// The Phase 2 pass refused these, and nineteen of the read-only SLT
+    /// corpus's thirty-seven refusals were exactly this shape.
+    Constant(usize),
 }
 
 impl Source<'_> {
@@ -477,6 +524,17 @@ impl Source<'_> {
                 };
                 probe.run(pool, borrowed, downstream)
             }
+            Source::Rows(rows) => {
+                crate::ops::emit_rows(rows, downstream)?;
+                downstream.finish()
+            }
+            Source::Constant(rows) => {
+                if *rows > 0 {
+                    let batch = Batch::new(*rows, Vec::new());
+                    downstream.push(&batch)?;
+                }
+                downstream.finish()
+            }
         }
     }
 
@@ -488,6 +546,8 @@ impl Source<'_> {
             Source::Reverse(_) => "RANGE REVERSE",
             Source::Skip(_) => "SKIP SCAN",
             Source::Point(_, _) => "POINT PROBE",
+            Source::Rows(_) => "SCAN SUBQUERY",
+            Source::Constant(_) => "CONSTANT ROW",
         }
     }
 }
@@ -668,14 +728,40 @@ fn plan_stages(
     if !plan.compounds.is_empty() {
         return unsupported("a compound query");
     }
-    if plan.sources.is_empty() {
-        return unsupported("a query with no FROM term");
-    }
+    // A query with no FROM term produces no stages at all, and that is a legal
+    // plan rather than a refusal: `SELECT 1` reads no tree, so there is nothing
+    // for a stage to describe. Every function below already loops over the
+    // stages rather than indexing the first, except the two that build the
+    // source and the space - and both now have an empty case.
     let mut stages: Vec<PreparedStage> = Vec::new();
     let mut offset = 0usize;
     let sensitive = order_sensitive(&plan.select);
     for (position, source) in plan.sources.iter().enumerate() {
         let outermost = position == 0;
+        // **An outer join is refused rather than answered as an inner one.**
+        //
+        // The physical pass never looked at the join kind and always built
+        // `JoinKind::Inner`, so a `LEFT JOIN` silently dropped the outer rows
+        // that matched nothing. That was unreachable while every such query was
+        // refused for another reason, and the moment a keyless inner term became
+        // runnable the differential corpus produced it: `SELECT people.team FROM
+        // people LEFT JOIN teams ON ...` answered six rows as four nulls.
+        //
+        // Doing it properly needs the `ON` condition evaluated per candidate
+        // pair - an index nested loop assumes the key equality *is* the
+        // condition - which is a real operator rather than a flag, and it is not
+        // in this phase's scope. A named refusal is the honest state until it
+        // is: the corpus reports it, and nobody gets a wrong answer meanwhile.
+        if !outermost
+            && matches!(
+                source.join,
+                inillucent_sql::ast::JoinKind::Left
+                    | inillucent_sql::ast::JoinKind::Right
+                    | inillucent_sql::ast::JoinKind::Full
+            )
+        {
+            return unsupported("an outer join");
+        }
         match &source.path {
             AccessPath::TableScan { root } => {
                 let root = if outermost {
@@ -690,12 +776,16 @@ fn plan_stages(
                     if outermost {
                         AccessKind::Full
                     } else {
-                        // An inner term with no usable index is a nested loop
-                        // over every row, which the builder refuses rather than
-                        // running: it is a cross product with a residual, and
-                        // the shapes Phase 2 must answer never produce one.
-                        return unsupported("a join whose inner term has no index");
+                        // An inner term with no usable index is a cross
+                        // product: every inner row pairs with every outer one,
+                        // and any predicate over the pair is a residual. Phase 2
+                        // refused it because the read families never produce
+                        // one; the corpora do - `SELECT count(*) FROM people
+                        // CROSS JOIN teams` - and refusing a shape the engine
+                        // can answer is a gap rather than a policy.
+                        AccessKind::Nested
                     },
+                    source.id,
                     position,
                     false,
                     &mut offset,
@@ -711,6 +801,7 @@ fn plan_stages(
                     } else {
                         AccessKind::Nested
                     },
+                    source.id,
                     position,
                     false,
                     &mut offset,
@@ -729,6 +820,7 @@ fn plan_stages(
                     catalog,
                     *root,
                     kind,
+                    source.id,
                     position,
                     false,
                     &mut offset,
@@ -763,6 +855,7 @@ fn plan_stages(
                         catalog,
                         *table_root,
                         AccessKind::Full,
+                        source.id,
                         position,
                         false,
                         &mut offset,
@@ -785,11 +878,19 @@ fn plan_stages(
                     catalog,
                     *index_root,
                     kind,
+                    source.id,
                     position,
                     false,
                     &mut offset,
                 )?;
-                if covering.is_none() {
+                // A `WITHOUT ROWID` table's primary-key index *is* the table:
+                // one b-tree, reported at the table's own root page. So it
+                // carries every column by construction and there is no rowid to
+                // look anything up by - which is exactly what the lookup stage
+                // below tried to do, five times over in the differential
+                // corpus, with "the index entry carries no rowid".
+                let is_the_table = *index_root == *table_root;
+                if covering.is_none() && !is_the_table {
                     // The index does not carry every column the query reads, so
                     // the row is fetched from the table by rowid. That is the
                     // TDD's `RowidLookup`, expressed as what it is: a nested
@@ -799,13 +900,51 @@ fn plan_stages(
                         catalog,
                         *table_root,
                         AccessKind::Nested,
+                        source.id,
                         position,
                         true,
                         &mut offset,
                     )?;
                 }
             }
-            AccessPath::Subquery { .. } => return unsupported("a subquery source"),
+            AccessPath::Subquery {
+                width, correlated, ..
+            } => {
+                if !outermost {
+                    // An inner subquery has to be rebuilt or rescanned once per
+                    // outer row, which is a nested loop over a materialised
+                    // buffer rather than over a tree. Refusing it is honest;
+                    // the outermost case below is the one the corpus needs.
+                    return unsupported("a subquery as an inner join term");
+                }
+                if *correlated {
+                    // A correlated subquery reads a FROM term outside itself,
+                    // and the outermost term has nothing outside it - so this
+                    // is a plan that should not exist rather than one to run.
+                    return unsupported("a correlated subquery as the outermost term");
+                }
+                stages.push(PreparedStage {
+                    root: 0,
+                    kind: AccessKind::Materialised,
+                    source: source.id,
+                    term: position,
+                    is_lookup: false,
+                    offset,
+                    width: *width,
+                    // A materialised row is its own record: slot `i` is column
+                    // `i`, there is no rowid, and nothing is known about the
+                    // order - so no streaming rule may assume one.
+                    layout: Some(SourceLayout {
+                        tree_key: 0,
+                        slots: (0..*width).map(Some).collect(),
+                        rowid: None,
+                        types: vec![StaticType::Unknown; *width],
+                        width: *width,
+                        key_columns: Vec::new(),
+                    }),
+                });
+                offset = offset.saturating_add(*width);
+            }
             AccessPath::Recursive { .. } | AccessPath::RecursiveSelf { .. } => {
                 return unsupported("a recursive CTE")
             }
@@ -831,6 +970,7 @@ fn push_stage(
     root: u32,
     kind: AccessKind,
     source: usize,
+    term: usize,
     is_lookup: bool,
     offset: &mut usize,
 ) -> DbResult<()> {
@@ -841,9 +981,11 @@ fn push_stage(
         root,
         kind,
         source,
+        term,
         is_lookup,
         offset: *offset,
         width: layout.width,
+        layout: None,
     });
     *offset = offset.saturating_add(layout.width);
     Ok(())
@@ -855,15 +997,6 @@ fn push_stage(
 fn refuse_unhandled(select: &BoundSelect) -> DbResult<()> {
     if !select.windows.is_empty() {
         return unsupported("a window function");
-    }
-    if !select.values.is_empty() {
-        return unsupported("a VALUES arm");
-    }
-    if select.having.is_some() {
-        return unsupported("HAVING");
-    }
-    if select.aggregates.iter().any(|call| call.distinct) {
-        return unsupported("an aggregate with DISTINCT");
     }
     Ok(())
 }
@@ -880,7 +1013,7 @@ struct Space<'c> {
     /// The stages, in order.
     stages: &'c [PreparedStage],
     /// Each stage's layout.
-    layouts: &'c [&'c SourceLayout],
+    layouts: &'c [SourceLayout],
     /// The static type of every column of the joined row.
     types: &'c [StaticType],
     /// The tree columns the *joined* rows arrive sorted by, when they do.
@@ -966,17 +1099,9 @@ pub fn build_prepared<'t>(
     let held = space_of(catalog, prepared)?;
     let space = held.view(&prepared.stages);
     let chain = build_chain(plan, catalog, prepared, &space, params, sink)?;
-    let head_stage = prepared
-        .stages
-        .first()
-        .ok_or_else(|| misuse("a plan with no stages"))?;
-    let source = build_source(plan, catalog, &space, params, head_stage, chain.limit)?;
+    let (source, description) = source_for(plan, catalog, &space, params, prepared, chain.limit)?;
     let mut operators = chain.operators;
-    operators.push(format!(
-        "{} tree {}",
-        head_stage.kind.describe(),
-        head_stage.root
-    ));
+    operators.push(description);
     operators.reverse();
     Ok((
         Pipeline {
@@ -997,16 +1122,22 @@ pub fn build_prepared<'t>(
 /// a view of it on every execution: none of it depends on the bound parameters,
 /// so re-deriving it per execution would be three allocations spent to arrive
 /// at the same answer.
-struct HeldSpace<'c> {
+struct HeldSpace {
     /// Each stage's layout.
-    layouts: Vec<&'c SourceLayout>,
+    ///
+    /// Owned rather than borrowed from the catalog, because a materialised
+    /// subquery's layout is synthesised on its stage and there is nothing in the
+    /// catalog to borrow it from - and a `Statement` owns both its `Prepared`
+    /// and its space, which a borrow between them would make self-referential.
+    /// It is built once per prepare and never per execution.
+    layouts: Vec<SourceLayout>,
     /// The static type of every column of the joined row.
     types: Vec<StaticType>,
     /// The tree columns the joined rows arrive sorted by, when they do.
     order: Vec<usize>,
 }
 
-impl<'c> HeldSpace<'c> {
+impl HeldSpace {
     /// Returns a view of this space over a statement's stages.
     ///
     /// @param stages - the prepared stages, outermost first
@@ -1024,13 +1155,17 @@ impl<'c> HeldSpace<'c> {
 ///
 /// @param catalog - where the layouts come from
 /// @param prepared - the structural choices [`prepare`] made
-fn space_of<'c>(catalog: &'c dyn TreeCatalog, prepared: &Prepared) -> DbResult<HeldSpace<'c>> {
+fn space_of(catalog: &dyn TreeCatalog, prepared: &Prepared) -> DbResult<HeldSpace> {
     let mut layouts = Vec::with_capacity(prepared.stages.len());
     let mut types: Vec<StaticType> = Vec::new();
     for stage in &prepared.stages {
-        let layout = catalog
-            .layout(stage.root)
-            .ok_or_else(|| misuse(format!("no layout imported for root page {}", stage.root)))?;
+        let layout = match &stage.layout {
+            Some(held) => held,
+            None => catalog.layout(stage.root).ok_or_else(|| {
+                misuse(format!("no layout imported for root page {}", stage.root))
+            })?,
+        }
+        .clone();
         types.extend(layout.types.iter().copied());
         layouts.push(layout);
     }
@@ -1281,6 +1416,20 @@ fn build_chain<'t>(
     chain = Box::new(Project::new(compiled_projection, chain));
     operators.push("PROJECT".to_string());
 
+    // `HAVING` filters *groups*, so it sits between the aggregate and the
+    // projection: it reads accumulators and `GROUP BY` keys, which is the same
+    // space a result column reads, and it runs before the projection throws
+    // away the columns it needs. Building it here rather than beside the
+    // `WHERE` filters is the whole of the difference between the two clauses.
+    if let Some(having) = &select.having {
+        let translated = translate_post(having, select, &space, params, group_width)?;
+        chain = Box::new(Filter::new(
+            compile(&translated, &projection_input_types)?,
+            chain,
+        ));
+        operators.push("FILTER HAVING".to_string());
+    }
+
     match plan.aggregation {
         AggregationMode::None => {}
         AggregationMode::Whole => {
@@ -1407,7 +1556,7 @@ pub struct Statement<'t> {
     /// The structural choices, owned so the statement is self-contained.
     prepared: Prepared,
     /// The layouts and types, computed once.
-    held: HeldSpace<'t>,
+    held: HeldSpace,
     /// The operator chain, built once.
     head: Box<dyn Sink + 't>,
     /// The pool the source's pages live in.
@@ -1442,12 +1591,15 @@ impl<'t> Statement<'t> {
         }
         let source = {
             let space = self.held.view(&self.prepared.stages);
-            let stage = self
-                .prepared
-                .stages
-                .first()
-                .ok_or_else(|| misuse("a plan with no stages"))?;
-            build_source(self.plan, self.catalog, &space, params, stage, self.limit)?
+            source_for(
+                self.plan,
+                self.catalog,
+                &space,
+                params,
+                &self.prepared,
+                self.limit,
+            )?
+            .0
         };
         self.head.reset()?;
         source.run(self.pool, self.head.as_mut())
@@ -1480,15 +1632,7 @@ pub fn build_statement<'t>(
     };
     let rebindable = params.reads() == before;
     let mut operators = chain.operators;
-    let head_stage = prepared
-        .stages
-        .first()
-        .ok_or_else(|| misuse("a plan with no stages"))?;
-    operators.push(format!(
-        "{} tree {}",
-        head_stage.kind.describe(),
-        head_stage.root
-    ));
+    operators.push(describe_source(&prepared));
     operators.reverse();
     let names = chain.names;
     Ok(Statement {
@@ -1502,6 +1646,83 @@ pub fn build_statement<'t>(
         shape: Shape { names, operators },
         rebindable,
     })
+}
+
+/// Returns what drives a pipeline, and the line `EXPLAIN` prints for it.
+///
+/// The one place that decides, so the three callers - a one-shot run, a reused
+/// statement's rebuild, and a statement's construction - cannot disagree about a
+/// plan with no stages.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees come from
+/// @param space - the joined column space
+/// @param params - the bound parameters
+/// @param prepared - the structural choices `prepare` made
+/// @param limit - the statement's `LIMIT`, when it has a constant one
+fn source_for<'t>(
+    plan: &PhysicalPlan,
+    catalog: &'t dyn TreeCatalog,
+    space: &Space<'_>,
+    params: &Params,
+    prepared: &Prepared,
+    limit: Option<usize>,
+) -> DbResult<(Source<'t>, String)> {
+    match prepared.stages.first() {
+        // A materialised subquery: the inner pipeline runs to completion into a
+        // buffer, and the buffer drives the outer one. It is built here rather
+        // than in `build_source` because it needs the plan and the catalog
+        // rather than a tree.
+        Some(stage) if stage.kind == AccessKind::Materialised => {
+            let term = plan
+                .sources
+                .get(stage.term)
+                .ok_or_else(|| misuse("a stage names a FROM term the plan does not have"))?;
+            let AccessPath::Subquery { plan: inner, .. } = &term.path else {
+                return Err(misuse("a materialised stage over something else"));
+            };
+            let sub = prepare(inner, catalog, ForcePlan::default())?;
+            let (rows, _) = run_prepared(inner, catalog, &sub, params)?;
+            Ok((Source::Rows(rows), describe_source(prepared)))
+        }
+        Some(stage) => Ok((
+            build_source(plan, catalog, space, params, stage, limit)?,
+            describe_source(prepared),
+        )),
+        // A `VALUES` arm has no FROM term either, and its rows *are* its
+        // answer: every expression is a constant, so they are evaluated once
+        // here rather than projected out of an empty row.
+        None if !plan.select.values.is_empty() => {
+            let empty = Space {
+                stages: &[],
+                layouts: &[],
+                types: &[],
+                order: &[],
+            };
+            let mut rows: Vec<Vec<OwnedDatum>> = Vec::with_capacity(plan.select.values.len());
+            for row in &plan.select.values {
+                let mut out = Vec::with_capacity(row.len());
+                for expr in row {
+                    out.push(constant_value(expr, &empty, params, None)?);
+                }
+                rows.push(out);
+            }
+            Ok((Source::Rows(rows), "SCAN VALUES".to_string()))
+        }
+        // A query with no FROM term: one row of no columns, and the whole
+        // answer comes out of the projection.
+        None => Ok((Source::Constant(1), describe_source(prepared))),
+    }
+}
+
+/// Returns the `EXPLAIN` line for whatever drives a plan.
+///
+/// @param prepared - the structural choices `prepare` made
+fn describe_source(prepared: &Prepared) -> String {
+    match prepared.stages.first() {
+        Some(stage) => format!("{} tree {}", stage.kind.describe(), stage.root),
+        None => "SCAN CONSTANT ROW".to_string(),
+    }
 }
 
 /// Builds the driving source for the outermost stage.
@@ -1526,7 +1747,7 @@ fn build_source<'t>(
     let projection = Projection::all(stage.width);
     let source_term = plan
         .sources
-        .get(stage.source)
+        .get(stage.term)
         .ok_or_else(|| misuse("a stage names a FROM term the plan does not have"))?;
     let path = &source_term.path;
     let table = &source_term.table;
@@ -1562,6 +1783,13 @@ fn build_source<'t>(
             )))
         }
         AccessKind::Nested => Err(misuse("a nested stage cannot drive a pipeline")),
+        // Unreachable: `source_for` answers a materialised stage before it gets
+        // here, because building one needs the plan and the catalog rather than
+        // a tree. Stated rather than folded into the arm above, so that a stage
+        // kind added later is a compile error.
+        AccessKind::Materialised => Err(misuse(
+            "a materialised stage is built by `source_for`, not from a tree",
+        )),
     }
 }
 
@@ -1613,7 +1841,7 @@ fn build_nested<'t>(
     } else {
         let source_term = plan
             .sources
-            .get(stage.source)
+            .get(stage.term)
             .ok_or_else(|| misuse("a stage names a FROM term the plan does not have"))?;
         nested_key(&source_term.path, &source_term.table, space, params)?
     };
@@ -1659,6 +1887,9 @@ fn nested_key(
             ..
         } => {
             if equalities.is_empty() {
+                // An index seek with a bound but no equality is a *range* over
+                // the inner tree, not a cross product - reading it as one would
+                // drop the bound and pair every row with every row.
                 return unsupported("a join whose inner index seek has no equality");
             }
             if low.is_some() || high.is_some() {
@@ -1675,6 +1906,9 @@ fn nested_key(
             // entry sharing it.
             Ok((keys, false))
         }
+        // A table scan as an inner term is a cross product, and the join reads
+        // an empty key list as exactly that.
+        AccessPath::TableScan { .. } => Ok((Vec::new(), false)),
         _ => unsupported("that inner access path in a join"),
     }
 }
@@ -1936,6 +2170,25 @@ fn fold(expr: &Expr) -> Option<OwnedDatum> {
                 }
             }
         }
+        // A unary operator over a constant, which is what a negative literal
+        // is: `WHERE id = -3` and `LIMIT -1` both bind as a negation of a
+        // literal rather than as a literal, and both were refused as "reads a
+        // column" - a message that named the wrong thing entirely.
+        //
+        // The value comes from `inillucent_scalar::eval`, which is where the
+        // executor's own unary operators get theirs. A second implementation
+        // here would agree with that one until the first time somebody fixed a
+        // rounding rule in one of them.
+        Expr::Unary { op, operand } => {
+            let value = crate::scalar::to_value(fold(operand)?.borrow());
+            let answer = match op {
+                UnaryOp::Negate => inillucent_scalar::eval::negate(&value),
+                UnaryOp::Identity => value,
+                UnaryOp::BitNot => inillucent_scalar::eval::bit_not(&value),
+                UnaryOp::Not => inillucent_scalar::eval::logical_not(&value),
+            };
+            Some(crate::scalar::from_value(answer))
+        }
         _ => None,
     }
 }
@@ -2096,7 +2349,69 @@ pub fn run_prepared(
 /// @param expr - the bound expression
 /// @param space - the joined column space
 /// @param params - the bound parameters
+/// How a bound expression's leaves are resolved.
+///
+/// The same expression means different things above and below an aggregate: a
+/// `GROUP BY` key is a scan column on one side of the operator and output column
+/// zero on the other. Making that a *parameter* of one traversal rather than two
+/// traversals is what keeps the two from drifting - which they had, by twenty-odd
+/// node kinds.
+#[derive(Clone, Copy)]
+enum Frame<'a> {
+    /// Reading the scan's own columns.
+    Scan,
+    /// Reading the row an aggregate emitted: the keys, then the accumulators.
+    Post {
+        /// The bound statement, for the aggregate and `GROUP BY` lists.
+        select: &'a BoundSelect,
+        /// How many `GROUP BY` keys precede the accumulators.
+        group_width: usize,
+    },
+}
+
+/// Translates a bound expression that reads the scan's columns.
+///
+/// @param expr - the bound expression
+/// @param space - the joined column space
+/// @param params - the bound parameters
 fn translate_scan(expr: &BoundExpr, space: &Space<'_>, params: &Params) -> DbResult<Expr> {
+    translate(expr, space, params, Frame::Scan)
+}
+
+fn translate(
+    expr: &BoundExpr,
+    space: &Space<'_>,
+    params: &Params,
+    frame: Frame<'_>,
+) -> DbResult<Expr> {
+    // The leaves, which are the only thing the two frames disagree about. Every
+    // node below this point recurses with the same frame, which is what makes
+    // this one traversal rather than two that have to be kept in step - and
+    // keeping them in step is exactly what failed: the post-aggregation copy
+    // handled six node kinds and refused the rest, so `length(group_concat(x))`
+    // was "a function call outside an aggregate" and `HAVING` had nowhere to be
+    // translated at all.
+    if let Frame::Post {
+        select,
+        group_width,
+    } = frame
+    {
+        if let BoundExpr::Aggregate { slot } = expr {
+            return Ok(Expr::Column(group_width.saturating_add(*slot)));
+        }
+        if let Some(position) = select.group_by.iter().position(|key| key == expr) {
+            return Ok(Expr::Column(position));
+        }
+        // A column read outside an aggregate in a grouped query is what SQLite
+        // calls a "bare column", and it answers with an arbitrary row of the
+        // group. Refusing is the honest thing to do rather than picking one.
+        if matches!(expr, BoundExpr::Column { .. } | BoundExpr::Rowid { .. }) {
+            return unsupported(&format!(
+                "the expression {} outside an aggregate",
+                name_of(expr)
+            ));
+        }
+    }
     Ok(match expr {
         BoundExpr::Null => Expr::Literal(OwnedDatum::Null),
         BoundExpr::Integer(number) => Expr::Literal(OwnedDatum::Int(*number)),
@@ -2117,9 +2432,14 @@ fn translate_scan(expr: &BoundExpr, space: &Space<'_>, params: &Params) -> DbRes
                 .rowid(*source)
                 .ok_or_else(|| misuse("the tree read does not carry a rowid"))?,
         ),
-        BoundExpr::Not(operand) => Expr::Not(Box::new(translate_scan(operand, space, params)?)),
+        // "Column n of the row at this point", which is what the binder gives a
+        // `VALUES` arm's result columns and an `ORDER BY` written as an
+        // ordinal. It is already an index rather than a name, so there is
+        // nothing to resolve.
+        BoundExpr::SorterColumn { column } => Expr::Column(usize::from(*column)),
+        BoundExpr::Not(operand) => Expr::Not(Box::new(translate(operand, space, params, frame)?)),
         BoundExpr::IsNull { operand, negated } => {
-            let inner = Box::new(translate_scan(operand, space, params)?);
+            let inner = Box::new(translate(operand, space, params, frame)?);
             if *negated {
                 Expr::IsNotNull(inner)
             } else {
@@ -2127,16 +2447,16 @@ fn translate_scan(expr: &BoundExpr, space: &Space<'_>, params: &Params) -> DbRes
             }
         }
         BoundExpr::And(left, right) => Expr::And(
-            Box::new(translate_scan(left, space, params)?),
-            Box::new(translate_scan(right, space, params)?),
+            Box::new(translate(left, space, params, frame)?),
+            Box::new(translate(right, space, params, frame)?),
         ),
         BoundExpr::Or(left, right) => Expr::Or(
-            Box::new(translate_scan(left, space, params)?),
-            Box::new(translate_scan(right, space, params)?),
+            Box::new(translate(left, space, params, frame)?),
+            Box::new(translate(right, space, params, frame)?),
         ),
         BoundExpr::Arithmetic { op, left, right } => {
-            let left = Box::new(translate_scan(left, space, params)?);
-            let right = Box::new(translate_scan(right, space, params)?);
+            let left = Box::new(translate(left, space, params, frame)?);
+            let right = Box::new(translate(right, space, params, frame)?);
             // `+`, `-` and `*` have a specialised integer node; everything else
             // - divide, modulo, concatenation, the bitwise operators - goes
             // through the shared implementation.
@@ -2162,8 +2482,8 @@ fn translate_scan(expr: &BoundExpr, space: &Space<'_>, params: &Params) -> DbRes
             // form is kept for the case where there is nothing to apply,
             // because it is the fast path and most comparisons are it.
             let op = compare_op(*op)?;
-            let left = Box::new(translate_scan(left, space, params)?);
-            let right = Box::new(translate_scan(right, space, params)?);
+            let left = Box::new(translate(left, space, params, frame)?);
+            let right = Box::new(translate(right, space, params, frame)?);
             if affinity.is_none() && *collation == inillucent_value::collation::Collation::Binary {
                 Expr::Compare(op, left, right)
             } else {
@@ -2178,13 +2498,13 @@ fn translate_scan(expr: &BoundExpr, space: &Space<'_>, params: &Params) -> DbRes
         }
         BoundExpr::Unary { op, operand } => Expr::Unary {
             op: *op,
-            operand: Box::new(translate_scan(operand, space, params)?),
+            operand: Box::new(translate(operand, space, params, frame)?),
         },
         BoundExpr::Cast { operand, affinity } => Expr::Cast {
-            operand: Box::new(translate_scan(operand, space, params)?),
+            operand: Box::new(translate(operand, space, params, frame)?),
             affinity: *affinity,
         },
-        BoundExpr::Collate { operand, .. } => translate_scan(operand, space, params)?,
+        BoundExpr::Collate { operand, .. } => translate(operand, space, params, frame)?,
         BoundExpr::Is {
             negated,
             left,
@@ -2193,8 +2513,8 @@ fn translate_scan(expr: &BoundExpr, space: &Space<'_>, params: &Params) -> DbRes
             collation,
         } => Expr::Is {
             negated: *negated,
-            left: Box::new(translate_scan(left, space, params)?),
-            right: Box::new(translate_scan(right, space, params)?),
+            left: Box::new(translate(left, space, params, frame)?),
+            right: Box::new(translate(right, space, params, frame)?),
             affinity: *affinity,
             collation: *collation,
         },
@@ -2207,9 +2527,9 @@ fn translate_scan(expr: &BoundExpr, space: &Space<'_>, params: &Params) -> DbRes
             collation,
         } => Expr::Between {
             negated: *negated,
-            operand: Box::new(translate_scan(operand, space, params)?),
-            low: Box::new(translate_scan(low, space, params)?),
-            high: Box::new(translate_scan(high, space, params)?),
+            operand: Box::new(translate(operand, space, params, frame)?),
+            low: Box::new(translate(low, space, params, frame)?),
+            high: Box::new(translate(high, space, params, frame)?),
             affinity: *affinity,
             collation: *collation,
         },
@@ -2221,10 +2541,10 @@ fn translate_scan(expr: &BoundExpr, space: &Space<'_>, params: &Params) -> DbRes
             collation,
         } => Expr::InList {
             negated: *negated,
-            operand: Box::new(translate_scan(operand, space, params)?),
+            operand: Box::new(translate(operand, space, params, frame)?),
             list: list
                 .iter()
-                .map(|expr| translate_scan(expr, space, params))
+                .map(|expr| translate(expr, space, params, frame))
                 .collect::<DbResult<Vec<Expr>>>()?,
             affinity: *affinity,
             collation: *collation,
@@ -2238,18 +2558,18 @@ fn translate_scan(expr: &BoundExpr, space: &Space<'_>, params: &Params) -> DbRes
             let mut translated = Vec::with_capacity(branches.len());
             for (when, then) in branches {
                 translated.push((
-                    translate_scan(when, space, params)?,
-                    translate_scan(then, space, params)?,
+                    translate(when, space, params, frame)?,
+                    translate(then, space, params, frame)?,
                 ));
             }
             Expr::Case {
                 operand: match operand {
-                    Some(operand) => Some(Box::new(translate_scan(operand, space, params)?)),
+                    Some(operand) => Some(Box::new(translate(operand, space, params, frame)?)),
                     None => None,
                 },
                 branches: translated,
                 otherwise: match otherwise {
-                    Some(otherwise) => Some(Box::new(translate_scan(otherwise, space, params)?)),
+                    Some(otherwise) => Some(Box::new(translate(otherwise, space, params, frame)?)),
                     None => None,
                 },
                 collation: *collation,
@@ -2274,10 +2594,10 @@ fn translate_scan(expr: &BoundExpr, space: &Space<'_>, params: &Params) -> DbRes
             Expr::Pattern {
                 negated: *negated,
                 kind,
-                operand: Box::new(translate_scan(operand, space, params)?),
-                pattern: Box::new(translate_scan(pattern, space, params)?),
+                operand: Box::new(translate(operand, space, params, frame)?),
+                pattern: Box::new(translate(pattern, space, params, frame)?),
                 escape: match escape {
-                    Some(escape) => Some(Box::new(translate_scan(escape, space, params)?)),
+                    Some(escape) => Some(Box::new(translate(escape, space, params, frame)?)),
                     None => None,
                 },
             }
@@ -2292,7 +2612,7 @@ fn translate_scan(expr: &BoundExpr, space: &Space<'_>, params: &Params) -> DbRes
             // and `range.lookaside` calls it once per row.
             let translated = arguments
                 .iter()
-                .map(|expr| translate_scan(expr, space, params))
+                .map(|expr| translate(expr, space, params, frame))
                 .collect::<DbResult<Vec<Expr>>>()?;
             if *func == ScalarFunc::Length && translated.len() == 1 {
                 match translated.into_iter().next() {
@@ -2311,14 +2631,14 @@ fn translate_scan(expr: &BoundExpr, space: &Space<'_>, params: &Params) -> DbRes
             func: *func,
             arguments: arguments
                 .iter()
-                .map(|expr| translate_scan(expr, space, params))
+                .map(|expr| translate(expr, space, params, frame))
                 .collect::<DbResult<Vec<Expr>>>()?,
         },
         BoundExpr::Time { func, arguments } => Expr::Time {
             func: *func,
             arguments: arguments
                 .iter()
-                .map(|expr| translate_scan(expr, space, params))
+                .map(|expr| translate(expr, space, params, frame))
                 .collect::<DbResult<Vec<Expr>>>()?,
             // Every `now` in one statement is the same instant, which is
             // SQLite's rule and the reason this is read once here rather than
@@ -2335,6 +2655,12 @@ fn translate_scan(expr: &BoundExpr, space: &Space<'_>, params: &Params) -> DbRes
 /// accumulator, and both are columns of the row the aggregate operator emits:
 /// the keys first, then the accumulators.
 ///
+/// It is [`translate`] with a different frame rather than a second traversal,
+/// and that is the point: the old copy handled six node kinds and refused
+/// everything else, so `SELECT length(group_concat(name)) ... GROUP BY team` was
+/// "a function call outside an aggregate" - a refusal about the *shape* of a
+/// query the engine can perfectly well answer.
+///
 /// @param expr - the bound expression
 /// @param select - the bound statement, for the aggregate list
 /// @param space - the joined column space
@@ -2350,57 +2676,15 @@ fn translate_post(
     if select.aggregates.is_empty() {
         return translate_scan(expr, space, params);
     }
-    if let BoundExpr::Aggregate { slot } = expr {
-        return Ok(Expr::Column(group_width.saturating_add(*slot)));
-    }
-    if let Some(position) = select.group_by.iter().position(|key| key == expr) {
-        return Ok(Expr::Column(position));
-    }
-    match expr {
-        BoundExpr::Null
-        | BoundExpr::Integer(_)
-        | BoundExpr::Real(_)
-        | BoundExpr::Text(_)
-        | BoundExpr::Blob(_)
-        | BoundExpr::Parameter(_) => translate_scan(expr, space, params),
-        BoundExpr::Arithmetic { op, left, right } => Ok(Expr::Arith(
-            arith_op(*op)?,
-            Box::new(translate_post(left, select, space, params, group_width)?),
-            Box::new(translate_post(right, select, space, params, group_width)?),
-        )),
-        BoundExpr::Compare {
-            op,
-            left,
-            right,
-            affinity,
-            collation,
-        } => {
-            let op = compare_op(*op)?;
-            let left = Box::new(translate_post(left, select, space, params, group_width)?);
-            let right = Box::new(translate_post(right, select, space, params, group_width)?);
-            if affinity.is_none() && *collation == inillucent_value::collation::Collation::Binary {
-                Ok(Expr::Compare(op, left, right))
-            } else {
-                Ok(Expr::CompareWith {
-                    op,
-                    affinity: *affinity,
-                    collation: *collation,
-                    left,
-                    right,
-                })
-            }
-        }
-        // Anything else is an expression over the scan's columns, which is
-        // legal only when the statement does not aggregate - and it does, or
-        // this function would have returned at the top. A column read outside
-        // an aggregate in a grouped query is what SQLite calls a "bare column",
-        // and it answers with an arbitrary row of the group. Refusing is the
-        // honest thing to do rather than picking one.
-        other => unsupported(&format!(
-            "the expression {} outside an aggregate",
-            name_of(other)
-        )),
-    }
+    translate(
+        expr,
+        space,
+        params,
+        Frame::Post {
+            select,
+            group_width,
+        },
+    )
 }
 
 /// Returns the static type of each column an aggregate operator emits.
@@ -2488,7 +2772,24 @@ fn aggregate_specs(
                 Some(compile(&translated, types)?)
             }
         };
-        specs.push(AggregateSpec { kind, argument });
+        // `count(DISTINCT x)` compares its values under the collation `x`
+        // carries, which is the same rule `SELECT DISTINCT x` follows - and
+        // over the corpus's `NOCASE` team column the two have to agree.
+        let distinct = if call.distinct {
+            Some(
+                call.arguments
+                    .first()
+                    .map(expression_collation)
+                    .unwrap_or(Collation::Binary),
+            )
+        } else {
+            None
+        };
+        specs.push(AggregateSpec {
+            kind,
+            argument,
+            distinct,
+        });
     }
     Ok(specs)
 }
@@ -2508,7 +2809,7 @@ fn trim(width: usize, types: &[StaticType]) -> DbResult<Vec<Box<dyn crate::expr:
 /// @param select - the bound statement
 /// @param params - the bound parameters
 fn constant_limit(select: &BoundSelect, params: &Params) -> DbResult<Option<usize>> {
-    constant_count(select.limit.as_ref(), params)
+    constant_count(select.limit.as_ref(), params, Negative::NoLimit)
 }
 
 /// Returns the statement's `OFFSET`, when it is a constant.
@@ -2516,24 +2817,60 @@ fn constant_limit(select: &BoundSelect, params: &Params) -> DbResult<Option<usiz
 /// @param select - the bound statement
 /// @param params - the bound parameters
 fn constant_offset(select: &BoundSelect, params: &Params) -> DbResult<Option<usize>> {
-    constant_count(select.offset.as_ref(), params)
+    constant_count(select.offset.as_ref(), params, Negative::Zero)
+}
+
+/// What a negative `LIMIT` or `OFFSET` means.
+///
+/// **They mean different things and the difference is a wrong answer.** A
+/// negative `LIMIT` is SQLite's way of saying "no limit"; a negative `OFFSET` is
+/// treated as zero. The first version of this clamped both to zero, which turned
+/// `LIMIT -1` into `LIMIT 0` - every row suppressed - and would have done the
+/// same to a parameter somebody bound to -1.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Negative {
+    /// A negative count means there is no limit.
+    NoLimit,
+    /// A negative count means zero.
+    Zero,
 }
 
 /// Returns a `LIMIT`/`OFFSET` expression's value.
 ///
 /// @param expr - the expression, when there is one
 /// @param params - the bound parameters
-fn constant_count(expr: Option<&BoundExpr>, params: &Params) -> DbResult<Option<usize>> {
-    match expr {
-        None => Ok(None),
-        Some(BoundExpr::Integer(number)) => Ok(Some((*number).max(0) as usize)),
-        Some(BoundExpr::Parameter(index)) => match params.get(*index) {
-            OwnedDatum::Int(number) => Ok(Some(number.max(0) as usize)),
-            OwnedDatum::Null => Ok(None),
-            _ => unsupported("a LIMIT bound to a non-integer"),
+/// @param negative - what a negative value means for this clause
+fn constant_count(
+    expr: Option<&BoundExpr>,
+    params: &Params,
+    negative: Negative,
+) -> DbResult<Option<usize>> {
+    let number = match expr {
+        None => return Ok(None),
+        Some(BoundExpr::Integer(number)) => *number,
+        // A negative literal binds as a negation of a literal rather than as a
+        // literal, which is why `LIMIT -1` was refused as "not a constant".
+        Some(BoundExpr::Unary {
+            op: UnaryOp::Negate,
+            operand,
+        }) => match operand.as_ref() {
+            BoundExpr::Integer(number) => number.saturating_neg(),
+            _ => return unsupported("a LIMIT or OFFSET that is not a constant"),
         },
-        Some(_) => unsupported("a LIMIT or OFFSET that is not a constant"),
+        Some(BoundExpr::Parameter(index)) => match params.get(*index) {
+            OwnedDatum::Int(number) => number,
+            OwnedDatum::Null => return Ok(None),
+            _ => return unsupported("a LIMIT bound to a non-integer"),
+        },
+        Some(_) => return unsupported("a LIMIT or OFFSET that is not a constant"),
+    };
+    if number < 0 {
+        return Ok(match negative {
+            Negative::NoLimit => None,
+            Negative::Zero => Some(0),
+        });
     }
+    Ok(Some(number as usize))
 }
 
 /// Reports whether two translated expressions are the same expression.

@@ -433,10 +433,12 @@ mod tests {
                     AggregateSpec {
                         kind: AggregateKind::CountStar,
                         argument: None,
+                        distinct: None,
                     },
                     AggregateSpec {
                         kind: AggregateKind::Sum,
                         argument: Some(compile(&Expr::Column(1), &[StaticType::Int; 2]).unwrap()),
+                        distinct: None,
                     },
                 ],
                 Box::new(Collect::new()),

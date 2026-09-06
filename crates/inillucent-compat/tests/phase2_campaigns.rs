@@ -652,6 +652,12 @@ fn every_forced_plan_gives_the_same_answer() {
 #[test]
 fn the_physical_pass_refuses_what_it_cannot_run() {
     let fixture = fixture(200, 1_024, 256);
+    // **This list shrinks as constructs are implemented, and each one moves to
+    // `the_physical_pass_answers_what_it_implements` with an expected answer
+    // rather than being deleted.** task-1832 moved `HAVING`, an aggregate with
+    // `DISTINCT`, a `VALUES` arm, a query with no FROM term, a subquery source
+    // and a keyless join out of it; what is left is what the pass still routes
+    // to the VM.
     let refused = [
         (
             "a compound query",
@@ -662,14 +668,9 @@ fn the_physical_pass_refuses_what_it_cannot_run() {
             "SELECT id, row_number() OVER () FROM t",
         ),
         (
-            "HAVING",
-            "SELECT category FROM t GROUP BY category HAVING count(*) > 1",
+            "an outer join",
+            "SELECT t.id FROM t LEFT JOIN t AS u ON t.category = u.id",
         ),
-        (
-            "an aggregate with DISTINCT",
-            "SELECT count(DISTINCT category) FROM t",
-        ),
-        ("a VALUES arm", "VALUES (1), (2)"),
     ];
     for (what, sql) in refused {
         let Ok(plan) = fixture.plan(sql) else {
@@ -691,7 +692,7 @@ fn the_physical_pass_refuses_what_it_cannot_run() {
 #[test]
 fn the_physical_pass_answers_what_it_implements() {
     let fixture = fixture(500, 1_024, 256);
-    let cases: [(&str, usize); 8] = [
+    let cases: [(&str, usize); 14] = [
         ("SELECT id FROM t", 500),
         ("SELECT DISTINCT category FROM t ORDER BY category", 64),
         ("SELECT category, count(*) FROM t GROUP BY category", 64),
@@ -700,6 +701,22 @@ fn the_physical_pass_answers_what_it_implements() {
         ("SELECT id FROM t WHERE id = 42", 1),
         ("SELECT id FROM t WHERE id BETWEEN 10 AND 19", 10),
         ("SELECT id FROM t WHERE id > 495", 4),
+        // Moved here from the refusal list by task-1832. Each one carries the
+        // answer rather than only the acceptance: a construct that stopped
+        // being refused and started being wrong would otherwise read as
+        // progress.
+        (
+            "SELECT category FROM t GROUP BY category HAVING count(*) > 1",
+            64,
+        ),
+        (
+            "SELECT category FROM t GROUP BY category HAVING count(*) > 8",
+            0,
+        ),
+        ("SELECT count(DISTINCT category) FROM t", 1),
+        ("VALUES (1), (2)", 2),
+        ("SELECT 1", 1),
+        ("SELECT * FROM (SELECT id FROM t WHERE id < 7)", 7),
     ];
     for (sql, wanted) in cases {
         let plan = fixture

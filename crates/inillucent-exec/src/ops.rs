@@ -403,6 +403,23 @@ pub struct AggregateSpec {
     pub kind: AggregateKind,
     /// The argument, or `None` for `count(*)`.
     pub argument: Option<Box<dyn Eval>>,
+    /// The collation each distinct value is compared under, when the call said
+    /// `DISTINCT`.
+    pub distinct: Option<Collation>,
+}
+
+impl AggregateSpec {
+    /// Returns a fresh accumulator for this aggregate.
+    ///
+    /// One place, because three operators build them and a `DISTINCT` the
+    /// stream aggregate forgot would count duplicates in exactly the groups
+    /// nobody looked at.
+    pub fn accumulator(&self) -> Accumulator {
+        match self.distinct {
+            Some(collation) => Accumulator::distinct(self.kind.clone(), collation),
+            None => Accumulator::new(self.kind.clone()),
+        }
+    }
 }
 
 /// Aggregates the whole input into one row.
@@ -418,10 +435,7 @@ impl SimpleAggregate {
     /// @param specs - one per output column
     /// @param downstream - what to push the single result row into
     pub fn new(specs: Vec<AggregateSpec>, downstream: Box<dyn Sink>) -> SimpleAggregate {
-        let accumulators = specs
-            .iter()
-            .map(|spec| Accumulator::new(spec.kind.clone()))
-            .collect();
+        let accumulators = specs.iter().map(|spec| spec.accumulator()).collect();
         SimpleAggregate {
             specs,
             accumulators,
@@ -460,7 +474,13 @@ impl Sink for SimpleAggregate {
                 Some(argument) => {
                     // The vectorised path: a bare reference to a dense integer
                     // column of a batch with no selection vector.
-                    let dense = if batch.is_dense() {
+                    // A `DISTINCT` accumulator has to look at every value to
+                    // decide whether it has seen it, so the vectorised path is
+                    // not available to it - and one that took it anyway would
+                    // count duplicates. The accumulator is asked rather than
+                    // the operator remembering, because there are three
+                    // operators and one accumulator.
+                    let dense = if batch.is_dense() && accumulator.takes_dense() {
                         argument
                             .column()
                             .and_then(|column| batch.columns.get(column))
@@ -501,7 +521,7 @@ impl Sink for SimpleAggregate {
     fn reset(&mut self) -> DbResult<()> {
         for (index, spec) in self.specs.iter().enumerate() {
             if let Some(slot) = self.accumulators.get_mut(index) {
-                *slot = Accumulator::new(spec.kind.clone());
+                *slot = spec.accumulator();
             }
         }
         self.downstream.reset()
@@ -573,10 +593,7 @@ impl Sink for HashAggregate {
                         .iter()
                         .map(OwnedDatum::from_datum)
                         .collect(),
-                    self.specs
-                        .iter()
-                        .map(|spec| Accumulator::new(spec.kind.clone()))
-                        .collect(),
+                    self.specs.iter().map(|spec| spec.accumulator()).collect(),
                 )
             });
             for (index, spec) in self.specs.iter().enumerate() {
@@ -662,10 +679,7 @@ impl StreamAggregate {
         specs: Vec<AggregateSpec>,
         downstream: Box<dyn Sink>,
     ) -> StreamAggregate {
-        let accumulators = specs
-            .iter()
-            .map(|spec| Accumulator::new(spec.kind.clone()))
-            .collect();
+        let accumulators = specs.iter().map(|spec| spec.accumulator()).collect();
         StreamAggregate {
             collations,
             keys,
@@ -688,11 +702,7 @@ impl StreamAggregate {
             }
             self.rows.push(row);
         }
-        self.accumulators = self
-            .specs
-            .iter()
-            .map(|spec| Accumulator::new(spec.kind.clone()))
-            .collect();
+        self.accumulators = self.specs.iter().map(|spec| spec.accumulator()).collect();
         self.current = key;
         Ok(())
     }
@@ -717,10 +727,15 @@ impl StreamAggregate {
                     }
                 }
                 Some(argument) => {
-                    let dense = argument
-                        .column()
-                        .and_then(|column| batch.columns.get(column))
-                        .and_then(|vector| vector.dense_int_bytes());
+                    // As above: a `DISTINCT` accumulator sees every value.
+                    let dense = if accumulator.takes_dense() {
+                        argument
+                            .column()
+                            .and_then(|column| batch.columns.get(column))
+                            .and_then(|vector| vector.dense_int_bytes())
+                    } else {
+                        None
+                    };
                     match dense {
                         Some(bytes) => {
                             let from = start.saturating_mul(8);
@@ -837,7 +852,7 @@ impl Sink for StreamAggregate {
         self.rows.clear();
         for (index, spec) in self.specs.iter().enumerate() {
             if let Some(slot) = self.accumulators.get_mut(index) {
-                *slot = Accumulator::new(spec.kind.clone());
+                *slot = spec.accumulator();
             }
         }
         self.downstream.reset()
@@ -1541,6 +1556,7 @@ mod tests {
                     vec![AggregateSpec {
                         kind: kind.clone(),
                         argument: Some(compile(&Expr::Column(0), &[StaticType::Int]).unwrap()),
+                        distinct: None,
                     }],
                     Box::new(Collect::new()),
                 );
@@ -1548,6 +1564,7 @@ mod tests {
                     vec![AggregateSpec {
                         kind: kind.clone(),
                         argument: Some(compile(&Expr::Column(0), &[StaticType::Int]).unwrap()),
+                        distinct: None,
                     }],
                     Box::new(Collect::new()),
                 );
@@ -1583,6 +1600,7 @@ mod tests {
             vec![AggregateSpec {
                 kind: AggregateKind::CountStar,
                 argument: None,
+                distinct: None,
             }],
             Box::new(Collect::new()),
         );
@@ -1712,6 +1730,7 @@ mod tests {
             vec![AggregateSpec {
                 kind: AggregateKind::CountStar,
                 argument: None,
+                distinct: None,
             }],
             Box::new(Collect::new()),
         );
@@ -1780,12 +1799,14 @@ mod tests {
                         AggregateSpec {
                             kind: AggregateKind::CountStar,
                             argument: None,
+                            distinct: None,
                         },
                         AggregateSpec {
                             kind: AggregateKind::Sum,
                             argument: Some(
                                 compile(&Expr::Column(1), &[StaticType::Int; 2]).unwrap(),
                             ),
+                            distinct: None,
                         },
                     ],
                     Box::new(CollectInto::new(std::rc::Rc::clone(&rows))),

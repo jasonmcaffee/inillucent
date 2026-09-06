@@ -374,6 +374,20 @@ fn concurrent_committers_share_one_write_and_one_sync() {
     let base_syncs = syncs.load(Ordering::SeqCst);
     let base_writes = writes.load(Ordering::SeqCst);
 
+    // **The barrier goes between appending and waiting, not between appending
+    // the row and appending the commit.**
+    //
+    // The first version put it in the middle of `commit`, which appends the
+    // `Commit` record and then drives - so a thread that got all the way
+    // through before the next one appended drained a buffer holding only its
+    // own record, and each committer took its own sync. That is a *timing*
+    // assertion dressed as a property one: it passed on a quiet machine and
+    // failed the first time the whole suite ran in parallel.
+    //
+    // Split into its two halves, the property is exact rather than likely:
+    // after the barrier every record is in the buffer, so whichever thread
+    // drains first drains all of them, and the rest find their own end already
+    // durable. One write and one sync, deterministically.
     let threads = 8usize;
     let barrier = Arc::new(std::sync::Barrier::new(threads));
     let mut handles = Vec::new();
@@ -392,8 +406,14 @@ fn concurrent_committers_share_one_write_and_one_sync() {
                     },
                 )
                 .expect("an append");
+            handle
+                .append(txn, Body::Commit { cts: txn })
+                .expect("a commit record");
+            let end = handle.next_lsn();
             barrier.wait();
-            handle.commit(txn, txn).expect("a commit");
+            handle
+                .await_commit(end)
+                .expect("the commit becomes durable");
         }));
     }
     for handle in handles {
@@ -402,18 +422,13 @@ fn concurrent_committers_share_one_write_and_one_sync() {
 
     let sync_count = syncs.load(Ordering::SeqCst) - base_syncs;
     let write_count = writes.load(Ordering::SeqCst) - base_writes;
-    assert!(sync_count >= 1, "somebody has to sync");
-    assert!(
-        sync_count < threads as u64,
-        "{threads} committers took {sync_count} syncs, which is not a group commit"
+    assert_eq!(
+        sync_count, 1,
+        "{threads} committers with everything already buffered took {sync_count} syncs,          which is not a group commit"
     );
-    assert!(
-        write_count < threads as u64,
-        "{threads} committers took {write_count} writes, which is not a group commit"
-    );
-    assert!(
-        wal.stats().followers > 0,
-        "no committer ever waited behind a leader"
+    assert_eq!(
+        write_count, 1,
+        "{threads} committers with everything already buffered took {write_count} writes,          which is not a group commit"
     );
     // Everything every thread committed is durable when the last one returns.
     assert_eq!(wal.durable_end(), wal.next_lsn());

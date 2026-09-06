@@ -541,6 +541,78 @@ impl Sink for IndexNestedLoopJoin<'_> {
             } else {
                 spilled_keys.as_slice()
             };
+            // A join with *no* key at all is a cross product: every inner row
+            // pairs with every outer one. It is the shape `CROSS JOIN` and a
+            // `WHERE` with no usable equality both produce, and the only honest
+            // way to run it is to read the inner tree once per outer row - which
+            // is what SQLite does too.
+            if outer_keys.is_empty() {
+                let mut seen = 0usize;
+                let mut reported = Flow::Continue;
+                inner.visit_leaves(pool, &mut |leaf| {
+                    let rows: Vec<Vec<Datum<'_>>> = if leaf.has_writes() {
+                        leaf.live()?
+                    } else {
+                        Vec::new()
+                    };
+                    let live = if leaf.has_writes() {
+                        rows.len()
+                    } else {
+                        leaf.row_count()
+                    };
+                    if live == 0 {
+                        return Ok(true);
+                    }
+                    let total = width.saturating_add(inner_width);
+                    let mut columns: Vec<Vector<'_>> = Vec::with_capacity(total);
+                    for column in 0..width {
+                        columns.push(Vector::Const(batch.value(nth, column)?));
+                    }
+                    let mut held: Vec<Vec<Datum<'_>>> = Vec::new();
+                    if leaf.has_writes() {
+                        for index in &inner_projection.0 {
+                            held.push(
+                                rows.iter()
+                                    .map(|row| row.get(*index).copied().unwrap_or(Datum::Null))
+                                    .collect(),
+                            );
+                        }
+                    }
+                    for (position, column) in inner_projection.0.iter().enumerate() {
+                        columns.push(if leaf.has_writes() {
+                            Vector::Values(held.get(position).map(Vec::as_slice).unwrap_or(&[]))
+                        } else {
+                            Vector::from_column(leaf.column(*column)?)
+                        });
+                    }
+                    seen = seen.saturating_add(live);
+                    if *kind == JoinKind::Semi {
+                        return Ok(false);
+                    }
+                    reported = downstream.push(&Batch::new(live, columns))?;
+                    Ok(reported == Flow::Continue)
+                })?;
+                match kind {
+                    // Nothing to pair with, so an anti or left join keeps the
+                    // outer row null-extended.
+                    JoinKind::Anti if seen == 0 => {
+                        reported = push_outer(batch, nth, width, 0, downstream.as_mut())?;
+                    }
+                    JoinKind::Left if seen == 0 => {
+                        reported = push_outer(batch, nth, width, inner_width, downstream.as_mut())?;
+                    }
+                    // A semi join emits the outer row once when anything
+                    // matched, which is what the early return above stopped at.
+                    JoinKind::Semi if seen > 0 => {
+                        reported = push_outer(batch, nth, width, 0, downstream.as_mut())?;
+                    }
+                    _ => {}
+                }
+                if reported == Flow::Stop {
+                    return Ok(Flow::Stop);
+                }
+                continue;
+            }
             // A NULL join key matches nothing, in every join kind, because SQL
             // equality on NULL is never true.
             let null_key = probe.iter().any(|value| value.is_null());
@@ -655,8 +727,34 @@ impl Sink for IndexNestedLoopJoin<'_> {
                             }
                             at = at.saturating_add(1);
                         }
-                        for column in &inner_projection.0 {
-                            let vector = Vector::from_column(leaf.column(*column)?);
+                        // A leaf that has been written to cannot be read as
+                        // mini-columns: some of its rows are hidden and some are
+                        // tagged bytes in the delta area, and the span the visitor
+                        // computed is over the *sorted region* rather than over the
+                        // live rows. So it is merged, filtered by the same prefix
+                        // the visitor matched on, and pushed as values.
+                        let merged: Vec<Vec<Datum<'_>>> = if leaf.has_writes() {
+                            leaf.live_between(Some(probe), true, Some(probe), true)?
+                        } else {
+                            Vec::new()
+                        };
+                        let mut held: Vec<Vec<Datum<'_>>> = Vec::new();
+                        if leaf.has_writes() {
+                            for index in &inner_projection.0 {
+                                held.push(
+                                    merged
+                                        .iter()
+                                        .map(|row| row.get(*index).copied().unwrap_or(Datum::Null))
+                                        .collect(),
+                                );
+                            }
+                        }
+                        for (position, column) in inner_projection.0.iter().enumerate() {
+                            let vector = if leaf.has_writes() {
+                                Vector::Values(held.get(position).map(Vec::as_slice).unwrap_or(&[]))
+                            } else {
+                                Vector::from_column(leaf.column(*column)?)
+                            };
                             if heap {
                                 spilled.push(vector);
                             } else if let Some(slot) = inline.get_mut(at) {
@@ -664,13 +762,24 @@ impl Sink for IndexNestedLoopJoin<'_> {
                             }
                             at = at.saturating_add(1);
                         }
-                        selection.clear();
-                        selection.extend((start..end).map(|row| row as u32));
                         let columns: &[Vector<'_>] = if heap {
                             spilled.as_slice()
                         } else {
                             inline.get(..at).unwrap_or(&[])
                         };
+                        if leaf.has_writes() {
+                            if merged.is_empty() {
+                                return Ok(true);
+                            }
+                            seen = seen.saturating_add(merged.len());
+                            if *kind == JoinKind::Semi {
+                                return Ok(false);
+                            }
+                            reported = downstream.push(&Batch::over(merged.len(), columns))?;
+                            return Ok(reported == Flow::Continue);
+                        }
+                        selection.clear();
+                        selection.extend((start..end).map(|row| row as u32));
                         let mut span = Batch::over(leaf.row_count(), columns);
                         span.selection = Some(selection.as_slice());
                         seen = seen.saturating_add(end.saturating_sub(start));
