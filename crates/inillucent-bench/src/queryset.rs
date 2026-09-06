@@ -5,7 +5,6 @@
 //! which is what lets the score card attribute a difference to the index rather
 //! than to the model.
 
-use inillucent_core::embed_onnx::{Device, OnnxEmbedder, OnnxOptions};
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
@@ -895,11 +894,15 @@ fn sample_per_source(
 /// success@1 and success@10 across 120 queries, so the substitution does not move
 /// the scores.
 #[allow(dead_code)]
-pub fn embed_queries(model_dir: &str, model_file: &str, texts: &[String], device: Device) -> Result<Vec<Vec<f32>>> {
+pub fn embed_queries(
+    model: &crate::models::ResolvedModel,
+    options: &crate::arm::ArmOptions,
+    texts: &[String],
+) -> Result<Vec<Vec<f32>>> {
     if texts.is_empty() {
         return Ok(Vec::new());
     }
-    let embedder = open_query_embedder(model_dir, model_file, device)?;
+    let embedder = open_query_embedder(model, options)?;
     embed_with(&embedder, texts)
 }
 
@@ -910,16 +913,24 @@ pub fn embed_queries(model_dir: &str, model_file: &str, texts: &[String], device
 /// query families. Opening one per family spent more time loading the model than
 /// running it.
 /// @param model_dir - directory holding the weights
-/// @param model_file - the ONNX file name
+/// @param manifest - what the model is, including which weights file to open
 /// @param device - the processor to open the session on
 pub fn open_query_embedder(
-    model_dir: &str,
-    model_file: &str,
-    device: Device,
-) -> Result<OnnxEmbedder> {
-    OnnxEmbedder::open_model(model_dir, model_file, OnnxOptions { device, ..Default::default() })
-        .context("opening the ONNX embedder for the query set. Is ORT_DYLIB_PATH set?")
+    model: &crate::models::ResolvedModel,
+    options: &crate::arm::ArmOptions,
+) -> Result<crate::arm::Arm> {
+    crate::arm::Arm::open(
+        model,
+        &crate::arm::ArmOptions { batch_size: DEFAULT_QUERY_BATCH, ..options.clone() },
+    )
+    .context("opening the embedder for the query set. Is ORT_DYLIB_PATH set?")
 }
+
+/// Texts per inference call when embedding queries. Queries are short, so this is
+/// bounded by the session's own attention budget long before it is bounded by
+/// memory; the value only has to be larger than one, which it was not before the
+/// families were batched at all.
+const DEFAULT_QUERY_BATCH: usize = 16;
 
 /// Embed one family through an already open session.
 ///
@@ -929,17 +940,15 @@ pub fn open_query_embedder(
 /// query embedding twenty times slower than it needed to be for no benefit.
 /// @param embedder - an open session
 /// @param texts - the raw query strings
-pub fn embed_with(embedder: &OnnxEmbedder, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+pub fn embed_with(embedder: &crate::arm::Arm, texts: &[String]) -> Result<Vec<Vec<f32>>> {
     if texts.is_empty() {
         return Ok(Vec::new());
     }
-    // The query prefix, applied here rather than by `embed_documents`, which would
-    // apply the document one. Using the wrong prefix measurably degrades retrieval.
-    let prefixed: Vec<String> = texts
-        .iter()
-        .map(|t| inillucent_core::embed::query_prefix(&sanitize(t)))
-        .collect();
-    embedder.embed_prefixed(&prefixed).context("embedding a query set")
+    // The query prefix comes from the arm's own manifest, applied by the arm
+    // rather than here. Using the wrong prefix measurably degrades retrieval, and
+    // using one model's prefix on another model is worse than using none.
+    let sanitized: Vec<String> = texts.iter().map(|t| sanitize(t)).collect();
+    embedder.embed_queries(&sanitized).context("embedding a query set")
 }
 
 /// Drop control characters and quotes. Downloaded text carries the occasional

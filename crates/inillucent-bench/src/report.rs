@@ -214,6 +214,10 @@ pub struct ScoreCard {
     pub corpus_chunks: usize,
     pub corpus_documents: usize,
     pub dimensions: usize,
+    /// Which embedding model produced the vectors this card was graded on. It
+    /// used to be a string literal in this file, which was true of every run
+    /// until the day it was not.
+    pub model_id: String,
     pub engines: Vec<String>,
     pub scenarios: Vec<Scenario>,
     pub build: Vec<BuildFacts>,
@@ -380,8 +384,12 @@ pub fn render(card: &ScoreCard) -> String {
     let mut s = String::new();
     s.push_str("# inillucent Score Card\n\n");
     s.push_str(&format!(
-        "Generated {}. Corpus: {} chunks across {} documents, {} dimensional embeddings from `nomic-embed-text-v1.5` run in process at full precision.\n\n",
-        card.generated_at, card.corpus_chunks, card.corpus_documents, card.dimensions
+        "Generated {}. Corpus: {} chunks across {} documents, {} dimensional embeddings from `{}` run in process at full precision.\n\n",
+        card.generated_at,
+        card.corpus_chunks,
+        card.corpus_documents,
+        card.dimensions,
+        card.model_id
     ));
 
     s.push_str("The corpus is assembled from public data by this repository and embedded once. The identical vectors are written to the cache inillucent reads and to the PostgreSQL column pgvector reads, and every query is embedded once and handed to both engines, so the embedding model cancels out of the comparison entirely. A score difference is therefore attributable to indexing and ranking.\n\n");
@@ -669,6 +677,7 @@ mod tests {
             corpus_chunks: 100,
             corpus_documents: 10,
             dimensions: 768,
+            model_id: "nomic-embed-text-v1.5".into(),
             engines: vec!["inillucent".into(), "pgvector".into()],
             scenarios: vec![Scenario {
                 name: "Unfiltered vector accuracy".into(),

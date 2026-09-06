@@ -180,8 +180,11 @@ impl KeySpace {
 pub struct GradeOptions {
     pub limit: Option<usize>,
     pub per_source: usize,
-    pub model_dir: String,
-    pub model_file: String,
+    /// The model the queries are embedded with, resolved from its own manifest.
+    /// The corpus vectors already exist in the cache; this is the other half of
+    /// the pair, and it has to be the same model or every query is asked in a
+    /// space the documents were not embedded into.
+    pub model: crate::models::ResolvedModel,
     pub database_url: String,
     pub inillucent_only: bool,
     pub device: Device,
@@ -199,6 +202,9 @@ pub struct GradeOptions {
     pub runs_dir: PathBuf,
     /// Fixes every bootstrap interval and p-value the card reports.
     pub stats_seed: u64,
+    /// Where and how hard to run the model, including the llama.cpp endpoint for
+    /// a served arm.
+    pub arm_options: crate::arm::ArmOptions,
     /// The corpus file, recorded so two cards can be checked to describe the same
     /// corpus before they are compared.
     pub cache_path: PathBuf,
@@ -235,7 +241,7 @@ impl GradeOptions {
 /// deliberately far from the rest: it generates answerable queries the report does
 /// not score, used only to choose each engine's abstention threshold, so the
 /// threshold is not fitted on the queries it is then judged on.
-fn seeds() -> BTreeMap<String, u64> {
+pub fn seeds() -> BTreeMap<String, u64> {
     [
         ("identity", 11u64),
         ("heading", 12),
@@ -250,7 +256,7 @@ fn seeds() -> BTreeMap<String, u64> {
     .collect()
 }
 
-fn seed(name: &str) -> u64 {
+pub fn seed(name: &str) -> u64 {
     seeds().get(name).copied().unwrap_or(0)
 }
 
@@ -258,8 +264,7 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
     let GradeOptions {
         limit,
         per_source,
-        model_dir,
-        model_file,
+        model,
         database_url,
         inillucent_only,
         device,
@@ -272,8 +277,9 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
     } = options;
     let (limit, per_source, device) = (*limit, *per_source, *device);
     let (fusion, inillucent_only) = (*fusion, *inillucent_only);
-    let (model_dir, model_file, database_url) =
-        (model_dir.as_str(), model_file.as_str(), database_url.as_str());
+    let database_url = database_url.as_str();
+    let model_dir = model.dir.display().to_string();
+    let model_file = model.manifest.model_file.clone();
     let (lexical_coverage, lexical_proximity) = (*lexical_coverage, *lexical_proximity);
     let (lexical_prefix, lexical_tier) = (*lexical_prefix, *lexical_tier);
 
@@ -344,10 +350,34 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
         calibration.len()
     );
 
-    eprintln!("embedding queries with the in process model from {model_dir}");
+    eprintln!("embedding queries with {} from {model_dir}", model.manifest.id);
+    // The cache's own header, checked against the model about to embed the
+    // queries. Documents embedded by one model and queries by another is a
+    // comparison of two coordinate systems, and it produces a plausible-looking
+    // card rather than an error, which is why this is a refusal.
+    if corpus.header.has_provenance() {
+        anyhow::ensure!(
+            corpus.header.model_id == model.manifest.id,
+            "the cache was embedded with {} and the queries would be embedded with {}. A query \
+             vector only means anything in the space its documents were embedded into",
+            corpus.header.model_id,
+            model.manifest.id
+        );
+        anyhow::ensure!(
+            corpus.header.manifest_sha256 == model.digest(),
+            "{}'s manifest has changed since this cache was embedded ({} then, {} now)",
+            model.manifest.id,
+            crate::corpus::short(&corpus.header.manifest_sha256),
+            crate::corpus::short(&model.digest())
+        );
+    }
+    model.verify_files()?;
     // One session for all nine families. Opening a CUDA session costs tens of
     // seconds and there is no reason to pay for it nine times.
-    let embedder = queryset::open_query_embedder(model_dir, model_file, device)?;
+    let embedder = queryset::open_query_embedder(
+        model,
+        &crate::arm::ArmOptions { device, ..options.arm_options.clone() },
+    )?;
     let embed = |qs: &[GradedQuery]| -> Result<Vec<Vec<f32>>> {
         let texts: Vec<String> = qs.iter().map(|q| q.text.clone()).collect();
         queryset::embed_with(&embedder, &texts)
@@ -579,8 +609,13 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
         },
-        model_dir: model_dir.to_string(),
-        model_file: model_file.to_string(),
+        model_dir: model_dir.clone(),
+        model_file: model_file.clone(),
+        model_id: model.manifest.id.clone(),
+        model_manifest_sha256: model.digest(),
+        model_dims: model.manifest.dims,
+        model_max_tokens: model.manifest.max_tokens,
+        cache_header: corpus.header.clone(),
         device: format!("{device:?}"),
         database: runs::redact(database_url),
         seeds: seeds(),
@@ -604,6 +639,21 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
     provenance.insert("command".into(), runs::command_line());
     provenance.insert("corpus cache".into(), options.cache_path.display().to_string());
     provenance.insert("embedding model".into(), format!("{model_dir}/{model_file}"));
+    // Beside the path, what the path was taken to mean. A directory says where
+    // the weights were; only this says which prefixes, pooling, width and token
+    // bound produced the vectors, and those are what another run has to match.
+    provenance.insert(
+        "model manifest".into(),
+        format!(
+            "{} at {} dims, {} tokens, manifest {}{}",
+            model.manifest.id,
+            model.manifest.dims,
+            model.manifest.max_tokens,
+            crate::corpus::short(&model.digest()),
+            if model.manifest_on_disk { "" } else { " (assumed from the baseline constants)" }
+        ),
+    );
+    provenance.insert("corpus cache header".into(), corpus.header.describe());
     provenance.insert("device".into(), format!("{device:?}"));
     provenance.insert("baseline database".into(), runs::redact(database_url));
     provenance.insert(
@@ -644,6 +694,7 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
         corpus_chunks: stats.chunks,
         corpus_documents: stats.documents,
         dimensions: corpus.dims,
+        model_id: model.manifest.id.clone(),
         engines,
         scenarios,
         build,
