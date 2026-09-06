@@ -108,8 +108,7 @@ impl Database {
         let mut target = source.clone().into_os_string();
         target.push(".rdb");
         let target = PathBuf::from(target);
-        let engine =
-            ImportedDatabase::import_into(source, target.clone(), PAGE_SIZE, frames)?;
+        let engine = ImportedDatabase::import_into(source, target.clone(), PAGE_SIZE, frames)?;
         Ok(Database {
             engine: RefCell::new(engine),
             path: target,

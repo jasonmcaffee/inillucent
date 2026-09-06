@@ -1,5 +1,12 @@
 //! The qualification suites' handle on the new engine.
 //!
+//! Invariant: this module decides nothing. Every method is a call and a
+//! conversion - there is no fallback that answers when the engine refuses, no
+//! default that stands in for a value it did not return, and no place where a
+//! failure becomes a success. A suite repointed through here fails exactly when
+//! the engine fails it, which is the only thing that makes the failures worth
+//! reading.
+//!
 //! ## Why an adapter rather than a rewrite
 //!
 //! `inillucent-compat`'s suites - the differential corpus, the ACID and

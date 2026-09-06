@@ -26,12 +26,12 @@
 
 pub mod corpus;
 pub mod differential;
+pub mod facade;
 pub mod fixtures;
 pub mod hash;
 pub mod history;
 pub mod layering;
 pub mod manifest;
-pub mod facade;
 pub mod model;
 /// The rearchitected engine, which now lives in `inillucent-engine`.
 ///

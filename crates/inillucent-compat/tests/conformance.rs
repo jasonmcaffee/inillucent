@@ -11,9 +11,9 @@
 use std::path::PathBuf;
 
 use inillucent_compat::facade::Database;
-use inillucent_value::Value;
 use inillucent_compat::slt::{self, Record, TestFile};
 use inillucent_compat::workspace_root;
+use inillucent_value::Value;
 
 /// Returns every conformance file.
 fn test_files() -> Vec<PathBuf> {

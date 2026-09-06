@@ -8,9 +8,9 @@
 use std::path::PathBuf;
 
 use inillucent_compat::facade::Database;
-use inillucent_value::Value;
 use inillucent_compat::oracle::{Driver, Op, TaggedValue};
 use inillucent_compat::workspace_root;
+use inillucent_value::Value;
 
 /// Returns the pinned oracle binary, when it has been built.
 fn oracle_path() -> Option<PathBuf> {
@@ -68,7 +68,10 @@ fn render_tagged(value: &TaggedValue) -> String {
 }
 
 /// Runs a statement through inillucent, returning its rows or its failure.
-fn run(connection: &inillucent_compat::facade::Connection, sql: &str) -> Result<Vec<String>, String> {
+fn run(
+    connection: &inillucent_compat::facade::Connection,
+    sql: &str,
+) -> Result<Vec<String>, String> {
     let mut statement = match connection.prepare(sql) {
         Ok(statement) => statement,
         Err(reason) => return Err(reason.message().to_string()),
