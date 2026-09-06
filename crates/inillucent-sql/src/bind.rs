@@ -807,7 +807,16 @@ pub struct BoundSource {
     /// Where the rows come from.
     pub rows: SourceRows,
     /// The table, view or virtual table.
-    pub table: TableInfo,
+    /// The table this source reads, shared with the catalog rather than copied.
+    ///
+    /// **It was a `TableInfo` by value until task-1834.** Every table reference
+    /// in every statement therefore deep-cloned the catalog's entry - two name
+    /// vectors, a `ColumnInfo` per column each with its own heap fields, the
+    /// full `CREATE` text, and an `IndexInfo` per index with its own column
+    /// vector - which measured at 2,938 ns of `prepare.point`'s 6,093 ns
+    /// compile, 48% of it. Every read of it still goes through `Deref`, so
+    /// nothing above this line had to change.
+    pub table: std::rc::Rc<TableInfo>,
     /// The name the query refers to it by.
     pub alias: Vec<u8>,
     /// The join that attaches it to the term before it.
@@ -1979,7 +1988,13 @@ impl<'a> Binder<'a> {
             Some(alias) => self.ast.text(alias).to_vec(),
             None => table.name.clone(),
         };
-        let table = table.clone();
+        // The shared pointer, taken here rather than above: a view binds its
+        // body out of the catalog's own arena, and only the borrow keeps that
+        // alive. The second lookup is a folded-name comparison over the
+        // catalog's tables and costs a fraction of the clone it replaces.
+        let Some(table) = self.catalog.shared_table(database_name.as_deref(), &folded) else {
+            return Err(no_such_table(&written, span));
+        };
         let id = self.sources.len();
         self.sources.push(BoundSource {
             id,
@@ -2017,7 +2032,7 @@ impl<'a> Binder<'a> {
         self.sources.push(BoundSource {
             id,
             rows: SourceRows::RecursiveSelf { cte },
-            table,
+            table: std::rc::Rc::new(table),
             alias,
             join,
             constraint: None,
@@ -2077,7 +2092,7 @@ impl<'a> Binder<'a> {
         self.sources.push(BoundSource {
             id,
             rows: SourceRows::Table,
-            table: TableInfo::subquery(alias.clone(), 0, Vec::new()),
+            table: std::rc::Rc::new(TableInfo::subquery(alias.clone(), 0, Vec::new())),
             alias: alias.clone(),
             join,
             constraint: None,
@@ -2135,7 +2150,7 @@ impl<'a> Binder<'a> {
         let mut source = BoundSource {
             id,
             rows: SourceRows::Recursive(Box::new(RecursiveBody { seeds, steps })),
-            table,
+            table: std::rc::Rc::new(table),
             alias,
             join,
             constraint: None,
@@ -2269,7 +2284,7 @@ impl<'a> Binder<'a> {
         self.sources.push(BoundSource {
             id,
             rows: SourceRows::Subquery(Box::new(bound)),
-            table,
+            table: std::rc::Rc::new(table),
             alias,
             join,
             constraint: None,
