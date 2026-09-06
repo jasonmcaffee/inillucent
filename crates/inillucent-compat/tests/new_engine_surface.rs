@@ -146,6 +146,11 @@ const SURFACE: &[(&str, &str, Answers)] = &[
     ("pragma.journal_mode", "PRAGMA journal_mode", Yes),
     ("pragma.table_info", "PRAGMA table_info(t)", Yes),
     ("pragma.foreign_keys", "PRAGMA foreign_keys=ON", Yes),
+    (
+        "explain.query_plan",
+        "EXPLAIN QUERY PLAN SELECT a FROM t",
+        Yes,
+    ),
     // Subqueries used as values. Uncorrelated ones are folded once per
     // execution; `crates/inillucent-compat/tests/new_engine_subquery.rs` is
     // where their answers are checked against SQLite's.
@@ -176,12 +181,9 @@ const SURFACE: &[(&str, &str, Answers)] = &[
     ("release", "RELEASE s1", NotYet),
     ("attach", "ATTACH DATABASE ':memory:' AS other", NotYet),
     ("vacuum", "VACUUM", NotYet),
+    // Plain EXPLAIN is refused for a reason that is not "yet": see the two
+    // classes of refusal above.
     ("explain", "EXPLAIN SELECT a FROM t", NotYet),
-    (
-        "explain.query_plan",
-        "EXPLAIN QUERY PLAN SELECT a FROM t",
-        NotYet,
-    ),
 ];
 
 /// Every construct answers the way the inventory says it does.
@@ -197,11 +199,22 @@ fn the_new_engine_answers_what_the_inventory_says_it_answers() {
                 // A refusal has to name itself. An engine that answered
                 // "something went wrong" would be one a caller could not act
                 // on, and one this inventory could not tell apart from a bug.
+                //
+                // There are two classes of refusal here and the difference is
+                // worth keeping. Most say "not yet" - the construct is
+                // unimplemented and the phrase is a promise to whoever
+                // implements it. Plain `EXPLAIN` says something else: it lists
+                // a bytecode program's opcodes and this engine compiles no
+                // bytecode, so it is not waiting on anybody. A refusal that
+                // explains why it can never be answered in that form is a
+                // better refusal, not a worse one, so it is accepted here on
+                // its own terms rather than made to pretend it is pending.
                 let text = format!("{error:?}");
                 assert!(
                     text.contains("does not run yet")
                         || text.contains("does not handle")
-                        || text.contains("Unsupported"),
+                        || text.contains("Unsupported")
+                        || text.contains("compiles no bytecode"),
                     "{name} was refused without naming what it refused: {text}"
                 );
                 NotYet

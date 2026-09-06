@@ -1306,6 +1306,7 @@ impl ImportedDatabase {
         match &*self.compiled(sql)? {
             Cached::Select(_, prepared) => Ok(prepared.describe()),
             Cached::Ddl(_) => Ok(vec!["a directive".to_string()]),
+            Cached::QueryPlan(_) => Ok(vec!["a query plan".to_string()]),
             Cached::Insert(..) => Ok(vec!["an insert".to_string()]),
             Cached::VirtualInsert(_) => Ok(vec!["an insert into a module".to_string()]),
             Cached::Update(..) => Ok(vec!["an update".to_string()]),
@@ -1609,6 +1610,7 @@ impl ImportedDatabase {
         let found = std::time::Instant::now();
         let rows = match &*cached {
             Cached::Ddl(_)
+            | Cached::QueryPlan(_)
             | Cached::VirtualInsert(_)
             | Cached::Select(..)
             | Cached::Insert(_, None) => Vec::new(),
@@ -1626,6 +1628,10 @@ impl ImportedDatabase {
                 let sql = sql.clone();
                 self.execute_ddl(&sql)?;
             }
+            // Rendered when it was compiled, so there is nothing to apply and
+            // nothing to time. It is here to be exhaustive rather than to be
+            // measured: a plan description is not a workload.
+            Cached::QueryPlan(_) => {}
             Cached::VirtualInsert(statement) => {
                 let statement = statement.clone();
                 self.insert_into_module(&statement, params)?;
@@ -1689,6 +1695,7 @@ impl ImportedDatabase {
                 let sql = sql.clone();
                 self.execute_ddl(&sql)
             }
+            Cached::QueryPlan(lines) => Ok(query_plan_rows(lines)),
             Cached::VirtualInsert(statement) => {
                 let statement = statement.clone();
                 self.insert_into_module(&statement, params)
@@ -1745,10 +1752,92 @@ impl ImportedDatabase {
         Ok(compiled)
     }
 
+    /// Compiles an `EXPLAIN`, which the two forms of do different things.
+    ///
+    /// **`EXPLAIN QUERY PLAN` is answerable and plain `EXPLAIN` is not**, and
+    /// the reason is structural rather than unfinished. SQLite's `EXPLAIN`
+    /// lists the opcodes of the bytecode program it compiled; this engine
+    /// compiles no bytecode - it builds an operator chain - so there is no
+    /// opcode listing to print, and printing the operator chain under that name
+    /// would be answering a different question with the same word.
+    ///
+    /// `EXPLAIN QUERY PLAN` asks what the plan *is*, which this engine can
+    /// answer: `Prepared::describe` already renders the chain, and the
+    /// benchmark harness has been printing it beside SQLite's since Phase 1 so
+    /// a reader can see whether the two chose the same structure.
+    ///
+    /// @param sql - the whole statement text, for a refusal to quote
+    /// @param query_plan - whether `QUERY PLAN` was written
+    /// @param inner - the statement being explained
+    /// @param parsed - the parse the statement came out of
+    fn compile_explain(
+        &self,
+        sql: &str,
+        query_plan: bool,
+        inner: &inillucent_sql::ast::Statement,
+        parsed: &inillucent_sql::parser::ParsedStatement,
+    ) -> DbResult<Cached> {
+        if !query_plan {
+            return Err(misuse(format!(
+                "{sql}: plain EXPLAIN lists the opcodes of a bytecode program, and this \
+                 engine compiles no bytecode - it builds an operator chain. EXPLAIN \
+                 QUERY PLAN describes that chain and is answered"
+            )));
+        }
+        let authorizer = AllowAll;
+        let mut binder =
+            Binder::new(&self.catalog, &parsed.ast, &authorizer).with_source(sql.as_bytes());
+        let bound = binder
+            .bind_statement(inner)
+            .map_err(|error| misuse(format!("{sql}: {error:?}")))?;
+        let lines = match bound {
+            BoundStatement::Select(select) => {
+                plan_select_with(*select, Levers::default()).describe()
+            }
+            // A write's plan is the query that finds the rows it changes, and
+            // that is the thing a reader is asking about - "did my DELETE use
+            // the index" is the same question as "did the search use it".
+            // Answering "a delete" would be answering that it is a delete,
+            // which the reader wrote.
+            BoundStatement::Update(statement) => self
+                .keys_plan(
+                    &statement.table,
+                    statement.source,
+                    statement.filter.as_ref(),
+                    statement.limit.as_ref(),
+                    statement.offset.as_ref(),
+                )?
+                .0
+                .describe(),
+            BoundStatement::Delete(statement) => self
+                .keys_plan(
+                    &statement.table,
+                    statement.source,
+                    statement.filter.as_ref(),
+                    statement.limit.as_ref(),
+                    statement.offset.as_ref(),
+                )?
+                .0
+                .describe(),
+            other => vec![describe_statement(&other).to_string()],
+        };
+        Ok(Cached::QueryPlan(lines))
+    }
+
     /// Compiles one statement as far as its parameters allow.
     ///
     /// @param sql - the statement text
     fn compile(&self, sql: &str) -> DbResult<Cached> {
+        // `EXPLAIN` is decided before binding, because the binder's job is the
+        // statement being explained and not the explaining. The old engine did
+        // this a level up, where a VDBE program was available to render; here
+        // there is no program, and that difference is the whole of the
+        // `query_plan` split below.
+        let parsed = parse_next_statement(sql.as_bytes(), 0, &self.limits)
+            .map_err(|error| misuse(format!("{sql}: {error:?}")))?;
+        if let inillucent_sql::ast::Statement::Explain { query_plan, inner } = &parsed.statement {
+            return self.compile_explain(sql, *query_plan, inner, &parsed);
+        }
         match self.bind(sql)? {
             BoundStatement::Select(select) => {
                 let plan = plan_select_with(*select, Levers::default());
@@ -1903,6 +1992,41 @@ fn names_of(shape: &physical::Shape) -> Vec<String> {
         .collect()
 }
 
+/// Renders `EXPLAIN QUERY PLAN` lines as the rows a caller reads.
+///
+/// The four columns are SQLite's - `id`, `parent`, `notused`, `detail` - so a
+/// caller written against SQLite reads the same shape and finds its text where
+/// it expects it. The ids are the line's position rather than a tree: this
+/// engine's `describe` renders the chain source-first as a list, and inventing
+/// a parent for each line would be inventing structure the renderer does not
+/// carry. SQLite documents its own `EXPLAIN QUERY PLAN` output as unstable
+/// between releases, so the text was never the comparable part.
+///
+/// @param lines - the plan's operators, source first
+fn query_plan_rows(lines: &[String]) -> Outcome {
+    Outcome {
+        rows: lines
+            .iter()
+            .enumerate()
+            .map(|(position, line)| {
+                vec![
+                    OwnedDatum::Int(position as i64),
+                    OwnedDatum::Int(0),
+                    OwnedDatum::Int(0),
+                    OwnedDatum::Text(line.as_bytes().to_vec()),
+                ]
+            })
+            .collect(),
+        names: vec![
+            "id".to_string(),
+            "parent".to_string(),
+            "notused".to_string(),
+            "detail".to_string(),
+        ],
+        changes: Changes::default(),
+    }
+}
+
 /// A statement compiled once and run many times.
 ///
 /// Opaque on purpose: what is inside is the engine's business, and a caller that
@@ -1922,6 +2046,12 @@ enum Cached {
     /// Re-bound on every execution, because binding a `DROP TABLE` resolves
     /// whether the table is there and the answer changes when it runs.
     Ddl(String),
+    /// `EXPLAIN QUERY PLAN`, rendered when the statement was compiled.
+    ///
+    /// The lines describe the plan and the plan depends on the schema, so this
+    /// is cached and invalidated exactly like the query it describes - which is
+    /// the point of holding it here rather than rendering it per execution.
+    QueryPlan(Vec<String>),
     /// An insert into a virtual table, which the module applies.
     VirtualInsert(Box<inillucent_sql::dml::BoundInsert>),
     /// A query.
