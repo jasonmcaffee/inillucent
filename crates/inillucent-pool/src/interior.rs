@@ -261,24 +261,86 @@ impl<'p> InteriorRef<'p> {
         // 512 cache lines. Rowids are handed out in order, so leaf separators
         // are close to uniform and one interpolation lands on or beside the
         // right child.
+        // **The window's ends are carried, not re-read.** Every interpolated
+        // midpoint needs the leading eight bytes of the key at each end of the
+        // window, and the first step of every descent through this page asks
+        // for the same two: slot 0 and slot `count - 1`. Re-reading them per
+        // step cost two slot reads and two heap reads that the step before had
+        // already paid for, which on the medium fixture's root - one
+        // interpolation, then a second - was four of the six key reads a
+        // descent did.
+        //
+        // Only the end that moved is re-read, and it is re-read from the key
+        // the comparison below already fetched wherever that is the same slot.
         let target = leading_u64(probe);
         let mut low = 0usize;
         let mut high = self.count;
         let mut guesses = 0u32;
+        let mut low_value = if self.count == 0 {
+            0
+        } else {
+            leading_u64(self.key(0)?)
+        };
+        let mut high_value = if self.count == 0 {
+            0
+        } else {
+            leading_u64(self.key(self.count.saturating_sub(1))?)
+        };
         while low < high {
             let middle = if guesses < GUESSES && high.saturating_sub(low) > FLOOR {
                 guesses = guesses.saturating_add(1);
-                self.interpolate(low, high, target)?
+                Self::place(low, high, target, low_value, high_value)
             } else {
                 low.saturating_add(high.saturating_sub(low) / 2)
             };
-            if self.key(middle)? <= probe {
+            let key = self.key(middle)?;
+            let seen = leading_u64(key);
+            if key <= probe {
                 low = middle.saturating_add(1);
+                // **The bracket is allowed to be loose, and this end is.** The
+                // new low end is the slot *after* the one just read, so its
+                // value would be another read; the value just read is a lower
+                // bound on it, which is all a proportion needs. A midpoint is a
+                // guess - the window still shrinks by at least one slot per
+                // step whatever it returns, and the comparison that moves the
+                // window is the exact byte compare above - so a slightly
+                // conservative end costs at worst a poorer guess and never a
+                // wrong child.
+                low_value = seen;
             } else {
                 high = middle;
+                // This end is exact: the new high end *is* the slot just read.
+                high_value = seen;
             }
         }
         Ok((low, self.swip(low)?, self.swip_offset(low)?))
+    }
+
+    /// Returns a slot in `low..high` to examine next, by proportion.
+    ///
+    /// The arithmetic half of [`InteriorRef::interpolate`], taking the two end
+    /// values rather than reading them, so a search that already knows them
+    /// does not pay for them again. Always inside the window, so the search
+    /// that calls it terminates whatever the separators look like.
+    ///
+    /// @param low - the first slot still in the window
+    /// @param high - one past the last slot still in the window
+    /// @param target - the probe's leading eight bytes as a number
+    /// @param low_value - the leading eight bytes of `low`'s key
+    /// @param high_value - the leading eight bytes of `high - 1`'s key
+    fn place(low: usize, high: usize, target: u64, low_value: u64, high_value: u64) -> usize {
+        let last = high.saturating_sub(1);
+        if high_value <= low_value || target <= low_value {
+            return low;
+        }
+        if target >= high_value {
+            return last;
+        }
+        let span = u128::from(high_value.saturating_sub(low_value));
+        let into = u128::from(target.saturating_sub(low_value));
+        let width = u128::try_from(last.saturating_sub(low)).unwrap_or(0);
+        let offset = usize::try_from(into.saturating_mul(width) / span.max(1)).unwrap_or(0);
+        low.saturating_add(offset.min(last.saturating_sub(low)))
     }
 
     /// Returns a slot in `low..high` to examine next, by proportion.
@@ -293,17 +355,7 @@ impl<'p> InteriorRef<'p> {
         let last = high.saturating_sub(1);
         let low_value = leading_u64(self.key(low)?);
         let high_value = leading_u64(self.key(last)?);
-        if high_value <= low_value || target <= low_value {
-            return Ok(low);
-        }
-        if target >= high_value {
-            return Ok(last);
-        }
-        let span = u128::from(high_value.saturating_sub(low_value));
-        let into = u128::from(target.saturating_sub(low_value));
-        let width = u128::try_from(last.saturating_sub(low)).unwrap_or(0);
-        let offset = usize::try_from(into.saturating_mul(width) / span.max(1)).unwrap_or(0);
-        Ok(low.saturating_add(offset.min(last.saturating_sub(low))))
+        Ok(Self::place(low, high, target, low_value, high_value))
     }
 
     /// Returns every byte offset in this page that holds a swip.

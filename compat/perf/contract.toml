@@ -16,9 +16,18 @@
 # The unweighted table is published beside the weighted one, so a favourable mix
 # cannot hide a slow primitive.
 
+# task-1834 (Phase 5) raised both thresholds to the ones task-1816 sets. The
+# TDD states them as replacements rather than alternatives: "**Design target**:
+# weighted geomean lower 95% bound at least **3.0x**" and "**Floor**: no family
+# below **1.0x** (lower bound), replacing 0.90x". They are written here rather
+# than in the analyser for the same reason the weights are, and they were
+# raised - a threshold that moves towards the measurement is not a threshold.
+#
+# The weights below are untouched and remain the ones fixed before any
+# measurement was taken.
 schema_version = 1
-headline = "1.50"
-floor = "0.90"
+headline = "3.00"
+floor = "1.00"
 
 [[family]]
 id = "open.prepare"

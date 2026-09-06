@@ -49,7 +49,10 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use inillucent_compat::newengine::ImportedDatabase;
-use inillucent_compat::perf::{plan_for, Bind, Digest, Grouping, Paired, Sample, Workload};
+use inillucent_compat::perf::{
+    plan_for, qualified_rounds, weighted_headline, Bind, Contract, Digest, Grouping, Paired,
+    Sample, Workload,
+};
 use inillucent_compat::workspace_root;
 use inillucent_exec::physical::Params;
 use inillucent_tree::datum::OwnedDatum;
@@ -100,9 +103,33 @@ fn main() -> ExitCode {
         rounds: flag(&arguments, "--rounds")
             .and_then(|value| value.parse().ok())
             .unwrap_or(30),
+        // **32 KiB, because that is the page size this engine has.**
+        // `Options::default` is 32 KiB, Phase 1 fixed it there after measuring
+        // 16/32/64, and `readgate` - the harness every Phase 2 and Phase 3
+        // number was taken with - defaults to it. This binary defaulted to
+        // 8 KiB, which is a size task-1819 measured on purpose and rejected,
+        // so every full-gate number from Phase 4 onwards was taken at a page
+        // size the engine does not ship.
+        //
+        // task-1834 isolated it from the memory budget rather than assuming,
+        // because the pool's bytes are frames times page size and moving one
+        // moves the other. Three configurations, ten paired rounds, medium:
+        //
+        // | | 8 KiB / 32 MiB | 32 KiB / **32 MiB** | 32 KiB / 128 MiB |
+        // |---|---|---|---|
+        // | `range.lookaside` | 0.79x | 0.98x | 0.96x |
+        // | `join.range` | 0.83x | 0.98x | 0.95x |
+        // | `scan.sort` | 3.20x | 5.31x | 5.21x |
+        // | `scan.distinct` | 1.04x | 1.63x | 1.60x |
+        // | `read.analytical` | 4.25x | 5.92x | 5.77x |
+        //
+        // The middle column holds the budget at the first column's and moves
+        // only the page size, and it reproduces the third. So the variable is
+        // the page size and not the memory, and the cache stays matched either
+        // way - SQLite's `cache_size` is derived from the pool's bytes below.
         page_size: flag(&arguments, "--page-size")
             .and_then(|value| value.parse().ok())
-            .unwrap_or(8_192),
+            .unwrap_or(32_768),
         frames: flag(&arguments, "--frames")
             .and_then(|value| value.parse().ok())
             .unwrap_or(4_096),
@@ -196,6 +223,12 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         -(plan.cache_size as f64) / 1024.0
     );
     println!("  fairness    : matched - one memory budget, both engines");
+    println!("  plan cache  : declared, and it is a inillucent design feature rather than less work");
+    println!("                inillucent keeps a prepared plan per statement text. The harness prepares");
+    println!("                identical text on every iteration, so both engines do the same logical");
+    println!("                work; SQLite has no equivalent inside the library. The open.prepare");
+    println!("                family re-prepares inside the timed region (prepare: each), which is");
+    println!("                where the cache is measured rather than assumed.");
     println!(
         "  warm state  : inillucent's pool is filled before each round; SQLite's cache fills as the plan runs"
     );
@@ -375,6 +408,104 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
             if met { "MET" } else { "MISSED" }
         );
     }
+
+    // **The headline, weighted and unweighted, in that order and both of them.**
+    // The weights are the checked-in ones in `compat/perf/contract.toml`, fixed
+    // before any measurement was taken; the unweighted table is published beside
+    // it so that a favourable mix cannot hide a slow primitive. The contract
+    // also carries the floor, which is what a family is judged against here -
+    // a family's *bar* is its TDD target and is reported above, and is a
+    // different and higher thing.
+    let contract = match Contract::parse(
+        &std::fs::read_to_string(workspace_root().join("compat/perf/contract.toml"))
+            .map_err(|error| format!("the performance contract is unreadable: {error}"))?,
+    ) {
+        Ok(contract) => contract,
+        Err(reason) => return Err(format!("the performance contract does not parse: {reason}")),
+    };
+    let rounds = qualified_rounds(&measured);
+    let full_plan = settings.families.len() == FAMILIES.len();
+    println!();
+    println!("## headline");
+    if rounds.is_empty() {
+        println!("  no round has a value for every workload, so there is no headline");
+        passed = false;
+    } else {
+        let (centre, low, high) = weighted_headline(&rounds, &contract, SEED);
+        let flat = Contract {
+            families: contract
+                .families
+                .iter()
+                .map(|family| inillucent_compat::perf::FamilyWeight {
+                    weight: 1.0 / contract.families.len() as f64,
+                    ..family.clone()
+                })
+                .collect(),
+            ..contract.clone()
+        };
+        let (flat_centre, flat_low, flat_high) = weighted_headline(&rounds, &flat, SEED);
+        println!(
+            "  {:<26} {:>9} {:>9} {:>9} {:>8}  {}",
+            "geometric mean", "ratio", "low", "high", "bound", "verdict"
+        );
+        // **Only a run of the whole plan is a headline.** A families-filtered
+        // run is an iteration aid: its weights do not sum to one and the number
+        // it would print is a different question wearing the answer's name.
+        let met = low >= contract.headline && full_plan;
+        println!(
+            "  {:<26} {centre:>8.2}x {low:>8.2}x {high:>8.2}x {:>7.2}x  {}",
+            "weighted, per the contract",
+            contract.headline,
+            if !full_plan {
+                "PARTIAL RUN - not a headline"
+            } else if met {
+                "MET"
+            } else {
+                "MISSED"
+            }
+        );
+        println!(
+            "  {:<26} {flat_centre:>8.2}x {flat_low:>8.2}x {flat_high:>8.2}x {:>8}  {}",
+            "unweighted, family-equal", "-", "reported"
+        );
+        println!(
+            "  {} rounds contributed, each one weighted mean of that round's log ratios",
+            rounds.len()
+        );
+        if full_plan {
+            passed = passed && met;
+        }
+    }
+
+    // The floor, which is a separate gate from every bar above: no required
+    // family may sit below it however good the headline is.
+    println!();
+    println!("## floor: no required family below {:.2}x", contract.floor);
+    let mut floored = true;
+    for (family, _) in FAMILIES {
+        if !settings.families.iter().any(|name| name == family) {
+            continue;
+        }
+        if !contract.is_required(family) {
+            continue;
+        }
+        let members: Vec<&Paired> = measured
+            .iter()
+            .filter(|entry| entry.family == family && entry.agreed && !entry.pairs.is_empty())
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        let (low, _) = pooled_interval(&members, SEED);
+        if low < contract.floor {
+            println!("  {family:<16} {low:>8.2}x  UNDER THE FLOOR");
+            floored = false;
+        }
+    }
+    if floored {
+        println!("  every required family is above it");
+    }
+    passed = passed && floored;
 
     println!();
     println!("## gate: {}", if passed { "MET" } else { "NOT MET" });
