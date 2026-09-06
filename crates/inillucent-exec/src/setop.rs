@@ -108,6 +108,33 @@ impl SetKeys {
         self.counts.contains_key(encoded)
     }
 
+    /// Records one already-materialised row, reporting whether it is new.
+    ///
+    /// **The same encoding the batch path uses**, so a caller holding rows and
+    /// a caller pushing batches agree about what a duplicate is. The recursive
+    /// CTE fill loop is the caller: it holds the rows a pass produced, and
+    /// `UNION` means a row already in the answer is not queued again - which is
+    /// the difference between a graph walk that terminates on a cycle and one
+    /// that does not.
+    ///
+    /// @param row - the row, whole, because a set operation compares whole rows
+    pub fn remember(&mut self, row: &[OwnedDatum]) -> bool {
+        let mut encoded = Vec::new();
+        for (column, value) in row.iter().enumerate() {
+            key::encode_into_with(
+                &value.borrow(),
+                self.collations
+                    .get(column)
+                    .copied()
+                    .unwrap_or(Collation::Binary),
+                &mut encoded,
+            );
+        }
+        let count = self.counts.entry(encoded).or_insert(0);
+        *count = count.saturating_add(1);
+        *count == 1
+    }
+
     /// Returns how many distinct keys were seen.
     pub fn len(&self) -> usize {
         self.counts.len()

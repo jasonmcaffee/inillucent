@@ -667,10 +667,11 @@ fn the_physical_pass_refuses_what_it_cannot_run() {
             "a window function",
             "SELECT id, row_number() OVER () FROM t",
         ),
-        (
-            "an outer join",
-            "SELECT t.id FROM t LEFT JOIN t AS u ON t.category = u.id",
-        ),
+        // An outer join left this list in task-1838: `NestedLoopJoin` reads the
+        // inner side once and evaluates the `ON` over each pair, which is what
+        // distinguishes "no partner" from "a partner that failed the condition"
+        // and so what a null extension needs. It is graded against the pinned
+        // shell by `advanced_sql::joins_match_the_oracle`, 21 statements.
     ];
     for (what, sql) in refused {
         let Ok(plan) = fixture.plan(sql) else {

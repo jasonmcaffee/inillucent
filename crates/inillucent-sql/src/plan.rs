@@ -566,7 +566,26 @@ pub fn plan_select_with(select: BoundSelect, levers: Levers) -> PhysicalPlan {
         let Some(source) = select.sources.get(*position) else {
             continue;
         };
-        let path = choose_path(level, &ids, source, &select, &terms, &mut consumed, levers);
+        // **An outer term's rows are not filtered on the way in.** A `WHERE`
+        // predicate over the null-extendable side is applied *after* the join,
+        // because a row that fails it must still produce a null-extended pair
+        // rather than vanish. Letting `choose_path` turn such a predicate into
+        // a seek would do both wrong things at once: filter the rows before the
+        // null extension, and mark the term consumed so it is never re-tested.
+        //
+        // So an outer term reads its whole source. A subquery, a recursive CTE
+        // and a virtual table each still resolve to what they are, because
+        // those are not access-path choices - they are what the term *is*.
+        let path = if is_outer(source.join) && matches!(source.rows, SourceRows::Table) {
+            match source.table.module.clone() {
+                Some(_) => choose_path(level, &ids, source, &select, &terms, &mut consumed, levers),
+                None => AccessPath::TableScan {
+                    root: source.table.root,
+                },
+            }
+        } else {
+            choose_path(level, &ids, source, &select, &terms, &mut consumed, levers)
+        };
         let (cost, rows) = path_cost(source, &path);
         sources.push(PlannedSource {
             cost,

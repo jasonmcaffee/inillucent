@@ -227,10 +227,18 @@ impl ImportedDatabase {
                 self.release(&name)?;
                 Ok(Outcome::empty())
             }
-            other => Err(misuse(format!(
-                "{sql} is {}, which the new engine does not run yet",
-                super::describe_directive(&other)
-            ))),
+            // **Marked as a capability gap, not as misuse.** A directive this
+            // engine has not implemented - `ATTACH`, `DETACH`, `VACUUM` - is a
+            // construct it does not do yet, which is a different thing from a
+            // statement the caller got wrong, and a caller in front of it has to
+            // be able to tell them apart without matching on prose.
+            other => {
+                let what = super::describe_directive(&other);
+                Err(misuse(format!(
+                    "{sql} is {what}, which the new engine does not run yet"
+                ))
+                .with_unsupported(what))
+            }
         }
     }
 

@@ -198,7 +198,7 @@ const SURFACE: &[(&str, &str, Answers)] = &[
     (
         "subquery.correlated",
         "SELECT a FROM t WHERE EXISTS (SELECT 1 FROM t AS u WHERE u.id = t.id)",
-        NotYet,
+        Yes,
     ),
     ("attach", "ATTACH DATABASE ':memory:' AS other", NotYet),
     ("vacuum", "VACUUM", NotYet),

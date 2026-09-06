@@ -522,6 +522,60 @@ impl ImportedDatabase {
             catalog = catalog.with_table(info.clone());
         }
 
+        // **The objects that have no tree**, which the loop above skipped
+        // because it skipped `info.root == 0`. A view and a trigger are rows in
+        // the schema and nothing else: a view is a query the binder resolves
+        // when a statement reads through it, and a trigger is a body the write
+        // path fires. Dropping them made an imported database answer
+        // `no such table: blue` for a view the fixture declared - which reads
+        // as a schema the source never had rather than as a refusal.
+        for info in &loaded.tables {
+            if info.kind != inillucent_sql::catalog_view::TableKind::View {
+                continue;
+            }
+            entries.push(SchemaEntry {
+                kind: ObjectKind::View,
+                name: info.name.clone(),
+                table: info.name.clone(),
+                root: PageId::NONE,
+                sql: info.create_sql.clone(),
+                stats: Default::default(),
+                // A view has no tree, so it has no identifier either. Zero is
+                // what `Recorded.root` documents for an object with none, and
+                // it is what a virtual table's row already carries.
+                tree_id: 0,
+            });
+            identifiers.push(0);
+            tables.push((*info).clone());
+            catalog = catalog.with_table((*info).clone());
+        }
+        // A trigger belongs to a table rather than to itself, so it is written
+        // out of the table it is attached to. The declaration comes from the
+        // source's own `sqlite_schema` text rather than from the parsed body:
+        // the text is the definition, and rendering one back would lose
+        // whatever the printer does not know how to write.
+        for info in &loaded.tables {
+            for trigger in &info.triggers {
+                let Some(sql) = declarations.get(&(
+                    "trigger".to_string(),
+                    String::from_utf8_lossy(&trigger.name).to_ascii_lowercase(),
+                )) else {
+                    skipped.push(String::from_utf8_lossy(&trigger.name).into_owned());
+                    continue;
+                };
+                entries.push(SchemaEntry {
+                    kind: ObjectKind::Trigger,
+                    name: trigger.name.clone(),
+                    table: info.name.clone(),
+                    root: PageId::NONE,
+                    sql: sql.as_bytes().to_vec(),
+                    stats: Default::default(),
+                    tree_id: 0,
+                });
+                identifiers.push(0);
+            }
+        }
+
         // The catalog tree goes in last, because it names every root page the
         // import allocated.
         //
@@ -2310,11 +2364,12 @@ impl ImportedDatabase {
                 // The same for an `UPDATE`'s assignments: the plan above finds
                 // the rows, and the values written into them are evaluated by
                 // the write path from expressions the plan never carried.
-                let folded = if *assignments_hold_subquery {
+                let folded = if *assignments_hold_subquery || !statement.returning.is_empty() {
                     let assigned: Vec<&inillucent_sql::bind::BoundExpr> = statement
                         .assignments
                         .iter()
                         .map(|assignment| &assignment.value)
+                        .chain(statement.returning.iter().map(|column| &column.expr))
                         .collect();
                     inillucent_exec::subquery::fold_expressions(&assigned, self, params)?
                 } else {
@@ -2354,6 +2409,19 @@ impl ImportedDatabase {
             }
             Cached::Delete(statement, plan, prepared) => {
                 let keys = self.keys_of(plan, prepared, params)?;
+                // A `RETURNING` clause is a result-column list the write path
+                // evaluates directly, so the plan-shaped fold never sees its
+                // subqueries. `DELETE ... RETURNING id, (SELECT count(*) FROM
+                // b)` came back as "a correlated subquery" - which is what an
+                // unfilled slot looks like from inside `translate`, and a true
+                // sentence about the slot rather than about the query.
+                let returned: Vec<&inillucent_sql::bind::BoundExpr> = statement
+                    .returning
+                    .iter()
+                    .map(|column| &column.expr)
+                    .collect();
+                let folded = inillucent_exec::subquery::fold_expressions(&returned, self, params)?;
+                let params = folded.as_ref().unwrap_or(params);
                 self.write(params, |target, log, params| {
                     dml::delete(statement, target, log, params, &keys)
                 })

@@ -73,7 +73,7 @@ use inillucent_value::collation::Collation;
 use crate::aggregate::AggregateKind;
 use crate::batch::Batch;
 use crate::expr::{compile, ArithOp, CompareOp, Expr, StaticType};
-use crate::join::{IndexNestedLoopJoin, JoinKind, ValuesScan};
+use crate::join::{IndexNestedLoopJoin, JoinKind, NestedLoopJoin, ValuesScan};
 use crate::ops::{
     AdjacentDistinct, AggregateSpec, CollectInto, Distinct, Filter, Flow, HashAggregate, Limit,
     Project, SimpleAggregate, Sink, Sort, SortKey, StreamAggregate, TopN,
@@ -181,6 +181,78 @@ pub trait TreeCatalog {
     fn covering_candidates(&self, table_root: u32) -> Vec<u32> {
         let _ = table_root;
         Vec::new()
+    }
+
+    /// Returns the rows a recursive CTE's queue is currently holding.
+    ///
+    /// **The one piece of state a recursive query has, handed in the same way a
+    /// module's rows are.** A `WITH RECURSIVE` term reads *itself*: the step arm
+    /// runs once per pass over the rows the previous pass produced, and that
+    /// working set is neither a tree nor a plan - it is a buffer the fill loop
+    /// owns. Asking for it through this trait is what lets the step arm be an
+    /// ordinary plan run by the ordinary pipeline, with no second execution
+    /// path and no recursion in the operator chain.
+    ///
+    /// `None` for every catalog that is not inside such a loop, which is every
+    /// one of them except the wrapper `run_recursive` builds per pass.
+    ///
+    /// @param cte - the FROM term whose queue is wanted
+    fn recursive_rows(&self, cte: usize) -> Option<&[Vec<OwnedDatum>]> {
+        let _ = cte;
+        None
+    }
+}
+
+/// A catalog that also answers one recursive CTE's queue.
+///
+/// Everything else is delegated, so the step arm sees exactly the trees, the
+/// layouts and the modules the statement sees. Wrapping rather than threading a
+/// parameter through every builder is what keeps a recursive query from
+/// changing the shape of a signature nothing else uses.
+struct WithQueue<'a> {
+    /// The catalog underneath, which answers everything but the queue.
+    inner: &'a dyn TreeCatalog,
+    /// The FROM term this queue belongs to.
+    cte: usize,
+    /// The rows the previous pass produced.
+    rows: &'a [Vec<OwnedDatum>],
+}
+
+impl TreeCatalog for WithQueue<'_> {
+    fn pool(&self) -> &Pool {
+        self.inner.pool()
+    }
+
+    fn tree(&self, root: u32) -> Option<&PagedTree> {
+        self.inner.tree(root)
+    }
+
+    fn layout(&self, root: u32) -> Option<&SourceLayout> {
+        self.inner.layout(root)
+    }
+
+    fn covering_candidates(&self, table_root: u32) -> Vec<u32> {
+        self.inner.covering_candidates(table_root)
+    }
+
+    fn virtual_rows(
+        &self,
+        table: &TableInfo,
+        path: &AccessPath,
+        params: &Params,
+        needed: &inillucent_sql::bind::ColumnUse,
+    ) -> DbResult<Option<Vec<Vec<OwnedDatum>>>> {
+        self.inner.virtual_rows(table, path, params, needed)
+    }
+
+    fn recursive_rows(&self, cte: usize) -> Option<&[Vec<OwnedDatum>]> {
+        // An inner CTE's queue does not hide an outer one's: a query may hold
+        // two recursive terms, and each pass wraps the catalog the other one is
+        // already being read through.
+        if cte == self.cte {
+            return Some(self.rows);
+        }
+        self.inner.recursive_rows(cte)
     }
 }
 
@@ -347,6 +419,26 @@ impl Params {
             values: self.values.clone(),
             reads: std::cell::Cell::new(self.reads.get()),
             subqueries,
+        }
+    }
+
+    /// Returns this set with the folded-subquery table emptied.
+    ///
+    /// **For a statement run from inside another one's row.** A correlated
+    /// block is a statement of its own and folds its own uncorrelated
+    /// subqueries; carrying the outer table in would tell it the fold had
+    /// already happened - `has_subqueries` is how `crate::subquery::fold`
+    /// decides - and leave its slots unfilled, which reads from inside
+    /// `translate` as "a correlated subquery": a true sentence about the slot
+    /// and a false one about the query.
+    ///
+    /// The bound values are kept, because a nested block may read `?1` and has
+    /// to see the same binding the outer statement did.
+    pub fn without_subqueries(&self) -> Params {
+        Params {
+            values: self.values.clone(),
+            reads: std::cell::Cell::new(self.reads.get()),
+            subqueries: Vec::new(),
         }
     }
 
@@ -710,7 +802,7 @@ pub struct Shape {
 /// Returns an error naming what the physical pass will not run.
 ///
 /// @param what - the construct, in words
-fn unsupported<T>(what: &str) -> DbResult<T> {
+pub(crate) fn unsupported<T>(what: &str) -> DbResult<T> {
     // **The sentence and the marker are written in the same place**, so a
     // caller asking `DbError::unsupported()` and a caller reading the message
     // cannot be told different things. The wording is unchanged from before
@@ -886,30 +978,22 @@ fn plan_stages(
     let sensitive = order_sensitive(&plan.select);
     for (position, source) in plan.sources.iter().enumerate() {
         let outermost = position == 0;
-        // **An outer join is refused rather than answered as an inner one.**
+        // **An outer join is answered by materialising the inner side.**
         //
-        // The physical pass never looked at the join kind and always built
+        // It used to be refused, and the refusal was right while it stood: the
+        // physical pass never looked at the join kind and always built
         // `JoinKind::Inner`, so a `LEFT JOIN` silently dropped the outer rows
-        // that matched nothing. That was unreachable while every such query was
-        // refused for another reason, and the moment a keyless inner term became
-        // runnable the differential corpus produced it: `SELECT people.team FROM
-        // people LEFT JOIN teams ON ...` answered six rows as four nulls.
+        // that matched nothing - `SELECT people.team FROM people LEFT JOIN
+        // teams ON ...` answered six rows as four nulls.
         //
-        // Doing it properly needs the `ON` condition evaluated per candidate
-        // pair - an index nested loop assumes the key equality *is* the
-        // condition - which is a real operator rather than a flag, and it is not
-        // in this phase's scope. A named refusal is the honest state until it
-        // is: the corpus reports it, and nobody gets a wrong answer meanwhile.
-        if !outermost
-            && matches!(
-                source.join,
-                inillucent_sql::ast::JoinKind::Left
-                    | inillucent_sql::ast::JoinKind::Right
-                    | inillucent_sql::ast::JoinKind::Full
-            )
-        {
-            return unsupported("an outer join");
-        }
+        // What it needs that an index nested loop cannot give is the `ON`
+        // condition evaluated per candidate *pair*: an index probe assumes the
+        // key equality **is** the condition, and an outer join has to know that
+        // a pair failed the condition in order to null-extend instead. So the
+        // inner side is read once into a buffer and `NestedLoopJoin` evaluates
+        // the condition over each pair - which also gives `RIGHT` and `FULL`,
+        // because a materialised build side is the only thing that can remember
+        // which of its rows matched (see `build_nested`).
         match &source.path {
             AccessPath::TableScan { root } => {
                 let root = if outermost {
@@ -1058,55 +1142,40 @@ fn plan_stages(
             AccessPath::Subquery {
                 width, correlated, ..
             } => {
-                if !outermost {
-                    // An inner subquery has to be rebuilt or rescanned once per
-                    // outer row, which is a nested loop over a materialised
-                    // buffer rather than over a tree. Refusing it is honest;
-                    // the outermost case below is the one the corpus needs.
-                    return unsupported("a subquery as an inner join term");
-                }
-                if *correlated {
+                // An inner subquery is a nested loop over a materialised
+                // buffer rather than over a tree, which is exactly what
+                // `build_nested` builds for it. The rows are read once rather
+                // than once per outer row: a derived table is a query with no
+                // free variables, so re-running it would answer the same thing.
+                if *correlated && outermost {
                     // A correlated subquery reads a FROM term outside itself,
                     // and the outermost term has nothing outside it - so this
                     // is a plan that should not exist rather than one to run.
                     return unsupported("a correlated subquery as the outermost term");
                 }
-                stages.push(PreparedStage {
-                    functions: Vec::new(),
-                    root: 0,
-                    kind: AccessKind::Materialised,
-                    source: source.id,
-                    term: position,
-                    is_lookup: false,
-                    offset,
-                    width: *width,
-                    // A materialised row is its own record: slot `i` is column
-                    // `i`, there is no rowid, and nothing is known about the
-                    // order - so no streaming rule may assume one.
-                    layout: Some(SourceLayout {
-                        tree_key: 0,
-                        slots: (0..*width).map(Some).collect(),
-                        rowid: None,
-                        types: vec![StaticType::Unknown; *width],
-                        width: *width,
-                        key_columns: Vec::new(),
-                    }),
-                });
-                offset = offset.saturating_add(*width);
+                push_materialised(&mut stages, source.id, position, *width, &mut offset);
             }
-            AccessPath::Recursive { .. } | AccessPath::RecursiveSelf { .. } => {
-                return unsupported("a recursive CTE")
+            // A recursive CTE and the reference to the one being filled are
+            // both *materialised* stages: the first is the fill loop's answer
+            // and the second is the queue it is currently on, and neither is a
+            // tree. `source_for` and `materialise_stage` produce the rows.
+            AccessPath::Recursive { width, .. } => {
+                push_materialised(&mut stages, source.id, position, *width, &mut offset);
+            }
+            AccessPath::RecursiveSelf { .. } => {
+                let width = source.table.columns.len().max(1);
+                push_materialised(&mut stages, source.id, position, width, &mut offset);
             }
             // A virtual table is a *materialised* stage: the module produces
             // its rows on the caller's side and the pipeline reads them, which
             // is the same shape a subquery already has.
             AccessPath::VirtualScan { .. } => {
-                if !outermost {
-                    // A module answering once per outer row is a nested loop
-                    // into somebody else's code, and the plan the module chose
-                    // was chosen for one set of constraints. Refused by name.
-                    return unsupported("a virtual table as an inner join term");
-                }
+                // A module is asked once, whether it is the outermost term or
+                // an inner one: the plan it chose was chosen for one set of
+                // constraints, and asking it again per outer row would be
+                // asking a different question than the one it costed. As an
+                // inner term its rows drive a `NestedLoopJoin`, like a
+                // subquery's.
                 let declared = source.table.columns.len().max(1);
                 // **A module's row carries its rowid when the query asks for
                 // one.** `SELECT rowid FROM t WHERE t MATCH ...` is the shape
@@ -1219,6 +1288,14 @@ pub(crate) struct Space<'c> {
     pub(crate) types: &'c [StaticType],
     /// The tree columns the *joined* rows arrive sorted by, when they do.
     pub(crate) order: &'c [usize],
+    /// Which joined-row column each correlated subquery's answer sits in.
+    ///
+    /// Empty for every statement that has none, which is nearly all of them.
+    /// A correlated block cannot be folded into a constant - it reads the row
+    /// being tested - so `crate::correlate` computes it beside the row and this
+    /// is the map an expression finds it through, exactly as a module's
+    /// auxiliary functions are found.
+    pub(crate) correlations: &'c [(usize, usize)],
 }
 
 impl Space<'_> {
@@ -1233,6 +1310,16 @@ impl Space<'_> {
     /// @param source - the planner FROM term
     /// @param declared - the column's declared position, which is what every
     ///   builder of a [`SourceLayout`] indexes its `slots` by
+    /// Returns the joined-row column one correlated subquery's answer sits in.
+    ///
+    /// @param id - the binder's statement-wide number for the subquery
+    fn correlated(&self, id: usize) -> Option<usize> {
+        self.correlations
+            .iter()
+            .find(|(held, _)| *held == id)
+            .map(|(_, column)| *column)
+    }
+
     fn column(&self, source: usize, declared: usize) -> Option<usize> {
         let mut found = None;
         for (index, stage) in self.stages.iter().enumerate() {
@@ -1374,11 +1461,24 @@ impl HeldSpace {
     ///
     /// @param stages - the prepared stages, outermost first
     pub(crate) fn view<'a>(&'a self, stages: &'a [PreparedStage]) -> Space<'a> {
+        self.view_with(stages, &[])
+    }
+
+    /// Returns a view that also knows where the correlated answers sit.
+    ///
+    /// @param stages - the prepared stages, outermost first
+    /// @param correlations - each block's number and the cell holding its answer
+    pub(crate) fn view_with<'a>(
+        &'a self,
+        stages: &'a [PreparedStage],
+        correlations: &'a [(usize, usize)],
+    ) -> Space<'a> {
         Space {
             stages,
             layouts: &self.layouts,
             types: &self.types,
             order: &self.order,
+            correlations,
         }
     }
 }
@@ -1457,14 +1557,42 @@ fn build_chain<'t>(
 ) -> DbResult<Chain<'t>> {
     let select = &plan.select;
     refuse_unhandled(select)?;
-    let space = &Space {
+    // **A correlated block is answered beside the row, not inside an
+    // expression.** Each one becomes a column appended to the joined row, and
+    // `crate::correlate` is the operator that fills it - so the `WHERE` and the
+    // projection read a column rather than reaching for a catalog that
+    // `expr::Eval`'s `Send + Sync` bound puts out of reach. `correlations_of`
+    // returns nothing for a statement with none, which is nearly all of them,
+    // and the operator is then never built.
+    let outer = Space {
         stages: space.stages,
         layouts: space.layouts,
         types: space.types,
         order: space.order,
+        correlations: &[],
+    };
+    let correlations = crate::correlate::correlations_of(plan, &|expr: &BoundExpr| match expr {
+        BoundExpr::Column { source, column, .. } => outer.column(*source, *column as usize),
+        BoundExpr::Rowid { source } => outer.rowid(*source),
+        _ => None,
+    })?;
+    let joined_width = space.types.len();
+    let correlation_columns: Vec<(usize, usize)> = correlations
+        .iter()
+        .enumerate()
+        .map(|(position, correlation)| (correlation.id, joined_width.saturating_add(position)))
+        .collect();
+    let mut widened_types = space.types.to_vec();
+    widened_types.extend(std::iter::repeat(StaticType::Unknown).take(correlations.len()));
+    let space = &Space {
+        stages: space.stages,
+        layouts: space.layouts,
+        types: &widened_types,
+        order: space.order,
+        correlations: &correlation_columns,
     };
 
-    let scan_types = space.types.to_vec();
+    let scan_types = widened_types.clone();
     let group_width = select.group_by.len();
     let skipping = prepared
         .stages
@@ -1532,16 +1660,27 @@ fn build_chain<'t>(
     // rather than merely differently ordered.
     let group_collations: Vec<Collation> =
         select.group_by.iter().map(expression_collation).collect();
-    let grouped_walk = plan.aggregation == AggregationMode::Grouped
-        && !prepared.forced.hash_group
-        && is_scan_prefix(&group_exprs, scan_order);
-
     // Whether the projected rows arrive in the order the ORDER BY asks for.
     let reversed = prepared
         .stages
         .first()
         .map(|stage| stage.kind == AccessKind::Reverse)
         .unwrap_or(false);
+    // **Adjacency has no direction, and `space.order` deliberately does.** A
+    // reverse walk brings each group's rows together exactly as a forward one
+    // does, but `space_of` empties `order` for a reverse scan - correctly, since
+    // the rows arrive in the *reverse* of that order and no rule reading it may
+    // assume otherwise. Asking `is_scan_prefix` alone therefore said "not
+    // grouped by the walk", the aggregate became a hash one, and it emitted its
+    // groups in key order: `SELECT k, count(*) FROM t GROUP BY k ORDER BY k
+    // DESC` came back *ascending*, with the planner having already skipped the
+    // sorter because the walk was supposed to answer the ordering.
+    //
+    // So the adjacency question is asked of the planner for a reverse walk,
+    // which decided it from the access path rather than from the direction.
+    let grouped_walk = plan.aggregation == AggregationMode::Grouped
+        && !prepared.forced.hash_group
+        && (is_scan_prefix(&group_exprs, scan_order) || (reversed && plan.grouped_walk));
     // A non-default NULL placement is a real ordering requirement, and no scan
     // order satisfies it by accident.
     let default_nulls = sort_keys
@@ -1561,7 +1700,25 @@ fn build_chain<'t>(
             && sort_keys.iter().all(|term| !term.descending)
             && output_is_sorted_by(&sort_keys, &projected, plan, scan_order, grouped_walk)
     };
-    let sorted_already = sorted_already || (skipping && !sort_keys.is_empty());
+    // **A skip scan produces the distinct prefix in *ascending* order**, which
+    // answers an ascending `ORDER BY` over that prefix and nothing else. This
+    // line used to say only "skipping", and `SELECT k, count(*) FROM t GROUP BY
+    // k ORDER BY k DESC` therefore skipped its sorter and came back ascending -
+    // a wrong answer rather than a slow one, and one no single-direction test
+    // could see. The same two conditions the forward branch above applies are
+    // applied here, because it is the same claim about the same walk.
+    // **A skip scan produces the distinct prefix in *ascending* order**, which
+    // answers an ascending `ORDER BY` over that prefix and nothing else. This
+    // line used to say only "skipping", and `SELECT k, count(*) FROM t GROUP BY
+    // k ORDER BY k DESC` therefore skipped its sorter and came back ascending -
+    // a wrong answer rather than a slow one, and one no single-direction test
+    // could see. The same two conditions the forward branch above applies are
+    // applied here, because it is the same claim about the same walk.
+    let sorted_already = sorted_already
+        || (skipping
+            && !sort_keys.is_empty()
+            && sort_keys.iter().all(|term| !term.descending)
+            && output_is_sorted_by(&sort_keys, &projected, plan, scan_order, grouped_walk));
 
     // Built bottom-up, because each operator owns the one below it. The
     // description is collected in the same order and reversed at the end, so it
@@ -1571,6 +1728,23 @@ fn build_chain<'t>(
 
     let limit = constant_limit(select, params)?;
     let offset = constant_offset(select, params)?.unwrap_or(0);
+    // **What the *source* may stop after, which is not the statement's LIMIT.**
+    // A source that stops early is only right when nothing between it and the
+    // `Limit` operator changes how many rows there are: a residual filter drops
+    // some, a join multiplies them, `DISTINCT` and an aggregate collapse them,
+    // and an `OFFSET` throws the first ones away - so `LIMIT 2 OFFSET 1` needs
+    // three rows read and returned one.
+    //
+    // It was the bare `LIMIT`, which made `WHERE id <= 5 ORDER BY id DESC LIMIT
+    // 2 OFFSET 1` answer one row instead of two.
+    let source_limit = limit.filter(|_| {
+        plan.residuals.iter().all(Option::is_none)
+            && plan.constant_filter.is_none()
+            && prepared.stages.len() == 1
+            && !select.distinct
+            && plan.aggregation == AggregationMode::None
+            && select.windows.is_empty()
+    });
     if sort_keys.is_empty() || sorted_already {
         if let Some(limit) = limit {
             chain = Box::new(Limit::new(limit, offset, chain));
@@ -1723,6 +1897,18 @@ fn build_chain<'t>(
     // to `'t` here and only here: an index nested loop borrows its inner tree,
     // and it wraps everything built so far rather than being wrapped by it.
     let mut chain: Box<dyn Sink + 't> = chain;
+    // The correlation operator goes *below* every join and *above* every
+    // filter: the value it computes reads the whole joined row, and the `WHERE`
+    // that tests it runs after the last join has widened that row.
+    if !correlations.is_empty() {
+        operators.push("CORRELATED SUBQUERY".to_string());
+        chain = Box::new(crate::correlate::Correlated::new(
+            correlations,
+            catalog,
+            params,
+            chain,
+        ));
+    }
     for index in (1..prepared.stages.len()).rev() {
         let stage = prepared
             .stages
@@ -1751,7 +1937,7 @@ fn build_chain<'t>(
         head: chain,
         operators,
         names,
-        limit,
+        limit: source_limit.map(|limit| limit.saturating_add(offset)),
     })
 }
 
@@ -1929,11 +2115,7 @@ fn source_for<'t>(
                     .ok_or_else(|| misuse("a virtual table the caller does not have"))?;
                 return Ok((Source::Rows(rows), describe_source(prepared)));
             }
-            let AccessPath::Subquery { plan: inner, .. } = &term.path else {
-                return Err(misuse("a materialised stage over something else"));
-            };
-            let sub = prepare(inner, catalog, ForcePlan::default())?;
-            let (rows, _) = run_prepared(inner, catalog, &sub, params)?;
+            let rows = materialise_stage(plan, catalog, params, stage)?;
             Ok((Source::Rows(rows), describe_source(prepared)))
         }
         Some(stage) => Ok((
@@ -1949,6 +2131,7 @@ fn source_for<'t>(
                 layouts: &[],
                 types: &[],
                 order: &[],
+                correlations: &[],
             };
             let mut rows: Vec<Vec<OwnedDatum>> = Vec::with_capacity(plan.select.values.len());
             for row in &plan.select.values {
@@ -1964,6 +2147,47 @@ fn source_for<'t>(
         // answer comes out of the projection.
         None => Ok((Source::Constant(1), describe_source(prepared))),
     }
+}
+
+/// Pushes one stage whose rows the caller produces rather than a tree.
+///
+/// A derived table, a recursive CTE, the queue that CTE is being filled from,
+/// and a virtual table's rows are all this shape: the pipeline reads a buffer,
+/// not pages. A materialised row is its own record - slot `i` is column `i`,
+/// there is no rowid, and nothing is known about the order, so no streaming
+/// rule may assume one.
+///
+/// @param stages - the stages built so far
+/// @param source - the binder's number for the FROM term
+/// @param term - the term's position in the plan's own arrays
+/// @param width - how many columns a row holds
+/// @param offset - the first joined-row column this stage fills, advanced here
+fn push_materialised(
+    stages: &mut Vec<PreparedStage>,
+    source: usize,
+    term: usize,
+    width: usize,
+    offset: &mut usize,
+) {
+    stages.push(PreparedStage {
+        functions: Vec::new(),
+        root: 0,
+        kind: AccessKind::Materialised,
+        source,
+        term,
+        is_lookup: false,
+        offset: *offset,
+        width,
+        layout: Some(SourceLayout {
+            tree_key: 0,
+            slots: (0..width).map(Some).collect(),
+            rowid: None,
+            types: vec![StaticType::Unknown; width],
+            width,
+            key_columns: Vec::new(),
+        }),
+    });
+    *offset = offset.saturating_add(width);
 }
 
 /// Returns the `EXPLAIN` line for whatever drives a plan.
@@ -2028,9 +2252,8 @@ fn build_source<'t>(
         }
         AccessKind::Reverse => {
             let bounds = span_bounds(path, table, space, params)?;
-            let high = bounds.high;
             Ok(Source::Reverse(ReverseScan::new(
-                tree, projection, high, limit,
+                tree, projection, bounds, limit,
             )))
         }
         AccessKind::Nested => Err(misuse("a nested stage cannot drive a pipeline")),
@@ -2063,6 +2286,20 @@ fn build_nested<'t>(
     index: usize,
     downstream: Box<dyn Sink + 't>,
 ) -> DbResult<Box<dyn Sink + 't>> {
+    let source_term = plan
+        .sources
+        .get(stage.term)
+        .ok_or_else(|| misuse("a stage names a FROM term the plan does not have"))?;
+    // **Two shapes of inner term, and the join kind is what picks between
+    // them.** An inner join over a tree probes it once per outer row and never
+    // materialises anything, which is the shape every read family measures. An
+    // outer join, and any term that is not a tree at all, reads its rows once
+    // into a buffer and pairs them: an outer join has to know that a pair
+    // *failed* the condition in order to null-extend instead of dropping, and a
+    // probe cannot tell that from a key that was not there.
+    if inillucent_sql::plan::is_outer(source_term.join) || stage.kind == AccessKind::Materialised {
+        return build_materialised_join(plan, catalog, space, params, stage, downstream);
+    }
     let tree = catalog
         .tree(stage.root)
         .ok_or_else(|| misuse(format!("no tree imported for root page {}", stage.root)))?;
@@ -2090,10 +2327,6 @@ fn build_nested<'t>(
             true,
         )
     } else {
-        let source_term = plan
-            .sources
-            .get(stage.term)
-            .ok_or_else(|| misuse("a stage names a FROM term the plan does not have"))?;
         nested_key(&source_term.path, &source_term.table, space, params)?
     };
     let compiled = keys
@@ -2109,6 +2342,233 @@ fn build_nested<'t>(
         full_key,
         downstream,
     )))
+}
+
+/// Builds one inner stage as a nested loop over rows read once.
+///
+/// **The one shape that can answer an outer join.** Its build side is a vector,
+/// so it can evaluate the `ON` condition over each candidate pair - which is
+/// what distinguishes "no partner" from "a partner that failed the condition",
+/// the whole difference between an inner join and a `LEFT` one - and it can
+/// remember which build rows matched, which is the whole of `RIGHT` and `FULL`.
+///
+/// It is also what a term that is not a tree gets: a derived table, a recursive
+/// CTE and a virtual table each produce rows rather than pages, and reading
+/// them once rather than once per outer row is correct because none of them has
+/// a free variable to re-evaluate.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees and layouts come from
+/// @param space - the joined column space
+/// @param params - the bound parameters
+/// @param stage - the inner stage
+/// @param downstream - what to push joined rows into
+fn build_materialised_join<'t>(
+    plan: &PhysicalPlan,
+    catalog: &'t dyn TreeCatalog,
+    space: &Space<'_>,
+    params: &Params,
+    stage: &PreparedStage,
+    downstream: Box<dyn Sink + 't>,
+) -> DbResult<Box<dyn Sink + 't>> {
+    let source_term = plan
+        .sources
+        .get(stage.term)
+        .ok_or_else(|| misuse("a stage names a FROM term the plan does not have"))?;
+    let rows = materialise_stage(plan, catalog, params, stage)?;
+    // The condition is compiled over the *joined* row - every column produced
+    // so far, then this stage's - which is exactly the space the pipeline
+    // already describes, so an `ON` naming either side needs no special case.
+    let joined_types: Vec<StaticType> = space
+        .types
+        .get(..stage.offset.saturating_add(stage.width))
+        .map(<[StaticType]>::to_vec)
+        .unwrap_or_else(|| space.types.to_vec());
+    let condition = match &source_term.on {
+        Some(expr) => {
+            let translated = translate_scan(expr, space, params)?;
+            Some(compile(&translated, &joined_types)?)
+        }
+        None => None,
+    };
+    Ok(Box::new(NestedLoopJoin::new(
+        join_kind_of(source_term.join),
+        rows,
+        condition,
+        downstream,
+    )))
+}
+
+/// Returns the executor's join kind for the one the statement wrote.
+///
+/// `CROSS` and a comma are inner joins that differ only in whether the planner
+/// may reorder them, which it decided before this pass ran.
+///
+/// @param join - the join as the statement wrote it
+fn join_kind_of(join: inillucent_sql::ast::JoinKind) -> JoinKind {
+    match join {
+        inillucent_sql::ast::JoinKind::Left => JoinKind::Left,
+        inillucent_sql::ast::JoinKind::Right => JoinKind::Right,
+        inillucent_sql::ast::JoinKind::Full => JoinKind::Full,
+        inillucent_sql::ast::JoinKind::Comma
+        | inillucent_sql::ast::JoinKind::Inner
+        | inillucent_sql::ast::JoinKind::Cross => JoinKind::Inner,
+    }
+}
+
+/// Reads one stage's rows into a buffer, whatever kind of source it is.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees and layouts come from
+/// @param params - the bound parameters
+/// @param stage - the stage to read
+fn materialise_stage(
+    plan: &PhysicalPlan,
+    catalog: &dyn TreeCatalog,
+    params: &Params,
+    stage: &PreparedStage,
+) -> DbResult<Vec<Vec<OwnedDatum>>> {
+    let source_term = plan
+        .sources
+        .get(stage.term)
+        .ok_or_else(|| misuse("a stage names a FROM term the plan does not have"))?;
+    match &source_term.path {
+        AccessPath::Subquery { plan: inner, .. } => {
+            let prepared = prepare(inner, catalog, ForcePlan::default())?;
+            Ok(run_prepared(inner, catalog, &prepared, params)?.0)
+        }
+        AccessPath::VirtualScan { .. } => {
+            let needed = plan.select.columns_read(source_term.id);
+            catalog
+                .virtual_rows(&source_term.table, &source_term.path, params, &needed)?
+                .ok_or_else(|| misuse("a virtual table the caller does not have"))
+        }
+        AccessPath::Recursive {
+            seeds,
+            steps,
+            width,
+        } => run_recursive(source_term.id, seeds, steps, *width, catalog, params),
+        // The queue the fill loop is on, handed in by `run_recursive` through a
+        // catalog that answers it. A plan reaching this outside such a loop is
+        // a plan the binder should not have produced.
+        AccessPath::RecursiveSelf { cte } => catalog
+            .recursive_rows(*cte)
+            .map(<[Vec<OwnedDatum>]>::to_vec)
+            .ok_or_else(|| misuse("a reference to a recursive CTE outside the loop that fills it")),
+        // Every remaining path reads a tree, and an outer term's path is a
+        // plain scan of it by construction - the planner does not let a
+        // predicate become a seek on a side that has to null-extend.
+        _ => {
+            let tree = catalog
+                .tree(stage.root)
+                .ok_or_else(|| misuse(format!("no tree imported for root page {}", stage.root)))?;
+            let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let mut sink = CollectInto::new(std::rc::Rc::clone(&collected));
+            FullScan::new(tree, Projection::all(stage.width)).run(catalog.pool(), &mut sink)?;
+            let rows = collected.borrow().clone();
+            Ok(rows)
+        }
+    }
+}
+
+/// How many passes a recursive CTE may make before the engine refuses.
+///
+/// A recursion whose step arm never stops producing rows is a query that does
+/// not end, and the only difference between that and a slow one is a number, so
+/// there is a number. SQLite's own guard is the same idea under a different
+/// name: it stops when the queue is empty, and a `LIMIT` is what a person adds
+/// to a recursion that would not.
+const MAX_RECURSIVE_PASSES: usize = 1_000_000;
+
+/// Fills a recursive CTE and returns every row it produced.
+///
+/// **The seed arms once, then the step arms until a pass produces nothing.**
+/// Each pass runs the step arms over the rows the *previous* pass produced -
+/// not over every row so far - which is what makes the work proportional to the
+/// rows rather than to their square, and it is SQLite's own rule.
+///
+/// `UNION` de-duplicates against everything already produced and `UNION ALL`
+/// does not, which is also the difference between a graph walk that terminates
+/// on a cycle and one that does not.
+///
+/// @param cte - the FROM term whose queue this is
+/// @param seeds - the arms that do not reference the CTE
+/// @param steps - the arms that do
+/// @param width - how many columns a row holds
+/// @param catalog - where the trees and layouts come from
+/// @param params - the bound parameters
+fn run_recursive(
+    cte: usize,
+    seeds: &[(inillucent_sql::ast::CompoundOp, PhysicalPlan)],
+    steps: &[(inillucent_sql::ast::CompoundOp, PhysicalPlan)],
+    width: usize,
+    catalog: &dyn TreeCatalog,
+    params: &Params,
+) -> DbResult<Vec<Vec<OwnedDatum>>> {
+    let distinct = seeds
+        .iter()
+        .chain(steps.iter())
+        .any(|(op, _)| *op == inillucent_sql::ast::CompoundOp::Union);
+    let collations = vec![Collation::Binary; width.max(1)];
+    let mut produced: Vec<Vec<OwnedDatum>> = Vec::new();
+    for (_, arm) in seeds {
+        let (rows, _) = run_any(arm, catalog, params)?;
+        produced.extend(rows);
+    }
+    if distinct {
+        produced = distinct_rows(produced, &collations, &mut Vec::new());
+    }
+    let mut answer = produced.clone();
+    let mut working = produced;
+    for _ in 0..MAX_RECURSIVE_PASSES {
+        if working.is_empty() {
+            return Ok(answer);
+        }
+        let queued = WithQueue {
+            inner: catalog,
+            cte,
+            rows: &working,
+        };
+        let mut fresh: Vec<Vec<OwnedDatum>> = Vec::new();
+        for (_, arm) in steps {
+            let (rows, _) = run_any(arm, &queued, params)?;
+            fresh.extend(rows);
+        }
+        if distinct {
+            fresh = distinct_rows(fresh, &collations, &mut answer.clone());
+        }
+        if fresh.is_empty() {
+            return Ok(answer);
+        }
+        answer.extend(fresh.clone());
+        working = fresh;
+    }
+    Err(misuse(
+        "a recursive CTE did not settle; it produced rows for a million passes",
+    ))
+}
+
+/// Returns the rows that are neither duplicates of each other nor already seen.
+///
+/// @param rows - the rows a pass produced
+/// @param collations - the collation of each column
+/// @param seen - the rows already produced, extended with the ones kept
+fn distinct_rows(
+    rows: Vec<Vec<OwnedDatum>>,
+    collations: &[Collation],
+    seen: &mut Vec<Vec<OwnedDatum>>,
+) -> Vec<Vec<OwnedDatum>> {
+    let mut keys = SetKeys::new(collations.to_vec());
+    for row in seen.iter() {
+        keys.remember(row);
+    }
+    let mut kept = Vec::with_capacity(rows.len());
+    for row in rows {
+        if keys.remember(&row) {
+            kept.push(row);
+        }
+    }
+    kept
 }
 
 /// Returns the key expressions an inner stage probes with.
@@ -2295,8 +2755,24 @@ fn span_bounds(
                     high_inclusive: true,
                 });
             }
-            if let Some(value) = low_value {
-                low_key.push(value);
+            let mut low_inclusive = low_inclusive;
+            match low_value {
+                Some(value) => low_key.push(value),
+                // **A range with no lower bound still excludes NULL.**
+                // `WHERE k < -1000` is unknown for a NULL `k`, so SQLite
+                // returns no row for one; an index holds its NULLs first, so a
+                // walk that starts at the beginning returns exactly those. An
+                // exclusive lower bound of NULL starts past that run, which is
+                // the same rule said in the key's own terms.
+                //
+                // `WHERE k > 5` never had the problem: its own lower bound
+                // already starts above the NULLs, which is why this was only
+                // ever wrong in the one direction.
+                None if high_value.is_some() => {
+                    low_key.push(OwnedDatum::Null);
+                    low_inclusive = false;
+                }
+                None => {}
             }
             if let Some(value) = high_value {
                 high_key.push(value);
@@ -2361,6 +2837,7 @@ pub fn literal_value(expr: &BoundExpr, params: &Params) -> DbResult<OwnedDatum> 
         layouts: &[],
         types: &[],
         order: &[],
+        correlations: &[],
     };
     constant_value(expr, &empty, params, None)
 }
@@ -2963,26 +3440,153 @@ pub fn run_windowed(
     let folded = crate::subquery::fold(plan, catalog, params)?;
     let params = folded.as_ref().unwrap_or(params);
     let select = &plan.select;
-    if !select.aggregates.is_empty() || !select.group_by.is_empty() {
-        return unsupported("a window function beside an aggregate");
-    }
     if !select.compounds.is_empty() {
         return unsupported("a window function in a compound arm");
     }
     let Some(first) = select.windows.first() else {
         return unsupported("a window pass with no window in it");
     };
-    for window in &select.windows {
-        if window.partition_by != first.partition_by || window.order_by != first.order_by {
-            return unsupported("two windows with different PARTITION BY or ORDER BY");
+    // **One pass per distinct window frame, not one pass per statement.** Two
+    // calls that share a `PARTITION BY` and an `ORDER BY` see the same
+    // partitions and the same peer groups, so they are computed together over
+    // one ordering; two that do not need the rows in two different orders and
+    // there is no single sort that serves both. Refusing the second shape was
+    // honest while there was one pass; grouping the calls is what makes it
+    // unnecessary.
+    let groups = window_groups(select);
+    let pre = window_inputs(select);
+    let rows = window_input_rows(select, &pre, first, catalog, params)?;
+    // The output row is the buffered values followed by one slot per call, in
+    // the order the binder numbered them - which is the space
+    // `Frame::Window` addresses and the reason the slots are filled by
+    // scattering rather than by appending.
+    let width = pre.len();
+    let mut widened: Vec<Vec<OwnedDatum>> = rows
+        .iter()
+        .map(|row| {
+            let mut whole = row.clone();
+            whole.extend(std::iter::repeat(OwnedDatum::Null).take(select.windows.len()));
+            whole
+        })
+        .collect();
+    for (position, group) in groups.iter().enumerate() {
+        // The first group's ordering is the one the inner query already sorted
+        // by, so it is not sorted again; every other group needs the rows in
+        // its own order.
+        let ordered = if position == 0 {
+            tagged(&rows)
+        } else {
+            sort_tagged(tagged(&rows), &pre, group)?
+        };
+        let pass = window_plan(select, &pre, group)?;
+        let computed = crate::window::compute(&ordered, &pass)?;
+        for row in &computed {
+            let Some(OwnedDatum::Int(at)) = row.get(width) else {
+                return Err(misuse("a window pass lost the row it was computing for"));
+            };
+            let at = *at as usize;
+            for (nth, slot) in group.slots.iter().enumerate() {
+                let value = row
+                    .get(width.saturating_add(1).saturating_add(nth))
+                    .cloned()
+                    .unwrap_or(OwnedDatum::Null);
+                if let Some(cell) = widened
+                    .get_mut(at)
+                    .and_then(|row| row.get_mut(width.saturating_add(*slot)))
+                {
+                    *cell = value;
+                }
+            }
         }
     }
+    project_over_window(select, &pre, width, widened, params)
+}
 
-    let pre = window_inputs(select, first);
-    let rows = window_input_rows(select, &pre, first, catalog, params)?;
-    let pass = window_plan(select, &pre, first)?;
-    let widened = crate::window::compute(&rows, &pass)?;
-    project_over_window(select, &pre, pre.len(), widened, params)
+/// One set of window calls that share a frame.
+struct WindowGroup {
+    /// The `PARTITION BY` and `ORDER BY` every call in the group shares.
+    window: BoundWindow,
+    /// Which of `select.windows` the group holds, by the binder's slot.
+    slots: Vec<usize>,
+}
+
+/// Groups a statement's window calls by the frame they share.
+///
+/// @param select - the bound statement
+fn window_groups(select: &BoundSelect) -> Vec<WindowGroup> {
+    let mut groups: Vec<WindowGroup> = Vec::new();
+    for (slot, call) in select.windows.iter().enumerate() {
+        match groups.iter_mut().find(|group| {
+            group.window.partition_by == call.partition_by && group.window.order_by == call.order_by
+        }) {
+            Some(group) => group.slots.push(slot),
+            None => groups.push(WindowGroup {
+                window: call.clone(),
+                slots: vec![slot],
+            }),
+        }
+    }
+    groups
+}
+
+/// Returns the rows with their original position appended.
+///
+/// The position is what lets a pass over a *re-sorted* copy write its answers
+/// back into the row they belong to. It sits after the buffered values, where
+/// `window_plan` addresses nothing, so no pass can read it by accident.
+///
+/// @param rows - the buffered rows, in their original order
+fn tagged(rows: &[Vec<OwnedDatum>]) -> Vec<Vec<OwnedDatum>> {
+    rows.iter()
+        .enumerate()
+        .map(|(at, row)| {
+            let mut whole = row.clone();
+            whole.push(OwnedDatum::Int(at as i64));
+            whole
+        })
+        .collect()
+}
+
+/// Sorts tagged rows into one window group's own order.
+///
+/// @param rows - the tagged rows
+/// @param pre - the buffered row's expressions
+/// @param group - the group whose frame decides the order
+fn sort_tagged(
+    rows: Vec<Vec<OwnedDatum>>,
+    pre: &[BoundExpr],
+    group: &WindowGroup,
+) -> DbResult<Vec<Vec<OwnedDatum>>> {
+    let mut keys: Vec<SortKey> = Vec::new();
+    // A partition key only has to bring a partition's rows together, so its
+    // direction is free; the ordering terms are the window's own and are not.
+    for expr in &group.window.partition_by {
+        keys.push(SortKey {
+            column: column_of(pre, expr)?,
+            descending: false,
+            collation: expression_collation(expr),
+            nulls_first: true,
+        });
+    }
+    for term in &group.window.order_by {
+        keys.push(SortKey {
+            column: column_of(pre, &term.expr)?,
+            descending: term.order == SortOrder::Descending,
+            collation: term.collation,
+            nulls_first: term.nulls == NullOrder::First,
+        });
+    }
+    if keys.is_empty() {
+        return Ok(rows);
+    }
+    let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let mut sorter = Sort::new(
+        keys,
+        Box::new(CollectInto::new(std::rc::Rc::clone(&collected))),
+    );
+    ValuesScan::new(rows).run(&mut sorter)?;
+    let answer = collected.borrow().clone();
+    Ok(answer)
 }
 
 /// Returns the values a window pass reads, in buffered-row order.
@@ -2993,16 +3597,26 @@ pub fn run_windowed(
 /// met, deduplicated, so a value used twice occupies one column.
 ///
 /// @param select - the bound statement
-/// @param window - the window every call shares
-fn window_inputs(select: &BoundSelect, window: &BoundWindow) -> Vec<BoundExpr> {
+fn window_inputs(select: &BoundSelect) -> Vec<BoundExpr> {
     let mut pre: Vec<BoundExpr> = Vec::new();
-    for expr in &window.partition_by {
-        remember(&mut pre, expr);
-    }
-    for term in &window.order_by {
-        remember(&mut pre, &term.expr);
+    // The *first* window's frame first, because the inner query is sorted by it
+    // and reading it out of the same columns it sorted by is one fewer thing to
+    // keep in step. Every other window's frame is gathered below with the rest.
+    if let Some(first) = select.windows.first() {
+        for expr in &first.partition_by {
+            remember(&mut pre, expr);
+        }
+        for term in &first.order_by {
+            remember(&mut pre, &term.expr);
+        }
     }
     for call in &select.windows {
+        for expr in &call.partition_by {
+            remember(&mut pre, expr);
+        }
+        for term in &call.order_by {
+            remember(&mut pre, &term.expr);
+        }
         for expr in &call.arguments {
             remember(&mut pre, expr);
         }
@@ -3046,7 +3660,14 @@ fn remember(pre: &mut Vec<BoundExpr>, expr: &BoundExpr) {
 fn gather_leaves(expr: &BoundExpr, pre: &mut Vec<BoundExpr>) {
     match expr {
         BoundExpr::WindowRef { .. } => {}
-        BoundExpr::Column { .. } | BoundExpr::Rowid { .. } => remember(pre, expr),
+        // An aggregate is a leaf here for the same reason a column is: the
+        // inner query computes it, and what the projection above the pass reads
+        // is the value rather than the call. Without this a statement that
+        // aggregates *and* windows lost its `count(*)` between the two passes,
+        // which is why the two used to be refused together.
+        BoundExpr::Column { .. } | BoundExpr::Rowid { .. } | BoundExpr::Aggregate { .. } => {
+            remember(pre, expr)
+        }
         other => {
             for child in other.children() {
                 gather_leaves(child, pre);
@@ -3083,7 +3704,6 @@ fn window_input_rows(
     inner.distinct = false;
     inner.limit = None;
     inner.offset = None;
-    inner.having = None;
     // The pass's own ordering: the partition keys, then the window's `ORDER BY`.
     // A partition key only has to bring a partition's rows together, so its
     // direction is free; the ordering terms are the window's own and are not.
@@ -3103,16 +3723,22 @@ fn window_input_rows(
     Ok(run_prepared(&planned, catalog, &prepared, params)?.0)
 }
 
-/// Builds the window pass, addressing everything by buffered column.
+/// Builds one window pass, addressing everything by buffered column.
+///
+/// A pass covers exactly the calls that share a frame, which is what
+/// `window_groups` decided: the partitions and the peer groups are properties
+/// of the frame, so calls with different ones cannot be computed over one
+/// ordering of the rows.
 ///
 /// @param select - the bound statement
 /// @param pre - the buffered row's expressions
-/// @param window - the window every call shares
+/// @param group - the calls sharing one frame, and the frame
 fn window_plan(
     select: &BoundSelect,
     pre: &[BoundExpr],
-    window: &BoundWindow,
+    group: &WindowGroup,
 ) -> DbResult<WindowPlan> {
+    let window = &group.window;
     let partition = window
         .partition_by
         .iter()
@@ -3129,8 +3755,12 @@ fn window_plan(
             })
         })
         .collect::<DbResult<Vec<WindowOrderTerm>>>()?;
-    let mut calls = Vec::with_capacity(select.windows.len());
-    for call in &select.windows {
+    let mut calls = Vec::with_capacity(group.slots.len());
+    for call in group
+        .slots
+        .iter()
+        .filter_map(|slot| select.windows.get(*slot))
+    {
         let func = match call.call {
             BoundWindowCall::Plain(plain) => WindowSlot::Plain(plain),
             BoundWindowCall::Aggregate(aggregate) => WindowSlot::Aggregate(match aggregate {
@@ -3720,9 +4350,22 @@ fn translate(
             collation,
             ..
         } => {
+            // **A correlated block is a column, not a constant.** It reads the
+            // row being tested, so `crate::correlate` computed it beside the
+            // row and put the answer here; `EXISTS` and its negation are
+            // already applied, because the operator is the only thing that
+            // knows whether the block produced anything.
+            if let Some(column) = space.correlated(*id) {
+                return Ok(match kind {
+                    SubqueryKind::Exists | SubqueryKind::Scalar => Expr::Column(column),
+                    SubqueryKind::In => {
+                        return unsupported("a correlated IN subquery");
+                    }
+                });
+            }
             // Folded before the chain was built, by `subquery::fold`. A slot
-            // that is empty is a correlated subquery, which has no single
-            // value because it reads a column of the row being tested.
+            // that is empty is a correlated subquery whose column this pass was
+            // not given, which is a plan the builder should not have produced.
             let Some(value) = params.subquery(*id) else {
                 return unsupported("a correlated subquery used as a value");
             };
