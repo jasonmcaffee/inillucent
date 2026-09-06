@@ -534,6 +534,7 @@ impl ImportedDatabase {
             let mut log = WalLog {
                 wal: &self.wal,
                 txn,
+                undo: None,
             };
             let mut store = WriteStore {
                 database: &mut self.database,
@@ -859,6 +860,7 @@ impl ImportedDatabase {
             let mut log = WalLog {
                 wal: &self.wal,
                 txn,
+                undo: None,
             };
             let mut store = WriteStore {
                 database: &mut self.database,
@@ -1053,6 +1055,7 @@ impl ImportedDatabase {
                 let mut log = WalLog {
                     wal: &self.wal,
                     txn,
+                    undo: None,
                 };
                 let mut store = WriteStore {
                     database: &mut self.database,

@@ -212,6 +212,7 @@ impl ImportedDatabase {
         let mut log = WalLog {
             wal: &self.wal,
             txn,
+            undo: None,
         };
         let tree = self
             .trees
@@ -256,6 +257,7 @@ impl ImportedDatabase {
         let mut log = WalLog {
             wal: &self.wal,
             txn,
+            undo: None,
         };
         let tree = self
             .trees

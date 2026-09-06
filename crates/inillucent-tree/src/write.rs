@@ -164,6 +164,38 @@ pub trait TreeLog {
     ///
     /// @param body - what is about to happen
     fn log(&mut self, body: Body<'_>) -> DbResult<u64>;
+
+    /// Whether this log is collecting before-images.
+    ///
+    /// **The log is asked rather than told.** A write path that had to be
+    /// given a flag would have one more argument on every entry point and one
+    /// more thing a caller can pass wrongly; the log already knows whether a
+    /// transaction is open, because it is the transaction's log.
+    ///
+    /// The default is false, which is what an autocommit statement wants: it
+    /// cannot be abandoned, so nothing has to be remembered, and it pays
+    /// nothing for the possibility.
+    fn wants_undo(&self) -> bool {
+        false
+    }
+
+    /// Records what one row looked like before a write changed it.
+    ///
+    /// `before` is `None` when the key was not there, which is what a rollback
+    /// restores by deleting it again.
+    ///
+    /// @param tree - the tree the row is in
+    /// @param key - the row's key columns
+    /// @param before - the whole row as it was, or `None`
+    fn undo(
+        &mut self,
+        tree: u64,
+        key: Vec<OwnedDatum>,
+        before: Option<Vec<OwnedDatum>>,
+    ) -> DbResult<()> {
+        let _ = (tree, key, before);
+        Ok(())
+    }
 }
 
 /// A [`Spill`] that answers with a reference to nowhere.
@@ -331,6 +363,11 @@ impl PagedTree {
         want_previous: bool,
         replace: bool,
     ) -> DbResult<Option<Vec<OwnedDatum>>> {
+        // A log collecting before-images needs the row that was there, so the
+        // read the caller did not ask for happens anyway. That is the whole
+        // cost of being able to abandon a transaction, and it is paid only
+        // inside one.
+        let want_previous = want_previous || log.wants_undo();
         if row.len() != self.columns().len() {
             return Err(misuse(format!(
                 "a row of {} values does not fit a tree of {} columns",
@@ -449,6 +486,12 @@ impl PagedTree {
                 }
                 self.make_room(database, log, page, &path, Some(&key))?;
                 continue;
+            }
+            // Recorded here rather than above the room check, because a retry
+            // re-locates and would record the same row twice.
+            if log.wants_undo() {
+                let owned: Vec<OwnedDatum> = key.iter().map(OwnedDatum::from_datum).collect();
+                log.undo(self.tree_id(), owned, previous.clone())?;
             }
 
             // A delta row that is about to be removed may own out-of-line
@@ -574,6 +617,16 @@ impl PagedTree {
         // disagree about how a key is written was the difference between a
         // database that recovers and one that only recovers if a checkpoint
         // happened to have written the leaf.
+        // Recorded after the room handling, because the retry above deletes
+        // again and would record the same row twice.
+        if log.wants_undo() {
+            let owned: Vec<OwnedDatum> = key
+                .iter()
+                .take(self.key_columns())
+                .map(OwnedDatum::from_datum)
+                .collect();
+            log.undo(self.tree_id(), owned, previous.clone())?;
+        }
         let mut tagged_key = Vec::new();
         for value in key.iter().take(self.key_columns()) {
             value.encode_tagged(&mut tagged_key);
@@ -672,6 +725,18 @@ impl PagedTree {
             != crate::mutate::Applied::Yes
         {
             return Ok(false);
+        }
+        // The whole row, not the one slot. A rollback restores a row, and a
+        // record that named only the column changed would restore a row that
+        // never existed if two updates touched two columns of it.
+        if log.wants_undo() {
+            let before = self.row_at(database.pool(), page, key)?;
+            let owned: Vec<OwnedDatum> = key
+                .iter()
+                .take(self.key_columns())
+                .map(OwnedDatum::from_datum)
+                .collect();
+            log.undo(self.tree_id(), owned, before)?;
         }
         let mut slot = Vec::new();
         value.encode_tagged(&mut slot);
