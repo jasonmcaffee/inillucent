@@ -241,7 +241,7 @@ fn a_tree_written_to_arbitrarily_still_agrees_with_a_btreemap() {
                     page
                 };
                 let path = ancestors(&tree, &database, page);
-                tree.make_room(&mut database, &mut log, page, &path)
+                tree.make_room(&mut database, &mut log, page, &path, None)
                     .unwrap_or_else(|error| panic!("{context}: compaction failed: {error:?}"));
             }
             operations = operations.saturating_add(1);
