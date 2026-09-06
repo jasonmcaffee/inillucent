@@ -899,7 +899,10 @@ fn time_sqlite(
 /// @param database - the copy SQLite wrote to
 /// @param sql - the question
 fn ask_sqlite(database: &Path, sql: &str) -> Result<String, String> {
-    let shell = workspace_root().join(".sqlite-ref/3.53.4/shell/sqlite3.exe");
+    let shell = workspace_root().join(format!(
+        ".sqlite-ref/3.53.4/shell/sqlite3{}",
+        std::env::consts::EXE_SUFFIX
+    ));
     let shell = if shell.exists() {
         shell
     } else {
@@ -921,8 +924,19 @@ fn ask_sqlite(database: &Path, sql: &str) -> Result<String, String> {
 /// Returns the `sqlite-bench` executable, if it has been built.
 fn sqlite_bench() -> Option<PathBuf> {
     let root = workspace_root().join(".sqlite-ref/3.53.4");
-    for name in ["sqlite-bench.exe", "sqlite-bench"] {
-        let path = root.join(name);
+    // **This platform's binary, not whichever name happens to exist.** Both are
+    // checked in beside each other, and the list used to try `.exe` first on
+    // every platform. Under WSL that is not a missing file, it is a *running*
+    // one: binfmt happily executes the Windows build, which is then handed a
+    // Linux plan path it cannot resolve and reports
+    // `cannot open /tmp/inillucent-fullgate-<pid>.plan` - a file that is plainly
+    // there. The Linux arm of the portability gate failed on that and nothing
+    // else.
+    for name in [
+        format!("sqlite-bench{}", std::env::consts::EXE_SUFFIX),
+        "sqlite-bench".to_string(),
+    ] {
+        let path = root.join(&name);
         if path.is_file() {
             return Some(path);
         }
