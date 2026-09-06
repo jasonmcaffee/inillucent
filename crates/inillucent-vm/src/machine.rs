@@ -2534,6 +2534,7 @@ impl Machine {
         let outcome = {
             let mut context = inillucent_ext::vtab::Context {
                 host: host.services(),
+                store: None,
                 database,
                 limits: &limits,
                 catalog: schema.as_deref(),

@@ -30,7 +30,8 @@ use inillucent_value::{Collation, Value};
 
 pub use inillucent_sql::vtab::{
     Change, ConstraintOp, ConstraintSpec, ConstraintUsage, Declaration, DeclaredColumn, FilterPlan,
-    IndexQuery, ModuleArguments, ModuleRef, OrderSpec, ShadowRoot, ShadowTable, ROWID_COLUMN,
+    IndexQuery, ModuleArguments, ModuleRef, OrderSpec, ShadowRoot, ShadowStore, ShadowTable,
+    ROWID_COLUMN,
 };
 
 /// Everything a module may reach while it is answering.
@@ -42,6 +43,18 @@ pub use inillucent_sql::vtab::{
 pub struct Context<'host> {
     /// The connection, as a module is allowed to see it.
     pub host: &'host mut dyn Host,
+    /// Where the module's own shadow tables live.
+    ///
+    /// **A trait rather than a pager, because the engine underneath is not
+    /// fixed.** The TDD's Phase 4 puts FTS5 and the R-Tree over the new engine's
+    /// PAX trees, and the modules reach their storage only through
+    /// [`crate::shadow::ShadowTables`] - so pointing that at a different store
+    /// is the whole of the port, and the tokenizers, the ranking, the segment
+    /// merges and the R-Tree's node logic are not touched at all.
+    ///
+    /// `None` means the caller is the old engine and the pager below `host` is
+    /// the store, which is what every existing call site is.
+    pub store: Option<&'host mut dyn ShadowStore>,
     /// Which one this table lives in.
     pub database: usize,
     /// The run-time limits.
