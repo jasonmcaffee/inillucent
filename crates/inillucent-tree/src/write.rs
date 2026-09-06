@@ -89,7 +89,8 @@ enum Fit {
     /// old page carried that a fresh pack does not know about.
     Compact(Vec<u8>, PageId, u64),
     /// They do not, so the leaf splits and the rows have to outlive the borrow.
-    Split(Vec<Vec<OwnedDatum>>),
+    /// The flag says whether the rows are arriving in key order.
+    Split(Vec<Vec<OwnedDatum>>, bool),
 }
 
 /// Reports whether a leaf holds fewer than half the rows it was packed with.
@@ -125,6 +126,14 @@ const COMPACT_FILL: f64 = 0.90;
 /// terminate: the row that would not fit is one row, and half a page has room
 /// for any row small enough to have been in the tree at all.
 const SPLIT_FILL: f64 = 0.50;
+
+/// How full the left half of an *append's* split is packed.
+///
+/// Rows arriving in key order never come back to the page they left behind, so
+/// the room a split creates belongs on the right. Half and half would leave
+/// every page but the last permanently half empty - twice the pages, twice the
+/// descents, and twice the file.
+const APPEND_FILL: f64 = 0.95;
 
 /// Where a mutation writes its log records.
 ///
@@ -617,6 +626,7 @@ impl PagedTree {
                     rows.iter()
                         .map(|row| row.iter().map(OwnedDatum::from_datum).collect())
                         .collect(),
+                    appending,
                 ),
             }
         };
@@ -624,12 +634,21 @@ impl PagedTree {
             Fit::Compact(image, right, max_cts) => {
                 self.compact_into(database, log, page, image, right, max_cts)
             }
-            Fit::Split(rows) => {
+            Fit::Split(rows, appending) => {
                 let borrowed: Vec<Vec<Datum<'_>>> = rows
                     .iter()
                     .map(|row| row.iter().map(OwnedDatum::borrow).collect())
                     .collect();
-                self.split(database, log, page, path, &borrowed)
+                // **An append splits lopsidedly.** Half and half is right when
+                // rows arrive from everywhere: both pages then have room for
+                // the next one wherever it lands. When they arrive in order,
+                // the left page is finished the moment it is written and every
+                // subsequent row goes to the right, so an even split leaves a
+                // permanently half-empty page behind and halves how many rows a
+                // page ends up holding. Filling the left and leaving the room
+                // on the right is what the rows are actually going to need.
+                let fill = if appending { APPEND_FILL } else { SPLIT_FILL };
+                self.split(database, log, page, path, &borrowed, fill)
             }
         }
     }
@@ -673,6 +692,7 @@ impl PagedTree {
     /// @param page - the leaf being split
     /// @param path - the interior pages above it, root first
     /// @param rows - its live rows, sorted
+    /// @param fill - how full to pack the left half
     fn split(
         &mut self,
         database: &mut Database,
@@ -680,6 +700,7 @@ impl PagedTree {
         page: PageId,
         path: &[PageId],
         rows: &[Vec<Datum<'_>>],
+        fill: f64,
     ) -> DbResult<()> {
         if rows.len() < 2 {
             return Err(misuse(
@@ -693,7 +714,7 @@ impl PagedTree {
             self.columns().to_vec(),
             self.key_columns(),
         )?;
-        let taken = match builder.pack(rows, SPLIT_FILL)? {
+        let taken = match builder.pack(rows, fill)? {
             Packed::Filled { rows: packed, .. } => packed.max(1).min(rows.len().saturating_sub(1)),
             Packed::RowTooLarge => {
                 return Err(misuse(
