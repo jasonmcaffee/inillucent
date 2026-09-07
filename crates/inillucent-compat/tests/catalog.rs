@@ -81,20 +81,43 @@ fn open(path: &Path) -> Database {
         .expect("the database opens")
 }
 
-/// Schema SQL that does not parse is corruption naming the object, not a table
-/// that quietly has no columns.
+/// Schema SQL that does not parse names the statement and the reason, not a
+/// table that quietly has no columns - and not a damaged file either.
+///
+/// The assertion is on `message()` rather than on `detail()` because that is
+/// the field a caller is told to read and the field the driver shows. Putting
+/// the explanation only in `detail()` - which is suppressed unless the database
+/// was opened with diagnostics on - left `message()` answering the primary
+/// code's canned "database disk image is malformed" for a file whose bytes are
+/// perfectly fine. See task-1847.
 #[test]
-fn unparseable_schema_sql_is_corruption() {
+fn unparseable_schema_sql_names_the_statement_and_the_reason() {
     let failure = table_from_create_sql(b"CREATE TABLE t(a,", 0, 2).expect_err("it must not parse");
-    assert_eq!(failure.code(), inillucent_base::PrimaryCode::Corrupt);
-    // The primary code is SQLite's own generic corruption message; what says
-    // *which* object is wrong is the detail, which is where a reader looks.
+    assert_eq!(failure.code(), inillucent_base::PrimaryCode::Error);
     assert!(
-        failure
-            .detail()
-            .is_some_and(|detail| detail.contains("malformed schema SQL")),
+        failure.message().contains("cannot parse the CREATE TABLE"),
         "{failure:?}"
     );
+    assert!(
+        !failure.message().contains("disk image is malformed"),
+        "{failure:?}"
+    );
+    // The offset survives, so a caller can point at the character.
+    assert!(failure.sql_offset().is_some(), "{failure:?}");
+}
+
+/// The reserved-word column names that started task-1847: `left` and `right`
+/// are ordinary column names in SQLite, and a schema SQLite writes has to load.
+#[test]
+fn a_table_whose_columns_are_named_left_and_right_loads() {
+    let table = table_from_create_sql(b"CREATE TABLE pairs (left TEXT, right TEXT)", 0, 2)
+        .expect("it loads");
+    let names: Vec<String> = table
+        .columns
+        .iter()
+        .map(|column| String::from_utf8_lossy(&column.name).into_owned())
+        .collect();
+    assert_eq!(names, vec!["left".to_string(), "right".to_string()]);
 }
 
 /// Schema SQL that is not a `CREATE TABLE` at all is corruption too.
@@ -299,10 +322,21 @@ fn an_unchanged_schema_does_not_recompile() {
     assert_eq!(statement.explain(), before);
 }
 
-/// A schema whose `sqlite_schema` row is not SQL at all is corruption, and the
-/// message names the object so a reader knows where to look.
+/// A schema whose `sqlite_schema` row will not parse names the object **and**
+/// says what was wrong with the text, in the field a caller reads.
+///
+/// This used to assert `Corrupt` and a `detail()` naming the object, and both
+/// halves were the defect task-1847 fixed. `message()` - the field the driver
+/// shows an application - answered "database disk image is malformed", which
+/// sends a reader to `PRAGMA integrity_check` on a file whose bytes are fine;
+/// and the object name was attached with `with_detail`, which *replaced* the
+/// parse reason the loader had just written, so even with diagnostics on the
+/// reason was gone.
+///
+/// The bytes here were read perfectly. What could not be understood is the
+/// statement, so that is what the failure says.
 #[test]
-fn a_corrupt_schema_row_names_its_object() {
+fn an_unparseable_schema_row_names_its_object_and_the_reason() {
     let Some(path) = build(
         "corrupt.db",
         &[
@@ -318,13 +352,18 @@ fn a_corrupt_schema_row_names_its_object() {
     let database = open(&path);
     let failure = match database.connect() {
         Err(failure) => failure,
-        Ok(_) => panic!("a corrupt schema must not connect"),
+        Ok(_) => panic!("a schema that will not parse must not connect"),
     };
-    assert_eq!(failure.code(), inillucent_base::PrimaryCode::Corrupt);
+    // Not corruption: the file is readable and SQLite opens it. It is the
+    // statement this engine could not parse.
+    assert_eq!(failure.code(), inillucent_base::PrimaryCode::Error);
+    let message = failure.message();
+    assert!(message.contains("good"), "{failure:?}");
     assert!(
-        failure
-            .detail()
-            .is_some_and(|detail| detail.contains("good")),
+        message.contains("cannot parse the CREATE TABLE"),
         "{failure:?}"
     );
+    assert!(message.contains("syntax error"), "{failure:?}");
+    assert!(!message.contains("disk image is malformed"), "{failure:?}");
+    assert_eq!(failure.detail(), Some(message), "{failure:?}");
 }

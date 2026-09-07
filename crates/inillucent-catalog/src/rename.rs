@@ -226,6 +226,14 @@ pub fn quoted(name: &[u8]) -> Vec<u8> {
 /// The check is the whole reason a rewrite is safe to keep. An `ALTER` that
 /// produced text the parser cannot read would leave a database whose schema
 /// fails to load, and that is not recoverable from inside the engine.
+///
+/// These failures stay `Corrupt`, unlike the stored-schema failures task-1847
+/// moved off it in `load.rs`. The distinction is whose text it is: a stored
+/// `CREATE TABLE` is text SQLite wrote and the caller can read, so a parse
+/// failure there is a gap in this engine's grammar and says so. Text *this*
+/// engine just generated and cannot read back is an internal defect nothing the
+/// caller wrote can cause, and filing it under the caller's typos would hide
+/// it.
 pub fn reparsed(sql: Vec<u8>) -> DbResult<Vec<u8>> {
     let limits = Limits::default();
     let parsed = parse_next_statement(&sql, 0, &limits).map_err(|reason| {
@@ -335,17 +343,25 @@ pub fn referenced_tables(sql: &[u8]) -> Vec<Vec<u8>> {
 /// which would take the wrong half of `a INTEGER, ab TEXT`.
 pub fn drop_column(sql: &[u8], position: usize) -> DbResult<Vec<u8>> {
     let limits = Limits::default();
+    // The text being read here is the *stored* `CREATE TABLE`, so a failure is
+    // the same fact the import path reports and is reported the same way: the
+    // statement could not be parsed, which is not a claim about the disk. The
+    // rewrite self-checks below stay corruption on purpose - see `reparsed`.
     let parsed = parse_next_statement(sql, 0, &limits)
-        .map_err(|reason| error::corrupt(format!("malformed schema SQL: {}", reason.message())))?;
+        .map_err(|reason| crate::load::unparseable_schema("CREATE TABLE", reason))?;
     let Statement::CreateTable {
         body: inillucent_sql::ast::CreateTableBody::Columns { columns, .. },
         ..
     } = &parsed.statement
     else {
-        return Err(error::corrupt("schema SQL is not a CREATE TABLE"));
+        return Err(crate::load::corrupt_schema(
+            "the schema SQL for this table is not a CREATE TABLE",
+        ));
     };
     let Some(doomed) = columns.get(position) else {
-        return Err(error::corrupt("the column to drop is not in the schema"));
+        return Err(crate::load::corrupt_schema(
+            "the column to drop is not in the schema",
+        ));
     };
     let start = doomed.span.start as usize;
     let end = doomed.span.end as usize;
