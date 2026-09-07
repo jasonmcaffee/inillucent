@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     # Phase 1 foundation.
+    "crates/inillucent-alloc",
     "crates/inillucent-base",
     "crates/inillucent-vfs",
     "crates/inillucent-sim",
@@ -69,6 +70,7 @@ license = "MIT"
 # First-party crates. Every internal edge is declared here so that the layering
 # test in inillucent-compat can read one table instead of walking the file system.
 # ---------------------------------------------------------------------------
+inillucent-alloc = { path = "crates/inillucent-alloc" }
 inillucent-base = { path = "crates/inillucent-base" }
 inillucent-vfs = { path = "crates/inillucent-vfs" }
 inillucent-sim = { path = "crates/inillucent-sim" }

@@ -21,6 +21,15 @@
 
 schema_version = 1
 
+# The allocator is below everything and depends on nothing, which is the point:
+# it is the one crate that may write `unsafe`, and it can only do so safely
+# because there is nothing underneath it to re-enter.
+[[crate]]
+name = "inillucent-alloc"
+kind = "production"
+layer = 0
+may_depend_on = []
+
 [[crate]]
 name = "inillucent-base"
 kind = "production"

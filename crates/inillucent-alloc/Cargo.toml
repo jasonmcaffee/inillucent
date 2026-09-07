@@ -1,0 +1,12 @@
+[package]
+name = "inillucent-alloc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The size-classed free list the engine's binaries install as their global allocator."
+
+# No dependencies at all, first-party or otherwise. An allocator that reached
+# anything could re-enter itself through whatever that thing allocates, and the
+# whole crate exists so the `#![forbid(unsafe_code)]` every other production
+# crate carries can stay true.
+[dependencies]

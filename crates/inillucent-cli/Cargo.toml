@@ -10,6 +10,7 @@ name = "inillucent-shell"
 path = "src/main.rs"
 
 [dependencies]
+inillucent-alloc = { workspace = true }
 inillucent-base = { workspace = true }
 inillucent-engine = { workspace = true }
 inillucent-value = { workspace = true }

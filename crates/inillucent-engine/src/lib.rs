@@ -322,6 +322,15 @@ pub struct ImportedDatabase {
     /// once and asked many times, and because `CREATE VIRTUAL TABLE` has to find
     /// one by name before anything else can happen.
     registry: inillucent_ext::registry::Registry,
+    /// The eponymous virtual tables the registry provides, derived once.
+    ///
+    /// **A catalog refresh happens after every DDL statement, and deriving
+    /// these means connecting every eponymous module to read its declaration.**
+    /// They are a function of the registry alone - not of the schema - so
+    /// re-deriving them per refresh was work with no input that had changed,
+    /// on the path the gate's `schema.index` measures. Rebuilt only when a
+    /// module or a pragma is registered, which is at open and nowhere else.
+    eponymous: Vec<inillucent_sql::catalog_view::TableInfo>,
     /// The virtual tables that have been connected, by folded name.
     virtual_tables: HashMap<Vec<u8>, vtab::Connected>,
     /// The indexes a module owns, by the root page of the table they index.
@@ -1422,6 +1431,7 @@ impl ImportedDatabase {
             levers: Levers::default(),
             collations: Vec::new(),
             registry: modules(),
+            eponymous: Vec::new(),
             virtual_tables: HashMap::new(),
             vector_indexes: HashMap::new(),
             index_stages: std::cell::Cell::new((0, 0, 0, 0, 0)),
@@ -1598,6 +1608,7 @@ impl ImportedDatabase {
             levers: Levers::default(),
             collations: Vec::new(),
             registry: modules(),
+            eponymous: Vec::new(),
             virtual_tables: HashMap::new(),
             vector_indexes: HashMap::new(),
             index_stages: std::cell::Cell::new((0, 0, 0, 0, 0)),
