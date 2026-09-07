@@ -6,6 +6,13 @@ search similar to pgvector. Written for task-1802 from the sprint's tickets (tas
 and a code audit of the tree at commit `b94b8da`; every number names its source and none was
 estimated. The implementation is a separate ticket for Opus.
 
+> **Phase 2 has been implemented.** task-1838 delivered its nine parts and task-1844 the ATTACH and
+> temporary-object work that Part 2 deferred. Everything from here to `## Sources` is the plan as it
+> was written, kept as the record of what was asked for; **the plan for the work that comes next is
+> [Phase 3](#phase-3-the-improvement-plan-from-the-second-review-task-1843) at the end of this
+> document**, written for task-1843 from measurements taken at commit `d885e91` rather than from what
+> the implementing tickets reported.
+
 ## Introduction
 
 The task-1816 rearchitecture replaced a SQLite-file-format engine that measured 0.05x to 0.70x
@@ -399,3 +406,322 @@ Functional and differential over unit, in this order for every part:
 - `tasks/task-1816-rearchitecture-tdd.md` (goals, non-goals, contract, triage)
 - `_agent_output/task-1802-review/code-analysis.md` (the tree at `b94b8da`)
 - `inillucent-scorecard.md`, `product-overview.md`, task-1774, task-1775, task-1779 (the retrieval engine and Nikaya)
+
+---
+
+# Phase 3: the improvement plan from the second review (task-1843)
+
+Everything above was written for task-1802 and implemented by **task-1838** (nine parts) and
+**task-1844** (ATTACH, DETACH and temporary objects). This section is what the second review found
+when it re-measured the tree at `d885e91` instead of reading what those tickets reported, and it is
+the plan for the ticket that comes next. It replaces nothing above; the parts that are still open are
+named here rather than rewritten.
+
+## What Phase 2 closed, so nobody re-does it
+
+| goal | state at `d885e91` |
+|---|---|
+| G1 no silent wrong answer | **Partly.** The `VIRTUAL` generated-column shift, unenforced foreign keys and unenforced `NOT NULL` are fixed. Four remain, and this review found three of them. |
+| G2 the SQL surface | **Met.** 47 of 50 inventoried constructs; outer joins, derived tables, recursive CTEs, correlated subqueries, triggers, foreign keys, `ATTACH`/`DETACH`, temporary objects. |
+| G3 user functions and collations | **Met.** |
+| G4 the floor | **Half.** Headline met on four fresh runs (lower bounds 3.11x, 3.20x, 3.20x, 3.14x against 3.00x; 30 of 30 digest-equal each). Floor missed by four families. |
+| G5 Linux ≥ 2.00x | **Not met, and shown unreachable by a Linux change.** 1.53x. |
+| G6 memory and CPU | **Met.** 2.15x SQLite's peak at medium, 2.33x at large; 0.79x its user CPU and 0.15x its kernel CPU at medium. |
+| G7 vector search from SQL | **Met.** Recall 1.000 through the planned index; the SQL path costs 0.98x the store's own query. |
+| G8 one engine | **Half, and it regressed in a way nobody measured**: the facade is re-rooted, the old crates still wait on task-1837 — and the workspace no longer resolves from a clone. |
+| G9 retrieval footprint | **Measured.** 3.83 GB resident, 3.0 s open, postings persisted, graph build 3.04x. |
+
+## Goals of Phase 3, each with its acceptance
+
+| # | goal | acceptance |
+|---|---|---|
+| H1 | The repository builds from a clone | `git clone` into an empty directory, then `cargo metadata --no-deps` exits 0 and `cargo build --workspace` succeeds, on a machine that has never held `drivers/` |
+| H2 | No silent wrong answer in the write path | the differential probe's nine wrong answers become zero; `schema_forms.rs`'s two `STRICT` tests pass; a new `affinity.rs` compares `typeof` and ordering against the oracle over every declared type |
+| H3 | A `SELECT` can be bounded, whatever it reads | `SELECT value FROM generate_series(1,10) LIMIT 3` answers in under 10 ms; `virtual_rows` is replaced by a streaming cursor; the eponymous form is bound for every registered module |
+| H4 | The log is bounded by the data | after a build and a checkpoint, the segments on disk hold nothing below the checkpoint LSN; the 200,000-row fixture's total on-disk size is under 2x SQLite's |
+| H5 | The performance floor | `inillucent-fullgate` medium, 30 rounds, four consecutive runs: weighted lower bound at least 3.00x **and** no family under 1.00x |
+| H6 | The refusals a SQLite application actually hits | `CREATE TABLE ... AS SELECT`, `UPDATE ... FROM`, `WITH` on DML, partial and expression indexes, row values, `CREATE INDEX` on `WITHOUT ROWID`, and writing through an `INSTEAD OF` trigger all run; `new_engine_surface.rs` counts down |
+| H7 | The shell is the engine | `CREATE TEMP TABLE` through `inillucent-shell` behaves as it does through `Connection`; a `cli.rs` script covers it |
+
+Non-goals are unchanged from Phase 2, plus one: **nothing in Phase 3 changes a bar, a weight or a
+fixture in `compat/perf/contract.toml`.** task-1833's recommendation to re-examine the `schema` and
+`extension` bars is still Jason's decision and is still not taken here.
+
+## Part A: make the repository build from a clone
+
+**Ranked first because it costs minutes and because every other acceptance in this document is
+unverifiable by anyone else until it is done.**
+
+`1854f3d` added `drivers/inillucent-driver` and `drivers/inillucent-driver-capi` to `[workspace]
+members` and to `[workspace.dependencies]`. `drivers/` is untracked and is not in `.gitignore`, so it
+exists on exactly one machine. Reproduced:
+
+```
+$ git clone --depth 1 file:///c/jason/dev/inillucent clone-check
+$ cargo metadata --manifest-path clone-check/Cargo.toml --no-deps
+error: failed to load manifest for workspace member `...\clone-check\drivers/inillucent-driver`
+       referenced by workspace at `...\clone-check\Cargo.toml`
+exit 101
+```
+
+Two ways to fix it, and the choice belongs to whoever holds task-1837: commit `drivers/` as it
+stands, or revert the two member lines and the two dependency lines until the driver lands. Either is
+one commit. **Whichever is chosen, a test has to hold it**: `inillucent-compat` gains a check that
+every path named in `[workspace] members` exists and contains a `Cargo.toml`, so the next crate added
+before it is committed fails in CI rather than on somebody else's clone.
+
+Acceptance: H1.
+
+## Part B: the four silent wrong answers
+
+Every one of these is a declaration an application trusts. They are ordered by how much of the engine
+they touch, smallest first, because the affinity one is the largest change in this document and should
+not block the three that are an afternoon each.
+
+### B1: `CHECK`
+
+The machinery is all there and one call is missing. `collect_checks` (`inillucent-catalog/src/load.rs`)
+fills `TableInfo::checks` from the stored `CREATE TABLE`; `bind_checks`
+(`inillucent-sql/src/dml.rs`) turns them into `BoundInsert::checks` and `BoundUpdate::checks`;
+`codes::CHECK` is `SQLITE_CONSTRAINT_CHECK` already. `inillucent-exec` never reads the field — the
+string `checks` appears in that crate exactly once, in a comment.
+
+Evaluate them in `declarations_are_met` (`inillucent-exec/src/dml.rs`), which is where `NOT NULL` and
+the `VECTOR(N)` width are already enforced, on the row image about to be written, in SQLite's order
+(after `NOT NULL`, before the unique indexes), honouring the statement's `OR IGNORE`/`OR REPLACE` the
+way the `NOT NULL` arm does. The message is `CHECK constraint failed: <the source text>` — SQLite
+quotes the expression as written, which is why `CheckInfo` keeps the text rather than a bound tree.
+
+Acceptance: `check.column`, `check.table` and `check.update` in the probe agree with the oracle, and a
+`cli.rs` script is byte-identical.
+
+### B2: `STRICT`
+
+`check_strict` (`inillucent-sql/src/directive.rs`) already refuses a `STRICT` table whose columns are
+not from the allowed set, and `codes::DATATYPE` is defined and raised only for a mis-sized vector.
+`TableInfo::strict` is loaded and never read on the write path.
+
+Add the type-class test to `declarations_are_met`: for a `STRICT` table, each column's declared type
+constrains the storage class of the value about to be written (`INT`/`INTEGER` accepts an integer,
+`REAL` an integer or a real that converts exactly, `TEXT` text, `BLOB` a blob, `ANY` anything), and a
+value outside it fails with `SQLITE_CONSTRAINT_DATATYPE` and SQLite's message, `cannot store <CLASS>
+value in <TYPE> column <table>.<column>`.
+
+Acceptance: `schema_forms.rs`'s `strict_tables_refuse_the_wrong_class` and
+`strict_is_enforced_on_a_file_sqlite_wrote` pass; the probe's `strict.int` agrees.
+
+### B3: `AUTOINCREMENT`
+
+`INTEGER PRIMARY KEY AUTOINCREMENT`, one insert, a delete, another insert: this engine hands out 1
+again where SQLite hands out 2. SQLite keeps the high-water mark in `sqlite_sequence` and never
+reuses; `TableInfo::autoincrement` is parsed here and the allocator ignores it. Write the high-water
+mark to a `sqlite_sequence` tree in the same transaction as the row, read it at open, and refuse the
+insert with `SQLITE_FULL` when the mark reaches `i64::MAX`, which is what SQLite does.
+
+Acceptance: the probe's `autoincrement` case agrees; a rollback test asserts the mark rolls back with
+the row.
+
+### B4: column affinity on write
+
+**The largest item in this document, and the one to schedule with the most room.** SQLite applies a
+column's affinity to a value on the way in: `'42'` into an `INTEGER` column is stored as the integer
+42, `42` into a `TEXT` column as the text `'42'`, `1` into a `REAL` column as `1.0`. This engine stores
+what it was handed. Everything downstream follows: `typeof()` answers differently, a comparison between
+a stored `'42'` and a literal `42` takes the other branch of SQLite's type-ordering rules, and an index
+over a column whose rows are of mixed storage class orders them differently — which means the same
+`ORDER BY` and the same `WHERE` can return rows in a different order or a different set.
+
+`inillucent-value` already has the machinery: `Affinity`, `cast`, and the storage classes. What is
+missing is the application point. Put it beside the other write-path declarations, in
+`declarations_are_met`'s loop or immediately before it, so that one function is where "what the
+declaration means" lives:
+
+1. Derive each column's affinity once, at catalog load, from its declared type using SQLite's five
+   rules, and store it on `ColumnInfo` — deriving it per write would put a string scan on the write
+   path.
+2. Apply it to the row image before the constraints are checked, because `NOT NULL`, `CHECK` and
+   `STRICT` all test the value that will actually be stored.
+3. Apply it on the read side only where SQLite does — comparison against a column with affinity — and
+   nowhere else. The `INTEGER PRIMARY KEY` path already has its own rule and must not be double-applied.
+
+**This part is the one that can move a ratio**, because it adds work to every write. Measure
+`write.insert.batch`, `write.update.indexed` and `txn.large` on `inillucent-probeprofile` before and
+`inillucent-fullgate` after; a conversion that costs more than the run-to-run spread on a column whose
+value already has the right class means the fast path is missing and should short-circuit on class
+equality before it converts.
+
+Acceptance: a new `crates/inillucent-compat/tests/affinity.rs` that, for each of SQLite's five
+affinities, inserts every storage class and compares `typeof`, the stored value, an `ORDER BY` and an
+indexed `WHERE` against the oracle; plus the probe's three affinity cases.
+
+## Part C: a scan that can be stopped, and table-valued functions
+
+Two defects with one root, and the hang is the visible half.
+
+**The root.** `TreeCatalog::virtual_rows` returns `Option<Vec<Vec<OwnedDatum>>>`, so a virtual-table
+scan is materialised in full before any operator above it runs. Its doc comment argues this is safe
+"for the shapes a module answers — a MATCH, a bounding box — a result set that fits in memory by
+construction". `generate_series` is a counter-example that ships in the same registry: with no `stop`
+constraint it is 4,294,967,295 rows, and `SELECT value FROM gs LIMIT 3` neither returns nor can be
+stopped. Measured: three shapes, all past a 25-second timeout; one run held about 1.2 cores and a
+growing working set for ten minutes.
+
+Replace the materialised `Vec` with a cursor the source drives: `virtual_rows` becomes
+`virtual_cursor`, returning something `physical.rs` can pull a batch at a time and abandon on
+`Flow::Stop`, the same way `scan.rs` abandons a b-tree scan. The `Module`/`VirtualCursor` contract in
+`inillucent-ext` is already a cursor with `filter`/`next`/`eof`/`column`; it is the catalog boundary
+that flattens it. FTS5 and the R-Tree keep working because a cursor over a produced run is what they
+had underneath anyway.
+
+**The other half.** The eponymous, table-valued form is the one a SQLite user writes:
+`FROM generate_series(1, 10)`, `FROM json_each(x)`, `FROM pragma_table_info('t')`. All three are
+`no such table` on the new engine. `SeriesModule::eponymous()` returns `true` and nothing consults it;
+`JsonWalkModule` refuses `CREATE VIRTUAL TABLE` outright, so it is unreachable from SQL by any route.
+Bind a `FROM` term whose name resolves to an eponymous module as a virtual table whose arguments are
+`Eq` constraints on its hidden columns — which is exactly what `best_index` is already written to
+consume, and is why the series' `stop` is missing today. `pragma_*` is the same mechanism over the
+pragma set, and closes `new_engine_surface.rs`'s `pragma.table_valued` row.
+
+Acceptance: H3, plus `new_engine_surface.rs`'s `pragma.table_valued` moving from `NotYet` to `Yes`,
+plus a test that a `LIMIT` over an unbounded series returns in bounded time — written as a test with a
+timeout, because the failure mode is a hang and an assertion on rows would never be reached.
+
+## Part D: retire a log segment
+
+`Wal::retire_segments_below` is written, has a doc comment saying it is "called after a checkpoint",
+and is covered by six cases in `inillucent-wal/tests/recovery.rs`. It is called from one place:
+`inillucent-txn/src/engine.rs`, which is not the engine that ships. `inillucent-engine`'s
+`checkpoint()` calls `note_checkpoint`, which appends a checkpoint record and returns.
+
+Measured consequence: the same 200,000 rows built through `INSERT ... SELECT` are 18.4 MB in SQLite
+and **179.1 MB** here — 27.6 MB of data file and **151.5 MB of log segments**, which survive the
+checkpoint, a clean close, a reopen and a second checkpoint.
+
+Call it from `Database::checkpoint` after `note_checkpoint`, with the checkpoint LSN, on `main` and on
+every attached database (`checkpoint_attached` is where the attached half already loops). The function
+is already written to be safe about it: a segment it cannot delete is left alone and reported `Ok`,
+and a leftover is refused on the next open by its sequence number.
+
+Then check the two things a redo log makes easy to get wrong, both of which the existing tests
+already have the shape for: a segment holding a record at or above the checkpoint LSN is **not**
+deleted, and a crash immediately after the deletion recovers to the same database as a crash
+immediately before it. `inillucent-sim` drives both.
+
+Acceptance: H4, plus a `durability.rs` case that crashes at every write across a checkpoint and finds
+the same rows.
+
+## Part E: the floor
+
+Unchanged from Phase 2's Part 4 in substance — none of it was done — but re-ranked by the fresh
+numbers, and with the two families that moved struck out so the next ticket does not re-attack them.
+
+| workload | Phase 2 said | today | plan |
+|---|---|---|---|
+| `prepare.trivial` | 0.31x | 0.31x–0.32x | a per-statement bump arena for the binder and planner; intern folded names once per catalog snapshot; skip `bind` for a statement with no table. **task-1838 §5 measured the target: 25 heap allocations per trivial compile, and the Windows CRT heap is 59% of the time.** A size-classed free list behind `GlobalAlloc` was measured at 17% overall and is the cheapest first move |
+| `txn.large` | 0.24x | 0.19x–0.20x | route `UPDATE`'s read through the borrowing `probe` path instead of the allocating `PagedTree::point`; overwrite a same-width value in place in the delta area instead of delete-plus-insert; one log record per update |
+| `write.insert.batch` | 0.12x at small | 0.48x–0.50x at medium, 0.49x family at small | keep delta entries sorted by pre-encoded key and bisect, instead of decoding every entry's key per lookup. A delta *format* change, not a size change |
+| `schema.index` | 0.54x | 0.54x–0.56x | build the index from a sorted run of encoded keys with a radix pass instead of comparisons; log one record per packed leaf. The 3.00x bar is shown unreachable; 1.00x is the acceptance |
+| `extension.fts.build` | 0.11x | 0.25x–0.27x | still the module's own cost. task-1835 moved the query path; the build path is what is left |
+| ~~`extension.rtree.insert`~~ | 0.12x | **0.89x–0.95x** | done by task-1838's shadow-write batching; do not re-attack |
+| `extension.json` | 0.26x | 0.62x–0.68x | cache the parsed JSONB of a constant argument on the plan rather than per call |
+| `range.lookaside`, `join.range` | not named | 0.93x–0.96x | the only two read workloads under 1.00x, and neither has ever been profiled. Profile before planning |
+
+Rule, unchanged: every change is measured on `inillucent-probeprofile` before and `inillucent-fullgate`
+after, and a change that costs `read.point` or `read.analytical` more than the run-to-run spread is
+refused. Note that **Part B4 pushes the other way** — it adds work to the write path — so the two
+should be measured together rather than in sequence, and the write families' budget spent knowingly.
+
+Acceptance: H5.
+
+## Part F: the refusals a SQLite application hits
+
+Phase 2's Part 2 cleared the join and subquery refusals. What is left is the list an application
+written for SQLite runs into on its first day, in the order the differential probe hit them:
+
+| construct | where it is refused |
+|---|---|
+| `CREATE TABLE ... AS SELECT` | the binder — a `CREATE` whose column list comes from a plan |
+| `UPDATE ... FROM` | the binder — an update whose rows come from a join |
+| `WITH` on `INSERT`/`UPDATE`/`DELETE` | the binder — the CTE is bound for `SELECT` only |
+| partial indexes | `CREATE INDEX ... WHERE`: the predicate has to be stored, bound at load, and consulted by the planner before the index is usable |
+| indexes on expressions | the same, plus the expression evaluated per row on maintenance |
+| row values | the binder — `(a, b) = (1, 2)` and its `IN` form |
+| `CREATE INDEX` on a `WITHOUT ROWID` table | the DDL path |
+| writing through an `INSTEAD OF` trigger | `no layout imported for v` — the trigger fires and the write has no target |
+
+Partial and expression indexes are the two that need planner work rather than binder work and should
+be taken last. `CREATE TABLE ... AS SELECT` and `WITH` on DML are the two cheapest and are what a
+migration script hits first.
+
+Acceptance: H6.
+
+## Part G: the shell is the engine, and two smaller repairs
+
+- **`CREATE TEMP TABLE` through `inillucent-shell`** reports success and then `no such table`.
+  task-1844 fixed exactly this shape inside the engine — `execute_batch` and `Statement::step` reached
+  it without saying whose statement it was — and the shell's own path was not covered by that ticket's
+  tests, which drive `Connection` directly. Add the shell's path to `cli.rs`, which byte-compares
+  whole scripts against `sqlite3`, and the class of defect cannot come back.
+- **Undoing a `DROP TABLE` inside a transaction** is refused, which is fine, *and* leaves the
+  connection unable to read the table afterwards (`no layout imported for root page 2147483648`),
+  which is not: a refusal that damages the session is worse than one that does not. Either roll the
+  schema back with the rows, or refuse the `DROP` at the point it is issued inside a transaction.
+- **Three built-in functions compute a different value from SQLite**: `json_valid('{}')` answers 0
+  where SQLite answers 1; `strftime('%Y-%W', '2024-03-01')` answers `2024-08` against `2024-09`; and
+  `printf('%05.2f', 3.14159)` answers `3.14`, ignoring the zero-padded width. Each is a small fix in
+  `inillucent-scalar`, and each is the kind of difference that only shows up in somebody's data.
+  Widen `new_engine_differential.rs` over the whole 128-name function table rather than fixing three
+  and assuming the rest.
+
+Acceptance: H7 and H2's remainder.
+
+## Ordering, and what it is safe to parallelise
+
+```mermaid
+flowchart LR
+  A["A: build from a clone"] --> B1["B1 CHECK"]
+  A --> B2["B2 STRICT"]
+  A --> B3["B3 AUTOINCREMENT"]
+  A --> C["C: streaming vtab scan + table-valued functions"]
+  A --> D["D: retire log segments"]
+  B1 --> B4["B4 column affinity"]
+  B2 --> B4
+  B4 --> E["E: the floor"]
+  C --> F["F: the remaining refusals"]
+  D --> E
+  E --> G["G: the shell, the DROP rollback, three functions"]
+  F --> G
+```
+
+Part A first and alone. B1, B2, B3, C and D are independent of each other and of B4. **B4 and E have
+to be measured together**, because B4 adds work to the write path and E is trying to take it away, and
+two tickets measuring the same families in sequence would each report the other's change as its own.
+
+## Testing strategy for Phase 3
+
+The Phase 2 strategy above still applies, with three additions this review's findings ask for:
+
+1. **The differential probe becomes a checked-in test, not a one-off.** The 61 scripts in
+   `_agent_output/task-1843-inillucent-review-2/semantics/` are the review's evidence; as a test they
+   are a gate. Add them to `crates/inillucent-compat/tests/` as a table like `new_engine_surface.rs`'s,
+   each case declaring `Agrees` or `Refuses`, so that a construct that starts agreeing fails the test
+   until its row is moved — the same discipline the inventory already has, applied to *answers*
+   rather than to *acceptance*.
+2. **A hang is a test with a timeout.** The `generate_series` defect cannot be caught by an assertion
+   on rows, because the assertion is never reached. Any test for Part C runs the statement with a
+   deadline and fails on the deadline.
+3. **The workspace manifest is checked.** `inillucent-compat` asserts that every path in `[workspace]
+   members` exists, so Part A's defect cannot recur silently.
+
+## Sources for Phase 3
+
+- This ticket's own measurements, at `d885e91`, in
+  `_agent_output/task-1843-inillucent-review-2/`: `gate-20260906T231706/` (four medium runs, small,
+  large, read gate, search gate, shell RSS, probe profile, vector probe, `medium-summary.txt`),
+  `semantics/` (the 61-case differential probe and the hang narrowing), `ondisk.txt`, `opencost.txt`,
+  `cargo-test.txt`.
+- task-1838's closing summary and its nine part reports (what Phase 2 actually delivered).
+- task-1844's closing summary and `_agent_output/task-1844/schema-forms-findings.md` (ATTACH, temp,
+  and the per-test disposition of `schema_forms.rs`).
+- task-1835 (the FTS5 query path), task-1834 §5 (the compile-stage breakdown), task-1816 (the
+  rearchitecture's goals and non-goals).
