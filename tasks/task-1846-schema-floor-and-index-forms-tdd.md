@@ -6,14 +6,18 @@ designed, what the measurements said, and where the design was wrong.
 Four pieces:
 
 - **A** — `schema` was the last family under the 1.00x floor. `CREATE INDEX` at medium cost 49.4 ms
-  against SQLite's ~31; it is now **28.0 ms**, and the family reads **1.22x–1.31x** where it read
-  0.66x.
+  against SQLite's ~31; it is now **26.4–27.1 ms**, and the family reads **1.19x–1.22x** across four
+  consecutive 30-round runs where it read 0.66x.
 - **B** — partial indexes, `CREATE INDEX ix ON t(a) WHERE b > 5`.
 - **C** — indexes on expressions, `CREATE INDEX ix ON t(lower(a))`.
 - **D** — `CREATE INDEX` on a `WITHOUT ROWID` table.
 
 B, C and D were the three `Differs` rows in `crates/inillucent-compat/tests/semantics.rs`. That file
-is now **94 of 94**, with two cases added.
+is now **106 of 106** with no `Differs` row left: its 92, task-1849's 7, and 7 added here.
+
+**H5 is still not met, and not because of any of the four.** The floor clause is missed on two of the
+four runs by `extension`, whose low bound straddled 1.00x before this ticket existed — see the
+acceptance section.
 
 ---
 
@@ -199,17 +203,47 @@ not exist, and a wrong answer now that one can.
 
 ---
 
-## What the acceptance says
+## What the acceptance says, and the half of it that is not this ticket's
 
-1. **`inillucent-fullgate` medium, 30 rounds, four consecutive runs**: weighted lower bound at least
-   3.00x and no family under 1.00x. Met — see the ticket's closing comment for the four-run table.
-   The read gate was run either side of Part D's change to the non-covering lookup and no read family
-   moved beyond its spread.
-2. **`semantics.rs` at 94 of 94.** The `agreed >= CASES.len() - 3` slack is now
-   `assert_eq!(agreed, CASES.len())`.
-3. **`cargo test --workspace`**: four failing binaries — `harness` (1), `ordering` (1), `planner` (2),
-   `schema_forms` (14) — every one of those tests in the set task-1845 recorded at `9ef6aee`.
-   `policy` is green where the baseline had its format check red.
+**Four consecutive 30-round `inillucent-fullgate` medium runs, on the merged tree:**
+
+| run | `schema` | `extension` | weighted low | floor |
+|---|---|---|---|---|
+| 1 | 1.22x [1.17, 1.45] | 1.14x [**0.99**, 1.33] | 3.80x | extension UNDER |
+| 2 | 1.19x [1.16, 1.25] | 1.15x [1.00, 1.34] | 3.85x | all above |
+| 3 | 1.21x [1.13, 1.22] | 1.16x [**0.99**, 1.34] | 3.80x | extension UNDER |
+| 4 | 1.19x [1.15, 1.67] | 1.16x [1.06, 1.44] | 3.75x | all above |
+
+1. **`schema` is met on all four**, 1.19x-1.22x with lows 1.13-1.17, from 0.66x. That is what this
+   ticket owned. The weighted lower bound clears 3.00x on all four.
+2. **The floor clause is met on two of four, and the family that misses is `extension`.** The ticket
+   asserted that "A is the only thing standing in the way"; measurement says otherwise, and the proof
+   that it is not this ticket's doing is in the baseline that assertion was written against:
+   task-1845's four runs had `extension` lows of 1.02, 1.01, **0.99**, 1.03, and its run 3 prints the
+   identical `extension 0.99x UNDER THE FLOOR` line. The family straddled 1.00x before task-1846
+   existed. Its ratio is marginally *better* now - 1.14-1.16x against 1.11-1.17x - and the
+   differences are hundredths, inside the run-to-run spread.
+
+   The workload dragging it is `extension.fts.build` at 0.30x, which Phase 3's Part E already names
+   as outstanding. It is now **task-1852**, because a bound that one run lands above at 1.06 and
+   another below at 0.99 from identical code cannot be closed by re-running the gate.
+
+   **So H5 is not met, and this ticket is not the reason.**
+3. The read gate was run either side of Part D's change to the non-covering lookup: `read.point`
+   31.00x to 30.72x, `read.range` 5.03x to 4.95x, `read.join` 4.86x to 4.57x, `read.analytical`
+   6.30x to 6.20x, PointProbe 312.9 ns to 293.0 ns. Every workload inside the other run's interval.
+4. **`semantics.rs` at 106 of 106**, with no `Differs` row: the 92 it had, task-1849's 7
+   `UNIQUE`-under-`UPDATE` shapes, 2 over a table that has been written to, and 5 where the two
+   tickets meet. The `agreed >= CASES.len() - 3` slack is now `assert_eq!(agreed, CASES.len())`.
+
+   Those last five were measured **before** the merge so their predictions could go red: `into` and
+   `two.indexes` had to flip from DIFFERS, and `outof`, `staying` and `maintenance.crossing` had to
+   *hold* - they agreed beforehand only because nothing was checked at all, and had to go on agreeing
+   for the opposite reason once the check was reached. Two flipped, three held, exactly as
+   predicted.
+5. **`cargo test --workspace`**: four failing binaries of 196 - `harness` (1), `ordering` (1),
+   `planner` (2), `schema_forms` (14) - every one of those 18 tests in the set task-1845 recorded at
+   `9ef6aee`. `policy` is green where the baseline had its format check red.
 
 ## Non-goals, unchanged
 
@@ -218,6 +252,11 @@ Multi-process and multi-thread access stay out of scope.
 
 ## Found and not fixed here
 
-An `UPDATE` that violates a **secondary `UNIQUE` index** without moving the table's own key is
-accepted silently. It reproduces on the `9ef6aee` binary, so it predates this ticket and is not one of
-A–D; it is **task-1849**, with the cause named and the four things a fix has to get right.
+- An `UPDATE` that violates a **secondary `UNIQUE` index** without moving the table's own key was
+  accepted silently. It reproduced on the `9ef6aee` binary, so it predated this ticket and was not
+  one of A-D. Filed as **task-1849**, fixed there, and merged back into this branch - the interaction
+  between its fix and this ticket's partial indexes is the five cases above, which neither ticket
+  could have tested alone: before 1846 the index cannot be created, and before 1849 the check is
+  never reached.
+- **`extension.fts.build` at 0.30x** is the last family under the floor, and the only thing left
+  between the engine and H5. Filed as **task-1852**.
