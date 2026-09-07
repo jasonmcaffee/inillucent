@@ -48,6 +48,7 @@ pub mod declared;
 pub mod dml;
 pub mod expr;
 pub mod join;
+pub mod lateral;
 pub mod ops;
 pub mod paged;
 pub mod physical;

@@ -227,6 +227,47 @@ pub trait TreeCatalog {
     /// @param path - the access path the planner chose for it
     /// @param params - the values bound to `?1`, `?2`, ...
     /// @param needed - which of the term's columns the query reads
+    /// Returns every row of a virtual scan whose arguments came from outside.
+    ///
+    /// **What a lateral join needs.** An ordinary virtual scan folds its
+    /// arguments from the statement - a literal, a parameter - and can do that
+    /// once. A table-valued function whose argument reads an outer column has a
+    /// different argument per outer row, and the value can only be known where
+    /// that row is: in the operator above. So it is evaluated there and handed
+    /// down here, one call per outer row.
+    ///
+    /// `supplied` is in the same order the module's `filter` will see, which is
+    /// the order `best_index` asked for.
+    ///
+    /// @param table - the FROM term's table, which names the module's instance
+    /// @param path - the access path the planner chose for it
+    /// @param params - the values bound to `?1`, `?2`, ...
+    /// @param needed - which of the term's columns the query reads
+    /// @param supplied - the argument values, already evaluated
+    fn virtual_rows_supplied(
+        &self,
+        table: &TableInfo,
+        path: &AccessPath,
+        params: &Params,
+        needed: &inillucent_sql::bind::ColumnUse,
+        supplied: &[OwnedDatum],
+    ) -> DbResult<Option<Vec<Vec<OwnedDatum>>>> {
+        let _ = supplied;
+        self.virtual_rows(table, path, params, needed)
+    }
+
+    /// Returns every row of a virtual scan, materialised.
+    ///
+    /// For the one caller that genuinely needs the whole answer at once: a
+    /// virtual table standing as a *materialised stage* of a join, which is read
+    /// many times and so cannot be a cursor that is consumed once. It is written
+    /// in terms of [`TreeCatalog::virtual_cursor`] rather than beside it, so
+    /// there is one implementation of what a module's scan means.
+    ///
+    /// @param table - the FROM term's table, which names the module's instance
+    /// @param path - the access path the planner chose for it
+    /// @param params - the values bound to `?1`, `?2`, ...
+    /// @param needed - which of the term's columns the query reads
     fn virtual_rows(
         &self,
         table: &TableInfo,
@@ -2881,6 +2922,16 @@ fn build_nested<'t>(
     // into a buffer and pairs them: an outer join has to know that a pair
     // *failed* the condition in order to null-extend instead of dropping, and a
     // probe cannot tell that from a key that was not there.
+    // **A table-valued function whose argument reads an outer column.** It has
+    // a different answer per outer row, so it is driven per outer row; see
+    // `crate::lateral` for why materialising it once would be wrong rather than
+    // slow. This is checked before the materialised path, which is where such a
+    // term would otherwise go.
+    if let AccessPath::VirtualScan { offer, .. } = &source_term.path {
+        if offer.iter().any(|held| reads_a_column(&held.value)) {
+            return build_lateral_join(plan, catalog, space, params, stage, downstream);
+        }
+    }
     if inillucent_sql::plan::is_outer(source_term.join) || stage.kind == AccessKind::Materialised {
         return build_materialised_join(plan, catalog, space, params, stage, index, downstream);
     }
@@ -2988,6 +3039,88 @@ fn has_equi_key(
     };
     let translated = translate_scan(expr, space, params)?;
     Ok(crate::autoindex::equi_keys(&translated, stage.offset, stage.width).is_some())
+}
+
+/// Reports whether an expression reads any column at all.
+///
+/// The test that separates a table-valued function's *constant* argument -
+/// `json_each('[1,2]')`, `generate_series(1, 10)` - from one that reads the row
+/// beside it. The first can be folded once; the second cannot be folded at all.
+///
+/// @param expr - the argument expression
+fn reads_a_column(expr: &BoundExpr) -> bool {
+    let mut used = inillucent_sql::bind::ColumnUse::default();
+    // Asked about *every* source: an argument reading this term's own column
+    // would be a cycle the binder does not produce, so any column at all means
+    // an outer one.
+    for source in 0..MAX_SOURCES {
+        expr.columns_read(source, &mut used);
+        if used.opaque || !used.columns.is_empty() {
+            return true;
+        }
+    }
+    false
+}
+
+/// How many FROM terms an expression is asked about when looking for a column.
+///
+/// The limit on terms in one statement, which is what bounds the loop above.
+const MAX_SOURCES: usize = 64;
+
+/// Builds an inner stage as a module driven once per outer row.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the module's rows come from
+/// @param space - the joined column space
+/// @param params - the bound parameters
+/// @param stage - the inner stage
+/// @param downstream - what to push joined rows into
+fn build_lateral_join<'t>(
+    plan: &PhysicalPlan,
+    catalog: &'t dyn TreeCatalog,
+    space: &Space<'_>,
+    params: &Params,
+    stage: &PreparedStage,
+    downstream: Box<dyn Sink + 't>,
+) -> DbResult<Box<dyn Sink + 't>> {
+    let source_term = plan
+        .sources
+        .get(stage.term)
+        .ok_or_else(|| misuse("a stage names a FROM term the plan does not have"))?;
+    let AccessPath::VirtualScan { offer, chosen, .. } = &source_term.path else {
+        return Err(misuse("a lateral join over a term that is not a module"));
+    };
+    let outer_types: Vec<StaticType> = space
+        .types
+        .get(..stage.offset)
+        .map(<[StaticType]>::to_vec)
+        .unwrap_or_default();
+    // **In the order the module asked for them.** `best_index` chose which
+    // offered constraints feed `filter` and in what order; the values handed
+    // down have to arrive in that order, because the module reads them
+    // positionally.
+    let order: Vec<usize> = match chosen {
+        Some(choice) => choice.arguments.clone(),
+        None => (0..offer.len()).collect(),
+    };
+    let mut arguments = Vec::with_capacity(order.len());
+    for position in order {
+        let Some(constraint) = offer.get(position) else {
+            continue;
+        };
+        let translated = translate_scan(&constraint.value, space, params)?;
+        arguments.push(compile(&translated, &outer_types)?);
+    }
+    Ok(Box::new(crate::lateral::LateralModule::new(
+        source_term.table.clone(),
+        source_term.path.clone(),
+        params.clone(),
+        plan.select.columns_read(source_term.id),
+        arguments,
+        catalog,
+        stage.width,
+        downstream,
+    )))
 }
 
 /// Builds one inner stage as a nested loop over rows read once.
