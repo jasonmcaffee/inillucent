@@ -85,7 +85,13 @@ pub enum AccessPath {
         /// Whether the index columns used are stored descending.
         descending: Vec<bool>,
         /// Which table column each index column holds.
-        columns: Vec<u16>,
+        ///
+        /// `None` for a key the index *computes*: an index on `lower(a)` holds
+        /// a value no column of the table carries, and the probe value takes no
+        /// column affinity because there is no column to take it from - which
+        /// is SQLite's rule and the reason this is an `Option` rather than a
+        /// position that would have to be invented.
+        columns: Vec<Option<u16>>,
         /// Whether the table has no rowid, so the index key holds the key.
         without_rowid: bool,
         /// Where in each entry the row's primary key sits, for a `WITHOUT
@@ -1849,6 +1855,7 @@ pub fn write_path_with(
         join: JoinKind::Inner,
         constraint: None,
         suppressed: Vec::new(),
+        index_exprs: Vec::new(),
     };
     let mut consumed = vec![false; terms.len()];
     // A write reads the whole row it is about to change, so no index covers it.
@@ -1982,21 +1989,35 @@ fn index_path(
 ) -> Option<AccessPath> {
     let table = &source.table;
     let mut best: Option<(f64, AccessPath, Vec<usize>)> = None;
-    for index in &table.indexes {
+    for (at, index) in table.indexes.iter().enumerate() {
         // An index a module owns is not a b-tree: it has no root to seek into
         // and no key order to walk. `vector_path` is the only path that can use
         // one, and it was tried before this.
         if index.origin == crate::catalog_view::IndexOrigin::Module {
             continue;
         }
-        if index.partial_sql.is_some() {
-            // A partial index only holds the rows its predicate accepts. Using
-            // one without proving the query implies that predicate would lose
-            // rows, and the implication test is phase 8's.
+        // The expressions this index needs, when the binder could bind them.
+        // `None` for every ordinary index, and for one whose schema text did
+        // not bind - which leaves a partial index unusable and an expression
+        // key unmatched, both the conservative answer.
+        let computed = source.index_exprs.iter().find(|held| held.position == at);
+        let usable = index.partial_sql.is_none() || implies(computed, terms);
+        if !usable && index.partial_sql.is_some() {
+            // **A partial index only holds the rows its predicate accepts.**
+            // Using one over a query that does not imply the predicate would
+            // lose rows - silently, and only the rows the predicate excludes -
+            // so the index is skipped unless the implication is *proved*.
+            //
+            // The proof is SQLite's own, and it is deliberately the crudest one
+            // that is sound: the predicate appears, unchanged, as a conjunct of
+            // the statement's `WHERE`. `WHERE b > 5 AND a = 1` therefore uses an
+            // index declared `WHERE b > 5`, and `WHERE b > 6` does not, even
+            // though it implies it. A cleverer test would answer more queries
+            // and would be a place for a wrong answer to live.
             continue;
         }
         let Some((path, used)) = index_candidate(
-            id, position, ids, table, index, terms, consumed, needed, levers,
+            id, position, ids, table, index, computed, usable, terms, consumed, needed, levers,
         ) else {
             continue;
         };
@@ -2031,12 +2052,15 @@ fn index_path(
 
 /// Builds the best path over one index, or `None` if it cannot be used.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn index_candidate(
     id: usize,
     position: usize,
     ids: &[usize],
     table: &TableInfo,
     index: &IndexInfo,
+    computed: Option<&crate::dml::BoundIndexExprs>,
+    usable: bool,
     terms: &[BoundExpr],
     consumed: &[bool],
     needed: &ColumnUse,
@@ -2046,16 +2070,29 @@ fn index_candidate(
     let mut used = Vec::new();
     let mut collations = Vec::new();
     let mut descending = Vec::new();
-    let mut columns = Vec::new();
+    let mut columns: Vec<Option<u16>> = Vec::new();
     let mut key = 0usize;
     while let Some(key_column) = index.columns.get(key) {
-        let Some(column) = key_column.column else {
-            break;
-        };
         let collation = collation_of(&key_column.collation);
-        let Some((term_index, value)) =
-            find_equality(id, position, ids, column, collation, terms, consumed, &used)
-        else {
+        let found = match key_column.column {
+            Some(column) => {
+                find_equality(id, position, ids, column, collation, terms, consumed, &used)
+                    .map(|(term_index, value)| (term_index, value, Some(column)))
+            }
+            // **A key the index computes.** `CREATE INDEX ix ON t(lower(a))`
+            // answers `WHERE lower(a) = 'ab'` and nothing else: the entry holds
+            // the expression's value, so the only predicate it can seek on is
+            // one whose own side is that same expression. The comparison is
+            // between *bound* expressions, which is why the binder puts them on
+            // the FROM term - see `BoundSource::index_exprs`.
+            None => computed
+                .and_then(|held| held.keys.get(key).cloned().flatten())
+                .and_then(|wanted| {
+                    find_expr_equality(position, ids, &wanted, collation, terms, consumed, &used)
+                })
+                .map(|(term_index, value)| (term_index, value, None)),
+        };
+        let Some((term_index, value, column)) = found else {
             break;
         };
         equalities.push(value);
@@ -2108,13 +2145,13 @@ fn index_candidate(
             if low.is_some() || high.is_some() {
                 collations.push(collation);
                 descending.push(key_column.descending);
-                columns.push(column);
+                columns.push(Some(column));
             }
         }
     }
     let covering = levers
         .has(Levers::COVERING_INDEX)
-        .then(|| covering_slots(table, index, needed))
+        .then(|| covering_slots(table, index, needed, usable))
         .flatten();
     if equalities.is_empty() && low.is_none() && high.is_none() && covering.is_none() {
         // Nothing to seek to and nothing to save by reading the entries: this
@@ -2170,8 +2207,9 @@ fn covering_slots(
     table: &TableInfo,
     index: &IndexInfo,
     needed: &ColumnUse,
+    usable: bool,
 ) -> Option<Vec<(u16, usize)>> {
-    if needed.opaque || table.without_rowid || index.partial_sql.is_some() {
+    if needed.opaque || table.without_rowid || !usable {
         return None;
     }
     let mut slots = Vec::with_capacity(needed.columns.len());
@@ -2215,6 +2253,82 @@ fn find_equality(
             continue;
         }
         if comparison_collation(term) != collation {
+            continue;
+        }
+        return Some((index, value));
+    }
+    None
+}
+
+/// Reports whether a query's `WHERE` implies a partial index's predicate.
+///
+/// **SQLite's rule, and deliberately the crudest sound one**: the predicate
+/// appears, unchanged, as a conjunct of the statement's `WHERE`. So an index
+/// declared `WHERE b > 5` answers `WHERE b > 5 AND a = 1` and does not answer
+/// `WHERE b > 6`, even though the second implies the first. Proving the general
+/// implication is a theorem prover in the planner, and every case it got wrong
+/// would be a query silently missing exactly the rows the predicate excludes.
+///
+/// `false` when the index's own predicate could not be bound, which is what
+/// leaves an index the planner cannot reason about unchosen rather than chosen
+/// on a guess.
+///
+/// @param computed - the index's bound expressions, when it has them
+/// @param terms - the statement's `WHERE` conjuncts
+fn implies(computed: Option<&crate::dml::BoundIndexExprs>, terms: &[BoundExpr]) -> bool {
+    let Some(held) = computed else {
+        return false;
+    };
+    let Some(predicate) = held.predicate.as_ref() else {
+        return false;
+    };
+    terms.iter().any(|term| term == predicate)
+}
+
+/// Finds an equality against an expression the index computes.
+///
+/// The mirror of [`find_equality`] for a key that is not a column: the term has
+/// to compare the index's own key expression against something the join has
+/// already produced, under the collation the key is ordered by.
+///
+/// @param position - the FROM term's position among the ones already joined
+/// @param ids - the FROM terms joined so far
+/// @param wanted - the index's bound key expression
+/// @param collation - the collation the key is ordered under
+/// @param terms - the statement's `WHERE` conjuncts
+/// @param consumed - which terms an earlier stage already used
+/// @param used - which terms this candidate has already used
+#[allow(clippy::too_many_arguments)]
+fn find_expr_equality(
+    position: usize,
+    ids: &[usize],
+    wanted: &BoundExpr,
+    collation: Collation,
+    terms: &[BoundExpr],
+    consumed: &[bool],
+    used: &[usize],
+) -> Option<(usize, BoundExpr)> {
+    for (index, term) in terms.iter().enumerate() {
+        if consumed.get(index).copied().unwrap_or(false) || used.contains(&index) {
+            continue;
+        }
+        let BoundExpr::Compare {
+            op, left, right, ..
+        } = term
+        else {
+            continue;
+        };
+        if *op != BinaryOp::Equal || comparison_collation(term) != collation {
+            continue;
+        }
+        let value = if left.as_ref() == wanted {
+            right.as_ref().clone()
+        } else if right.as_ref() == wanted {
+            left.as_ref().clone()
+        } else {
+            continue;
+        };
+        if !is_available(position, ids, &value) {
             continue;
         }
         return Some((index, value));

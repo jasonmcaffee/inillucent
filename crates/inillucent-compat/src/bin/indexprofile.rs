@@ -59,7 +59,12 @@ fn main() -> ExitCode {
     println!("## {sql}");
     println!("  iterations: {iterations}");
     let mut totals: Vec<f64> = Vec::with_capacity(iterations);
-    let mut last = String::new();
+    // One column per stage, so each is a median over the rounds rather than
+    // whatever the last one happened to cost. The prologue is the sixth: the
+    // part of the statement before the scan - parsing, binding, allocating the
+    // root, re-parsing the canonical SQL - which no stage times and which
+    // subtraction is therefore the only way to see.
+    let mut stages: Vec<Vec<f64>> = vec![Vec::with_capacity(iterations); 8];
     for round in 0..iterations {
         if let Err(error) = database.execute_any(DROP, &Params::new()) {
             eprintln!("drop failed on round {round}: {}", error.message());
@@ -70,15 +75,43 @@ fn main() -> ExitCode {
             eprintln!("create failed on round {round}: {}", error.message());
             return ExitCode::FAILURE;
         }
-        totals.push(started.elapsed().as_nanos() as f64 / 1e6);
-        last = database.build_stages();
+        let total = started.elapsed().as_nanos() as f64 / 1e6;
+        totals.push(total);
+        let (scan, sort, unique, flatten, pack, catalog, seal) = database.build_stage_nanos();
+        let measured =
+            [scan, sort, unique, flatten, pack, catalog, seal].map(|value| value as f64 / 1e6);
+        let named = measured.iter().sum::<f64>();
+        for (column, value) in measured.iter().enumerate() {
+            if let Some(held) = stages.get_mut(column) {
+                held.push(*value);
+            }
+        }
+        if let Some(held) = stages.get_mut(7) {
+            held.push((total - named).max(0.0));
+        }
     }
     let _ = database.execute_any(DROP, &Params::new());
-    totals.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-    let middle = totals.get(totals.len() / 2).copied().unwrap_or(0.0);
-    println!("  median total: {middle:.1} ms");
-    println!("  last round  : {last}");
+    println!("  median total: {:.1} ms", median(&mut totals));
+    for (column, name) in [
+        "scan", "sort", "unique", "flatten", "pack", "catalog", "seal", "prologue",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let Some(held) = stages.get_mut(column) else {
+            continue;
+        };
+        println!("  {name:<9}: {:.1} ms", median(held));
+    }
     ExitCode::SUCCESS
+}
+
+/// Returns the median of a set of measurements, sorting it in the process.
+///
+/// @param values - the measurements
+fn median(values: &mut [f64]) -> f64 {
+    values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    values.get(values.len() / 2).copied().unwrap_or(0.0)
 }
 
 /// Returns a flag's value, when it was given.

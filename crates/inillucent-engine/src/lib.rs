@@ -80,6 +80,7 @@ pub mod analyze;
 pub mod attach;
 pub mod connect;
 pub mod ddl;
+mod entries;
 pub mod multi;
 pub mod pragma;
 pub mod vtab;
@@ -348,9 +349,7 @@ pub struct ImportedDatabase {
     /// test-only crate, and nothing in the engine consults it - the same shape
     /// as the write path's `execute_timed`, and for the same reason: `schema`
     /// is a gate this project has already been wrong about the cause of once.
-    index_stages: std::cell::Cell<(u128, u128, u128, u128, u128)>,
-    /// TEMPORARY: how long the owned-to-borrowed copy before a bulk build took.
-    borrow_nanos: std::cell::Cell<u128>,
+    index_stages: std::cell::Cell<(u128, u128, u128, u128, u128, u128, u128)>,
     /// How many times the catalog has changed.
     ///
     /// A plan compiled at one generation is not run at another: `execute_ddl`
@@ -1201,10 +1200,12 @@ impl ImportedDatabase {
                 identifiers.push(index.root);
                 shapes.insert(index.root, shape);
                 layouts.insert(index.root, layout);
-                covering
-                    .entry(info.root)
-                    .or_insert_with(Vec::new)
-                    .push(index.root);
+                if covers_every_row(index) {
+                    covering
+                        .entry(info.root)
+                        .or_insert_with(Vec::new)
+                        .push(index.root);
+                }
             }
             tables.push(info.clone());
             catalog = catalog.with_table(info.clone());
@@ -1335,6 +1336,7 @@ impl ImportedDatabase {
                 // declared columns, so the record slots start at tree column 1.
                 slots: (1..=5).map(Some).collect(),
                 rowid: Some(0),
+                identity: vec![0],
                 types: vec![
                     StaticType::Int,
                     StaticType::Text,
@@ -1434,8 +1436,7 @@ impl ImportedDatabase {
             eponymous: Vec::new(),
             virtual_tables: HashMap::new(),
             vector_indexes: HashMap::new(),
-            index_stages: std::cell::Cell::new((0, 0, 0, 0, 0)),
-            borrow_nanos: std::cell::Cell::new(0),
+            index_stages: std::cell::Cell::new((0, 0, 0, 0, 0, 0, 0)),
             catalog_generation: 0,
             attached: Vec::new(),
             temps: Vec::new(),
@@ -1611,8 +1612,7 @@ impl ImportedDatabase {
             eponymous: Vec::new(),
             virtual_tables: HashMap::new(),
             vector_indexes: HashMap::new(),
-            index_stages: std::cell::Cell::new((0, 0, 0, 0, 0)),
-            borrow_nanos: std::cell::Cell::new(0),
+            index_stages: std::cell::Cell::new((0, 0, 0, 0, 0, 0, 0)),
             catalog_generation: 0,
         };
         opened.rebuild_tables()?;
@@ -2245,18 +2245,37 @@ impl ImportedDatabase {
 
     /// Returns where the last `CREATE INDEX` spent its time.
     ///
-    /// Microseconds per stage, rendered for a report.
+    /// Milliseconds per stage, rendered for a report.
     pub fn build_stages(&self) -> String {
-        let (scan, sort, unique, pack, tail) = self.index_stages.get();
+        let (scan, sort, unique, flatten, pack, catalog, seal) = self.index_stages.get();
         format!(
-            "scan {:.1} ms, sort {:.1} ms, unique {:.1} ms, pack {:.1} ms (of which borrow {:.1} ms), catalog {:.1} ms",
+            "scan {:.1} ms, sort {:.1} ms, unique {:.1} ms, flatten {:.1} ms, pack {:.1} ms, catalog {:.1} ms, seal {:.1} ms",
             scan as f64 / 1e6,
             sort as f64 / 1e6,
             unique as f64 / 1e6,
+            flatten as f64 / 1e6,
             pack as f64 / 1e6,
-            self.borrow_nanos.get() as f64 / 1e6,
-            tail as f64 / 1e6
+            catalog as f64 / 1e6,
+            seal as f64 / 1e6
         )
+    }
+
+    /// Returns the last `CREATE INDEX`'s stages in nanoseconds.
+    ///
+    /// **The raw numbers, so a harness can take a median rather than report one
+    /// round.** `build_stages` renders whatever the *last* round happened to
+    /// cost, and a single round of a 35 ms statement moves by several
+    /// milliseconds - enough that reading the stages off one round and the
+    /// total off thirty says the two do not add up when they do.
+    ///
+    /// Scan, sort, uniqueness check, flatten, pack, catalog, seal.
+    ///
+    /// `flatten` is the arena being read out into the run of `Datum`s the bulk
+    /// builder walks. It is separate from `pack` because the two are different
+    /// claims - one is a copy this ticket could still remove, the other is the
+    /// tree being written - and folding them together is how the copy hid.
+    pub fn build_stage_nanos(&self) -> (u128, u128, u128, u128, u128, u128, u128) {
+        self.index_stages.get()
     }
 
     /// Returns the log, so a caller can read its counters.
@@ -2570,6 +2589,19 @@ impl ImportedDatabase {
             ) else {
                 continue;
             };
+            // A `DROP` that is rolled back puts the index's tree back, and
+            // it may only rejoin the covering set on the same terms it was in
+            // it: the catalog text is what says whether it is partial.
+            let partial = inillucent_catalog::load::index_from_create_sql(
+                &held.entry.sql,
+                &TableInfo::subquery(held.entry.table.clone(), 0, Vec::new()),
+                index_root,
+            )
+            .map(|index| index.partial_sql.is_some())
+            .unwrap_or(true);
+            if partial {
+                continue;
+            }
             let candidates = self.covering.entry(table_root).or_default();
             if !candidates.contains(&index_root) {
                 candidates.push(index_root);
@@ -5462,6 +5494,10 @@ fn table_shape(info: &TableInfo) -> (Vec<ColumnSpec>, SourceLayout) {
             tree_key: info.root,
             slots,
             rowid: Some(0),
+            // A rowid table's row is identified by its rowid, and by nothing
+            // else - which is what makes an index entry over one a single
+            // trailing column.
+            identity: vec![0],
             types,
             width,
             // A rowid-clustered tree is ordered by its rowid, which is column 0.
@@ -5600,6 +5636,12 @@ fn keyed_table_shape(info: &TableInfo) -> DbResult<(Vec<ColumnSpec>, usize, Sour
             // There is no rowid: that is what `WITHOUT ROWID` means, and a
             // query that asks for one is refused rather than given the key.
             rowid: None,
+            // The primary key is what identifies the row instead, and it is the
+            // leading `key_columns` of the record. Stated here unconditionally
+            // rather than read off `key_columns`, which is emptied when the
+            // tree is not "already sorted" and would leave a `DESC` or collated
+            // primary key with no identity at all.
+            identity: (0..key_columns).collect(),
             types,
             width: stored_width,
             key_columns: if ordered {
@@ -5662,11 +5704,19 @@ fn import_index(
 /// pages, and by `CREATE INDEX`, which fills it from the table tree. The shape
 /// is the same question in both cases and is answered in one place.
 ///
+/// **What follows the indexed columns is whatever identifies the table row**:
+/// a rowid for an ordinary table, and the *primary key's columns* for a
+/// `WITHOUT ROWID` one, which is SQLite's rule and the reason such an index was
+/// refused here until now. `SourceLayout::identity` names them, so a
+/// non-covering seek probes the table with the right key without having to
+/// re-derive which columns those were.
+///
 /// @param table - the table the index is on
 /// @param index - the index's declaration
 /// @param root - the identifier the tree is registered under
 fn index_shape(table: &TableInfo, index: &IndexInfo, root: u32) -> (Vec<ColumnSpec>, SourceLayout) {
-    let key_columns = index.columns.len().saturating_add(1);
+    let trailing = identity_columns(table);
+    let key_columns = index.columns.len().saturating_add(trailing.len().max(1));
     let mut columns = Vec::with_capacity(key_columns);
     let mut types = Vec::with_capacity(key_columns);
     let mut slots: Vec<Option<usize>> = vec![None; table.columns.len()];
@@ -5719,27 +5769,65 @@ fn index_shape(table: &TableInfo, index: &IndexInfo, root: u32) -> (Vec<ColumnSp
             *slot = Some(position);
         }
     }
-    // The rowid entry at the end, which is also the table's rowid-alias column.
-    columns.push(ColumnSpec::key(PhysicalType::Int64));
-    types.push(StaticType::Int);
-    let rowid_position = key_columns.saturating_sub(1);
-    if let Some(alias) = table.rowid_alias.map(usize::from) {
-        if let Some(slot) = slots.get_mut(alias) {
-            *slot = Some(rowid_position);
+    // What identifies the table row, at the end of the entry.
+    let indexed = index.columns.len();
+    let identity: Vec<usize> = if trailing.is_empty() {
+        // An ordinary table: one rowid column, which is also the table's
+        // rowid-alias column when it declared one.
+        columns.push(ColumnSpec::key(PhysicalType::Int64));
+        types.push(StaticType::Int);
+        if let Some(alias) = table.rowid_alias.map(usize::from) {
+            if let Some(slot) = slots.get_mut(alias) {
+                *slot = Some(indexed);
+            }
         }
-    }
+        vec![indexed]
+    } else {
+        // A `WITHOUT ROWID` table: its primary key, in its key order. Each of
+        // those columns is genuinely carried by this tree, so its slot is
+        // mapped and a query reading a primary-key column can be answered from
+        // the entry - which is what an index on such a table is worth.
+        for (offset, declared) in trailing.iter().enumerate() {
+            let (physical, static_type) = match table.columns.get(*declared) {
+                Some(info) => physical_for(info.affinity),
+                None => (PhysicalType::Any, StaticType::Unknown),
+            };
+            let collation = table
+                .columns
+                .get(*declared)
+                .map(|info| collation_of(&info.collation))
+                .unwrap_or(Collation::Binary);
+            if collation != Collation::Binary {
+                ordered = false;
+            }
+            columns.push(ColumnSpec::key(physical).with_collation(collation));
+            types.push(static_type);
+            if let Some(slot) = slots.get_mut(*declared) {
+                // An indexed column that is also a primary-key column keeps the
+                // slot it already has: the entry holds it twice, and reading the
+                // first copy is what the planner already expects.
+                if slot.is_none() {
+                    *slot = Some(indexed.saturating_add(offset));
+                }
+            }
+        }
+        (indexed..key_columns).collect()
+    };
+    let rowid_position = trailing.is_empty().then_some(indexed);
 
     (
         columns,
         SourceLayout {
             tree_key: root,
             slots,
-            rowid: Some(rowid_position),
+            rowid: rowid_position,
+            identity,
             types,
             width: key_columns,
             // An index tree is ordered by every column of its entry, in order:
-            // the indexed columns then the rowid. A descending index column
-            // would break that, which is why one disqualifies the tree above.
+            // the indexed columns then whatever identifies the row. A
+            // descending index column would break that, which is why one
+            // disqualifies the tree above.
             key_columns: if ordered {
                 (0..key_columns).collect()
             } else {
@@ -5747,6 +5835,55 @@ fn index_shape(table: &TableInfo, index: &IndexInfo, root: u32) -> (Vec<ColumnSp
             },
         },
     )
+}
+
+/// Returns the declared columns that identify one of a table's rows.
+///
+/// Empty for a rowid table, whose rows are identified by a rowid rather than by
+/// any declared column; the primary key's columns in key order for a `WITHOUT
+/// ROWID` one. It is the one place that answers the question, so the index
+/// shape, the build path and the write path cannot disagree about what an entry
+/// carries.
+///
+/// @param table - the table
+pub fn identity_columns(table: &TableInfo) -> Vec<usize> {
+    if !table.without_rowid {
+        return Vec::new();
+    }
+    let mut keyed: Vec<(u16, usize)> = table
+        .columns
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, column)| column.primary_key_position.map(|at| (at, slot)))
+        .collect();
+    keyed.sort_unstable();
+    keyed.into_iter().map(|(_, slot)| slot).collect()
+}
+
+/// Reports whether an index's tree may stand in for a scan of its table.
+///
+/// **A partial index holds only the rows its predicate accepted, so it may
+/// not.** The physical pass replaces a plain table scan with a scan of the
+/// smallest tree that carries every column the query reads, and it decides
+/// "carries every column" by building the pipeline against the candidate's
+/// layout and seeing whether it translates. That test is about *columns*; it
+/// cannot see that a tree holds fewer rows than the table, so a partial index
+/// offered as a candidate answers `SELECT rowid FROM t` with the rows inside
+/// the predicate and no error.
+///
+/// It was measured exactly that way: with `CREATE INDEX ix ON u(a) WHERE b > 5`
+/// on a two-row table, `SELECT rowid FROM u` returned one row while
+/// `SELECT rowid FROM u WHERE b = 1` - which the index cannot cover, so it fell
+/// back to the table - returned the other. Both plans said `SCAN u`, because
+/// this substitution happens after the planner has spoken.
+///
+/// An index on an *expression* is fine here: it holds an entry for every row,
+/// and the columns it does not carry are unmapped in its layout, so the
+/// translation test already refuses it for a query that reads one.
+///
+/// @param index - the index being considered
+fn covers_every_row(index: &IndexInfo) -> bool {
+    index.partial_sql.is_none()
 }
 
 /// Returns the collation a folded name refers to.
@@ -5991,7 +6128,9 @@ fn load_schema(
         )?;
         trees.insert(identifier, tree);
         layouts.insert(identifier, layout);
-        covering.entry(table_root).or_default().push(identifier);
+        if covers_every_row(&index) {
+            covering.entry(table_root).or_default().push(identifier);
+        }
         // The index joins its table's declaration, so the binder offers it
         // to the planner exactly as the import does.
         if let Some((_, info)) = infos.get_mut(&folded) {
@@ -6049,6 +6188,7 @@ fn load_schema(
             tree_key: schema_root,
             slots: (1..=5).map(Some).collect(),
             rowid: Some(0),
+            identity: vec![0],
             types: vec![
                 StaticType::Int,
                 StaticType::Text,

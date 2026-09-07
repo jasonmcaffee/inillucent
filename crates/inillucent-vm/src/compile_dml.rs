@@ -34,7 +34,7 @@ use inillucent_sql::dml::{
 use inillucent_sql::plan::{self, BoundKind, RangeBound};
 use inillucent_value::{Affinity, Collation};
 
-use crate::compile::{Compiler, Label, Sink};
+use crate::compile::{named_columns, Compiler, Label, Sink};
 use crate::program::Comparison;
 use crate::program::{
     IndexKey, Instruction, Opcode, Operand, Program, ProgramDependencies, ResultColumn,
@@ -2811,7 +2811,7 @@ impl Compiler {
                 &equalities,
                 low,
                 high,
-                &columns,
+                &named_columns(columns),
             ),
             _ => self.emit_collect_by_scan(writer, filter, sorter),
         }

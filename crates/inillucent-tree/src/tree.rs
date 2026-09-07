@@ -388,7 +388,7 @@ impl Tree {
             if self.pages.len() > 1 {
                 self.pages.remove(index);
             } else {
-                let page = self.builder.encode(&[])?;
+                let page = self.builder.encode_empty()?;
                 if let Some(slot) = self.pages.get_mut(index) {
                     *slot = page;
                 }

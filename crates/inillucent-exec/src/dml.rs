@@ -70,7 +70,7 @@ use inillucent_tree::PagedTree;
 use inillucent_value::collation::Collation;
 
 use crate::batch::{Batch, Vector};
-use crate::declared::WriteDeclarations;
+use crate::declared::{IndexExprs, WriteDeclarations};
 use crate::expr::{compile, Eval};
 use crate::physical::{translate_scan, AccessKind, HeldSpace, Params, PreparedStage, SourceLayout};
 use crate::trigger::{self, Depth};
@@ -443,6 +443,7 @@ pub fn keys_query_joined(
         join: SqlJoinKind::Inner,
         constraint: None,
         suppressed: Vec::new(),
+        index_exprs: Vec::new(),
     }];
     sources.extend(joined.iter().cloned());
     Ok(BoundSelect {
@@ -493,6 +494,7 @@ pub fn module_keys_query(
             join: SqlJoinKind::Inner,
             constraint: None,
             suppressed: Vec::new(),
+            index_exprs: Vec::new(),
         }],
         filter: filter.cloned(),
         group_by: Vec::new(),
@@ -644,8 +646,14 @@ pub fn insert_at(
     // affinities that convert a value on the way in, the `STRICT` type classes,
     // and the `CHECK` predicates. All three were collected by the catalog and
     // consulted by nobody until task-1845.
-    let declarations =
-        WriteDeclarations::compile(table, &layout, &statement.checks, &space, params)?;
+    let declarations = WriteDeclarations::compile(
+        table,
+        &layout,
+        &statement.checks,
+        &statement.index_exprs,
+        &space,
+        params,
+    )?;
 
     let rows: Vec<Row> = match &statement.source {
         BoundInsertSource::Values(values) => {
@@ -733,7 +741,15 @@ pub fn insert_at(
             continue;
         }
         let Some(stored) = write_one(
-            statement, &layout, &space, &plan, target, image, params, depth,
+            statement,
+            &layout,
+            &space,
+            &plan,
+            target,
+            image,
+            params,
+            depth,
+            IndexExprs::new(&declarations, &space),
         )?
         else {
             continue;
@@ -866,6 +882,9 @@ pub fn view_layout(table: &TableInfo) -> SourceLayout {
         tree_key: 0,
         slots: (0..table.columns.len()).map(Some).collect(),
         rowid: None,
+        // A view's row identifies no stored row, which is the whole reason an
+        // `INSTEAD OF` trigger exists.
+        identity: Vec::new(),
         types: vec![crate::expr::StaticType::Unknown; table.columns.len()],
         width: table.columns.len(),
         key_columns: Vec::new(),
@@ -1093,6 +1112,7 @@ fn write_one(
     row: Row,
     params: &Params,
     depth: Depth,
+    indexes: IndexExprs<'_>,
 ) -> DbResult<Option<Row>> {
     let table = &statement.table;
     // **The common insert asks the table once.**
@@ -1109,17 +1129,17 @@ fn write_one(
     // those probed too, and an `ON CONFLICT` clause needs to know *which* row
     // it collided with, so both take the general path below.
     if resolution(statement) == Resolution::Raise && unique_indexes(table).next().is_none() {
-        if place_row_absent(table, layout, target, &row)? {
+        if place_row_absent(table, layout, target, &row, indexes)? {
             return Ok(Some(row));
         }
-        return Err(conflicting_row(table, layout, target, &row)?
+        return Err(conflicting_row(table, layout, target, &row, indexes)?
             .map(|clash| clash.error)
             .unwrap_or_else(|| {
                 let (code, message) = rowid_message(table);
                 DbError::new(ExtendedCode(code)).with_message(message)
             }));
     }
-    if let Some(clash) = conflicting_row(table, layout, target, &row)? {
+    if let Some(clash) = conflicting_row(table, layout, target, &row, indexes)? {
         match resolution(statement) {
             Resolution::Skip => return Ok(None),
             Resolution::Replace => {
@@ -1140,11 +1160,13 @@ fn write_one(
                     &statement.replace_triggers,
                     params,
                     depth,
+                    indexes,
                 )?;
             }
             Resolution::Update => {
-                let updated =
-                    upsert_row(statement, table, layout, space, plan, target, &clash, &row)?;
+                let updated = upsert_row(
+                    statement, table, layout, space, plan, target, &clash, &row, indexes,
+                )?;
                 return Ok(Some(updated));
             }
             // `ABORT`, `FAIL` and `ROLLBACK` all raise here and differ only in
@@ -1152,7 +1174,7 @@ fn write_one(
             Resolution::Raise => return Err(clash.error),
         }
     }
-    place_row(table, layout, target, None, &row)?;
+    place_row(table, layout, target, None, &row, indexes)?;
     Ok(Some(row))
 }
 
@@ -1214,6 +1236,7 @@ fn conflicting_row(
     layout: &SourceLayout,
     target: &mut dyn WriteTarget,
     row: &[OwnedDatum],
+    indexes: IndexExprs<'_>,
 ) -> DbResult<Option<Conflict>> {
     let key = key_of(layout, row);
     if !key.is_empty() && row_exists(table, target, &key)? {
@@ -1223,8 +1246,13 @@ fn conflicting_row(
             error: DbError::new(ExtendedCode(code)).with_message(message),
         }));
     }
-    for index in unique_indexes(table) {
-        let entry = index_entry(index, layout, row);
+    for (position, index) in unique_indexes(table) {
+        // A partial unique index constrains only the rows it holds, so a row
+        // its predicate rejects can never clash with anything in it.
+        if !indexes.holds(position, row)? {
+            continue;
+        }
+        let entry = index_entry(position, index, layout, row, indexes)?;
         // A NULL is distinct from every other NULL in a UNIQUE index, which is
         // SQL's rule and the reason a nullable unique column may hold any
         // number of NULLs.
@@ -1271,6 +1299,7 @@ fn conflicting_row(
 /// @param clash - the conflict, naming the row already there
 /// @param excluded - the row that was being inserted
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn upsert_row(
     statement: &BoundInsert,
     table: &TableInfo,
@@ -1280,6 +1309,7 @@ fn upsert_row(
     target: &mut dyn WriteTarget,
     clash: &Conflict,
     excluded: &[OwnedDatum],
+    indexes: IndexExprs<'_>,
 ) -> DbResult<Row> {
     // **The row that is there is read only when something needs it.** An upsert
     // that assigns every column but the key, over a table with no index, and
@@ -1310,9 +1340,9 @@ fn upsert_row(
         }
     }
     if needed {
-        replace_row(table, layout, target, &before, &after)?;
+        replace_row(table, layout, target, &before, &after, indexes)?;
     } else {
-        place_row(table, layout, target, None, &after)?;
+        place_row(table, layout, target, None, &after, indexes)?;
     }
     Ok(after)
 }
@@ -1439,8 +1469,14 @@ pub fn update_at(
     for column in &statement.returning {
         projected.push(space.compile(&column.expr, params)?);
     }
-    let declarations =
-        WriteDeclarations::compile(table, &layout, &statement.checks, &space, params)?;
+    let declarations = WriteDeclarations::compile(
+        table,
+        &layout,
+        &statement.checks,
+        &statement.index_exprs,
+        &space,
+        params,
+    )?;
 
     let mut changes = Changes::default();
     let captured = target.captures(table.root);
@@ -1485,14 +1521,27 @@ pub fn update_at(
         // ordinary conflict check; leaving it alone is not, or every update
         // would collide with the row it is updating.
         if !same_key(&layout, &before, &after) {
-            if let Some(clash) = conflicting_row(table, &layout, target, &after)? {
+            if let Some(clash) = conflicting_row(
+                table,
+                &layout,
+                target,
+                &after,
+                IndexExprs::new(&declarations, &space),
+            )? {
                 match statement.on_conflict {
                     Some(ConflictAction::Ignore) => continue,
                     Some(ConflictAction::Replace) => {
                         let Some(held) = read_row(table, target, &clash.key)? else {
                             continue;
                         };
-                        remove_row(table, &layout, target, &clash.key, &held)?;
+                        remove_row(
+                            table,
+                            &layout,
+                            target,
+                            &clash.key,
+                            &held,
+                            IndexExprs::new(&declarations, &space),
+                        )?;
                     }
                     _ => return Err(clash.error),
                 }
@@ -1543,7 +1592,14 @@ pub fn update_at(
             }
         };
         let current = reread.as_ref().unwrap_or(&before);
-        replace_row(table, &layout, target, current, &after)?;
+        replace_row(
+            table,
+            &layout,
+            target,
+            current,
+            &after,
+            IndexExprs::new(&declarations, &space),
+        )?;
         changes.rows = changes.rows.saturating_add(1);
         if captured {
             changes.removed.push(before.clone());
@@ -1671,6 +1727,12 @@ pub fn delete_at(
     }
     let layout = layout_of(target, table)?;
     let space = RowSpace::new(&sources_for(statement.source, &statement.triggers), &layout);
+    // A delete declares no `CHECK` to meet, but it does have to know which of
+    // the table's indexes hold the row it is removing: an entry only comes out
+    // of a partial index if the predicate accepted the row, and an index key the
+    // table does not carry has to be recomputed to be found.
+    let declarations =
+        WriteDeclarations::compile(table, &layout, &[], &statement.index_exprs, &space, params)?;
     let mut projected = Vec::with_capacity(statement.returning.len());
     for column in &statement.returning {
         projected.push(space.compile(&column.expr, params)?);
@@ -1703,6 +1765,7 @@ pub fn delete_at(
             &statement.triggers,
             params,
             depth,
+            IndexExprs::new(&declarations, &space),
         )? {
             changes.rows = changes.rows.saturating_add(1);
             if captured {
@@ -1741,6 +1804,7 @@ fn remove_with_triggers(
     triggers: &[inillucent_sql::dml::BoundTrigger],
     params: &Params,
     depth: Depth,
+    indexes: IndexExprs<'_>,
 ) -> DbResult<bool> {
     if trigger::fire(
         triggers,
@@ -1764,7 +1828,7 @@ fn remove_with_triggers(
     if !row_exists(table, target, key)? {
         return Ok(false);
     }
-    remove_row(table, layout, target, key, row)?;
+    remove_row(table, layout, target, key, row, indexes)?;
     trigger::fire(
         triggers,
         TriggerTime::After,
@@ -1794,14 +1858,22 @@ fn replace_row(
     target: &mut dyn WriteTarget,
     before: &[OwnedDatum],
     after: &[OwnedDatum],
+    indexes: IndexExprs<'_>,
 ) -> DbResult<()> {
     if !same_key(layout, before, after) {
         // The row moved, so the old one is a delete and the new one an insert.
         // Doing it as an in-place replace would leave the old key behind.
-        remove_row(table, layout, target, &key_of(layout, before), before)?;
-        return place_row(table, layout, target, None, after);
+        remove_row(
+            table,
+            layout,
+            target,
+            &key_of(layout, before),
+            before,
+            indexes,
+        )?;
+        return place_row(table, layout, target, None, after, indexes);
     }
-    place_row(table, layout, target, Some(before), after)
+    place_row(table, layout, target, Some(before), after, indexes)
 }
 
 /// Writes one row only if its key is free, and maintains its index entries.
@@ -1820,6 +1892,7 @@ fn place_row_absent(
     layout: &SourceLayout,
     target: &mut dyn WriteTarget,
     row: &[OwnedDatum],
+    indexes: IndexExprs<'_>,
 ) -> DbResult<bool> {
     let placed = {
         let (database, trees, log) = target.parts_for(table.root)?;
@@ -1832,8 +1905,11 @@ fn place_row_absent(
     if !placed {
         return Ok(false);
     }
-    for index in maintained(table) {
-        let entry = index_entry(index, layout, row);
+    for (position, index) in maintained(table) {
+        if !indexes.holds(position, row)? {
+            continue;
+        }
+        let entry = index_entry(position, index, layout, row, indexes)?;
         write_index_entry(index, target, &entry, true)?;
     }
     Ok(true)
@@ -1852,6 +1928,7 @@ fn place_row(
     target: &mut dyn WriteTarget,
     before: Option<&[OwnedDatum]>,
     row: &[OwnedDatum],
+    indexes: IndexExprs<'_>,
 ) -> DbResult<()> {
     // **An index whose entry did not change is not touched at all.**
     //
@@ -1865,16 +1942,31 @@ fn place_row(
     //
     // Old before new *within* an index, still, so an entry that did change
     // leaves and comes back rather than briefly existing twice.
-    for index in maintained(table) {
-        let after = index_entry(index, layout, row);
-        let previous = before.map(|held| index_entry(index, layout, held));
-        if previous.as_deref() == Some(after.as_slice()) {
+    for (position, index) in maintained(table) {
+        // **A partial index is asked about both images.** A row that has moved
+        // across the predicate leaves the index or joins it, and a row on the
+        // same side of it is maintained as any other row is.
+        let holds_after = indexes.holds(position, row)?;
+        let after = if holds_after {
+            Some(index_entry(position, index, layout, row, indexes)?)
+        } else {
+            None
+        };
+        let previous = match before {
+            Some(held) if indexes.holds(position, held)? => {
+                Some(index_entry(position, index, layout, held, indexes)?)
+            }
+            _ => None,
+        };
+        if previous == after {
             continue;
         }
         if let Some(previous) = previous {
             write_index_entry(index, target, &previous, false)?;
         }
-        write_index_entry(index, target, &after, true)?;
+        if let Some(after) = after {
+            write_index_entry(index, target, &after, true)?;
+        }
     }
     let (database, trees, log) = target.parts_for(table.root)?;
     let tree = trees
@@ -1949,9 +2041,13 @@ fn remove_row(
     target: &mut dyn WriteTarget,
     key: &[OwnedDatum],
     row: &[OwnedDatum],
+    indexes: IndexExprs<'_>,
 ) -> DbResult<()> {
-    for index in maintained(table) {
-        let entry = index_entry(index, layout, row);
+    for (position, index) in maintained(table) {
+        if !indexes.holds(position, row)? {
+            continue;
+        }
+        let entry = index_entry(position, index, layout, row, indexes)?;
         write_index_entry(index, target, &entry, false)?;
     }
     let (database, trees, log) = target.parts_for(table.root)?;
@@ -1963,18 +2059,24 @@ fn remove_row(
     Ok(())
 }
 
-/// Returns the indexes of a table that the write path maintains.
+/// Returns the indexes of a table that the write path maintains, with their
+/// positions.
 ///
 /// A `WITHOUT ROWID` table's primary-key index *is* the table: one b-tree,
 /// reported at the table's own root. Maintaining it separately would write
 /// every row twice.
 ///
+/// The position travels with the index because a partial index's predicate and
+/// an expression key are compiled per index and found by it - see
+/// [`IndexExprs`].
+///
 /// @param table - the table
-fn maintained(table: &TableInfo) -> impl Iterator<Item = &IndexInfo> {
+fn maintained(table: &TableInfo) -> impl Iterator<Item = (usize, &IndexInfo)> {
     table
         .indexes
         .iter()
-        .filter(|index| index.root != 0 && index.root != table.root)
+        .enumerate()
+        .filter(|(_, index)| index.root != 0 && index.root != table.root)
 }
 
 /// Adds or removes one entry in one index.
@@ -2009,15 +2111,31 @@ fn write_index_entry(
 
 /// Builds one index entry from a table row.
 ///
-/// An index entry is the indexed columns followed by the rowid, which is what
-/// the import builds and what every read of an index assumes.
+/// An index entry is the indexed columns followed by whatever identifies the
+/// table row - a rowid for an ordinary table, and the primary key's columns for
+/// a `WITHOUT ROWID` one. That is what the import builds, what `index_shape`
+/// describes, and what every read of an index assumes.
 ///
 /// @param index - the index
 /// @param layout - the table tree's layout
 /// @param row - the table row, in tree-column order
-fn index_entry(index: &IndexInfo, layout: &SourceLayout, row: &[OwnedDatum]) -> Row {
-    let mut entry = Vec::with_capacity(index.columns.len().saturating_add(1));
-    for column in &index.columns {
+fn index_entry(
+    position: usize,
+    index: &IndexInfo,
+    layout: &SourceLayout,
+    row: &[OwnedDatum],
+    indexes: IndexExprs<'_>,
+) -> DbResult<Row> {
+    let trailing = layout.identity.len().max(1);
+    let mut entry = Vec::with_capacity(index.columns.len().saturating_add(trailing));
+    for (key, column) in index.columns.iter().enumerate() {
+        // A key the index computes is evaluated over the row; a key that is a
+        // column is read out of it. `key` answers `None` for every index that
+        // computes nothing, which is every index the gate measures.
+        if let Some(computed) = indexes.key(position, key, row)? {
+            entry.push(computed);
+            continue;
+        }
         entry.push(
             column
                 .column
@@ -2026,23 +2144,30 @@ fn index_entry(index: &IndexInfo, layout: &SourceLayout, row: &[OwnedDatum]) -> 
                 .unwrap_or(OwnedDatum::Null),
         );
     }
-    entry.push(
-        layout
-            .rowid
-            .and_then(|slot| row.get(slot).cloned())
-            .unwrap_or(OwnedDatum::Null),
-    );
-    entry
+    if layout.identity.is_empty() {
+        entry.push(
+            layout
+                .rowid
+                .and_then(|slot| row.get(slot).cloned())
+                .unwrap_or(OwnedDatum::Null),
+        );
+        return Ok(entry);
+    }
+    for slot in &layout.identity {
+        entry.push(row.get(*slot).cloned().unwrap_or(OwnedDatum::Null));
+    }
+    Ok(entry)
 }
 
 /// Returns the unique indexes of a table that are trees of their own.
 ///
 /// @param table - the table
-fn unique_indexes(table: &TableInfo) -> impl Iterator<Item = &IndexInfo> {
+fn unique_indexes(table: &TableInfo) -> impl Iterator<Item = (usize, &IndexInfo)> {
     table
         .indexes
         .iter()
-        .filter(|index| index.unique && index.root != 0 && index.root != table.root)
+        .enumerate()
+        .filter(|(_, index)| index.unique && index.root != 0 && index.root != table.root)
 }
 
 /// Returns an index entry's key prefix, or `None` when a NULL makes it distinct.

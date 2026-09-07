@@ -17,12 +17,23 @@
 //! input, every byte of standard output and standard error - and the case
 //! declares the outcome rather than the rows.
 //!
-//! ## The three that still differ
+//! ## The two cases about building an index over a written-to table
 //!
-//! `index.partial`, `index.expr` and `without.rowid.index`: the three
-//! `CREATE INDEX` forms task-1845 did not close. Each is a refusal rather
-//! than a wrong answer - the statement is declined and nothing is stored
-//! incorrectly - and each is `Differs` here until it is done.
+//! `index.after.writes` and its `WITHOUT ROWID` twin insert, update and delete
+//! *before* the `CREATE INDEX`, so the leaves the build reads carry tombstones
+//! and a delta area. That is a different code path from a freshly imported
+//! table - the merge, rather than the vectorised mini-column read - and
+//! task-1846 gave it a projected implementation of its own to stop it reading
+//! every column of every row. Two implementations of one merge is exactly the
+//! shape that drifts, so the answer is compared against the reference here.
+//!
+//! ## All of them agree
+//!
+//! `index.partial`, `index.expr` and `without.rowid.index` - the three
+//! `CREATE INDEX` forms task-1845 left refused - were closed by task-1846, and
+//! their rows moved from `Differs` to `Agrees`. There is no `Differs` row left,
+//! and the check below that a case which starts agreeing fails until its row is
+//! moved is what will report the next one either way.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -52,7 +63,8 @@ struct Case {
     expect: Expect,
 }
 
-/// The 92 cases: the review's 61, plus the agreeing shapes it did not record.
+/// The 94 cases: the review's 61, plus the agreeing shapes it did not record,
+/// plus the two task-1846 added over a table that has been written to.
 const CASES: &[Case] = &[
     Case {
         name: "select.basic",
@@ -400,13 +412,13 @@ const CASES: &[Case] = &[
         name: "index.partial",
         kind: "surface",
         script: "CREATE TABLE t(a,b);\nCREATE INDEX ix ON t(a) WHERE b > 5;\nINSERT INTO t VALUES (1,9),(2,1);\nSELECT a FROM t WHERE a=1 AND b>5;",
-        expect: Differs,
+        expect: Agrees,
     },
     Case {
         name: "index.expr",
         kind: "surface",
         script: "CREATE TABLE t(a TEXT);\nCREATE INDEX ix ON t(lower(a));\nINSERT INTO t VALUES ('AB');\nSELECT a FROM t WHERE lower(a)='ab';",
-        expect: Differs,
+        expect: Agrees,
     },
     Case {
         name: "rowvalue",
@@ -424,7 +436,19 @@ const CASES: &[Case] = &[
         name: "without.rowid.index",
         kind: "surface",
         script: "CREATE TABLE t(a TEXT PRIMARY KEY, b) WITHOUT ROWID;\nCREATE INDEX ix ON t(b);\nINSERT INTO t VALUES ('k',5);\nSELECT * FROM t WHERE b=5;",
-        expect: Differs,
+        expect: Agrees,
+    },
+    Case {
+        name: "index.after.writes",
+        kind: "surface",
+        script: "CREATE TABLE t(a INTEGER, b TEXT);\nINSERT INTO t VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d'),(5,'e');\nUPDATE t SET b='B' WHERE a=2;\nDELETE FROM t WHERE a=4;\nINSERT INTO t VALUES (6,'f');\nCREATE INDEX ix ON t(b);\nSELECT b, a FROM t ORDER BY b;\nSELECT count(*) FROM t;\nSELECT a FROM t WHERE b='B';",
+        expect: Agrees,
+    },
+    Case {
+        name: "index.after.writes.without.rowid",
+        kind: "surface",
+        script: "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT) WITHOUT ROWID;\nINSERT INTO t VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d'),(5,'e');\nUPDATE t SET b='B' WHERE a=2;\nDELETE FROM t WHERE a=4;\nINSERT INTO t VALUES (6,'f');\nCREATE INDEX ix ON t(b);\nSELECT b, a FROM t ORDER BY b;\nSELECT a FROM t WHERE b='B';",
+        expect: Agrees,
     },
     Case {
         name: "pragma.tablevalued",
@@ -725,9 +749,10 @@ fn every_probed_construct_answers_as_the_table_says() {
 "
         )
     );
-    assert!(
-        agreed >= CASES.len() - 3,
-        "only {agreed} of {} agreed; the header names three that do not",
+    assert_eq!(
+        agreed,
+        CASES.len(),
+        "only {agreed} of {} agreed, and this file names none that should not",
         CASES.len()
     );
 }

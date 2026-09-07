@@ -1505,7 +1505,7 @@ impl PagedTree {
             .map(|held| Swip::unswizzled(*held))
             .collect();
         let mut parent_image = interior.build(&keys, &swips)?;
-        let empty = builder.encode(&[])?;
+        let empty = builder.encode_empty()?;
 
         let lsn = log.log(Body::Structural {
             kind: Structural::Merge,

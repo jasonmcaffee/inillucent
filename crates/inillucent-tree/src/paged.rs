@@ -112,9 +112,29 @@ impl KeyEncoding {
     /// @param values - the key tuple
     /// @param collations - one per column; short means BINARY for the rest
     pub fn encode_under(self, values: &[Datum<'_>], collations: &[Collation]) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.encode_into(values, collations, &mut out);
+        out
+    }
+
+    /// Appends a key tuple's comparable bytes to a buffer.
+    ///
+    /// **The appending form is what lets a bulk build keep every key in one
+    /// arena.** `CREATE INDEX` needs a key per row to sort by, and returning a
+    /// `Vec` per row is one heap allocation per row - the exact cost that made
+    /// the previous attempt at pre-encoded keys slower than the comparison sort
+    /// it replaced. With a single buffer and a run of offsets there is no
+    /// per-row allocation at all, and the bytes are the tree's own encoding, so
+    /// sorting by `memcmp` over them is sorting by the order the tree is read
+    /// in rather than by a second opinion about it.
+    ///
+    /// @param values - the key tuple
+    /// @param collations - one per column; short means BINARY for the rest
+    /// @param out - the buffer to append to
+    pub fn encode_into(self, values: &[Datum<'_>], collations: &[Collation], out: &mut Vec<u8>) {
         match (self, values.first()) {
             (KeyEncoding::Rowid, Some(Datum::Int(number))) if values.len() == 1 => {
-                key::order_preserving_int(*number).to_vec()
+                out.extend_from_slice(&key::order_preserving_int(*number));
             }
             (KeyEncoding::Rowid, Some(Datum::Real(number))) if values.len() == 1 => {
                 // A real probe against a rowid tree: clamp to the integer it
@@ -127,12 +147,19 @@ impl KeyEncoding {
                 } else {
                     number.floor() as i64
                 };
-                key::order_preserving_int(clamped).to_vec()
+                out.extend_from_slice(&key::order_preserving_int(clamped));
             }
-            (KeyEncoding::Rowid, Some(Datum::Null)) => key::order_preserving_int(i64::MIN).to_vec(),
-            (KeyEncoding::Rowid, None) => Vec::new(),
-            (KeyEncoding::Rowid, Some(_)) => vec![0xFF; 8],
-            (KeyEncoding::General, _) => key::encode_with(values, collations).into_bytes(),
+            (KeyEncoding::Rowid, Some(Datum::Null)) => {
+                out.extend_from_slice(&key::order_preserving_int(i64::MIN));
+            }
+            (KeyEncoding::Rowid, None) => {}
+            (KeyEncoding::Rowid, Some(_)) => out.extend_from_slice(&[0xFF; 8]),
+            (KeyEncoding::General, _) => {
+                for (index, value) in values.iter().enumerate() {
+                    let collation = collations.get(index).copied().unwrap_or(Collation::Binary);
+                    key::encode_into_with(value, collation, out);
+                }
+            }
         }
     }
 }
@@ -484,12 +511,12 @@ impl PagedTree {
     /// @param columns - the column directory, key columns first
     /// @param key_columns - how many leading columns form the key
     /// @param rows - the rows, already sorted by the key columns
-    pub fn bulk_build(
+    pub fn bulk_build<'d, R: AsRef<[Datum<'d>]>>(
         database: &mut Database,
         tree_id: u64,
         columns: Vec<ColumnSpec>,
         key_columns: usize,
-        rows: &[Vec<Datum<'_>>],
+        rows: &[R],
     ) -> DbResult<PagedTree> {
         PagedTree::bulk_build_logged(database, None, tree_id, columns, key_columns, rows)
     }
@@ -520,13 +547,13 @@ impl PagedTree {
     /// @param columns - the column directory, key columns first
     /// @param key_columns - how many leading columns form the key
     /// @param rows - the rows, already sorted by the key columns
-    pub fn bulk_build_logged(
+    pub fn bulk_build_logged<'d, R: AsRef<[Datum<'d>]>>(
         database: &mut Database,
         mut log: Option<&mut dyn crate::write::TreeLog>,
         tree_id: u64,
         columns: Vec<ColumnSpec>,
         key_columns: usize,
-        rows: &[Vec<Datum<'_>>],
+        rows: &[R],
     ) -> DbResult<PagedTree> {
         let page_size = database.page_size();
         let encoding = KeyEncoding::choose(&columns, key_columns);
@@ -566,8 +593,10 @@ impl PagedTree {
                     let first = remaining
                         .first()
                         .ok_or_else(|| corrupt("a packed leaf held no rows"))?;
-                    let head: Vec<Datum<'_>> = first.iter().copied().take(key_columns).collect();
-                    separators.push(encoding.encode_under(&head, &collations));
+                    let head = first.as_ref().get(..key_columns).unwrap_or(first.as_ref());
+                    let mut separator = Vec::new();
+                    encoding.encode_into(head, &collations, &mut separator);
+                    separators.push(separator);
                     images.push(page);
                     at = at.saturating_add(packed);
                     row_count = row_count.saturating_add(packed as u64);
@@ -587,7 +616,7 @@ impl PagedTree {
             // An empty tree is still a tree: one empty leaf, so every reader
             // has a page to land on and nothing has to special-case a root that
             // does not exist.
-            images.push(builder.encode(&[])?);
+            images.push(builder.encode_empty()?);
             #[allow(clippy::let_underscore_untyped)]
             let _ = &mut nowhere;
             separators.push(Vec::new());
@@ -3160,7 +3189,9 @@ mod tests {
         let path = DbPath::new("empty.rdb");
         let mut database =
             Database::create(&vfs, &path, Options::default().with_page_size(512)).unwrap();
-        let tree = PagedTree::bulk_build(&mut database, 3, rowid_columns(), 1, &[]).unwrap();
+        let tree =
+            PagedTree::bulk_build::<Vec<Datum<'_>>>(&mut database, 3, rowid_columns(), 1, &[])
+                .unwrap();
         assert_eq!(tree.leaf_count(), 1);
         assert_eq!(tree.row_count(), 0);
         assert!(tree.rows(database.pool()).unwrap().is_empty());

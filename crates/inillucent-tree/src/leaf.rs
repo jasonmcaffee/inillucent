@@ -1436,6 +1436,115 @@ impl<'p> LeafRef<'p> {
         Ok(rows)
     }
 
+    /// Visits every live row, projecting only the columns asked for.
+    ///
+    /// **The same merge [`LeafRef::live`] performs, without materialising a row
+    /// per row and without reading the columns the caller did not ask for.**
+    /// The sorted region minus its tombstones, with the delta area's rows
+    /// replacing the ones they shadow and, where the delta area holds one key
+    /// twice, the newest - the lowest index - winning.
+    ///
+    /// It exists because `CREATE INDEX` reads **two** columns of a table that
+    /// may have six, over every row, and `live` hands it all six in a fresh
+    /// `Vec` each. On a leaf that has never been written to that does not
+    /// arise - the caller takes the vectorised mini-column path and `live` is
+    /// not called at all - but the performance gate builds its index *after*
+    /// its write workloads, so nearly every leaf has a delta entry by then and
+    /// the whole scan went down the slow path. It was **14.3 ms** of a 38.9 ms
+    /// `CREATE INDEX` there against 3.4 ms on a freshly imported table, and
+    /// that gap is this.
+    ///
+    /// Rows are **not sorted**: a caller that needs key order sorts what it
+    /// collects, and the index build sorts the whole table's entries once, so a
+    /// sort per leaf would be work thrown away.
+    ///
+    /// @param columns - the columns to project, in the order to project them
+    /// @param visit - called once per live row with those columns
+    pub fn visit_live(
+        &self,
+        columns: &[usize],
+        visit: &mut dyn FnMut(&[Datum<'p>]) -> DbResult<()>,
+    ) -> DbResult<()> {
+        // The delta area's keys, read once. Almost every leaf has none, and
+        // then the sorted region needs no shadow test at all.
+        let mut delta_keys: Vec<Vec<Datum<'p>>> = Vec::with_capacity(self.delta_count);
+        for index in 0..self.delta_count {
+            let mut key = Vec::with_capacity(self.key_columns);
+            for column in 0..self.key_columns {
+                key.push(self.delta_value(index, column)?);
+            }
+            delta_keys.push(key);
+        }
+        let projected_columns: Vec<MiniColumn<'p>> = columns
+            .iter()
+            .map(|column| self.column(*column))
+            .collect::<DbResult<Vec<MiniColumn<'p>>>>()?;
+        let key_columns: Vec<MiniColumn<'p>> = if delta_keys.is_empty() {
+            Vec::new()
+        } else {
+            (0..self.key_columns)
+                .map(|column| self.column(column))
+                .collect::<DbResult<Vec<MiniColumn<'p>>>>()?
+        };
+        // The tombstone bitmap, derived once rather than per row.
+        let tombstones = if self.has_tombstones() {
+            Some(self.tombstones()?)
+        } else {
+            None
+        };
+        let mut row_key: Vec<Datum<'p>> = Vec::with_capacity(self.key_columns);
+        let mut projected: Vec<Datum<'p>> = Vec::with_capacity(columns.len());
+        for row in 0..self.row_count {
+            if let Some(bitmap) = tombstones {
+                let byte = bitmap
+                    .get(row / 8)
+                    .copied()
+                    .ok_or_else(|| corrupt(format!("row {row} is outside the tombstone bitmap")))?;
+                if byte & (1u8 << (row % 8)) != 0 {
+                    continue;
+                }
+            }
+            if !delta_keys.is_empty() {
+                row_key.clear();
+                for column in &key_columns {
+                    row_key.push(column.value(row)?);
+                }
+                if delta_keys
+                    .iter()
+                    .any(|held| self.compare_keys(held, &row_key) == std::cmp::Ordering::Equal)
+                {
+                    // A delta entry for this key replaces the sorted row, so
+                    // the sorted one is skipped and the delta one emitted below.
+                    continue;
+                }
+            }
+            projected.clear();
+            for column in &projected_columns {
+                projected.push(column.value(row)?);
+            }
+            visit(&projected)?;
+        }
+        for index in 0..self.delta_count {
+            let Some(key) = delta_keys.get(index) else {
+                continue;
+            };
+            let shadowed = delta_keys
+                .get(..index)
+                .unwrap_or(&[])
+                .iter()
+                .any(|held| self.compare_keys(held, key) == std::cmp::Ordering::Equal);
+            if shadowed {
+                continue;
+            }
+            projected.clear();
+            for column in columns {
+                projected.push(self.delta_value(index, *column)?);
+            }
+            visit(&projected)?;
+        }
+        Ok(())
+    }
+
     /// Materialises the live rows inside a key range.
     ///
     /// The merged counterpart of the sorted region's `lower_bound`/`upper_bound`
@@ -2035,7 +2144,7 @@ impl LeafBuilder {
     ///
     /// @param rows - the rows to pack, sorted by key
     /// @param fill - the fraction of the page to fill, 0.0..=1.0
-    pub fn pack(&self, rows: &[Vec<Datum<'_>>], fill: f64) -> DbResult<Packed> {
+    pub fn pack<'d, R: AsRef<[Datum<'d>]>>(&self, rows: &[R], fill: f64) -> DbResult<Packed> {
         self.pack_with(rows, fill, None)
     }
 
@@ -2048,9 +2157,17 @@ impl LeafBuilder {
     /// @param rows - the rows to pack, sorted by key
     /// @param fill - the fraction of the page to fill, 0.0..=1.0
     /// @param spill - where an oversized value goes, when there is somewhere
-    pub fn pack_with(
+    ///
+    /// **Generic over the row's container, and that is the whole point.** A
+    /// `Vec<Datum>` already implements `AsRef<[Datum]>`, so every caller that
+    /// holds owned rows - the compaction path in `write.rs`, the fixture import
+    /// - compiles unchanged; and a caller that has its rows in an arena passes
+    /// `&[&[Datum]]` and copies nothing. `CREATE INDEX` used to materialise a
+    /// `Vec<Vec<Datum>>` of the whole input purely to call this, which was
+    /// 4.2 ms of a 48 ms statement at a hundred thousand rows.
+    pub fn pack_with<'d, R: AsRef<[Datum<'d>]>>(
         &self,
-        rows: &[Vec<Datum<'_>>],
+        rows: &[R],
         fill: f64,
         spill: Option<&mut dyn Spill>,
     ) -> DbResult<Packed> {
@@ -2073,6 +2190,7 @@ impl LeafBuilder {
         let mut heap = 0usize;
         let mut placed = 0usize;
         for row in rows {
+            let row = row.as_ref();
             let mut row_heap = 0usize;
             for (index, column) in self.columns.iter().enumerate() {
                 let value = row.get(index).copied().unwrap_or(Datum::Null);
@@ -2144,17 +2262,26 @@ impl LeafBuilder {
     /// Encodes the rows into a page.
     ///
     /// @param rows - the rows to encode, sorted by key
-    pub fn encode(&self, rows: &[Vec<Datum<'_>>]) -> DbResult<Vec<u8>> {
+    pub fn encode<'d, R: AsRef<[Datum<'d>]>>(&self, rows: &[R]) -> DbResult<Vec<u8>> {
         self.encode_with(rows, None)
+    }
+
+    /// Encodes a leaf holding no rows.
+    ///
+    /// Named rather than written as `encode(&[])`, because a generic `encode`
+    /// cannot infer the row container from an empty slice and the turbofish it
+    /// would otherwise need at each call site says nothing to a reader.
+    pub fn encode_empty(&self) -> DbResult<Vec<u8>> {
+        self.encode_with::<&[Datum<'_>]>(&[], None)
     }
 
     /// Encodes the rows into a page, sending oversized values out of line.
     ///
     /// @param rows - the rows to encode, sorted by key
     /// @param spill - where an oversized value goes, when there is somewhere
-    pub fn encode_with(
+    pub fn encode_with<'d, R: AsRef<[Datum<'d>]>>(
         &self,
-        rows: &[Vec<Datum<'_>>],
+        rows: &[R],
         mut spill: Option<&mut dyn Spill>,
     ) -> DbResult<Vec<u8>> {
         let count = rows.len();
@@ -2196,7 +2323,7 @@ impl LeafBuilder {
             let values_at = base.saturating_add(class_bytes(count));
             let threshold = self.threshold(index, spill.is_some());
             for (row, values) in rows.iter().enumerate() {
-                let value = values.get(index).copied().unwrap_or(Datum::Null);
+                let value = values.as_ref().get(index).copied().unwrap_or(Datum::Null);
                 let class = classify_at(column.physical, &value, threshold);
                 if class == ValueClass::Exception {
                     has_exceptions = true;
@@ -2294,7 +2421,7 @@ impl LeafBuilder {
         page::write_u64(&mut page, leaf_header::MAX_CTS, 0)?;
         let low_fence = rows
             .first()
-            .and_then(|row| row.first().copied())
+            .and_then(|row| row.as_ref().first().copied())
             .and_then(|value| value.as_int())
             .unwrap_or(0);
         page::write_u64(&mut page, leaf_header::LOW_FENCE, low_fence as u64)?;
@@ -3293,7 +3420,7 @@ mod tests {
         ];
         let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();
 
-        let empty = builder.encode(&[]).unwrap();
+        let empty = builder.encode_empty().unwrap();
         let leaf = LeafRef::parse(&empty).unwrap();
         assert_eq!(leaf.row_count(), 0);
         assert!(

@@ -168,10 +168,15 @@ own thread and fails on the deadline.
 |---|---|
 | `VACUUM`, `VACUUM INTO` | refused, and named in the message |
 | plain `EXPLAIN` | refused on purpose: there is no bytecode to list. `EXPLAIN QUERY PLAN` is answered |
-| partial indexes (`CREATE INDEX ... WHERE`) | `unsupported: partial indexes`. The predicate is parsed and stored by the loader; what is missing is maintaining the entries and an implication check before the planner may use it |
-| indexes on expressions | `unsupported: indexes on expressions`. Same shape: `IndexColumnInfo::expr_sql` is there, the write path and the planner are not |
-| `CREATE INDEX` on a `WITHOUT ROWID` table | refused. An index on one has the table's primary key as its trailing entry rather than a rowid, and every tree here appends exactly one rowid column |
 | a second process on the same file, a second writer, SQLite's file format, the C ABI on the new engine | design non-goals of task-1816 |
+
+**Closed by task-1846**, each byte-compared against `sqlite3`: **partial indexes**, **indexes on
+expressions**, and **`CREATE INDEX` on a `WITHOUT ROWID` table** - the last three refusals
+`semantics.rs` carried. A partial index is maintained on both images of an `UPDATE`, so a row that
+moves across the predicate joins the index or leaves it, and the planner uses one only when the
+predicate appears unchanged as a conjunct of the query's `WHERE`, which is SQLite's own rule. An index
+on a `WITHOUT ROWID` table carries that table's primary key where a rowid would go, named by
+`SourceLayout::identity` so the non-covering lookup probes the table with it.
 
 **Closed by task-1845**, each byte-compared against `sqlite3` including its refusals:
 `CREATE TABLE ... AS SELECT` (the stored text is synthesised from the query's result columns, down to

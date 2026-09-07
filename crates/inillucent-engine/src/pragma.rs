@@ -521,7 +521,13 @@ impl ImportedDatabase {
                     } else {
                         b"c".to_vec()
                     }),
-                    OwnedDatum::Int(0),
+                    // **The `partial` column, which was a hard zero while a
+                    // partial index could not be created.** It can now, and an
+                    // application asks this column precisely to find out
+                    // whether an index answers every row - so answering `0` for
+                    // one that does not is the kind of difference that only
+                    // shows up in somebody's data.
+                    OwnedDatum::Int(i64::from(index.partial_sql.is_some())),
                 ]
             })
             .collect();
