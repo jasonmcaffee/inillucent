@@ -1050,3 +1050,530 @@ fn an_order_by_over_a_descending_index_is_not_reversed() {
         failures.join("\n\n")
     );
 }
+
+/// Runs a script through both engines, grading every statement and every probe.
+///
+/// **The grading is per statement, not at the end**, for the reason the file's
+/// campaign test gives: a statement that leaves the two engines on different
+/// data is the statement to name, and a comparison only at the end names the
+/// last one. Each step compares three things - whether both engines failed, the
+/// message when they did, and every probe query - plus `check_trees`, so a row
+/// put back by an undo that missed an index entry is caught here rather than by
+/// a covering query months later.
+///
+/// The probes are the caller's because these tables are the caller's: the
+/// fixture's `members` schema is not what the task-1850 repros are written
+/// over, and each of them wants its own shape.
+///
+/// @param pair - the two engines over the same data
+/// @param script - the statements, in order
+/// @param probes - the queries asked after every statement
+fn walk(pair: &mut Pair, script: &[&str], probes: &[&str]) -> Vec<String> {
+    let mut failures = Vec::new();
+    for sql in script {
+        let (reference, ours) = apply(pair, sql);
+        if reference.is_some() != ours.is_some() {
+            failures.push(format!("{sql}\n  sqlite {reference:?}\n  ours   {ours:?}"));
+            continue;
+        }
+        if let (Some(theirs), Some(mine)) = (&reference, &ours) {
+            if theirs != mine {
+                failures.push(format!(
+                    "{sql}\n  sqlite refused with {theirs:?}\n  ours   refused with {mine:?}"
+                ));
+            }
+        }
+        if let Err(error) = pair.engine.check_trees() {
+            failures.push(format!(
+                "after {sql}\n  a tree is structurally wrong: {}",
+                error.detail().unwrap_or("no detail")
+            ));
+        }
+        for probe in probes {
+            probe_both(pair, probe, &mut failures);
+        }
+    }
+    failures
+}
+
+/// Compares one probe, counting a refusal both engines agree on as agreement.
+///
+/// [`compare`] treats a query the oracle refuses as evidence of nothing and
+/// records it, which is right where the probe is the point. Here the probes run
+/// after *every* statement of a script that builds its own tables, so a probe
+/// over the second table is asked before the second table exists - and "no such
+/// table" from both engines is a real answer they agree on. A refusal from only
+/// one of them is still a difference, and that is the case worth keeping.
+///
+/// @param pair - the two engines over the same data
+/// @param sql - the query
+/// @param failures - where a difference is recorded
+fn probe_both(pair: &mut Pair, sql: &str, failures: &mut Vec<String>) {
+    let reference = pair
+        .oracle
+        .send(&Op::Query(sql.to_string()))
+        .expect("the oracle answers");
+    if !reference.ok {
+        match pair.engine.execute_any(sql, &Params::new()) {
+            Ok(_) => failures.push(format!(
+                "{sql}\n  sqlite refused it: {}\n  ours   answered it",
+                reference.message
+            )),
+            Err(_) => {}
+        }
+        return;
+    }
+    compare(pair, sql, failures);
+}
+
+/// A statement that fails partway puts back everything it had written.
+///
+/// **This is task-1850's defect, and it is one missing thing rather than a list
+/// of cases.** SQLite's default conflict algorithm is `ABORT`, which undoes the
+/// *statement* and keeps the transaction; this engine undid nothing, so a
+/// four-row `INSERT` that collided on its third row kept the first two and
+/// committed them - half a statement, durably, behind a diagnostic that said it
+/// failed.
+///
+/// The cases below are deliberately not all about uniqueness. The engine had no
+/// statement boundary at all, so every kind of failure leaked the same way, and
+/// each of these was measured differing against the pinned oracle before the
+/// boundary existed: a `NOT NULL`, a `STRICT` type class, an `INSERT ... SELECT`
+/// rather than `VALUES`, an `UPDATE OR REPLACE` that **deleted** the row in its
+/// way and then failed a `CHECK` - which is the worst shape of it, because the
+/// failure destroys a row rather than half-writing one - and a `DELETE` stopped
+/// by a `BEFORE DELETE` trigger, which had already removed the rows before it.
+#[test]
+fn a_statement_that_fails_partway_puts_back_what_it_wrote() {
+    let Some(mut pair) = pair("partial") else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+
+    let mut failures = walk(
+        &mut pair,
+        &[
+            "CREATE TABLE k(id INTEGER PRIMARY KEY, b INTEGER)",
+            "INSERT INTO k VALUES (1,1),(2,2),(12,3)",
+            // The ticket's first repro: row 1 moves to 11, row 2 collides with
+            // 12, and the 11 stayed.
+            "UPDATE k SET id = id + 10 WHERE id <= 2",
+            // A multi-row INSERT whose second row collides.
+            "INSERT INTO k VALUES (9,0)",
+            "INSERT INTO k VALUES (7,1),(9,2)",
+            // The rows a `SELECT` produced rather than a `VALUES` list.
+            "INSERT INTO k SELECT id + 1, b FROM k ORDER BY id",
+        ],
+        &["SELECT id, b FROM k ORDER BY id", "SELECT count(*) FROM k"],
+    );
+
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "CREATE TABLE n(a TEXT, b INTEGER NOT NULL)",
+            "INSERT INTO n VALUES ('p',1),('q',2)",
+            // No index anywhere: the row that fails is the second, and the
+            // first had already been rewritten.
+            "UPDATE n SET a = 'r', b = CASE WHEN a = 'q' THEN NULL ELSE 5 END",
+        ],
+        &["SELECT a, b FROM n ORDER BY rowid"],
+    ));
+
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "CREATE TABLE s(a INTEGER) STRICT",
+            // Not a constraint at all - a type class - and it leaked the same
+            // way, which is what the untagged-error default is for.
+            "INSERT INTO s VALUES (1),('x'),(3)",
+        ],
+        &["SELECT a FROM s ORDER BY rowid", "SELECT count(*) FROM s"],
+    ));
+
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "CREATE TABLE r(a TEXT, b INTEGER CHECK(b < 9))",
+            "CREATE UNIQUE INDEX ru ON r(a)",
+            "INSERT INTO r VALUES ('x',1),('y',2)",
+            // `OR REPLACE` deletes the row in the way and *then* fails the
+            // `CHECK`, so the failure destroyed a row rather than half-writing
+            // one - and reported an error, so nothing suggested looking.
+            "UPDATE OR REPLACE r SET a = 'x', b = 20 WHERE b = 2",
+        ],
+        &[
+            "SELECT a, b FROM r ORDER BY b",
+            "SELECT a FROM r ORDER BY a",
+        ],
+    ));
+
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "CREATE TABLE d(id INTEGER PRIMARY KEY, b INTEGER)",
+            "INSERT INTO d VALUES (1,1),(2,2),(3,3)",
+            "CREATE TRIGGER dg BEFORE DELETE ON d WHEN OLD.id = 3 \
+             BEGIN SELECT RAISE(ABORT,'no'); END",
+            // A `DELETE`, which has no `OR` clause at all and so can only get
+            // the default.
+            "DELETE FROM d",
+        ],
+        &["SELECT id FROM d ORDER BY id", "SELECT count(*) FROM d"],
+    ));
+
+    assert!(
+        failures.is_empty(),
+        "a failed statement did not put back what it wrote:\n{}",
+        failures.join("\n\n")
+    );
+}
+
+/// `FAIL` keeps the rows written before the failure and `ABORT` keeps none.
+///
+/// The two were indistinguishable: both raised and neither undid anything, so
+/// `FAIL` was right by accident and `ABORT` - which every unqualified statement
+/// gets - was wrong. The same statement is run three ways over the same data so
+/// the difference is the clause and nothing else.
+#[test]
+fn or_fail_keeps_the_rows_or_abort_does_not() {
+    let Some(mut pair) = pair("failabort") else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+
+    let probes = ["SELECT id, b FROM f ORDER BY id", "SELECT count(*) FROM f"];
+    let mut failures = walk(
+        &mut pair,
+        &[
+            "CREATE TABLE f(id INTEGER PRIMARY KEY, b INTEGER)",
+            "INSERT INTO f VALUES (30,0)",
+            // Four rows, the third colliding. `OR FAIL` keeps 10 and 20.
+            "INSERT OR FAIL INTO f VALUES (10,1),(20,2),(30,3),(40,4)",
+            "DELETE FROM f WHERE id <> 30",
+            // The same statement, defaulting to `ABORT`: nothing is kept.
+            "INSERT INTO f VALUES (10,1),(20,2),(30,3),(40,4)",
+            // And written out, which has to mean the same thing.
+            "INSERT OR ABORT INTO f VALUES (10,1),(20,2),(30,3),(40,4)",
+            // `IGNORE` and `REPLACE` resolve rather than raise, and are here so
+            // that a change to the raising arms cannot quietly move them.
+            "INSERT OR IGNORE INTO f VALUES (10,1),(20,2),(30,3),(40,4)",
+            "DELETE FROM f WHERE id <> 30",
+            "INSERT OR REPLACE INTO f VALUES (10,1),(20,2),(30,3),(40,4)",
+        ],
+        &probes,
+    );
+
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "CREATE TABLE g(id INTEGER PRIMARY KEY, b INTEGER)",
+            "INSERT INTO g VALUES (1,1),(2,2),(12,3)",
+            // An `UPDATE` rather than an `INSERT`: the first row moved and
+            // `OR FAIL` keeps the move.
+            "UPDATE OR FAIL g SET id = id + 10 WHERE id <= 2",
+        ],
+        &["SELECT id, b FROM g ORDER BY b"],
+    ));
+
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "CREATE TABLE h(a TEXT, b INTEGER NOT NULL)",
+            "INSERT INTO h VALUES ('p',1),('q',2)",
+            "UPDATE OR FAIL h SET a = 'r', b = CASE WHEN a = 'q' THEN NULL ELSE 5 END",
+        ],
+        &["SELECT a, b FROM h ORDER BY rowid"],
+    ));
+
+    assert!(
+        failures.is_empty(),
+        "`OR FAIL` and `OR ABORT` did not differ the way SQLite's do:\n{}",
+        failures.join("\n\n")
+    );
+}
+
+/// `OR ROLLBACK` discards the whole open transaction, not just the statement.
+///
+/// Three things go, and the engine used to lose all three: the rows the
+/// transaction had already written, the savepoints inside it, and the
+/// transaction itself - so the `COMMIT` that follows has nothing to commit and
+/// says so. That last one is how a caller *finds out*, which is why the scripts
+/// here end in a `COMMIT` and a statement after it.
+#[test]
+fn or_rollback_discards_the_transaction() {
+    let Some(mut pair) = pair("rollback") else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+
+    let probes = ["SELECT id, b FROM w ORDER BY id", "SELECT count(*) FROM w"];
+    let mut failures = walk(
+        &mut pair,
+        &[
+            "CREATE TABLE w(id INTEGER PRIMARY KEY, b INTEGER)",
+            "INSERT INTO w VALUES (30,0)",
+            "BEGIN",
+            "INSERT INTO w VALUES (99,9)",
+            // The 99 goes with the transaction, not just the row that failed.
+            "INSERT OR ROLLBACK INTO w VALUES (10,1),(30,3)",
+            // Nothing is open, so this refuses - which is the observable.
+            "COMMIT",
+            // And the connection still works afterwards.
+            "INSERT INTO w VALUES (98,8)",
+        ],
+        &probes,
+    );
+
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "BEGIN",
+            "INSERT INTO w VALUES (97,7)",
+            "SAVEPOINT s1",
+            "INSERT INTO w VALUES (96,6)",
+            // The savepoints go with the transaction: `RELEASE` then has no
+            // such savepoint to release.
+            "UPDATE OR ROLLBACK w SET id = 30 WHERE id = 97",
+            "RELEASE s1",
+            "COMMIT",
+        ],
+        &probes,
+    ));
+
+    failures.extend(walk(
+        &mut pair,
+        &[
+            // Outside a transaction `ROLLBACK` and `ABORT` are the same thing,
+            // because the statement *is* the transaction - and the `COMMIT`
+            // after it still has nothing to commit.
+            "INSERT OR ROLLBACK INTO w VALUES (11,1),(30,3)",
+            "COMMIT",
+        ],
+        &probes,
+    ));
+
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "CREATE TABLE c(a TEXT, b INTEGER NOT NULL ON CONFLICT ROLLBACK)",
+            "INSERT INTO c VALUES ('p',1)",
+            "BEGIN",
+            "INSERT INTO c VALUES ('w',9)",
+            // Written on the constraint rather than on the statement, which is
+            // the same algorithm reached a different way.
+            "INSERT INTO c VALUES ('x',NULL)",
+            "COMMIT",
+        ],
+        &["SELECT a, b FROM c ORDER BY rowid"],
+    ));
+
+    assert!(
+        failures.is_empty(),
+        "`OR ROLLBACK` did not discard the transaction:\n{}",
+        failures.join("\n\n")
+    );
+}
+
+/// A statement failing inside a `SAVEPOINT` leaves the savepoint standing.
+///
+/// The other side of the `OR ROLLBACK` test, and the one that says the undo is
+/// *scoped*: `ABORT` puts back the statement and stops, so everything the
+/// transaction wrote before it - including the savepoint - is still there, and
+/// `ROLLBACK TO` then means what it meant.
+#[test]
+fn a_failed_statement_leaves_the_savepoint_around_it() {
+    let Some(mut pair) = pair("savepoint") else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+
+    let failures = walk(
+        &mut pair,
+        &[
+            "CREATE TABLE p(id INTEGER PRIMARY KEY, b INTEGER)",
+            "INSERT INTO p VALUES (30,0)",
+            "BEGIN",
+            "INSERT INTO p VALUES (99,9)",
+            "SAVEPOINT s1",
+            "INSERT INTO p VALUES (98,8)",
+            // Fails on its second row: the 97 goes, the 98 and the 99 stay.
+            "INSERT INTO p VALUES (97,7),(30,3)",
+            // The savepoint is still there, so this takes the 98 with it.
+            "ROLLBACK TO s1",
+            "COMMIT",
+        ],
+        &["SELECT id, b FROM p ORDER BY id", "SELECT count(*) FROM p"],
+    );
+
+    assert!(
+        failures.is_empty(),
+        "a failed statement disturbed the savepoint around it:\n{}",
+        failures.join("\n\n")
+    );
+}
+
+/// A trigger's `RAISE` action decides what the statement undoes.
+///
+/// `RAISE(ABORT)`, `RAISE(FAIL)` and `RAISE(ROLLBACK)` report the same code and
+/// the same message and differ **only** in this, which is why all three behaved
+/// as one before the action was carried past the compiler. `RAISE(IGNORE)` is
+/// here as the control: it abandons the row rather than failing, and the firing
+/// point rather than the unwind is what does it.
+///
+/// The second half is the one a caller notices: a trigger's writes to *another*
+/// table are the failing statement's writes too, and they go back with it.
+#[test]
+fn a_triggers_raise_action_decides_what_goes_back() {
+    let Some(mut pair) = pair("raise") else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+
+    let probes = [
+        "SELECT id, b FROM t1 ORDER BY id",
+        "SELECT count(*) FROM t1",
+    ];
+    let mut failures = walk(
+        &mut pair,
+        &[
+            "CREATE TABLE t1(id INTEGER PRIMARY KEY, b INTEGER)",
+            "CREATE TRIGGER t1a BEFORE INSERT ON t1 WHEN NEW.b = 2 \
+             BEGIN SELECT RAISE(ABORT,'no'); END",
+            "INSERT INTO t1 VALUES (1,1),(2,2),(3,3)",
+            "DROP TRIGGER t1a",
+            "CREATE TRIGGER t1f BEFORE INSERT ON t1 WHEN NEW.b = 2 \
+             BEGIN SELECT RAISE(FAIL,'no'); END",
+            "INSERT INTO t1 VALUES (1,1),(2,2),(3,3)",
+            "DROP TRIGGER t1f",
+            "DELETE FROM t1",
+            "CREATE TRIGGER t1i BEFORE INSERT ON t1 WHEN NEW.b = 2 \
+             BEGIN SELECT RAISE(IGNORE); END",
+            "INSERT INTO t1 VALUES (1,1),(2,2),(3,3)",
+            "DROP TRIGGER t1i",
+        ],
+        &probes,
+    );
+
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "DELETE FROM t1",
+            "CREATE TRIGGER t1r BEFORE INSERT ON t1 WHEN NEW.b = 2 \
+             BEGIN SELECT RAISE(ROLLBACK,'no'); END",
+            "BEGIN",
+            "INSERT INTO t1 VALUES (9,9)",
+            // The 9 goes with the transaction, and the `COMMIT` after it has
+            // nothing to commit.
+            "INSERT INTO t1 VALUES (1,1),(2,2),(3,3)",
+            "COMMIT",
+            "DROP TRIGGER t1r",
+        ],
+        &probes,
+    ));
+
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "CREATE TABLE t2(id INTEGER PRIMARY KEY, b INTEGER)",
+            "CREATE TABLE t2log(x INTEGER)",
+            "CREATE TRIGGER t2a AFTER INSERT ON t2 BEGIN INSERT INTO t2log VALUES (NEW.id); END",
+            "INSERT INTO t2 VALUES (5,0)",
+            // The trigger wrote a log row per inserted row, and the statement
+            // then failed: the log rows are the statement's writes too.
+            "INSERT INTO t2 VALUES (1,1),(2,2),(5,5)",
+            // Under `OR FAIL` they stay, along with the rows that produced them.
+            "INSERT OR FAIL INTO t2 VALUES (1,1),(2,2),(5,5)",
+        ],
+        &[
+            "SELECT id, b FROM t2 ORDER BY id",
+            "SELECT x FROM t2log ORDER BY x",
+            "SELECT count(*) FROM t2log",
+        ],
+    ));
+
+    assert!(
+        failures.is_empty(),
+        "a trigger's `RAISE` action did not decide what went back:\n{}",
+        failures.join("\n\n")
+    );
+}
+
+/// A foreign key stopping a statement partway puts the rest back.
+///
+/// A foreign-key violation is a `RAISE(ABORT)` in a body the binder synthesises,
+/// so it never had to hear of conflict algorithms to be fixed - it gets the
+/// default like any untagged error. It is graded anyway, in both directions,
+/// because it is the shape that leaves *two* tables disagreeing: a `DELETE` a
+/// child restricts had already deleted the parents before it.
+#[test]
+fn a_foreign_key_that_stops_a_statement_puts_the_rest_back() {
+    let Some(mut pair) = pair("foreignkey") else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+
+    let failures = walk(
+        &mut pair,
+        &[
+            "PRAGMA foreign_keys = ON",
+            "CREATE TABLE fp(id INTEGER PRIMARY KEY)",
+            "CREATE TABLE fc(id INTEGER PRIMARY KEY, p INTEGER REFERENCES fp(id))",
+            "INSERT INTO fp VALUES (1),(2),(3)",
+            "INSERT INTO fc VALUES (10,3)",
+            // The third child has no parent: the first two must not be there.
+            "INSERT INTO fc VALUES (11,1),(12,2),(13,7)",
+            // And the delete the child restricts must leave every parent.
+            "DELETE FROM fp",
+        ],
+        &[
+            "SELECT id FROM fp ORDER BY id",
+            "SELECT id, p FROM fc ORDER BY id",
+            "SELECT count(*) FROM fp",
+            "SELECT count(*) FROM fc",
+        ],
+    );
+
+    assert!(
+        failures.is_empty(),
+        "a foreign key left a statement half-applied:\n{}",
+        failures.join("\n\n")
+    );
+}
+
+/// A transaction statement refuses what SQLite refuses.
+///
+/// `COMMIT` and `ROLLBACK` with nothing open, and `BEGIN` with something open,
+/// all succeeded silently. The engine's own `commit_batch` and `rollback` are
+/// deliberately tolerant - they are called at boundaries by code that does not
+/// know whether a transaction is open - and the *statements* must not be, or a
+/// caller has no way to learn that an `OR ROLLBACK` ended the transaction
+/// underneath it.
+#[test]
+fn a_transaction_statement_refuses_what_sqlite_refuses() {
+    let Some(mut pair) = pair("txnstate") else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+
+    let failures = walk(
+        &mut pair,
+        &[
+            "COMMIT",
+            "ROLLBACK",
+            "BEGIN",
+            "BEGIN",
+            "COMMIT",
+            "COMMIT",
+            "ROLLBACK",
+            // Still usable after all of that.
+            "INSERT INTO members VALUES (60, 'x60@x', 'red', 'x60', 1)",
+        ],
+        &["SELECT count(*) FROM members"],
+    );
+
+    assert!(
+        failures.is_empty(),
+        "a transaction statement did not refuse what SQLite refuses:\n{}",
+        failures.join("\n\n")
+    );
+}

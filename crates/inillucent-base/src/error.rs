@@ -158,6 +158,33 @@ impl fmt::Display for DatabaseName {
     }
 }
 
+/// What a failing statement leaves behind.
+///
+/// **SQLite's five conflict algorithms differ in three ways, and only this one
+/// belongs to the layer above the write path.** `IGNORE` and `REPLACE` resolve
+/// the row and carry on, which is a decision the write path makes for itself;
+/// the other three all report the failure and differ solely in how much of what
+/// has already been written goes back. The write path cannot make *that*
+/// decision - it owns neither the undo buffer nor the transaction - so it says
+/// what it wants and the engine does it.
+///
+/// An error that was never tagged reads as [`Unwind::Statement`], which is
+/// SQLite's default `ABORT`. That is deliberate, and it is why a `STRICT` type
+/// failure, a foreign-key violation and a trigger's `RAISE` all undo the
+/// statement without any of their raise sites having heard of this type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Unwind {
+    /// The statement's own writes go back and the transaction is kept -
+    /// SQLite's `ABORT`, and what every unqualified statement gets.
+    Statement,
+    /// Nothing goes back: the rows written before the failure stay - SQLite's
+    /// `FAIL`.
+    Nothing,
+    /// The statement's writes and the whole open transaction go back - SQLite's
+    /// `ROLLBACK`.
+    Transaction,
+}
+
 /// Everything an error carries beyond its code.
 ///
 /// Held behind a pointer because almost every error has none of it: the code's
@@ -194,6 +221,23 @@ struct ErrorContext {
     /// It changes no code and no message: an error carrying it reports the same
     /// `SQLITE_MISUSE` and the same text it always did.
     unsupported: Option<String>,
+    /// How much of what has been written this failure undoes, when a conflict
+    /// algorithm said.
+    ///
+    /// `None` reads as [`Unwind::Statement`]. It is set at the innermost site
+    /// that knows - a `RAISE`, then a constraint carrying its own clause, then
+    /// the statement's own `OR` - and only when it is not already set, so the
+    /// precedence is the order those sites run in rather than a rule written
+    /// down anywhere.
+    unwind: Option<Unwind>,
+    /// Whether the unwind was written out by a `RAISE`, which nothing overrides.
+    ///
+    /// **The one place SQLite's precedence is not innermost-first.** A trigger
+    /// body's `RAISE(ROLLBACK)` beats the statement that fired it, and the
+    /// statement that fired it beats a nested statement's own `OR` clause and
+    /// any clause written on a constraint - so "set if absent" gets two of the
+    /// three right and this flag gets the third.
+    unwind_explicit: bool,
 }
 
 /// A inillucent error: a stable code plus the context a caller may safely see.
@@ -210,6 +254,12 @@ pub struct DbError {
 
 impl PartialEq for DbError {
     /// Compares the code and every effective field, so the boxing is invisible.
+    ///
+    /// **`unwind` is deliberately not one of them.** Equality here is over what
+    /// the error *says*; the unwind is about what the engine does with it, and
+    /// folding it in would make an error tagged at a raise site unequal to the
+    /// same error written out in a test - a comparison that would start failing
+    /// for a reason nothing in the message could show.
     fn eq(&self, other: &DbError) -> bool {
         self.extended == other.extended
             && self.message() == other.message()
@@ -266,6 +316,66 @@ impl DbError {
     pub fn with_unsupported(mut self, what: impl Into<String>) -> DbError {
         self.context_mut().unsupported = Some(what.into());
         self
+    }
+
+    /// Records how much of what has been written this failure undoes, unless
+    /// something closer to the failure has already said.
+    ///
+    /// **Set if absent, never overwritten**, because the sites that know run
+    /// innermost first and SQLite's precedence is exactly that order: an
+    /// explicit `RAISE(ROLLBACK)` beats the enclosing statement's `OR FAIL`,
+    /// and a statement's `OR` beats the clause written on the constraint. A
+    /// setter that overwrote would invert it, and the inversion is invisible -
+    /// the error text is the same either way and only the rows differ.
+    ///
+    /// @param unwind - what this failure undoes
+    pub fn or_unwind(mut self, unwind: Unwind) -> DbError {
+        let context = self.context_mut();
+        if context.unwind.is_none() {
+            context.unwind = Some(unwind);
+        }
+        self
+    }
+
+    /// Records an unwind a `RAISE` wrote out, which nothing overrides.
+    ///
+    /// `RAISE(ROLLBACK, ...)` in a trigger body rolls the transaction back
+    /// whatever the statement that fired the trigger asked for, which is the
+    /// one direction [`DbError::or_unwind`]'s innermost-first rule gets wrong.
+    ///
+    /// @param unwind - what the `RAISE` undoes
+    pub fn with_raised_unwind(mut self, unwind: Unwind) -> DbError {
+        let context = self.context_mut();
+        context.unwind = Some(unwind);
+        context.unwind_explicit = true;
+        self
+    }
+
+    /// Records the unwind of the statement a trigger's statements are nested
+    /// in, which beats theirs and beats a constraint's own clause.
+    ///
+    /// SQLite's rule: "if an `ON CONFLICT` clause is specified as part of the
+    /// statement causing the trigger to fire, then conflict handling policy of
+    /// the outer statement is used instead". So this is the one setter that
+    /// overwrites - and it still yields to a `RAISE`.
+    ///
+    /// @param unwind - what the outermost statement's `OR` clause undoes
+    pub fn with_outer_unwind(mut self, unwind: Unwind) -> DbError {
+        let context = self.context_mut();
+        if !context.unwind_explicit {
+            context.unwind = Some(unwind);
+        }
+        self
+    }
+
+    /// Returns how much of what has been written this failure undoes.
+    ///
+    /// An untagged error undoes the statement, which is SQLite's `ABORT`.
+    pub fn unwind(&self) -> Unwind {
+        self.context
+            .as_ref()
+            .and_then(|context| context.unwind)
+            .unwrap_or(Unwind::Statement)
     }
 
     /// Attaches the byte offset in the SQL text that produced the error.

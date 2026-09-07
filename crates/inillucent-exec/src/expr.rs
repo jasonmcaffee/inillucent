@@ -28,6 +28,7 @@
 //! a literal. Everything else compiles to the generic node, which is the same
 //! code the old VM ran, and correctness never depends on which was chosen.
 
+use inillucent_base::error::Unwind;
 use inillucent_base::DbResult;
 use inillucent_sql::ast::{BinaryOp, UnaryOp};
 use inillucent_sql::function::{JsonFunc, MathFunc, ScalarFunc, TimeFunc};
@@ -227,6 +228,13 @@ pub enum Expr {
         code: i32,
         /// The message the caller sees.
         message: Vec<u8>,
+        /// How much of what has been written the action undoes.
+        ///
+        /// The whole of the difference between `RAISE(ABORT)`, `RAISE(FAIL)`
+        /// and `RAISE(ROLLBACK)`: they report the same code and the same
+        /// message and differ only here. It was dropped before task-1850, so
+        /// all three behaved as `RAISE(ABORT)` - which itself did not abort.
+        unwind: Unwind,
     },
     /// Addition, subtraction, multiplication.
     Arith(ArithOp, Box<Expr>, Box<Expr>),
@@ -474,9 +482,14 @@ pub fn compile(expr: &Expr, types: &[StaticType]) -> DbResult<Box<dyn Eval>> {
             body: body.clone(),
             arguments: compile_all(arguments, types)?,
         }),
-        Expr::Raise { code, message } => Box::new(Raise {
+        Expr::Raise {
+            code,
+            message,
+            unwind,
+        } => Box::new(Raise {
             code: *code,
             message: String::from_utf8_lossy(message).into_owned(),
+            unwind: *unwind,
         }),
         Expr::CompareWith {
             op,
@@ -830,13 +843,19 @@ struct Raise {
     code: i32,
     /// The message.
     message: String,
+    /// What the action undoes.
+    unwind: Unwind,
 }
 
 impl Eval for Raise {
     fn value<'p>(&self, _batch: &Batch<'p>, _nth: usize) -> DbResult<Computed<'p>> {
         Err(
             inillucent_base::error::DbError::new(inillucent_base::error::ExtendedCode(self.code))
-                .with_message(self.message.clone()),
+                .with_message(self.message.clone())
+                // Written out, so nothing overrides it: a trigger body's
+                // `RAISE(ROLLBACK)` rolls the transaction back whatever the
+                // statement that fired the trigger asked for.
+                .with_raised_unwind(self.unwind),
         )
     }
 }

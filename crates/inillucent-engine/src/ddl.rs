@@ -275,11 +275,26 @@ impl ImportedDatabase {
             Directive::Alter { table, action, .. } => self.alter_table(source, &table, &action),
             Directive::Analyze { table, .. } => self.analyze(table.as_deref()),
             Directive::Reindex { indexes, .. } => self.reindex(&indexes),
+            // **The three transaction statements refuse what SQLite refuses.**
+            // `begin_batch`, `commit_batch` and `rollback` are deliberately
+            // tolerant - they are called at boundaries by code that does not
+            // know whether a transaction is open - and the *statements* are
+            // not: SQLite reports all three of these, and until task-1850 this
+            // engine reported none of them. It is the same defect three times,
+            // and it is how a caller finds out that an `OR ROLLBACK` ended the
+            // transaction underneath it: the `COMMIT` that follows has nothing
+            // left to commit and has to say so.
             Directive::Begin(_) => {
+                if self.batch.get().is_some() {
+                    return Err(refusal("cannot start a transaction within a transaction"));
+                }
                 self.begin_batch();
                 Ok(Outcome::empty())
             }
             Directive::Commit => {
+                if self.batch.get().is_none() {
+                    return Err(refusal("cannot commit - no transaction is active"));
+                }
                 self.commit_batch()?;
                 Ok(Outcome::empty())
             }
@@ -294,6 +309,9 @@ impl ImportedDatabase {
                     Ok(Outcome::empty())
                 }
                 None => {
+                    if self.batch.get().is_none() {
+                        return Err(refusal("cannot rollback - no transaction is active"));
+                    }
                     self.rollback()?;
                     Ok(Outcome::empty())
                 }
