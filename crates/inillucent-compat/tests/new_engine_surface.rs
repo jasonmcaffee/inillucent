@@ -159,10 +159,12 @@ const SURFACE: &[(&str, &str, Answers)] = &[
     ("pragma.database_list", "PRAGMA database_list", Yes),
     // The *table-valued* form, which is what a tool writes when it wants to
     // join against a pragma. `.databases` in the shell is written this way.
+    // Answered since task-1845: the eponymous form binds, and a `pragma_*`
+    // function's rows come from the same `pragma_rows` the directive runs.
     (
         "pragma.table_valued",
         "SELECT name FROM pragma_database_list",
-        NotYet,
+        Yes,
     ),
     // Abandoning a transaction. `crates/inillucent-compat/tests/new_engine_rollback.rs`
     // is where the undo is checked; these rows only record that the statements

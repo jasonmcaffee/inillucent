@@ -594,10 +594,8 @@ impl ImportedDatabase {
         path: &AccessPath,
         params: &inillucent_exec::physical::Params,
         needed: &inillucent_sql::bind::ColumnUse,
-    ) -> DbResult<Option<Vec<Vec<OwnedDatum>>>> {
-        let Some(connected) = self.virtual_tables.get(&table.folded) else {
-            return Ok(None);
-        };
+        downstream: &mut dyn inillucent_exec::ops::Sink,
+    ) -> DbResult<bool> {
         // **The constraints are pushed down, and they have to be.** A residual
         // the engine can test itself is a choice; `documents MATCH 'lorem'` is
         // not one, because `MATCH` is the *module's* operator and the engine has
@@ -616,7 +614,34 @@ impl ImportedDatabase {
             offer, order_by, ..
         } = path
         else {
-            return Ok(None);
+            return Ok(false);
+        };
+        // **A `pragma_*` function is answered by the connection, not a module.**
+        // Its rows come from `pragma_rows` - the same function `PRAGMA
+        // table_info(t)` runs - because a pragma reads the connection, and a
+        // `Module` reaches its storage through a `Context` that has no way to
+        // ask one. One implementation, two spellings.
+        if table.folded.starts_with(b"pragma_") {
+            return self.pragma_function_rows(table, offer, params, downstream);
+        }
+        // **An eponymous module has nothing in `virtual_tables`**, because
+        // nothing ever created it: the name is the table. It is connected here,
+        // for this scan, with no arguments - which is all `SeriesModule` and
+        // `JsonWalkModule` want, since the arguments a caller wrote arrive as
+        // `Eq` constraints on the hidden columns rather than as connect-time
+        // text. The connection is not cached: these modules hold no state, and
+        // caching one would mean a map that has to be invalidated when the
+        // registry changes.
+        let held;
+        let connected = match self.virtual_tables.get(&table.folded) {
+            Some(connected) => connected,
+            None => {
+                let Some(connected) = self.connect_eponymous(&table.folded)? else {
+                    return Ok(false);
+                };
+                held = connected;
+                &held
+            }
         };
         let specs: Vec<inillucent_sql::vtab::ConstraintSpec> =
             offer.iter().map(|held| held.spec.clone()).collect();
@@ -677,7 +702,55 @@ impl ImportedDatabase {
                 }
             }
         }
-        let mut rows: Vec<Vec<OwnedDatum>> = Vec::new();
+        // **Everything the module did not promise is tested here, per row.**
+        //
+        // The planner takes every offered predicate out of the residual on the
+        // optimistic assumption that a later pass puts back the ones the module
+        // did not promise to apply - which is what `VirtualChoice::recheck`
+        // exists for. There is no such pass on this path, so the recheck happens
+        // where the rows are: `omit` is the module promising, and anything else
+        // is the engine's to test.
+        //
+        // It is not a tidiness point. The R-Tree takes the constraints it can
+        // use to prune its own tree and leaves the rest; without this,
+        // `WHERE minX > 0 AND maxX < 100000` answered with all three boxes
+        // instead of the one that matches.
+        //
+        // It is built before the scan rather than applied after it, because the
+        // scan no longer produces a `Vec` there is an "after" for.
+        let mut rechecks: Vec<(usize, inillucent_sql::vtab::ConstraintOp, OwnedDatum, inillucent_value::collation::Collation)> =
+            Vec::new();
+        for (position, constraint) in offer.iter().enumerate() {
+            let promised = query
+                .usage
+                .get(position)
+                .map(|usage| usage.omit)
+                .unwrap_or(false);
+            if promised {
+                continue;
+            }
+            // A negative column is the rowid, which a produced row does not
+            // carry: the module's declared columns are all a row holds. Such a
+            // constraint has to have been the module's to apply.
+            let Ok(column) = usize::try_from(constraint.spec.column) else {
+                return Err(misuse(
+                    "the module did not apply a rowid constraint and the engine cannot",
+                ));
+            };
+            rechecks.push((
+                column,
+                constraint.spec.op,
+                inillucent_exec::physical::literal_value(&constraint.value, params)?,
+                connected.table.collation(column),
+            ));
+        }
+        // **A batch at a time, and abandoned when the pipeline says stop.** The
+        // buffer is one batch rather than the whole answer, which is what makes
+        // `SELECT value FROM generate_series(1,10) LIMIT 3` return: without it
+        // the scan ran to 4,294,967,295 rows before the `LIMIT` above it saw a
+        // single one (task-1843).
+        let mut rows: Vec<Vec<OwnedDatum>> = Vec::with_capacity(inillucent_exec::batch::BATCH_ROWS);
+        let mut stopped = false;
         cursor.filter(&mut context, &plan)?;
         while !cursor.eof() {
             let mut row = Vec::with_capacity(width);
@@ -712,55 +785,162 @@ impl ImportedDatabase {
                     &[],
                 )?));
             }
+            if !passes_rechecks(&row, &rechecks)? {
+                cursor.next(&mut context)?;
+                continue;
+            }
             rows.push(row);
+            if rows.len() >= inillucent_exec::batch::BATCH_ROWS {
+                if inillucent_exec::ops::emit_rows(&rows, downstream)?
+                    == inillucent_exec::ops::Flow::Stop
+                {
+                    stopped = true;
+                    break;
+                }
+                rows.clear();
+            }
             cursor.next(&mut context)?;
         }
         drop(context);
-        // **Everything the module did not promise is tested again here.**
-        //
-        // The planner takes every offered predicate out of the residual on the
-        // optimistic assumption that a later pass puts back the ones the module
-        // did not promise to apply - which is what `VirtualChoice::recheck`
-        // exists for. There is no such pass on this path, so the recheck happens
-        // where the rows are: `omit` is the module promising, and anything else
-        // is the engine's to test.
-        //
-        // It is not a tidiness point. The R-Tree takes the constraints it can
-        // use to prune its own tree and leaves the rest; without this,
-        // `WHERE minX > 0 AND maxX < 100000` answered with all three boxes
-        // instead of the one that matches.
-        for (position, constraint) in offer.iter().enumerate() {
-            let promised = query
-                .usage
-                .get(position)
-                .map(|usage| usage.omit)
-                .unwrap_or(false);
-            if promised {
+        if !stopped && !rows.is_empty() {
+            inillucent_exec::ops::emit_rows(&rows, downstream)?;
+        }
+        return Ok(true);
+    }
+}
+
+/// Reports whether a produced row satisfies the constraints the module left.
+///
+/// @param row - the row the cursor produced
+/// @param rechecks - the column, operator, value and collation of each
+fn passes_rechecks(
+    row: &[OwnedDatum],
+    rechecks: &[(
+        usize,
+        inillucent_sql::vtab::ConstraintOp,
+        OwnedDatum,
+        inillucent_value::collation::Collation,
+    )],
+) -> DbResult<bool> {
+    for (column, op, wanted, collation) in rechecks {
+        let Some(held) = row.get(*column) else {
+            return Ok(false);
+        };
+        if !satisfies(held, *op, wanted, *collation)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+impl ImportedDatabase {
+
+    /// Answers a `pragma_*` table-valued function.
+    ///
+    /// The argument arrives as an `Eq` constraint on the first hidden column and
+    /// the schema qualifier as one on the second, which is exactly what
+    /// `bind_table_arguments` produces for `pragma_table_info('t')`. Nothing is
+    /// promised to the planner, so the two constraints stay in the residual and
+    /// the pipeline tests them again - which is why the produced row carries the
+    /// argument and the schema in its own hidden columns rather than dropping
+    /// them.
+    ///
+    /// @param table - the function's catalog entry
+    /// @param offer - the constraints the planner pushed down
+    /// @param params - the values bound to `?1`, `?2`, ...
+    /// @param downstream - where the batches go
+    fn pragma_function_rows(
+        &self,
+        table: &inillucent_sql::catalog_view::TableInfo,
+        offer: &[inillucent_sql::plan::VirtualConstraint],
+        params: &inillucent_exec::physical::Params,
+        downstream: &mut dyn inillucent_exec::ops::Sink,
+    ) -> DbResult<bool> {
+        let Some(pragma) = table.folded.strip_prefix(b"pragma_".as_slice()) else {
+            return Ok(false);
+        };
+        let hidden: Vec<usize> = table
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, column)| column.hidden)
+            .map(|(at, _)| at)
+            .collect();
+        let mut argument = OwnedDatum::Null;
+        let mut schema = OwnedDatum::Null;
+        for constraint in offer {
+            if constraint.spec.op != inillucent_sql::vtab::ConstraintOp::Eq {
                 continue;
             }
-            let wanted = inillucent_exec::physical::literal_value(&constraint.value, params)?;
-            // A negative column is the rowid, which a materialised row does not
-            // carry: the module's declared columns are all a row holds. Such a
-            // constraint has to have been the module's to apply.
             let Ok(column) = usize::try_from(constraint.spec.column) else {
-                return Err(misuse(
-                    "the module did not apply a rowid constraint and the engine cannot",
-                ));
+                continue;
             };
-            let op = constraint.spec.op;
-            let collation = connected.table.collation(column);
-            let mut kept: Vec<Vec<OwnedDatum>> = Vec::with_capacity(rows.len());
-            for row in rows {
-                let Some(held) = row.get(column) else {
-                    continue;
-                };
-                if satisfies(held, op, &wanted, collation)? {
-                    kept.push(row);
-                }
+            let value = inillucent_exec::physical::literal_value(&constraint.value, params)?;
+            if hidden.first() == Some(&column) {
+                argument = value;
+            } else if hidden.get(1) == Some(&column) {
+                schema = value;
             }
-            rows = kept;
         }
-        Ok(Some(rows))
+        // The pragma reader takes the argument as the parser's own shape, which
+        // is a name or an expression; a value bound at run time is neither, so
+        // it is spelled back as the text the reader reads.
+        let spelled = match &argument {
+            OwnedDatum::Null => None,
+            other => Some(inillucent_sql::directive::PragmaArgument::Name(
+                pragma_argument_text(other),
+            )),
+        };
+        let Some(answer) = self.pragma_rows(pragma, spelled.as_ref())? else {
+            return Ok(false);
+        };
+        let width = answer.names.len();
+        let mut rows: Vec<Vec<OwnedDatum>> =
+            Vec::with_capacity(inillucent_exec::batch::BATCH_ROWS);
+        for row in answer.rows {
+            let mut held = row;
+            held.truncate(width);
+            while held.len() < width {
+                held.push(OwnedDatum::Null);
+            }
+            held.push(argument.clone());
+            held.push(schema.clone());
+            rows.push(held);
+            if rows.len() >= inillucent_exec::batch::BATCH_ROWS {
+                if inillucent_exec::ops::emit_rows(&rows, downstream)?
+                    == inillucent_exec::ops::Flow::Stop
+                {
+                    return Ok(true);
+                }
+                rows.clear();
+            }
+        }
+        if !rows.is_empty() {
+            inillucent_exec::ops::emit_rows(&rows, downstream)?;
+        }
+        Ok(true)
+    }
+
+    /// Connects an eponymous module for the length of one scan.
+    ///
+    /// `Ok(None)` means the name is not an eponymous module, which is how a
+    /// caller with no virtual table of that name at all is told so.
+    ///
+    /// @param folded - the module's folded name
+    fn connect_eponymous(&self, folded: &[u8]) -> DbResult<Option<Connected>> {
+        let Some(module) = self.registry.eponymous(folded) else {
+            return Ok(None);
+        };
+        let arguments = inillucent_sql::vtab::ModuleArguments {
+            database: 0,
+            schema: b"main".to_vec(),
+            table: folded.to_vec(),
+            module: folded.to_vec(),
+            arguments: Vec::new(),
+            shadows: Vec::new(),
+        };
+        let table = module.connect(&arguments, false)?;
+        Ok(Some(Connected { table, arguments }))
     }
 
     /// Connects every virtual table the catalog declares.
@@ -1118,5 +1298,17 @@ impl ImportedDatabase {
             outcome?;
         }
         Ok(())
+    }
+}
+
+/// Renders a bound value as the text a pragma reader reads.
+///
+/// @param value - the value the statement supplied as the argument
+fn pragma_argument_text(value: &OwnedDatum) -> Vec<u8> {
+    match value {
+        OwnedDatum::Null => Vec::new(),
+        OwnedDatum::Int(number) => number.to_string().into_bytes(),
+        OwnedDatum::Real(number) => inillucent_value::numeric::real_to_text(*number),
+        OwnedDatum::Text(bytes) | OwnedDatum::Blob(bytes) => bytes.clone(),
     }
 }

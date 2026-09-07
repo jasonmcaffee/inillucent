@@ -416,6 +416,47 @@ impl TableInfo {
         matches!(self.kind, TableKind::Table | TableKind::Virtual) && !self.without_rowid
     }
 
+    /// Returns a table that stands for an eponymous module.
+    ///
+    /// A module reached as a name rather than through `CREATE VIRTUAL TABLE` -
+    /// `generate_series`, `json_each`, `pragma_table_info` - belongs to no
+    /// database and has no `sqlite_schema` row, so everything a stored table
+    /// carries is absent and only the module's declaration remains.
+    ///
+    /// @param name - the module's name, which is also the table's
+    /// @param columns - the columns the module declared
+    /// @param module - the module reference the executor resolves it by
+    /// @param without_rowid - whether the module declared no rowid
+    pub fn eponymous(
+        name: Vec<u8>,
+        columns: Vec<ColumnInfo>,
+        module: crate::vtab::ModuleRef,
+        without_rowid: bool,
+    ) -> TableInfo {
+        let folded = name.to_ascii_lowercase();
+        TableInfo {
+            name,
+            folded,
+            database: 0,
+            root: 0,
+            columns,
+            rowid_alias: None,
+            without_rowid,
+            strict: false,
+            autoincrement: false,
+            kind: TableKind::Virtual,
+            create_sql: Vec::new(),
+            foreign_keys: Vec::new(),
+            foreign_key_triggers: Vec::new(),
+            module: Some(module),
+            view: None,
+            triggers: Vec::new(),
+            analysed_rows: None,
+            indexes: Vec::new(),
+            checks: Vec::new(),
+        }
+    }
+
     /// Returns a table that stands for a nested query's result.
     ///
     /// The column list is the block's result columns: their names are what a
@@ -666,6 +707,21 @@ pub struct StaticCatalog {
     /// 2,938 ns of `prepare.point`'s 6,093 - 48% of the statement's whole
     /// compile. An `Rc` makes it a refcount bump.
     pub tables: Vec<std::rc::Rc<TableInfo>>,
+    /// The eponymous virtual tables the connection's modules provide.
+    ///
+    /// `generate_series`, `json_each`, `json_tree`, `pragma_table_info`: the
+    /// name *is* the table, so they belong to no database and have no
+    /// `sqlite_schema` row. They are searched **last**, so a real table called
+    /// `generate_series` shadows the module rather than the other way round -
+    /// which is SQLite's order and the only safe one, because the file was
+    /// there first.
+    ///
+    /// Filled by the engine from its module registry on every catalog refresh.
+    /// Before task-1845 nothing filled it and the eponymous form did not exist:
+    /// `FROM generate_series(1,10)` was `no such table`, which also left
+    /// `json_each` unreachable from SQL by any route, because `JsonWalkModule`
+    /// refuses `CREATE VIRTUAL TABLE` outright.
+    pub eponymous: Vec<std::rc::Rc<TableInfo>>,
     /// The generation of this snapshot.
     pub generation: u64,
 }
@@ -676,8 +732,17 @@ impl StaticCatalog {
         StaticCatalog {
             databases: vec![(b"main".to_vec(), 0)],
             tables: Vec::new(),
+            eponymous: Vec::new(),
             generation: 0,
         }
+    }
+
+    /// Adds an eponymous virtual table, returning the catalog.
+    ///
+    /// @param table - the module's table, as its declaration describes it
+    pub fn with_eponymous(mut self, table: TableInfo) -> StaticCatalog {
+        self.eponymous.push(std::rc::Rc::new(table));
+        self
     }
 
     /// Adds a table, returning the catalog, for building fixtures.
@@ -714,7 +779,10 @@ impl CatalogView for StaticCatalog {
                 return Some(std::rc::Rc::clone(found));
             }
         }
-        None
+        self.eponymous
+            .iter()
+            .find(|table| table.folded == folded)
+            .map(std::rc::Rc::clone)
     }
 
     /// Returns the number of attached databases.
@@ -753,7 +821,11 @@ impl CatalogView for StaticCatalog {
                 return Some(found.as_ref());
             }
         }
-        None
+        // Last, so a real table of the same name shadows the module.
+        self.eponymous
+            .iter()
+            .find(|table| table.folded == folded)
+            .map(std::rc::Rc::as_ref)
     }
 
     /// Returns the table an index belongs to, and the index.

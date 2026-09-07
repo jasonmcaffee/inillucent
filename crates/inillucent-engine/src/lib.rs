@@ -874,14 +874,15 @@ impl TreeCatalog for ImportedDatabase {
         self.covering.get(&table_root).cloned().unwrap_or_default()
     }
 
-    fn virtual_rows(
+    fn virtual_cursor(
         &self,
         table: &TableInfo,
         path: &inillucent_sql::plan::AccessPath,
         params: &Params,
         needed: &inillucent_sql::bind::ColumnUse,
-    ) -> DbResult<Option<Vec<Vec<OwnedDatum>>>> {
-        self.rows_of_module(table, path, params, needed)
+        downstream: &mut dyn inillucent_exec::ops::Sink,
+    ) -> DbResult<bool> {
+        self.rows_of_module(table, path, params, needed, downstream)
     }
 
     fn vector_candidates(
@@ -4354,14 +4355,15 @@ impl TreeCatalog for WriteView<'_> {
         self.covering.get(&table_root).cloned().unwrap_or_default()
     }
 
-    fn virtual_rows(
+    fn virtual_cursor(
         &self,
         table: &TableInfo,
         path: &inillucent_sql::plan::AccessPath,
         params: &Params,
         needed: &inillucent_sql::bind::ColumnUse,
-    ) -> DbResult<Option<Vec<Vec<OwnedDatum>>>> {
-        let _ = (path, params, needed);
+        downstream: &mut dyn inillucent_exec::ops::Sink,
+    ) -> DbResult<bool> {
+        let _ = (path, params, needed, downstream);
         Err(misuse(format!(
             "a trigger body reads {}, which is a virtual table",
             String::from_utf8_lossy(&table.name)
