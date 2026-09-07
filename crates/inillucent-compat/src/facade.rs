@@ -164,9 +164,17 @@ impl Database {
     }
 
     /// Returns a connection to this database.
+    ///
+    /// **The session is taken once, here, and every later call reuses it.** The
+    /// suites hold a `Connection` and this type opens a short-lived engine
+    /// connection per call - so without a session of its own, every statement
+    /// would be a different connection to the engine, and a temporary table
+    /// would not survive the statement that made it.
     pub fn connect(&self) -> DbResult<Connection> {
+        let session = self.engine.connect().session();
         Ok(Connection {
             engine: Rc::clone(&self.engine),
+            session,
         })
     }
 
@@ -197,6 +205,15 @@ impl Database {
 pub struct Connection {
     /// The database, held so a connection can outlive the handle it came from.
     engine: Rc<Engine>,
+    /// Which connection this is, so that every call is the same one.
+    session: u64,
+}
+
+impl Connection {
+    /// Returns this connection's engine handle, on its own session.
+    fn open(&self) -> inillucent_engine::connect::Connection<'_> {
+        self.engine.connect_as(self.session)
+    }
 }
 
 impl Connection {
@@ -204,14 +221,14 @@ impl Connection {
     ///
     /// @param sql - the statements, separated by semicolons
     pub fn execute_batch(&self, sql: &str) -> DbResult<()> {
-        self.engine.connect().execute_batch(sql)
+        self.open().execute_batch(sql)
     }
 
     /// Runs one statement for its effect and returns how many rows it changed.
     ///
     /// @param sql - the statement
     pub fn execute(&self, sql: &str) -> DbResult<i64> {
-        self.engine.connect().execute(sql)
+        self.open().execute(sql)
     }
 
     /// Runs one statement and returns its rows.
@@ -219,8 +236,7 @@ impl Connection {
     /// @param sql - the statement
     pub fn query(&self, sql: &str) -> DbResult<Vec<Vec<Value<'static>>>> {
         Ok(self
-            .engine
-            .connect()
+            .open()
             .query(sql)?
             .iter()
             .map(|row| row_of(row))
@@ -232,9 +248,10 @@ impl Connection {
     /// @param sql - the statement
     pub fn prepare(&self, sql: &str) -> DbResult<Statement<'_>> {
         Ok(Statement {
-            inner: self.engine.connect().prepare(sql)?,
+            inner: self.open().prepare(sql)?,
             engine: Rc::clone(&self.engine),
             sql: sql.to_string(),
+            session: self.session,
             row: Vec::new(),
         })
     }
@@ -243,12 +260,13 @@ impl Connection {
     ///
     /// @param sql - the script, positioned at the statement to compile
     pub fn prepare_with_tail(&self, sql: &str) -> DbResult<(Statement<'_>, usize)> {
-        let (inner, consumed) = self.engine.connect().prepare_with_tail(sql)?;
+        let (inner, consumed) = self.open().prepare_with_tail(sql)?;
         Ok((
             Statement {
                 inner,
                 engine: Rc::clone(&self.engine),
                 sql: sql.get(..consumed).unwrap_or(sql).to_string(),
+                session: self.session,
                 row: Vec::new(),
             },
             consumed,
@@ -268,9 +286,7 @@ impl Connection {
         flags: inillucent_ext::registry::FunctionFlags,
         body: inillucent_ext::registry::ScalarBody,
     ) -> DbResult<()> {
-        self.engine
-            .connect()
-            .create_scalar_function(name, arity, flags, body)
+        self.open().create_scalar_function(name, arity, flags, body)
     }
 
     /// Registers an aggregate an application defined.
@@ -286,8 +302,7 @@ impl Connection {
         flags: inillucent_ext::registry::FunctionFlags,
         body: inillucent_ext::registry::AggregateBody,
     ) -> DbResult<()> {
-        self.engine
-            .connect()
+        self.open()
             .create_aggregate_function(name, arity, flags, body)
     }
 
@@ -296,7 +311,7 @@ impl Connection {
     /// @param name - the name it was registered under
     /// @param arity - the arity it was registered for
     pub fn remove_function(&self, name: &str, arity: i32) -> bool {
-        self.engine.connect().remove_function(name, arity)
+        self.open().remove_function(name, arity)
     }
 
     /// Registers a collating sequence an application defined.
@@ -308,51 +323,51 @@ impl Connection {
         name: &str,
         comparator: inillucent_value::collation::Comparator,
     ) -> DbResult<()> {
-        self.engine.connect().create_collation(name, comparator)
+        self.open().create_collation(name, comparator)
     }
 
     /// Returns how many statements are compiled and held.
     pub fn cached_plan_count(&self) -> usize {
-        self.engine.connect().cached_plan_count()
+        self.open().cached_plan_count()
     }
 
     /// Turns off one or more planner optimizations for this connection.
     ///
     /// @param mask - the levers to switch off
     pub fn disable_optimizations(&self, mask: u32) {
-        self.engine.connect().disable_optimizations(mask);
+        self.open().disable_optimizations(mask);
     }
 
     /// Rereads the schema from the file.
     pub fn reload_schema(&self) -> DbResult<()> {
-        self.engine.connect().reload_schema()
+        self.open().reload_schema()
     }
 
     /// Returns the schema's generation, which changes when the schema does.
     ///
     /// @param _database - which attached database, which this engine has one of
     pub fn schema_cookie(&self, _database: usize) -> DbResult<u64> {
-        Ok(self.engine.connect().schema_cookie())
+        Ok(self.open().schema_cookie())
     }
 
     /// Returns how many rows the last statement changed.
     pub fn changes(&self) -> i64 {
-        self.engine.connect().changes()
+        self.open().changes()
     }
 
     /// Returns how many rows every statement so far has changed.
     pub fn total_changes(&self) -> i64 {
-        self.engine.connect().total_changes()
+        self.open().total_changes()
     }
 
     /// Returns the rowid the last `INSERT` assigned.
     pub fn last_insert_rowid(&self) -> i64 {
-        self.engine.connect().last_insert_rowid()
+        self.open().last_insert_rowid()
     }
 
     /// Returns whether every statement is its own transaction.
     pub fn autocommit(&self) -> bool {
-        self.engine.connect().autocommit()
+        self.open().autocommit()
     }
 
     /// Makes everything written so far durable in the file.
@@ -379,6 +394,9 @@ pub struct Statement<'connection> {
     engine: Rc<Engine>,
     /// The statement's own text, kept for [`Statement::explain`].
     sql: String,
+    /// The connection it was compiled on, so a plan is described against the
+    /// same schema it was built against.
+    session: u64,
     /// The row the last step arrived at, converted once per step.
     row: Vec<Value<'static>>,
 }
@@ -517,7 +535,7 @@ impl Statement<'_> {
     /// reach it - is what the chain says.
     pub fn explain(&self) -> Vec<String> {
         self.engine
-            .connect()
+            .connect_as(self.session)
             .explain(&self.sql)
             .unwrap_or_else(|error| vec![format!("cannot describe: {error:?}")])
     }

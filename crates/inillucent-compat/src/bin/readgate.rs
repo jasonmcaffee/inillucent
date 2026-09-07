@@ -894,7 +894,9 @@ fn measure_probe_with(
     let width = tree.columns().len();
     let projection = projection.unwrap_or_else(|| inillucent_exec::Projection::all(width));
     let probe = inillucent_exec::PointProbe::new(tree, projection);
-    let pool = inillucent_exec::physical::TreeCatalog::pool(database);
+    let Some(pool) = inillucent_exec::physical::TreeCatalog::pool_for(database, root) else {
+        return Ok(None);
+    };
     let mut out: Vec<OwnedDatum> = Vec::with_capacity(width);
     let keys: Vec<i64> = (0..4_096u64)
         .map(|iteration| {
@@ -935,7 +937,9 @@ fn measure_descent(database: &ImportedDatabase, rows: u32) -> Result<(f64, f64, 
     let Some(tree) = inillucent_exec::physical::TreeCatalog::tree(database, root) else {
         return Ok((0.0, 0.0, 0.0));
     };
-    let pool = inillucent_exec::physical::TreeCatalog::pool(database);
+    let Some(pool) = inillucent_exec::physical::TreeCatalog::pool_for(database, root) else {
+        return Ok((0.0, 0.0, 0.0));
+    };
     let keys: Vec<i64> = (0..4_096u64)
         .map(|iteration| {
             1 + (iteration.wrapping_mul(2_654_435_761) % u64::from(rows.max(1))) as i64

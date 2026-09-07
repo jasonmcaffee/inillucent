@@ -221,6 +221,9 @@ impl Engine {
                 .max(inillucent_wal::FIRST_LSN),
             sequence: database.meta().wal_sequence.max(1),
             cts_watermark: database.meta().cts_watermark,
+            // This engine opens one file at a time, so no commit it recovers
+            // was ever waiting on a decision in another one.
+            doubtful: Default::default(),
         };
         let (outcome, allocated, freed) = {
             let mut applier = Applier::new(&mut database, rows);

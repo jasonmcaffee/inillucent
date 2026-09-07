@@ -156,8 +156,25 @@ impl Trees for BTreeMap<u32, PagedTree> {
 
 /// Everything a write needs that a read does not.
 pub trait WriteTarget {
-    /// Returns the file and its trees, both mutably and at the same time.
-    fn parts(&mut self) -> (&mut Database, &mut dyn Trees);
+    /// Returns the file one tree is in, its trees, and its log - all three at
+    /// the same instant.
+    ///
+    /// **The log comes back with the file rather than being handed in.** A
+    /// connection is a set of databases: a `TEMP` trigger firing on a write to
+    /// `main` writes rows into two files inside one statement, and one
+    /// `&mut dyn TreeLog` cannot describe both. Asking for the log by naming the
+    /// tree is what makes it impossible to write a row into one file and
+    /// describe it in another's log - which would be a database that recovers
+    /// into a state it was never in.
+    ///
+    /// The trees come back whole rather than one tree, because a write touches a
+    /// table and its indexes together and they are all in the same file.
+    ///
+    /// @param root - the handle of the tree about to be written
+    fn parts_for(
+        &mut self,
+        root: u32,
+    ) -> DbResult<(&mut Database, &mut dyn Trees, &mut dyn TreeLog)>;
 
     /// Returns a tree's layout: which tree column each declared column holds.
     ///
@@ -527,17 +544,15 @@ fn sources_for(source: usize, triggers: &[inillucent_sql::dml::BoundTrigger]) ->
 ///
 /// @param statement - the bound insert
 /// @param target - the file and its trees
-/// @param log - where the records go
 /// @param params - the bound parameters
 /// @param supplied - the rows a `SELECT` source produced, empty for `VALUES`
 pub fn insert(
     statement: &BoundInsert,
     target: &mut dyn WriteTarget,
-    log: &mut dyn TreeLog,
     params: &Params,
     supplied: &[Row],
 ) -> DbResult<Changes> {
-    insert_at(statement, target, log, params, supplied, Depth::default())
+    insert_at(statement, target, params, supplied, Depth::default())
 }
 
 /// Applies an `INSERT` that is already some triggers deep.
@@ -549,14 +564,12 @@ pub fn insert(
 ///
 /// @param statement - the bound insert
 /// @param target - the file and its trees
-/// @param log - where the records go
 /// @param params - the bound parameters
 /// @param supplied - the rows a `SELECT` source produced, empty for `VALUES`
 /// @param depth - how many triggers deep this write already is
 pub fn insert_at(
     statement: &BoundInsert,
     target: &mut dyn WriteTarget,
-    log: &mut dyn TreeLog,
     params: &Params,
     supplied: &[Row],
     depth: Depth,
@@ -621,7 +634,6 @@ pub fn insert_at(
             &layout.slots,
             layout.rowid,
             target,
-            log,
             params,
             depth,
         )? == trigger::Fired::SkipRow
@@ -632,7 +644,7 @@ pub fn insert_at(
             continue;
         }
         let Some(stored) = write_one(
-            statement, &layout, &space, &plan, target, log, image, params, depth,
+            statement, &layout, &space, &plan, target, image, params, depth,
         )?
         else {
             continue;
@@ -647,7 +659,6 @@ pub fn insert_at(
             &layout.slots,
             layout.rowid,
             target,
-            log,
             params,
             depth,
         )? == trigger::Fired::SkipRow
@@ -866,7 +877,6 @@ impl InsertPlan {
 /// @param space - the row space
 /// @param plan - the compiled statement
 /// @param target - the file and its trees
-/// @param log - where the records go
 /// @param row - the row image, in tree-column order
 #[allow(clippy::too_many_arguments)]
 fn write_one(
@@ -875,7 +885,6 @@ fn write_one(
     space: &RowSpace,
     plan: &InsertPlan,
     target: &mut dyn WriteTarget,
-    log: &mut dyn TreeLog,
     row: Row,
     params: &Params,
     depth: Depth,
@@ -895,7 +904,7 @@ fn write_one(
     // those probed too, and an `ON CONFLICT` clause needs to know *which* row
     // it collided with, so both take the general path below.
     if resolution(statement) == Resolution::Raise && unique_indexes(table).next().is_none() {
-        if place_row_absent(table, layout, target, log, &row)? {
+        if place_row_absent(table, layout, target, &row)? {
             return Ok(Some(row));
         }
         return Err(conflicting_row(table, layout, target, &row)?
@@ -921,7 +930,6 @@ fn write_one(
                     table,
                     layout,
                     target,
-                    log,
                     &clash.key,
                     &held,
                     &statement.replace_triggers,
@@ -930,9 +938,8 @@ fn write_one(
                 )?;
             }
             Resolution::Update => {
-                let updated = upsert_row(
-                    statement, table, layout, space, plan, target, log, &clash, &row,
-                )?;
+                let updated =
+                    upsert_row(statement, table, layout, space, plan, target, &clash, &row)?;
                 return Ok(Some(updated));
             }
             // `ABORT`, `FAIL` and `ROLLBACK` all raise here and differ only in
@@ -940,7 +947,7 @@ fn write_one(
             Resolution::Raise => return Err(clash.error),
         }
     }
-    place_row(table, layout, target, log, None, &row)?;
+    place_row(table, layout, target, None, &row)?;
     Ok(Some(row))
 }
 
@@ -1020,7 +1027,7 @@ fn conflicting_row(
             continue;
         };
         let found = {
-            let (database, trees) = target.parts();
+            let (database, trees, _) = target.parts_for(index.root)?;
             match trees.get(index.root) {
                 Some(tree) => {
                     let borrowed: Vec<Datum<'_>> = prefix.iter().map(OwnedDatum::borrow).collect();
@@ -1056,7 +1063,6 @@ fn conflicting_row(
 /// @param space - the row space
 /// @param plan - the compiled statement
 /// @param target - the file and its trees
-/// @param log - where the records go
 /// @param clash - the conflict, naming the row already there
 /// @param excluded - the row that was being inserted
 #[allow(clippy::too_many_arguments)]
@@ -1067,7 +1073,6 @@ fn upsert_row(
     space: &RowSpace,
     plan: &InsertPlan,
     target: &mut dyn WriteTarget,
-    log: &mut dyn TreeLog,
     clash: &Conflict,
     excluded: &[OwnedDatum],
 ) -> DbResult<Row> {
@@ -1100,9 +1105,9 @@ fn upsert_row(
         }
     }
     if needed {
-        replace_row(table, layout, target, log, &before, &after)?;
+        replace_row(table, layout, target, &before, &after)?;
     } else {
-        place_row(table, layout, target, log, None, &after)?;
+        place_row(table, layout, target, None, &after)?;
     }
     Ok(after)
 }
@@ -1154,31 +1159,27 @@ fn needs_before(
 ///
 /// @param statement - the bound update
 /// @param target - the file and its trees
-/// @param log - where the records go
 /// @param params - the bound parameters
 /// @param keys - the key of each row the `WHERE` selected
 pub fn update(
     statement: &BoundUpdate,
     target: &mut dyn WriteTarget,
-    log: &mut dyn TreeLog,
     params: &Params,
     keys: &[Row],
 ) -> DbResult<Changes> {
-    update_at(statement, target, log, params, keys, Depth::default())
+    update_at(statement, target, params, keys, Depth::default())
 }
 
 /// Applies an `UPDATE` that is already some triggers deep.
 ///
 /// @param statement - the bound update
 /// @param target - the file and its trees
-/// @param log - where the records go
 /// @param params - the bound parameters
 /// @param keys - the key of each row the `WHERE` selected
 /// @param depth - how many triggers deep this write already is
 pub fn update_at(
     statement: &BoundUpdate,
     target: &mut dyn WriteTarget,
-    log: &mut dyn TreeLog,
     params: &Params,
     keys: &[Row],
     depth: Depth,
@@ -1250,7 +1251,7 @@ pub fn update_at(
                         let Some(held) = read_row(table, target, &clash.key)? else {
                             continue;
                         };
-                        remove_row(table, &layout, target, log, &clash.key, &held)?;
+                        remove_row(table, &layout, target, &clash.key, &held)?;
                     }
                     _ => return Err(clash.error),
                 }
@@ -1266,7 +1267,6 @@ pub fn update_at(
             &layout.slots,
             layout.rowid,
             target,
-            log,
             params,
             depth,
         )? == trigger::Fired::SkipRow
@@ -1302,7 +1302,7 @@ pub fn update_at(
             }
         };
         let current = reread.as_ref().unwrap_or(&before);
-        replace_row(table, &layout, target, log, current, &after)?;
+        replace_row(table, &layout, target, current, &after)?;
         changes.rows = changes.rows.saturating_add(1);
         if captured {
             changes.removed.push(before.clone());
@@ -1318,7 +1318,6 @@ pub fn update_at(
             &layout.slots,
             layout.rowid,
             target,
-            log,
             params,
             depth,
         )? == trigger::Fired::SkipRow
@@ -1400,31 +1399,27 @@ fn answer_correlations(
 ///
 /// @param statement - the bound delete
 /// @param target - the file and its trees
-/// @param log - where the records go
 /// @param params - the bound parameters
 /// @param keys - the key of each row the `WHERE` selected
 pub fn delete(
     statement: &BoundDelete,
     target: &mut dyn WriteTarget,
-    log: &mut dyn TreeLog,
     params: &Params,
     keys: &[Row],
 ) -> DbResult<Changes> {
-    delete_at(statement, target, log, params, keys, Depth::default())
+    delete_at(statement, target, params, keys, Depth::default())
 }
 
 /// Applies a `DELETE` that is already some triggers deep.
 ///
 /// @param statement - the bound delete
 /// @param target - the file and its trees
-/// @param log - where the records go
 /// @param params - the bound parameters
 /// @param keys - the key of each row the `WHERE` selected
 /// @param depth - how many triggers deep this write already is
 pub fn delete_at(
     statement: &BoundDelete,
     target: &mut dyn WriteTarget,
-    log: &mut dyn TreeLog,
     params: &Params,
     keys: &[Row],
     depth: Depth,
@@ -1459,7 +1454,6 @@ pub fn delete_at(
             table,
             &layout,
             target,
-            log,
             key,
             &row,
             &statement.triggers,
@@ -1488,7 +1482,6 @@ pub fn delete_at(
 /// @param table - the table being written
 /// @param layout - the table tree's layout
 /// @param target - the file and its trees
-/// @param log - where the records go
 /// @param key - the row's key
 /// @param row - the row as it is
 /// @param triggers - the triggers this delete fires
@@ -1499,7 +1492,6 @@ fn remove_with_triggers(
     table: &TableInfo,
     layout: &SourceLayout,
     target: &mut dyn WriteTarget,
-    log: &mut dyn TreeLog,
     key: &[OwnedDatum],
     row: &[OwnedDatum],
     triggers: &[inillucent_sql::dml::BoundTrigger],
@@ -1516,7 +1508,6 @@ fn remove_with_triggers(
         &layout.slots,
         layout.rowid,
         target,
-        log,
         params,
         depth,
     )? == trigger::Fired::SkipRow
@@ -1529,7 +1520,7 @@ fn remove_with_triggers(
     if !row_exists(table, target, key)? {
         return Ok(false);
     }
-    remove_row(table, layout, target, log, key, row)?;
+    remove_row(table, layout, target, key, row)?;
     trigger::fire(
         triggers,
         TriggerTime::After,
@@ -1540,7 +1531,6 @@ fn remove_with_triggers(
         &layout.slots,
         layout.rowid,
         target,
-        log,
         params,
         depth,
     )?;
@@ -1552,24 +1542,22 @@ fn remove_with_triggers(
 /// @param table - the table being written
 /// @param layout - the table tree's layout
 /// @param target - the file and its trees
-/// @param log - where the records go
 /// @param before - the row as it was
 /// @param after - the row as it should be
 fn replace_row(
     table: &TableInfo,
     layout: &SourceLayout,
     target: &mut dyn WriteTarget,
-    log: &mut dyn TreeLog,
     before: &[OwnedDatum],
     after: &[OwnedDatum],
 ) -> DbResult<()> {
     if !same_key(layout, before, after) {
         // The row moved, so the old one is a delete and the new one an insert.
         // Doing it as an in-place replace would leave the old key behind.
-        remove_row(table, layout, target, log, &key_of(layout, before), before)?;
-        return place_row(table, layout, target, log, None, after);
+        remove_row(table, layout, target, &key_of(layout, before), before)?;
+        return place_row(table, layout, target, None, after);
     }
-    place_row(table, layout, target, log, Some(before), after)
+    place_row(table, layout, target, Some(before), after)
 }
 
 /// Writes one row only if its key is free, and maintains its index entries.
@@ -1582,17 +1570,15 @@ fn replace_row(
 /// @param table - the table being written
 /// @param layout - the table tree's layout
 /// @param target - the file and its trees
-/// @param log - where the records go
 /// @param row - the row to write
 fn place_row_absent(
     table: &TableInfo,
     layout: &SourceLayout,
     target: &mut dyn WriteTarget,
-    log: &mut dyn TreeLog,
     row: &[OwnedDatum],
 ) -> DbResult<bool> {
     let placed = {
-        let (database, trees) = target.parts();
+        let (database, trees, log) = target.parts_for(table.root)?;
         let tree = trees
             .get_mut(table.root)
             .ok_or_else(|| missing_tree(table))?;
@@ -1604,7 +1590,7 @@ fn place_row_absent(
     }
     for index in maintained(table) {
         let entry = index_entry(index, layout, row);
-        write_index_entry(index, target, log, &entry, true)?;
+        write_index_entry(index, target, &entry, true)?;
     }
     Ok(true)
 }
@@ -1614,14 +1600,12 @@ fn place_row_absent(
 /// @param table - the table being written
 /// @param layout - the table tree's layout
 /// @param target - the file and its trees
-/// @param log - where the records go
 /// @param before - the row this one replaces, when it replaces one
 /// @param row - the row to write
 fn place_row(
     table: &TableInfo,
     layout: &SourceLayout,
     target: &mut dyn WriteTarget,
-    log: &mut dyn TreeLog,
     before: Option<&[OwnedDatum]>,
     row: &[OwnedDatum],
 ) -> DbResult<()> {
@@ -1644,11 +1628,11 @@ fn place_row(
             continue;
         }
         if let Some(previous) = previous {
-            write_index_entry(index, target, log, &previous, false)?;
+            write_index_entry(index, target, &previous, false)?;
         }
-        write_index_entry(index, target, log, &after, true)?;
+        write_index_entry(index, target, &after, true)?;
     }
-    let (database, trees) = target.parts();
+    let (database, trees, log) = target.parts_for(table.root)?;
     let tree = trees
         .get_mut(table.root)
         .ok_or_else(|| missing_tree(table))?;
@@ -1713,22 +1697,20 @@ fn only_change(before: &[OwnedDatum], after: &[OwnedDatum]) -> Option<usize> {
 /// @param table - the table being written
 /// @param layout - the table tree's layout
 /// @param target - the file and its trees
-/// @param log - where the records go
 /// @param key - the row's key
 /// @param row - the row as it stands, which the caller has already read
 fn remove_row(
     table: &TableInfo,
     layout: &SourceLayout,
     target: &mut dyn WriteTarget,
-    log: &mut dyn TreeLog,
     key: &[OwnedDatum],
     row: &[OwnedDatum],
 ) -> DbResult<()> {
     for index in maintained(table) {
         let entry = index_entry(index, layout, row);
-        write_index_entry(index, target, log, &entry, false)?;
+        write_index_entry(index, target, &entry, false)?;
     }
-    let (database, trees) = target.parts();
+    let (database, trees, log) = target.parts_for(table.root)?;
     let tree = trees
         .get_mut(table.root)
         .ok_or_else(|| missing_tree(table))?;
@@ -1760,17 +1742,15 @@ fn maintained(table: &TableInfo) -> impl Iterator<Item = &IndexInfo> {
 ///
 /// @param index - the index
 /// @param target - the file and its trees
-/// @param log - where the records go
 /// @param entry - the entry: the keys, then the rowid
 /// @param adding - true to add it, false to remove it
 fn write_index_entry(
     index: &IndexInfo,
     target: &mut dyn WriteTarget,
-    log: &mut dyn TreeLog,
     entry: &[OwnedDatum],
     adding: bool,
 ) -> DbResult<()> {
-    let (database, trees) = target.parts();
+    let (database, trees, log) = target.parts_for(index.root)?;
     let Some(tree) = trees.get_mut(index.root) else {
         return Ok(());
     };
@@ -1965,7 +1945,7 @@ fn row_exists(
     target: &mut dyn WriteTarget,
     key: &[OwnedDatum],
 ) -> DbResult<bool> {
-    let (database, trees) = target.parts();
+    let (database, trees, _) = target.parts_for(table.root)?;
     let Some(tree) = trees.get(table.root) else {
         return Ok(false);
     };
@@ -1983,7 +1963,7 @@ fn read_row(
     target: &mut dyn WriteTarget,
     key: &[OwnedDatum],
 ) -> DbResult<Option<Row>> {
-    let (database, trees) = target.parts();
+    let (database, trees, _) = target.parts_for(table.root)?;
     let Some(tree) = trees.get(table.root) else {
         return Ok(None);
     };
@@ -2022,8 +2002,11 @@ fn missing_tree(table: &TableInfo) -> DbError {
 struct Borrowed<'a>(&'a mut dyn WriteTarget);
 
 impl WriteTarget for Borrowed<'_> {
-    fn parts(&mut self) -> (&mut Database, &mut dyn Trees) {
-        self.0.parts()
+    fn parts_for(
+        &mut self,
+        root: u32,
+    ) -> DbResult<(&mut Database, &mut dyn Trees, &mut dyn TreeLog)> {
+        self.0.parts_for(root)
     }
 
     fn layout(&self, root: u32) -> Option<&SourceLayout> {
@@ -2045,7 +2028,7 @@ impl WriteTarget for Borrowed<'_> {
 /// @param target - the file and its trees
 /// @param table - the table
 fn highest_rowid(target: &mut dyn WriteTarget, table: &TableInfo) -> DbResult<i64> {
-    let (database, trees) = target.parts();
+    let (database, trees, _) = target.parts_for(table.root)?;
     let Some(tree) = trees.get(table.root) else {
         return Ok(0);
     };

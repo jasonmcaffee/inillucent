@@ -64,7 +64,6 @@ use inillucent_tree::datum::OwnedDatum;
 use crate::dml::{self, Row, WriteTarget};
 use crate::expr::RAISE_IGNORE;
 use crate::physical::{self, Params};
-use inillucent_tree::write::TreeLog;
 
 /// How deep one write may push another before the engine refuses.
 ///
@@ -204,7 +203,6 @@ fn substitution<'a>(
 /// @param slots - the fired table's declared-to-tree column map
 /// @param rowid - which tree column of that table holds the rowid
 /// @param target - the file and its trees
-/// @param log - where the records go
 /// @param params - the bound parameters
 /// @param depth - how deep this fire already is
 #[allow(clippy::too_many_arguments)]
@@ -215,7 +213,6 @@ pub fn fire(
     slots: &[Option<usize>],
     rowid: Option<usize>,
     target: &mut dyn WriteTarget,
-    log: &mut dyn TreeLog,
     params: &Params,
     depth: Depth,
 ) -> DbResult<Fired> {
@@ -238,7 +235,7 @@ pub fn fire(
             }
         }
         for statement in &trigger.body {
-            match run_body(statement, rows, slots, rowid, target, log, params, deeper) {
+            match run_body(statement, rows, slots, rowid, target, params, deeper) {
                 Ok(()) => {}
                 Err(error) if is_ignore(&error) => return Ok(Fired::SkipRow),
                 Err(error) => return Err(named(error, trigger)),
@@ -352,7 +349,6 @@ fn run_select(
 /// @param slots - the fired table's declared-to-tree column map
 /// @param rowid - which tree column of that table holds the rowid
 /// @param target - the file and its trees
-/// @param log - where the records go
 /// @param params - the bound parameters
 /// @param depth - how deep this body already is
 #[allow(clippy::too_many_arguments)]
@@ -362,7 +358,6 @@ fn run_body(
     slots: &[Option<usize>],
     rowid: Option<usize>,
     target: &mut dyn WriteTarget,
-    log: &mut dyn TreeLog,
     params: &Params,
     depth: Depth,
 ) -> DbResult<()> {
@@ -391,7 +386,7 @@ fn run_body(
                 }
                 inillucent_sql::dml::BoundInsertSource::Values(_) => Vec::new(),
             };
-            dml::insert_at(&insert, target, log, params, &supplied, depth)?;
+            dml::insert_at(&insert, target, params, &supplied, depth)?;
             Ok(())
         }
         BoundTriggerStatement::Update(update) => {
@@ -401,7 +396,7 @@ fn run_body(
                 &mut substitution(rows, slots, rowid),
             );
             let keys = keys_for_update(&update, target, params)?;
-            dml::update_at(&update, target, log, params, &keys, depth)?;
+            dml::update_at(&update, target, params, &keys, depth)?;
             Ok(())
         }
         BoundTriggerStatement::Delete(delete) => {
@@ -411,7 +406,7 @@ fn run_body(
                 &mut substitution(rows, slots, rowid),
             );
             let keys = keys_for_delete(&delete, target, params)?;
-            dml::delete_at(&delete, target, log, params, &keys, depth)?;
+            dml::delete_at(&delete, target, params, &keys, depth)?;
             Ok(())
         }
     }

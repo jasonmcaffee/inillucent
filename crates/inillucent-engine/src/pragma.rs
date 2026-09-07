@@ -69,11 +69,7 @@ impl ImportedDatabase {
             b"index_info" | b"index_xinfo" => self.pragma_index_info(argument),
             b"table_list" => self.pragma_table_list(),
             b"database_list" => Ok(Outcome {
-                rows: vec![vec![
-                    OwnedDatum::Int(0),
-                    OwnedDatum::Text(b"main".to_vec()),
-                    OwnedDatum::Text(self.path.to_string_lossy().as_bytes().to_vec()),
-                ]],
+                rows: self.database_list(),
                 names: vec!["seq".into(), "name".into(), "file".into()],
                 changes: Default::default(),
             }),
@@ -81,6 +77,44 @@ impl ImportedDatabase {
             // error, and the next statement runs.
             _ => Ok(Outcome::empty()),
         }
+    }
+
+    /// Returns one row per database this connection holds, in schema order.
+    ///
+    /// `main` first, then the connection's temporary database when it has made
+    /// one, then the attachments in the order they arrived - which is the order
+    /// an unqualified name is resolved in, minus `temp`'s place at the front of
+    /// it, and the cheapest end-to-end check that the schema set is what the
+    /// connection thinks it is.
+    ///
+    /// A database with no file - `temp`, and `ATTACH ':memory:'` - reports an
+    /// empty path, which is what SQLite reports for the same thing.
+    fn database_list(&self) -> Vec<Vec<OwnedDatum>> {
+        let mut rows = Vec::new();
+        for (seq, at) in self.schema_numbers().into_iter().enumerate() {
+            let (name, file) = match at {
+                super::MAIN => (
+                    b"main".to_vec(),
+                    self.path.to_string_lossy().as_bytes().to_vec(),
+                ),
+                _ => match self.schema_at(at) {
+                    Some(held) => (
+                        held.name.clone(),
+                        held.path
+                            .as_ref()
+                            .map(|path| path.to_string_lossy().as_bytes().to_vec())
+                            .unwrap_or_default(),
+                    ),
+                    None => continue,
+                },
+            };
+            rows.push(vec![
+                OwnedDatum::Int(seq as i64),
+                OwnedDatum::Text(name),
+                OwnedDatum::Text(file),
+            ]);
+        }
+        rows
     }
 
     /// Reads or sets the buffer pool's budget, in SQLite's own units.

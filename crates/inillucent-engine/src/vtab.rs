@@ -531,13 +531,26 @@ impl ImportedDatabase {
         // module that writes an initial row writes it into one of them.
         let table = {
             let txn = self.current_txn();
+            let at = self.ddl_schema;
+            let session = self.session.get();
+            let wal = self
+                .log_of(at)
+                .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
             let mut log = WalLog {
-                wal: &self.wal,
+                wal,
                 txn,
+                schema: at,
+                wrote: false,
                 undo: None,
             };
             let mut store = WriteStore {
-                database: &mut self.database,
+                database: super::file_of(
+                    &mut self.database,
+                    &mut self.attached,
+                    &mut self.temps,
+                    session,
+                    at,
+                )?,
                 trees: &mut self.trees,
                 log: &mut log,
             };
@@ -857,13 +870,26 @@ impl ImportedDatabase {
             .ok_or_else(|| misuse(format!("no such table: {}", String::from_utf8_lossy(name))))?;
         let outcome = {
             let txn = self.current_txn();
+            let at = self.ddl_schema;
+            let session = self.session.get();
+            let wal = self
+                .log_of(at)
+                .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
             let mut log = WalLog {
-                wal: &self.wal,
+                wal,
                 txn,
+                schema: at,
+                wrote: false,
                 undo: None,
             };
             let mut store = WriteStore {
-                database: &mut self.database,
+                database: super::file_of(
+                    &mut self.database,
+                    &mut self.attached,
+                    &mut self.temps,
+                    session,
+                    at,
+                )?,
                 trees: &mut self.trees,
                 log: &mut log,
             };
@@ -1052,13 +1078,26 @@ impl ImportedDatabase {
             };
             let outcome = {
                 let txn = self.current_txn();
+                let at = self.ddl_schema;
+                let session = self.session.get();
+                let wal = self
+                    .log_of(at)
+                    .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
                 let mut log = WalLog {
-                    wal: &self.wal,
+                    wal,
                     txn,
+                    schema: at,
+                    wrote: false,
                     undo: None,
                 };
                 let mut store = WriteStore {
-                    database: &mut self.database,
+                    database: super::file_of(
+                        &mut self.database,
+                        &mut self.attached,
+                        &mut self.temps,
+                        session,
+                        at,
+                    )?,
                     trees: &mut self.trees,
                     log: &mut log,
                 };
