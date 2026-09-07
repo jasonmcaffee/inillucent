@@ -258,6 +258,31 @@ One file is one buffer pool and the engine is single threaded. Confine a
 on it with a lock your binding owns. **There is no lock inside**, and the driver
 does not pretend there is. Two databases on two files are independent.
 
+### Sessions, and a connection per call
+
+A **session** is what `temp.`, `ATTACH` and the connection pragmas are scoped
+to. `inillucent_connect` opens one and the handle keeps it, so every call on
+that handle is the same session however the call is implemented underneath —
+which matters, because underneath it is a connection per call: the Rust
+`Connection` borrows its `Database`, and a C handle cannot hold a borrow.
+
+That is worth knowing if you are writing a binding that does *not* go through
+the C ABI. `inillucent_driver::Connection<'d>` borrows the `Database`, so a
+long-lived object cannot hold both — it is a self-referential struct and Rust
+will not have it. A caller in that position holds the `Database` and connects
+per call, and must carry the session across:
+
+```rust
+let session = database.connect().session();
+// ... later, and for every call:
+let connection = database.connect_as(session);
+```
+
+Without it every call is a new session, and a `CREATE TEMP TABLE` typed into a
+query console is gone by the next statement (task-1848). `suite.json`'s
+`a_temp_table_survives_a_connection_per_call` is the case for this, and it is
+the one case that sets `"connection": "per_call"`.
+
 ### Known-good starting points
 
 - **Python** — `ctypes`, standard library only. `bindings/python/inillucent.py`

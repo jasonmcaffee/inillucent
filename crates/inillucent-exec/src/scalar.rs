@@ -32,6 +32,13 @@
 use inillucent_base::error::misuse;
 use inillucent_base::DbResult;
 use inillucent_scalar::{builtin, datetime, eval, json, mathfn, pattern};
+
+/// What a scalar function may need to know about the connection around it.
+///
+/// Re-exported so the engine can fill one without a dependency of its own on
+/// the function library: it hands a `Params` to the executor, and the executor
+/// is what calls the functions.
+pub use inillucent_scalar::builtin::Context;
 use inillucent_sql::ast::{BinaryOp, UnaryOp};
 use inillucent_sql::function::{JsonFunc, MathFunc, ScalarFunc, TimeFunc};
 use inillucent_tree::datum::{Datum, OwnedDatum};
@@ -106,13 +113,51 @@ pub struct ScalarCall {
     pub arguments: Vec<Box<dyn Eval>>,
     /// The collation the function's comparisons use.
     pub collation: Collation,
+    /// What the connection's counters said when the statement began.
+    ///
+    /// Five built-ins answer a question about the connection rather than about
+    /// their arguments, and the new engine used to hand them a default context
+    /// - so `changes()`, `total_changes()` and `last_insert_rowid()` answered
+    /// `0` for ever and `random()` answered one constant (task-1854).
+    ///
+    /// Every field of it is a constant for the length of the statement except
+    /// the seed, which is in `stream` because it has to move per call.
+    pub context: Context,
+    /// The random built-ins' seed, advanced once per evaluation.
+    ///
+    /// **Per call, not per statement.** `SELECT random(), random()` answers two
+    /// different numbers in SQLite, and one call site evaluated once per row
+    /// has to answer a different number per row. An atomic rather than a
+    /// `Cell` because a compiled expression is `Sync`: the executor's node
+    /// trait requires it, and a plan may be shared.
+    pub stream: std::sync::atomic::AtomicU64,
 }
 
 impl Eval for ScalarCall {
     fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
         let values = arguments_of(&self.arguments, batch, nth)?;
-        let answer = builtin::call(self.func, &values, self.collation, ENCODING);
+        let context = Context {
+            seed: self.next_seed(),
+            ..self.context
+        };
+        let answer = builtin::call_with(self.func, &values, self.collation, ENCODING, context);
         Ok(Computed::Owned(from_value(answer)))
+    }
+}
+
+impl ScalarCall {
+    /// Returns the next seed for the random built-ins, moving the stream on.
+    ///
+    /// `splitmix64`, which is the function library's own scrambler, so adjacent
+    /// seeds give unrelated values rather than correlated ones.
+    fn next_seed(&self) -> u64 {
+        let held = self
+            .stream
+            .fetch_add(0x9E37_79B9_7F4A_7C15, std::sync::atomic::Ordering::Relaxed);
+        let mut z = held.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
     }
 }
 
@@ -794,6 +839,8 @@ mod tests {
             func: ScalarFunc::Substr,
             arguments: vec![column(0, 3), column(1, 3), column(2, 3)],
             collation: Collation::Binary,
+            context: Context::default(),
+            stream: std::sync::atomic::AtomicU64::new(0),
         };
         let answer = eval_one(
             &node,
@@ -816,6 +863,8 @@ mod tests {
             func: ScalarFunc::Upper,
             arguments: vec![column(0, 1)],
             collation: Collation::Binary,
+            context: Context::default(),
+            stream: std::sync::atomic::AtomicU64::new(0),
         };
         assert_eq!(
             eval_one(&node, &[Datum::Text(b"mixed Case")]),

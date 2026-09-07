@@ -287,6 +287,15 @@ pub enum Expr {
         arguments: Vec<Expr>,
         /// The collation the function's comparisons use.
         collation: Collation,
+        /// What the connection's counters said when the statement began.
+        ///
+        /// Read once here for the same reason [`Expr::Time`]'s `now` is: every
+        /// `changes()` in one statement is the same number, because SQLite
+        /// moves the counters when a statement *finishes*. Reading it per row
+        /// in the node would be a different answer wearing the same name - and
+        /// leaving it out is what made all four of them answer `0` for ever
+        /// (task-1854).
+        context: crate::scalar::Context,
     },
     /// A call to one of the math functions.
     Math {
@@ -581,10 +590,13 @@ pub fn compile(expr: &Expr, types: &[StaticType]) -> DbResult<Box<dyn Eval>> {
             func,
             arguments,
             collation,
+            context,
         } => Box::new(crate::scalar::ScalarCall {
             func: *func,
             arguments: compile_all(arguments, types)?,
             collation: *collation,
+            context: *context,
+            stream: std::sync::atomic::AtomicU64::new(context.seed),
         }),
         Expr::Json { func, arguments } => {
             Box::new(crate::scalar::compile_json(*func, arguments, types)?)

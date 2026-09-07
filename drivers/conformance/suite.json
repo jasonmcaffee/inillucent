@@ -18,6 +18,14 @@
     "  {\"text\": \"one\"}   {\"blob\": [0, 255, 1]}",
     "A blob is a byte array rather than base64 so that no runner needs a decoder.",
     "",
+    "A CASE may set \"connection\": \"per_call\", which asks the runner to open a fresh",
+    "connection for every setup statement and every step, all continuing one session.",
+    "That is the shape a driver in another language is forced into - a connection that",
+    "borrows its database cannot be held by a garbage-collected caller, and a C handle",
+    "cannot hold a borrow at all - and it is what the C ABI does on every call. A runner",
+    "whose connections already work that way satisfies it by doing nothing. Absent means",
+    "one connection for the whole case, which is every other case here.",
+    "",
     "A STEP asserts whatever keys it carries and ignores the rest, so a case can",
     "check a row count without pinning the rows, or a status without pinning the",
     "message. The keys are:",
@@ -271,6 +279,44 @@
           "rows": [[{ "text": "CREATE TABLE pairs (left TEXT, right TEXT, inner TEXT, outer TEXT, cross TEXT, indexed TEXT)" }]]
         },
         { "sql": "SELECT left right FROM pairs", "status": "syntax" }
+      ]
+    },
+    {
+      "name": "a_temp_table_survives_a_connection_per_call",
+      "about": "A temporary table belongs to a session, and a caller that hands out a connection per call has to stay in one or it loses everything a session scopes. This case runs every statement on its own connection, so it passes only if the driver can continue a session: before task-1848 the Rust driver exposed connect() and not connect_as(), and the C ABI opened a new session on every call - so a CREATE TEMP TABLE typed into a query console was gone by the next statement, an ATTACH did not outlive its own call, and a connection pragma had to be re-applied every time. The last two steps are the rest of the scope: an ordinary table is visible either way, and a temp table shadows a permanent one of the same name, which is only observable if the temp one is still there.",
+      "connection": "per_call",
+      "setup": [
+        "CREATE TABLE kept (a INTEGER PRIMARY KEY, b TEXT)",
+        "INSERT INTO kept VALUES (1, 'permanent')"
+      ],
+      "steps": [
+        { "sql": "CREATE TEMP TABLE scratch (a INTEGER PRIMARY KEY, b TEXT)", "affected": 0 },
+        { "sql": "INSERT INTO scratch VALUES (1, 'one')", "affected": 1 },
+        {
+          "sql": "SELECT a, b FROM scratch ORDER BY a",
+          "columns": ["a", "b"],
+          "rows": [[{ "int": 1 }, { "text": "one" }]],
+          "affected": null,
+          "total": 1
+        },
+        {
+          "sql": "SELECT b FROM temp.scratch",
+          "rows": [[{ "text": "one" }]]
+        },
+        {
+          "sql": "SELECT b FROM kept",
+          "rows": [[{ "text": "permanent" }]]
+        },
+        { "sql": "CREATE TEMP TABLE kept (a INTEGER PRIMARY KEY, b TEXT)", "affected": 0 },
+        { "sql": "INSERT INTO kept VALUES (2, 'temporary')", "affected": 1 },
+        {
+          "sql": "SELECT b FROM kept",
+          "rows": [[{ "text": "temporary" }]]
+        },
+        {
+          "sql": "SELECT b FROM main.kept",
+          "rows": [[{ "text": "permanent" }]]
+        }
       ]
     },
     {

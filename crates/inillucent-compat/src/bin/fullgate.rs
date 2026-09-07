@@ -462,6 +462,12 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
                 println!("  {:<24} {stages}", "  last round");
             }
         }
+        if entry.workload == "extension.fts.build" {
+            let stages = FTS_STAGES.with(|held| held.borrow().clone());
+            if !stages.is_empty() {
+                println!("  {:<24} {stages}", "  last round");
+            }
+        }
     }
 
     println!();
@@ -1142,6 +1148,44 @@ thread_local! {
     /// The engine already times the stages; this carries the last round's out
     /// so the report can print them beside the ratio.
     static INDEX_STAGES: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+
+    /// Where the last FTS5 index build this process ran spent its time.
+    ///
+    /// The same arrangement as `INDEX_STAGES`, and for the same reason: a
+    /// workload under the floor needs its breakdown printed beside the number.
+    /// `extension.fts.build` has been at 0.30x for two tickets and each of them
+    /// had to re-derive where the time went; this prints it every run.
+    static FTS_STAGES: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Renders where an FTS5 build spent its time, as one line.
+///
+/// Empty when nothing was indexed, so the caller prints nothing rather than a
+/// row of zeroes.
+///
+/// @param stages - what the module measured
+fn fts_stage_line(stages: inillucent_ext::vtab::fts5::BuildStages) -> String {
+    if stages.rows == 0 {
+        return String::new();
+    }
+    let ms = |nanos: u128| nanos as f64 / 1e6;
+    format!(
+        "{} rows, content {:.1} ms, tokenize {:.1} ms, docsize {:.1} ms, \
+         group {:.1} ms, terms {:.1} ms, new terms {:.1} ms ({}), \
+         dict read {:.1} ms, dict write {:.1} ms, totals {:.1} ms, flush {:.1} ms",
+        stages.rows,
+        ms(stages.content),
+        ms(stages.tokenize),
+        ms(stages.docsize),
+        ms(stages.group),
+        ms(stages.terms.saturating_sub(stages.new_terms)),
+        ms(stages.new_terms),
+        stages.new_term_count,
+        ms(stages.dictionary_read),
+        ms(stages.dictionary_write),
+        ms(stages.totals),
+        ms(stages.flush),
+    )
 }
 
 /// Times one mutating workload.
@@ -1182,6 +1226,11 @@ fn time_write(
         .prepare_statement(&workload.sql)
         .map_err(|error| why(&error))?;
     let mut changed = 0u64;
+    // Cleared before the clock rather than after it, so the line printed is the
+    // last round's build and not every round's added together.
+    if workload.name == "extension.fts.build" {
+        inillucent_ext::vtab::fts5::reset_build_stages();
+    }
     let started = Instant::now();
     if workload.grouping != Grouping::Autocommit {
         database.begin_batch();
@@ -1204,9 +1253,14 @@ fn time_write(
         }
     }
     database.commit_batch().map_err(|error| why(&error))?;
+    let nanos = started.elapsed().as_secs_f64() * 1e9;
+    if workload.name == "extension.fts.build" {
+        let line = fts_stage_line(inillucent_ext::vtab::fts5::build_stages());
+        FTS_STAGES.with(|held| *held.borrow_mut() = line);
+    }
     Ok(Sample {
         workload: workload.name.clone(),
-        nanos: started.elapsed().as_secs_f64() * 1e9,
+        nanos,
         rows: changed,
         digest: 0,
     })

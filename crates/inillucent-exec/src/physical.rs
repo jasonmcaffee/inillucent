@@ -520,6 +520,35 @@ pub struct Params {
     /// An entry is `None` when the subquery is correlated, which is the one
     /// case that has no single value. The physical pass refuses those by name.
     subqueries: Vec<Option<crate::subquery::Subvalue>>,
+    /// What the connection's counters said when this statement began.
+    ///
+    /// `changes()`, `total_changes()`, `last_insert_rowid()` and the seed the
+    /// random built-ins draw from. They ride here for the same reason a folded
+    /// subquery does: a plan is cached by its text, so a value baked into the
+    /// plan would answer `SELECT changes()` with the count from whenever the
+    /// statement was first compiled.
+    ///
+    /// They are constants for the length of one statement, which is SQLite's
+    /// own rule - the counters move when a statement *finishes* - so reading
+    /// them once here is not an approximation.
+    ///
+    /// A `Cell` because the engine fills it on a `Params` the caller owns and
+    /// lends: an application binds its values and hands over `&Params`, and the
+    /// connection state is not the application's to supply.
+    context: std::cell::Cell<crate::scalar::Context>,
+}
+
+/// Scrambles a seed into the next one.
+///
+/// `splitmix64`, which is the function library's own scrambler, so adjacent
+/// seeds give unrelated streams rather than correlated ones.
+///
+/// @param seed - the seed to move on from
+fn split_mix(seed: u64) -> u64 {
+    let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 impl Params {
@@ -528,6 +557,7 @@ impl Params {
         Params {
             values: Vec::new(),
             reads: std::cell::Cell::new(0),
+            context: std::cell::Cell::new(crate::scalar::Context::default()),
             subqueries: Vec::new(),
         }
     }
@@ -539,6 +569,7 @@ impl Params {
         Params {
             values,
             reads: std::cell::Cell::new(0),
+            context: std::cell::Cell::new(crate::scalar::Context::default()),
             subqueries: Vec::new(),
         }
     }
@@ -553,6 +584,7 @@ impl Params {
         Params {
             values: self.values.clone(),
             reads: std::cell::Cell::new(self.reads.get()),
+            context: self.context.clone(),
             subqueries,
         }
     }
@@ -573,6 +605,7 @@ impl Params {
         Params {
             values: self.values.clone(),
             reads: std::cell::Cell::new(self.reads.get()),
+            context: self.context.clone(),
             subqueries: Vec::new(),
         }
     }
@@ -607,6 +640,37 @@ impl Params {
     /// Returns how many parameter reads this set has answered.
     pub fn reads(&self) -> u64 {
         self.reads.get()
+    }
+
+    /// Tells this set what the connection's counters say.
+    ///
+    /// Called once per statement, by the engine, before anything is compiled.
+    ///
+    /// @param context - the counters and the statement's random seed
+    pub fn set_context(&self, context: crate::scalar::Context) {
+        self.context.set(context);
+    }
+
+    /// Returns what the connection's counters said.
+    ///
+    /// Counted as a parameter read for the same reason a `?1` is: a chain that
+    /// baked these in must not be re-run against a later state of the
+    /// connection, and the read counter is what already decides that.
+    ///
+    /// **The seed moves on every read, so two call sites in one statement do
+    /// not share a stream.** `SELECT random(), random()` is two nodes, each
+    /// with its own stream advanced per row; started from the same number they
+    /// would answer the same pair, which is what SQLite does not do. The
+    /// counters themselves are unchanged by the read - every `changes()` in one
+    /// statement is the same number.
+    pub fn context(&self) -> crate::scalar::Context {
+        self.reads.set(self.reads.get().saturating_add(1));
+        let held = self.context.get();
+        self.context.set(crate::scalar::Context {
+            seed: split_mix(held.seed),
+            ..held
+        });
+        held
     }
 
     /// Replaces every bound value, reusing the buffer.
@@ -4675,6 +4739,9 @@ fn translate(
                     func: *func,
                     arguments: translated,
                     collation: *collation,
+                    // Every `changes()` in one statement is the same number,
+                    // for the same reason every `now` is the same instant.
+                    context: params.context(),
                 }
             }
         }

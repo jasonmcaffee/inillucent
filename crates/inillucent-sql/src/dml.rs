@@ -63,6 +63,30 @@ pub struct BoundCheck {
     pub expr: BoundExpr,
 }
 
+/// A `NOT NULL` column's `DEFAULT`, bound so a `REPLACE` can stand it in.
+///
+/// **REPLACE's rule for a `NOT NULL` violation is to substitute the column's
+/// default, and to fall back to `ABORT` only when there is no default.** So
+/// `UPDATE OR REPLACE t SET c = NULL` on `c TEXT NOT NULL DEFAULT 'd'` stores
+/// `'d'`, and this engine refused the statement instead (task-1853).
+///
+/// The write path cannot bind one for itself: a default is schema text, and by
+/// the time a row is being checked the parser is long out of scope. The binder
+/// already binds one for every column a statement *omits*; these are the same
+/// expressions bound for the columns it supplies, which is where a NULL that
+/// needs replacing can come from.
+///
+/// Only the columns that can need it are here - `NOT NULL` and with a default -
+/// so an ordinary table carries an empty vector and the write path skips the
+/// whole apparatus.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoundDefault {
+    /// The column the default belongs to.
+    pub column: u16,
+    /// The default expression, bound.
+    pub expr: BoundExpr,
+}
+
 /// The expressions one index needs evaluated per row to be maintained.
 ///
 /// **An index is usually just columns of the row, and then it needs none of
@@ -155,6 +179,8 @@ pub struct BoundInsert {
     pub on_conflict: Option<ConflictAction>,
     /// The table's `CHECK` constraints.
     pub checks: Vec<BoundCheck>,
+    /// The `DEFAULT`s a `REPLACE` may stand in for a NULL, by column.
+    pub not_null_defaults: Vec<BoundDefault>,
     /// The expressions the table's partial and expression indexes need.
     pub index_exprs: Vec<BoundIndexExprs>,
     /// The `ON CONFLICT ... DO UPDATE` clause, when there is one.
@@ -234,6 +260,8 @@ pub struct BoundUpdate {
     pub on_conflict: Option<ConflictAction>,
     /// The table's `CHECK` constraints.
     pub checks: Vec<BoundCheck>,
+    /// The `DEFAULT`s a `REPLACE` may stand in for a NULL, by column.
+    pub not_null_defaults: Vec<BoundDefault>,
     /// The expressions the table's partial and expression indexes need.
     pub index_exprs: Vec<BoundIndexExprs>,
     /// The `RETURNING` columns.
@@ -298,10 +326,10 @@ fn can_replace(table: &TableInfo, statement: Option<ConflictAction>) -> bool {
         .indexes
         .iter()
         .any(|index| index.conflict == Some(ConflictAction::Replace))
-        || table
-            .columns
-            .iter()
-            .any(|column| column.not_null_conflict == Some(ConflictAction::Replace))
+        || table.columns.iter().any(|column| {
+            column.not_null_conflict == Some(ConflictAction::Replace)
+                || column.primary_key_conflict == Some(ConflictAction::Replace)
+        })
 }
 
 /// Reports whether an unusable key's fault is one this write has to report.
@@ -409,6 +437,7 @@ impl<'a> Binder<'a> {
         let (columns, rowid) = self.column_sources(&table, &targets)?;
         let named_rowid = targets.iter().position(|target| *target == ROWID_TARGET);
         let checks = self.bind_checks(&table)?;
+        let not_null_defaults = self.bind_not_null_defaults(&table)?;
         let index_exprs = self.bind_index_exprs(&table)?;
         let upsert = self.bind_upsert(&table, insert)?;
         let returning = self.bind_returning(&insert.returning)?;
@@ -437,6 +466,7 @@ impl<'a> Binder<'a> {
             arity,
             on_conflict: insert.on_conflict,
             checks,
+            not_null_defaults,
             upsert,
             sequence_root,
             returning,
@@ -504,6 +534,7 @@ impl<'a> Binder<'a> {
             None => None,
         };
         let checks = self.bind_checks(&table)?;
+        let not_null_defaults = self.bind_not_null_defaults(&table)?;
         let index_exprs = self.bind_index_exprs(&table)?;
         let returning = self.bind_returning(&update.returning)?;
         let limit = match update.limit {
@@ -536,6 +567,7 @@ impl<'a> Binder<'a> {
             filter,
             on_conflict: update.on_conflict,
             checks,
+            not_null_defaults,
             returning,
             limit,
             offset,
@@ -1226,6 +1258,41 @@ impl<'a> Binder<'a> {
             return Ok(BoundExpr::Null);
         }
         self.bind_schema_expr(sql)
+    }
+
+    /// Binds the `DEFAULT` of every `NOT NULL` column that declares one.
+    ///
+    /// What `REPLACE` substitutes for a NULL in such a column - see
+    /// [`BoundDefault`]. A column with no default is left out, which is what
+    /// makes the write path's fallback to `ABORT` the absence of an entry
+    /// rather than a second test.
+    ///
+    /// The rowid alias is left out too: the row image carries the key the
+    /// statement is about to allocate, and the write path does not check it.
+    ///
+    /// @param table - the table being written
+    fn bind_not_null_defaults(
+        &mut self,
+        table: &TableInfo,
+    ) -> Result<Vec<BoundDefault>, ParseError> {
+        let mut defaults = Vec::new();
+        for (position, column) in table.columns.iter().enumerate() {
+            if !column.not_null || Some(position as u16) == table.rowid_alias {
+                continue;
+            }
+            let Some(sql) = column.default_sql.as_ref() else {
+                continue;
+            };
+            if sql.is_empty() {
+                continue;
+            }
+            let expr = self.bind_schema_expr(&sql.clone())?;
+            defaults.push(BoundDefault {
+                column: position as u16,
+                expr,
+            });
+        }
+        Ok(defaults)
     }
 
     /// Binds every `CHECK` the table declares.

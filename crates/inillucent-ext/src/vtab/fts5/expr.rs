@@ -760,6 +760,12 @@ fn term_pages(
 ) -> DbResult<Vec<i64>> {
     let mut pages = Vec::new();
     if term.prefix {
+        // **The staged dictionary rows go out first.** A term this transaction
+        // created is held in the buffer and written in term order at the flush,
+        // so a scan that ran before it would not see it - and a prefix search
+        // inside the transaction that wrote the term would miss it. The point
+        // lookup below needs no flush, because the buffer answers it.
+        super::flush_doclists(context, shadows, buffer)?;
         // A prefix reads every term the dictionary holds that starts with it.
         // The dictionary is in term order, so the run is contiguous - which is
         // what makes a prefix search cheaper than a scan of every term.
@@ -779,7 +785,9 @@ fn term_pages(
             }
             Ok(true)
         })?;
-    } else if let Some(page) = super::term_row(context, shadows, buffer, &term.token, false)? {
+    } else if let Some(page) =
+        super::term_row(context, shadows, buffer, &term.token, false)?.map(|held| held.page)
+    {
         pages.push(page);
     }
     Ok(pages)

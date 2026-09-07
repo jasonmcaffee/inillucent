@@ -4568,6 +4568,7 @@ pub fn subquery_columns(select: &BoundSelect, names: &[Vec<u8>]) -> Vec<ColumnIn
                 collation: collation.name().as_bytes().to_ascii_lowercase(),
                 not_null: false,
                 not_null_conflict: None,
+                primary_key_conflict: None,
                 default_sql: None,
                 primary_key_position: None,
                 hidden: false,

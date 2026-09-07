@@ -34,7 +34,7 @@
 
 use inillucent_base::{error, DbError, DbResult};
 use inillucent_pool::{Database, PageId, Pool};
-use inillucent_sql::catalog_view::TableInfo;
+use inillucent_sql::catalog_view::{IndexInfo, TableInfo};
 use inillucent_tree::datum::{Datum, OwnedDatum};
 use inillucent_tree::paged::PagedTree;
 use inillucent_tree::types::{ColumnSpec, PhysicalType};
@@ -549,7 +549,53 @@ pub fn tables_from_entries(
             .map_err(|error| error.with_detail(format!("in trigger {}", name_of(entry))))?;
         table.triggers.push(trigger);
     }
+    for table in &mut tables {
+        for index in &mut table.indexes {
+            stored_ascending(index);
+        }
+    }
     Ok(tables)
+}
+
+/// Records that an index's key columns are stored ascending, whatever the
+/// declaration said.
+///
+/// **The paged engine's trees have no descending key column**: every tree is
+/// built ascending, by the bulk builder for `CREATE INDEX` and by the import
+/// after `in_key_order` has re-sorted SQLite's entries into this tree's own
+/// order. The declaration is a different question from the storage, and the
+/// planner asks the catalog - so a catalog that repeats the declaration is
+/// telling the planner about a tree that does not exist.
+///
+/// It drew three conclusions from it and every one was inverted (task-1855):
+///
+/// - the range bounds, emitted in the index's order, so `WHERE c >= 10` became
+///   `(-inf, 10]` and answered one row of three - a silent wrong answer on an
+///   ordinary `SELECT`;
+/// - whether an ordering is already provided, so `ORDER BY c` came back
+///   descending with no sort;
+/// - which direction to walk, so a reverse scan was chosen where a forward one
+///   was needed.
+///
+/// task-1849 closed this for an *imported* index by dropping it at the door;
+/// `CREATE INDEX ic ON t(c DESC)` built one anyway. Saying "ascending" here is
+/// what makes the two halves the same answer, and it makes such an index
+/// **usable** rather than absent: an ascending tree serves `ORDER BY c DESC`
+/// by walking backwards, which the planner already asks for when the term's
+/// direction and the key's disagree.
+///
+/// Nothing observable is lost. The `CREATE INDEX ... DESC` text is stored and
+/// returned by `sqlite_schema` exactly as written, and this engine's
+/// `index_info`/`index_xinfo` do not report a direction column at all. The one
+/// thing the declaration would still be worth is a tree that really is stored
+/// descending, and that is a format change - the key encoding, the leaf
+/// comparisons and every scan - for whichever phase decides to pay for it.
+///
+/// @param index - the index whose key columns are being described
+fn stored_ascending(index: &mut IndexInfo) {
+    for column in &mut index.columns {
+        column.descending = false;
+    }
 }
 
 /// Builds a view's entry in the binder's table list.

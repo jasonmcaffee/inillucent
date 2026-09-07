@@ -100,7 +100,8 @@ mod json {
 
         /// Returns the value as a `usize`, for a number.
         pub fn count(&self) -> Option<usize> {
-            self.integer().and_then(|number| usize::try_from(number).ok())
+            self.integer()
+                .and_then(|number| usize::try_from(number).ok())
         }
 
         /// Returns the value as a `bool`.
@@ -218,8 +219,11 @@ mod json {
                         'b' => out.push('\u{8}'),
                         'f' => out.push('\u{c}'),
                         'u' => {
-                            let hex: String =
-                                text.get(*at..at.saturating_add(4)).unwrap_or_default().iter().collect();
+                            let hex: String = text
+                                .get(*at..at.saturating_add(4))
+                                .unwrap_or_default()
+                                .iter()
+                                .collect();
                             let code = u32::from_str_radix(&hex, 16)
                                 .map_err(|_| format!("`\\u{hex}` is not a code point"))?;
                             out.push(char::from_u32(code).unwrap_or('\u{fffd}'));
@@ -374,7 +378,9 @@ fn shown(value: &Value) -> String {
 /// @param wrong - where to record a mismatch
 fn check_success(step: &Json, outcome: &Rows, wrong: &mut Vec<String>) {
     if let Some(status) = step.get("status").and_then(Json::text) {
-        wrong.push(format!("expected it to fail with `{status}` and it succeeded"));
+        wrong.push(format!(
+            "expected it to fail with `{status}` and it succeeded"
+        ));
         return;
     }
     if let Some(columns) = step.get("columns") {
@@ -464,7 +470,9 @@ fn check_success(step: &Json, outcome: &Rows, wrong: &mut Vec<String>) {
 /// @param wrong - where to record a mismatch
 fn check_failure(step: &Json, failure: &inillucent_driver::Error, wrong: &mut Vec<String>) {
     let Some(status) = step.get("status").and_then(Json::text) else {
-        wrong.push(format!("it was expected to succeed and it failed: {failure}"));
+        wrong.push(format!(
+            "it was expected to succeed and it failed: {failure}"
+        ));
         return;
     };
     if failure.status.name() != status {
@@ -514,13 +522,34 @@ fn the_conformance_suite_passes() {
         let name = case.get("name").and_then(Json::text).unwrap_or("(unnamed)");
         let file = scratch(name);
         let database = Database::open(&file).expect("the scratch database opens");
-        let connection = database.connect();
+        // **A case may ask to be run a connection per call**, which is the shape
+        // a driver in another language is forced into: `Connection` borrows the
+        // `Database`, so a garbage-collected caller - or a C handle - keeps the
+        // database and connects per call. Every one of those is a new session
+        // unless the session number is carried across, and a session is what
+        // `temp.`, `ATTACH` and the connection pragmas are scoped to. Running
+        // such a case on one long-lived connection would pass without testing
+        // anything (task-1848).
+        let per_call = case
+            .get("connection")
+            .and_then(Json::text)
+            .is_some_and(|how| how == "per_call");
+        let session = database.connect().session();
+        let hold = (!per_call).then(|| database.connect_as(session));
         let mut wrong: Vec<String> = Vec::new();
 
         for statement in case.get("setup").map(Json::items).unwrap_or_default() {
             let Some(sql) = statement.text() else {
                 wrong.push("a setup statement is not a string".to_owned());
                 continue;
+            };
+            let held;
+            let connection = match &hold {
+                Some(open) => open,
+                None => {
+                    held = database.connect_as(session);
+                    &held
+                }
             };
             if let Err(why) = connection.query(sql, &[], usize::MAX) {
                 wrong.push(format!("the setup statement `{sql}` was refused: {why}"));
@@ -540,8 +569,19 @@ fn the_conformance_suite_passes() {
                         Err(why) => wrong.push(format!("`{sql}`: {why}")),
                     }
                 }
-                let limit = step.get("limit").and_then(Json::count).unwrap_or(usize::MAX);
+                let limit = step
+                    .get("limit")
+                    .and_then(Json::count)
+                    .unwrap_or(usize::MAX);
                 let mut said: Vec<String> = Vec::new();
+                let held;
+                let connection = match &hold {
+                    Some(open) => open,
+                    None => {
+                        held = database.connect_as(session);
+                        &held
+                    }
+                };
                 match connection.query(sql, &params, limit) {
                     Ok(outcome) => check_success(step, &outcome, &mut said),
                     Err(failure) => check_failure(step, &failure, &mut said),
@@ -553,7 +593,7 @@ fn the_conformance_suite_passes() {
             }
         }
 
-        drop(connection);
+        drop(hold);
         drop(database);
         let _ = std::fs::remove_file(&file);
         for problem in wrong {
@@ -580,10 +620,8 @@ mod reader_tests {
     /// The reader handles the shapes the suite uses.
     #[test]
     fn it_reads_the_shapes_the_suite_uses() {
-        let document = parse(
-            r#"{"a": [1, -2.5, true, false, null, "x\ny"], "b": {"c": "héllo"}}"#,
-        )
-        .expect("reads");
+        let document = parse(r#"{"a": [1, -2.5, true, false, null, "x\ny"], "b": {"c": "héllo"}}"#)
+            .expect("reads");
         let list = document.get("a").expect("a").items().to_vec();
         assert_eq!(list.len(), 6);
         assert_eq!(list.first().and_then(Json::integer), Some(1));
@@ -592,7 +630,10 @@ mod reader_tests {
         assert_eq!(list.get(4), Some(&Json::Null));
         assert_eq!(list.get(5).and_then(Json::text), Some("x\ny"));
         assert_eq!(
-            document.get("b").and_then(|b| b.get("c")).and_then(Json::text),
+            document
+                .get("b")
+                .and_then(|b| b.get("c"))
+                .and_then(Json::text),
             Some("héllo")
         );
     }

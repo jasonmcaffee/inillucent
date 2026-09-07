@@ -1011,6 +1011,14 @@ fn two_different_windows_in_one_statement_are_both_computed() {
 /// write involved. It was found by the window sweep, whose inner query is
 /// `SELECT score, id ... ORDER BY score` - a projection the descending index
 /// covers, which is what made the planner reach for it.
+///
+/// **Since task-1856 this grades the index rather than its absence.** task-1849
+/// closed it by dropping a descending index at the door, so from then until now
+/// the queries below were answered off the table and the index they are named
+/// after was not in the file at all. `members_score` is imported now, and
+/// `the_import_keeps_a_descending_index_and_answers_over_it` asserts that it is
+/// - so if it were ever dropped again, that test fails and these queries go
+/// back to proving nothing.
 #[test]
 fn an_order_by_over_a_descending_index_is_not_reversed() {
     let Some(mut pair) = pair("descorder") else {
@@ -1049,6 +1057,940 @@ fn an_order_by_over_a_descending_index_is_not_reversed() {
         "an ordering over a descending index came back wrong:\n{}",
         failures.join("\n\n")
     );
+}
+
+/// A descending index is imported, and answers the same as one `CREATE INDEX`
+/// built.
+///
+/// **The two halves of task-1855, in one test, because the ticket is that they
+/// disagreed.** An imported `DESC` index was dropped and named in `skipped`; a
+/// created one was built and the catalog then lied about it, so the planner
+/// inverted its range bounds and `WHERE c >= 10` answered one row of three.
+/// Both now say the same thing: the tree is ascending and the catalog says
+/// ascending, and the declaration survives only in the `sqlite_schema` text.
+///
+/// The three conclusions are graded apart, because a fix for one is not a fix
+/// for the others: the **bounds** (four comparisons, over nine rows so that an
+/// inverted bound cannot select the right count by coincidence), the
+/// **ordering** the index is credited with providing, and the **direction** the
+/// walk goes in.
+#[test]
+fn the_import_keeps_a_descending_index_and_answers_over_it() {
+    let Some(program) = oracle_path() else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+    let directory = scratch("descimport");
+    let path = directory.join("ladder.db");
+    let mut oracle = Driver::start("sqlite", &program).expect("the oracle starts");
+    oracle
+        .send(&Op::Open(path.to_string_lossy().into_owned()))
+        .expect("the oracle opens the fixture");
+    for sql in [
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, c INTEGER)",
+        "CREATE INDEX ic ON t (c DESC)",
+        "INSERT INTO t VALUES (1,10),(2,20),(3,30),(4,40),(5,50),(6,60),(7,70),(8,80),(9,90)",
+    ] {
+        let observed = oracle
+            .send(&Op::Exec(sql.to_string()))
+            .expect("the exec runs");
+        assert!(
+            observed.ok,
+            "the fixture did not build: {sql}: {}",
+            observed.message
+        );
+    }
+    let engine = ImportedDatabase::import(path, 4_096)
+        .unwrap_or_else(|error| panic!("the fixture did not import: {:?}", error.detail()));
+    // **Named, not counted.** The index used to be reported here as
+    // "ic (a descending index)", which is what made every query below answer
+    // off the table and say nothing about the index.
+    let skipped = engine.skipped().to_vec();
+    assert!(
+        !skipped.iter().any(|name| name.contains("ic")),
+        "the descending index was skipped by the import: {skipped:?}"
+    );
+    let mut pair = Pair {
+        engine,
+        oracle,
+        _directory: directory,
+    };
+
+    let mut failures = Vec::new();
+    for sql in QUESTIONS_A_DESCENDING_INDEX_ANSWERS {
+        compare(&mut pair, sql, &mut failures);
+    }
+    assert!(
+        failures.is_empty(),
+        "an imported descending index answered differently from SQLite:\n{}",
+        failures.join("\n\n")
+    );
+
+    // The created half, over the same rows and the same questions. A second
+    // fixture rather than a second index on the first, so the planner is not
+    // choosing between two candidates for the same column - which would let one
+    // of them be wrong and never be read.
+    let Some(mut built) = created_descending_pair() else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+    let mut failures = Vec::new();
+    for sql in QUESTIONS_A_DESCENDING_INDEX_ANSWERS {
+        compare(&mut built, sql, &mut failures);
+    }
+    assert!(
+        failures.is_empty(),
+        "a created descending index answered differently from SQLite:\n{}",
+        failures.join("\n\n")
+    );
+}
+
+/// The questions asked of a descending index, one group per conclusion the
+/// planner draws from a key column's direction.
+///
+/// The counts grade the **bounds** on their own, being direction-blind. The
+/// orderings grade whether the index is credited with providing one, and which
+/// way the walk goes; every one of them is total, so a tie cannot report a
+/// difference that is not one.
+const QUESTIONS_A_DESCENDING_INDEX_ANSWERS: &[&str] = &[
+    "SELECT count(*) FROM t WHERE c >= 10",
+    "SELECT count(*) FROM t WHERE c > 40",
+    "SELECT count(*) FROM t WHERE c <= 30",
+    "SELECT count(*) FROM t WHERE c < 90",
+    "SELECT count(*) FROM t WHERE c BETWEEN 25 AND 75",
+    "SELECT c FROM t WHERE c >= 10 ORDER BY c",
+    "SELECT c FROM t WHERE c > 40 AND c <= 70 ORDER BY c",
+    "SELECT c FROM t ORDER BY c",
+    "SELECT c FROM t ORDER BY c DESC",
+    "SELECT c FROM t WHERE c >= 30 ORDER BY c DESC",
+    "SELECT c, id FROM t WHERE c > 20 ORDER BY c LIMIT 3",
+    "SELECT c, id FROM t WHERE c > 20 ORDER BY c DESC LIMIT 3",
+];
+
+/// Builds the same nine rows with the descending index made by `CREATE INDEX`
+/// on this engine rather than imported.
+///
+/// The oracle still builds and holds the fixture - it is the reference - but
+/// the index the new engine plans over is one its own DDL and bulk builder
+/// produced, which is the half `CREATE INDEX ... DESC` broke.
+fn created_descending_pair() -> Option<Pair> {
+    let program = oracle_path()?;
+    let directory = scratch("desccreated");
+    let path = directory.join("ladder.db");
+    let mut oracle = Driver::start("sqlite", &program).expect("the oracle starts");
+    oracle
+        .send(&Op::Open(path.to_string_lossy().into_owned()))
+        .expect("the oracle opens the fixture");
+    for sql in [
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, c INTEGER)",
+        "INSERT INTO t VALUES (1,10),(2,20),(3,30),(4,40),(5,50),(6,60),(7,70),(8,80),(9,90)",
+    ] {
+        let observed = oracle
+            .send(&Op::Exec(sql.to_string()))
+            .expect("the exec runs");
+        assert!(
+            observed.ok,
+            "the fixture did not build: {sql}: {}",
+            observed.message
+        );
+    }
+    let engine = ImportedDatabase::import(path, 4_096)
+        .unwrap_or_else(|error| panic!("the fixture did not import: {:?}", error.detail()));
+    let mut pair = Pair {
+        engine,
+        oracle,
+        _directory: directory,
+    };
+    let (reference, ours) = apply(&mut pair, "CREATE INDEX ic ON t (c DESC)");
+    assert!(
+        reference.is_none() && ours.is_none(),
+        "CREATE INDEX ... DESC was refused: sqlite {reference:?}, ours {ours:?}"
+    );
+    Some(pair)
+}
+
+/// A constraint's own `ON CONFLICT` clause decides which arm runs.
+///
+/// **task-1853, and every one of its cases is a refusal where SQLite writes the
+/// row** - the direction that is easy to miss, because a wrong answer looks
+/// like a working constraint. `a TEXT UNIQUE ON CONFLICT IGNORE` means the
+/// clause is on the *constraint*, so a plain `INSERT` that collides on `a`
+/// skips that row and keeps the rest; this engine read only the statement's own
+/// `OR` clause and raised, so a four-row insert wrote nothing.
+///
+/// The precedence is graded too, because getting the arm right and the order
+/// wrong is the same bug wearing a hat: a statement's `OR` beats the
+/// constraint's clause, an `ON CONFLICT ... DO UPDATE` beats both.
+///
+/// The rowid alias is here as its own case because its clause lives somewhere
+/// else entirely - on the *column*, since there is no index to hang it on - and
+/// the write path was reading the `NOT NULL`'s clause for it, which answers a
+/// question about a constraint the table need not even declare.
+#[test]
+fn a_constraints_own_conflict_clause_decides_the_arm() {
+    let Some(mut pair) = pair("constraintconflict") else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+
+    // 1. `ON CONFLICT IGNORE` on a secondary UNIQUE: the ticket's first repro.
+    let mut failures = walk(
+        &mut pair,
+        &[
+            "CREATE TABLE ci(id INTEGER PRIMARY KEY, a TEXT UNIQUE ON CONFLICT IGNORE)",
+            "INSERT INTO ci VALUES (30,'z')",
+            "INSERT INTO ci VALUES (10,'p'),(20,'q'),(40,'z'),(50,'r')",
+            "UPDATE ci SET a = 'z' WHERE id = 50",
+        ],
+        &[
+            "SELECT id, a FROM ci ORDER BY id",
+            "SELECT a FROM ci ORDER BY a",
+            "SELECT count(*) FROM ci",
+        ],
+    );
+
+    // 2. `ON CONFLICT REPLACE` on the same shape, which deletes the row in the
+    //    way rather than skipping the new one.
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "CREATE TABLE cr(id INTEGER PRIMARY KEY, a TEXT UNIQUE ON CONFLICT REPLACE)",
+            "INSERT INTO cr VALUES (30,'z')",
+            "INSERT INTO cr VALUES (10,'p'),(20,'q'),(40,'z'),(50,'r')",
+            "UPDATE cr SET a = 'p' WHERE id = 50",
+        ],
+        &[
+            "SELECT id, a FROM cr ORDER BY id",
+            "SELECT a FROM cr ORDER BY a",
+            "SELECT count(*) FROM cr",
+        ],
+    ));
+
+    // 3. The rowid alias, whose clause is on the column: written on the column
+    //    and written as a table constraint, which makes no index to carry it.
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "CREATE TABLE pk(id INTEGER PRIMARY KEY ON CONFLICT IGNORE, a TEXT)",
+            "INSERT INTO pk VALUES (1,'p'),(2,'q')",
+            "INSERT INTO pk VALUES (3,'r'),(1,'zz'),(4,'s')",
+        ],
+        &[
+            "SELECT id, a FROM pk ORDER BY id",
+            "SELECT count(*) FROM pk",
+        ],
+    ));
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "CREATE TABLE pr(id INTEGER, a TEXT, PRIMARY KEY(id) ON CONFLICT REPLACE)",
+            "INSERT INTO pr VALUES (1,'p'),(2,'q')",
+            "INSERT INTO pr VALUES (3,'r'),(1,'zz'),(4,'s')",
+        ],
+        &[
+            "SELECT id, a FROM pr ORDER BY id",
+            "SELECT count(*) FROM pr",
+        ],
+    ));
+
+    // 4. Precedence: the statement's OR beats the constraint's clause, and an
+    //    upsert's DO UPDATE beats both.
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "CREATE TABLE pc(id INTEGER PRIMARY KEY, a TEXT UNIQUE ON CONFLICT IGNORE)",
+            "INSERT INTO pc VALUES (1,'p')",
+            "INSERT OR REPLACE INTO pc VALUES (2,'p')",
+            "INSERT INTO pc VALUES (3,'p') ON CONFLICT(a) DO UPDATE SET id = id + 100",
+        ],
+        &[
+            "SELECT id, a FROM pc ORDER BY id",
+            "SELECT a FROM pc ORDER BY a",
+        ],
+    ));
+
+    // 5. `REPLACE` deleting a row on each of two different unique indexes. The
+    //    insert path asked once and then wrote, so the second collision was
+    //    left standing; the update path had always looped.
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "CREATE TABLE two(id INTEGER PRIMARY KEY, a TEXT UNIQUE, b TEXT UNIQUE)",
+            "INSERT INTO two VALUES (1,'p','P'),(2,'q','Q')",
+            "INSERT OR REPLACE INTO two VALUES (3,'p','Q')",
+        ],
+        &[
+            "SELECT id, a, b FROM two ORDER BY id",
+            "SELECT a FROM two ORDER BY a",
+            "SELECT b FROM two ORDER BY b",
+        ],
+    ));
+
+    assert!(
+        failures.is_empty(),
+        "a constraint's own conflict clause was not honoured:\n{}",
+        failures.join("\n\n")
+    );
+}
+
+/// A table-level `CHECK` takes an `ON CONFLICT` clause, and a column-level one
+/// does not.
+///
+/// **The widest of task-1853's four, because it was a parse error rather than a
+/// wrong answer**: `CONSTRAINT small CHECK(b < 9) ON CONFLICT FAIL` made the
+/// whole `CREATE TABLE` fail, and every statement after it said `no such
+/// table`. The table's `CREATE` text is stored and re-parsed on every open, so
+/// a grammar that cannot read it back is a database that cannot be opened.
+///
+/// Both halves are graded, because accepting *more* than the reference is a
+/// difference too: SQLite's `ccons` has no `onconf`, so the same clause on a
+/// column-level `CHECK` is a syntax error there and must be one here.
+///
+/// And the clause is **not acted on**, which is also measured rather than
+/// assumed: SQLite parses `onconf` on a table constraint and never reads it, so
+/// `ON CONFLICT FAIL` aborts like anything else and `ON CONFLICT IGNORE` does
+/// not skip the row.
+#[test]
+fn a_table_level_check_takes_a_conflict_clause_and_ignores_it() {
+    let Some(mut pair) = pair("checkconflict") else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+
+    let mut failures = walk(
+        &mut pair,
+        &[
+            "CREATE TABLE cf(a TEXT, b INTEGER, CONSTRAINT small CHECK(b < 9) ON CONFLICT FAIL)",
+            "INSERT INTO cf VALUES ('x',1)",
+            // Ignored, so this aborts and keeps none of the three.
+            "INSERT INTO cf VALUES ('y',2),('z',20),('w',3)",
+            "SELECT count(*) FROM cf",
+        ],
+        &[
+            "SELECT a, b FROM cf ORDER BY rowid",
+            "SELECT sql FROM sqlite_master WHERE name = 'cf'",
+        ],
+    );
+
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "CREATE TABLE cg(a TEXT, b INTEGER, CHECK(b < 9) ON CONFLICT IGNORE)",
+            "INSERT INTO cg VALUES ('x',1)",
+            "INSERT INTO cg VALUES ('y',2),('z',20),('w',3)",
+        ],
+        &[
+            "SELECT a, b FROM cg ORDER BY rowid",
+            "SELECT count(*) FROM cg",
+        ],
+    ));
+
+    // The column-level form, which both engines must refuse. Graded on *whether*
+    // each refused rather than on the wording: every parse error this engine
+    // reports carries what it expected next and SQLite's does not, which is a
+    // difference in every message of this class and not about this clause.
+    let (reference, ours) = apply(
+        &mut pair,
+        "CREATE TABLE ch(a TEXT, b INTEGER CHECK(b < 9) ON CONFLICT IGNORE)",
+    );
+    if reference.is_none() || ours.is_none() {
+        failures.push(format!(
+            "a column-level CHECK's conflict clause was not refused by both:              sqlite {reference:?}, ours {ours:?}"
+        ));
+    }
+    for sql in ["SELECT count(*) FROM sqlite_master WHERE name = 'ch'"] {
+        compare(&mut pair, sql, &mut failures);
+    }
+
+    assert!(
+        failures.is_empty(),
+        "a CHECK's conflict clause was read wrongly:\n{}",
+        failures.join("\n\n")
+    );
+}
+
+/// `REPLACE` stands a column's `DEFAULT` in for a NULL in a `NOT NULL` column.
+///
+/// task-1853's fourth: SQLite's rule for a `NOT NULL` violation resolved as
+/// `REPLACE` is to substitute the column's default, and to fall back to `ABORT`
+/// only when there is none. This engine raised in both cases, so
+/// `UPDATE OR REPLACE t SET c = NULL` was refused where SQLite stores `'d'`.
+///
+/// The fallback is graded beside it, because a substitution that fires when
+/// there is nothing to substitute would store a NULL in a `NOT NULL` column -
+/// which is worse than the refusal it replaced. `DEFAULT NULL` is the same case
+/// wearing a default, and is graded too.
+#[test]
+fn or_replace_stands_a_default_in_for_a_null() {
+    let Some(mut pair) = pair("replacedefault") else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+
+    let mut failures = walk(
+        &mut pair,
+        &[
+            "CREATE TABLE rd(a TEXT UNIQUE, c TEXT NOT NULL DEFAULT 'd')",
+            "INSERT INTO rd VALUES ('x','p'),('y','q')",
+            // The ticket's repro: the update collides on `a` *and* nulls a
+            // NOT NULL column, so both rules apply to one statement.
+            "UPDATE OR REPLACE rd SET a = 'x', c = NULL WHERE a = 'y'",
+        ],
+        &["SELECT a, c FROM rd ORDER BY a", "SELECT count(*) FROM rd"],
+    );
+
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "CREATE TABLE rn(a TEXT UNIQUE, c TEXT NOT NULL)",
+            "INSERT INTO rn VALUES ('x','p'),('y','q')",
+            // No default: ABORT, and task-1850's undo puts the row back.
+            "UPDATE OR REPLACE rn SET a = 'x', c = NULL WHERE a = 'y'",
+        ],
+        &["SELECT a, c FROM rn ORDER BY a", "SELECT count(*) FROM rn"],
+    ));
+
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "CREATE TABLE ri(a TEXT, c TEXT NOT NULL DEFAULT 'd', e INTEGER NOT NULL DEFAULT (3+4))",
+            // The insert path, and a default that is an expression rather than
+            // a literal - so a substitution that stored the text of it fails.
+            "INSERT OR REPLACE INTO ri VALUES ('x',NULL,NULL)",
+            // Two columns in one statement, both filled.
+            "INSERT INTO ri VALUES ('y','p',1)",
+            "UPDATE OR REPLACE ri SET c = NULL, e = NULL WHERE a = 'y'",
+            // Without REPLACE it is still a refusal.
+            "INSERT INTO ri VALUES ('z',NULL,2)",
+        ],
+        &["SELECT a, c, e FROM ri ORDER BY a", "SELECT count(*) FROM ri"],
+    ));
+
+    failures.extend(walk(
+        &mut pair,
+        &[
+            // The clause on the constraint rather than on the statement.
+            "CREATE TABLE rc(a TEXT, c TEXT NOT NULL ON CONFLICT REPLACE DEFAULT 'd')",
+            "INSERT INTO rc VALUES ('x',NULL)",
+            "CREATE TABLE rz(a TEXT, c TEXT NOT NULL ON CONFLICT REPLACE)",
+            "INSERT INTO rz VALUES ('x',NULL)",
+            // A default that does not satisfy the constraint is no default.
+            "CREATE TABLE rq(a TEXT, c TEXT NOT NULL DEFAULT NULL)",
+            "INSERT OR REPLACE INTO rq VALUES ('x',NULL)",
+        ],
+        &[
+            "SELECT a, c FROM rc ORDER BY a",
+            "SELECT count(*) FROM rz",
+            "SELECT count(*) FROM rq",
+        ],
+    ));
+
+    assert!(
+        failures.is_empty(),
+        "REPLACE did not substitute a default the way SQLite does:\n{}",
+        failures.join("\n\n")
+    );
+}
+
+/// An `ON CONFLICT ... DO NOTHING` does not silence a `CHECK` or a `NOT NULL`.
+///
+/// **Found while measuring task-1853, and it is a constraint silently not
+/// enforced.** The upsert clause is about a *key* collision on a named target;
+/// a missing value and a false predicate are neither, and SQLite raises for
+/// both. The write path was reading the upsert's arm for them, so
+/// `INSERT INTO t VALUES (2,20) ON CONFLICT DO NOTHING` on
+/// `b INTEGER CHECK(b < 9)` skipped the row and reported success - which reads,
+/// from the application's side, exactly like a row that collided.
+///
+/// A plain `INSERT OR IGNORE` still skips both, which is the case that must not
+/// move: the statement's own `OR` algorithm does beat the constraint's clause.
+#[test]
+fn do_nothing_does_not_silence_a_check_or_a_not_null() {
+    let Some(mut pair) = pair("donothing") else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+
+    let mut failures = walk(
+        &mut pair,
+        &[
+            "CREATE TABLE dn(id INTEGER PRIMARY KEY, b INTEGER CHECK(b < 9))",
+            "INSERT INTO dn VALUES (1,1)",
+            "INSERT INTO dn VALUES (2,20) ON CONFLICT DO NOTHING",
+            "INSERT INTO dn VALUES (1,20) ON CONFLICT(id) DO UPDATE SET b = 5",
+            // The one that must go on skipping.
+            "INSERT OR IGNORE INTO dn VALUES (3,20),(4,3)",
+            // And a key collision, which DO NOTHING is actually about.
+            "INSERT INTO dn VALUES (1,7) ON CONFLICT DO NOTHING",
+        ],
+        &[
+            "SELECT id, b FROM dn ORDER BY id",
+            "SELECT count(*) FROM dn",
+        ],
+    );
+
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "CREATE TABLE dm(id INTEGER PRIMARY KEY, b INTEGER NOT NULL)",
+            "INSERT INTO dm VALUES (1,1)",
+            "INSERT INTO dm VALUES (2,NULL) ON CONFLICT DO NOTHING",
+            "INSERT OR IGNORE INTO dm VALUES (3,NULL),(4,4)",
+        ],
+        &[
+            "SELECT id, b FROM dm ORDER BY id",
+            "SELECT count(*) FROM dm",
+        ],
+    ));
+
+    assert!(
+        failures.is_empty(),
+        "an upsert's DO NOTHING silenced a constraint it does not govern:\n{}",
+        failures.join("\n\n")
+    );
+}
+
+/// `changes()`, `total_changes()` and `last_insert_rowid()` answer what SQLite
+/// answers.
+///
+/// **task-1854, and it was a silent wrong answer on the *success* path.** The
+/// three exist as scalar functions in the dialect and the new engine answered
+/// every one of them `0`, for every statement, for ever - so an application
+/// reading `changes()` from SQL to decide whether an `UPDATE ... WHERE` matched
+/// anything, which is the ordinary way to do an optimistic update, concluded
+/// that nothing matched.
+///
+/// The C API was already right, which is what made it invisible: it reads the
+/// connection, and only the SQL scalars were unwired.
+///
+/// The three are not one question, and the script grades what separates them:
+///
+/// - a **trigger's** rows are in `total_changes()` and not in `changes()`;
+/// - a `SELECT`, a DDL and a transaction statement move none of them, and a
+///   `DELETE` that matched nothing sets `changes()` to zero rather than leaving
+///   the previous statement's number there;
+/// - `total_changes()` is never decremented, so a `ROLLBACK` does not put it
+///   back;
+/// - `last_insert_rowid()` is the last rowid *attempted*.
+#[test]
+fn the_three_connection_scalars_answer_what_sqlite_answers() {
+    let Some(mut pair) = pair("scalars") else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+    level_the_counters(&mut pair);
+
+    let probes = &[
+        COUNTERS,
+        // Read through an expression too, so a fold that only fires on a bare
+        // call in a result column would not hide a wrong value.
+        "SELECT changes() + total_changes() * 0",
+    ];
+
+    let mut failures = walk(
+        &mut pair,
+        &[
+            "CREATE TABLE c(id INTEGER PRIMARY KEY, a TEXT UNIQUE)",
+            "INSERT INTO c VALUES (1,'p'),(2,'q'),(3,'r')",
+            // A SELECT moves none of them.
+            "SELECT count(*) FROM c",
+            // A DELETE that matched nothing still sets changes() to zero.
+            "DELETE FROM c WHERE id > 100",
+            // An allocated rowid, which is the value last_insert_rowid() is for.
+            "INSERT INTO c(a) VALUES ('s')",
+            "UPDATE c SET a = a || '!' WHERE id <= 2",
+        ],
+        probes,
+    );
+
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "CREATE TABLE g(id INTEGER PRIMARY KEY, a TEXT)",
+            "CREATE TABLE h(id INTEGER PRIMARY KEY, b TEXT)",
+            "CREATE TRIGGER gt AFTER INSERT ON g BEGIN INSERT INTO h VALUES (NEW.id, NEW.a); END",
+            // Two rows in, two more written by the trigger: changes() is 2 and
+            // total_changes() moves by 4.
+            "INSERT INTO g VALUES (60,'m'),(61,'n')",
+            "DELETE FROM g WHERE id = 60",
+        ],
+        probes,
+    ));
+
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "CREATE TABLE r(id INTEGER PRIMARY KEY, a TEXT)",
+            "INSERT INTO r VALUES (1,'p')",
+            "BEGIN",
+            "INSERT INTO r VALUES (70,'w')",
+            // A rollback does not put total_changes() back, and does not put
+            // last_insert_rowid() back either.
+            "ROLLBACK",
+            "SELECT count(*) FROM r",
+        ],
+        probes,
+    ));
+
+    assert!(
+        failures.is_empty(),
+        "a connection scalar answered differently from SQLite:\n{}",
+        failures.join("\n\n")
+    );
+}
+
+/// The counters after a statement that failed partway.
+///
+/// **The arithmetic that separates `ABORT` from `FAIL`.** SQLite undoes an
+/// `ABORT`, so the rows it wrote never happened and neither counter moves;
+/// `OR FAIL` keeps them, so `changes()` is the number it kept and
+/// `total_changes()` moves by the same. This engine answered `0 | 0` for both,
+/// because the `Changes` a write builds is lost the moment it raises.
+///
+/// `last_insert_rowid()` is the one that is *not* put back. SQLite documents it
+/// as the last rowid attempted, and it measures out that way: an `INSERT` of
+/// two rows that fails on the second answers the first row's rowid, with the
+/// table holding neither of them.
+#[test]
+fn the_counters_after_a_failed_statement_are_sqlites() {
+    let Some(mut pair) = pair("failedcounters") else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+    level_the_counters(&mut pair);
+
+    let probes = &[COUNTERS, "SELECT id FROM f ORDER BY id"];
+
+    // The ticket's own two rows, in order: three inserts, then an ABORT that
+    // writes one row and puts it back, then an OR FAIL that keeps one.
+    let mut failures = walk(
+        &mut pair,
+        &[
+            "CREATE TABLE f(id INTEGER PRIMARY KEY, a TEXT)",
+            "INSERT INTO f VALUES (1,'p'),(2,'q'),(12,'r')",
+            "UPDATE f SET id = id + 10 WHERE id <= 2",
+            "UPDATE OR FAIL f SET id = id + 10 WHERE id <= 2",
+        ],
+        probes,
+    );
+
+    failures.extend(walk(
+        &mut pair,
+        &[
+            "CREATE TABLE x(id INTEGER PRIMARY KEY, a TEXT UNIQUE)",
+            "INSERT INTO x VALUES (5,'p')",
+            // The second row collides, the first is undone - and the rowid the
+            // first was written under is what last_insert_rowid() answers.
+            "INSERT INTO x VALUES (7,'r'),(8,'p')",
+        ],
+        &[
+            COUNTERS,
+            "SELECT id, a FROM x ORDER BY id",
+            "SELECT a FROM x ORDER BY a",
+        ],
+    ));
+
+    assert!(
+        failures.is_empty(),
+        "the counters after a failed statement differ from SQLite:\n{}",
+        failures.join("\n\n")
+    );
+}
+
+/// `random()` answers a different number every time it is called.
+///
+/// **Found while wiring task-1854's other three, and it is the same root
+/// cause**: the new engine called the function library with a default context,
+/// and the default seed is zero - so `random()` answered one constant,
+/// `-2152535657050944081`, in every statement of every connection since the
+/// engine existed. One number is a legal answer to one call and a wrong answer
+/// to two, and an application seeding a token, a sample or a shuffle from it
+/// got a constant with no way to notice.
+///
+/// It is graded as a *property* rather than against the oracle, because the
+/// point of it is that the two engines do **not** agree: a sequence that
+/// matched SQLite's would be a worse bug than a constant. Three properties, one
+/// per way the constant showed:
+///
+/// - two calls in one statement differ, so each call site has its own stream;
+/// - one call site evaluated per row differs per row;
+/// - two statements differ, so the stream is not restarted.
+#[test]
+fn random_is_not_one_number() {
+    let Some(mut pair) = pair("random") else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+    let two = ours_answer(&mut pair, "SELECT random() = random()");
+    assert_eq!(
+        two,
+        Some(OwnedDatum::Int(0)),
+        "two random() calls in one statement answered the same number"
+    );
+
+    apply(&mut pair, "CREATE TABLE rr(a INTEGER)");
+    apply(
+        &mut pair,
+        "INSERT INTO rr VALUES (1),(2),(3),(4),(5),(6),(7),(8)",
+    );
+    let distinct = ours_answer(&mut pair, "SELECT count(DISTINCT random()) FROM rr");
+    assert_eq!(
+        distinct,
+        Some(OwnedDatum::Int(8)),
+        "random() over eight rows did not answer eight different numbers"
+    );
+
+    let first = ours_answer(&mut pair, "SELECT random()");
+    let second = ours_answer(&mut pair, "SELECT random()");
+    assert_ne!(
+        first, second,
+        "two statements answered the same random(): {first:?}"
+    );
+    assert!(
+        first.is_some() && !matches!(first, Some(OwnedDatum::Null)),
+        "random() answered nothing at all"
+    );
+}
+
+/// The counter probe, with the cumulative one read as a *difference*.
+///
+/// **The two engines cannot agree on `total_changes()` in absolute terms, and
+/// that is the fixture rather than a defect.** The oracle got its rows by
+/// running the `INSERT`s; this engine got them by importing the file the oracle
+/// wrote, so it never ran a statement at all and its counter is zero where the
+/// reference's is five. Every statement after that moves both by the same
+/// amount, which is the claim worth grading - so the baseline is taken on each
+/// side and subtracted.
+///
+/// [`BASELINE`] is what puts the number where this can read it, and every
+/// script whose probes include this has to run it first.
+const COUNTERS: &str =
+    "SELECT changes(), total_changes() - (SELECT b FROM counter_base), last_insert_rowid()";
+
+/// Records each engine's own starting `total_changes()`, and levels the other
+/// two counters while it is there.
+///
+/// Run once per pair, **before** anything the case is about, because the
+/// fixture leaves the two engines in different states: the oracle ran five
+/// `INSERT`s and this engine imported the file they produced, so `changes()` is
+/// 1 against 0 and `last_insert_rowid()` is 5 against 0. The `INSERT` below is
+/// one row on each side, which puts all three where they can be compared - and
+/// leaves `counter_base` holding the difference [`COUNTERS`] subtracts.
+///
+/// @param pair - the two engines over the same data
+fn level_the_counters(pair: &mut Pair) {
+    for sql in [
+        "CREATE TABLE counter_base(b INTEGER)",
+        "INSERT INTO counter_base SELECT total_changes()",
+    ] {
+        let (reference, ours) = apply(pair, sql);
+        assert!(
+            reference.is_none() && ours.is_none(),
+            "the counter baseline did not take: sqlite {reference:?}, ours {ours:?}"
+        );
+    }
+}
+
+/// Runs one query against this engine and returns its first value.
+///
+/// For the properties that are about *this* engine rather than about agreeing
+/// with the reference - `random()` being different every time is the one, and a
+/// comparison against the oracle would be asking the two generators to produce
+/// the same stream, which is neither true nor wanted.
+///
+/// @param pair - the two engines over the same data
+/// @param sql - the query
+fn ours_answer(pair: &mut Pair, sql: &str) -> Option<OwnedDatum> {
+    let outcome = pair.engine.execute_any(sql, &Params::new()).ok()?;
+    outcome.rows.first().and_then(|row| row.first()).cloned()
+}
+
+/// `PRAGMA integrity_check` reports an index that disagrees with its table.
+///
+/// **task-1851: the detector that would have caught task-1849's write bug.**
+/// That ticket's defect - an `UPDATE` that violated a secondary `UNIQUE` index
+/// was performed silently - left a database `integrity_check` then declared
+/// healthy: index `u` held two entries under `'x'`,
+/// `SELECT count(*) FROM t WHERE a='x'` answered 2 from the index and 1 from
+/// the table, and the checker saw nothing. The write is closed; the detector is
+/// what this is.
+///
+/// **The damage is built by writing the index tree directly**, because no SQL
+/// statement can produce it any more - that is what task-1849 means - so
+/// `write_index_entry_unchecked` is the only way to put a database into the
+/// state the checker exists to find.
+///
+/// Three shapes, because they are three disagreements and a checker that finds
+/// one need not find the others:
+///
+/// - a second entry under a key the index already holds - `non-unique entry`;
+/// - a table row whose entry has been taken away - `row N missing`;
+/// - an entry naming a row the table does not have - `wrong # of entries`.
+#[test]
+fn integrity_check_reports_an_index_that_disagrees_with_its_table() {
+    let directory = scratch("integrity");
+    let path = directory.join("damaged.db");
+
+    // 1. Two entries under one key in a UNIQUE index. This is exactly the state
+    //    task-1849's `UPDATE t SET a='x' WHERE b=2` used to leave behind.
+    let mut engine =
+        ImportedDatabase::create(path.clone(), 32_768, 4_096).expect("a fresh database");
+    for sql in [
+        "CREATE TABLE t(a TEXT, b INTEGER)",
+        "CREATE UNIQUE INDEX u ON t(a)",
+        "INSERT INTO t VALUES ('x',1),('y',2)",
+    ] {
+        engine
+            .execute_any(sql, &Params::new())
+            .unwrap_or_else(|error| panic!("{sql}: {:?}", error.detail()));
+    }
+    assert_eq!(
+        integrity(&mut engine),
+        "ok",
+        "an undamaged database was reported as damaged"
+    );
+    // The entry the row with rowid 2 would have if its `a` were also 'x'.
+    engine
+        .write_index_entry_unchecked(
+            "u",
+            &[OwnedDatum::Text(b"x".to_vec()), OwnedDatum::Int(2)],
+            true,
+        )
+        .expect("the entry is written");
+    assert_eq!(
+        integrity(&mut engine),
+        "non-unique entry in index u",
+        "a duplicate entry in a UNIQUE index was not reported"
+    );
+    // And it is reported after a close and an open, so the damage is a state of
+    // the file rather than of this process.
+    engine.checkpoint().expect("the database checkpoints");
+    drop(engine);
+    let mut reopened = ImportedDatabase::open(path, 32_768, 4_096).expect("the file opens");
+    assert_eq!(
+        integrity(&mut reopened),
+        "non-unique entry in index u",
+        "the damage was not visible after a reopen"
+    );
+    drop(reopened);
+
+    // 2. A row whose index entry is gone.
+    let missing = directory.join("missing.db");
+    let mut engine = ImportedDatabase::create(missing, 32_768, 4_096).expect("a fresh database");
+    for sql in [
+        "CREATE TABLE m(a TEXT, b INTEGER)",
+        "CREATE INDEX mi ON m(a)",
+        "INSERT INTO m VALUES ('p',1),('q',2),('r',3)",
+    ] {
+        engine
+            .execute_any(sql, &Params::new())
+            .unwrap_or_else(|error| panic!("{sql}: {:?}", error.detail()));
+    }
+    assert_eq!(integrity(&mut engine), "ok");
+    engine
+        .write_index_entry_unchecked(
+            "mi",
+            &[OwnedDatum::Text(b"q".to_vec()), OwnedDatum::Int(2)],
+            false,
+        )
+        .expect("the entry is removed");
+    assert_eq!(
+        integrity(&mut engine),
+        "row 2 missing from index mi",
+        "a row with no index entry was not reported"
+    );
+    drop(engine);
+
+    // 3. An entry naming a row the table does not hold.
+    let dangling = directory.join("dangling.db");
+    let mut engine = ImportedDatabase::create(dangling, 32_768, 4_096).expect("a fresh database");
+    for sql in [
+        "CREATE TABLE d(a TEXT, b INTEGER)",
+        "CREATE INDEX di ON d(a)",
+        "INSERT INTO d VALUES ('p',1),('q',2)",
+    ] {
+        engine
+            .execute_any(sql, &Params::new())
+            .unwrap_or_else(|error| panic!("{sql}: {:?}", error.detail()));
+    }
+    assert_eq!(integrity(&mut engine), "ok");
+    engine
+        .write_index_entry_unchecked(
+            "di",
+            &[OwnedDatum::Text(b"z".to_vec()), OwnedDatum::Int(99)],
+            true,
+        )
+        .expect("the entry is written");
+    assert_eq!(
+        integrity(&mut engine),
+        "wrong # of entries in index di",
+        "an entry naming a row that is not there was not reported"
+    );
+}
+
+/// A healthy database is still `ok`, over every index shape the engine builds.
+///
+/// **The half that a false positive fails**, and it is the half worth having:
+/// a checker that reports damage on a sound database is worse than one that
+/// reports none, because it is the answer a person acts on. NULLs are the case
+/// to get wrong - SQL's rule is that every NULL is distinct, so two rows with
+/// NULL in a `UNIQUE` column are not a duplicate - and a partial index and an
+/// index on an expression are the two whose entry count is legitimately not the
+/// table's row count.
+///
+/// It is compared against the pinned oracle rather than asserted, so a checker
+/// that starts refusing something SQLite accepts fails here.
+#[test]
+fn a_sound_database_still_answers_ok() {
+    let Some(mut pair) = pair("integrityok") else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+    let mut failures = walk(
+        &mut pair,
+        &[
+            // Two NULLs in a UNIQUE column, which are not duplicates.
+            "CREATE TABLE n(a TEXT UNIQUE, b TEXT)",
+            "INSERT INTO n VALUES (NULL,'p'),(NULL,'q'),('z','r')",
+            // A partial index, whose entry count is not the row count.
+            "CREATE TABLE p(id INTEGER PRIMARY KEY, s TEXT)",
+            "INSERT INTO p VALUES (1,'a'),(2,NULL),(3,'c')",
+            "CREATE INDEX pt ON p(s) WHERE s IS NOT NULL",
+            // An index on an expression, whose keys are not columns.
+            "CREATE INDEX pe ON p(lower(s))",
+            // A compound index, and one over a WITHOUT ROWID table, whose rows
+            // are identified by their primary key rather than by a rowid.
+            "CREATE TABLE w(a TEXT, b TEXT, c TEXT, PRIMARY KEY(a,b)) WITHOUT ROWID",
+            "INSERT INTO w VALUES ('m','n','o'),('o','p','q')",
+            "CREATE INDEX wc ON w(c,a)",
+            // And writes over all of it, because an index the write path
+            // maintains wrongly is what the checker is for.
+            "UPDATE p SET s = 'd' WHERE id = 2",
+            "DELETE FROM w WHERE a = 'm'",
+            "INSERT INTO n VALUES (NULL,'s')",
+        ],
+        &["PRAGMA integrity_check", "PRAGMA quick_check"],
+    );
+
+    assert!(
+        failures.is_empty(),
+        "integrity_check disagreed with SQLite on a sound database:\n{}",
+        failures.join("\n\n")
+    );
+    let _ = &mut failures;
+}
+
+/// Returns what `PRAGMA integrity_check` answers.
+///
+/// @param engine - the database to ask
+fn integrity(engine: &mut ImportedDatabase) -> String {
+    let outcome = engine
+        .execute_any("PRAGMA integrity_check", &Params::new())
+        .expect("integrity_check runs");
+    match outcome.rows.first().and_then(|row| row.first()) {
+        Some(OwnedDatum::Text(text)) => String::from_utf8_lossy(text).into_owned(),
+        other => format!("{other:?}"),
+    }
 }
 
 /// Runs a script through both engines, grading every statement and every probe.

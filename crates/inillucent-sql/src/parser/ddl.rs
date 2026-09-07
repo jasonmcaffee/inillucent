@@ -348,7 +348,10 @@ impl Parser<'_> {
             self.expect(Punctuator::LeftParen)?;
             let expr = self.parse_expr()?;
             self.expect(Punctuator::RightParen)?;
-            return Ok(TableConstraint::Check(expr));
+            return Ok(TableConstraint::Check {
+                expr,
+                on_conflict: self.parse_on_conflict()?,
+            });
         }
         self.expect_keyword(Keyword::FOREIGN)?;
         self.expect_keyword(Keyword::KEY)?;
