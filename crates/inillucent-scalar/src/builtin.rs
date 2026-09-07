@@ -49,6 +49,9 @@ pub fn call_with(
     context: Context,
 ) -> Value<'static> {
     match func {
+        ScalarFunc::VectorDistanceCos => vector_pair(arguments, cosine_distance),
+        ScalarFunc::VectorDistanceL2 => vector_pair(arguments, euclidean_distance),
+        ScalarFunc::VectorDot => vector_pair(arguments, dot_product),
         ScalarFunc::Printf => crate::printf::format(arguments, encoding),
         ScalarFunc::OctetLength => octet_length(arguments.first()),
         ScalarFunc::Random => Value::Integer(scramble(context.seed) as i64),
@@ -875,4 +878,100 @@ mod tests {
             Value::Integer(0)
         );
     }
+}
+
+/// A vector, as this engine stores one: little-endian `f32` in a blob.
+///
+/// **The same bytes `inillucent_search` writes**, which is what makes a column
+/// of vectors and the retrieval store's own copies interchangeable. A blob
+/// whose length is not a multiple of four is not a vector; nor is text, an
+/// integer or a NULL, and each of those answers NULL rather than an error,
+/// because a distance is an expression and an expression that raised on a NULL
+/// would make `WHERE v IS NOT NULL AND vector_distance_cos(v, ?) < 0.2`
+/// impossible to write.
+///
+/// @param value - the argument
+fn vector_of(value: Option<&Value<'static>>) -> Option<Vec<f32>> {
+    let Some(Value::Blob(blob)) = value else {
+        return None;
+    };
+    let bytes = blob.raw();
+    if bytes.is_empty() || bytes.len() % 4 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4);
+    for chunk in bytes.chunks_exact(4) {
+        let mut raw = [0u8; 4];
+        raw.copy_from_slice(chunk);
+        out.push(f32::from_bits(u32::from_le_bytes(raw)));
+    }
+    Some(out)
+}
+
+/// Applies a two-vector measure, answering NULL when either side is not one.
+///
+/// Two vectors of different widths are **not** an error either: a table may
+/// hold vectors from two models, and a comparison between them has no answer
+/// rather than a wrong one.
+///
+/// @param arguments - the call's arguments
+/// @param measure - what to compute from the pair
+fn vector_pair(arguments: &[Value<'static>], measure: fn(&[f32], &[f32]) -> f64) -> Value<'static> {
+    let (Some(left), Some(right)) = (vector_of(arguments.first()), vector_of(arguments.get(1)))
+    else {
+        return Value::Null;
+    };
+    if left.len() != right.len() {
+        return Value::Null;
+    }
+    let answer = measure(&left, &right);
+    if answer.is_nan() {
+        return Value::Null;
+    }
+    Value::Real(answer)
+}
+
+/// Returns the cosine *distance*, `1 - cos(a, b)`, in `[0, 2]`.
+///
+/// A zero vector has no direction, so its cosine is undefined; that answers
+/// NULL through the NaN check above rather than pretending the distance is 1.
+fn cosine_distance(left: &[f32], right: &[f32]) -> f64 {
+    let mut dot = 0.0f64;
+    let mut left_norm = 0.0f64;
+    let mut right_norm = 0.0f64;
+    for (one, two) in left.iter().zip(right.iter()) {
+        dot += f64::from(*one) * f64::from(*two);
+        left_norm += f64::from(*one) * f64::from(*one);
+        right_norm += f64::from(*two) * f64::from(*two);
+    }
+    let scale = left_norm.sqrt() * right_norm.sqrt();
+    if scale == 0.0 {
+        return f64::NAN;
+    }
+    // **Clamped, because the arithmetic overshoots and the overshoot is
+    // visible.** A vector against itself gives `dot / scale` of one plus an ulp
+    // or two, and `1 - that` is then a tiny *negative* distance - which is not
+    // wrong by any amount anybody cares about and is deeply confusing to read.
+    // The cosine of two real vectors is in `[-1, 1]`, so the distance is in
+    // `[0, 2]`, and saying so costs one comparison.
+    (1.0 - dot / scale).clamp(0.0, 2.0)
+}
+
+/// Returns the Euclidean distance between two vectors.
+fn euclidean_distance(left: &[f32], right: &[f32]) -> f64 {
+    let mut total = 0.0f64;
+    for (one, two) in left.iter().zip(right.iter()) {
+        let gap = f64::from(*one) - f64::from(*two);
+        total += gap * gap;
+    }
+    total.sqrt()
+}
+
+/// Returns the dot product of two vectors.
+fn dot_product(left: &[f32], right: &[f32]) -> f64 {
+    let mut total = 0.0f64;
+    for (one, two) in left.iter().zip(right.iter()) {
+        total += f64::from(*one) * f64::from(*two);
+    }
+    total
 }

@@ -89,6 +89,24 @@ pub enum ScalarFunc {
     SourceId,
     /// `sqlite_version()`
     Version,
+    /// `vector_distance_cos(a, b)`, the cosine distance between two vectors.
+    ///
+    /// **Not a SQLite function, and the first one this engine adds.** pgvector
+    /// spells it `a <=> b`; the whole point of Phase 2's Part 7 is that a
+    /// vector is a value a `SELECT` can order by, and an operator that is sugar
+    /// for a function needs the function to exist first. A vector is a blob of
+    /// little-endian `f32`, which is what `inillucent_search` already stores and
+    /// what `vector_distance_l2` and `vector_dot` read too.
+    VectorDistanceCos,
+    /// `vector_distance_l2(a, b)`, the Euclidean distance between two vectors.
+    VectorDistanceL2,
+    /// `vector_dot(a, b)`, the dot product of two vectors.
+    ///
+    /// Negated relative to pgvector's `<#>`, which answers the *negative* inner
+    /// product so that a smaller number is a better match. This answers the dot
+    /// product itself, because a function named `dot` that returned its negative
+    /// would be a trap; the ordering sugar negates where it needs to.
+    VectorDot,
 }
 
 /// An aggregate built-in.
@@ -596,6 +614,9 @@ pub fn lookup_scalar(folded: &[u8]) -> Option<ScalarFunc> {
         b"upper" => ScalarFunc::Upper,
         b"zeroblob" => ScalarFunc::ZeroBlob,
         b"sqlite_version" => ScalarFunc::Version,
+        b"vector_distance_cos" => ScalarFunc::VectorDistanceCos,
+        b"vector_distance_l2" => ScalarFunc::VectorDistanceL2,
+        b"vector_dot" => ScalarFunc::VectorDot,
         _ => return None,
     };
     Some(func)
@@ -636,6 +657,9 @@ pub fn scalar_arity_ok(func: ScalarFunc, count: usize) -> bool {
         | ScalarFunc::Upper
         | ScalarFunc::ZeroBlob => count == 1,
         ScalarFunc::IfNull | ScalarFunc::NullIf | ScalarFunc::Glob => count == 2,
+        ScalarFunc::VectorDistanceCos | ScalarFunc::VectorDistanceL2 | ScalarFunc::VectorDot => {
+            count == 2
+        }
         ScalarFunc::Iif | ScalarFunc::Replace => count == 3,
         ScalarFunc::Instr => count == 2,
         ScalarFunc::Like => count == 2 || count == 3,
@@ -918,6 +942,9 @@ const SCALARS: &[(&str, i64)] = &[
     ("unixepoch", -1),
     ("unlikely", 1),
     ("upper", 1),
+    ("vector_distance_cos", 2),
+    ("vector_distance_l2", 2),
+    ("vector_dot", 2),
     ("zeroblob", 1),
 ];
 

@@ -599,6 +599,9 @@ pub fn insert_at(
         {
             continue;
         }
+        if !declarations_are_met(table, &layout, &image, resolution(statement))? {
+            continue;
+        }
         let Some(stored) = write_one(
             statement, &layout, &space, &plan, target, log, image, params, depth,
         )?
@@ -1245,6 +1248,18 @@ pub fn update_at(
         // was a whole row copied out of the tree and thrown away: `txn.large`
         // is two thousand updates in one transaction and paid for two thousand
         // of them (task-1838 §4).
+        if !declarations_are_met(
+            table,
+            &layout,
+            &after,
+            match statement.on_conflict {
+                Some(ConflictAction::Ignore) => Resolution::Skip,
+                Some(ConflictAction::Replace) => Resolution::Replace,
+                _ => Resolution::Raise,
+            },
+        )? {
+            continue;
+        }
         let reread = if statement.triggers.is_empty() {
             None
         } else {
@@ -1787,6 +1802,91 @@ fn key_of(layout: &SourceLayout, row: &[OwnedDatum]) -> Vec<OwnedDatum> {
         .iter()
         .filter_map(|column| row.get(*column).cloned())
         .collect()
+}
+
+/// Refuses a row a column's declaration does not allow.
+///
+/// **The engine accepted one until task-1838 §7 tried to write a vector into a
+/// typed column and found nothing checking anything.** `INSERT INTO t(a) VALUES
+/// (NULL)` on `a INTEGER NOT NULL` stored the NULL and answered success, which
+/// is the third silent wrong answer of the kind Part 1 was about and the worst
+/// of them: an application that declares a column `NOT NULL` and reads it back
+/// without checking is exactly the application the declaration is for.
+///
+/// `Ok(false)` means the statement said `OR IGNORE` and the row is skipped;
+/// `Ok(true)` means every `NOT NULL` column has a value. The order matters and
+/// is SQLite's: `BEFORE` bodies run first, because one of them may be what
+/// supplies the value, and the constraint is checked on the image that is about
+/// to be written.
+///
+/// A rowid alias is not checked here even when it is declared `NOT NULL`: the
+/// row image carries the key the statement is about to allocate, and SQLite
+/// fills one in for the same reason.
+///
+/// @param table - the table being written
+/// @param layout - the table tree's layout
+/// @param row - the image about to be written
+/// @param resolution - what the statement said to do with a conflict
+fn declarations_are_met(
+    table: &TableInfo,
+    layout: &SourceLayout,
+    row: &[OwnedDatum],
+    resolution: Resolution,
+) -> DbResult<bool> {
+    for (position, column) in table.columns.iter().enumerate() {
+        let Some(slot) = layout.slots.get(position).copied().flatten() else {
+            continue;
+        };
+        let value = row.get(slot);
+        // **A `VECTOR(N)` column holds N floats or nothing.** The width is the
+        // only thing the declaration promises that the storage does not already
+        // enforce, and a vector of the wrong width is not a slow query, it is a
+        // distance that silently answers NULL for ever (task-1838 §7).
+        if let Some(width) = column.vector_dimensions() {
+            let wrong = match value {
+                Some(OwnedDatum::Blob(bytes)) => bytes.len() != width.saturating_mul(4),
+                Some(OwnedDatum::Null) | None => false,
+                _ => true,
+            };
+            if wrong {
+                return Err(
+                    DbError::new(ExtendedCode(codes::DATATYPE)).with_message(format!(
+                        "cannot store this value in {}.{}: it is not a vector of {} dimensions",
+                        String::from_utf8_lossy(&table.name),
+                        String::from_utf8_lossy(&column.name),
+                        width
+                    )),
+                );
+            }
+        }
+        if !column.not_null || Some(position as u16) == table.rowid_alias {
+            continue;
+        }
+        if !matches!(value, Some(OwnedDatum::Null) | None) {
+            continue;
+        }
+        // The constraint carries its own `ON CONFLICT`, and the statement may
+        // override it: `INSERT OR IGNORE` beats `NOT NULL ON CONFLICT ABORT`.
+        let action = match resolution {
+            Resolution::Skip => Some(ConflictAction::Ignore),
+            Resolution::Replace => Some(ConflictAction::Replace),
+            // An upsert's `DO UPDATE` is about a *key* collision, not about a
+            // missing value, so a NULL still fails the constraint the way a
+            // plain insert's would.
+            Resolution::Update | Resolution::Raise => column.not_null_conflict,
+        };
+        if matches!(action, Some(ConflictAction::Ignore)) {
+            return Ok(false);
+        }
+        return Err(
+            DbError::new(ExtendedCode(codes::NOT_NULL)).with_message(format!(
+                "NOT NULL constraint failed: {}.{}",
+                String::from_utf8_lossy(&table.name),
+                String::from_utf8_lossy(&column.name)
+            )),
+        );
+    }
+    Ok(true)
 }
 
 /// Reports whether two images of a row have the same key.
