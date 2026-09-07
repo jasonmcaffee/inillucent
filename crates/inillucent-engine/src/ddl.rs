@@ -394,7 +394,7 @@ impl ImportedDatabase {
                 Err(refusal("cannot VACUUM from within a transaction"))
             }
             Directive::Vacuum { into: None, .. } => {
-                self.checkpoint()?;
+                self.vacuum_in_place()?;
                 Ok(Outcome::empty())
             }
             Directive::Vacuum {
@@ -409,7 +409,11 @@ impl ImportedDatabase {
                     // safe to put in a backup script: it never overwrites.
                     return Err(refusal("output file already exists"));
                 }
-                self.backup_into(std::path::Path::new(&path))?;
+                // **A rebuild, not a copy.** `VACUUM INTO` is documented as
+                // writing a *compacted* database, and a byte copy reproduces
+                // the free pages and the half-empty leaves it was asked to
+                // remove - which is what it used to do here.
+                self.rebuild_into(std::path::Path::new(&path))?;
                 Ok(Outcome::empty())
             }
         }
@@ -1964,6 +1968,13 @@ impl ImportedDatabase {
                 String::from_utf8_lossy(table)
             )));
         }
+        if let AlterKind::AddColumn { risk, .. } = action {
+            if let Some(message) = risk.refusal() {
+                if self.table_has_a_row(&folded)? {
+                    return Err(refusal(message));
+                }
+            }
+        }
         let mut updates: Vec<(i64, SchemaEntry)> = Vec::new();
         for held in self.entries_of(at) {
             let (rowid, entry) = (&held.rowid, &held.entry);
@@ -2020,7 +2031,7 @@ impl ImportedDatabase {
                     moved.sql = rename::reparsed(next)?;
                     moved
                 }
-                AlterKind::AddColumn { start, end } => {
+                AlterKind::AddColumn { start, end, .. } => {
                     if !itself {
                         continue;
                     }
@@ -2165,6 +2176,29 @@ impl ImportedDatabase {
     /// tree's pages go back to the free map.
     ///
     /// @param folded - the table's folded name
+    /// Returns whether a table holds at least one row.
+    ///
+    /// `ADD COLUMN` is the only caller: three of the five things it may not add
+    /// are only unaddable because an existing row would have no value for them,
+    /// so an empty table takes all three and SQLite accepts them. It stops at
+    /// the first row rather than counting, because the question is existence.
+    ///
+    /// @param folded - the table's folded name
+    fn table_has_a_row(&mut self, folded: &[u8]) -> DbResult<bool> {
+        let Some(root) = self
+            .tables
+            .iter()
+            .find(|table| table.folded == folded)
+            .map(|table| table.root)
+        else {
+            return Ok(false);
+        };
+        let Some(tree) = self.trees.get(&root) else {
+            return Ok(false);
+        };
+        Ok(!tree.rows(self.pool_of(root)?)?.is_empty())
+    }
+
     fn rebuild_table_tree(&mut self, folded: &[u8]) -> DbResult<()> {
         let Some(info) = self
             .tables

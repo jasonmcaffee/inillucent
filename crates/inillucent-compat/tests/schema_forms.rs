@@ -1003,22 +1003,23 @@ fn without_rowid_round_trips_through_sqlite() {
     );
 }
 
-/// `VACUUM`, which folds the log into the file and leaves it self-contained.
+/// `VACUUM`, which rebuilds the database and gives the free space back.
 ///
-/// **It does not defragment, and this test does not pretend it does.** SQLite's
-/// `VACUUM` rebuilds every b-tree into a fresh file, which moves every root
-/// page and reclaims the space a `DELETE` left; here the pages a delete frees
-/// go back to the free map and are handed out again, so what is left for the
-/// statement to do is make the file durable on its own - which is a checkpoint.
-/// Reclaiming the trailing space would be a logical rebuild of a live database
-/// and deserves its own ticket rather than a paragraph at the end of one.
+/// **It defragments, and this test proves it by measuring.** Until task-1860
+/// the statement was a checkpoint: the pages a `DELETE` freed went back to the
+/// free map and were handed out again, the file never shrank, and this comment
+/// said so. It is now a logical rebuild - every table recreated, every row
+/// re-inserted in key order, every index built over rows that are already
+/// there - so the file that comes out is the one this engine would have written
+/// had nothing ever been deleted.
 ///
-/// What is asserted is the part that has a contract: after it, every row, every
-/// index, the view, the trigger and the `WITHOUT ROWID` table still answer, the
-/// header word survives, and the reference can open what came out. A schema row
-/// left pointing at an old root is something inillucent would read back
+/// Three things are asserted, and the first is the one that was missing: the
+/// file is **smaller afterwards**. Then that every row, every index, the view,
+/// the trigger and the `WITHOUT ROWID` table still answer, and the header word
+/// survives. And then that the *reference* can open what came out - a schema
+/// row left pointing at an old root is something inillucent would read back
 /// perfectly well and SQLite would report as corrupt, which is why the oracle
-/// is the check that means anything.
+/// is the check that means the most.
 #[test]
 fn vacuum_folds_the_log_in_and_sqlite_still_reads() {
     let path = scratch("vacuum");
@@ -1057,7 +1058,17 @@ fn vacuum_folds_the_log_in_and_sqlite_still_reads() {
             "DELETE FROM w WHERE n % 2 = 0",
         ],
     );
+    // **Measured across the statement, not asserted about it.** A checkpoint
+    // first, so the comparison is between two files that both hold everything
+    // rather than between one that does and one whose pages are still in a log.
+    run_all(&connection, &["PRAGMA wal_checkpoint"]);
+    let before = std::fs::metadata(&path).map(|held| held.len()).unwrap_or(0);
     run_all(&connection, &["VACUUM"]);
+    let after = std::fs::metadata(&path).map(|held| held.len()).unwrap_or(0);
+    assert!(
+        after < before,
+        "VACUUM must give the space back: {before} bytes before, {after} after"
+    );
     // Everything still answers, through the table, through the index, through
     // the view, and through the table with no rowid.
     assert_eq!(
@@ -1144,7 +1155,16 @@ fn vacuum_into_writes_a_copy_sqlite_reads() {
         .display()
         .to_string()
         .replace(std::path::MAIN_SEPARATOR, "/");
+    run_all(&connection, &["PRAGMA wal_checkpoint"]);
+    let original = std::fs::metadata(&path).map(|held| held.len()).unwrap_or(0);
     run_all(&connection, &[&format!("VACUUM INTO '{target}'")]);
+    let written = std::fs::metadata(&copy).map(|held| held.len()).unwrap_or(0);
+    // **A rebuild, not a byte copy.** The two used to be the same size to the
+    // byte, because the statement called `std::fs::copy`.
+    assert!(
+        written <= original,
+        "VACUUM INTO must compact: {original} bytes in, {written} out"
+    );
     // The original is untouched and still works.
     assert_eq!(
         run(&connection, "SELECT id, name FROM t ORDER BY id"),

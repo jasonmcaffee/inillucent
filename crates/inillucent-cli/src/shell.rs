@@ -243,13 +243,12 @@ impl Shell {
             format!("Error near line {line}: {}", failure.message)
         };
         self.complain(&heading);
-        let Some(offset) = failure.offset.filter(|offset| *offset > 0) else {
+        let Some(offset) = failure.offset else {
             return;
         };
-        let first = sql.lines().next().unwrap_or(sql);
-        let column = (offset as usize).min(first.len());
-        eprintln!("  {first}");
-        eprintln!("  {}^--- error here", " ".repeat(column));
+        for line in error_context(sql.as_bytes(), offset as usize) {
+            self.complain(&line);
+        }
     }
 
     /// Runs a statement and collects its column names and rows.
@@ -716,6 +715,62 @@ fn plan_children(
             );
         }
     }
+}
+
+/// Returns the two lines that point at where a statement went wrong.
+///
+/// A port of the reference shell's `shell_error_context`, down to the two
+/// arrangements of the marker and the number that chooses between them, because
+/// this is one of the places a transcript is compared rather than read. The
+/// reference slides a window along the statement so the offending token is never
+/// off the left of the line, truncates at 78 bytes, flattens every space
+/// character to a plain space so a tab cannot shift the marker, and then draws
+/// the caret to the left of the token while it still fits and to the right of a
+/// trailing rule once it does not.
+///
+/// Returns nothing when the position is not inside the statement, which is the
+/// reference's answer for `no such table` and for everything that fails while
+/// stepping rather than while parsing.
+///
+/// @param sql - the whole statement, as the shell was given it
+/// @param offset - the byte the engine says the error is at
+fn error_context(sql: &[u8], offset: usize) -> Vec<String> {
+    if offset >= sql.len() {
+        return Vec::new();
+    }
+    // Slide the window right until the marker is within 50 bytes of the start,
+    // never stopping inside a UTF-8 sequence.
+    let mut start = 0usize;
+    let mut column = offset;
+    while column > 50 {
+        start += 1;
+        column -= 1;
+        while sql.get(start).is_some_and(|byte| byte & 0xc0 == 0x80) {
+            start += 1;
+            column -= 1;
+        }
+    }
+    let window = sql.get(start..).unwrap_or_default();
+    let mut length = window.len().min(78);
+    while length > 0 && window.get(length).is_some_and(|byte| byte & 0xc0 == 0x80) {
+        length -= 1;
+    }
+    let shown = String::from_utf8_lossy(window.get(..length).unwrap_or_default())
+        .chars()
+        .map(|character| {
+            if character.is_ascii_whitespace() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let marker = if column < 25 {
+        format!("  {}^--- error here", " ".repeat(column))
+    } else {
+        format!("  {}error here ---^", " ".repeat(column - 14))
+    };
+    vec![format!("  {shown}"), marker]
 }
 
 /// Returns what a failure should say to a person.

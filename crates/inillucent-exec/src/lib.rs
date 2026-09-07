@@ -41,6 +41,7 @@
 )]
 
 pub mod aggregate;
+pub mod autoindex;
 pub mod batch;
 pub mod correlate;
 pub mod declared;

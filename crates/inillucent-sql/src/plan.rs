@@ -390,6 +390,15 @@ pub struct PhysicalPlan {
     pub distinct_walk: bool,
     /// The later arms of a compound, each with the operator that joined it.
     pub compounds: Vec<(CompoundOp, PhysicalPlan)>,
+    /// Which optimizations were on when this plan was chosen.
+    ///
+    /// Carried on the plan rather than looked up by the executor, because a
+    /// plan is *cached* and a lever that changed after it was built must not
+    /// change what it does - a plan that consulted the connection at execution
+    /// time would answer one way today and another tomorrow with no
+    /// recompilation in between. The connection throws its compiled statements
+    /// away when a lever moves, which is what makes this field the truth.
+    pub levers: Levers,
     /// Whether any expression in this plan holds a subquery used as a value.
     ///
     /// Decided here because it is a property of the *statement* and not of the
@@ -518,13 +527,23 @@ impl Levers {
     /// cannot be measured, and because "the cache made prepare six times
     /// faster" needs an arm to be a claim rather than an assertion.
     pub const PLAN_CACHE: u32 = 32;
+    /// Build a throwaway structure over an unindexed inner side of a join,
+    /// rather than walking it once per outer row.
+    ///
+    /// What `PRAGMA automatic_index` switches. It is a lever rather than a
+    /// constant for the same reason the others are - an optimisation that
+    /// cannot be switched off cannot be measured - and because SQLite exposes
+    /// exactly this switch under exactly this name, so an application that
+    /// turns it off there has somewhere to turn it off here.
+    pub const AUTOMATIC_INDEX: u32 = 64;
     /// Every lever this build has.
     pub const EVERY: u32 = Levers::PLAN_CACHE
         | Levers::COVERING_INDEX
         | Levers::INDEXED_WRITE
         | Levers::ORDERED_WALK
         | Levers::STREAMING_GROUP
-        | Levers::FUSED_BYTECODE;
+        | Levers::FUSED_BYTECODE
+        | Levers::AUTOMATIC_INDEX;
 
     /// Returns the shipped configuration: everything on.
     pub fn all() -> Levers {
@@ -741,6 +760,7 @@ pub fn plan_select_with(select: BoundSelect, levers: Levers) -> PhysicalPlan {
         distinct_walk,
         compounds,
         subqueries,
+        levers,
     }
 }
 

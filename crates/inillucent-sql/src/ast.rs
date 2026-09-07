@@ -863,6 +863,37 @@ pub struct Update {
     pub limit: Option<ExprId>,
     /// The `OFFSET`.
     pub offset: Option<ExprId>,
+    /// Where the clause the reference build has no grammar for was written.
+    ///
+    /// `ORDER BY` and `LIMIT` on a `DELETE` or an `UPDATE` are a compile-time
+    /// option in SQLite, and the pinned build is not compiled with it - so the
+    /// reference answers `near "ORDER": syntax error` and points at the word.
+    /// The syntax register requires these to *parse* here, so the refusal is
+    /// the binder's; it needs the position to be able to point at the same
+    /// word, and this is where the parser leaves it.
+    pub limited_at: Option<(Limited, crate::lexer::Span)>,
+}
+
+/// Which of the two words a limited `DELETE` or `UPDATE` was written with.
+///
+/// The reference names the first one it cannot parse, so a statement carrying
+/// both reports `ORDER` and one carrying only a `LIMIT` reports `LIMIT`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Limited {
+    /// `ORDER BY`.
+    OrderBy,
+    /// `LIMIT`.
+    Limit,
+}
+
+impl Limited {
+    /// Returns the word the refusal quotes.
+    pub fn word(self) -> &'static str {
+        match self {
+            Limited::OrderBy => "ORDER",
+            Limited::Limit => "LIMIT",
+        }
+    }
 }
 
 /// A `DELETE` statement.
@@ -882,6 +913,15 @@ pub struct Delete {
     pub limit: Option<ExprId>,
     /// The `OFFSET`.
     pub offset: Option<ExprId>,
+    /// Where the clause the reference build has no grammar for was written.
+    ///
+    /// `ORDER BY` and `LIMIT` on a `DELETE` or an `UPDATE` are a compile-time
+    /// option in SQLite, and the pinned build is not compiled with it - so the
+    /// reference answers `near "ORDER": syntax error` and points at the word.
+    /// The syntax register requires these to *parse* here, so the refusal is
+    /// the binder's; it needs the position to be able to point at the same
+    /// word, and this is where the parser leaves it.
+    pub limited_at: Option<(Limited, crate::lexer::Span)>,
 }
 
 /// Which kind of object a `DROP` names.

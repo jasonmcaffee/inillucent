@@ -67,14 +67,15 @@ impl ParseError {
         match &self.kind {
             ParseErrorKind::Lex(kind) => kind.message().to_string(),
             ParseErrorKind::Unexpected { found, expected } => {
-                if expected.is_empty() {
-                    format!(r#"near "{found}": syntax error"#)
-                } else {
-                    format!(
-                        r#"near "{found}": syntax error, expected {}"#,
-                        join_expected(expected)
-                    )
-                }
+                // **The expected set is not printed.** The reference never
+                // names what it wanted - every syntax failure it reports is
+                // `near "X": syntax error` and nothing more - and a message
+                // that adds `, expected ;` is a message no transcript
+                // comparison can match. The set is still carried, because it is
+                // what `expected()` answers and the parser's own tests read it;
+                // it is only the rendering that stops at the reference's words.
+                let _ = expected;
+                format!(r#"near "{found}": syntax error"#)
             }
             ParseErrorKind::UnexpectedEnd { expected } => {
                 if expected.is_empty() {

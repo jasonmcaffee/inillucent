@@ -81,6 +81,24 @@ pub fn call_with(
         ),
         ScalarFunc::IfNull => coalesce(arguments),
         ScalarFunc::Iif => iif(arguments),
+        ScalarFunc::Unknown => Value::Null,
+        // `subtype` is answered by the binder, which is the only place that
+        // knows which function produced the argument; a value here carries no
+        // tag, so an argument that reached this far has none.
+        ScalarFunc::Subtype => Value::Integer(0),
+        ScalarFunc::Unistr => unistr(arguments.first()).unwrap_or(Value::Null),
+        ScalarFunc::UnistrQuote => unistr_quote(
+            &arguments.first().cloned().unwrap_or(Value::Null),
+            encoding,
+        ),
+        ScalarFunc::CompileOptionUsed => compile_option_used(arguments.first()),
+        ScalarFunc::CompileOptionGet => compile_option_get(arguments.first()),
+        // The log is written by the connection, which a scalar cannot reach.
+        // The answer is the reference's: NULL, whatever it was given.
+        ScalarFunc::Log => Value::Null,
+        // Both of these refuse before they are called, in `refusal_for`.
+        ScalarFunc::LoadExtension => Value::Null,
+        ScalarFunc::Regexp => regexp(arguments, encoding),
         ScalarFunc::Instr => instr(arguments, encoding),
         ScalarFunc::Length => unary(arguments, length),
         ScalarFunc::Like => pattern_call(arguments, true, encoding, !context.like_case_sensitive),
@@ -292,12 +310,162 @@ fn coalesce(arguments: &[Value<'static>]) -> Value<'static> {
 
 /// `iif(condition, then, otherwise)`.
 fn iif(arguments: &[Value<'static>]) -> Value<'static> {
-    let condition = arguments.first().cloned().unwrap_or(Value::Null);
-    let index = usize::from(eval::truth(&condition) != compare::Truth::True);
-    arguments
-        .get(index.saturating_add(1))
-        .cloned()
+    // Pairs of a test and its answer, with an optional final `ELSE`. The
+    // three-argument form everybody writes is the shortest interesting case of
+    // this and not a different function, which is why the loop rather than an
+    // index: `iif(a,1,b,2,3)` is `CASE WHEN a THEN 1 WHEN b THEN 2 ELSE 3 END`.
+    let mut at = 0usize;
+    while at + 1 < arguments.len() {
+        let condition = arguments.get(at).cloned().unwrap_or(Value::Null);
+        if eval::truth(&condition) == compare::Truth::True {
+            return arguments.get(at + 1).cloned().unwrap_or(Value::Null);
+        }
+        at += 2;
+    }
+    // An odd argument count leaves one over, and that one is the `ELSE`.
+    arguments.get(at).cloned().unwrap_or(Value::Null)
+}
+
+/// `unistr(x)`, which expands the two Unicode escapes.
+///
+/// `\uXXXX` and `\UXXXXXXXX` name a code point; the punctuation escapes stand
+/// for themselves; and anything else is `invalid Unicode escape`, which is a
+/// statement failure rather than a NULL. A non-text argument is returned
+/// unchanged, which is the reference's answer for `unistr(1)`.
+///
+/// Returns `None` when the escape is not one of the two, which the caller turns
+/// into the refusal - the sentence is in `refusal_for` so that the failure
+/// carries a message rather than becoming a quiet NULL.
+///
+/// @param value - the argument, or nothing
+fn unistr(value: Option<&Value<'static>>) -> Option<Value<'static>> {
+    let value = value?;
+    let Value::Text(text) = value else {
+        return Some(value.clone());
+    };
+    let expanded = expand_unicode_escapes(&text.utf8_bytes())?;
+    Some(Value::owned_text(&expanded).unwrap_or(Value::Null))
+}
+
+/// Expands `unistr`'s escapes, or returns nothing when one is malformed.
+///
+/// @param bytes - the text as written
+fn expand_unicode_escapes(bytes: &[u8]) -> Option<Vec<u8>> {
+    const PUNCTUATION: &[u8] = b"\\'\"";
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0usize;
+    while at < bytes.len() {
+        let byte = bytes.get(at).copied()?;
+        if byte != b'\\' {
+            out.push(byte);
+            at += 1;
+            continue;
+        }
+        let letter = bytes.get(at + 1).copied()?;
+        let width = match letter {
+            b'u' => 4usize,
+            b'U' => 8,
+            other if PUNCTUATION.contains(&other) => {
+                out.push(other);
+                at += 2;
+                continue;
+            }
+            _ => return None,
+        };
+        let digits = bytes.get(at + 2..at + 2 + width)?;
+        let mut point = 0u32;
+        for digit in digits {
+            point = point
+                .checked_mul(16)?
+                .checked_add(char::from(*digit).to_digit(16)?)?;
+        }
+        let character = char::from_u32(point)?;
+        let mut buffer = [0u8; 4];
+        out.extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
+        at += 2 + width;
+    }
+    Some(out)
+}
+
+/// `unistr_quote(x)`, which is `quote()` with the control characters escaped.
+///
+/// Text holding nothing below `0x20` quotes exactly as `quote()` does; text
+/// that holds one is written as a `unistr('...')` call so that the result can
+/// be pasted back into SQL and read the same way. Characters above ASCII are
+/// **not** escaped, which is the reference's behaviour and is worth stating
+/// because the name suggests otherwise.
+///
+/// @param value - the argument
+/// @param encoding - the connection's text encoding
+fn unistr_quote(value: &Value<'static>, encoding: TextEncoding) -> Value<'static> {
+    let Value::Text(text) = value else {
+        return quote(value, encoding);
+    };
+    let bytes = text.utf8_bytes();
+    if !bytes.iter().any(|byte| *byte < 0x20) {
+        return quote(value, encoding);
+    }
+    let mut out = b"unistr('".to_vec();
+    for byte in bytes.iter() {
+        match byte {
+            b'\'' => out.extend_from_slice(b"''"),
+            b'\\' => out.extend_from_slice(b"\\\\"),
+            other if *other < 0x20 => {
+                out.extend_from_slice(format!("\\u{other:04x}").as_bytes());
+            }
+            other => out.push(*other),
+        }
+    }
+    out.extend_from_slice(b"')");
+    Value::owned_text(&out).unwrap_or(Value::Null)
+}
+
+/// `sqlite_compileoption_used(name)`.
+fn compile_option_used(value: Option<&Value<'static>>) -> Value<'static> {
+    let Some(Value::Text(text)) = value else {
+        return Value::Null;
+    };
+    let name = String::from_utf8_lossy(&text.utf8_bytes()).into_owned();
+    Value::Integer(i64::from(inillucent_base::compile_option_used(&name)))
+}
+
+/// `sqlite_compileoption_get(n)`, which is NULL past the end of the list.
+fn compile_option_get(value: Option<&Value<'static>>) -> Value<'static> {
+    let Some(index) = value.and_then(|value| match value {
+        Value::Integer(number) => usize::try_from(*number).ok(),
+        _ => None,
+    }) else {
+        return Value::Null;
+    };
+    inillucent_base::COMPILE_OPTIONS
+        .get(index)
+        .and_then(|option| Value::owned_text(option.as_bytes()).ok())
         .unwrap_or(Value::Null)
+}
+
+/// `regexp(pattern, subject)`, which is what `X REGEXP Y` compiles to.
+///
+/// Note the argument order: the operator puts the subject on the left and the
+/// pattern on the right, and the function takes them the other way round. That
+/// is SQLite's convention for every `X op Y` that is sugar for a function, and
+/// getting it backwards is a bug that answers plausibly.
+///
+/// A pattern that will not compile is a statement failure rather than a NULL,
+/// and the refusal is made in `refusal_for`; this only runs once the pattern is
+/// known to be good.
+fn regexp(arguments: &[Value<'static>], encoding: TextEncoding) -> Value<'static> {
+    let (Some(pattern), Some(subject)) = (arguments.first(), arguments.get(1)) else {
+        return Value::Null;
+    };
+    if pattern.is_null() || subject.is_null() {
+        return Value::Null;
+    }
+    let pattern = eval::text_bytes(pattern, encoding);
+    let subject = eval::text_bytes(subject, encoding);
+    match crate::regexp::Regexp::compile(&pattern, false) {
+        Ok(compiled) => Value::Integer(i64::from(compiled.matches(&subject))),
+        Err(_) => Value::Null,
+    }
 }
 
 /// `nullif(a, b)`.
@@ -967,7 +1135,7 @@ fn vector_of(value: Option<&Value<'static>>) -> Option<Vec<f32>> {
 /// NULL argument, and a pair whose cosine is undefined because a side has no
 /// direction. Everything else that used to answer NULL here - a text argument,
 /// a blob that is not a multiple of four bytes, two vectors of different widths
-/// - is a refusal now, raised by [`vector_argument_refusal`] before the call
+/// - is a refusal now, raised by [`refusal_for`] before the call
 /// reaches this function. See that function for why.
 ///
 /// @param arguments - the call's arguments
@@ -987,23 +1155,52 @@ fn vector_pair(arguments: &[Value<'static>], measure: fn(&[f32], &[f32]) -> f64)
     Value::Real(answer)
 }
 
-/// Returns what a vector measure refuses this argument pair with, if it does.
+/// Returns the sentence a function refuses with, before it is called at all.
 ///
-/// **A ranking query given the wrong-width vector used to answer NULL for every
-/// row and then order them arbitrarily.** That is the worst outcome an
-/// embedding query has: the caller passed a 1536-wide probe to a 768-wide
-/// column, the answer came back as rows in some order, and nothing anywhere
-/// said the measure had not been taken. pgvector raises `different vector
-/// dimensions 1536 and 768` and this does the same.
+/// A scalar returns a `Value`, so a function that has to *fail* cannot say so
+/// through its return type. This is where those failures live, and the test for
+/// belonging here is the same each time: would a NULL be indistinguishable from
+/// a real answer? A vector measure over a mismatched pair, an invalid Unicode
+/// escape and a pattern that will not compile all pass that test, and so does
+/// `load_extension`, which must never quietly answer nothing.
 ///
-/// A NULL argument is still NULL rather than a refusal, because it is the one
-/// case with a real meaning - the row has no embedding yet - and
-/// `WHERE v IS NOT NULL AND vector_distance_cos(v, ?) < 0.2` has to remain
-/// writable.
-///
-/// @param func - the measure being called
-/// @param arguments - the call's arguments
-pub fn vector_argument_refusal(func: ScalarFunc, arguments: &[Value<'static>]) -> Option<String> {
+/// @param func - which function is about to be called
+/// @param arguments - what it is about to be called with
+pub fn refusal_for(func: ScalarFunc, arguments: &[Value<'static>]) -> Option<String> {
+    // Three functions refuse before they compute rather than answering NULL,
+    // and the reason is the same in each case: a NULL would be an answer the
+    // caller cannot tell from a real one.
+    match func {
+        ScalarFunc::Unistr => {
+            if let Some(Value::Text(text)) = arguments.first() {
+                if expand_unicode_escapes(&text.utf8_bytes()).is_none() {
+                    return Some("invalid Unicode escape".to_string());
+                }
+            }
+            return None;
+        }
+        ScalarFunc::Regexp => {
+            let pattern = arguments.first()?;
+            if pattern.is_null() {
+                return None;
+            }
+            let bytes = eval::text_bytes(pattern, TextEncoding::Utf8);
+            return crate::regexp::Regexp::compile(&bytes, false)
+                .err()
+                .map(str::to_string);
+        }
+        // **No path is loadable.** This engine has no dynamic loader and is not
+        // going to grow one: loading native code chosen by a string is the
+        // vulnerability the registry's allow-list exists to close, and a build
+        // that forbids `unsafe` cannot call `LoadLibrary` anyway. What it can
+        // do is refuse in the words the platform uses, which is what the
+        // reference reports for every path that is not a loadable extension -
+        // including one that exists but is not one.
+        ScalarFunc::LoadExtension => {
+            return Some(MODULE_NOT_FOUND.to_string());
+        }
+        _ => {}
+    }
     let name = match func {
         ScalarFunc::VectorDistanceCos => "vector_distance_cos",
         ScalarFunc::VectorDistanceL2 => "vector_distance_l2",
@@ -1075,3 +1272,17 @@ fn dot_product(left: &[f32], right: &[f32]) -> f64 {
     }
     total
 }
+
+/// What the platform says when a library cannot be loaded.
+///
+/// The trailing newline is the reference's, not a stray: Windows'
+/// `FormatMessage` ends its sentences with CR LF and SQLite passes the string
+/// through untouched, so a transcript compared byte for byte has a blank line
+/// after the error. On other platforms the loader says something else, which is
+/// why this is per-platform rather than one string.
+#[cfg(windows)]
+const MODULE_NOT_FOUND: &str = "The specified module could not be found.\r\n";
+
+/// As above, for a loader that reports in the C library's words.
+#[cfg(not(windows))]
+const MODULE_NOT_FOUND: &str = "no such file or directory";

@@ -83,6 +83,7 @@ pub mod ddl;
 mod entries;
 pub mod multi;
 pub mod pragma;
+mod rebuild;
 pub mod vtab;
 
 use std::collections::HashMap;
@@ -305,6 +306,32 @@ pub struct ImportedDatabase {
     /// Whether `PRAGMA defer_foreign_keys` has put every immediate check off
     /// until the commit, for the transaction now open.
     defer_foreign_keys: bool,
+    /// Whether `PRAGMA ignore_check_constraints` has turned `CHECK` off.
+    ///
+    /// Like `foreign_keys` it is read by the *binder*, so changing it throws
+    /// away the compiled statements: a plan built while checks were on carries
+    /// them and would keep carrying them after the pragma turned them off.
+    ignore_check_constraints: bool,
+    /// What `PRAGMA secure_delete` is set to: 0 off, 1 on, 2 fast.
+    ///
+    /// On, the bytes a deleted row occupied are overwritten before the space is
+    /// reused, so a row that has been deleted is not still readable in the file
+    /// by anyone who opens it with a hex editor. Off is SQLite default and
+    /// this engine default, because the overwrite is a write.
+    secure_delete: u8,
+    /// What `PRAGMA auto_vacuum` is set to: 0 none, 1 full, 2 incremental.
+    ///
+    /// Settable only while the database holds no table, which is SQLite rule -
+    /// the mode decides how the file is laid out, and changing it afterwards is
+    /// what `VACUUM` is for.
+    auto_vacuum: u8,
+    /// Whether `PRAGMA automatic_index` lets the planner build one.
+    ///
+    /// On by default, as in SQLite: an unindexed table on the inner side of a
+    /// join is scanned once per outer row, and building a transient index over
+    /// it first is cheaper as soon as the outer side has more than a handful of
+    /// rows.
+    automatic_index: bool,
     /// Whether a cyclic-key sweep is already running.
     ///
     /// The sweep runs statements, and a statement runs the sweep; without this
@@ -1532,6 +1559,10 @@ impl ImportedDatabase {
             busy_timeout_ms: 0,
             foreign_keys: false,
             defer_foreign_keys: false,
+            ignore_check_constraints: false,
+            secure_delete: 0,
+            auto_vacuum: 0,
+            automatic_index: true,
             settling: std::cell::Cell::new(false),
             scratch_ast: std::cell::RefCell::new(None),
             levers: Levers::default(),
@@ -1718,6 +1749,10 @@ impl ImportedDatabase {
             busy_timeout_ms: 0,
             foreign_keys: false,
             defer_foreign_keys: false,
+            ignore_check_constraints: false,
+            secure_delete: 0,
+            auto_vacuum: 0,
+            automatic_index: true,
             settling: std::cell::Cell::new(false),
             scratch_ast: std::cell::RefCell::new(None),
             levers: Levers::default(),
@@ -3163,6 +3198,107 @@ impl ImportedDatabase {
     /// The campaign tests run this after every statement. A tree that has
     /// drifted structurally still answers a scan correctly for a long time,
     /// which is precisely why the check has to be a check rather than a query.
+    /// Returns the catalog rows of `main`, for the rebuild to replay.
+    ///
+    /// @returns one entry per object, in catalog order
+    pub(crate) fn main_entries(&self) -> Vec<inillucent_catalog::paged::SchemaEntry> {
+        self.entries.iter().map(|held| held.entry.clone()).collect()
+    }
+
+    /// Returns what `PRAGMA user_version` would answer.
+    pub(crate) fn user_version(&self) -> i32 {
+        self.database.user_version()
+    }
+
+    /// Returns what `PRAGMA application_id` would answer.
+    pub(crate) fn application_id(&self) -> i32 {
+        self.database.application_id()
+    }
+
+    /// Rebuilds this database into a file that holds nothing spare.
+    ///
+    /// **What `VACUUM` and `VACUUM INTO` both do**, differing only in where the
+    /// result goes. See `crate::rebuild` for why it is a logical copy rather
+    /// than a page one - in short, because a page copy reproduces the free
+    /// space it was asked to remove.
+    ///
+    /// @param destination - the file to write, which must not already exist
+    pub(crate) fn rebuild_into(&mut self, destination: &std::path::Path) -> DbResult<()> {
+        self.checkpoint()?;
+        crate::rebuild::rebuild_into(self, destination, self.page_size, self.frames)
+    }
+
+    /// Gives free pages back to the filesystem, up to a budget.
+    ///
+    /// **What `PRAGMA incremental_vacuum` asks for, done the way this engine
+    /// can do it.** SQLite relocates the trailing free pages one at a time and
+    /// truncates, which its pointer map makes cheap; here free space is given
+    /// back by rebuilding, so the budget is a *threshold* rather than a
+    /// quantity: asked to reclaim `n` pages, it reclaims every free page or
+    /// none, and reclaiming more than was asked is never a wrong answer - only
+    /// a longer one. That is the same reasoning `analysis_limit` already uses.
+    ///
+    /// Doing nothing when there is nothing free is what keeps the pragma cheap
+    /// to call in a loop, which is how applications use it.
+    ///
+    /// @param pages - how many free pages the caller asked to see returned
+    pub(crate) fn reclaim_free_pages(&mut self, pages: usize) -> DbResult<()> {
+        let free = self.database.free_pages();
+        if free == 0 || free < pages as u64 {
+            return Ok(());
+        }
+        self.vacuum_in_place()
+    }
+
+    /// Rebuilds this database over itself, reclaiming everything nothing uses.
+    ///
+    /// The rebuild is written beside the database and then moved over it, so a
+    /// crash at any point leaves either the original or the rebuilt file whole
+    /// and never a half-written one. The connection reopens onto the new file
+    /// afterwards, because every tree handle it holds names a root that has
+    /// moved.
+    pub(crate) fn vacuum_in_place(&mut self) -> DbResult<()> {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_nanos() as u64)
+            .unwrap_or(0);
+        let scratch = crate::rebuild::scratch_beside(&self.path, stamp);
+        let _ = std::fs::remove_file(&scratch);
+        self.rebuild_into(&scratch)?;
+        let path = self.path.clone();
+        let page_size = self.page_size;
+        let frames = self.frames;
+        // **The old file is closed before it is replaced, not after.** Every
+        // handle this connection holds names a root in the file that is about
+        // to go, and a pool still holding frames of a file whose bytes have
+        // changed underneath it is a pool that will answer from the database
+        // that used to be there. Assigning through `self` is what closes it:
+        // the old value is dropped as the old value of the assignment, which is
+        // the only moment in this function when neither file is open by us.
+        *self = ImportedDatabase::open(scratch.clone(), page_size, frames)?;
+        // **And its log segments go with it.** They describe the pages of the
+        // database that was there; left beside the file they would be replayed
+        // over the rebuilt one on the next open, which is the rebuild undone by
+        // recovery. The checkpoint at the head of `rebuild_into` already folded
+        // everything they hold into the file that is about to be overwritten.
+        crate::rebuild::remove_log_segments(&path);
+        std::fs::copy(&scratch, &path).map_err(|error| {
+            inillucent_base::error::misuse(format!(
+                "cannot write the rebuilt database over {}: {error}",
+                path.display()
+            ))
+        })?;
+        *self = ImportedDatabase::open(path, page_size, frames)?;
+        crate::rebuild::remove_log_segments(&scratch);
+        let _ = std::fs::remove_file(&scratch);
+        Ok(())
+    }
+
+    /// Checks every tree in every attached database, and their agreement.
+    ///
+    /// The campaign tests run this after every statement. A tree that has
+    /// drifted structurally still answers a scan correctly for a long time,
+    /// which is precisely why the check has to be a check rather than a query.
     pub fn check_trees(&self) -> DbResult<()> {
         for (root, tree) in &self.trees {
             let pool = self
@@ -4010,6 +4146,22 @@ impl ImportedDatabase {
     /// Returns which planner optimizations this connection has on.
     pub fn levers(&self) -> Levers {
         self.levers
+    }
+
+    /// Turns the automatic index on or off, which `PRAGMA automatic_index` does.
+    ///
+    /// It is its own method rather than a call to `disable_levers` because that
+    /// one only ever turns levers *off* - it is the measurement harness's entry
+    /// point, and an A/B arm never turns one back on. A pragma has to do both.
+    ///
+    /// @param on - whether the planner may build one
+    pub(crate) fn set_automatic_index(&mut self, on: bool) {
+        let mask = self.levers.disabled();
+        self.levers = Levers::without(if on {
+            mask & !Levers::AUTOMATIC_INDEX
+        } else {
+            mask | Levers::AUTOMATIC_INDEX
+        });
     }
 
     /// Returns the body of one registered function, for the machinery.
@@ -5110,7 +5262,17 @@ fn refused(error: inillucent_sql::diagnostic::ParseError) -> inillucent_base::er
     // path, a bound value or page bytes. The detail is left in place so that
     // everything reading it - the shell, the gate, the surface inventory -
     // sees exactly what it saw before.
-    let built = refusal(error.message()).with_message(error.message());
+    let mut built = refusal(error.message()).with_message(error.message());
+    // **And the position, which used to be dropped here.** A refusal carries the
+    // span of the token it is about, and the shell draws the reference's two
+    // lines of caret art from it - so losing it here turned every parse failure
+    // into a bare sentence where the reference points at the word. A refusal
+    // that is deliberately positionless says so with a default span, which is
+    // what `no_such_table` and the `ALTER TABLE` refusals use, and those stay
+    // positionless because the reference points at nothing for them either.
+    if error.span != inillucent_sql::lexer::Span::default() {
+        built = built.with_sql_offset(error.offset());
+    }
     match error.kind {
         inillucent_sql::diagnostic::ParseErrorKind::Unsupported(what) => {
             built.with_unsupported(what)

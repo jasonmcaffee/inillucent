@@ -456,7 +456,13 @@ fn clip<'a>(bytes: &'a [u8], collation: Collation, folded: &'a mut Vec<u8>) -> &
         // callback into the connection that registered it, and the key encoder
         // makes the same choice - so the prefix stays a prefix of what the
         // encoder produces.
-        Collation::Binary | Collation::Custom(_) => bytes.get(..PREFIX_BYTES).unwrap_or(bytes),
+        // `decimal` and `uint` join `Custom` here for exactly the same reason:
+        // neither has a byte transformation whose order is the collation order,
+        // so neither can key a tree - see
+        // `Collation::is_order_preserving_in_keys`.
+        Collation::Binary | Collation::Custom(_) | Collation::Decimal | Collation::Uint => {
+            bytes.get(..PREFIX_BYTES).unwrap_or(bytes)
+        }
         Collation::NoCase => {
             // Lowercasing commutes with clipping, so only the prefix is folded.
             folded.clear();

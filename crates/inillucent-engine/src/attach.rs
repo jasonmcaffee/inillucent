@@ -88,7 +88,9 @@ impl ImportedDatabase {
             )));
         }
         if self.attached.len() >= MAX_ATTACHED {
-            return Err(refusal("too many attached databases"));
+            return Err(refusal(format!(
+                "too many attached databases - max {MAX_ATTACHED}"
+            )));
         }
         let (vfs, path, held) = if file == IN_MEMORY || file.is_empty() {
             let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());

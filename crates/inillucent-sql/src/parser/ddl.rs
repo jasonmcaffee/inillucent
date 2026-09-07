@@ -219,8 +219,12 @@ impl Parser<'_> {
                 ColumnConstraint::Unique(self.parse_on_conflict()?)
             }
             Keyword::CHECK => {
-                let at = self.bump()?.span;
+                self.bump()?;
                 self.expect(Punctuator::LeftParen)?;
+                // The reference points at the *expression*, not at the keyword,
+                // and the shell draws its caret from the offset - so the span
+                // taken here is the first token inside the parenthesis.
+                let at = self.peek()?.span;
                 let before = self.selects;
                 let expr = self.parse_expr()?;
                 self.expect(Punctuator::RightParen)?;
@@ -347,8 +351,9 @@ impl Parser<'_> {
             });
         }
         if self.at_keyword(Keyword::CHECK)? {
-            let at = self.bump()?.span;
+            self.bump()?;
             self.expect(Punctuator::LeftParen)?;
+            let at = self.peek()?.span;
             let before = self.selects;
             let expr = self.parse_expr()?;
             self.expect(Punctuator::RightParen)?;

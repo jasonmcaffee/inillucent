@@ -57,3 +57,46 @@ pub const IMPLEMENTATION_PHASE: &str = "phase 1: VFS, binary primitives, and sim
 
 /// The SQLite release every parity claim in this workspace is measured against.
 pub const REFERENCE_SQLITE_VERSION: &str = "3.53.4";
+
+/// What this build reports about itself.
+///
+/// The choices a caller can act on, not a transcription of SQLite's list: an
+/// option naming a subsystem this engine does not have would be a claim about
+/// somebody else's build.
+///
+/// It lives here rather than beside `PRAGMA compile_options` because
+/// `sqlite_compileoption_get` and `sqlite_compileoption_used` answer questions
+/// about the same list from `inillucent-scalar`, which sits below the engine.
+/// One list, three readers.
+pub const COMPILE_OPTIONS: &[&str] = &[
+    "ENGINE=inillucent",
+    "THREADSAFE=0",
+    "DEFAULT_JOURNAL_MODE=wal",
+    "DEFAULT_LOCKING_MODE=exclusive",
+    "DEFAULT_ENCODING=UTF-8",
+    "ENABLE_FTS3",
+    "ENABLE_FTS4",
+    "ENABLE_FTS5",
+    "ENABLE_GEOPOLY",
+    "ENABLE_RTREE",
+    "ENABLE_DBSTAT_VTAB",
+    "ENABLE_DBPAGE_VTAB",
+    "ENABLE_STMTVTAB",
+    "ENABLE_JSON1",
+    "ENABLE_VECTOR",
+    "ENABLE_HNSW",
+    "ENABLE_SESSION",
+    "OMIT_SHARED_CACHE",
+];
+
+/// Returns whether an option is set, in `sqlite_compileoption_used`'s terms.
+///
+/// The reference accepts the name with or without its `SQLITE_` prefix and
+/// compares the whole entry, `NAME=value` included, so `THREADSAFE` does not
+/// match `THREADSAFE=0`.
+///
+/// @param name - the option, with or without the `SQLITE_` prefix
+pub fn compile_option_used(name: &str) -> bool {
+    let wanted = name.strip_prefix("SQLITE_").unwrap_or(name);
+    COMPILE_OPTIONS.iter().any(|entry| *entry == wanted)
+}

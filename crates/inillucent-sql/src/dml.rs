@@ -493,8 +493,8 @@ impl<'a> Binder<'a> {
 
     /// Binds an `UPDATE` with its CTEs already in scope.
     fn bind_update_body(&mut self, update: &ast::Update) -> Result<BoundUpdate, ParseError> {
-        if !update.order_by.is_empty() {
-            return Err(unsupported("ORDER BY on UPDATE", Span::default()));
+        if let Some(refusal) = limited_dml_refusal(update.limited_at) {
+            return Err(refusal);
         }
         let (table, source) =
             self.write_target_from_term(update.target, &TriggerEventInfo::Update(Vec::new()))?;
@@ -594,8 +594,8 @@ impl<'a> Binder<'a> {
 
     /// Binds a `DELETE` with its CTEs already in scope.
     fn bind_delete_body(&mut self, delete: &ast::Delete) -> Result<BoundDelete, ParseError> {
-        if !delete.order_by.is_empty() {
-            return Err(unsupported("ORDER BY on DELETE", Span::default()));
+        if let Some(refusal) = limited_dml_refusal(delete.limited_at) {
+            return Err(refusal);
         }
         let (table, source) =
             self.write_target_from_term(delete.target, &TriggerEventInfo::Delete)?;
@@ -1576,4 +1576,18 @@ pub fn rowid_message(table: &TableInfo) -> (i32, String) {
             ),
         ),
     }
+}
+
+/// Returns the refusal a `DELETE` or `UPDATE` with `ORDER BY`/`LIMIT` earns.
+///
+/// The pinned reference is not compiled with `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`,
+/// so it has no grammar for the clause at all and answers `near "ORDER": syntax
+/// error` with its caret under the word. The syntax register requires the form
+/// to *parse* here - it is a published production - so the refusal is made here
+/// instead, in the reference's words and at the reference's position.
+///
+/// @param limited - the word and where it was written, from the parser
+fn limited_dml_refusal(limited: Option<(ast::Limited, Span)>) -> Option<ParseError> {
+    let (word, span) = limited?;
+    Some(crate::bind::refused(word.word(), span))
 }

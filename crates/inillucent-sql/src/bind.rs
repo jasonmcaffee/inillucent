@@ -22,7 +22,7 @@ use crate::ast::{FrameBound, FrameExclude, FrameUnit};
 use crate::catalog_view::{CatalogView, ColumnInfo, TableInfo, TableKind};
 use crate::diagnostic::{ParseError, ParseErrorKind};
 use crate::function::{self, AggregateFunc, JsonFunc, MathFunc, ScalarFunc, TimeFunc, WindowFunc};
-use crate::lexer::Span;
+use crate::lexer::{QuoteForm, Span};
 
 /// What an authorizer decided about one action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3578,7 +3578,23 @@ impl<'a> Binder<'a> {
                 escape,
             } => {
                 if op == PatternOp::Regexp {
-                    return Err(no_such_function(b"regexp", span));
+                    // `X REGEXP Y` is sugar for `regexp(Y, X)` - the pattern
+                    // first - and the operator exists only because the function
+                    // does. The reference shell registers one, so this engine
+                    // registers one too, and the operator binds to it here
+                    // rather than refusing.
+                    let subject = self.bind_expr(operand)?;
+                    let pattern = self.bind_expr(pattern)?;
+                    let call = BoundExpr::Function {
+                        func: ScalarFunc::Regexp,
+                        arguments: vec![pattern, subject],
+                        collation: Collation::Binary,
+                    };
+                    return Ok(if negated {
+                        BoundExpr::Not(Box::new(call))
+                    } else {
+                        call
+                    });
                 }
                 if op == PatternOp::Match {
                     // `x MATCH y` is a call to a function called `match`, which
@@ -4051,7 +4067,11 @@ impl<'a> Binder<'a> {
             }
         }
         if self.sources.is_empty() && table_folded.is_none() {
-            return Err(no_such_column(self.ast.text(column), span));
+            return Err(no_such_column_quoted(
+                self.ast.text(column),
+                self.ast.name(column).map(|name| name.quote).unwrap_or(QuoteForm::Bare),
+                span,
+            ));
         }
         match table_folded {
             Some(_)
@@ -4066,7 +4086,20 @@ impl<'a> Binder<'a> {
                     span,
                 ))
             }
-            _ => Err(no_such_column(self.ast.text(column), span)),
+            _ if table_folded.is_none() => Err(no_such_column_quoted(
+                self.ast.text(column),
+                self.ast.name(column).map(|name| name.quote).unwrap_or(QuoteForm::Bare),
+                span,
+            )),
+            // A qualified reference names both halves, which is what the
+            // reference prints: `no such column: t.b`, not `no such column: b`.
+            _ => {
+                let qualifier = table.map(|id| self.ast.text(id)).unwrap_or(b"");
+                Err(no_such_column(
+                    &[qualifier, b".", self.ast.text(column)].concat(),
+                    span,
+                ))
+            }
         }
     }
 
@@ -4122,9 +4155,12 @@ impl<'a> Binder<'a> {
                     collation,
                 })
             }
-            BinaryOp::Match | BinaryOp::Regexp => {
-                Err(no_such_function(b"regexp", self.ast.expr_span(right)))
-            }
+            BinaryOp::Regexp => Ok(BoundExpr::Function {
+                func: ScalarFunc::Regexp,
+                arguments: vec![bound_right, bound_left],
+                collation: Collation::Binary,
+            }),
+            BinaryOp::Match => Err(no_such_function(b"match", self.ast.expr_span(right))),
             BinaryOp::Extract | BinaryOp::ExtractText => Ok(BoundExpr::Json {
                 func: if op == BinaryOp::Extract {
                     JsonFunc::Arrow
@@ -4720,6 +4756,32 @@ pub(crate) fn no_such_table(name: &[u8], span: Span) -> ParseError {
     ParseError::new(
         ParseErrorKind::Refused(format!("no such table: {}", String::from_utf8_lossy(name))),
         Span::default(),
+    )
+}
+
+/// Returns a "no such column" failure in SQLite's wording, with the hint a
+/// double-quoted name earns.
+///
+/// A bare `"word"` is an identifier that *may* fall back to a string literal,
+/// and this build refuses the fallback the way the reference's does. The
+/// reference does not simply refuse it, though: it re-quotes the name and adds
+/// the sentence that tells the author what they probably meant. The hint is
+/// only for the unqualified form, because `t."b"` cannot be a string literal in
+/// any dialect and the reference prints `no such column: t.b` for it.
+///
+/// @param name - the column name as written, with quoting already removed
+/// @param quote - how it was quoted
+/// @param span - where it was written
+pub(crate) fn no_such_column_quoted(name: &[u8], quote: QuoteForm, span: Span) -> ParseError {
+    if quote != QuoteForm::Double {
+        return no_such_column(name, span);
+    }
+    ParseError::new(
+        ParseErrorKind::Refused(format!(
+            "no such column: \"{}\" - should this be a string literal in single-quotes?",
+            String::from_utf8_lossy(name)
+        )),
+        span,
     )
 }
 

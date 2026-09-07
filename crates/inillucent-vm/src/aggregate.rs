@@ -127,7 +127,14 @@ impl Accumulator {
             self.seen.push(value.clone());
         }
         match self.func {
-            AggregateFunc::External => {
+            // The percentile family collects its rows for the same reason a
+            // registered aggregate does: none of them can answer until the
+            // whole group is in and sorted.
+            AggregateFunc::External
+            | AggregateFunc::Median
+            | AggregateFunc::Percentile
+            | AggregateFunc::PercentileCont
+            | AggregateFunc::PercentileDisc => {
                 self.count = self.count.saturating_add(1);
                 self.rows.push(arguments.to_vec());
             }
@@ -269,12 +276,73 @@ impl Accumulator {
         &self.rows
     }
 
+
+    /// Returns what a percentile aggregate settles on, over the sorted group.
+    ///
+    /// The same arithmetic the vectorised executor's
+    /// `Accumulator::finish_percentile` does, and it is written twice for the
+    /// reason the crate documentation gives for aggregates generally: the two
+    /// executors keep genuinely different state, and this one steps over
+    /// `Value`s. The *rule* is stated once, in
+    /// `inillucent_exec::aggregate::Percentile`, and the two implementations of
+    /// it are checked against each other by the compatibility suite.
+    fn finish_percentile(&self) -> Value<'static> {
+        let hundredths = self.func == AggregateFunc::Percentile;
+        let discrete = self.func == AggregateFunc::PercentileDisc;
+        let fraction = if self.func == AggregateFunc::Median {
+            0.5
+        } else {
+            let Some(given) = self
+                .rows
+                .first()
+                .and_then(|row| row.get(1))
+                .map(inillucent_value::cast::real_value)
+            else {
+                return Value::Null;
+            };
+            if hundredths {
+                given / 100.0
+            } else {
+                given
+            }
+        };
+        if !(0.0..=1.0).contains(&fraction) {
+            return Value::Null;
+        }
+        let mut values: Vec<f64> = self
+            .rows
+            .iter()
+            .filter_map(|row| row.first())
+            .filter(|value| !value.is_null())
+            .map(inillucent_value::cast::real_value)
+            .collect();
+        if values.is_empty() {
+            return Value::Null;
+        }
+        values.sort_by(|left, right| left.total_cmp(right));
+        let last = values.len().saturating_sub(1);
+        let position = fraction * last as f64;
+        if discrete {
+            let at = (position.floor().max(0.0) as usize).min(last);
+            return Value::Real(values.get(at).copied().unwrap_or(f64::NAN));
+        }
+        let below = (position.floor().max(0.0) as usize).min(last);
+        let above = (position.ceil().max(0.0) as usize).min(last);
+        let low = values.get(below).copied().unwrap_or(f64::NAN);
+        let high = values.get(above).copied().unwrap_or(f64::NAN);
+        Value::Real(low + (high - low) * (position - below as f64))
+    }
+
     /// Produces the aggregate's value, without the mark.
     fn finish_value(&self) -> DbResult<Value<'static>> {
         Ok(match self.func {
             // The machine finishes an external aggregate itself, because only
             // it holds the table the name resolves in.
             AggregateFunc::External => Value::Null,
+            AggregateFunc::Median
+            | AggregateFunc::Percentile
+            | AggregateFunc::PercentileCont
+            | AggregateFunc::PercentileDisc => self.finish_percentile(),
             AggregateFunc::Count => Value::Integer(self.count),
             AggregateFunc::Sum => {
                 if !self.saw_value {

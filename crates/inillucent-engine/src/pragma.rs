@@ -132,12 +132,10 @@ impl ImportedDatabase {
             b"writable_schema" => self.pragma_writable_schema(argument),
             b"query_only" => self.pragma_query_only(argument),
             b"recursive_triggers" => self.pragma_recursive_triggers(argument),
-            // Reported: one value each, and a write that asks for another is
-            // refused rather than accepted and dropped.
-            b"auto_vacuum" => pragma_fixed_number(argument, "auto_vacuum", 0, &["0", "none"]),
-            b"secure_delete" => {
-                pragma_fixed_number(argument, "secure_delete", 0, &["0", "off", "false", "no"])
-            }
+            b"auto_vacuum" => self.pragma_auto_vacuum(argument),
+            b"secure_delete" => self.pragma_secure_delete(argument),
+            b"ignore_check_constraints" => self.pragma_ignore_check_constraints(argument),
+            b"automatic_index" => self.pragma_automatic_index(argument),
             // This engine's temporary tables live in memory, so DEFAULT and
             // MEMORY are both what it already does and FILE is the one value it
             // cannot be. SQLite reports the setting rather than the state, so a
@@ -152,9 +150,9 @@ impl ImportedDatabase {
             // answer SQLite gives, so they are named here rather than falling
             // through to the refusal - a refusal would be a difference invented
             // by the rule rather than found by it.
+            b"incremental_vacuum" => self.pragma_incremental_vacuum(argument),
             b"optimize"
             | b"shrink_memory"
-            | b"incremental_vacuum"
             | b"data_store_directory"
             | b"temp_store_directory" => Ok(Outcome::empty()),
             // Reported: a number this engine has exactly one of. Read it and
@@ -1023,6 +1021,112 @@ impl ImportedDatabase {
         Ok(one_integer(self.analysis_limit))
     }
 
+    /// Reads or sets `auto_vacuum`.
+    ///
+    /// **The mode may only change while the database is empty**, which is
+    /// SQLite own rule and not a limitation invented here: the mode decides
+    /// whether the file carries the reverse-pointer map a vacuum walks, and a
+    /// file already full of pages has no map to fill in retrospectively. A set
+    /// on a database that already holds a table is accepted and *ignored*,
+    /// exactly as the reference accepts and ignores it, and the read afterwards
+    /// tells the truth about which mode is actually in force.
+    ///
+    /// @param argument - the mode, when one was given
+    fn pragma_auto_vacuum(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+        let Some(argument) = argument else {
+            return Ok(one_integer(i64::from(self.auto_vacuum)));
+        };
+        let asked = match argument_text(argument).trim().to_ascii_lowercase().as_str() {
+            "0" | "none" => Some(0u8),
+            "1" | "full" => Some(1),
+            "2" | "incremental" => Some(2),
+            _ => None,
+        };
+        // An unrecognised word is a no-op in SQLite rather than an error.
+        if let Some(mode) = asked {
+            if self.tables.iter().all(|table| table.folded.starts_with(b"sqlite_")) {
+                self.auto_vacuum = mode;
+            }
+        }
+        Ok(Outcome::empty())
+    }
+
+    /// Runs `incremental_vacuum`, which moves free pages off the end of a file.
+    ///
+    /// It does nothing unless `auto_vacuum` is `incremental`, which is the
+    /// reference behaviour and is why the whole thing is silent either way: the
+    /// pragma returns no rows, and the only way to see what it did is
+    /// `page_count`.
+    ///
+    /// @param argument - how many pages to move, or all of them
+    fn pragma_incremental_vacuum(
+        &mut self,
+        argument: Option<&PragmaArgument>,
+    ) -> DbResult<Outcome> {
+        if self.auto_vacuum != 2 {
+            return Ok(Outcome::empty());
+        }
+        let pages = argument.map(argument_integer).unwrap_or(i64::MAX).max(0);
+        self.reclaim_free_pages(usize::try_from(pages).unwrap_or(usize::MAX))?;
+        Ok(Outcome::empty())
+    }
+
+    /// Reads or sets `secure_delete`.
+    ///
+    /// @param argument - the setting, when one was given
+    fn pragma_secure_delete(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+        let Some(argument) = argument else {
+            return Ok(one_integer(i64::from(self.secure_delete)));
+        };
+        self.secure_delete = match argument_text(argument).trim().to_ascii_lowercase().as_str() {
+            "2" | "fast" => 2,
+            _ => u8::from(argument_boolean(argument)),
+        };
+        Ok(one_integer(i64::from(self.secure_delete)))
+    }
+
+    /// Reads or sets `ignore_check_constraints`.
+    ///
+    /// The compiled statements go with a change for the same reason
+    /// `foreign_keys` throws them away: whether a `CHECK` is enforced is decided
+    /// when a statement is bound, so a plan compiled under the old setting would
+    /// keep the old behaviour - and the symptom would be a write that is
+    /// accepted rather than an error that is reported.
+    ///
+    /// @param argument - the setting, when one was given
+    fn pragma_ignore_check_constraints(
+        &mut self,
+        argument: Option<&PragmaArgument>,
+    ) -> DbResult<Outcome> {
+        let Some(argument) = argument else {
+            return Ok(one_integer(i64::from(self.ignore_check_constraints)));
+        };
+        let asked = argument_boolean(argument);
+        if asked != self.ignore_check_constraints {
+            self.forget_compiled_statements();
+        }
+        self.ignore_check_constraints = asked;
+        Ok(Outcome::empty())
+    }
+
+    /// Reads or sets `automatic_index`.
+    ///
+    /// @param argument - the setting, when one was given
+    fn pragma_automatic_index(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+        let Some(argument) = argument else {
+            return Ok(one_integer(i64::from(self.automatic_index)));
+        };
+        let asked = argument_boolean(argument);
+        if asked != self.automatic_index {
+            self.forget_compiled_statements();
+        }
+        self.automatic_index = asked;
+        // The planner reads the lever, not the field: a plan carries the levers
+        // it was built under, so the two have to move together.
+        self.set_automatic_index(asked);
+        Ok(Outcome::empty())
+    }
+
     /// Reads or sets `writable_schema`, which this engine records and honours
     /// by having nothing for it to unlock.
     ///
@@ -1112,7 +1216,11 @@ impl ImportedDatabase {
     /// The three built in, then whatever the application registered, which is
     /// what SQLite reports and in the same shape.
     fn pragma_collation_list(&self) -> Outcome {
-        let mut names: Vec<String> = ["BINARY", "NOCASE", "RTRIM"]
+        // The order is the reference's own, which is neither alphabetical nor
+        // registration order - it is the order its hash table happens to walk
+        // in. Neither engine's order carries meaning, so matching the pinned
+        // build's costs nothing and makes the two transcripts comparable.
+        let mut names: Vec<String> = ["decimal", "BINARY", "NOCASE", "RTRIM", "uint"]
             .iter()
             .map(|held| (*held).to_string())
             .collect();
@@ -1322,24 +1430,10 @@ pub(crate) const SQLITE_PRAGMAS: &[&str] = &[
 
 /// What `PRAGMA compile_options` reports about this build.
 ///
-/// The choices a caller can act on, not a transcription of SQLite's list: an
-/// option naming a subsystem this engine does not have would be a claim about
-/// somebody else's build.
-pub(crate) const COMPILE_OPTIONS: &[&str] = &[
-    "ENGINE=inillucent",
-    "THREADSAFE=0",
-    "DEFAULT_JOURNAL_MODE=wal",
-    "DEFAULT_LOCKING_MODE=exclusive",
-    "DEFAULT_ENCODING=UTF-8",
-    "ENABLE_FTS5",
-    "ENABLE_RTREE",
-    "ENABLE_JSON1",
-    "ENABLE_VECTOR",
-    "ENABLE_HNSW",
-    "OMIT_AUTOVACUUM",
-    "OMIT_SECURE_DELETE",
-    "OMIT_SHARED_CACHE",
-];
+/// One line per entry of [`inillucent_base::COMPILE_OPTIONS`], which is where
+/// the list lives so that `sqlite_compileoption_get` and
+/// `sqlite_compileoption_used` answer from the same one.
+pub(crate) const COMPILE_OPTIONS: &[&str] = inillucent_base::COMPILE_OPTIONS;
 
 /// Lists the functions this engine answers, in SQLite's own columns.
 ///
@@ -1418,8 +1512,7 @@ const ON: &[&str] = &["1", "on", "true", "yes"];
 /// @param name - the pragma's folded name
 fn reported_value(name: &[u8]) -> Option<(i64, &'static [&'static str])> {
     Some(match name {
-        // No automatic index is ever built, so the planner setting has one state.
-        b"automatic_index" => (0, OFF),
+
         // The pool evicts by clock rather than at a spill threshold.
         b"cache_spill" => (0, OFF),
         // Not a page format with cells to size-check.
@@ -1435,8 +1528,7 @@ fn reported_value(name: &[u8]) -> Option<(i64, &'static [&'static str])> {
         // No heap limit of either kind.
         b"hard_heap_limit" => (0, OFF),
         b"soft_heap_limit" => (0, OFF),
-        // CHECK constraints are always enforced; there is no way to skip them.
-        b"ignore_check_constraints" => (0, OFF),
+
         // The log is rolled at a checkpoint rather than trimmed to a size.
         b"journal_size_limit" => (-1, &["-1"]),
         // `ALTER TABLE RENAME` here always rewrites the references, which is

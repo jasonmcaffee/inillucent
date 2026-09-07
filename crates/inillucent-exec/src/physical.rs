@@ -70,7 +70,7 @@ use inillucent_tree::PagedTree;
 use inillucent_value::affinity::Affinity;
 use inillucent_value::collation::Collation;
 
-use crate::aggregate::AggregateKind;
+use crate::aggregate::{AggregateKind, Percentile};
 use crate::batch::Batch;
 use crate::expr::{compile, ArithOp, CompareOp, Expr, StaticType};
 use crate::join::{IndexNestedLoopJoin, JoinKind, NestedLoopJoin, ValuesScan};
@@ -2882,7 +2882,7 @@ fn build_nested<'t>(
     // *failed* the condition in order to null-extend instead of dropping, and a
     // probe cannot tell that from a key that was not there.
     if inillucent_sql::plan::is_outer(source_term.join) || stage.kind == AccessKind::Materialised {
-        return build_materialised_join(plan, catalog, space, params, stage, downstream);
+        return build_materialised_join(plan, catalog, space, params, stage, index, downstream);
     }
     let tree = catalog
         .tree(stage.root)
@@ -2923,6 +2923,19 @@ fn build_nested<'t>(
     } else {
         nested_key(&source_term.path, &source_term.table, space, params)?
     };
+    // **And a third shape: an inner term with nothing to seek on.** An empty key
+    // list means the loop below walks the whole inner tree once per outer row,
+    // which is a join that is rows times rows. That is exactly the case
+    // `PRAGMA automatic_index` is about, in SQLite and here: read the inner side
+    // once instead, key it on the join expression, and probe. The test is only
+    // whether there is a key to build the table on - `build_materialised_join`
+    // is where it is built.
+    if keys.is_empty()
+        && plan.levers.has(inillucent_sql::plan::Levers::AUTOMATIC_INDEX)
+        && has_equi_key(plan, space, params, stage, index)?
+    {
+        return build_materialised_join(plan, catalog, space, params, stage, index, downstream);
+    }
     let compiled = keys
         .iter()
         .map(|expr| compile(expr, &outer_types))
@@ -2941,6 +2954,40 @@ fn build_nested<'t>(
         full_key,
         downstream,
     )))
+}
+
+/// Reports whether an inner stage's condition can key a hash table.
+///
+/// Asked *before* the join shape is chosen, because the answer is what chooses
+/// it: without a key there is nothing to build and the nested loop is the only
+/// shape left. It runs the same extraction the builder does, which is one
+/// translation and one walk of a condition - paid once per stage at compile
+/// time, against a join it is about to make linear.
+///
+/// @param plan - the planner's output
+/// @param space - the joined column space
+/// @param params - the bound parameters
+/// @param stage - the inner stage
+/// @param index - the stage's position, which names its residual
+fn has_equi_key(
+    plan: &PhysicalPlan,
+    space: &Space<'_>,
+    params: &Params,
+    stage: &PreparedStage,
+    index: usize,
+) -> DbResult<bool> {
+    let Some(source_term) = plan.sources.get(stage.term) else {
+        return Ok(false);
+    };
+    let Some(expr) = source_term
+        .on
+        .as_ref()
+        .or_else(|| plan.residuals.get(index).and_then(Option::as_ref))
+    else {
+        return Ok(false);
+    };
+    let translated = translate_scan(expr, space, params)?;
+    Ok(crate::autoindex::equi_keys(&translated, stage.offset, stage.width).is_some())
 }
 
 /// Builds one inner stage as a nested loop over rows read once.
@@ -2968,6 +3015,7 @@ fn build_materialised_join<'t>(
     space: &Space<'_>,
     params: &Params,
     stage: &PreparedStage,
+    index: usize,
     downstream: Box<dyn Sink + 't>,
 ) -> DbResult<Box<dyn Sink + 't>> {
     let source_term = plan
@@ -2994,6 +3042,71 @@ fn build_materialised_join<'t>(
         }
         None => None,
     };
+    // **The automatic index.** When the condition is a conjunction of plain
+    // equalities with one side of the join per term, the inner rows go into a
+    // hash table keyed on the inner halves and every outer row probes it -
+    // which turns a join that was rows-times-rows into rows-plus-rows. SQLite
+    // builds a transient b-tree for the same reason and puts it under the same
+    // switch; `crate::autoindex` says why the structures differ and the switch
+    // does not.
+    //
+    // The nested loop below is what `PRAGMA automatic_index = off` selects, and
+    // it is also what a condition this cannot key on gets - which is most of
+    // them, deliberately: a residual predicate the hash key did not capture
+    // would have to be re-tested per pair, and there is nowhere here to do it.
+    if plan.levers.has(inillucent_sql::plan::Levers::AUTOMATIC_INDEX) {
+        // **`ON` for an outer join, the residual for an inner one.** A non-outer
+        // join's constraint is split into the planner's term list before paths
+        // are chosen, so what is left of `b.p = a.x` arrives as this stage's
+        // residual and `source_term.on` is empty - which is exactly the case
+        // this optimisation exists for.
+        //
+        // The residual is left in place rather than removed. It is applied as a
+        // `Filter` above every join, so re-testing a condition the hash key has
+        // already enforced costs a comparison per surviving row and cannot
+        // change an answer; removing it would mean proving that the key
+        // captured the whole predicate, and this operator has no way to prove
+        // that about an expression it declined to look inside.
+        let keyed = source_term
+            .on
+            .as_ref()
+            .or_else(|| plan.residuals.get(index).and_then(Option::as_ref));
+        if let Some(expr) = keyed {
+            let translated = translate_scan(expr, space, params)?;
+            if let Some(keys) =
+                crate::autoindex::equi_keys(&translated, stage.offset, stage.width)
+            {
+                let outer_types: Vec<StaticType> = space
+                    .types
+                    .get(..stage.offset)
+                    .map(<[StaticType]>::to_vec)
+                    .unwrap_or_default();
+                let inner_types: Vec<StaticType> = space
+                    .types
+                    .get(stage.offset..stage.offset.saturating_add(stage.width))
+                    .map(<[StaticType]>::to_vec)
+                    .unwrap_or_default();
+                let probe = keys
+                    .probe
+                    .iter()
+                    .map(|expr| compile(expr, &outer_types))
+                    .collect::<DbResult<Vec<_>>>()?;
+                let build = keys
+                    .build
+                    .iter()
+                    .map(|expr| compile(expr, &inner_types))
+                    .collect::<DbResult<Vec<_>>>()?;
+                let mut join = crate::join::HashJoin::new(
+                    join_kind_of(source_term.join),
+                    build,
+                    probe,
+                    downstream,
+                );
+                join.build_materialised(&rows)?;
+                return Ok(Box::new(join));
+            }
+        }
+    }
     Ok(Box::new(NestedLoopJoin::new(
         join_kind_of(source_term.join),
         rows,
@@ -5275,6 +5388,10 @@ fn aggregate_specs(
             AggregateFunc::JsonbGroupArray => AggregateKind::JsonGroupArray(true),
             AggregateFunc::JsonGroupObject => AggregateKind::JsonGroupObject(false),
             AggregateFunc::JsonbGroupObject => AggregateKind::JsonGroupObject(true),
+            AggregateFunc::Median => AggregateKind::Percentile(Percentile::Median),
+            AggregateFunc::Percentile => AggregateKind::Percentile(Percentile::Hundredths),
+            AggregateFunc::PercentileCont => AggregateKind::Percentile(Percentile::Continuous),
+            AggregateFunc::PercentileDisc => AggregateKind::Percentile(Percentile::Discrete),
             AggregateFunc::External => {
                 let name = call.external.clone().unwrap_or_default();
                 let Some(body) = space
@@ -5296,7 +5413,12 @@ fn aggregate_specs(
             // same reason a registered aggregate's do: the accumulator is
             // handed the whole row, and the vectorised single-value path stays
             // exactly as it was for everything that reduces one value.
-            AggregateKind::JsonGroupObject(_) | AggregateKind::External(_) => call
+            // The percentile family's second argument is the fraction, and it
+            // reaches the accumulator the same way: the whole row is kept, so
+            // any row's copy of the constant will do at `finish`.
+            AggregateKind::JsonGroupObject(_)
+            | AggregateKind::External(_)
+            | AggregateKind::Percentile(_) => call
                 .arguments
                 .iter()
                 .skip(1)
