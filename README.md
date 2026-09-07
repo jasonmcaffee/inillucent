@@ -26,8 +26,8 @@ similar to pgvector. Measured against that:
 
 | goal | state | evidence |
 |---|---|---|
-| Faster than SQLite | **Yes on Windows at 100k rows and up, on the bar, not above it.** Weighted geomean lower bound 3.00x to 3.08x across four 30-round runs at medium (bar 3.00x); 3.72x at large; 2.29x at small. On Linux the same binary is 1.42x at medium. | task-1834 §5e, §5h |
-| No family slower than SQLite | **No, but four families are now down to three.** At medium over 30 rounds the lower bounds are `open.prepare` 0.81x, `transaction` 0.99x, `schema` 0.53x, `extension` 0.41x; `read.range` and `write` have cleared their bars. The contract's 1.00x floor is not met. | task-1838 §4 |
+| Faster than SQLite | **Yes on Windows at 100k rows and up, on the bar, not above it.** Weighted geomean 3.11x at medium, lower bound 3.09x against a 3.00x bar, one 30-round run (task-1838 §4; the four-run qualification is owed); 3.72x at large; 2.29x at small. On Linux the same binary is 1.42x at medium. | task-1838 §4, task-1834 §5h |
+| No family slower than SQLite | **Not yet: three families, down from six.** At medium over 30 rounds the lower bounds are `open.prepare` 0.79x, `schema` 0.56x, `extension` 0.50x. `write`, `transaction`, `read.range` and `large.values` have cleared. The contract's 1.00x floor is not met. | task-1838 §4 |
 | Same features as SQLite | **Not yet, but the list is short.** The new engine runs 46 of 50 inventoried constructs. Shipped by task-1838: trigger firing and foreign key enforcement (immediate and deferred), `LEFT`/`RIGHT`/`FULL OUTER JOIN`, derived tables in `FROM`, recursive CTEs, correlated subqueries, user-defined scalar and aggregate functions and collations, and the `VIRTUAL` generated column that used to shift later columns. Still missing: temp tables, `ATTACH`, `VACUUM`, plain `EXPLAIN`, and the table-valued pragma form. | task-1838 §1-3, `new_engine_surface.rs` |
 | Same durability and isolation | **Yes, single process, one writer.** WAL with group commit, snapshot isolation, ARIES-style redo recovery, undo for `ROLLBACK`/`SAVEPOINT`, crash campaigns under a deterministic simulator. Multi-process access and SQLite's file format are deliberate non-goals. | task-1832, task-1816 |
 | Embedding search like pgvector | **Yes, and graded better than pgvector on 15 of 17 primary comparisons** with zero worse; in production on a 598,560-chunk mailbox at recall 1.000 and 27 ms p95. Reachable from SQL only through the `inillucent_search` virtual table: there is no `vector` column type or distance operator in the grammar yet. | `inillucent-scorecard.md`, task-1775 |
@@ -362,11 +362,10 @@ struck below rather than deleted, so the list still reads as a record of what wa
 3. ~~**Outer joins**, derived tables in `FROM`, recursive CTEs, correlated subqueries as values.~~
    Shipped, task-1838 §2.
 4. ~~**User-defined functions and collations** on the new connection.~~ Shipped, task-1838 §3.
-5. **The floor**: `open.prepare` 0.81x, `transaction` 0.99x, `schema` 0.53x, `extension` 0.41x at
-   medium; `write` at small; `txn.large` 0.18x. The same write path has a **space** cost nothing had
-   measured: `INSERT INTO w SELECT id, v FROM u` over 100,000 rows writes 3,130 pages for 104 pages
-   of data, 32 rows to a 32 KiB page, because every row goes through a leaf's delta area and the
-   leaf splits at `DELTA_LIMIT` rather than compacting (task-1838 §6; reproduces at `5eeb269`).
+5. **The floor**: `open.prepare` 0.79x, `schema` 0.56x, `extension` 0.50x at medium; `write` at
+   small; `txn.large` 0.18x. The space cost that came with them is fixed: an append no longer splits
+   a leaf that is not full, so a page holds what it can rather than `DELTA_LIMIT` rows
+   (task-1838 §4).
 6. **Linux**: 1.45x weighted where Windows is 3.02x, because SQLite is much faster there and the new
    engine is not much faster there.
 7. ~~**Process-level memory and CPU** for both engines, unmeasured.~~ Measured, task-1838 §6: see

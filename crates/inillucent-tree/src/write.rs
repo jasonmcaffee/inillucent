@@ -818,22 +818,38 @@ impl PagedTree {
             // once, and a leaf with extents holds few rows, so the copy costs
             // little where it costs anything at all.
             let spilled = leaf.has_extents();
-            // **An append splits rather than compacts.**
+            // **An append splits *lopsidedly*; it does not split *early*.**
             //
-            // A leaf filled by rows arriving in key order is compacted, filled
-            // again by the next thirty-two, and compacted again - and a
-            // compaction repacks every live row and writes the whole page to
-            // the log. On the gate's `write.insert.batch`, two thousand rows
-            // appended to a hundred thousand cost a hundred and ten of those:
-            // nine hundred kilobytes of log for two hundred and forty
-            // kilobytes of rows.
+            // This flag used to force a split instead of a compaction, on the
+            // argument that a leaf filled by rows arriving in key order is
+            // compacted, filled again by the next thirty-two, and compacted
+            // again - and that a compaction repacks every live row and writes
+            // the whole page to the log.
             //
-            // Splitting instead leaves a half-empty page on the right, which is
-            // where the next rows are going anyway, so the same work happens
-            // once per page rather than once per delta area. It is the append
-            // case every b-tree special-cases, and the condition is the same
-            // one they use: this is the last leaf, and the key arriving sorts
-            // after everything in it.
+            // The argument does not survive being measured on a page rather
+            // than on a workload (task-1838 §4). A leaf can only hold
+            // `DELTA_LIMIT` rows before it is full, so forcing a split gave the
+            // left page **thirty-two rows** and the right page none - and the
+            // next thirty-two filled the new page and split it again. Every
+            // page in an appended tree held thirty-two rows where the same
+            // table built out of key order held nine hundred and sixty-two:
+            // `INSERT INTO w SELECT id, v FROM u` over a hundred thousand rows
+            // wrote 3,130 pages for 104 pages of data, and a 200,000-row table
+            // was 221 MB against SQLite's 10.7.
+            //
+            // The log went the same way, which is what settles it: the same
+            // insert checkpoints **72** pages now against **3,134** before, so
+            // splitting three pages per thirty-two rows always cost more log
+            // than compacting one. On the gate: `write.insert.batch` 0.35x to
+            // 0.50x, `fts.build` 0.15x to 0.25x, `rtree.insert` 0.26x to 0.33x,
+            // the `transaction` family over the 1.00x floor for the first time,
+            // the headline 3.01x to 3.11x, and every read family inside the
+            // run-to-run spread.
+            //
+            // What the flag still does is choose the fill when a split really
+            // is needed - the page is genuinely full - because rows arriving in
+            // order never come back to the page they left behind. See
+            // `APPEND_FILL`.
             let appending = leaf.right_sibling().is_none()
                 && rows.len() >= 2
                 && match (arriving, rows.last()) {
@@ -859,7 +875,7 @@ impl PagedTree {
                 Packed::Filled {
                     page: image,
                     rows: packed,
-                } if packed == rows.len() && !appending => {
+                } if packed == rows.len() => {
                     Fit::Compact(image, leaf.right_sibling(), leaf.max_cts())
                 }
                 // A split rewrites three pages and needs the rows to outlive the
