@@ -1,0 +1,795 @@
+//! The inillucent driver: what an application uses to talk to the engine.
+//!
+//! Invariant: **this crate holds every decision and depends on
+//! `inillucent-engine` and nothing else.** That single edge is the whole reason
+//! it exists. `crates/unluminous-db` in the Unluminous repository is the first
+//! consumer, and a consumer that reached into `inillucent-pool`,
+//! `inillucent-tree` or `inillucent-exec` would be built on ground the
+//! rearchitecture is still moving: `_agent_output/task-1834-phase5/README.md`
+//! §14 schedules the deletion of four more crates and the absorption of a
+//! fifth. Everything above this line is unaffected by all of it.
+//!
+//! `inillucent-driver-capi` is a marshalling layer over this crate that decides
+//! nothing, and is what every language that is not Rust binds to. Rust does not
+//! go through it: DuckDB routes its own Rust binding through its C ABI because
+//! its core is C++, and ours is Rust, so doing the same would be paying that
+//! cost without that reason.
+//!
+//! ## The one thing to read before using it
+//!
+//! **This engine is deliberately incomplete, and [`capability`] is how you find
+//! out what it will not do.** It cannot enforce a foreign key, answer a `LEFT
+//! JOIN`, run a recursive CTE, use a derived table in `FROM`, register a
+//! function, or stop a running statement. It refuses those rather than
+//! answering them wrongly, and a refusal arrives as [`Status::Unsupported`]
+//! with [`Error::feature`] naming the construct - which is a different thing
+//! from the [`Status::Syntax`] a mistyped statement gets, and the distinction
+//! is the point of the driver.
+//!
+//! `foreign_keys` is the one that needs saying twice, because it fails
+//! *silently*: a violating write succeeds. Check the constraint in the
+//! application until `capability::supports("foreign_keys")` answers
+//! `Support::Yes`.
+//!
+//! ## Threads
+//!
+//! One file is one buffer pool and the engine is single threaded, so a
+//! [`Database`] is neither `Send` nor `Sync`, and this is a contract rather than
+//! an oversight: two connections holding two pools over one set of bytes would
+//! be two page caches over one file. Two databases on two files are
+//! independent.
+
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+#![deny(clippy::indexing_slicing)]
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used)]
+#![deny(clippy::panic)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_used
+    )
+)]
+
+pub mod capability;
+pub mod error;
+pub mod introspect;
+pub mod rows;
+pub mod value;
+
+use std::cell::Cell;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use inillucent_engine::connect::{Database as EngineDatabase, Statement as EngineStatement};
+
+pub use capability::{capability, supports, Capability, Support, CAPABILITIES};
+pub use error::{Error, Result, Status};
+pub use introspect::{Item, Kind, Table};
+pub use rows::Rows;
+pub use value::{Column, Value, ValueKind};
+
+/// The driver's own version, and the engine's beneath it.
+pub const VERSION: &str = concat!(
+    "inillucent-driver ",
+    env!("CARGO_PKG_VERSION"),
+    " (engine ",
+    env!("CARGO_PKG_VERSION"),
+    ")"
+);
+
+/// Returns what this driver calls itself.
+///
+/// The string a consumer shows in a Test Connection dialog. It names the driver
+/// and the engine separately because they are separately versioned even when
+/// the numbers agree today.
+pub fn version() -> &'static str {
+    VERSION
+}
+
+/// How a database is opened.
+#[derive(Clone, Copy, Debug)]
+pub struct OpenOptions {
+    /// Create the file when there is nothing at the path. Default `true`.
+    pub create: bool,
+    /// Refuse any statement that is not a query. Default `false`; see
+    /// [`Connection::execute`] for exactly what it refuses and what it does
+    /// not.
+    pub read_only: bool,
+    /// How many frames the buffer pool holds. Default 4,096, which is 128 MiB
+    /// at the engine's 32 KiB page.
+    pub cache_frames: usize,
+    /// Let an error carry the engine's internal diagnostic text.
+    ///
+    /// Default `false`, and off for a reason rather than out of caution:
+    /// `inillucent-base` promises that an error's *message* never holds a
+    /// file-system path or a bound value, and puts everything that does into
+    /// the detail. A caller that turns this on is asking for text it must not
+    /// show a person or send to a shared log.
+    pub diagnostics: bool,
+}
+
+impl Default for OpenOptions {
+    /// The defaults a caller gets from [`Database::open`].
+    fn default() -> OpenOptions {
+        OpenOptions {
+            create: true,
+            read_only: false,
+            cache_frames: 4_096,
+            diagnostics: false,
+        }
+    }
+}
+
+/// An open database file.
+///
+/// Neither `Send` nor `Sync`, by construction: it holds the engine, which holds
+/// one buffer pool over one file.
+pub struct Database {
+    engine: EngineDatabase,
+    path: PathBuf,
+    options: OpenOptions,
+}
+
+impl std::fmt::Debug for Database {
+    /// Names the file and the mode, and never anything a caller bound.
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.debug_struct("Database")
+            .field("path", &self.path)
+            .field("read_only", &self.options.read_only)
+            .finish()
+    }
+}
+
+impl Database {
+    /// Opens a database, creating it when the path holds nothing.
+    ///
+    /// @param path - the database file
+    pub fn open(path: impl AsRef<Path>) -> Result<Database> {
+        Database::open_with(path, OpenOptions::default())
+    }
+
+    /// Opens a database with the options stated.
+    ///
+    /// **A file this engine did not write is not a file it opens.** File-format
+    /// compatibility with SQLite is a non-goal of the rearchitecture, so a `.db`
+    /// SQLite wrote reports that neither meta page is readable, which is true
+    /// and is what it should say. [`Database::import_sqlite`] is the one route
+    /// from one to the other.
+    ///
+    /// @param path - the database file
+    /// @param options - how to open it
+    pub fn open_with(path: impl AsRef<Path>, options: OpenOptions) -> Result<Database> {
+        let path = path.as_ref().to_path_buf();
+        if !options.create && !path.is_file() {
+            return Err(Error::said(
+                Status::NotFound,
+                format!("there is no database at {}.", path.display()),
+            ));
+        }
+        let engine = EngineDatabase::open_with(&path, options.cache_frames)
+            .map_err(|error| Error::from_engine(&error, options.diagnostics))?;
+        Ok(Database {
+            engine,
+            path,
+            options,
+        })
+    }
+
+    /// Reads a SQLite file and builds a inillucent database beside it.
+    ///
+    /// The rebuilt file sits at the source path with `.rdb` appended, and the
+    /// source is never written to. Same rows, different bytes - which is the
+    /// arrangement the rearchitecture chose when it dropped format
+    /// compatibility.
+    ///
+    /// @param path - the SQLite database to read
+    pub fn import_sqlite(path: impl AsRef<Path>) -> Result<Database> {
+        let options = OpenOptions::default();
+        let engine = EngineDatabase::import_with(path.as_ref(), options.cache_frames)
+            .map_err(|error| Error::from_engine(&error, options.diagnostics))?;
+        let path = engine.path().to_path_buf();
+        Ok(Database {
+            engine,
+            path,
+            options,
+        })
+    }
+
+    /// Returns a connection to this database.
+    pub fn connect(&self) -> Connection<'_> {
+        Connection {
+            database: self,
+            engine: self.engine.connect(),
+            depth: Cell::new(0),
+        }
+    }
+
+    /// Returns the file this database is in.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Makes everything written so far durable in the file.
+    ///
+    /// A database dropped without this is not lost - opening it replays the log
+    /// - but a checkpoint is what makes the next open cheap.
+    pub fn checkpoint(&self) -> Result<()> {
+        self.engine
+            .checkpoint()
+            .map_err(|error| self.classify(&error))
+    }
+
+    /// Walks every tree and reports the first thing that is wrong.
+    pub fn integrity_check(&self) -> Result<()> {
+        self.engine.check().map_err(|error| self.classify(&error))
+    }
+
+    /// Copies this database into a file, and checks the copy.
+    ///
+    /// The copy is opened and walked before this returns, because a backup
+    /// nobody checked is a file that is *assumed* to be a database, and the cost
+    /// of finding out otherwise is paid at the worst possible moment.
+    ///
+    /// @param path - where the copy goes
+    pub fn backup_to(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.engine
+            .backup_to(path.as_ref())
+            .map_err(|error| self.classify(&error))
+    }
+
+    /// Turns an engine error into a driver error, honouring the open options.
+    ///
+    /// @param error - the engine's error
+    fn classify(&self, error: &inillucent_engine::DbError) -> Error {
+        Error::from_engine(error, self.options.diagnostics)
+    }
+}
+
+/// A connection to a database.
+///
+/// It borrows the database rather than owning a handle of its own, because one
+/// file is one pool.
+pub struct Connection<'d> {
+    database: &'d Database,
+    engine: inillucent_engine::connect::Connection<'d>,
+    /// How deep the caller is inside [`Connection::transaction`].
+    ///
+    /// Counted so a nested call is refused by name rather than committing an
+    /// outer caller's work early, which is the shape of a bug nobody notices
+    /// until something is half written.
+    depth: Cell<u32>,
+}
+
+impl std::fmt::Debug for Connection<'_> {
+    /// Names the database, and nothing a caller bound.
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.debug_struct("Connection")
+            .field("path", &self.database.path)
+            .finish()
+    }
+}
+
+impl Connection<'_> {
+    /// Runs one statement and returns everything it produced.
+    ///
+    /// **`limit` cuts the rows handed back and not the rows produced**, because
+    /// the engine materialises: see [`rows`] for why that makes
+    /// [`Rows::total`] exact where a server-backed driver can only estimate,
+    /// and what it costs.
+    ///
+    /// In read-only mode a statement that does not bind to a query is refused
+    /// with [`Status::ReadOnly`] - including a `PRAGMA`, because a pragma that
+    /// takes a value changes something. The classification is the binder's
+    /// rather than a scan of the text, so it cannot be talked past by
+    /// whitespace or a comment.
+    ///
+    /// @param sql - the statement
+    /// @param params - the values bound to `?1`, `?2`, ...
+    /// @param limit - how many rows to hand back
+    pub fn query(&self, sql: &str, params: &[Value], limit: usize) -> Result<Rows> {
+        if self.database.options.read_only {
+            self.refuse_if_it_writes(sql)?;
+        }
+        self.run(sql, params, limit)
+    }
+
+    /// Runs one statement for its effect and returns how many rows it changed.
+    ///
+    /// @param sql - the statement
+    /// @param params - the values bound to `?1`, `?2`, ...
+    pub fn execute(&self, sql: &str, params: &[Value]) -> Result<u64> {
+        Ok(self.query(sql, params, 0)?.affected.unwrap_or(0))
+    }
+
+    /// Runs several statements separated by semicolons, for their effect.
+    ///
+    /// @param sql - the statements
+    pub fn execute_batch(&self, sql: &str) -> Result<()> {
+        if self.database.options.read_only {
+            return Err(Error::said(
+                Status::ReadOnly,
+                "this connection is read only, and a batch is for statements that change \
+                 something.",
+            ));
+        }
+        self.engine
+            .execute_batch(sql)
+            .map_err(|error| self.database.classify(&error))
+    }
+
+    /// Compiles a statement so it can be run more than once.
+    ///
+    /// @param sql - the statement
+    pub fn prepare(&self, sql: &str) -> Result<Statement<'_>> {
+        if self.database.options.read_only {
+            self.refuse_if_it_writes(sql)?;
+        }
+        let engine = self
+            .engine
+            .prepare(sql)
+            .map_err(|error| self.database.classify(&error))?;
+        Ok(Statement {
+            connection: self,
+            engine,
+            sql: sql.to_owned(),
+        })
+    }
+
+    /// Describes how a statement would be run.
+    ///
+    /// The operator chain, which is what `EXPLAIN QUERY PLAN` answers. There is
+    /// no bytecode listing because there is no bytecode.
+    ///
+    /// @param sql - the statement
+    pub fn explain(&self, sql: &str) -> Result<Vec<String>> {
+        self.engine
+            .explain(sql)
+            .map_err(|error| self.database.classify(&error))
+    }
+
+    /// Writes several statements as one transaction, or writes none of them.
+    ///
+    /// **`check` is handed in rather than run afterwards**, and that is the
+    /// whole shape of the method rather than a convenience. A postcondition
+    /// tested after the `COMMIT` is a report about something that has already
+    /// happened; tested before it, it is a guard. The consumer's rule - every
+    /// statement a row editor writes must change exactly one row - only means
+    /// anything in the second form.
+    ///
+    /// Any failure, and any `check` that refuses, rolls the whole thing back.
+    ///
+    /// @param work - the statements and their bound values, in order
+    /// @param check - what must be true of the changed-row counts before commit
+    pub fn transaction<F>(&self, work: &[(String, Vec<Value>)], check: F) -> Result<Vec<u64>>
+    where
+        F: Fn(&[u64]) -> Result<()>,
+    {
+        if self.database.options.read_only {
+            return Err(Error::said(
+                Status::ReadOnly,
+                "this connection is read only, and a transaction is for statements that \
+                 change something.",
+            ));
+        }
+        if self.depth.get() > 0 {
+            return Err(Error::said(
+                Status::InvalidState,
+                "a transaction is already open on this connection; this driver does not nest \
+                 them, because committing the inner one would commit the outer one's work \
+                 too.",
+            ));
+        }
+        self.depth.set(1);
+        let outcome = self.transact(work, check);
+        self.depth.set(0);
+        outcome
+    }
+
+    /// Runs the body of [`Connection::transaction`], so the depth is always put
+    /// back.
+    ///
+    /// @param work - the statements and their bound values
+    /// @param check - the postcondition
+    fn transact<F>(&self, work: &[(String, Vec<Value>)], check: F) -> Result<Vec<u64>>
+    where
+        F: Fn(&[u64]) -> Result<()>,
+    {
+        self.engine
+            .execute_batch("BEGIN")
+            .map_err(|error| self.database.classify(&error))?;
+        let mut affected = Vec::with_capacity(work.len());
+        for (statement, values) in work {
+            match self.run(statement, values, 0) {
+                Ok(rows) => affected.push(rows.affected.unwrap_or(0)),
+                Err(why) => return Err(self.rolled_back(why)),
+            }
+        }
+        if let Err(why) = check(&affected) {
+            return Err(self.rolled_back(why));
+        }
+        self.engine
+            .execute_batch("COMMIT")
+            .map_err(|error| self.database.classify(&error))?;
+        Ok(affected)
+    }
+
+    /// Rolls the open transaction back and hands back the reason it is being
+    /// rolled back.
+    ///
+    /// A failure to roll back is not swallowed: it replaces the reason, because
+    /// a caller told only about the first failure would believe nothing was
+    /// written.
+    ///
+    /// @param why - what went wrong
+    fn rolled_back(&self, why: Error) -> Error {
+        match self.engine.execute_batch("ROLLBACK") {
+            Ok(()) => why,
+            Err(error) => {
+                let mut failed = self.database.classify(&error);
+                failed.message = format!(
+                    "{} - and the rollback after it failed: {}. The database may hold a \
+                     partial write.",
+                    why.message, failed.message
+                );
+                failed
+            }
+        }
+    }
+
+    /// Runs a statement with no read-only check, which the caller has done.
+    ///
+    /// @param sql - the statement
+    /// @param params - the bound values
+    /// @param limit - how many rows to keep
+    fn run(&self, sql: &str, params: &[Value], limit: usize) -> Result<Rows> {
+        let started = Instant::now();
+        let mut statement = self
+            .engine
+            .prepare(sql)
+            .map_err(|error| self.database.classify(&error))?;
+        bind_all(&mut statement, params)?;
+        collect(
+            &mut statement,
+            sql,
+            limit,
+            started,
+            self.database.options.diagnostics,
+        )
+        .map_err(|error| self.database.classify(&error))
+    }
+
+    /// Refuses a statement that is not a query, for a read-only connection.
+    ///
+    /// It asks the engine to *plan* the statement, which succeeds only for a
+    /// query - `plan` reports "is not a read-only statement" for anything else.
+    /// So the classification is the binder's own and cannot be talked past by a
+    /// comment, a case change or leading whitespace, which is what a scan of the
+    /// text would fall to.
+    ///
+    /// @param sql - the statement
+    fn refuse_if_it_writes(&self, sql: &str) -> Result<()> {
+        match self.engine.explain(sql) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let classified = self.database.classify(&error);
+                // A statement that failed to *plan* for any other reason - a
+                // missing table, a construct the engine cannot run - is that
+                // failure and not a read-only refusal, and reporting it as one
+                // would tell a caller to reopen the file over a typo.
+                match classified.status {
+                    Status::Syntax if classified.message.contains("not a read-only statement") => {
+                        Err(Error::said(
+                            Status::ReadOnly,
+                            "this connection is read only, and that statement changes something.",
+                        ))
+                    }
+                    _ => Err(classified),
+                }
+            }
+        }
+    }
+
+    /// Returns the rowid the last `INSERT` on this database assigned.
+    pub fn last_insert_rowid(&self) -> i64 {
+        self.engine.last_insert_rowid()
+    }
+
+    /// Returns how many rows every statement so far has changed.
+    pub fn total_changes(&self) -> i64 {
+        self.engine.total_changes()
+    }
+
+    /// Returns whether a transaction is open.
+    pub fn in_transaction(&self) -> bool {
+        !self.engine.autocommit()
+    }
+
+    /// Returns the schema's generation, which changes when the schema does.
+    ///
+    /// A consumer that caches a table's columns compares this to know whether
+    /// the cache is stale, rather than re-reading the schema per statement.
+    pub fn schema_cookie(&self) -> u64 {
+        self.engine.schema_cookie()
+    }
+
+    /// Asks another thread to stop a running statement.
+    ///
+    /// **Always refused, and see `capability::supports("cancel")`.** The engine's
+    /// statement materialises - it runs whole on its first step and then walks
+    /// the rows it produced - so there is no loop in which a flag would be read.
+    /// A cancel that set one would return success and do nothing until the
+    /// statement finished of its own accord, which is a wrong answer wearing the
+    /// clothes of a feature.
+    pub fn cancel(&self) -> Result<()> {
+        Err(Error {
+            status: Status::Unsupported,
+            message: "this engine cannot stop a running statement: it runs a statement whole \
+                      rather than a row at a time, so there is no point at which it could \
+                      notice."
+                .to_owned(),
+            detail: None,
+            feature: Some("cancelling a running statement".to_owned()),
+            offset: None,
+            engine_code: 0,
+        })
+    }
+
+    // —— introspection ————————————————————————————————————————————
+
+    /// Returns the schemas this database has, which is one.
+    ///
+    /// Answered as a list of one rather than as nothing, so a consumer drawing a
+    /// tree has the same shape for every engine and never asks which it is
+    /// drawing.
+    pub fn schemas(&self) -> Result<Vec<String>> {
+        Ok(vec!["main".to_owned()])
+    }
+
+    /// Returns everything in the schema.
+    pub fn items(&self) -> Result<Vec<Item>> {
+        let rows = self.internal(
+            "SELECT type, name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' \
+             ORDER BY type, name",
+            &[],
+        )?;
+        let mut items = Vec::with_capacity(rows.rows.len());
+        for row in &rows.rows {
+            let Some(kind) = row.first().and_then(Value::text).and_then(Kind::from_name) else {
+                continue;
+            };
+            let Some(name) = row.get(1).and_then(Value::text) else {
+                continue;
+            };
+            items.push(Item {
+                name: name.to_owned(),
+                kind,
+            });
+        }
+        Ok(items)
+    }
+
+    /// Returns one table's columns and key.
+    ///
+    /// @param name - the table's name
+    pub fn table(&self, name: &str) -> Result<Table> {
+        let statement = format!("PRAGMA table_info({})", introspect::quoted(name));
+        let rows = self.internal(&statement, &[])?;
+        if rows.rows.is_empty() {
+            return Err(Error::said(
+                Status::NotFound,
+                format!("`{name}` has no columns, or is not in this database."),
+            ));
+        }
+        let mut table = Table {
+            name: name.to_owned(),
+            ..Table::default()
+        };
+        let mut key: Vec<(i64, String)> = Vec::new();
+        for row in &rows.rows {
+            let column_name = cell_text(row.get(1));
+            let declared = cell_text(row.get(2));
+            table.not_null.push(cell_integer(row.get(3)) == 1);
+            let position = cell_integer(row.get(5));
+            if position > 0 {
+                key.push((position, column_name.clone()));
+            }
+            table.columns.push(Column::new(column_name, declared));
+        }
+        key.sort_by_key(|(position, _)| *position);
+        table.key = key.into_iter().map(|(_, name)| name).collect();
+        table.without_rowid = self.is_without_rowid(name);
+        Ok(table)
+    }
+
+    /// Returns the `CREATE` statement a schema entry was made by.
+    ///
+    /// The original text, which the engine keeps, rather than something composed
+    /// from a catalogue - so what a consumer shows is what somebody typed.
+    ///
+    /// @param name - the entry's name
+    pub fn ddl(&self, name: &str) -> Result<String> {
+        let rows = self.internal(
+            "SELECT sql FROM sqlite_schema WHERE name = ?1",
+            &[Value::Text(name.to_owned())],
+        )?;
+        rows.rows
+            .first()
+            .and_then(|row| row.first())
+            .and_then(Value::text)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                Error::said(
+                    Status::NotFound,
+                    format!("`{name}` is not in this database's schema."),
+                )
+            })
+    }
+
+    /// Reports whether a table has no implicit rowid to address a row by.
+    ///
+    /// Asked of the table rather than of its declaration, because `WITHOUT
+    /// ROWID` is a property the schema text records and a selectable `rowid` is
+    /// the property a caller actually needs. A table that answers the query has
+    /// one.
+    ///
+    /// @param name - the table's name
+    fn is_without_rowid(&self, name: &str) -> bool {
+        let statement = format!("SELECT rowid FROM {} LIMIT 1", introspect::quoted(name));
+        self.internal(&statement, &[]).is_err()
+    }
+
+    /// Runs a statement the driver composed, past the read-only check.
+    ///
+    /// The check is about the *caller's* statements. Introspection is the
+    /// driver's own and is read-only by construction - every one of them is a
+    /// `SELECT` or a reporting `PRAGMA` written in this file - so putting it
+    /// through a rule meant for arbitrary text would refuse `PRAGMA table_info`
+    /// on a read-only connection, which is the one mode that needs it most.
+    ///
+    /// @param sql - the statement
+    /// @param params - the bound values
+    fn internal(&self, sql: &str, params: &[Value]) -> Result<Rows> {
+        self.run(sql, params, usize::MAX)
+    }
+}
+
+/// A statement compiled once and run more than once.
+pub struct Statement<'c> {
+    connection: &'c Connection<'c>,
+    engine: EngineStatement<'c>,
+    sql: String,
+}
+
+impl Statement<'_> {
+    /// Runs the statement with these values bound.
+    ///
+    /// @param params - the values bound to `?1`, `?2`, ...
+    /// @param limit - how many rows to hand back
+    pub fn query(&mut self, params: &[Value], limit: usize) -> Result<Rows> {
+        let started = Instant::now();
+        self.engine.clear_bindings();
+        bind_all(&mut self.engine, params)?;
+        self.engine.reset();
+        let diagnostics = self.connection.database.options.diagnostics;
+        collect(&mut self.engine, &self.sql, limit, started, diagnostics)
+            .map_err(|error| self.connection.database.classify(&error))
+    }
+
+    /// Returns the statement this was compiled from.
+    pub fn sql(&self) -> &str {
+        &self.sql
+    }
+}
+
+impl std::fmt::Debug for Statement<'_> {
+    /// Names the statement's text, which is the caller's own and holds no bound
+    /// value.
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.debug_struct("Statement")
+            .field("sql", &self.sql)
+            .finish()
+    }
+}
+
+/// Binds every value in order, starting at `?1`.
+///
+/// @param statement - the engine statement
+/// @param params - the values
+fn bind_all(statement: &mut EngineStatement<'_>, params: &[Value]) -> Result<()> {
+    for (nth, value) in params.iter().enumerate() {
+        let index = u32::try_from(nth.saturating_add(1)).map_err(|_| {
+            Error::said(
+                Status::InvalidState,
+                "that is more bound parameters than a statement can have.",
+            )
+        })?;
+        statement
+            .bind(index, value.to_engine())
+            .map_err(|error| Error::from_engine(&error, false))?;
+    }
+    Ok(())
+}
+
+/// Steps a statement to the end and collects what it produced.
+///
+/// **The limit cuts what is handed back, never what is produced**, so `total` is
+/// the exact count and `more` is a fact. See [`rows`].
+///
+/// @param statement - the engine statement
+/// @param sql - the statement's text, for the tag
+/// @param limit - how many rows to keep
+/// @param started - when the call began
+/// @param diagnostics - whether internal detail may be carried
+fn collect(
+    statement: &mut EngineStatement<'_>,
+    sql: &str,
+    limit: usize,
+    started: Instant,
+    diagnostics: bool,
+) -> std::result::Result<Rows, inillucent_engine::DbError> {
+    let _ = diagnostics;
+    let mut kept: Vec<Vec<Value>> = Vec::new();
+    let mut total = 0usize;
+    while statement.step()? {
+        total = total.saturating_add(1);
+        if kept.len() < limit {
+            kept.push(statement.row().iter().map(Value::from_engine).collect());
+        }
+    }
+    let columns: Vec<Column> = statement
+        .columns()
+        .iter()
+        .map(|name| Column::new(name.clone(), String::new()))
+        .collect();
+    let changed = statement.changes();
+    // A query is a statement that named columns and changed nothing. An
+    // `INSERT ... RETURNING` does both, which is why the count decides rather
+    // than the shape.
+    let affected = match columns.is_empty() || changed > 0 {
+        true => Some(changed as u64),
+        false => None,
+    };
+    let counted = match affected {
+        Some(count) if columns.is_empty() => count as usize,
+        _ => total,
+    };
+    Ok(Rows {
+        columns,
+        rows: kept,
+        affected,
+        total,
+        more: total > limit,
+        elapsed: started.elapsed(),
+        tag: rows::tag_for(sql, counted),
+    })
+}
+
+/// Reads a cell as text, answering the empty string for anything else.
+///
+/// @param cell - the cell, if there was one
+fn cell_text(cell: Option<&Value>) -> String {
+    match cell {
+        Some(Value::Text(text)) => text.clone(),
+        Some(Value::Integer(number)) => number.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Reads a cell as an integer, answering zero for anything else.
+///
+/// `PRAGMA table_info` reports its flags as integers, and a build that reported
+/// them as text would otherwise silently make every column nullable.
+///
+/// @param cell - the cell, if there was one
+fn cell_integer(cell: Option<&Value>) -> i64 {
+    match cell {
+        Some(Value::Integer(number)) => *number,
+        Some(Value::Text(text)) => text.parse().unwrap_or(0),
+        _ => 0,
+    }
+}

@@ -1,0 +1,14 @@
+[package]
+name = "inillucent-driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The driver: the stable surface an application uses to talk to the inillucent relational engine."
+
+[dependencies]
+# The engine, and nothing else. That single edge is the whole point of the
+# crate: a consumer binds to this and is then unaffected by the
+# rearchitecture's remaining deletions, which move crates underneath it.
+# `inillucent-engine` re-exports the two types a caller needs to name -
+# `BoundParams` and `Value` - so that this stays one edge rather than three.
+inillucent-engine = { workspace = true }

@@ -10,6 +10,14 @@
 corpus.jsonl
 /index.inillucent/
 
+# Engine databases and their log segments, wherever a test or a scratch run
+# leaves one. These are output, never source: no `.rdb` has ever been tracked,
+# and `drivers/inillucent-driver/other.rdb` is what an uncommitted directory
+# looks like once somebody has run its tests in place.
+*.rdb
+*.rdb-wal.*
+*.rdb-journal
+
 # Editor and operating system noise.
 .DS_Store
 /.quill/
