@@ -990,6 +990,17 @@ pub struct BoundAggregate {
     pub star: bool,
     /// The collation the aggregate compares with.
     pub collation: Collation,
+    /// The `FILTER (WHERE ...)` clause, when one was written.
+    ///
+    /// A row the filter does not keep is not folded in at all - it does not
+    /// count, it does not sum and it does not appear in a `group_concat`.
+    pub filter: Option<BoundExpr>,
+    /// The `ORDER BY` written inside the argument list.
+    ///
+    /// Empty for nearly every call. It matters to the aggregates whose answer
+    /// depends on the order the rows arrive in - `group_concat` and the JSON
+    /// group aggregates - and SQLite accepts it on any of them.
+    pub order_by: Vec<BoundOrderTerm>,
 }
 
 /// Returns the collation a result column compares with.
@@ -1191,6 +1202,16 @@ impl BoundSelect {
         for aggregate in &self.aggregates {
             for argument in &aggregate.arguments {
                 argument.columns_read(source, into);
+            }
+            // The call's own `FILTER` and `ORDER BY` read the row too. Missing
+            // them here would let a covering index be chosen that does not hold
+            // a column the filter tests, which reads as a wrong answer rather
+            // than as a refusal.
+            if let Some(filter) = &aggregate.filter {
+                filter.columns_read(source, into);
+            }
+            for term in &aggregate.order_by {
+                term.expr.columns_read(source, into);
             }
         }
         for window in &self.windows {
@@ -3080,6 +3101,10 @@ impl<'a> Binder<'a> {
             arguments: bound,
             star: false,
             collation,
+            // A registered aggregate reaches this path without a `FILTER` or an
+            // `ORDER BY`; both are read where a built-in is bound.
+            filter: None,
+            order_by: Vec::new(),
         };
         if let Some(slot) = self
             .aggregates
@@ -3360,6 +3385,36 @@ impl<'a> Binder<'a> {
             let nulls = term.nulls.unwrap_or(match term.order {
                 // SQLite sorts NULLs first ascending and last descending when
                 // no explicit null ordering is written.
+                SortOrder::Ascending => NullOrder::First,
+                SortOrder::Descending => NullOrder::Last,
+            });
+            bound.push(BoundOrderTerm {
+                expr,
+                order: term.order,
+                nulls,
+                collation,
+            });
+        }
+        Ok(bound)
+    }
+
+    /// Binds the `ORDER BY` written inside an aggregate's argument list.
+    ///
+    /// Not [`Binder::bind_order_by`]: that one resolves a bare integer as an
+    /// ordinal into the *result columns*, which an aggregate's own `ORDER BY`
+    /// has none of. `group_concat(b ORDER BY 1)` sorts by the literal 1 in
+    /// SQLite, which is to say by nothing.
+    ///
+    /// @param terms - the terms as written
+    fn bind_aggregate_order(
+        &mut self,
+        terms: &[ast::OrderTerm],
+    ) -> Result<Vec<BoundOrderTerm>, ParseError> {
+        let mut bound = Vec::with_capacity(terms.len());
+        for term in terms {
+            let expr = self.bind_expr(term.expr)?;
+            let collation = expr.collation().unwrap_or(Collation::Binary);
+            let nulls = term.nulls.unwrap_or(match term.order {
                 SortOrder::Ascending => NullOrder::First,
                 SortOrder::Descending => NullOrder::Last,
             });
@@ -3690,13 +3745,13 @@ impl<'a> Binder<'a> {
                 if let Some(over) = over {
                     return self.bind_window_call(name, distinct, arguments, filter, over, span);
                 }
-                if filter.is_some() {
-                    return Err(unsupported("FILTER on a call with no OVER", span));
-                }
-                if !order_by.is_empty() {
-                    return Err(unsupported("ORDER BY inside an aggregate", span));
-                }
-                self.bind_call(name, distinct, arguments, span)
+                // **`FILTER` and an in-argument `ORDER BY` belong to the
+                // aggregate, not to the window.** Both were refused here, so
+                // `count(*) FILTER (WHERE a > 15)` and
+                // `group_concat(b ORDER BY a DESC)` - two shapes an ordinary
+                // report is written in - could not be asked at all. They are
+                // bound onto the call and applied by the accumulator.
+                self.bind_call_with(name, distinct, arguments, filter, &order_by, span)
             }
             Expr::Exists { negated, select } => {
                 let block = self.bind_value_subquery(select, span)?;
@@ -4035,6 +4090,19 @@ impl<'a> Binder<'a> {
         {
             return self.bind_row_comparison(op, &lefts, &rights, self.ast.expr_span(left));
         }
+        // **A row value against a query**, which is the form an application
+        // actually writes: `WHERE (a, b) = (SELECT a, b FROM t WHERE id = 3)`.
+        // Only the row-against-a-row spelling was desugared, so this was
+        // `unsupported: row values`.
+        if let (Some(lefts), Some(select)) = (
+            self.row_value_parts(left),
+            self.ast.expr(right).and_then(|expr| match expr {
+                Expr::Subquery(select) => Some(*select),
+                _ => None,
+            }),
+        ) {
+            return self.bind_row_against_query(op, &lefts, select, self.ast.expr_span(left));
+        }
         let bound_left = self.bind_expr(left)?;
         let bound_right = self.bind_expr(right)?;
         match op {
@@ -4208,6 +4276,71 @@ impl<'a> Binder<'a> {
         }
     }
 
+    /// Binds a comparison between a row value and a one-row query.
+    ///
+    /// **The query is bound once and read column by column.** Each part becomes
+    /// its own scalar subquery over the same block with the other result
+    /// columns trimmed away - which is what makes `(a, b) = (SELECT x, y ...)`
+    /// mean `a = x AND b = y` over *one* row rather than two independent
+    /// lookups: the block is the same block, so it plans and folds once, and
+    /// `crate::subquery` answers an uncorrelated one exactly once per
+    /// execution.
+    ///
+    /// The comparison is then the ordinary lexicographic desugaring the
+    /// row-against-a-row form already uses, so `<` and `<=` mean here what they
+    /// mean there.
+    ///
+    /// @param op - the operator
+    /// @param lefts - the left row's parts
+    /// @param select - the query on the right
+    /// @param span - where the comparison was written
+    fn bind_row_against_query(
+        &mut self,
+        op: BinaryOp,
+        lefts: &[ExprId],
+        select: ast::SelectId,
+        span: Span,
+    ) -> Result<BoundExpr, ParseError> {
+        let block = self.bind_value_subquery(select, span)?;
+        if block.columns.len() != lefts.len() {
+            return Err(refused(
+                format!(
+                    "row value misused: {} values on the left and {} on the right",
+                    lefts.len(),
+                    block.columns.len()
+                ),
+                span,
+            ));
+        }
+        let mut bound_lefts = Vec::with_capacity(lefts.len());
+        for part in lefts {
+            bound_lefts.push(self.bind_expr(*part)?);
+        }
+        let mut bound_rights = Vec::with_capacity(block.columns.len());
+        for at in 0..block.columns.len() {
+            let mut one = block.clone();
+            one.columns = block.columns.get(at..at.saturating_add(1)).map_or_else(
+                Vec::new,
+                <[crate::bind::BoundResultColumn]>::to_vec,
+            );
+            let collation = one
+                .columns
+                .first()
+                .map(|column| result_collation(&column.expr))
+                .unwrap_or(Collation::Binary);
+            bound_rights.push(BoundExpr::Subquery {
+                id: self.next_subquery_id(),
+                kind: SubqueryKind::Scalar,
+                negated: false,
+                operand: None,
+                block: Box::new(one),
+                affinity: None,
+                collation,
+            });
+        }
+        compare_bound_rows(op, &bound_lefts, &bound_rights, span)
+    }
+
     /// Binds a comparison between two row values.
     ///
     /// @param op - the operator
@@ -4264,6 +4397,30 @@ impl<'a> Binder<'a> {
         arguments: Option<Vec<ExprId>>,
         span: Span,
     ) -> Result<BoundExpr, ParseError> {
+        self.bind_call_with(name, distinct, arguments, None, &[], span)
+    }
+
+    /// Binds a call that may carry a `FILTER` and an in-argument `ORDER BY`.
+    ///
+    /// Both belong to an *aggregate* call and are dropped for anything else,
+    /// which is what the arity and aggregate checks below already establish:
+    /// a scalar call cannot reach the arm that reads them.
+    ///
+    /// @param name - the function name
+    /// @param distinct - whether `DISTINCT` was written
+    /// @param arguments - the argument list, or `None` for `count(*)`
+    /// @param filter - the `FILTER (WHERE ...)` clause, when one was written
+    /// @param order_by - the `ORDER BY` inside the argument list
+    /// @param span - where the call was written
+    fn bind_call_with(
+        &mut self,
+        name: ast::NameId,
+        distinct: bool,
+        arguments: Option<Vec<ExprId>>,
+        filter: Option<ExprId>,
+        order_by: &[ast::OrderTerm],
+        span: Span,
+    ) -> Result<BoundExpr, ParseError> {
         let folded = self.ast.folded(name).to_vec();
         if self
             .authorizer
@@ -4305,6 +4462,15 @@ impl<'a> Binder<'a> {
                 bound.push(self.bind_expr(*argument)?);
             }
             self.inside_aggregate = false;
+            // The `FILTER` and the `ORDER BY` read the row the aggregate is
+            // folding, so they bind in the same scope the arguments did - and
+            // outside `inside_aggregate`, because neither may itself contain
+            // an aggregate.
+            let bound_filter = match filter {
+                Some(expr) => Some(self.bind_expr(expr)?),
+                None => None,
+            };
+            let bound_order = self.bind_aggregate_order(order_by)?;
             let collation = bound
                 .first()
                 .and_then(BoundExpr::collation)
@@ -4329,6 +4495,8 @@ impl<'a> Binder<'a> {
                 arguments: bound,
                 star,
                 collation,
+                filter: bound_filter,
+                order_by: bound_order,
             };
             // The same aggregate written twice is one accumulator. It is not
             // only cheaper: `... ORDER BY count(*)` has to name the *same* slot
@@ -4814,4 +4982,35 @@ fn lexicographic_chain(
             Box::new(lexicographic_chain(op, lefts, rights, at.saturating_add(1))),
         )),
     )
+}
+
+/// Returns the comparison a row value against a row value means.
+///
+/// **One desugaring, shared by both spellings.** `=` is a chain of equalities,
+/// `<>` is the negation of that chain rather than an inequality of its own -
+/// which is what makes `(1, NULL) <> (1, 2)` unknown - and the ordering
+/// operators are lexicographic. The row-against-a-query form binds different
+/// operands and then means exactly this.
+///
+/// @param op - the operator
+/// @param lefts - the left row, already bound
+/// @param rights - the right row, already bound
+/// @param span - where the comparison was written
+fn compare_bound_rows(
+    op: BinaryOp,
+    lefts: &[BoundExpr],
+    rights: &[BoundExpr],
+    span: Span,
+) -> Result<BoundExpr, ParseError> {
+    match op {
+        BinaryOp::Equal => Ok(equality_chain(lefts, rights)),
+        BinaryOp::NotEqual => Ok(BoundExpr::Not(Box::new(equality_chain(lefts, rights)))),
+        BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual => {
+            Ok(lexicographic_chain(op, lefts, rights, 0))
+        }
+        _ => Err(ParseError::new(
+            ParseErrorKind::Refused("row value misused".to_string()),
+            span,
+        )),
+    }
 }

@@ -51,6 +51,26 @@ pub enum AggregateKind {
     Maximum,
     /// `group_concat(x, sep)`.
     GroupConcat(String),
+    /// `json_group_array(x)` and its `jsonb_` spelling.
+    ///
+    /// The flag is the binary form. A NULL is a *member* here rather than a row
+    /// to skip: `json_group_array` over one NULL is `[null]` and not `[]`,
+    /// because the document records what the rows held and a JSON null is a
+    /// value.
+    JsonGroupArray(bool),
+    /// `json_group_object(label, value)` and its `jsonb_` spelling.
+    JsonGroupObject(bool),
+    /// A **bare column**: one read outside any aggregate in an aggregating
+    /// query.
+    ///
+    /// `SELECT id, max(a) FROM t` is SQLite's own extension, and its rule is
+    /// exact rather than arbitrary: when the query has exactly one `min` or
+    /// `max`, the bare columns come from **the row that produced the extreme**,
+    /// and otherwise from an arbitrary row - which SQLite takes as the last one
+    /// of the group. The witness is the ordering that names the extreme, and it
+    /// is carried per bare column rather than shared, so no accumulator has to
+    /// see inside another.
+    Bare(Option<std::cmp::Ordering>),
     /// An aggregate an application registered.
     ///
     /// It is handed every row of the group, in order, rather than a running
@@ -117,6 +137,23 @@ pub struct Accumulator {
     saw_real: bool,
     /// The extreme value seen, for `min` and `max`.
     extreme: Option<OwnedDatum>,
+    /// The value a bare column has settled on, and the witness that chose it.
+    chosen: Option<OwnedDatum>,
+    /// Where the sort keys start in a collected row, and their directions.
+    ///
+    /// `None` for a call with no `ORDER BY` of its own, which is nearly all of
+    /// them. When it is set, every row is collected rather than reduced and the
+    /// fold happens at `finish`, in the order the keys give - because
+    /// `group_concat(b ORDER BY a DESC)` is a different answer from
+    /// `group_concat(b)` and the difference is the order the rows arrive in.
+    sort: Option<(usize, Vec<bool>)>,
+    /// The rows a JSON group aggregate has collected, in row order.
+    ///
+    /// One value for the array form and two - label, value - for the object
+    /// form. Kept as values rather than folded into a document as they arrive,
+    /// because the document is built by `inillucent_scalar::json`, which is
+    /// where the one implementation of a JSON document lives.
+    json_rows: Vec<Vec<inillucent_value::value::Value<'static>>>,
     /// The joined text, for `group_concat`.
     joined: String,
     /// Every row of the group, for a registered aggregate and nothing else.
@@ -137,6 +174,9 @@ impl Accumulator {
             integer_sum: 0,
             real_sum: 0.0,
             compensation: 0.0,
+            chosen: None,
+            sort: None,
+            json_rows: Vec::new(),
             is_real: false,
             overflowed: false,
             saw_real: false,
@@ -169,7 +209,22 @@ impl Accumulator {
     /// asks rather than the caller remembering, because the caller is three
     /// operators and the accumulator is one.
     pub fn takes_dense(&self) -> bool {
-        self.seen.is_none() && !matches!(self.kind, AggregateKind::External(_))
+        self.seen.is_none()
+            && !matches!(
+                self.kind,
+                AggregateKind::External(_)
+                    | AggregateKind::JsonGroupArray(_)
+                    | AggregateKind::JsonGroupObject(_)
+                    | AggregateKind::Bare(_)
+            )
+    }
+
+    /// Tells this accumulator to collect its rows and sort them.
+    ///
+    /// @param at - the position of the first sort key in a collected row
+    /// @param descending - one flag per key, in key order
+    pub fn sort_by(&mut self, at: usize, descending: Vec<bool>) {
+        self.sort = Some((at, descending));
     }
 
     /// Folds one whole row of arguments in, for a registered aggregate.
@@ -182,6 +237,55 @@ impl Accumulator {
     /// @param values - one row's arguments, in written order
     pub fn push_values(&mut self, values: Vec<inillucent_value::value::Value<'static>>) {
         self.count = self.count.saturating_add(1);
+        // **A JSON group aggregate comes through this entry point** rather than
+        // through `push`, because a NULL is a *member* of the document it
+        // builds and not a row to skip: `json_group_array` over one NULL is
+        // `[null]` and not `[]`, and `push` drops NULLs before the accumulator
+        // sees them. A call with its own `ORDER BY` comes through it too, for
+        // the different reason that its rows cannot be folded until they are in
+        // order.
+        if let AggregateKind::Bare(witness) = self.kind {
+            let value = values
+                .first()
+                .cloned()
+                .unwrap_or(inillucent_value::value::Value::Null);
+            let Some(wanted) = witness else {
+                // No single extreme to follow, so the row is arbitrary and this
+                // takes the *first* of the group - which is what the reference
+                // answers, measured rather than assumed: `SELECT id, count(*)
+                // FROM t` is 1 there and was 4 here when the last row won.
+                if self.chosen.is_none() {
+                    self.chosen = Some(crate::scalar::from_value(value));
+                }
+                return;
+            };
+            let seen = values
+                .get(1)
+                .cloned()
+                .unwrap_or(inillucent_value::value::Value::Null);
+            let seen = crate::scalar::from_value(seen);
+            // A NULL never wins a `min` or a `max`, so a row whose witness is
+            // NULL cannot be the row the bare column comes from - unless no row
+            // has yet been chosen at all.
+            let replace = match &self.extreme {
+                None => true,
+                Some(held) => !seen.borrow().is_null() && seen.borrow().compare(&held.borrow()) == wanted,
+            };
+            if replace {
+                self.extreme = Some(seen);
+                self.chosen = Some(crate::scalar::from_value(value));
+            }
+            return;
+        }
+        if self.sort.is_some()
+            || matches!(
+                self.kind,
+                AggregateKind::JsonGroupArray(_) | AggregateKind::JsonGroupObject(_)
+            )
+        {
+            self.json_rows.push(values);
+            return;
+        }
         self.rows.push(values);
     }
 
@@ -221,6 +325,12 @@ impl Accumulator {
                 }
                 self.joined.push_str(&render(value));
             }
+            // Unreachable: `AggregateSpec::takes_whole_row` sends all three of
+            // these through `push_values`. Stated rather than folded into
+            // another arm so a kind added later is a compilation error.
+            AggregateKind::JsonGroupArray(_)
+            | AggregateKind::JsonGroupObject(_)
+            | AggregateKind::Bare(_) => {}
         }
     }
 
@@ -234,10 +344,14 @@ impl Accumulator {
     pub fn push_dense_ints(&mut self, bytes: &[u8]) {
         let rows = bytes.len() / 8;
         match self.kind {
-            // Unreachable: `takes_dense` is false for a registered aggregate,
-            // so no operator offers it a mini-column. Stated rather than folded
+            // Unreachable: `takes_dense` is false for a registered aggregate
+            // and `takes_whole_row` is true for a JSON group, so no operator
+            // offers either of them a mini-column. Stated rather than folded
             // into another arm, so a kind added later is a compilation error.
-            AggregateKind::External(_) => {}
+            AggregateKind::External(_)
+            | AggregateKind::JsonGroupArray(_)
+            | AggregateKind::JsonGroupObject(_)
+            | AggregateKind::Bare(_) => {}
             AggregateKind::CountStar | AggregateKind::Count => {
                 self.count = self.count.saturating_add(rows as i64);
             }
@@ -313,7 +427,13 @@ impl Accumulator {
     /// Every kind supports it; the method exists so a caller reads a name
     /// rather than a comment when it decides which path to take.
     pub fn takes_dense_ints(&self) -> bool {
-        !matches!(self.kind, AggregateKind::External(_))
+        !matches!(
+            self.kind,
+            AggregateKind::External(_)
+                | AggregateKind::JsonGroupArray(_)
+                | AggregateKind::JsonGroupObject(_)
+                | AggregateKind::Bare(_)
+        )
     }
 
     /// Folds one numeric value into the running total.
@@ -432,6 +552,11 @@ impl Accumulator {
 
     /// Returns the aggregate's value.
     pub fn finish(&self) -> DbResult<OwnedDatum> {
+        // A call with its own `ORDER BY` collected its rows; they are folded
+        // here, in the order the keys give.
+        if let Some((at, descending)) = &self.sort {
+            return self.finish_sorted(*at, descending);
+        }
         Ok(match &self.kind {
             AggregateKind::CountStar | AggregateKind::Count => OwnedDatum::Int(self.count),
             // The whole group at once, which is what the boundary promises.
@@ -472,6 +597,44 @@ impl Accumulator {
                     OwnedDatum::Real(total / self.count as f64)
                 }
             }
+            AggregateKind::JsonGroupArray(binary) => {
+                let mut items = Vec::with_capacity(self.json_rows.len());
+                for row in &self.json_rows {
+                    let value = row
+                        .first()
+                        .cloned()
+                        .unwrap_or(inillucent_value::value::Value::Null);
+                    inillucent_scalar::json::group_array_step(
+                        &mut items,
+                        &inillucent_scalar::json::Argument::plain(&value),
+                    )?;
+                }
+                crate::scalar::from_value(
+                    inillucent_scalar::json::group_array_final(items, *binary)?.value,
+                )
+            }
+            AggregateKind::JsonGroupObject(binary) => {
+                let mut members = Vec::with_capacity(self.json_rows.len());
+                for row in &self.json_rows {
+                    let label = row
+                        .first()
+                        .cloned()
+                        .unwrap_or(inillucent_value::value::Value::Null);
+                    let value = row
+                        .get(1)
+                        .cloned()
+                        .unwrap_or(inillucent_value::value::Value::Null);
+                    inillucent_scalar::json::group_object_step(
+                        &mut members,
+                        &inillucent_scalar::json::Argument::plain(&label),
+                        &inillucent_scalar::json::Argument::plain(&value),
+                    )?;
+                }
+                crate::scalar::from_value(
+                    inillucent_scalar::json::group_object_final(members, *binary)?.value,
+                )
+            }
+            AggregateKind::Bare(_) => self.chosen.clone().unwrap_or(OwnedDatum::Null),
             AggregateKind::Minimum | AggregateKind::Maximum => {
                 self.extreme.clone().unwrap_or(OwnedDatum::Null)
             }
@@ -484,6 +647,67 @@ impl Accumulator {
             }
         })
     }
+    /// Returns the aggregate's value over its rows in the sort's own order.
+    ///
+    /// The keys are encoded with the tree's own key encoding, which is what
+    /// `DISTINCT` already compares with here, so a mixed-type column orders the
+    /// way every other comparison in the engine orders it. A descending key
+    /// reverses that key alone, which is what `ORDER BY a DESC, b` means.
+    ///
+    /// @param at - the position of the first sort key in a collected row
+    /// @param descending - one flag per key, in key order
+    fn finish_sorted(&self, at: usize, descending: &[bool]) -> DbResult<OwnedDatum> {
+        let mut order: Vec<usize> = (0..self.json_rows.len()).collect();
+        let key_of = |row: &Vec<inillucent_value::value::Value<'static>>, which: usize| {
+            let mut encoded = Vec::new();
+            let value = row
+                .get(at.saturating_add(which))
+                .cloned()
+                .unwrap_or(inillucent_value::value::Value::Null);
+            inillucent_tree::key::encode_into_with(
+                &crate::scalar::from_value(value).borrow(),
+                Collation::Binary,
+                &mut encoded,
+            );
+            encoded
+        };
+        order.sort_by(|left, right| {
+            let (Some(a), Some(b)) = (self.json_rows.get(*left), self.json_rows.get(*right)) else {
+                return std::cmp::Ordering::Equal;
+            };
+            for (which, down) in descending.iter().enumerate() {
+                let ordering = key_of(a, which).cmp(&key_of(b, which));
+                let ordering = if *down { ordering.reverse() } else { ordering };
+                if ordering != std::cmp::Ordering::Equal {
+                    return ordering;
+                }
+            }
+            // A tie keeps the arrival order, which is what a stable sort of the
+            // positions gives.
+            left.cmp(right)
+        });
+        let sorted: Vec<Vec<inillucent_value::value::Value<'static>>> = order
+            .into_iter()
+            .filter_map(|at| self.json_rows.get(at).cloned())
+            .collect();
+        let mut folded = Accumulator::new(self.kind.clone());
+        for row in sorted {
+            match self.kind {
+                // The document builders keep taking whole rows.
+                AggregateKind::JsonGroupArray(_) | AggregateKind::JsonGroupObject(_) => {
+                    folded.push_values(row);
+                }
+                // Everything else reduces one value, and a NULL is a row it
+                // skips - which `push` already knows.
+                _ => {
+                    let value = row.first().cloned().unwrap_or(inillucent_value::value::Value::Null);
+                    folded.push(&crate::scalar::from_value(value).borrow());
+                }
+            }
+        }
+        folded.finish()
+    }
+
 }
 
 /// Renders a value as text, the way the dialect's text conversion does.
