@@ -269,6 +269,35 @@ of. Six of the 20 are deliberate negative controls — an ordinary successful ca
 transaction, an explicit `ROLLBACK`, `OR IGNORE`, `OR REPLACE`, `OR FAIL` — and all six still agree
 after the change.
 
+### A second sweep, for the edges the first one did not reach
+
+Fifteen more cases (`cases-extra.json`), aimed at the places a statement undo could plausibly be
+incomplete rather than absent: `AUTOINCREMENT` and `sqlite_sequence` after a failure and under
+`OR FAIL`, a `WITHOUT ROWID` table on both the insert and the update path, a row carried in and out
+of **three** indexes at once with every one of them re-probed, a `DELETE` stopped by a trigger with a
+`UNIQUE` index to put back, a `TEMP` table, an upsert's `DO UPDATE` arm colliding with a third row,
+`RELEASE` after a failed statement, nested savepoints with a failure between them, two failures in a
+row inside one transaction, a failure followed by an explicit `ROLLBACK`, a `STORED` generated
+column, and a row whose value is large enough to be stored out of line.
+
+**Thirteen agree.** The two that do not are both pre-existing and neither is about undo:
+
+- **`last_insert_rowid()` answers `0` always**, like `changes()` and `total_changes()` — the same
+  missing scalar, added to **task-1854**. Its failure-path arithmetic is the interesting part and is
+  recorded there: SQLite answers `7` after `INSERT INTO t VALUES (7,'r'),(8,'p')` fails on the second
+  row, so the counter keeps a rowid the statement assigned and then undid.
+- **A `DESC` index inverts its own range bounds** — `SELECT count(*) FROM t WHERE c >= 10` answers 1
+  of 3 rows. Reproduced on a script with no failure, no conflict and no transaction in it, and
+  identical on the release shells built at `8894378` and here, so it predates this ticket entirely.
+  It is the read-path defect task-1849 named and closed for *imported* indexes by dropping them;
+  `CREATE INDEX ... DESC` in this engine builds one anyway and the planner then reads its direction
+  off a catalog the tree disagrees with. Filed as **task-1855**.
+
+The large-value case is worth naming as a pass rather than a line in a list: a row spilled out of
+line is restored by `put`, which re-spills it, and the undo record carries the whole row rather than
+the reference — so a statement that half-wrote a three-kilobyte value puts it back intact, and the
+probe reads its length and prefix back to say so.
+
 ### The tests fail without the fix
 
 Seven tests added to `new_engine_writes.rs`. Proved rather than assumed: `git worktree add --detach`
