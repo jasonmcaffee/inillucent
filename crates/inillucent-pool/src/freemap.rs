@@ -235,7 +235,23 @@ impl FreeMap {
     /// Returns how many pages the map describes as free.
     pub fn free_count(&self) -> u64 {
         let total = (self.pages.len() as u64).saturating_mul(pages_per_map(self.page_size) as u64);
-        (0..total)
+        self.free_count_below(total)
+    }
+
+    /// Returns how many pages *of the file* the map describes as free.
+    ///
+    /// **The number `PRAGMA freelist_count` wants, and the reason it answered
+    /// 261,883 on a five-page database.** [`FreeMap::free_count`] counts every
+    /// bit the map has room for, and one map page over a 4 KiB file describes
+    /// 32,736 pages whether or not the file has them - so it was reporting the
+    /// map's capacity, and a `DELETE` could not move it. Free means a page the
+    /// file has and nothing is using; a page id past the end of the file is not
+    /// free, it does not exist.
+    ///
+    /// @param page_count - how many pages the file holds
+    pub fn free_count_below(&self, page_count: u64) -> u64 {
+        let total = (self.pages.len() as u64).saturating_mul(pages_per_map(self.page_size) as u64);
+        (0..total.min(page_count))
             .filter(|page| !self.is_allocated(PageId(*page)))
             .count() as u64
     }

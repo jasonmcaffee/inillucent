@@ -1916,6 +1916,19 @@ fn rowid_path(
             key: value,
         });
     }
+    // **A range is an outermost-term path only.** The physical pass drives an
+    // inner term either by probing it per outer row or by reading it once into
+    // a buffer, and neither of those is a walk between two bounds - so a range
+    // chosen here for an inner term was refused downstream with "the physical
+    // pass does not handle a rowid range as an inner join term yet", which is
+    // what `SELECT x.id, y.id FROM t x JOIN t y ON y.a = x.a AND y.id > x.id`
+    // hit. Not choosing it is better than refusing it: the bound stays
+    // unconsumed, so it is tested as a residual over the pair and the self join
+    // answers. The equality half above is unaffected, because a seek per outer
+    // row *is* what an index nested loop does.
+    if position != 0 {
+        return None;
+    }
     let mut low = None;
     let mut high = None;
     let mut used = Vec::new();

@@ -94,6 +94,27 @@ fn schema_of(directive: &Directive) -> usize {
     }
 }
 
+/// Returns whether a directive changes the schema the cookie describes.
+///
+/// The `CREATE`s, the `DROP`s and `ALTER`. A pragma, a transaction control or
+/// an `ANALYZE` does not - `ANALYZE` writes statistics rather than a schema -
+/// and neither does anything the engine answers from the connection.
+///
+/// @param directive - the bound statement
+fn schema_change(directive: &Directive) -> bool {
+    matches!(
+        directive,
+        Directive::CreateTable { .. }
+            | Directive::CreateTableAsSelect { .. }
+            | Directive::CreateVirtualTable { .. }
+            | Directive::CreateView { .. }
+            | Directive::CreateIndex { .. }
+            | Directive::CreateTrigger { .. }
+            | Directive::Drop { .. }
+            | Directive::Alter { .. }
+    )
+}
+
 impl ImportedDatabase {
     /// Returns how many times the catalog has changed.
     ///
@@ -139,8 +160,18 @@ impl ImportedDatabase {
             self.ensure_temp()?;
         }
         self.ddl_schema = at;
+        // **The schema cookie moves once per schema change, and only here.**
+        // Not in `refresh_catalog`, which also runs on open and on `ATTACH`:
+        // a cookie that rose every time the catalog was re-derived would climb
+        // on a database nobody had changed, which is the one thing an
+        // application watching it must be able to rule out. Read back by
+        // `PRAGMA schema_version`; a directive that failed does not move it.
+        let changes_schema = schema_change(&directive);
         let outcome = self.run_directive(directive, sql);
         self.ddl_schema = previous;
+        if changes_schema && outcome.is_ok() {
+            self.database.bump_schema_cookie();
+        }
         outcome
     }
 

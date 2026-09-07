@@ -308,6 +308,11 @@ pub struct Pool {
     file: Box<dyn VfsFile>,
     /// How many pages the file holds.
     page_count: Cell<u64>,
+    /// The most pages the pool holds at once, which `PRAGMA cache_size` sets.
+    ///
+    /// The whole pool by default, so the setting costs nothing until it is
+    /// used. See [`Pool::set_budget`].
+    budget: Cell<usize>,
     /// What has happened, for the report.
     ///
     /// One `Cell` per counter rather than one `Cell<PoolStats>`, because
@@ -442,6 +447,8 @@ impl Pool {
             }),
             file,
             page_count: Cell::new(page_count),
+            // The whole pool until `PRAGMA cache_size` says otherwise.
+            budget: Cell::new(frames.max(1)),
             counters: Counters::default(),
             // No log until a caller says otherwise, so nothing is refused. A
             // bulk build and a read-only open both run this way, and both are
@@ -504,6 +511,25 @@ impl Pool {
         self.buffers.len()
     }
 
+    /// Returns how many pages the pool will hold at once.
+    ///
+    /// The whole pool unless `PRAGMA cache_size` asked for less.
+    pub fn budget(&self) -> usize {
+        self.budget.get()
+    }
+
+    /// Caps how many pages the pool holds at once.
+    ///
+    /// Clamped into `1..=frames()`: a budget of nothing cannot read a page, and
+    /// one larger than the pool is the pool. Growing past the frames the pool
+    /// was opened with is not possible - the buffers are allocated once - so a
+    /// caller asking for more is told the truth by reading the value back.
+    ///
+    /// @param pages - how many pages to hold at once
+    pub fn set_budget(&self, pages: usize) {
+        self.budget.set(pages.clamp(1, self.buffers.len().max(1)));
+    }
+
     /// Returns how many bytes the pool occupies.
     pub fn byte_size(&self) -> usize {
         self.buffers.len().saturating_mul(self.page_size)
@@ -513,6 +539,7 @@ impl Pool {
     pub fn page_count(&self) -> u64 {
         self.page_count.get()
     }
+
 
     /// Returns what the pool has done.
     pub fn stats(&self) -> PoolStats {
@@ -802,12 +829,38 @@ impl Pool {
     }
 
     /// Returns a free frame's index, cooling and evicting to get one.
+    ///
+    /// **The budget is consulted before the free list.** `PRAGMA cache_size` is
+    /// a ceiling on how many database pages are held in memory - that is
+    /// SQLite's own definition of it - so a pool asked for a smaller cache
+    /// stops taking fresh frames once that many are resident and re-uses one
+    /// instead. The allocated buffers stay allocated, which is what SQLite's
+    /// page cache does too; what the setting bounds is the pages, and that is
+    /// what this bounds.
+    ///
+    /// With no `cache_size` set the budget is the whole pool, so the first
+    /// branch is the only one taken until the pool is full - the same path, and
+    /// the same cost, as before the budget existed.
     fn take_frame(&self) -> DbResult<u32> {
-        if let Some(frame) = self.state.borrow_mut().free.pop() {
-            return Ok(frame);
+        let budget = self.budget.get();
+        {
+            let mut state = self.state.borrow_mut();
+            let resident = self.buffers.len().saturating_sub(state.free.len());
+            if resident < budget {
+                if let Some(frame) = state.free.pop() {
+                    return Ok(frame);
+                }
+            }
         }
         self.cool()?;
         if let Some(frame) = self.evict_one()? {
+            return Ok(frame);
+        }
+        // Over budget with nothing evictable - every resident page is pinned.
+        // The budget is a ceiling on caching, not a wall the statement runs
+        // into, so a frame the pool owns and is not using is better than a
+        // refusal.
+        if let Some(frame) = self.state.borrow_mut().free.pop() {
             return Ok(frame);
         }
         Err(no_mem(

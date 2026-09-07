@@ -2611,13 +2611,20 @@ fn build_source<'t>(
                 return Err(misuse("a vector stage over a path that is not one"));
             };
             let wanted = literal_value(probe, params)?;
-            let Some(keys) = catalog.vector_candidates(index, &wanted.borrow(), *depth)? else {
-                return Err(misuse(format!(
-                    "no vector index named {}",
-                    String::from_utf8_lossy(index)
-                )));
-            };
-            Ok(Source::Vector(PointProbe::new(tree, projection), keys))
+            let probe_over = PointProbe::new(tree, projection);
+            let keys = iterative_candidates(
+                plan,
+                catalog,
+                space,
+                params,
+                stage,
+                index,
+                &wanted.borrow(),
+                *depth,
+                limit,
+                &probe_over,
+            )?;
+            Ok(Source::Vector(probe_over, keys))
         }
         AccessKind::Nested => Err(misuse("a nested stage cannot drive a pipeline")),
         // Unreachable: `source_for` answers a materialised stage before it gets
@@ -2628,6 +2635,168 @@ fn build_source<'t>(
             "a materialised stage is built by `source_for`, not from a tree",
         )),
     }
+}
+
+/// How much wider each round of an iterative vector scan asks.
+///
+/// Four rather than two because a round costs a graph walk plus a descent per
+/// candidate, and the number of rounds is what the query pays for: a filter
+/// keeping one row in a hundred is reached in four rounds rather than seven.
+const VECTOR_WIDEN: usize = 4;
+
+/// The most candidates one iterative vector scan will ask an index for.
+///
+/// A stop that only matters if a store keeps answering with as many rows as it
+/// was asked for however deep it is taken - which no finite table does, so
+/// exhaustion is what ends the loop in practice. This is the backstop.
+const VECTOR_CANDIDATE_CAP: usize = 1 << 24;
+
+/// Returns the candidate rowids a filtered vector search must look at.
+///
+/// **An approximate index probed for `k` and then filtered returns fewer than
+/// `k` rows, and nothing says so.** 400 vectors, a predicate keeping 5% of
+/// them and `LIMIT 10` returned one row where the exhaustive plan returns ten:
+/// recall 0.1, silently. The index was asked for ten neighbours and nine of
+/// them failed the `WHERE`, so nine of the answer's rows were never candidates
+/// at all.
+///
+/// So the probe is *iterative*, which is what pgvector's `hnsw.iterative_scan`
+/// is: ask for `k`, test the residual over what came back, and if fewer than
+/// `k` rows survive, ask deeper - until enough survive or the store is
+/// exhausted, which it is the moment it answers with fewer rows than it was
+/// asked for. A query with no residual is the case this whole function skips:
+/// there is nothing to lose, so one round is the answer.
+///
+/// The cost of a round the predicate rejects is one descent per candidate, and
+/// those descents are made twice - once here to count, once in
+/// [`Source::Vector`] to produce. That is the price of keeping the predicate
+/// where the pipeline already tests it rather than pushing a second copy of
+/// the expression evaluator into the store's cursor, and it is paid only by a
+/// vector query that carries a `WHERE`.
+///
+/// @param plan - the planner's output, for the residual predicates
+/// @param catalog - where the index and the pool come from
+/// @param space - the joined column space the predicates are compiled over
+/// @param params - the bound parameters
+/// @param stage - the vector stage, for its tree's pool
+/// @param index - the store's name
+/// @param wanted - the vector to measure against
+/// @param depth - the `LIMIT`, which is the first round's `k`
+/// @param limit - the statement's row limit, when it has a constant one
+/// @param probe_over - the probe the counting rounds read rows with
+#[allow(clippy::too_many_arguments)]
+fn iterative_candidates(
+    plan: &PhysicalPlan,
+    catalog: &dyn TreeCatalog,
+    space: &Space<'_>,
+    params: &Params,
+    stage: &PreparedStage,
+    index: &[u8],
+    wanted: &Datum<'_>,
+    depth: usize,
+    limit: Option<usize>,
+    probe_over: &PointProbe<'_>,
+) -> DbResult<Vec<i64>> {
+    let ask = |k: usize| -> DbResult<Vec<i64>> {
+        catalog.vector_candidates(index, wanted, k)?.ok_or_else(|| {
+            misuse(format!(
+                "no vector index named {}",
+                String::from_utf8_lossy(index)
+            ))
+        })
+    };
+    let predicates = residual_programs(plan, space, params)?;
+    let mut keys = ask(depth)?;
+    if predicates.is_empty() {
+        return Ok(keys);
+    }
+    // The rows the statement is asking for. `LIMIT` is what a vector path is
+    // chosen by, so this is nearly always `depth` - but a plan that arrived
+    // here with a smaller chain limit should stop at the smaller number.
+    let target = limit.unwrap_or(depth).min(depth).max(1);
+    let Some(pool) = catalog.pool_for(stage.root) else {
+        return Ok(keys);
+    };
+    let mut want = depth;
+    loop {
+        // The store answering with fewer rows than it was asked for is the only
+        // honest signal that there is nothing more to find, and it is checked
+        // before the count so an exhausted graph ends the loop even when the
+        // predicate rejects everything.
+        let exhausted = keys.len() < want;
+        let survivors = surviving_rows(&keys, pool, probe_over, &predicates)?;
+        if survivors >= target || exhausted || want >= VECTOR_CANDIDATE_CAP {
+            return Ok(keys);
+        }
+        want = want.saturating_mul(VECTOR_WIDEN).min(VECTOR_CANDIDATE_CAP);
+        keys = ask(want)?;
+    }
+}
+
+/// Compiles the predicates the pipeline will test over a stage's own rows.
+///
+/// The whole `WHERE` minus what the access path already consumed, which is
+/// exactly what [`build_chain`] hangs `Filter` operators for - built a second
+/// time here rather than shared, because the chain's copies are boxed into an
+/// operator tree the source cannot reach into.
+///
+/// @param plan - the planner's output
+/// @param space - the joined column space
+/// @param params - the bound parameters
+fn residual_programs(
+    plan: &PhysicalPlan,
+    space: &Space<'_>,
+    params: &Params,
+) -> DbResult<Vec<Box<dyn crate::expr::Eval>>> {
+    let mut built: Vec<Box<dyn crate::expr::Eval>> = Vec::new();
+    for expr in plan
+        .constant_filter
+        .iter()
+        .chain(plan.residuals.iter().flatten())
+    {
+        let translated = translate_scan(expr, space, params)?;
+        built.push(compile(&translated, space.types)?);
+    }
+    Ok(built)
+}
+
+/// Counts how many of a candidate list's rows pass every predicate.
+///
+/// @param keys - the candidate rowids
+/// @param pool - the buffer pool the rows are read through
+/// @param probe_over - the probe the rows are read with
+/// @param predicates - the compiled residuals, all of which must hold
+fn surviving_rows(
+    keys: &[i64],
+    pool: &Pool,
+    probe_over: &PointProbe<'_>,
+    predicates: &[Box<dyn crate::expr::Eval>],
+) -> DbResult<usize> {
+    let mut buffer: Vec<OwnedDatum> = Vec::new();
+    let mut seen = 0usize;
+    for key in keys {
+        if !probe_over.lookup(pool, &[Datum::Int(*key)], &mut buffer)? {
+            continue;
+        }
+        let borrowed: Vec<Datum<'_>> = buffer.iter().map(OwnedDatum::borrow).collect();
+        let columns: Vec<crate::batch::Vector<'_>> = borrowed
+            .iter()
+            .map(|value| crate::batch::Vector::Values(std::slice::from_ref(value)))
+            .collect();
+        let batch = Batch::new(1, columns);
+        let mut held = true;
+        for predicate in predicates {
+            let verdict = predicate.value(&batch, 0)?;
+            if crate::expr::truth(&verdict.get()) != Some(true) {
+                held = false;
+                break;
+            }
+        }
+        if held {
+            seen = seen.saturating_add(1);
+        }
+    }
+    Ok(seen)
 }
 
 /// Builds one inner stage as an index nested loop join.

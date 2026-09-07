@@ -905,6 +905,7 @@ fn automatic_indexes(
                     expr_sql: None,
                     collation,
                     descending: false,
+                    declared_descending: false,
                 }],
                 partial_sql: None,
                 origin,
@@ -960,6 +961,8 @@ fn automatic_indexes(
                 expr_sql: None,
                 collation,
                 descending: key.order == inillucent_sql::ast::SortOrder::Descending,
+                declared_descending: key.order
+                    == inillucent_sql::ast::SortOrder::Descending,
             });
         }
         indexes.push(IndexInfo {
@@ -1066,6 +1069,7 @@ pub fn index_from_create_sql(sql: &[u8], table: &TableInfo, root: u32) -> DbResu
             expr_sql,
             collation,
             descending: key.order == inillucent_sql::ast::SortOrder::Descending,
+            declared_descending: key.order == inillucent_sql::ast::SortOrder::Descending,
         });
     }
     let partial_sql = filter.map(|expr| parsed.ast.expr_span(expr).slice(sql).to_vec());

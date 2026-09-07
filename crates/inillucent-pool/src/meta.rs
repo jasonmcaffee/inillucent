@@ -57,8 +57,24 @@ mod at {
     pub const UUID: usize = 72;
     /// The checksum, 4 bytes.
     pub const CHECKSUM: usize = 88;
-    /// Where the reserved region begins.
+    /// Where the reserved region begins, and where the checksum's tail starts.
+    ///
+    /// **This offset may not move.** The checksum is taken over `0..CHECKSUM`
+    /// and `RESERVED..`, so changing it would make every file written by an
+    /// earlier build fail its own checksum. Fields are added *inside* the
+    /// region instead, at the three offsets below: a file written before they
+    /// existed carries zeros there, which is what each of them means by
+    /// "unset", and its checksum still verifies because the region was always
+    /// covered.
     pub const RESERVED: usize = 92;
+    /// The application's `PRAGMA user_version`, 4 bytes.
+    pub const USER_VERSION: usize = 92;
+    /// The application's `PRAGMA application_id`, 4 bytes.
+    pub const APPLICATION_ID: usize = 96;
+    /// The schema cookie `PRAGMA schema_version` reports, 4 bytes.
+    pub const SCHEMA_COOKIE: usize = 100;
+    /// The first byte after the fields named here.
+    pub const AFTER_FIELDS: usize = 104;
 }
 
 /// The smallest a meta page can be and still hold every field.
@@ -86,6 +102,17 @@ pub struct Meta {
     /// The database's identity, so a WAL segment cannot be attached to the
     /// wrong file.
     pub uuid: u128,
+    /// What `PRAGMA user_version` reads and writes.
+    ///
+    /// **The engine stores none of it and reads none of it**, which is the
+    /// point: it is four bytes an application owns, and every migration
+    /// framework there is reads them to decide which migrations to run. SQLite
+    /// keeps it at offset 60 of its own header for the same reason.
+    pub user_version: i32,
+    /// What `PRAGMA application_id` reads and writes, with the same contract.
+    pub application_id: i32,
+    /// What `PRAGMA schema_version` reports: one per schema change.
+    pub schema_cookie: i32,
 }
 
 impl Meta {
@@ -104,6 +131,9 @@ impl Meta {
             wal_sequence: 0,
             generation: 1,
             uuid,
+            user_version: 0,
+            application_id: 0,
+            schema_cookie: 0,
         }
     }
 
@@ -131,6 +161,9 @@ impl Meta {
         put(page, at::WAL_SEQUENCE, &self.wal_sequence.to_le_bytes())?;
         put(page, at::GENERATION, &self.generation.to_le_bytes())?;
         put(page, at::UUID, &self.uuid.to_le_bytes())?;
+        put(page, at::USER_VERSION, &self.user_version.to_le_bytes())?;
+        put(page, at::APPLICATION_ID, &self.application_id.to_le_bytes())?;
+        put(page, at::SCHEMA_COOKIE, &self.schema_cookie.to_le_bytes())?;
         let sum = checksum(page)?;
         put(page, at::CHECKSUM, &sum.to_le_bytes())?;
         Ok(())
@@ -170,6 +203,11 @@ impl Meta {
             wal_sequence: u64v(page, at::WAL_SEQUENCE)?,
             generation: u64v(page, at::GENERATION)?,
             uuid: u128v(page, at::UUID)?,
+            // Absent in a file written before these three existed, which reads
+            // as zero - the value each of them starts at anyway.
+            user_version: i32v(page, at::USER_VERSION),
+            application_id: i32v(page, at::APPLICATION_ID),
+            schema_cookie: i32v(page, at::SCHEMA_COOKIE),
         })
     }
 
@@ -205,6 +243,22 @@ fn checksum(page: &[u8]) -> DbResult<u32> {
         .get(at::RESERVED..)
         .ok_or_else(|| corrupt("the meta page is too short to checksum"))?;
     Ok(inillucent_base::checksum::crc32_continue(crc32(head), tail))
+}
+
+/// Returns a 32-bit field from the reserved region, or zero when it is absent.
+///
+/// Zero rather than an error, because a page written before the field existed
+/// is not a corrupt page - it is a page whose application never set a version.
+///
+/// @param page - the page bytes
+/// @param offset - where the field sits
+fn i32v(page: &[u8], offset: usize) -> i32 {
+    let Some(slice) = page.get(offset..offset.saturating_add(4)) else {
+        return 0;
+    };
+    let mut bytes = [0u8; 4];
+    bytes.copy_from_slice(slice);
+    i32::from_le_bytes(bytes)
 }
 
 /// Copies bytes into the page at an offset, or says the page was short.

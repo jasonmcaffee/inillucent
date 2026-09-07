@@ -191,9 +191,53 @@ impl Database {
         self.meta.catalog_root = root;
     }
 
-    /// Returns how many pages the free map describes as free.
+    /// Returns how many pages of the file are free.
+    ///
+    /// Bounded by the file's own page count: the map has room for many more
+    /// bits than the file has pages, and counting all of them is what made
+    /// `PRAGMA freelist_count` answer six figures on a five-page database.
     pub fn free_pages(&self) -> u64 {
-        self.free.free_count()
+        self.free.free_count_below(self.pool.page_count())
+    }
+
+    /// Returns the four bytes `PRAGMA user_version` reads.
+    pub fn user_version(&self) -> i32 {
+        self.meta.user_version
+    }
+
+    /// Records what `PRAGMA user_version` was set to.
+    ///
+    /// It lands in the meta record and reaches the file at the next
+    /// checkpoint, which is the same durability every other meta field has.
+    ///
+    /// @param value - the value the application wrote
+    pub fn set_user_version(&mut self, value: i32) {
+        self.meta.user_version = value;
+    }
+
+    /// Returns the four bytes `PRAGMA application_id` reads.
+    pub fn application_id(&self) -> i32 {
+        self.meta.application_id
+    }
+
+    /// Records what `PRAGMA application_id` was set to.
+    ///
+    /// @param value - the value the application wrote
+    pub fn set_application_id(&mut self, value: i32) {
+        self.meta.application_id = value;
+    }
+
+    /// Returns the cookie `PRAGMA schema_version` reports.
+    pub fn schema_cookie(&self) -> i32 {
+        self.meta.schema_cookie
+    }
+
+    /// Moves the schema cookie on, which every schema change does.
+    ///
+    /// An application watches this to know its cached statements are stale,
+    /// which is the whole reason SQLite keeps one.
+    pub fn bump_schema_cookie(&mut self) {
+        self.meta.schema_cookie = self.meta.schema_cookie.wrapping_add(1);
     }
 
     /// Records where the log had reached when this checkpoint was taken.

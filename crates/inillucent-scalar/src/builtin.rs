@@ -910,9 +910,12 @@ fn vector_of(value: Option<&Value<'static>>) -> Option<Vec<f32>> {
 
 /// Applies a two-vector measure, answering NULL when either side is not one.
 ///
-/// Two vectors of different widths are **not** an error either: a table may
-/// hold vectors from two models, and a comparison between them has no answer
-/// rather than a wrong one.
+/// The NULL answers this can still give are the two that mean *no vector*: a
+/// NULL argument, and a pair whose cosine is undefined because a side has no
+/// direction. Everything else that used to answer NULL here - a text argument,
+/// a blob that is not a multiple of four bytes, two vectors of different widths
+/// - is a refusal now, raised by [`vector_argument_refusal`] before the call
+/// reaches this function. See that function for why.
 ///
 /// @param arguments - the call's arguments
 /// @param measure - what to compute from the pair
@@ -929,6 +932,50 @@ fn vector_pair(arguments: &[Value<'static>], measure: fn(&[f32], &[f32]) -> f64)
         return Value::Null;
     }
     Value::Real(answer)
+}
+
+/// Returns what a vector measure refuses this argument pair with, if it does.
+///
+/// **A ranking query given the wrong-width vector used to answer NULL for every
+/// row and then order them arbitrarily.** That is the worst outcome an
+/// embedding query has: the caller passed a 1536-wide probe to a 768-wide
+/// column, the answer came back as rows in some order, and nothing anywhere
+/// said the measure had not been taken. pgvector raises `different vector
+/// dimensions 1536 and 768` and this does the same.
+///
+/// A NULL argument is still NULL rather than a refusal, because it is the one
+/// case with a real meaning - the row has no embedding yet - and
+/// `WHERE v IS NOT NULL AND vector_distance_cos(v, ?) < 0.2` has to remain
+/// writable.
+///
+/// @param func - the measure being called
+/// @param arguments - the call's arguments
+pub fn vector_argument_refusal(func: ScalarFunc, arguments: &[Value<'static>]) -> Option<String> {
+    let name = match func {
+        ScalarFunc::VectorDistanceCos => "vector_distance_cos",
+        ScalarFunc::VectorDistanceL2 => "vector_distance_l2",
+        ScalarFunc::VectorDot => "vector_dot",
+        _ => return None,
+    };
+    let mut widths = [0usize; 2];
+    for (at, slot) in widths.iter_mut().enumerate() {
+        let value = arguments.get(at);
+        if matches!(value, None | Some(Value::Null)) {
+            return None;
+        }
+        let Some(vector) = vector_of(value) else {
+            return Some(format!(
+                "{name}: argument {} is not a vector",
+                at.saturating_add(1)
+            ));
+        };
+        *slot = vector.len();
+    }
+    let [left, right] = widths;
+    if left != right {
+        return Some(format!("different vector dimensions {left} and {right}"));
+    }
+    None
 }
 
 /// Returns the cosine *distance*, `1 - cos(a, b)`, in `[0, 2]`.

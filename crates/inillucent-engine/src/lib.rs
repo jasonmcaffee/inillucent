@@ -333,6 +333,29 @@ pub struct ImportedDatabase {
     /// measurement that varied it per statement would be comparing two plans of
     /// two different queries.
     levers: Levers,
+    /// What `PRAGMA cache_size` reads back, in SQLite's own signed units.
+    ///
+    /// `None` until a caller sets one, when it is the pool's own size in
+    /// kibibytes; afterwards it is the caller's number, so reading it always
+    /// describes the cache the engine is actually keeping.
+    pub(crate) cache_size: Option<i64>,
+    /// Whether this connection refuses to write, set by `PRAGMA query_only`.
+    ///
+    /// Honoured rather than remembered: a caller sets it to make a mistake
+    /// impossible, and one that recorded it and wrote anyway would be worse
+    /// than an engine that refused the pragma outright.
+    pub(crate) query_only: bool,
+    /// Whether a trigger's own writes fire triggers, set by
+    /// `PRAGMA recursive_triggers`.
+    pub(crate) recursive_triggers: bool,
+    /// The ceiling `PRAGMA max_page_count` set, in pages.
+    pub(crate) max_page_count: i64,
+    /// What `PRAGMA temp_store` reports.
+    ///
+    /// The *setting* rather than the state, which is what SQLite reports: this
+    /// engine keeps temporary tables in memory whatever the number says, and
+    /// the one value it cannot be - `FILE` - is refused rather than recorded.
+    pub(crate) temp_store: i64,
     /// The collations an application registered, by upper-cased name.
     ///
     /// The comparator itself lives in `inillucent-value`'s custom table, which
@@ -1125,8 +1148,42 @@ impl ImportedDatabase {
                 .with_frames(frames.max(64)),
         )?;
 
+        // The virtual tables the source declares, so the storage they own can
+        // be told from an application's own tables. A module's shadow tables
+        // are in SQLite's format and mean nothing to this engine's module of
+        // the same name; `inillucent-migrate` rebuilds a full-text table from
+        // its content instead. Importing them would also collide with the
+        // shadow tables that rebuild then tries to create.
+        let module_owners: Vec<Vec<u8>> = loaded
+            .tables
+            .iter()
+            .filter(|held| held.kind == inillucent_sql::catalog_view::TableKind::Virtual)
+            .map(|held| held.folded.clone())
+            .collect();
         for info in &loaded.tables {
-            if info.root == 0 || info.name.starts_with(b"sqlite_") {
+            if info.root == 0 {
+                continue;
+            }
+            if is_shadow_of(&module_owners, &info.folded) {
+                continue;
+            }
+            // **`sqlite_sequence` is carried; the rest of the reserved prefix is
+            // not.** It is not bookkeeping this engine can rebuild: it holds
+            // the AUTOINCREMENT high-water mark, and a table whose high rows
+            // were deleted reuses their keys without it - which is the one
+            // thing AUTOINCREMENT exists to prevent, failing silently on the
+            // first insert after a migration. This engine keeps the same table
+            // under the same name (`inillucent_exec::sequence`), so importing
+            // it is importing a table rather than translating a concept.
+            //
+            // `sqlite_stat1` and the rest are statistics and indexes this
+            // engine derives for itself, and carrying a stale copy would be
+            // worse than deriving a fresh one.
+            if info.name.starts_with(b"sqlite_")
+                && !info
+                    .name
+                    .eq_ignore_ascii_case(inillucent_exec::sequence::SEQUENCE_TABLE)
+            {
                 continue;
             }
             // A `WITHOUT ROWID` table is keyed by its primary key rather than
@@ -1456,6 +1513,11 @@ impl ImportedDatabase {
             settling: std::cell::Cell::new(false),
             scratch_ast: std::cell::RefCell::new(None),
             levers: Levers::default(),
+            cache_size: None,
+            query_only: false,
+            recursive_triggers: false,
+            max_page_count: crate::pragma::DEFAULT_MAX_PAGE_COUNT,
+            temp_store: 0,
             collations: Vec::new(),
             registry: modules(),
             eponymous: Vec::new(),
@@ -1634,6 +1696,11 @@ impl ImportedDatabase {
             settling: std::cell::Cell::new(false),
             scratch_ast: std::cell::RefCell::new(None),
             levers: Levers::default(),
+            cache_size: None,
+            query_only: false,
+            recursive_triggers: false,
+            max_page_count: crate::pragma::DEFAULT_MAX_PAGE_COUNT,
+            temp_store: 0,
             collations: Vec::new(),
             registry: modules(),
             eponymous: Vec::new(),
@@ -2258,6 +2325,7 @@ impl ImportedDatabase {
                         column: Some(index.declared),
                         collation: b"binary".to_vec(),
                         descending: false,
+                        declared_descending: false,
                         expr_sql: None,
                     }],
                     partial_sql: None,
@@ -3994,6 +4062,18 @@ impl ImportedDatabase {
         cached: &std::rc::Rc<Cached>,
         params: &Params,
     ) -> DbResult<Outcome> {
+        // **`PRAGMA query_only` is enforced here, at the one place every
+        // compiled statement passes through.** A caller sets it to make a
+        // mistake impossible, so recording it and writing anyway would be worse
+        // than not having the pragma at all. The message is SQLite's own, which
+        // is what an application's error handling is written against.
+        if self.query_only && writes_something(cached) {
+            return Err(inillucent_base::error::DbError::primary(
+                inillucent_base::error::PrimaryCode::ReadOnly,
+            )
+            .with_message("attempt to write a readonly database")
+            .with_detail("attempt to write a readonly database"));
+        }
         match &**cached {
             // **Borrowed, not cloned.** `cached` is an `Rc` the caller already
             // holds, so the statement outlives anything this does to `self` -
@@ -5725,6 +5805,52 @@ fn modules() -> inillucent_ext::registry::Registry {
     registry
 }
 
+/// Returns whether a table is one a virtual table owns.
+///
+/// FTS5 keeps `<name>_data`, `<name>_idx`, `<name>_docsize`, `<name>_content`
+/// and `<name>_config`; R*Tree keeps `<name>_node`, `<name>_rowid` and
+/// `<name>_parent`. Recognised by the prefix rather than by a list of suffixes,
+/// because the suffixes are the module's to choose and a list would be right
+/// until a module added one.
+///
+/// @param owners - the folded names of the file's virtual tables
+/// @param folded - the folded name of the table being considered
+fn is_shadow_of(owners: &[Vec<u8>], folded: &[u8]) -> bool {
+    owners.iter().any(|owner| {
+        folded
+            .strip_prefix(owner.as_slice())
+            .and_then(|rest| rest.strip_prefix(b"_".as_slice()))
+            .is_some_and(|suffix| !suffix.is_empty())
+    })
+}
+
+/// Returns whether a compiled statement would change the database.
+///
+/// Read by the `query_only` guard. A `Ddl` is judged by its text rather than by
+/// its bound form, because the compiled shape a directive keeps is the SQL: the
+/// statements it covers that change nothing - a pragma, `BEGIN`, `ANALYZE` -
+/// have to stay runnable under `query_only`, and SQLite lets them.
+///
+/// @param cached - the compiled statement
+fn writes_something(cached: &Cached) -> bool {
+    match cached {
+        Cached::Insert(..)
+        | Cached::VirtualInsert(_)
+        | Cached::Update(..)
+        | Cached::Delete(..) => true,
+        Cached::Ddl(sql) => {
+            let head = sql
+                .trim_start()
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            matches!(head.as_str(), "create" | "drop" | "alter" | "reindex")
+        }
+        _ => false,
+    }
+}
+
 /// Returns whether a declared column is a `VIRTUAL` generated one.
 ///
 /// The one predicate behind the whole `VIRTUAL` shift. A `VIRTUAL` generated
@@ -6724,6 +6850,27 @@ fn load_schema(
     // Neither was done here until now, which is the whole reason foreign
     // keys were unenforced: the binder fills a statement's `triggers` from
     // exactly these two places, and both were empty on this engine.
+    // **A view is a row and nothing else, and this loop was missing.** The
+    // catalog carried it - `SELECT type, name FROM sqlite_schema` listed
+    // `view|v` - but nothing put it into `entries`, so `tables_from_entries`
+    // never saw it and the binder never learned the name. `SELECT * FROM v`
+    // answered `no such table: v` against a schema that says the view is
+    // there, which is worse than a schema that dropped it: the object is
+    // listed and unreadable.
+    //
+    // It was not only the migration path. A view created by `CREATE VIEW`,
+    // queried, and then read again after a close and reopen was gone the same
+    // way, because this is the function every open goes through.
+    //
+    // Before the triggers, so an `INSTEAD OF` trigger finds the view it is
+    // attached to.
+    for entry in &stored {
+        if entry.kind != ObjectKind::View {
+            continue;
+        }
+        entries.push((rowid_of_name(entry), entry.clone()));
+        identifiers.push(0);
+    }
     for entry in &stored {
         if entry.kind != ObjectKind::Trigger {
             continue;
