@@ -239,6 +239,41 @@
       ]
     },
     {
+      "name": "reserved_word_column_names",
+      "about": "`left` and `right` are ordinary column names in SQLite - a diff table, a tree, a stereo channel, a page layout - and its name production accepts the join keywords and `INDEXED` directly rather than through the fallback set. A database using them imported as `corrupt` until task-1847, so this case pins every position a name can appear in: the declaration, a bare reference, a qualified one, an ORDER BY, and an explicit alias. The last step is the other half of the rule: a bare alias written with no AS takes the narrow fallback set, so `SELECT left right FROM pairs` is a syntax error in SQLite and has to stay one here - that is what keeps `FROM t LEFT JOIN u` a join rather than a table aliased `left`.",
+      "setup": [
+        "CREATE TABLE pairs (left TEXT, right TEXT, inner TEXT, outer TEXT, cross TEXT, indexed TEXT)",
+        "INSERT INTO pairs VALUES ('a', 'b', 'i', 'o', 'c', 'x')",
+        "INSERT INTO pairs VALUES ('c', 'd', 'i', 'o', 'c', 'x')"
+      ],
+      "steps": [
+        {
+          "sql": "SELECT left, right FROM pairs ORDER BY left",
+          "columns": ["left", "right"],
+          "rows": [
+            [{ "text": "a" }, { "text": "b" }],
+            [{ "text": "c" }, { "text": "d" }]
+          ],
+          "affected": null,
+          "total": 2
+        },
+        {
+          "sql": "SELECT pairs.inner, pairs.outer, pairs.cross, pairs.indexed FROM pairs WHERE left = 'a'",
+          "rows": [[{ "text": "i" }, { "text": "o" }, { "text": "c" }, { "text": "x" }]]
+        },
+        {
+          "sql": "SELECT left AS right, right AS left FROM pairs WHERE left = 'a'",
+          "columns": ["right", "left"],
+          "rows": [[{ "text": "a" }, { "text": "b" }]]
+        },
+        {
+          "sql": "SELECT sql FROM sqlite_schema WHERE name = 'pairs'",
+          "rows": [[{ "text": "CREATE TABLE pairs (left TEXT, right TEXT, inner TEXT, outer TEXT, cross TEXT, indexed TEXT)" }]]
+        },
+        { "sql": "SELECT left right FROM pairs", "status": "syntax" }
+      ]
+    },
+    {
       "name": "a_columns_declared_type_is_reported_and_an_expression_has_none",
       "about": "An expression genuinely has no declared type, and the empty string is the honest answer rather than a guess taken from the first row - which would be a different answer on a different page of the same query.",
       "setup": ["CREATE TABLE typed (a INTEGER PRIMARY KEY, b TEXT)", "INSERT INTO typed VALUES (1, 'one')"],

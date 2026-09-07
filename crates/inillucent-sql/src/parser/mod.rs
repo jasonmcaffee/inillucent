@@ -263,12 +263,45 @@ impl<'a> Parser<'a> {
         self.depth = self.depth.saturating_sub(1);
     }
 
-    /// Returns whether a token may be read as an identifier here.
+    /// Returns whether a token may be read as a name here.
     ///
-    /// A bare word is a name unless it is a hard keyword; a quoted word is
-    /// always a name. This is the per-position fallback question SQLite's
-    /// grammar asks, asked in the one place that can answer it.
+    /// A quoted word is always a name. A bare word is a name unless it is a
+    /// hard keyword, where "hard" is [`Keyword::may_be_name`] - SQLite's
+    /// `nm ::= idj | STRING` with `idj ::= ID|INDEXED|JOIN_KW`, so the fallback
+    /// set plus the seven join keywords plus `INDEXED`. This is the
+    /// per-position question SQLite's grammar asks, asked in the one place that
+    /// can answer it.
+    ///
+    /// It asked [`Keyword::may_fall_back`] until task-1847, which is the
+    /// narrower of the two sets and made `CREATE TABLE pairs (left TEXT)` - a
+    /// schema SQLite itself writes - a syntax error.
     fn token_is_name(token: Token) -> bool {
+        match token.kind {
+            TokenKind::Identifier { keyword, quote } => match quote {
+                QuoteForm::Bare => keyword.is_none_or(Keyword::may_be_name),
+                _ => true,
+            },
+            _ => false,
+        }
+    }
+
+    /// Returns whether a token may be read where SQLite's grammar writes `ids`.
+    ///
+    /// `%token_class ids ID|STRING` - deliberately narrower than
+    /// [`Parser::token_is_name`], which is the `idj` class and takes the join
+    /// keywords and `INDEXED` as well. **Two** positions in the grammar take
+    /// the narrow class and both were measured against the pinned release:
+    ///
+    /// - a bare alias, `as ::= ids`. This is what stops a join keyword being
+    ///   eaten as the alias of the table before it: `SELECT * FROM t LEFT JOIN
+    ///   u` is a join and `SELECT a left FROM t` is a syntax error, in SQLite
+    ///   and here. The same rule leaves `INDEXED` for `INDEXED BY` to claim.
+    /// - a declared type, `typename ::= ids`. `CREATE TABLE t (a left)` is a
+    ///   syntax error in SQLite even though `CREATE TABLE t (left a)` is not,
+    ///   because the name position and the type position take different
+    ///   classes. `CREATE TABLE t (a key)` parses, because `KEY` is in the
+    ///   fallback set and so lexes as `ID`.
+    fn token_is_plain_name(token: Token) -> bool {
         match token.kind {
             TokenKind::Identifier { keyword, quote } => match quote {
                 QuoteForm::Bare => keyword.is_none_or(Keyword::may_fall_back),
@@ -288,9 +321,15 @@ impl<'a> Parser<'a> {
         matches!(token.kind, TokenKind::Identifier { .. })
     }
 
-    /// Returns whether the next token may be read as an identifier.
+    /// Returns whether the next token may be read as a name.
     fn at_name(&mut self) -> Result<bool, ParseError> {
         Ok(Parser::token_is_name(self.peek()?))
+    }
+
+    /// Returns whether the next token may be read where the grammar writes
+    /// `ids` - a bare alias, or a declared type name.
+    fn at_plain_name(&mut self) -> Result<bool, ParseError> {
+        Ok(Parser::token_is_plain_name(self.peek()?))
     }
 
     /// Consumes an identifier, interning it.
@@ -348,15 +387,19 @@ impl<'a> Parser<'a> {
             let name = self.parse_name()?;
             return Ok((Some(name), true));
         }
-        // A bare alias is any word that may be a name. Almost every keyword
-        // that begins a following clause is a hard keyword and so cannot be a
-        // name at all - but `WINDOW` is in the fallback set, so `FROM t WINDOW
-        // w AS (...)` would read `WINDOW` as the table's alias and then choke
-        // on `w`. SQLite's own grammar gives it the same special treatment.
+        // A bare alias is any word in the *fallback* set - not the wider name
+        // set, which would read the `LEFT` of `FROM t LEFT JOIN u` as an alias
+        // and the `INDEXED` of `FROM t INDEXED BY i` as one too. SQLite draws
+        // the same line, in the same place, for the same reason.
+        //
+        // `WINDOW` needs one more exception on top of that: it *is* in the
+        // fallback set, so `FROM t WINDOW w AS (...)` would read `WINDOW` as
+        // the table's alias and then choke on `w`. SQLite's own grammar gives
+        // it the same special treatment.
         if self.at_keyword(Keyword::WINDOW)? {
             return Ok((None, false));
         }
-        if self.at_name()? {
+        if Parser::token_is_plain_name(self.peek()?) {
             let name = self.parse_name()?;
             return Ok((Some(name), false));
         }

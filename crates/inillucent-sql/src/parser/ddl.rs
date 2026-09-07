@@ -153,7 +153,12 @@ impl Parser<'_> {
     pub(super) fn parse_column_def(&mut self) -> Result<ColumnDef, ParseError> {
         let start = self.cursor();
         let name = self.parse_name()?;
-        let declared_type = if self.at_name()? {
+        // The *name* takes the wide class and the *type* takes the narrow one,
+        // so `left TEXT` is a column called `left` and `a left` is a syntax
+        // error - which is what the pinned release does. Asking the wide
+        // question here would read the `left` of `a left` as a type and accept
+        // a statement SQLite refuses.
+        let declared_type = if self.at_plain_name()? {
             let id = self.parse_type_name()?;
             Some(self.ast.text(id).to_vec())
         } else {
