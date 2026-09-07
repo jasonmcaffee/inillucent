@@ -2664,12 +2664,17 @@ impl ImportedDatabase {
                 continue;
             }
             held.wal.sync()?;
+            held.wal.roll_segment()?;
             let durable = held.wal.write_ahead_point();
             held.database.pool().set_durable_lsn(durable);
             let sequence = held.wal.sequence();
             held.database.set_log_position(durable, 0, sequence);
             held.database.checkpoint()?;
             held.wal.note_checkpoint(durable, 0)?;
+            // The segments below the checkpoint describe changes the file now
+            // holds, so keeping them is keeping a second copy of the database
+            // for ever. See `Database::checkpoint` for the measurement.
+            held.wal.retire_segments_below(durable)?;
             held.database
                 .pool()
                 .set_durable_lsn(held.wal.write_ahead_point());
@@ -2736,12 +2741,38 @@ impl ImportedDatabase {
         // the log for recovery to replay.
         self.refresh_statistics()?;
         self.wal.sync()?;
+        // **The segment boundary is moved to the checkpoint point first.**
+        // A segment is only retirable once every record in it is below the
+        // checkpoint LSN, and the segment being appended to never is - the
+        // checkpoint record itself lands in it. Rolling here is what turns
+        // "everything except the current segment" into "everything", and it is
+        // the difference between a log that shrinks and one that keeps one
+        // segment's worth of a finished build for ever.
+        self.wal.roll_segment()?;
         let durable = self.wal.write_ahead_point();
         self.database.pool().set_durable_lsn(durable);
         let sequence = self.wal.sequence();
         self.database.set_log_position(durable, 0, sequence);
         self.database.checkpoint()?;
         self.wal.note_checkpoint(durable, 0)?;
+        // **And then the segments the checkpoint has made redundant go.**
+        //
+        // `retire_segments_below` was written, documented as "called after a
+        // checkpoint", and covered by six cases in `inillucent-wal`'s recovery
+        // tests - and called from exactly one place, `inillucent-txn`'s engine,
+        // which is not the engine that ships. The consequence was measured on
+        // task-1843: the same 200,000 rows are 18.4 MB in SQLite and 179.1 MB
+        // here, 27.6 MB of data file and 151.5 MB of log segments that survive
+        // a checkpoint, a clean close, a reopen and a second checkpoint.
+        //
+        // It is safe to do here rather than only at close because the function
+        // deletes a segment only when every record in it is below the
+        // checkpoint LSN *and* the next segment starts at or below it, so a
+        // segment holding anything recovery would still need is left alone -
+        // and a segment it cannot unlink is left alone and reported `Ok`,
+        // because failing a checkpoint over a file that would not delete would
+        // turn a tidy-up into an outage.
+        self.wal.retire_segments_below(durable)?;
         self.database
             .pool()
             .set_durable_lsn(self.wal.write_ahead_point());

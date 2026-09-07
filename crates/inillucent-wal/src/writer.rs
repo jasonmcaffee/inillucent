@@ -564,6 +564,42 @@ impl Wal {
         if !needed {
             return Ok(());
         }
+        self.roll_now(next)
+    }
+
+    /// Closes the current segment and opens the next one, whatever its size.
+    ///
+    /// **What makes a checkpoint able to reclaim the log.**
+    /// `retire_segments_below` deletes a segment only when every record in it is
+    /// below the checkpoint LSN, which the *current* segment never is: it is the
+    /// one being appended to, so the checkpoint record itself lands in it and it
+    /// is kept for ever. Rolling first moves the boundary to exactly the
+    /// checkpoint point, so the segments behind it become entirely redundant and
+    /// go, and the new one starts with the checkpoint record and nothing else.
+    ///
+    /// Nothing is deleted here, so a crash between this and the checkpoint
+    /// leaves the same records in one more file - which recovery reads the same
+    /// way it reads any segment boundary.
+    ///
+    /// Returns whether a roll happened: an idle log whose current segment holds
+    /// no records is left alone, so a checkpoint on an unchanged database does
+    /// not leave a segment behind per call.
+    pub fn roll_segment(&self) -> DbResult<bool> {
+        let next = {
+            let inner = self.lock()?;
+            if inner.next_lsn <= self.segment_first_lsn() {
+                return Ok(false);
+            }
+            inner.next_lsn
+        };
+        self.roll_now(next)?;
+        Ok(true)
+    }
+
+    /// Writes out the segment being closed and opens the next one.
+    ///
+    /// @param next - the stream position the new segment starts at
+    fn roll_now(&self, next: u64) -> DbResult<()> {
         // Everything buffered belongs to the segment being closed, so it goes
         // out before the new one is opened. It is synced too: a segment nobody
         // will write to again whose tail is only in the page cache is a segment
