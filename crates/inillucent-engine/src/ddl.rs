@@ -821,8 +821,102 @@ impl ImportedDatabase {
         let sql = canonical_sql("CREATE TABLE", source, name_offset, source.len() as u32);
         self.define_table(name, sql)?;
         self.refresh_catalog();
+        // **`sqlite_sequence` comes into being with the first `AUTOINCREMENT`
+        // table**, not with the first row - SQLite writes the schema row at
+        // `CREATE TABLE` time and the table's own row at its first insert. The
+        // binder resolves `BoundInsert::sequence_root` from the catalog, so the
+        // table has to be there before any statement against the new table is
+        // compiled.
+        if self.table_is_autoincrement(name) {
+            self.ensure_sequence_table()?;
+        }
         self.seal()?;
         Ok(Outcome::empty())
+    }
+
+    /// Reports whether a table just defined never reuses a key.
+    ///
+    /// @param name - the table's name as written
+    fn table_is_autoincrement(&self, name: &[u8]) -> bool {
+        let folded = name.to_ascii_lowercase();
+        self.tables
+            .iter()
+            .any(|held| held.folded == folded && held.autoincrement)
+    }
+
+    /// Creates `sqlite_sequence` if the schema has not got one.
+    ///
+    /// The same shape `ANALYZE` uses for `sqlite_stat1`: a reserved-prefix table
+    /// cannot go through the statement path, because `sqlite_` is a name the
+    /// binder refuses, and a schema-writing statement that has to defeat the
+    /// binder's own rule to run is a rule with a hole in it.
+    fn ensure_sequence_table(&mut self) -> DbResult<()> {
+        let folded = inillucent_exec::sequence::SEQUENCE_TABLE.to_ascii_lowercase();
+        if self.tables.iter().any(|held| held.folded == folded) {
+            return Ok(());
+        }
+        self.define_table(
+            inillucent_exec::sequence::SEQUENCE_TABLE,
+            inillucent_exec::sequence::SEQUENCE_SQL.as_bytes().to_vec(),
+        )?;
+        self.refresh_catalog();
+        Ok(())
+    }
+
+    /// Removes a table's `sqlite_sequence` row, which is what `DROP` does to it.
+    ///
+    /// @param name - the dropped table's name, as `sqlite_sequence` stores it
+    fn forget_sequence(&mut self, name: &[u8]) -> DbResult<()> {
+        let folded = inillucent_exec::sequence::SEQUENCE_TABLE.to_ascii_lowercase();
+        let Some(root) = self
+            .tables
+            .iter()
+            .find(|held| held.folded == folded)
+            .map(|held| held.root)
+        else {
+            return Ok(());
+        };
+        let doomed: Vec<i64> = {
+            let pool = self.pool_of(root)?;
+            let Some(tree) = self.trees.get(&root) else {
+                return Ok(());
+            };
+            let mut keys = Vec::new();
+            tree.visit_leaves(pool, &mut |leaf| {
+                for row in leaf.live()? {
+                    let Some(Datum::Int(rowid)) = row.first().copied() else {
+                        continue;
+                    };
+                    if matches!(row.get(1), Some(Datum::Text(held)) if *held == name) {
+                        keys.push(rowid);
+                    }
+                }
+                Ok(true)
+            })?;
+            keys
+        };
+        if doomed.is_empty() {
+            return Ok(());
+        }
+        let txn = self.current_txn();
+        let at = self.schema_of(root);
+        let wal = self
+            .log_of(at)
+            .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
+        let mut log = WalLog {
+            wal,
+            txn,
+            schema: at,
+            wrote: false,
+            undo: None,
+        };
+        let Some(tree) = self.trees.get_mut(&root) else {
+            return Ok(());
+        };
+        for rowid in doomed {
+            tree.delete(&mut self.database, &mut log, &[Datum::Int(rowid)])?;
+        }
+        Ok(())
     }
 
     /// Builds a table's trees and records it, given its stored text.
@@ -1352,6 +1446,13 @@ impl ImportedDatabase {
                     self.release_tree(index.root)?;
                 }
                 self.release_tree(owner.root)?;
+                // The high-water mark goes with the table, so a table dropped
+                // and recreated starts from one again - which is SQLite's
+                // behaviour and the reason the mark is a row rather than a
+                // header field.
+                if owner.autoincrement {
+                    self.forget_sequence(&owner.name)?;
+                }
                 let _ = position;
             }
             Ast::Index => {
