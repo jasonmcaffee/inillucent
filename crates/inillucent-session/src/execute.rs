@@ -70,6 +70,15 @@ pub fn run_directive(
         Directive::CreateTable { .. } => run_write(connection, directive, |connection| {
             create_table(connection, directive, source)
         }),
+        // `CREATE TABLE ... AS SELECT` is answered by the new engine
+        // (task-1845) and not by this one, which is on its way out with the
+        // rest of the crates the rearchitecture is deleting. A refusal here is
+        // what it always was; what changed is only that the shape now has a
+        // directive of its own rather than being refused in the binder.
+        Directive::CreateTableAsSelect { .. } => Err(inillucent_base::DbError::primary(
+            inillucent_base::PrimaryCode::Misuse,
+        )
+        .with_message("unsupported: CREATE TABLE ... AS SELECT")),
         Directive::CreateVirtualTable { .. } => run_write(connection, directive, |connection| {
             create_virtual_table(connection, directive, source)
         }),
@@ -274,6 +283,7 @@ fn run_write(
 fn target_database(directive: &Directive) -> usize {
     match directive {
         Directive::CreateTable { database, .. }
+        | Directive::CreateTableAsSelect { database, .. }
         | Directive::CreateVirtualTable { database, .. }
         | Directive::Alter { database, .. }
         | Directive::Reindex { database, .. }

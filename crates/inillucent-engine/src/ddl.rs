@@ -154,6 +154,20 @@ impl ImportedDatabase {
                 exists,
                 ..
             } => self.create_table(source, name_offset, &name, exists, if_not_exists),
+            Directive::CreateTableAsSelect {
+                if_not_exists,
+                name,
+                exists,
+                create_sql,
+                select_sql,
+                ..
+            } => self.create_table_as_select(
+                &name,
+                exists,
+                if_not_exists,
+                create_sql,
+                &select_sql,
+            ),
             // **`USING inillucent_hnsw` is sugar for a store plus a promise.**
             // The store is an ordinary `inillucent_search` virtual table over
             // the same HNSW `inillucent-core` builds for the retrieval engine,
@@ -1018,6 +1032,54 @@ impl ImportedDatabase {
             tree.delete(&mut self.database, &mut log, &[Datum::Int(rowid)])?;
         }
         Ok(())
+    }
+
+    /// Creates a table from a query's shape and fills it from the query.
+    ///
+    /// **Two statements, in one transaction.** The `CREATE` half stores the text
+    /// the binder synthesised from the query's result columns; the fill half is
+    /// an ordinary `INSERT INTO name <select>`, compiled against the schema once
+    /// the table is in it. Writing the insert here instead would be a second
+    /// implementation of what an insert means - and would miss everything the
+    /// write path applies, from column affinity to the `NOT NULL` a declared
+    /// type carried over.
+    ///
+    /// @param name - the table's name as written
+    /// @param exists - whether a table of that name is already there
+    /// @param if_not_exists - whether the statement said so
+    /// @param create_sql - the `CREATE TABLE name(...)` text to store
+    /// @param select_sql - the query, as the source text it was written as
+    fn create_table_as_select(
+        &mut self,
+        name: &[u8],
+        exists: bool,
+        if_not_exists: bool,
+        create_sql: Vec<u8>,
+        select_sql: &[u8],
+    ) -> DbResult<Outcome> {
+        if exists {
+            if if_not_exists {
+                return Ok(Outcome::empty());
+            }
+            return Err(misuse(format!(
+                "table {} already exists",
+                String::from_utf8_lossy(name)
+            )));
+        }
+        self.define_table(name, create_sql)?;
+        self.refresh_catalog();
+        let fill = format!(
+            "INSERT INTO \"{}\" {}",
+            String::from_utf8_lossy(name).replace('"', "\"\""),
+            String::from_utf8_lossy(select_sql)
+        );
+        let outcome = self.execute_any(&fill, &inillucent_exec::physical::Params::new())?;
+        self.seal()?;
+        Ok(Outcome {
+            rows: Vec::new(),
+            names: Vec::new(),
+            changes: outcome.changes,
+        })
     }
 
     /// Builds a table's trees and records it, given its stored text.

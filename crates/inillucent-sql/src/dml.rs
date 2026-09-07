@@ -189,6 +189,18 @@ pub struct BoundUpdate {
     /// compiler that assumed zero read the wrong cursor for every fire after
     /// the first.
     pub source: usize,
+    /// The extra FROM terms of an `UPDATE ... FROM`, in written order.
+    ///
+    /// **The rows being updated come from a join.** `UPDATE t SET v = s.v FROM s
+    /// WHERE s.a = t.a` is the shape a migration writes to copy a column across
+    /// tables, and the values it assigns are not expressions over the target row
+    /// - they read a *different* row, one the join found. So the query that
+    /// finds the keys carries these terms too, and projects the assigned values
+    /// beside the key; see [`crate::dml::BoundUpdate::joins`].
+    ///
+    /// Empty for every ordinary `UPDATE`, which is what keeps the wider row off
+    /// the path the gate's `txn.large` measures.
+    pub from: Vec<crate::bind::BoundSource>,
     /// The assignments, in table column order with duplicates already refused.
     pub assignments: Vec<BoundAssignment>,
     /// The `WHERE` clause.
@@ -320,9 +332,22 @@ fn is_rowid_name(folded: &[u8]) -> bool {
 impl<'a> Binder<'a> {
     /// Binds an `INSERT` or `REPLACE`.
     pub fn bind_insert(&mut self, insert: &ast::Insert) -> Result<BoundInsert, ParseError> {
-        if !insert.with.ctes.is_empty() {
-            return Err(unsupported("WITH on INSERT", Span::default()));
+        // **A `WITH` on a DML statement is the same `WITH` a `SELECT` has.** The
+        // CTEs are in scope for the whole statement - the source query of an
+        // `INSERT`, the `WHERE` of an `UPDATE` or `DELETE` - and the binder's
+        // CTE stack already handles nesting, so pushing them here is all it
+        // takes. They were refused rather than bound, which is what a migration
+        // script written for SQLite hits first (task-1843).
+        let pushed = self.push_ctes(&insert.with)?;
+        let bound = self.bind_insert_body(insert);
+        if pushed {
+            self.pop_ctes();
         }
+        bound
+    }
+
+    /// Binds an `INSERT` with its CTEs already in scope.
+    fn bind_insert_body(&mut self, insert: &ast::Insert) -> Result<BoundInsert, ParseError> {
         let table = self.writable_target(
             insert.database,
             insert.table,
@@ -387,17 +412,31 @@ impl<'a> Binder<'a> {
 
     /// Binds an `UPDATE`.
     pub fn bind_update(&mut self, update: &ast::Update) -> Result<BoundUpdate, ParseError> {
-        if !update.with.ctes.is_empty() {
-            return Err(unsupported("WITH on UPDATE", Span::default()));
+        let pushed = self.push_ctes(&update.with)?;
+        let bound = self.bind_update_body(update);
+        if pushed {
+            self.pop_ctes();
         }
-        if !update.from.is_empty() {
-            return Err(unsupported("UPDATE ... FROM", Span::default()));
-        }
+        bound
+    }
+
+    /// Binds an `UPDATE` with its CTEs already in scope.
+    fn bind_update_body(&mut self, update: &ast::Update) -> Result<BoundUpdate, ParseError> {
         if !update.order_by.is_empty() {
             return Err(unsupported("ORDER BY on UPDATE", Span::default()));
         }
         let (table, source) =
             self.write_target_from_term(update.target, &TriggerEventInfo::Update(Vec::new()))?;
+        // **The `FROM` terms are bound after the target**, so the target keeps
+        // the lowest source number and every reference to an unqualified column
+        // resolves to it first - which is SQLite's rule and the reason
+        // `UPDATE t SET v = v + 1 FROM s` means the target's `v`.
+        let before = self.sources.len();
+        for term in &update.from {
+            self.bind_from_term(*term)?;
+        }
+        let joined: Vec<crate::bind::BoundSource> =
+            self.sources.get(before..).unwrap_or(&[]).to_vec();
         let mut assignments = Vec::new();
         for (names, value) in &update.assignments {
             let bound = self.bind_expr(*value)?;
@@ -455,6 +494,7 @@ impl<'a> Binder<'a> {
         Ok(BoundUpdate {
             table,
             source,
+            from: joined,
             assignments,
             filter,
             on_conflict: update.on_conflict,
@@ -469,9 +509,16 @@ impl<'a> Binder<'a> {
 
     /// Binds a `DELETE`.
     pub fn bind_delete(&mut self, delete: &ast::Delete) -> Result<BoundDelete, ParseError> {
-        if !delete.with.ctes.is_empty() {
-            return Err(unsupported("WITH on DELETE", Span::default()));
+        let pushed = self.push_ctes(&delete.with)?;
+        let bound = self.bind_delete_body(delete);
+        if pushed {
+            self.pop_ctes();
         }
+        bound
+    }
+
+    /// Binds a `DELETE` with its CTEs already in scope.
+    fn bind_delete_body(&mut self, delete: &ast::Delete) -> Result<BoundDelete, ParseError> {
         if !delete.order_by.is_empty() {
             return Err(unsupported("ORDER BY on DELETE", Span::default()));
         }

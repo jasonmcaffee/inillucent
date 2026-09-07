@@ -58,7 +58,7 @@ use inillucent_sql::bind::{
     BoundExpr, BoundResultColumn, BoundSelect, BoundSource, SourceRows, EXCLUDED_SOURCE,
     NEW_SOURCE, OLD_SOURCE,
 };
-use inillucent_sql::catalog_view::{IndexInfo, IndexOrigin, TableInfo};
+use inillucent_sql::catalog_view::{IndexInfo, IndexOrigin, TableInfo, TableKind};
 use inillucent_sql::dml::{
     codes, rowid_message, unique_message, BoundDelete, BoundInsert, BoundInsertSource, BoundUpdate,
     ColumnSource,
@@ -382,7 +382,43 @@ pub fn keys_query(
     offset: Option<&BoundExpr>,
     layout: &SourceLayout,
 ) -> DbResult<BoundSelect> {
-    let columns = key_columns(table, source, layout)?
+    keys_query_joined(table, source, filter, limit, offset, layout, &[], &[])
+}
+
+/// Returns the query that finds the keys of an `UPDATE ... FROM`, and the
+/// values it will write into them.
+///
+/// **The rows come from a join, so the values do too.** `UPDATE t SET v = s.v
+/// FROM s WHERE s.a = t.a` assigns from a row of `s`, which the write path
+/// never sees: it is handed keys and evaluates the assignments against the
+/// target row alone. So the keys query grows the extra FROM terms and projects
+/// the assigned values *beside* the key, and the write path reads them out of
+/// the row it was given rather than computing them.
+///
+/// With no extra terms and no projected assignments this is exactly
+/// [`keys_query`] - the same one source, the same one-column projection - so an
+/// ordinary `UPDATE` pays nothing for the shape.
+///
+/// @param table - the table being written
+/// @param source - the statement-wide number of its FROM term
+/// @param filter - the `WHERE` clause
+/// @param limit - the `LIMIT`
+/// @param offset - the `OFFSET`
+/// @param layout - the table tree's layout
+/// @param joined - the extra FROM terms, in written order
+/// @param assigned - the assignment expressions to project, in order
+#[allow(clippy::too_many_arguments)]
+pub fn keys_query_joined(
+    table: &TableInfo,
+    source: usize,
+    filter: Option<&BoundExpr>,
+    limit: Option<&BoundExpr>,
+    offset: Option<&BoundExpr>,
+    layout: &SourceLayout,
+    joined: &[BoundSource],
+    assigned: &[BoundExpr],
+) -> DbResult<BoundSelect> {
+    let mut columns: Vec<BoundResultColumn> = key_columns(table, source, layout)?
         .into_iter()
         .map(|expr| BoundResultColumn {
             expr,
@@ -391,16 +427,26 @@ pub fn keys_query(
             declared_type: Vec::new(),
         })
         .collect();
+    for expr in assigned {
+        columns.push(BoundResultColumn {
+            expr: expr.clone(),
+            name: b"value".to_vec(),
+            origin: None,
+            declared_type: Vec::new(),
+        });
+    }
+    let mut sources = vec![BoundSource {
+        id: source,
+        rows: SourceRows::Table,
+        table: std::rc::Rc::new(table.clone()),
+        alias: table.name.clone(),
+        join: SqlJoinKind::Inner,
+        constraint: None,
+        suppressed: Vec::new(),
+    }];
+    sources.extend(joined.iter().cloned());
     Ok(BoundSelect {
-        sources: vec![BoundSource {
-            id: source,
-            rows: SourceRows::Table,
-            table: std::rc::Rc::new(table.clone()),
-            alias: table.name.clone(),
-            join: SqlJoinKind::Inner,
-            constraint: None,
-            suppressed: Vec::new(),
-        }],
+        sources,
         filter: filter.cloned(),
         group_by: Vec::new(),
         having: None,
@@ -576,6 +622,15 @@ pub fn insert_at(
     depth: Depth,
 ) -> DbResult<Changes> {
     let table = &statement.table;
+    // **A view has no rows of its own, so the trigger IS the write.** The binder
+    // only lets a view be written when it has an `INSTEAD OF` trigger for the
+    // event; the statement's job is to build `NEW` and fire it, and nothing is
+    // stored. Reaching the ordinary path with a view asked for the layout of a
+    // table with no tree, which is where `no layout imported for v` came from
+    // (task-1843).
+    if table.kind == TableKind::View {
+        return insert_into_view(statement, target, params, supplied, depth);
+    }
     let layout = layout_of(target, table)?;
     // `excluded` only exists inside an `ON CONFLICT ... DO UPDATE`, so a plain
     // insert carries one image rather than two.
@@ -728,6 +783,92 @@ pub fn insert_at(
         }
     }
     Ok(changes)
+}
+
+/// Fires a view's `INSTEAD OF INSERT` triggers, storing nothing.
+///
+/// The row image is the view's columns in declaration order, which is what a
+/// trigger body's `NEW.x` resolves against - so the layout handed to the trigger
+/// machinery is the identity, and there is no rowid because a view has none.
+///
+/// @param statement - the bound insert, whose target is the expanded view
+/// @param target - the file and its trees
+/// @param params - the bound parameters
+/// @param supplied - the rows a `SELECT` source produced, empty for `VALUES`
+/// @param depth - how many triggers deep this write already is
+fn insert_into_view(
+    statement: &BoundInsert,
+    target: &mut dyn WriteTarget,
+    params: &Params,
+    supplied: &[Row],
+    depth: Depth,
+) -> DbResult<Changes> {
+    let table = &statement.table;
+    let layout = view_layout(table);
+    let space = RowSpace::new(&[statement.target_source], &layout);
+    let plan = InsertPlan::compile(statement, &layout, &space, params)?;
+    let rows: Vec<Row> = match &statement.source {
+        BoundInsertSource::Values(values) => {
+            let mut built = Vec::with_capacity(values.len());
+            for row in values {
+                let mut cells = Vec::with_capacity(row.len());
+                for expr in row {
+                    let eval = space.compile(expr, params)?;
+                    cells.push(space.evaluate(eval.as_ref(), &[])?);
+                }
+                built.push(cells);
+            }
+            built
+        }
+        BoundInsertSource::Select(_) => supplied.to_vec(),
+    };
+    let mut changes = Changes::default();
+    let mut never = None;
+    for supplied_row in &rows {
+        let image = plan.build_row(supplied_row, &space, &mut never, || Ok(0), None)?;
+        if trigger::fire(
+            &statement.triggers,
+            TriggerTime::InsteadOf,
+            trigger::TriggerRows {
+                old: None,
+                new: Some(image.as_slice()),
+            },
+            &layout.slots,
+            layout.rowid,
+            target,
+            params,
+            depth,
+        )? == trigger::Fired::SkipRow
+        {
+            continue;
+        }
+        changes.rows = changes.rows.saturating_add(1);
+        if !plan.returning.is_empty() {
+            let mut out = Vec::with_capacity(plan.returning.len());
+            for eval in &plan.returning {
+                out.push(space.evaluate(eval.as_ref(), &[image.as_slice()])?);
+            }
+            changes.returned.push(out);
+        }
+    }
+    Ok(changes)
+}
+
+/// Returns the row shape a view's `INSTEAD OF` trigger reads.
+///
+/// One slot per declared column, in order, and no rowid: a view's row is its
+/// result columns and nothing else.
+///
+/// @param table - the expanded view
+pub fn view_layout(table: &TableInfo) -> SourceLayout {
+    SourceLayout {
+        tree_key: 0,
+        slots: (0..table.columns.len()).map(Some).collect(),
+        rowid: None,
+        types: vec![crate::expr::StaticType::Unknown; table.columns.len()],
+        width: table.columns.len(),
+        key_columns: Vec::new(),
+    }
 }
 
 /// The expressions an `INSERT` evaluates, compiled once for the statement.
@@ -1248,6 +1389,9 @@ pub fn update_at(
     depth: Depth,
 ) -> DbResult<Changes> {
     let table = &statement.table;
+    if table.kind == TableKind::View {
+        return update_view(statement, target, params, keys, depth);
+    }
     let layout = layout_of(target, table)?;
     // **Only the images the statement can actually read.** A row space costs a
     // layout clone and a batch column per stage, per statement, and a statement
@@ -1268,16 +1412,26 @@ pub fn update_at(
                 .map(|held| held.id)
                 .collect::<Vec<usize>>(),
         );
+    // **An `UPDATE ... FROM` has already evaluated its values.** They read a
+    // row of the joined table, which the write path never sees: the keys query
+    // projected them beside the key, so each row handed in is
+    // `[key..., value_0, value_1, ...]` and the slot each value goes into is
+    // all this needs. An ordinary `UPDATE` compiles its assignments here as it
+    // always did.
+    let joined = !statement.from.is_empty();
     let mut assignments = Vec::with_capacity(statement.assignments.len());
+    let mut projected_slots: Vec<Option<usize>> = Vec::new();
     for assignment in &statement.assignments {
-        let Some(slot) = layout
+        let slot = layout
             .slots
             .get(usize::from(assignment.column))
             .copied()
-            .flatten()
-        else {
+            .flatten();
+        if joined {
+            projected_slots.push(slot);
             continue;
-        };
+        }
+        let Some(slot) = slot else { continue };
         assignments.push((slot, space.compile(&assignment.value, params)?));
     }
     let mut projected = Vec::with_capacity(statement.returning.len());
@@ -1288,7 +1442,10 @@ pub fn update_at(
 
     let mut changes = Changes::default();
     let captured = target.captures(table.root);
-    for key in keys {
+    for row in keys {
+        // An `UPDATE ... FROM` carries its assigned values after the key, so
+        // the probe is the key columns and no more.
+        let key = row.get(..layout.key_columns.len()).unwrap_or(row);
         // A row an earlier statement in the same transaction removed is skipped
         // rather than resurrected, which is what SQLite does.
         let Some(before) = read_row(table, target, key)? else {
@@ -1296,6 +1453,21 @@ pub fn update_at(
         };
         let answers = answer_correlations(&correlated, target, params, &before)?;
         let mut after = before.clone();
+        if joined {
+            // The values sit after the key columns of the row the keys query
+            // produced, in assignment order.
+            let width = layout.key_columns.len();
+            for (position, slot) in projected_slots.iter().enumerate() {
+                let (Some(slot), Some(value)) =
+                    (*slot, row.get(width.saturating_add(position)))
+                else {
+                    continue;
+                };
+                if let Some(cell) = after.get_mut(slot) {
+                    *cell = value.clone();
+                }
+            }
+        }
         for (slot, eval) in &assignments {
             // Every assignment reads the *before* image, so `SET a = b, b = a`
             // swaps the two rather than making them equal.
@@ -1493,6 +1665,9 @@ pub fn delete_at(
     depth: Depth,
 ) -> DbResult<Changes> {
     let table = &statement.table;
+    if table.kind == TableKind::View {
+        return delete_view(statement, target, params, keys, depth);
+    }
     let layout = layout_of(target, table)?;
     let space = RowSpace::new(&sources_for(statement.source, &statement.triggers), &layout);
     let mut projected = Vec::with_capacity(statement.returning.len());
@@ -1976,6 +2151,107 @@ fn declarations_are_met(
         );
     }
     Ok(true)
+}
+
+/// Fires a view's `INSTEAD OF UPDATE` triggers, storing nothing.
+///
+/// The rows handed in are the view's own, which is what `OLD` is; `NEW` is the
+/// same row with the statement's assignments applied. Nothing is written,
+/// because a view has nowhere to write to - the trigger body is the write.
+///
+/// @param statement - the bound update, whose target is the view
+/// @param target - the file and its trees
+/// @param params - the bound parameters
+/// @param rows - the view's rows, as its own query produced them
+/// @param depth - how many triggers deep this write already is
+fn update_view(
+    statement: &BoundUpdate,
+    target: &mut dyn WriteTarget,
+    params: &Params,
+    rows: &[Row],
+    depth: Depth,
+) -> DbResult<Changes> {
+    let table = &statement.table;
+    let layout = view_layout(table);
+    let space = RowSpace::new(&sources_for(statement.source, &statement.triggers), &layout);
+    let mut assignments = Vec::with_capacity(statement.assignments.len());
+    for assignment in &statement.assignments {
+        let Some(slot) = layout
+            .slots
+            .get(usize::from(assignment.column))
+            .copied()
+            .flatten()
+        else {
+            continue;
+        };
+        assignments.push((slot, space.compile(&assignment.value, params)?));
+    }
+    let mut changes = Changes::default();
+    for before in rows {
+        let mut after = before.clone();
+        for (slot, eval) in &assignments {
+            let value = space.evaluate(eval.as_ref(), &[before.as_slice()])?;
+            if let Some(cell) = after.get_mut(*slot) {
+                *cell = value;
+            }
+        }
+        if trigger::fire(
+            &statement.triggers,
+            TriggerTime::InsteadOf,
+            trigger::TriggerRows {
+                old: Some(before.as_slice()),
+                new: Some(after.as_slice()),
+            },
+            &layout.slots,
+            layout.rowid,
+            target,
+            params,
+            depth,
+        )? == trigger::Fired::SkipRow
+        {
+            continue;
+        }
+        changes.rows = changes.rows.saturating_add(1);
+    }
+    Ok(changes)
+}
+
+/// Fires a view's `INSTEAD OF DELETE` triggers, storing nothing.
+///
+/// @param statement - the bound delete, whose target is the view
+/// @param target - the file and its trees
+/// @param params - the bound parameters
+/// @param rows - the view's rows, as its own query produced them
+/// @param depth - how many triggers deep this write already is
+fn delete_view(
+    statement: &BoundDelete,
+    target: &mut dyn WriteTarget,
+    params: &Params,
+    rows: &[Row],
+    depth: Depth,
+) -> DbResult<Changes> {
+    let layout = view_layout(&statement.table);
+    let mut changes = Changes::default();
+    for before in rows {
+        if trigger::fire(
+            &statement.triggers,
+            TriggerTime::InsteadOf,
+            trigger::TriggerRows {
+                old: Some(before.as_slice()),
+                new: None,
+            },
+            &layout.slots,
+            layout.rowid,
+            target,
+            params,
+            depth,
+        )? == trigger::Fired::SkipRow
+        {
+            continue;
+        }
+        changes.rows = changes.rows.saturating_add(1);
+    }
+    Ok(changes)
 }
 
 /// Reports whether two images of a row have the same key.

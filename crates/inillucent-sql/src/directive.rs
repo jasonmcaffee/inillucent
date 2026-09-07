@@ -230,6 +230,33 @@ pub enum Directive {
         /// Whether the table already exists.
         exists: bool,
     },
+    /// `CREATE TABLE ... AS SELECT`.
+    ///
+    /// A `CREATE` whose column list comes from a plan, which is why it is a
+    /// directive of its own rather than a flag on the one above: everything
+    /// about the table - its column names, and the declared types it inherits
+    /// from the query's origin columns - is decided by binding the query, and
+    /// the `CREATE` text that is stored is *synthesised* rather than being a
+    /// slice of what was typed.
+    CreateTableAsSelect {
+        /// Whether `IF NOT EXISTS` was written.
+        if_not_exists: bool,
+        /// Which attached database.
+        database: usize,
+        /// The table name as written.
+        name: Vec<u8>,
+        /// Whether the table already exists.
+        exists: bool,
+        /// The `CREATE TABLE name(...)` text to store, built from the query.
+        create_sql: Vec<u8>,
+        /// The `SELECT` that fills it, as the source text it was written as.
+        ///
+        /// The text rather than the bound query, because the rows are inserted
+        /// by an ordinary `INSERT INTO name <select>` compiled against the
+        /// schema *after* the table exists - which is one implementation of
+        /// what an insert means rather than a second one written here.
+        select_sql: Vec<u8>,
+    },
     /// `CREATE VIRTUAL TABLE`.
     CreateVirtualTable {
         /// Whether `IF NOT EXISTS` was written.
@@ -587,7 +614,10 @@ impl<'a> Binder<'a> {
             strict,
         } = body
         else {
-            return Err(unsupported("CREATE TABLE ... AS SELECT", Span::default()));
+            let ast::CreateTableBody::AsSelect(select) = body else {
+                return Err(unsupported("CREATE TABLE ... AS SELECT", Span::default()));
+            };
+            return self.bind_create_table_as_select(temp, if_not_exists, database, name, *select);
         };
         if *without_rowid && !self.declares_primary_key(columns, constraints) {
             return Err(refused("PRIMARY KEY missing on table", Span::default()));
@@ -636,6 +666,119 @@ impl<'a> Binder<'a> {
             name: written,
             name_offset: self.name_offset(name),
             exists,
+        })
+    }
+
+    /// Binds `CREATE TABLE ... AS SELECT`.
+    ///
+    /// **The column list comes from a plan**, which is the whole of why this is
+    /// a shape of its own. SQLite takes the table's columns from the query's
+    /// result columns: the name each one reports, and the declared type it
+    /// carries when it is a plain reference to a column that has one. So
+    /// `CREATE TABLE u AS SELECT a*2 AS d, b, c FROM t` on `t(a INTEGER, b TEXT,
+    /// c REAL)` stores `CREATE TABLE u(d,b TEXT,c REAL)` - `d` is an expression
+    /// and inherits nothing, and the other two inherit their origin's type.
+    ///
+    /// The rows are inserted afterwards by an ordinary `INSERT INTO name
+    /// <select>`, compiled against the schema once the table is in it. That is
+    /// one implementation of what an insert means rather than a second one
+    /// written into the DDL path, and it is what makes the affinity Part B4
+    /// applies reach these rows too.
+    ///
+    /// @param temp - the temporary database's index, when `TEMP` was written
+    /// @param if_not_exists - whether `IF NOT EXISTS` was written
+    /// @param database - the schema qualifier, when one was written
+    /// @param name - the table's name
+    /// @param select - the query the table is built from
+    fn bind_create_table_as_select(
+        &mut self,
+        temp: Option<usize>,
+        if_not_exists: bool,
+        database: Option<ast::NameId>,
+        name: ast::NameId,
+        select: ast::SelectId,
+    ) -> Result<Directive, ParseError> {
+        let index = match temp {
+            Some(index) => index,
+            None => self.resolve_database(database)?,
+        };
+        let written = self.ast.text(name).to_vec();
+        if written.to_ascii_lowercase().starts_with(b"sqlite_") {
+            return Err(refused(
+                format!(
+                    "object name reserved for internal use: {}",
+                    String::from_utf8_lossy(&written)
+                ),
+                Span::default(),
+            ));
+        }
+        let folded = self.ast.folded(name).to_vec();
+        let database_name = self.catalog.database_name(index).to_vec();
+        let exists = self
+            .catalog
+            .find_table(Some(database_name.as_slice()), &folded)
+            .is_some();
+        if exists && !if_not_exists {
+            return Err(refused(
+                format!("table {} already exists", String::from_utf8_lossy(&written)),
+                Span::default(),
+            ));
+        }
+        let span = self
+            .ast
+            .select(select)
+            .map(|held| held.span)
+            .ok_or_else(|| refused("the query could not be read", Span::default()))?;
+        let select_sql = self
+            .source
+            .get(span.start as usize..span.end as usize)
+            .ok_or_else(|| refused("the query could not be read", span))?
+            .to_vec();
+        // Bound rather than merely parsed, because binding is what resolves the
+        // result columns' names and origins - and because a query that does not
+        // bind has to be refused here rather than after the table exists.
+        let bound = self.bind_select(select)?;
+        if bound.columns.is_empty() {
+            return Err(refused(
+                "a table must have at least one column",
+                Span::default(),
+            ));
+        }
+        let mut create_sql = Vec::new();
+        create_sql.extend_from_slice(b"CREATE TABLE ");
+        create_sql.extend_from_slice(&written);
+        create_sql.push(b'(');
+        let mut seen: Vec<Vec<u8>> = Vec::with_capacity(bound.columns.len());
+        for (position, column) in bound.columns.iter().enumerate() {
+            if position > 0 {
+                create_sql.push(b',');
+            }
+            let folded = column.name.to_ascii_lowercase();
+            if seen.contains(&folded) {
+                return Err(refused(
+                    format!(
+                        "duplicate column name: {}",
+                        String::from_utf8_lossy(&column.name)
+                    ),
+                    Span::default(),
+                ));
+            }
+            seen.push(folded);
+            create_sql.extend_from_slice(&quoted_name(&column.name));
+            if !column.declared_type.is_empty() {
+                create_sql.push(b' ');
+                create_sql.extend_from_slice(&column.declared_type);
+            }
+        }
+        create_sql.push(b')');
+        self.record_write_dependency(index);
+        Ok(Directive::CreateTableAsSelect {
+            if_not_exists,
+            database: index,
+            name: written,
+            exists,
+            create_sql,
+            select_sql,
         })
     }
 
@@ -1828,4 +1971,31 @@ impl<'a> Binder<'a> {
 /// Returns whether a bound statement is one the session carries out itself.
 pub fn is_directive(statement: &BoundStatement) -> bool {
     matches!(statement, BoundStatement::Directive(_))
+}
+
+/// Returns a column name as it can be written back into a `CREATE` statement.
+///
+/// A name a query invented - `SELECT 1` reports the column as `1` - is not an
+/// identifier, so it is quoted the way SQLite quotes it: `CREATE TABLE w("1")`.
+///
+/// @param name - the column's name as the query reports it
+fn quoted_name(name: &[u8]) -> Vec<u8> {
+    let plain = !name.is_empty()
+        && !name.first().is_some_and(u8::is_ascii_digit)
+        && name
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_');
+    if plain {
+        return name.to_vec();
+    }
+    let mut out = Vec::with_capacity(name.len().saturating_add(2));
+    out.push(b'"');
+    for byte in name {
+        if *byte == b'"' {
+            out.push(b'"');
+        }
+        out.push(*byte);
+    }
+    out.push(b'"');
+    out
 }
