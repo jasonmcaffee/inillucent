@@ -454,11 +454,19 @@ fn pad(out: &mut Vec<u8>, body: &[u8], spec: &Spec) {
     }
     // Zero padding goes *after* a sign, not before it, so `%05d` of -42 is
     // `-0042` rather than `000-42`.
+    //
+    // **A precision does not switch the zero off.** C says the `0` flag is
+    // ignored for `d`, `i`, `o`, `u`, `x` and `X` when a precision is given,
+    // and SQLite's own printf does not implement that rule: the pinned 3.53.4
+    // renders `%08.3d` of 42 as `00000042` and `%08.3x` of 255 as `000000ff`.
+    // Applying the C rule here made `printf('%05.2f', 3.14159)` answer `3.14`
+    // against the reference's `03.14` - and the guard was wrong for the integer
+    // conversions it was written for as well (task-1843).
     let numeric_conversion = matches!(
         spec.conversion,
         b'd' | b'i' | b'u' | b'x' | b'X' | b'o' | b'f' | b'e' | b'E' | b'g' | b'G'
     );
-    if spec.zero && spec.precision.is_none() && numeric_conversion {
+    if spec.zero && numeric_conversion {
         let signed = matches!(body.first(), Some(b'-') | Some(b'+') | Some(b' '));
         if signed {
             out.extend_from_slice(body.get(..1).unwrap_or(&[]));

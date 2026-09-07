@@ -626,7 +626,13 @@ fn render(day: f64, format: &[u8]) -> Value<'static> {
                 push_padded(&mut out, if weekday == 0 { 7 } else { weekday }, 1);
             }
             b'w' => push_padded(&mut out, weekday(day), 1),
-            b'W' => push_padded(&mut out, week_of_year(day, civil), 2),
+            b'U' => push_padded(&mut out, week_from(civil, days_after_sunday(day)), 2),
+            b'V' => push_padded(&mut out, iso_week(day).1, 2),
+            b'W' => push_padded(&mut out, week_from(civil, days_after_monday(day)), 2),
+            b'G' => {
+                let text = format!("{:04}", iso_week(day).0);
+                out.extend_from_slice(text.as_bytes());
+            }
             b'Y' => {
                 let text = format!("{:04}", civil.year);
                 out.extend_from_slice(text.as_bytes());
@@ -670,23 +676,50 @@ fn day_of_year(civil: Civil) -> i64 {
     (here - start) as i64 + 1
 }
 
-/// Returns the week of the year, with the first Sunday starting week one.
-fn week_of_year(day: f64, civil: Civil) -> i64 {
-    let start = julian_of(Civil {
-        year: civil.year,
-        month: 1,
-        day: 1,
-        hour: 0,
-        minute: 0,
-        second: 0.0,
-    });
-    let first_weekday = weekday(start);
-    let offset = (7 - first_weekday).rem_euclid(7);
-    let elapsed = (day.floor() - start.floor()) as i64;
-    if elapsed < offset {
-        return 0;
-    }
-    (elapsed - offset) / 7 + 1
+/// Returns how many days have passed since the first of January.
+///
+/// Zero on the first, which is what SQLite's `daysAfterJan01` counts. Our
+/// `day_of_year` is one-based, because `%j` is.
+fn days_after_jan01(civil: Civil) -> i64 {
+    day_of_year(civil).saturating_sub(1)
+}
+
+/// Returns how many days have passed since the week's Monday, Monday as zero.
+fn days_after_monday(day: f64) -> i64 {
+    (weekday(day) + 6).rem_euclid(7)
+}
+
+/// Returns how many days have passed since the week's Sunday, Sunday as zero.
+fn days_after_sunday(day: f64) -> i64 {
+    weekday(day)
+}
+
+/// Returns a week number counted from the year's first Monday or first Sunday.
+///
+/// **SQLite's own arithmetic, transcribed.** `%W` counts weeks whose first day
+/// is Monday and `%U` weeks whose first day is Sunday; in both, the days before
+/// the year's first such day are week 00 and the first is week 01. The previous
+/// implementation counted from the first *Sunday* for `%W` and was off by one
+/// besides, which put `strftime('%Y-%W','2024-03-01')` at `2024-08` against the
+/// reference's `2024-09` (task-1843).
+///
+/// @param civil - the instant, as a date
+/// @param days_after_start - days since the week's first day
+fn week_from(civil: Civil, days_after_start: i64) -> i64 {
+    (days_after_jan01(civil) - days_after_start + 7) / 7
+}
+
+/// Returns the ISO-8601 week-numbering year and week of a date.
+///
+/// The week a date belongs to is the week holding its Thursday, and the year is
+/// that Thursday's - which is why the two have to be computed together and why
+/// `2023-01-01` is week 52 of 2022.
+///
+/// @param day - the julian day
+fn iso_week(day: f64) -> (i64, i64) {
+    let thursday = day.floor() + (3 - days_after_monday(day)) as f64;
+    let moved = civil_of(thursday);
+    (moved.year, days_after_jan01(moved) / 7 + 1)
 }
 
 #[cfg(test)]

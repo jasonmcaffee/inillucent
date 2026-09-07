@@ -304,3 +304,114 @@ fn widths_match() {
         &format!("{SETUP}.mode column\n.width 4 12\nSELECT id, name FROM people;\n"),
     );
 }
+
+/// A temporary object made by one statement is there for the next one.
+///
+/// **The shell is one connection, not one per statement.** `CREATE TEMP TABLE`
+/// reported success through `inillucent-shell` and the very next line answered
+/// `no such table` (task-1843), because `Shell::collect` and `Shell::execute`
+/// each called `Database::connect` and got a fresh session - and a temporary
+/// object belongs to a session.
+///
+/// task-1844 fixed exactly this shape *inside* the engine, and its tests drive
+/// `Connection` directly, so the shell's own path was not covered. It is
+/// covered here, where a whole script is byte-compared against `sqlite3`, so
+/// the class of defect cannot come back unseen.
+#[test]
+fn a_temporary_table_survives_the_statement_that_made_it() {
+    check(
+        "temp-table",
+        "CREATE TEMP TABLE t(a);
+INSERT INTO t VALUES (5),(6);
+SELECT sum(a) FROM t;
+         CREATE TEMP VIEW v AS SELECT a * 2 FROM t;
+SELECT * FROM v;
+         SELECT count(*) FROM sqlite_temp_schema;
+",
+    );
+}
+
+/// A temporary table shadows a permanent one of the same name, in the shell.
+///
+/// The half a per-statement session could never have got wrong, because it
+/// could not see the temporary table at all - and the half that would break
+/// next if the session were ever handed out per call again.
+#[test]
+fn a_temporary_table_shadows_a_permanent_one() {
+    check(
+        "temp-shadow",
+        "CREATE TABLE t(a);
+INSERT INTO t VALUES (1);
+         CREATE TEMP TABLE t(a);
+INSERT INTO t VALUES (2);
+         SELECT a FROM t;
+SELECT a FROM main.t;
+SELECT a FROM temp.t;
+",
+    );
+}
+
+/// Undoing a `DROP TABLE` inside a transaction leaves the table readable.
+///
+/// The refusal was fine; what was not is that it left the connection unable to
+/// read the table afterwards - `no layout imported for root page 2147483648` -
+/// so a rollback that reported a failure had also destroyed the session. A
+/// refusal that damages the session is worse than one that does not.
+#[test]
+fn a_dropped_table_comes_back_with_its_rows() {
+    check(
+        "drop-rollback",
+        "CREATE TABLE t(a TEXT PRIMARY KEY, b);
+CREATE UNIQUE INDEX ux ON t(b);
+         INSERT INTO t VALUES ('k',5),('j',6);
+         BEGIN;
+DROP INDEX ux;
+DROP TABLE t;
+ROLLBACK;
+         SELECT count(*) FROM t;
+SELECT a FROM t WHERE b=6;
+         INSERT INTO t VALUES ('m',7);
+SELECT count(*) FROM t;
+         SELECT name FROM sqlite_schema ORDER BY name;
+",
+    );
+}
+
+/// The table-valued forms answer the same bytes through the shell.
+///
+/// `FROM generate_series(1,10)`, `FROM json_each(...)` and
+/// `FROM pragma_table_info('t')` were all `no such table` before task-1845.
+#[test]
+fn the_table_valued_functions_match() {
+    check(
+        "table-valued",
+        "CREATE TABLE t(a INTEGER, b TEXT);
+         SELECT count(*), sum(value) FROM generate_series(1,10);
+         SELECT value FROM generate_series(1,10) LIMIT 3;
+         SELECT key, value FROM json_each('[10,20]');
+         SELECT name, type FROM pragma_table_info('t');
+",
+    );
+}
+
+/// The three built-ins that computed a different value from SQLite.
+///
+/// `json_valid('{}')` answered 0 against 1, `strftime('%Y-%W','2024-03-01')`
+/// answered `2024-08` against `2024-09`, and `printf('%05.2f',3.14159)`
+/// answered `3.14` against `03.14` (task-1843). The neighbouring formats are
+/// here too, because fixing three and assuming the rest is how the next three
+/// stay hidden.
+#[test]
+fn the_repaired_builtins_match() {
+    check(
+        "builtins",
+        "SELECT json_valid('{}'), json_valid('[]'), json_valid('null'), json_valid('nope');
+         SELECT json_valid('{}',1), json_valid('{}',2), json_valid('{}',4), json_valid('{}',8);
+         SELECT strftime('%W|%U|%V|%G','2024-01-01');
+         SELECT strftime('%W|%U|%V|%G','2024-03-01');
+         SELECT strftime('%W|%U|%V|%G','2023-12-31');
+         SELECT strftime('%W|%U|%V|%G','2023-01-01');
+         SELECT printf('%05.2f|%8.3f|%08.3d|%08.3x|%-6d|%+d',3.14159,2.5,42,255,42,7);
+",
+    );
+}

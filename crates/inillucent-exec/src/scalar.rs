@@ -357,7 +357,16 @@ impl JsonCall {
         // Only the *document* is cached, and only when it arrived as unmarked
         // text. A later argument is read as a value rather than as a document,
         // so swapping one of those for a blob would change the answer.
-        if marks.first() == Some(&false) {
+        //
+        // **And `json_valid` is never given the substitution at all**, because
+        // it is the one function whose question is about the *text* rather than
+        // about the document it denotes: its flags ask whether the argument was
+        // RFC-8259, JSON5, or JSONB. Handing it the parsed blob answered every
+        // one of those about the blob, so `json_valid('{}')` was 0 where SQLite
+        // says 1 and `json_valid('{}', 4)` was 1 where SQLite says 0 - wrong in
+        // both directions, from an optimisation that is invisible everywhere
+        // else (task-1843).
+        if marks.first() == Some(&false) && self.func != JsonFunc::Valid {
             let replacement = values.first().and_then(|first| self.binary(first));
             if let (Some(blob), Some(slot)) = (replacement, values.first_mut()) {
                 *slot = blob;

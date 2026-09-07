@@ -2454,12 +2454,39 @@ impl ImportedDatabase {
                 .into_iter()
                 .map(|(rowid, entry)| {
                     let root = self.handle_of(at, entry.tree_id).unwrap_or(0);
-                    if entry.tree_id != 0 && !self.trees.contains_key(&root) {
-                        missing.push(String::from_utf8_lossy(&entry.name).into_owned());
-                    }
                     Recorded { rowid, root, entry }
                 })
                 .collect();
+            // **A `DROP` undone by restoring its catalog row has to get its
+            // tree handle back too.** `release_tree` takes the handle out of
+            // this connection when the object is dropped, and a rollback
+            // restores the *rows* - the catalog row and every page of the tree,
+            // which the undo log holds - but not the handle, because a handle
+            // is not a row. Before task-1845 the object came back into the
+            // schema with nothing behind it, the rollback was refused, and the
+            // connection was then unable to read the table at all: `no layout
+            // imported for root page 2147483648`. A refusal that damages the
+            // session is worse than one that does not (task-1843).
+            //
+            // The shape comes from the entry's own `CREATE` text, which is the
+            // same place `define_table` derives it from - so a re-attached tree
+            // is described exactly as the original was rather than from
+            // whatever this process happens to remember.
+            let restored = self.reattach_entries(at, &reloaded)?;
+            let reloaded: Vec<Recorded> = reloaded
+                .into_iter()
+                .map(|mut held| {
+                    if let Some(root) = restored.get(&held.rowid) {
+                        held.root = *root;
+                    }
+                    held
+                })
+                .collect();
+            for held in &reloaded {
+                if held.entry.tree_id != 0 && !self.trees.contains_key(&held.root) {
+                    missing.push(String::from_utf8_lossy(&held.entry.name).into_owned());
+                }
+            }
             if let Some(held) = self.entries_of_mut(at) {
                 *held = reloaded;
             }
@@ -2467,6 +2494,152 @@ impl ImportedDatabase {
         self.rebuild_tables()?;
         self.refresh_catalog();
         Ok(missing)
+    }
+
+    /// Re-attaches the tree of every restored entry this connection has lost.
+    ///
+    /// Called from [`ImportedDatabase::reload_entries`] after a rollback has put
+    /// the catalog rows back. Returns the handle each restored entry ended up
+    /// with, by catalog rowid, so the caller can correct its own list.
+    ///
+    /// An entry whose shape cannot be derived is left alone rather than
+    /// reported here: the caller's `missing` check is what turns that into a
+    /// refusal, and reporting it twice would report a rollback that half worked
+    /// as two different failures.
+    ///
+    /// @param at - which attached database
+    /// @param entries - the entries as the catalog tree now holds them
+    fn reattach_entries(
+        &mut self,
+        at: usize,
+        entries: &[Recorded],
+    ) -> DbResult<std::collections::HashMap<i64, u32>> {
+        let mut restored = std::collections::HashMap::new();
+        for held in entries {
+            if held.entry.tree_id == 0 {
+                continue;
+            }
+            let root = match self.handle_of(at, held.entry.tree_id) {
+                Some(root) if root != 0 => root,
+                _ => continue,
+            };
+            if self.trees.contains_key(&root) {
+                continue;
+            }
+            let Some((columns, key_columns, layout)) = self.shape_of_entry(entries, held, root)
+            else {
+                continue;
+            };
+            let Some(database) = self.schema_file(at) else {
+                continue;
+            };
+            let tree = PagedTree::attach(
+                database.pool(),
+                u64::from(held.entry.tree_id),
+                held.entry.root,
+                columns,
+                key_columns,
+                held.entry.stats.leaf_count,
+                held.entry.stats.row_count,
+            )?;
+            self.trees.insert(root, tree);
+            self.layouts.insert(root, layout);
+            self.owner.insert(root, at);
+            restored.insert(held.rowid, root);
+        }
+        // An index's tree is a covering candidate of its table's, and the link
+        // went with the handle when the object was dropped.
+        for held in entries {
+            if held.entry.kind != ObjectKind::Index {
+                continue;
+            }
+            let (Some(index_root), Some(table_root)) = (
+                restored.get(&held.rowid).copied(),
+                self.root_of_named(entries, at, &held.entry.table),
+            ) else {
+                continue;
+            };
+            let candidates = self.covering.entry(table_root).or_default();
+            if !candidates.contains(&index_root) {
+                candidates.push(index_root);
+            }
+        }
+        Ok(restored)
+    }
+
+    /// Returns the handle of a table named by one of the restored entries.
+    ///
+    /// @param entries - the entries as the catalog tree now holds them
+    /// @param at - which attached database
+    /// @param name - the table's name
+    fn root_of_named(&self, entries: &[Recorded], at: usize, name: &[u8]) -> Option<u32> {
+        let folded = name.to_ascii_lowercase();
+        entries
+            .iter()
+            .find(|held| {
+                held.entry.kind == ObjectKind::Table && held.entry.name.to_ascii_lowercase() == folded
+            })
+            .and_then(|held| self.handle_of(at, held.entry.tree_id))
+    }
+
+    /// Derives one entry's tree shape from its stored `CREATE` text.
+    ///
+    /// The same derivation `define_table` and `create_index` make, from the same
+    /// source: the text in the catalog row. An automatic index carries no text
+    /// of its own, so it is reconstructed from its table's - which is what the
+    /// loader does for one too.
+    ///
+    /// @param entries - the entries as the catalog tree now holds them
+    /// @param held - the entry whose tree is being rebuilt
+    /// @param root - the handle it will be registered under
+    fn shape_of_entry(
+        &self,
+        entries: &[Recorded],
+        held: &Recorded,
+        root: u32,
+    ) -> Option<(Vec<ColumnSpec>, usize, SourceLayout)> {
+        match held.entry.kind {
+            ObjectKind::Table => {
+                let info = table_from_create_sql(&held.entry.sql, 0, root).ok()?;
+                if info.without_rowid {
+                    keyed_table_shape(&info).ok()
+                } else {
+                    let (columns, layout) = table_shape(&info);
+                    Some((columns, 1, layout))
+                }
+            }
+            ObjectKind::Index => {
+                let owner = entries.iter().find(|other| {
+                    other.entry.kind == ObjectKind::Table
+                        && other.entry.name.to_ascii_lowercase()
+                            == held.entry.table.to_ascii_lowercase()
+                })?;
+                let table = table_from_create_sql(&owner.entry.sql, 0, owner.root).ok()?;
+                // An automatic index is declared by the *table's* text, and a
+                // created one by its own - the catalog stores an empty `sql`
+                // for the first, which is what tells the two apart.
+                let mut index = if held.entry.sql.is_empty() {
+                    let folded = held.entry.name.to_ascii_lowercase();
+                    table
+                        .indexes
+                        .iter()
+                        .find(|index| index.folded == folded)?
+                        .clone()
+                } else {
+                    inillucent_catalog::load::index_from_create_sql(
+                        &held.entry.sql,
+                        &table,
+                        root,
+                    )
+                    .ok()?
+                };
+                index.root = root;
+                let (columns, layout) = index_shape(&table, &index, root);
+                let key_columns = columns.len();
+                Some((columns, key_columns, layout))
+            }
+            _ => None,
+        }
     }
 
     /// Abandons the open transaction.

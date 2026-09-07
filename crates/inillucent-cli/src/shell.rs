@@ -28,6 +28,19 @@ pub struct Shell {
     /// made where it is used instead of being stored - storing it beside the
     /// database it borrows would be a self-referential struct for no gain.
     database: Database,
+    /// The session every one of those borrows is a continuation of.
+    ///
+    /// **Because a shell is one connection, not one per statement.** Temporary
+    /// objects belong to a session: `CREATE TEMP TABLE t(a)` puts `t` in the
+    /// session's own database, and a `SELECT` on a *different* session cannot
+    /// see it. Calling `Database::connect` per statement opened a new session
+    /// each time, so the shell reported success on the `CREATE` and then
+    /// `no such table: t` on the very next line (task-1843).
+    ///
+    /// task-1844 fixed exactly this shape inside the engine and added
+    /// `connect_as` for callers that hand out a connection per call over one
+    /// logical connection; the shell is one of those and was not converted.
+    session: u64,
     /// Where the database came from, for `.databases` and the prompt.
     path: String,
     /// How results are laid out.
@@ -68,8 +81,10 @@ impl Shell {
     /// Opens a shell on a database file, or on an in-memory one.
     pub fn open(path: &str) -> Result<Shell, String> {
         let database = Database::open(path).map_err(|error| error.message().to_string())?;
+        let session = database.connect().session();
         Ok(Shell {
             database,
+            session,
             path: path.to_string(),
             layout: Layout::default(),
             output: None,
@@ -86,8 +101,11 @@ impl Shell {
     }
 
     /// Returns the connection statements run on.
+    ///
+    /// Always the same session, so a temporary object made by one statement is
+    /// there for the next one.
     pub fn connection(&self) -> Connection<'_> {
-        self.database.connect()
+        self.database.connect_as(self.session)
     }
 
     /// Copies the open database into a file and checks the copy.
@@ -170,7 +188,7 @@ impl Shell {
                     self.say(&line);
                 }
                 if self.show_changes {
-                    let changes = self.database.connect().changes();
+                    let changes = self.connection().changes();
                     self.say(&format!("changes: {changes}"));
                 }
             }
@@ -207,8 +225,7 @@ impl Shell {
     /// Runs a statement and collects its column names and rows.
     pub fn collect(&self, sql: &str) -> Result<(Vec<String>, Vec<Vec<Value<'static>>>), Failure> {
         let mut statement = self
-            .database
-            .connect()
+            .connection()
             .prepare(sql)
             .map_err(|error| Failure {
                 message: reason(&error),
@@ -255,8 +272,7 @@ impl Shell {
 
     /// Runs a statement for its effect, reporting only a failure.
     pub fn execute(&mut self, sql: &str) -> Result<(), String> {
-        self.database
-            .connect()
+        self.connection()
             .execute_batch(sql)
             .map_err(|error| reason(&error))
     }
