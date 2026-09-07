@@ -76,6 +76,17 @@ pub enum Collation {
     NoCase,
     /// Compare the bytes, ignoring trailing spaces on either side.
     RTrim,
+    /// Compare text as decimal numbers of unbounded precision.
+    ///
+    /// `ext/misc/decimal.c`, which the reference shell compiles in - so a
+    /// database written against `sqlite3` may name it in a column declaration,
+    /// and an engine without it could not open that schema.
+    Decimal,
+    /// Compare text whose embedded runs of digits compare as numbers.
+    ///
+    /// `ext/misc/uint.c`. `x2` sorts before `x10` under it and after it under
+    /// `BINARY`, which is the whole point of it.
+    Uint,
     /// An application-defined comparison, by its id in the process-wide table.
     ///
     /// The id rather than the function is what makes `Collation` stay `Copy`,
@@ -91,6 +102,8 @@ impl Collation {
             Collation::Binary => "BINARY",
             Collation::NoCase => "NOCASE",
             Collation::RTrim => "RTRIM",
+            Collation::Decimal => "decimal",
+            Collation::Uint => "uint",
             // A custom collation's name is not static - it was chosen at run
             // time - so `custom_name` is what answers for one, and this is the
             // honest placeholder for a caller that wanted a `&'static str`.
@@ -115,6 +128,10 @@ impl Collation {
             Some(Collation::NoCase)
         } else if name.eq_ignore_ascii_case("RTRIM") {
             Some(Collation::RTrim)
+        } else if name.eq_ignore_ascii_case("decimal") {
+            Some(Collation::Decimal)
+        } else if name.eq_ignore_ascii_case("uint") {
+            Some(Collation::Uint)
         } else {
             None
         }
@@ -126,6 +143,8 @@ impl Collation {
             Collation::Binary => compare_binary(left, right),
             Collation::NoCase => compare_nocase(left, right),
             Collation::RTrim => compare_rtrim(left, right),
+            Collation::Decimal => compare_decimal(left, right),
+            Collation::Uint => compare_uint(left, right),
             // A comparator that has gone missing cannot happen - the table only
             // grows - but falling back to BINARY is better than a panic on the
             // comparison path, which is the hottest path in the engine.
@@ -137,8 +156,30 @@ impl Collation {
     }
 
     /// Returns every built-in, for exhaustive matrices.
-    pub fn all() -> [Collation; 3] {
-        [Collation::Binary, Collation::NoCase, Collation::RTrim]
+    pub fn all() -> [Collation; 5] {
+        [
+            Collation::Binary,
+            Collation::NoCase,
+            Collation::RTrim,
+            Collation::Decimal,
+            Collation::Uint,
+        ]
+    }
+
+    /// Reports whether ordering under this collation survives the key encoder.
+    ///
+    /// `BINARY`, `NOCASE` and `RTRIM` each have a byte transformation whose
+    /// natural order *is* the collation order, which is what lets an index
+    /// answer a range or an `ORDER BY` by walking it. `decimal`, `uint` and an
+    /// application comparator have no such transformation - "9" sorts after
+    /// "10" by bytes and before it by value - so an index keyed under one of
+    /// them is a set rather than a sequence, and the planner must not read an
+    /// ordering out of it.
+    pub fn is_order_preserving_in_keys(self) -> bool {
+        matches!(
+            self,
+            Collation::Binary | Collation::NoCase | Collation::RTrim
+        )
     }
 }
 
@@ -295,6 +336,159 @@ impl CollationRegistry {
             .map(|entry| entry.name.clone())
             .collect()
     }
+}
+
+
+/// Compares two decimal numbers written as text, at unbounded precision.
+///
+/// The comparison from `ext/misc/decimal.c`, without its arithmetic: leading
+/// space is ignored, an optional sign is read, and the two numbers are then
+/// compared by magnitude with the decimal points lined up. Text that is not a
+/// number at all compares as zero, which is what the reference produces for it.
+///
+/// @param left - the first value UTF-8 bytes
+/// @param right - the second value UTF-8 bytes
+fn compare_decimal(left: &[u8], right: &[u8]) -> Ordering {
+    let (left_negative, left_whole, left_fraction) = decimal_parts(left);
+    let (right_negative, right_whole, right_fraction) = decimal_parts(right);
+    let left_zero = left_whole.is_empty() && left_fraction.is_empty();
+    let right_zero = right_whole.is_empty() && right_fraction.is_empty();
+    // A signed zero is still zero, so the sign is only read once both sides are
+    // known to be something.
+    if left_zero && right_zero {
+        return Ordering::Equal;
+    }
+    let magnitude =
+        compare_decimal_magnitude((&left_whole, &left_fraction), (&right_whole, &right_fraction));
+    match (left_negative && !left_zero, right_negative && !right_zero) {
+        (false, true) => Ordering::Greater,
+        (true, false) => Ordering::Less,
+        (false, false) => magnitude,
+        (true, true) => magnitude.reverse(),
+    }
+}
+
+/// Splits decimal text into a sign and its two runs of digits.
+///
+/// Leading zeros go from the whole part and trailing zeros from the fraction,
+/// so `007.50` and `7.5` come back identical and compare equal.
+///
+/// @param bytes - the text
+fn decimal_parts(bytes: &[u8]) -> (bool, Vec<u8>, Vec<u8>) {
+    let mut at = 0usize;
+    while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+        at += 1;
+    }
+    let negative = match bytes.get(at) {
+        Some(b'-') => {
+            at += 1;
+            true
+        }
+        Some(b'+') => {
+            at += 1;
+            false
+        }
+        _ => false,
+    };
+    let mut whole = Vec::new();
+    while let Some(digit) = bytes.get(at).filter(|byte| byte.is_ascii_digit()) {
+        whole.push(*digit);
+        at += 1;
+    }
+    let mut fraction = Vec::new();
+    if bytes.get(at) == Some(&b'.') {
+        at += 1;
+        while let Some(digit) = bytes.get(at).filter(|byte| byte.is_ascii_digit()) {
+            fraction.push(*digit);
+            at += 1;
+        }
+    }
+    while whole.first() == Some(&b'0') {
+        whole.remove(0);
+    }
+    while fraction.last() == Some(&b'0') {
+        fraction.pop();
+    }
+    (negative, whole, fraction)
+}
+
+/// Compares two non-negative decimals given as their two digit runs.
+///
+/// @param left - the first number whole and fractional digits
+/// @param right - the second number whole and fractional digits
+fn compare_decimal_magnitude(left: (&[u8], &[u8]), right: (&[u8], &[u8])) -> Ordering {
+    let (left_whole, left_fraction) = left;
+    let (right_whole, right_fraction) = right;
+    // More digits before the point is a larger number, once leading zeros are
+    // gone - which is why they are stripped before anything is compared.
+    match left_whole.len().cmp(&right_whole.len()) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    match left_whole.cmp(right_whole) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    // The fractions line up at the point, so a plain byte comparison of the
+    // digit runs is the right one: the shorter runs out first and the longer is
+    // then larger, which the slice ordering already says.
+    left_fraction.cmp(right_fraction)
+}
+
+/// Compares text whose runs of digits compare as numbers.
+///
+/// A port of the comparator in `ext/misc/uint.c`: outside a digit run the bytes
+/// decide, and inside one the two runs are compared by length once leading
+/// zeros are dropped, then by digits.
+///
+/// @param left - the first value UTF-8 bytes
+/// @param right - the second value UTF-8 bytes
+fn compare_uint(left: &[u8], right: &[u8]) -> Ordering {
+    let mut i = 0usize;
+    let mut j = 0usize;
+    while i < left.len() && j < right.len() {
+        let a = left.get(i).copied().unwrap_or(0);
+        let b = right.get(j).copied().unwrap_or(0);
+        if a.is_ascii_digit() {
+            if !b.is_ascii_digit() {
+                return a.cmp(&b);
+            }
+            while left.get(i) == Some(&b'0') {
+                i += 1;
+            }
+            while right.get(j) == Some(&b'0') {
+                j += 1;
+            }
+            let mut run = 0usize;
+            while left.get(i + run).is_some_and(u8::is_ascii_digit)
+                && right.get(j + run).is_some_and(u8::is_ascii_digit)
+            {
+                run += 1;
+            }
+            // Whichever run is still going once the other has stopped is the
+            // longer number, and the longer number is the larger one.
+            if left.get(i + run).is_some_and(u8::is_ascii_digit) {
+                return Ordering::Greater;
+            }
+            if right.get(j + run).is_some_and(u8::is_ascii_digit) {
+                return Ordering::Less;
+            }
+            let a_run = left.get(i..i + run).unwrap_or(&[]);
+            let b_run = right.get(j..j + run).unwrap_or(&[]);
+            match a_run.cmp(b_run) {
+                Ordering::Equal => {}
+                other => return other,
+            }
+            i += run;
+            j += run;
+        } else if a != b {
+            return a.cmp(&b);
+        } else {
+            i += 1;
+            j += 1;
+        }
+    }
+    (left.len() - i).cmp(&(right.len() - j))
 }
 
 #[cfg(test)]

@@ -389,6 +389,50 @@ impl<'s> HashJoin<'s> {
     pub fn build_rows(&self) -> usize {
         self.table.rows.len()
     }
+
+    /// Adds rows that were materialised rather than streamed.
+    ///
+    /// The automatic index's entry point: the inner side of a join has already
+    /// been read into a vector by the time the operator is built, and turning
+    /// it back into batches only so that `build` can take them apart again is
+    /// work with no reader. The rows are fed a batch at a time even so, because
+    /// the key expressions are compiled against a batch and evaluating them one
+    /// row at a time would mean a second evaluator.
+    ///
+    /// @param rows - the inner side's rows, in the order they were read
+    pub fn build_materialised(&mut self, rows: &[Vec<OwnedDatum>]) -> DbResult<()> {
+        let width = rows.first().map(Vec::len).unwrap_or(0);
+        if width == 0 {
+            return Ok(());
+        }
+        let mut start = 0usize;
+        while start < rows.len() {
+            let end = start
+                .saturating_add(crate::batch::BATCH_ROWS)
+                .min(rows.len());
+            let chunk = rows.get(start..end).unwrap_or(&[]);
+            let mut held: Vec<Vec<Datum<'_>>> = Vec::with_capacity(width);
+            for column in 0..width {
+                held.push(
+                    chunk
+                        .iter()
+                        .map(|row| {
+                            row.get(column)
+                                .map(OwnedDatum::borrow)
+                                .unwrap_or(Datum::Null)
+                        })
+                        .collect(),
+                );
+            }
+            let columns: Vec<Vector<'_>> = held
+                .iter()
+                .map(|values| Vector::Values(values.as_slice()))
+                .collect();
+            self.build(&Batch::new(chunk.len(), columns))?;
+            start = end;
+        }
+        Ok(())
+    }
 }
 
 impl Sink for HashJoin<'_> {

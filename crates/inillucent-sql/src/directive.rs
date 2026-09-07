@@ -15,7 +15,9 @@
 //! through the same pager as everything else.
 
 use crate::ast::{self, ObjectKind, TransactionBehaviour};
-use crate::bind::{no_such_table, refused, unsupported, Binder, BoundExpr, BoundStatement};
+use crate::bind::{
+    no_such_table, refused, schema_refused, unsupported, Binder, BoundExpr, BoundStatement,
+};
 use crate::catalog_view::CatalogView;
 use crate::catalog_view::TableKind;
 use crate::diagnostic::ParseError;
@@ -153,6 +155,46 @@ impl BeginKind {
     }
 }
 
+/// What an added column would do to rows that already exist.
+///
+/// SQLite refuses `PRIMARY KEY` and `UNIQUE` while it is still compiling,
+/// because no table can take them however empty it is. The other three it
+/// defers: a `NOT NULL` column with no default, a non-constant default and a
+/// `STORED` generated column are refused *only when there is a row to break*,
+/// and are accepted on an empty table. That is not a quirk worth smoothing
+/// over - it is the difference between a migration that runs on a fresh
+/// database and one that runs on a populated one - so the binder records what
+/// it saw and the executor, which knows the row count, decides.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AddedColumnRisk {
+    /// `NOT NULL` with nothing to fill the existing rows with.
+    pub null_without_default: bool,
+    /// A `DEFAULT` the existing rows cannot all be given one answer from.
+    pub non_constant_default: bool,
+    /// `GENERATED ALWAYS AS (...) STORED`, which needs a value in every record.
+    pub generated_stored: bool,
+}
+
+impl AddedColumnRisk {
+    /// Returns the refusal a table with rows in it owes, in SQLite's wording.
+    ///
+    /// The capitalisation is the reference's own and is inconsistent between
+    /// the three; it is reproduced rather than tidied, because a caller
+    /// matching on the message is matching on what SQLite prints.
+    pub fn refusal(&self) -> Option<&'static str> {
+        if self.null_without_default {
+            return Some("Cannot add a NOT NULL column with default value NULL");
+        }
+        if self.non_constant_default {
+            return Some("Cannot add a column with non-constant default");
+        }
+        if self.generated_stored {
+            return Some("cannot add a STORED column");
+        }
+        None
+    }
+}
+
 /// What an `ALTER TABLE` does, with every name already resolved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AlterKind {
@@ -180,6 +222,8 @@ pub enum AlterKind {
         start: u32,
         /// Where it ends.
         end: u32,
+        /// What it would do to rows that already exist.
+        risk: AddedColumnRisk,
     },
     /// `DROP COLUMN`.
     DropColumn {
@@ -628,7 +672,13 @@ impl<'a> Binder<'a> {
             return self.bind_create_table_as_select(temp, if_not_exists, database, name, *select);
         };
         if *without_rowid && !self.declares_primary_key(columns, constraints) {
-            return Err(refused("PRIMARY KEY missing on table", Span::default()));
+            return Err(schema_refused(
+                format!(
+                    "PRIMARY KEY missing on table {}",
+                    String::from_utf8_lossy(self.ast.text(name))
+                ),
+                Span::default(),
+            ));
         }
         self.check_autoincrement(columns, *without_rowid)?;
         if *strict {
@@ -1104,10 +1154,11 @@ impl<'a> Binder<'a> {
                 }
             }
             ast::AlterAction::AddColumn(definition) => {
-                self.check_added_column(&target, definition)?;
+                let risk = self.check_added_column(&target, definition)?;
                 AlterKind::AddColumn {
                     start: definition.span.start,
                     end: definition.span.end,
+                    risk,
                 }
             }
             ast::AlterAction::DropColumn(name) => {
@@ -1147,7 +1198,7 @@ impl<'a> Binder<'a> {
         &self,
         table: &crate::catalog_view::TableInfo,
         definition: &ast::ColumnDef,
-    ) -> Result<(), ParseError> {
+    ) -> Result<AddedColumnRisk, ParseError> {
         let folded = self.ast.folded(definition.name).to_vec();
         if table.column_position(&folded).is_some() {
             return Err(refused(
@@ -1160,39 +1211,39 @@ impl<'a> Binder<'a> {
         }
         let mut not_null = false;
         let mut has_default = false;
+        let mut constant = true;
+        let mut generated_stored = false;
         for (_, constraint) in &definition.constraints {
             match constraint {
                 ast::ColumnConstraint::PrimaryKey { .. } => {
-                    return Err(refused("cannot add a PRIMARY KEY column", Span::default()))
+                    return Err(schema_refused(
+                        "Cannot add a PRIMARY KEY column",
+                        Span::default(),
+                    ))
                 }
                 ast::ColumnConstraint::Unique(_) => {
-                    return Err(refused("cannot add a UNIQUE column", Span::default()))
+                    return Err(schema_refused("Cannot add a UNIQUE column", Span::default()))
                 }
                 ast::ColumnConstraint::NotNull(_) => not_null = true,
                 ast::ColumnConstraint::Default(expr) => {
                     has_default = true;
                     if !self.constant_default(*expr) {
-                        return Err(refused(
-                            "cannot add a column with a non-constant default",
-                            Span::default(),
-                        ));
+                        constant = false;
                     }
                 }
                 ast::ColumnConstraint::Generated { stored, .. } => {
                     if *stored {
-                        return Err(refused("cannot add a STORED column", Span::default()));
+                        generated_stored = true;
                     }
                 }
                 _ => {}
             }
         }
-        if not_null && !has_default {
-            return Err(refused(
-                "cannot add a NOT NULL column with default value NULL",
-                Span::default(),
-            ));
-        }
-        Ok(())
+        Ok(AddedColumnRisk {
+            null_without_default: not_null && !has_default,
+            non_constant_default: !constant,
+            generated_stored,
+        })
     }
 
     /// Returns whether a `DEFAULT` is a constant an existing row can be given.

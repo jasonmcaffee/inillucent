@@ -879,7 +879,7 @@ impl Machine {
                 // A vector measure over a mismatched pair refuses rather than
                 // answering NULL, so a ranking query cannot come back ordered
                 // by a distance nobody took.
-                if let Some(said) = builtin::vector_argument_refusal(func, &arguments) {
+                if let Some(said) = builtin::refusal_for(func, &arguments) {
                     return Err(error::refusal(said));
                 }
                 let value = builtin::call_with(func, &arguments, collation, self.encoding, context);

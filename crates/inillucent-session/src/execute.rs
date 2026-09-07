@@ -512,7 +512,7 @@ fn alter_table(
                 moved.sql = Some(rename::reparsed(next)?);
                 moved
             }
-            AlterKind::AddColumn { start, end } => {
+            AlterKind::AddColumn { start, end, .. } => {
                 if !itself {
                     continue;
                 }

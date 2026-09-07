@@ -71,7 +71,9 @@ pub fn run(shell: &mut Shell, line: &str) {
         "show" => show(shell),
         "nullvalues" => shell.complain("Error: unknown command; try .help"),
         _ => shell.complain(&format!(
-            "Error: unknown command or invalid arguments: \"{name}\". Enter \".help\" for help"
+            // Two spaces, because the reference's format string is split
+            // across two string literals and the second one opens with one.
+            "Error: unknown command or invalid arguments:  \"{name}\". Enter \".help\" for help"
         )),
     }
 }

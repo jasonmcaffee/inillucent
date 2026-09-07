@@ -107,6 +107,28 @@ pub enum ScalarFunc {
     /// product itself, because a function named `dot` that returned its negative
     /// would be a trap; the ordering sugar negates where it needs to.
     VectorDot,
+    /// `unknown(...)`, which answers NULL to anything.
+    ///
+    /// SQLite registers it, lists it in `function_list`, and returns NULL from
+    /// it whatever it is given. It is here because a name the reference resolves
+    /// and this engine does not is a difference an application can see.
+    Unknown,
+    /// `subtype(x)`, the tag a function attached to its answer.
+    Subtype,
+    /// `unistr(x)`, which expands `\uXXXX` and `\UXXXXXXXX` escapes.
+    Unistr,
+    /// `unistr_quote(x)`, `quote()` with the control characters escaped.
+    UnistrQuote,
+    /// `sqlite_compileoption_used(name)`
+    CompileOptionUsed,
+    /// `sqlite_compileoption_get(n)`
+    CompileOptionGet,
+    /// `sqlite_log(code, message)`, which writes to the log and answers NULL.
+    Log,
+    /// `load_extension(path[, entry])`
+    LoadExtension,
+    /// `regexp(pattern, subject)`, which is what `X REGEXP Y` calls.
+    Regexp,
 }
 
 /// An aggregate built-in.
@@ -134,6 +156,16 @@ pub enum AggregateFunc {
     JsonGroupObject,
     /// `jsonb_group_object(label, x)`
     JsonbGroupObject,
+    /// `median(x)`, which is `percentile_cont(x, 0.5)` under a shorter name.
+    Median,
+    /// `percentile(x, p)`, where `p` runs 0 to 100.
+    Percentile,
+    /// `percentile_cont(x, f)`, where `f` runs 0 to 1 and the answer is
+    /// interpolated between the two rows it falls between.
+    PercentileCont,
+    /// `percentile_disc(x, f)`, which answers one of the rows rather than a
+    /// value between two of them.
+    PercentileDisc,
     /// An aggregate an application registered, named beside the call.
     ///
     /// The name is not in here because this enum is `Copy` and travels through
@@ -583,7 +615,7 @@ pub fn lookup_scalar(folded: &[u8]) -> Option<ScalarFunc> {
         b"glob" => ScalarFunc::Glob,
         b"hex" => ScalarFunc::Hex,
         b"ifnull" => ScalarFunc::IfNull,
-        b"iif" => ScalarFunc::Iif,
+        b"iif" | b"if" => ScalarFunc::Iif,
         b"instr" => ScalarFunc::Instr,
         b"length" => ScalarFunc::Length,
         b"like" => ScalarFunc::Like,
@@ -617,6 +649,15 @@ pub fn lookup_scalar(folded: &[u8]) -> Option<ScalarFunc> {
         b"vector_distance_cos" => ScalarFunc::VectorDistanceCos,
         b"vector_distance_l2" => ScalarFunc::VectorDistanceL2,
         b"vector_dot" => ScalarFunc::VectorDot,
+        b"unknown" => ScalarFunc::Unknown,
+        b"subtype" => ScalarFunc::Subtype,
+        b"unistr" => ScalarFunc::Unistr,
+        b"unistr_quote" => ScalarFunc::UnistrQuote,
+        b"sqlite_compileoption_used" => ScalarFunc::CompileOptionUsed,
+        b"sqlite_compileoption_get" => ScalarFunc::CompileOptionGet,
+        b"sqlite_log" => ScalarFunc::Log,
+        b"load_extension" => ScalarFunc::LoadExtension,
+        b"regexp" => ScalarFunc::Regexp,
         _ => return None,
     };
     Some(func)
@@ -637,6 +678,10 @@ pub fn lookup_aggregate(folded: &[u8]) -> Option<AggregateFunc> {
         b"json_group_array" => AggregateFunc::JsonGroupArray,
         b"jsonb_group_array" => AggregateFunc::JsonbGroupArray,
         b"json_group_object" => AggregateFunc::JsonGroupObject,
+        b"median" => AggregateFunc::Median,
+        b"percentile" => AggregateFunc::Percentile,
+        b"percentile_cont" => AggregateFunc::PercentileCont,
+        b"percentile_disc" => AggregateFunc::PercentileDisc,
         b"jsonb_group_object" => AggregateFunc::JsonbGroupObject,
         _ => return None,
     };
@@ -660,7 +705,19 @@ pub fn scalar_arity_ok(func: ScalarFunc, count: usize) -> bool {
         ScalarFunc::VectorDistanceCos | ScalarFunc::VectorDistanceL2 | ScalarFunc::VectorDot => {
             count == 2
         }
-        ScalarFunc::Iif | ScalarFunc::Replace => count == 3,
+        ScalarFunc::Replace => count == 3,
+        // `iif` is `CASE` written as a call: pairs of a test and a value, with
+        // an optional final answer. Two arguments is the shortest legal form
+        // and there is no upper bound, which is why it is not `count == 3`.
+        ScalarFunc::Iif => count >= 2,
+        ScalarFunc::Unknown => true,
+        ScalarFunc::Subtype
+        | ScalarFunc::Unistr
+        | ScalarFunc::UnistrQuote
+        | ScalarFunc::CompileOptionUsed
+        | ScalarFunc::CompileOptionGet => count == 1,
+        ScalarFunc::Log | ScalarFunc::Regexp => count == 2,
+        ScalarFunc::LoadExtension => count == 1 || count == 2,
         ScalarFunc::Instr => count == 2,
         ScalarFunc::Like => count == 2 || count == 3,
         ScalarFunc::Likelihood => count == 1 || count == 2,
@@ -692,6 +749,10 @@ pub fn aggregate_arity_ok(func: AggregateFunc, count: usize, star: bool) -> bool
         AggregateFunc::GroupConcat => !star && (count == 1 || count == 2),
         AggregateFunc::JsonGroupArray | AggregateFunc::JsonbGroupArray => !star && count == 1,
         AggregateFunc::JsonGroupObject | AggregateFunc::JsonbGroupObject => !star && count == 2,
+        AggregateFunc::Median => !star && count == 1,
+        AggregateFunc::Percentile
+        | AggregateFunc::PercentileCont
+        | AggregateFunc::PercentileDisc => !star && count == 2,
         // An application's aggregate declared its own arity, and the binder
         // checked it against the registration before getting here.
         AggregateFunc::External => !star,

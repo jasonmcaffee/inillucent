@@ -349,6 +349,23 @@ pub enum Expr {
         /// The affinity the declared type maps to.
         affinity: Affinity,
     },
+    /// A comparison's affinity conversion, applied on its own.
+    ///
+    /// **Not a `CAST`, and the difference is the whole reason it exists.** A
+    /// `CAST('abc' AS INTEGER)` is `0`; applying integer *affinity* to `'abc'`
+    /// leaves it as `'abc'`, because affinity converts only what converts
+    /// losslessly. `CompareWith` does this to both operands before comparing,
+    /// so anything that has to reproduce that comparison's *equality* by another
+    /// route - hashing it, for one - has to do the same conversion first, and
+    /// doing it with a `CAST` would put `'abc'` and `0` in one bucket.
+    ///
+    /// Its one caller is the automatic index; see `crate::autoindex`.
+    Affinity {
+        /// The operand.
+        operand: Box<Expr>,
+        /// The affinity the comparison applies.
+        affinity: Affinity,
+    },
     /// `IS` / `IS NOT`.
     Is {
         /// Whether `NOT` was written.
@@ -627,6 +644,10 @@ pub fn compile(expr: &Expr, types: &[StaticType]) -> DbResult<Box<dyn Eval>> {
             op: *op,
             operand: compile(operand, types)?,
         }),
+        Expr::Affinity { operand, affinity } => Box::new(ApplyAffinity {
+            operand: compile(operand, types)?,
+            affinity: *affinity,
+        }),
         Expr::Cast { operand, affinity } => Box::new(crate::scalar::Cast {
             operand: compile(operand, types)?,
             affinity: *affinity,
@@ -770,6 +791,7 @@ pub fn static_type(expr: &Expr, types: &[StaticType]) -> StaticType {
         | Expr::General { .. }
         | Expr::Unary { .. }
         | Expr::Cast { .. }
+        | Expr::Affinity { .. }
         | Expr::Case { .. } => StaticType::Unknown,
     }
 }
@@ -1313,6 +1335,29 @@ fn prefix_number(bytes: &[u8]) -> f64 {
 /// @param number - the value to render
 pub fn format_real(number: f64) -> String {
     String::from_utf8_lossy(&inillucent_value::numeric::real_to_text(number)).into_owned()
+}
+
+/// Applies a comparison's affinity to one value.
+///
+/// See [`Expr::Affinity`] for why this is not a cast.
+struct ApplyAffinity {
+    /// What to convert.
+    operand: Box<dyn Eval>,
+    /// The conversion.
+    affinity: Affinity,
+}
+
+impl Eval for ApplyAffinity {
+    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
+        let value = self.operand.value(batch, nth)?;
+        let converted = inillucent_value::affinity::apply_affinity(
+            crate::scalar::to_value(value.get()),
+            self.affinity,
+            inillucent_value::TextEncoding::Utf8,
+        )
+        .unwrap_or(inillucent_value::Value::Null);
+        Ok(Computed::Owned(crate::scalar::from_value(converted)))
+    }
 }
 
 #[cfg(test)]

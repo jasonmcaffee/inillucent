@@ -143,7 +143,7 @@ impl Eval for ScalarCall {
         // A vector measure over a mismatched pair refuses rather than answering
         // NULL, so a ranking query cannot come back ordered by a distance
         // nobody took.
-        if let Some(said) = builtin::vector_argument_refusal(self.func, &values) {
+        if let Some(said) = builtin::refusal_for(self.func, &values) {
             return Err(inillucent_base::error::refusal(said));
         }
         let answer = builtin::call_with(self.func, &values, self.collation, ENCODING, context);

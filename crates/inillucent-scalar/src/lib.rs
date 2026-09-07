@@ -77,6 +77,7 @@ pub mod json;
 pub mod mathfn;
 pub mod pattern;
 pub mod printf;
+pub mod regexp;
 pub mod window;
 
 /// The implementation phase that filled this crate in, as named by the TDD.

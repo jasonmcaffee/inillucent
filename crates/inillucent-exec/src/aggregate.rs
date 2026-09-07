@@ -60,6 +60,15 @@ pub enum AggregateKind {
     JsonGroupArray(bool),
     /// `json_group_object(label, value)` and its `jsonb_` spelling.
     JsonGroupObject(bool),
+    /// `median(x)`, `percentile(x, p)`, `percentile_cont(x, f)` and
+    /// `percentile_disc(x, f)`.
+    ///
+    /// One kind rather than four, because they differ only in where the
+    /// fraction comes from and whether the answer may fall between two rows -
+    /// see [`Percentile`]. Every one of them has to see the whole group sorted
+    /// before it can answer, so they collect their rows the way a registered
+    /// aggregate does rather than reducing as they go.
+    Percentile(Percentile),
     /// A **bare column**: one read outside any aggregate in an aggregating
     /// query.
     ///
@@ -95,6 +104,45 @@ const SPLIT: i128 = 16_384;
 ///
 /// 2^52. SQLite uses the same bound to decide whether a value needs splitting.
 const EXACT_IN_DOUBLE: i64 = 4_503_599_627_370_496;
+
+/// Which of the four percentile aggregates is being computed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Percentile {
+    /// `median(x)`: the fraction is fixed at one half.
+    Median,
+    /// `percentile(x, p)`: the second argument runs 0 to 100.
+    Hundredths,
+    /// `percentile_cont(x, f)`: the second argument runs 0 to 1, and the answer
+    /// is interpolated between the two rows the position falls between.
+    Continuous,
+    /// `percentile_disc(x, f)`: the same range, but the answer is one of the
+    /// rows rather than a value between two of them.
+    Discrete,
+}
+
+impl Percentile {
+    /// Returns the fraction of the way through the group, from 0 to 1.
+    ///
+    /// `median` ignores its (absent) second argument; `percentile` divides by a
+    /// hundred; the other two take the argument as written. A fraction outside
+    /// the range, or one that is not a number, has no answer and the aggregate
+    /// reports NULL rather than clamping - which is what the reference does.
+    ///
+    /// @param argument - the second argument's value, when there is one
+    fn fraction(self, argument: Option<f64>) -> Option<f64> {
+        let fraction = match self {
+            Percentile::Median => 0.5,
+            Percentile::Hundredths => argument? / 100.0,
+            Percentile::Continuous | Percentile::Discrete => argument?,
+        };
+        (0.0..=1.0).contains(&fraction).then_some(fraction)
+    }
+
+    /// Returns whether the answer may be a value no row held.
+    fn interpolates(self) -> bool {
+        !matches!(self, Percentile::Discrete)
+    }
+}
 
 /// One aggregate's running state.
 #[derive(Clone, Debug)]
@@ -215,6 +263,7 @@ impl Accumulator {
                 AggregateKind::External(_)
                     | AggregateKind::JsonGroupArray(_)
                     | AggregateKind::JsonGroupObject(_)
+                    | AggregateKind::Percentile(_)
                     | AggregateKind::Bare(_)
             )
     }
@@ -315,7 +364,9 @@ impl Accumulator {
             // A registered aggregate of one argument reaches here through the
             // ordinary single-value path; more than one goes through
             // `push_values`. Either way the row is kept rather than reduced.
-            AggregateKind::External(_) => self.rows.push(vec![crate::scalar::to_value(*value)]),
+            AggregateKind::External(_) | AggregateKind::Percentile(_) => {
+                self.rows.push(vec![crate::scalar::to_value(*value)])
+            }
             AggregateKind::Sum | AggregateKind::Total | AggregateKind::Average => {
                 self.push_numeric(value)
             }
@@ -336,6 +387,55 @@ impl Accumulator {
         }
     }
 
+    /// Returns what a percentile aggregate settles on, over the sorted group.
+    ///
+    /// The fraction is read from the *second* argument of any collected row -
+    /// it is a constant for the group, so any row's copy of it will do - and
+    /// `median` has no second argument at all. NULL is the answer to an empty
+    /// group and to a fraction outside `0..=1`, which is what the reference
+    /// answers rather than clamping.
+    ///
+    /// `percentile_disc` picks a row; the other three interpolate between the
+    /// two the position falls between, which is why the two arms differ in more
+    /// than rounding. Both index a group sorted by value, and the sort is done
+    /// here rather than as the rows arrive because the group is not known to be
+    /// complete until now.
+    ///
+    /// @param which - which of the four is being computed
+    fn finish_percentile(&self, which: Percentile) -> OwnedDatum {
+        let argument = self
+            .rows
+            .first()
+            .and_then(|row| row.get(1))
+            .and_then(numeric_value);
+        let Some(fraction) = which.fraction(argument) else {
+            return OwnedDatum::Null;
+        };
+        let mut values: Vec<f64> = self.rows.iter().filter_map(|row| {
+            row.first().and_then(numeric_value)
+        }).collect();
+        if values.is_empty() {
+            return OwnedDatum::Null;
+        }
+        values.sort_by(|left, right| left.total_cmp(right));
+        let last = values.len().saturating_sub(1);
+        let position = fraction * last as f64;
+        if !which.interpolates() {
+            // The row the position lands *in*, which is what "discrete" means:
+            // an answer some row actually held. It rounds down rather than to
+            // nearest, so `percentile_disc(x, 0.5)` over four rows is the
+            // second of them and not the third - measured against the
+            // reference, which is the only way to get this one right.
+            let at = position.floor().max(0.0) as usize;
+            return OwnedDatum::Real(values.get(at.min(last)).copied().unwrap_or(f64::NAN));
+        }
+        let below = position.floor().max(0.0) as usize;
+        let above = position.ceil().max(0.0) as usize;
+        let low = values.get(below.min(last)).copied().unwrap_or(f64::NAN);
+        let high = values.get(above.min(last)).copied().unwrap_or(f64::NAN);
+        OwnedDatum::Real(low + (high - low) * (position - below as f64))
+    }
+
     /// Folds a whole run of integers in at once.
     ///
     /// The vectorised entry point: a `sum` over a dense integer column calls
@@ -353,6 +453,7 @@ impl Accumulator {
             AggregateKind::External(_)
             | AggregateKind::JsonGroupArray(_)
             | AggregateKind::JsonGroupObject(_)
+            | AggregateKind::Percentile(_)
             | AggregateKind::Bare(_) => {}
             AggregateKind::CountStar | AggregateKind::Count => {
                 self.count = self.count.saturating_add(rows as i64);
@@ -563,6 +664,7 @@ impl Accumulator {
             AggregateKind::CountStar | AggregateKind::Count => OwnedDatum::Int(self.count),
             // The whole group at once, which is what the boundary promises.
             AggregateKind::External(body) => crate::scalar::from_value((body.0)(&self.rows)?),
+            AggregateKind::Percentile(which) => self.finish_percentile(*which),
             AggregateKind::Sum => {
                 if self.count == 0 {
                     OwnedDatum::Null
@@ -723,6 +825,24 @@ fn render(value: &Datum<'_>) -> String {
         Datum::Int(number) => number.to_string(),
         Datum::Real(number) => format_real(*number),
         Datum::Text(bytes) | Datum::Blob(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+
+/// Returns a value as a number, or nothing when it is not one.
+///
+/// A percentile is arithmetic over the group, so a text value that looks like a
+/// number counts and one that does not is skipped - the same rule `sum()`
+/// follows, and the reason both are written in terms of the dialect's own
+/// coercion rather than Rust's parser.
+///
+/// @param value - one collected argument
+fn numeric_value(value: &inillucent_value::value::Value<'static>) -> Option<f64> {
+    match value {
+        inillucent_value::value::Value::Null => None,
+        inillucent_value::value::Value::Integer(number) => Some(*number as f64),
+        inillucent_value::value::Value::Real(number) => Some(*number),
+        other => Some(inillucent_value::cast::real_value(other)),
     }
 }
 

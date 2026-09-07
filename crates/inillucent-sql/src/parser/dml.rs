@@ -146,13 +146,18 @@ impl Parser<'_> {
             None
         };
         let returning = self.parse_returning()?;
+        let mut limited_at = None;
         let order_by = if self.at_keyword(Keyword::ORDER)? {
+            limited_at = Some((crate::ast::Limited::OrderBy, self.peek()?.span));
             self.bump()?;
             self.expect_keyword(Keyword::BY)?;
             self.parse_order_terms()?
         } else {
             Vec::new()
         };
+        if limited_at.is_none() && self.at_keyword(Keyword::LIMIT)? {
+            limited_at = Some((crate::ast::Limited::Limit, self.peek()?.span));
+        }
         let (limit, offset) = self.parse_limit_clause()?;
         Ok(Statement::Update(Box::new(Update {
             with,
@@ -165,6 +170,7 @@ impl Parser<'_> {
             order_by,
             limit,
             offset,
+            limited_at,
         })))
     }
 
@@ -180,13 +186,18 @@ impl Parser<'_> {
             None
         };
         let returning = self.parse_returning()?;
+        let mut limited_at = None;
         let order_by = if self.at_keyword(Keyword::ORDER)? {
+            limited_at = Some((crate::ast::Limited::OrderBy, self.peek()?.span));
             self.bump()?;
             self.expect_keyword(Keyword::BY)?;
             self.parse_order_terms()?
         } else {
             Vec::new()
         };
+        if limited_at.is_none() && self.at_keyword(Keyword::LIMIT)? {
+            limited_at = Some((crate::ast::Limited::Limit, self.peek()?.span));
+        }
         let (limit, offset) = self.parse_limit_clause()?;
         Ok(Statement::Delete(Box::new(Delete {
             with,
@@ -196,6 +207,7 @@ impl Parser<'_> {
             order_by,
             limit,
             offset,
+            limited_at,
         })))
     }
 
