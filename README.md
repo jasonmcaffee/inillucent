@@ -400,8 +400,15 @@ struck below rather than deleted, so the list still reads as a record of what wa
    operator spellings, and `vector_distance_l2` as an *ordering* the planner recognises - only the
    cosine is wired to the index, because that is the measure the store is built on.
 10. **Deleting the old engine** and re-rooting `inillucent::Database` onto the new one.
-11. **The retrieval index's footprint**: 3.80 GB resident for 598k chunks, BM25 rebuilt on load,
-    single-threaded graph build.
+11. **The retrieval index's footprint**: 3.83 GB resident for 598,560 chunks, measured
+    (task-1838 §8). The two things this line used to ask for are done and the measurement says so:
+    the BM25 postings and dictionary **are** persisted - `lexical.bin` is 642 MB of terms and
+    doclists that `Bm25Index::read_from` reads back, and the whole 3.1 GB index opens in **3.0 s** -
+    and the graph build now runs on every core the machine has, **73.9 s to 24.3 s (3.04x)** over
+    30,000 vectors with recall unchanged (0.42 sequential against 0.44 parallel, on random uniform
+    vectors where an approximate index is intrinsically weak). What is left is the resident set
+    itself: 3.83 GB for a 3.1 GB index is the files plus the structures built over them, and
+    nothing has tried to make it smaller.
 12. **Multi-process and multi-thread access**, deliberate non-goals of task-1816 that a SQLite
     replacement will eventually be asked about.
 
@@ -440,6 +447,7 @@ target/release/inillucent-probeprofile $F/medium.db --scale medium --page-size 3
 target/release/inillucent-searchgate --documents 500 --rounds 30
 target/release/inillucent-shellrss                   # peak RSS, one shell each, same data
 target/release/inillucent-vectorprobe --rows 20000 --dims 256   # what the SQL vector path costs
+target/release/inillucent-childcost target/release/inillucent-bench open --dir <index>  # load time, peak RSS
 target/release/inillucent-prepareprofile $F/medium.db --iterations 4000   # where a compile goes
 target/release/inillucent-shell my.rdb
 
