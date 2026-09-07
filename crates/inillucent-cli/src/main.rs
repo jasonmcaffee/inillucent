@@ -39,6 +39,7 @@
 #[global_allocator]
 static ALLOCATOR: inillucent_alloc::Pooled = inillucent_alloc::Pooled;
 
+mod diagnose;
 mod dot;
 mod dump;
 mod import;

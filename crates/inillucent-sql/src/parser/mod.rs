@@ -255,10 +255,18 @@ impl<'a> Parser<'a> {
         Ok(ParseError::new(kind, token.span))
     }
 
-    /// Charges one level of recursion against the expression-depth limit.
+    /// Charges one level of recursion against the parser's own depth limit.
+    ///
+    /// **Not `ExprDepth`, which is a different measurement.** This counts how
+    /// deep the recursive descent has gone; `ExprDepth` counts how deep the
+    /// expression *tree* is, and the two differ by every redundant
+    /// parenthesis - `((((1))))` is four of one and one of the other. Charging
+    /// the parser's recursion against the tree's limit refused
+    /// `SELECT ((( ... 1 ... )))` at a thousand parentheses, which the
+    /// reference accepts because its parser stack is allowed 2500.
     fn enter(&mut self) -> Result<(), ParseError> {
         self.depth = self.depth.saturating_add(1);
-        if self.depth > self.limits.get(Limit::ExprDepth) {
+        if self.depth > self.limits.get(Limit::ParserDepth) {
             let span = Span::at(self.cursor());
             return Err(ParseError::new(
                 ParseErrorKind::LimitExceeded("parser stack depth"),

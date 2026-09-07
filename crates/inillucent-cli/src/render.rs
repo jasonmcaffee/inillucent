@@ -265,9 +265,21 @@ fn csv(layout: &Layout, columns: &[String], rows: &[Vec<Value<'static>>]) -> Vec
     }
     // The caller writes a newline after each line, so a row separator of
     // CR LF is a carriage return on the end of the line itself.
+    //
+    // **And a second one on Windows**, which looks wrong and is not. The
+    // reference's row separator is CR LF, and it writes it through a text-mode
+    // C stream that translates the LF into CR LF on the way out - so the bytes
+    // a caller actually receives from `sqlite3 -csv` on this platform are
+    // **CR CR LF**, and a shell that emitted the two-byte sequence would not be
+    // byte-compatible with the thing it is replacing. Rust's `println!` does no
+    // such translation, so the translation is done here, where it can be
+    // labelled. Elsewhere the reference's own stream emits CR LF and so do we.
     if layout.row_separator.ends_with(CRLF) {
         for line in &mut out {
             line.push(CR);
+            if cfg!(windows) {
+                line.push(CR);
+            }
         }
     }
     out

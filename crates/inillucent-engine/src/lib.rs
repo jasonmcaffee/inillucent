@@ -83,6 +83,7 @@ pub mod ddl;
 mod entries;
 pub mod multi;
 pub mod pragma;
+mod inspect;
 mod rebuild;
 pub mod vtab;
 
