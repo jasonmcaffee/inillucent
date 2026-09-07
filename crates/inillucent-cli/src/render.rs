@@ -263,8 +263,21 @@ fn csv(layout: &Layout, columns: &[String], rows: &[Vec<Value<'static>>]) -> Vec
             .collect();
         out.push(cells.join(","));
     }
+    // The caller writes a newline after each line, so a row separator of
+    // CR LF is a carriage return on the end of the line itself.
+    if layout.row_separator.ends_with(CRLF) {
+        for line in &mut out {
+            line.push(CR);
+        }
+    }
     out
 }
+
+/// The row separator RFC 4180 gives a CSV record, and the reference writes.
+const CRLF: &str = "\r\n";
+
+/// The carriage return half of it.
+const CR: char = '\r';
 
 /// Quotes one CSV field, if it needs it.
 ///

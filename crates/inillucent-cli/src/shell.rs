@@ -65,6 +65,20 @@ pub struct Shell {
     pub failed: bool,
     /// The line the statement being run started on.
     pub line: usize,
+    /// Where `.log` was pointed, when it was pointed anywhere.
+    ///
+    /// Recorded and never written to: this engine emits no log messages, so the
+    /// destination is a place nothing arrives. `.show` reports it, which is the
+    /// only thing that reads it.
+    pub log_to: Option<String>,
+    /// The values `.parameter set` bound, by the name they were given.
+    ///
+    /// **The shell's own table, not the engine's.** SQLite keeps them in a
+    /// `temp.sqlite_parameters` table and binds from it before each step; the
+    /// visible behaviour is the same and this needs no reserved table name.
+    /// Ordered by key, which is the order `.parameter list` prints and the
+    /// order the reference prints.
+    pub parameters: std::collections::BTreeMap<String, Value<'static>>,
 }
 
 /// Why a statement did not produce rows.
@@ -96,6 +110,8 @@ impl Shell {
             explain_plan: false,
             done: false,
             failed: false,
+            log_to: None,
+            parameters: std::collections::BTreeMap::new(),
             line: 1,
         })
     }
@@ -183,13 +199,29 @@ impl Shell {
                 self.report(sql, &failure);
             }
             Ok((columns, rows)) => {
+                // **`EXPLAIN QUERY PLAN` is drawn, not listed.** Its four
+                // columns are a tree, and the reference's shell renders them as
+                // one; printing `0|0|0|SCAN t` is the raw result of a statement
+                // nobody writes for the raw result.
+                if is_query_plan(sql) {
+                    for line in plan_tree(&rows) {
+                        self.say(&line);
+                    }
+                    self.finish_once();
+                    return;
+                }
                 let layout = self.layout.clone();
                 for line in render(&layout, &columns, &rows) {
                     self.say(&line);
                 }
                 if self.show_changes {
                     let changes = self.connection().changes();
-                    self.say(&format!("changes: {changes}"));
+                    // The reference prints both counters, aligned with three
+                    // spaces between them.
+                    let total = self.connection().total_changes();
+                    self.say(&format!(
+                        "changes: {changes}   total_changes: {total}"
+                    ));
                 }
             }
         }
@@ -224,11 +256,26 @@ impl Shell {
 
     /// Runs a statement and collects its column names and rows.
     pub fn collect(&self, sql: &str) -> Result<(Vec<String>, Vec<Vec<Value<'static>>>), Failure> {
-        let mut statement = self.connection().prepare(sql).map_err(|error| Failure {
+        let connection = self.connection();
+        let mut statement = connection.prepare(sql).map_err(|error| Failure {
             message: reason(&error),
             offset: error.sql_offset(),
             compiling: true,
         })?;
+        // **What `.parameter set` bound, applied by name.** A statement that
+        // names none of them binds nothing; a name the statement does not use
+        // is not an error, which is what makes a set of parameters reusable
+        // across a script.
+        if !self.parameters.is_empty() {
+            let names = connection.parameter_names(sql).unwrap_or_default();
+            for (name, index) in names {
+                let key = String::from_utf8_lossy(&name).into_owned();
+                let Some(value) = self.parameters.get(&key) else {
+                    continue;
+                };
+                let _ = statement.bind(index, crate::shell::datum_of(value));
+            }
+        }
         let mut rows = Vec::new();
         loop {
             match statement.step() {
@@ -257,13 +304,8 @@ impl Shell {
         let Ok((_, rows)) = self.collect(&plan) else {
             return;
         };
-        for row in rows {
-            let detail = row
-                .last()
-                .and_then(Value::as_text)
-                .map(|text| String::from_utf8_lossy(text.raw()).into_owned())
-                .unwrap_or_default();
-            self.say(&format!("QUERY PLAN {detail}"));
+        for line in plan_tree(&rows) {
+            self.say(&line);
         }
     }
 
@@ -559,6 +601,112 @@ fn value_of(datum: &OwnedDatum) -> Value<'static> {
         OwnedDatum::Real(number) => Value::Real(*number),
         OwnedDatum::Text(bytes) => Value::owned_text(bytes).unwrap_or(Value::Null),
         OwnedDatum::Blob(bytes) => Value::owned_blob(bytes).unwrap_or(Value::Null),
+    }
+}
+
+/// Returns one value as the datum a bind takes.
+///
+/// The reverse of [`value_of`], and the shell's own half of `.parameter`.
+///
+/// @param value - the value the shell is holding
+pub fn datum_of(value: &Value<'static>) -> OwnedDatum {
+    match value {
+        Value::Null => OwnedDatum::Null,
+        Value::Integer(number) => OwnedDatum::Int(*number),
+        Value::Real(number) => OwnedDatum::Real(*number),
+        Value::Text(text) => OwnedDatum::Text(text.raw().to_vec()),
+        Value::Blob(blob) => OwnedDatum::Blob(blob.raw().to_vec()),
+    }
+}
+
+/// Reports whether a statement is an `EXPLAIN QUERY PLAN`.
+///
+/// The words rather than the bound statement, because the shell decides how to
+/// *print* before it knows what the engine made of it - and the two spellings
+/// SQLite accepts are `EXPLAIN QUERY PLAN` and nothing else.
+///
+/// @param sql - the statement as typed
+fn is_query_plan(sql: &str) -> bool {
+    let mut words = sql.split_whitespace();
+    words.next().is_some_and(|word| word.eq_ignore_ascii_case("explain"))
+        && words.next().is_some_and(|word| word.eq_ignore_ascii_case("query"))
+        && words.next().is_some_and(|word| word.eq_ignore_ascii_case("plan"))
+}
+
+/// Renders `EXPLAIN QUERY PLAN`'s four columns as the tree the reference draws.
+///
+/// **The rows are a tree and were being printed as rows.** Each carries an id
+/// and its parent's id, and the reference draws them under a `QUERY PLAN`
+/// heading, with `|--` for a node that has a sibling after it and a backtick
+/// arm for the last, indented three characters per level - which is how a
+/// subquery under a step is told from a step beside it. Printing the raw four
+/// columns left the shape for the reader to work out.
+///
+/// @param rows - the plan's rows: id, parent, notused, detail
+pub fn plan_tree(rows: &[Vec<Value<'static>>]) -> Vec<String> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec!["QUERY PLAN".to_string()];
+    plan_children(rows, 0, "", 0, &mut lines);
+    lines
+}
+
+/// The arm the reference draws under the last child of a node.
+const LAST_ARM: &str = "`--";
+
+/// How deep a plan tree may be drawn before the walk gives up.
+///
+/// A plan that named itself as its own parent would otherwise not terminate,
+/// and a malformed plan is not a reason for a shell to hang. The cap rather
+/// than an id check, because this engine numbers its top-level rows from zero
+/// and the root is asked for by parent zero - so a row whose id and parent are
+/// both zero is the ordinary first line of every plan.
+const PLAN_DEPTH: usize = 64;
+
+/// Emits one parent's children, and theirs.
+///
+/// @param rows - every row of the plan
+/// @param parent - the id whose children to emit
+/// @param prefix - the indent the ancestors give
+/// @param depth - how deep this call is
+/// @param lines - where the rendered lines go
+fn plan_children(
+    rows: &[Vec<Value<'static>>],
+    parent: i64,
+    prefix: &str,
+    depth: usize,
+    lines: &mut Vec<String>,
+) {
+    if depth >= PLAN_DEPTH {
+        return;
+    }
+    let field = |row: &Vec<Value<'static>>, at: usize| -> i64 {
+        row.get(at).and_then(Value::as_integer).unwrap_or(0)
+    };
+    let children: Vec<&Vec<Value<'static>>> = rows
+        .iter()
+        .filter(|row| field(row, 1) == parent)
+        .collect();
+    for (at, row) in children.iter().enumerate() {
+        let last = at.saturating_add(1) == children.len();
+        let detail = row
+            .last()
+            .and_then(Value::as_text)
+            .map(|text| String::from_utf8_lossy(text.raw()).into_owned())
+            .unwrap_or_default();
+        let arm = if last { LAST_ARM } else { "|--" };
+        lines.push(format!("{prefix}{arm}{detail}"));
+        // A node that still has siblings below it keeps a vertical bar in its
+        // children's indent; the last one leaves a space.
+        let carried = format!("{prefix}{}", if last { "   " } else { "|  " });
+        // A row that names its own parent's id is its own child, which is what
+        // a top-level row looks like on an engine that numbers from zero: it
+        // has id 0 and parent 0. It is selected as a child of the root and must
+        // not then be expanded as its own parent.
+        if field(row, 0) != parent {
+            plan_children(rows, field(row, 0), &carried, depth.saturating_add(1), lines);
+        }
     }
 }
 
