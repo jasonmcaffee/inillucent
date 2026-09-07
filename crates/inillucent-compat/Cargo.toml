@@ -6,6 +6,7 @@ license.workspace = true
 description = "Parity manifest, compatibility report generator, and the SQLite oracle protocol."
 
 [dependencies]
+inillucent-alloc = { workspace = true }
 inillucent-base = { workspace = true }
 inillucent-value = { workspace = true }
 inillucent-storage = { workspace = true }

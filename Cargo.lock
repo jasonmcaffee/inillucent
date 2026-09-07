@@ -574,6 +574,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "inillucent-alloc"
+version = "0.1.0"
+
+[[package]]
 name = "inillucent-base"
 version = "0.1.0"
 
@@ -618,6 +622,7 @@ dependencies = [
 name = "inillucent-cli"
 version = "0.1.0"
 dependencies = [
+ "inillucent-alloc",
  "inillucent-base",
  "inillucent-engine",
  "inillucent-tree",
@@ -629,6 +634,7 @@ name = "inillucent-compat"
 version = "0.1.0"
 dependencies = [
  "inillucent",
+ "inillucent-alloc",
  "inillucent-base",
  "inillucent-catalog",
  "inillucent-engine",

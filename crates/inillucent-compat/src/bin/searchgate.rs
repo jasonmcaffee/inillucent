@@ -34,6 +34,18 @@
 //! Usage:
 //!   inillucent-searchgate [--documents N] [--rounds N]
 
+/// The engine's own allocator, installed for this program.
+///
+/// **Part of the build, not of a workload.** SQLite ships its own memory
+/// subsystem and is compiled as one translation unit; a Rust workspace measured
+/// on the platform allocator is being measured on a build configuration rather
+/// than on an engine, which is the same reasoning that fixed fat LTO and one
+/// codegen unit in the release profile. task-1838 §5 measured the Windows CRT
+/// heap at 59% of a trivial compile and this size-classed free list at 17%
+/// overall, which is why Phase 3's Part E names it the cheapest first move.
+#[global_allocator]
+static ALLOCATOR: inillucent_alloc::Pooled = inillucent_alloc::Pooled;
+
 use std::process::ExitCode;
 use std::time::Instant;
 

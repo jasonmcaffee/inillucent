@@ -437,8 +437,11 @@ impl ImportedDatabase {
         // anything putting them in the catalog, so every one of them was
         // `no such table` (task-1843). They go on last, so a real table of the
         // same name shadows the module.
-        for table in self.eponymous_tables() {
-            catalog = catalog.with_eponymous(table);
+        if self.eponymous.is_empty() {
+            self.eponymous = self.eponymous_tables();
+        }
+        for table in &self.eponymous {
+            catalog = catalog.with_eponymous(table.clone());
         }
         self.catalog = catalog;
         self.forget_compiled_statements();
