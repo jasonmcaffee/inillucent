@@ -34,3 +34,12 @@ corpus.jsonl
 # cargo-mutants writes its run directory here when --output is not given.
 /mutants.out/
 /mutants.out.old/
+
+# Retired tests, kept rather than deleted (task-1838 §9, Jason's ruling).
+#
+# The sixteen tests that asserted SQLite *file-format* interoperability - a
+# requirement task-1816 dropped when the new engine stopped writing SQLite files
+# - are moved here instead of being removed, so the history of what was once
+# promised is still on disk and readable. Nothing here is compiled: cargo only
+# looks in `tests/`.
+/_junk/
