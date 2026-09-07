@@ -3916,13 +3916,7 @@ impl ImportedDatabase {
                 Ok(Cached::Insert(statement, source, values_hold_subquery))
             }
             BoundStatement::Update(statement) => {
-                let (plan, prepared) = self.keys_plan(
-                    &statement.table,
-                    statement.source,
-                    statement.filter.as_ref(),
-                    statement.limit.as_ref(),
-                    statement.offset.as_ref(),
-                )?;
+                let (plan, prepared) = self.update_keys_plan(&statement)?;
                 let assignments_hold_subquery = statement.assignments.iter().any(|assignment| {
                     inillucent_sql::plan::expression_holds_subquery(&assignment.value)
                 });
@@ -3950,6 +3944,15 @@ impl ImportedDatabase {
                     Box::new(plan),
                     Box::new(prepared),
                 ))
+            }
+            BoundStatement::Delete(statement) if statement.view_rows.is_some() => {
+                let rows = statement
+                    .view_rows
+                    .as_ref()
+                    .ok_or_else(|| misuse("a view delete with no query"))?;
+                let plan = plan_select_with((**rows).clone(), self.levers);
+                let prepared = physical::prepare_any(&plan, self)?;
+                Ok(Cached::Delete(statement, Box::new(plan), Box::new(prepared)))
             }
             BoundStatement::Delete(statement) => {
                 let (plan, prepared) = self.keys_plan(
@@ -3999,6 +4002,59 @@ impl ImportedDatabase {
             .get(&table.root)
             .ok_or_else(|| misuse("no layout imported for the table being written"))?;
         let select = dml::keys_query(table, source, filter, limit, offset, layout)?;
+        let plan = plan_select_with(select, self.levers);
+        let prepared = physical::prepare_any(&plan, self)?;
+        Ok((plan, prepared))
+    }
+
+    /// Returns the query that finds an `UPDATE`'s rows, and its shape.
+    ///
+    /// For an ordinary `UPDATE` this is [`ImportedDatabase::keys_plan`]. For an
+    /// `UPDATE ... FROM` the query also carries the joined terms and projects
+    /// the assigned values beside the key, because those values read a row the
+    /// write path never sees.
+    ///
+    /// @param statement - the bound update
+    fn update_keys_plan(
+        &self,
+        statement: &inillucent_sql::dml::BoundUpdate,
+    ) -> DbResult<(PhysicalPlan, physical::Prepared)> {
+        // **A view's `keys` are its rows.** There is no tree to find a key in:
+        // an `INSTEAD OF UPDATE` fires with `OLD` taken from running the view,
+        // which is exactly the query the binder left on `view_rows`.
+        if let Some(rows) = &statement.view_rows {
+            let plan = plan_select_with((**rows).clone(), self.levers);
+            let prepared = physical::prepare_any(&plan, self)?;
+            return Ok((plan, prepared));
+        }
+        if statement.from.is_empty() {
+            return self.keys_plan(
+                &statement.table,
+                statement.source,
+                statement.filter.as_ref(),
+                statement.limit.as_ref(),
+                statement.offset.as_ref(),
+            );
+        }
+        let layout = self
+            .layouts
+            .get(&statement.table.root)
+            .ok_or_else(|| misuse("no layout imported for the table being written"))?;
+        let assigned: Vec<inillucent_sql::bind::BoundExpr> = statement
+            .assignments
+            .iter()
+            .map(|assignment| assignment.value.clone())
+            .collect();
+        let select = dml::keys_query_joined(
+            &statement.table,
+            statement.source,
+            statement.filter.as_ref(),
+            statement.limit.as_ref(),
+            statement.offset.as_ref(),
+            layout,
+            &statement.from,
+            &assigned,
+        )?;
         let plan = plan_select_with(select, self.levers);
         let prepared = physical::prepare_any(&plan, self)?;
         Ok((plan, prepared))
@@ -4334,6 +4390,7 @@ fn describe_directive(directive: &inillucent_sql::directive::Directive) -> &'sta
         Directive::Savepoint(_) => "SAVEPOINT",
         Directive::Release(_) => "RELEASE",
         Directive::CreateTable { .. } => "CREATE TABLE",
+        Directive::CreateTableAsSelect { .. } => "CREATE TABLE ... AS SELECT",
         Directive::CreateVirtualTable { .. } => "CREATE VIRTUAL TABLE",
         Directive::CreateView { .. } => "CREATE VIEW",
         Directive::CreateTrigger { .. } => "CREATE TRIGGER",

@@ -1774,7 +1774,7 @@ impl<'a> Binder<'a> {
     }
 
     /// Pushes the CTEs of a `WITH` prefix, returning whether it pushed any.
-    fn push_ctes(&mut self, with: &ast::With) -> Result<bool, ParseError> {
+    pub(crate) fn push_ctes(&mut self, with: &ast::With) -> Result<bool, ParseError> {
         if with.ctes.is_empty() {
             return Ok(false);
         }
@@ -1794,6 +1794,11 @@ impl<'a> Binder<'a> {
         }
         self.ctes.push(bindings);
         Ok(true)
+    }
+
+    /// Drops the innermost level of CTE bindings.
+    pub(crate) fn pop_ctes(&mut self) {
+        self.ctes.pop();
     }
 
     /// Returns the innermost CTE a folded name matches.
@@ -1993,7 +1998,7 @@ impl<'a> Binder<'a> {
     /// A table, a CTE reference, a view and a parenthesised subquery all end up
     /// as one entry in the block's scope. The last three carry the block they
     /// stand for, and everything below the binder treats them alike.
-    fn bind_from_term(&mut self, id: ast::FromTermId) -> Result<(), ParseError> {
+    pub(crate) fn bind_from_term(&mut self, id: ast::FromTermId) -> Result<(), ParseError> {
         let Some(term) = self.ast.from_term(id) else {
             return Err(unsupported("missing FROM term", Span::default()));
         };
@@ -3447,6 +3452,16 @@ impl<'a> Binder<'a> {
                 operand,
                 rhs,
             } => {
+                // **The row-value `IN` form is an OR of equality chains**, which
+                // is exactly what SQLite's `IN` over a value list means: `(a, b)
+                // IN (VALUES (1,2),(3,4))` is `(a=1 AND b=2) OR (a=3 AND b=4)`,
+                // with the same unknown-rather-than-false behaviour when a part
+                // is NULL. The rows are written as a `VALUES` clause, which the
+                // grammar parses as a select, so the desugaring reads them back
+                // out of it rather than adding a second spelling.
+                if let Some(parts) = self.row_value_parts(operand) {
+                    return self.bind_row_in(&parts, &rhs, negated, span);
+                }
                 let operand = self.bind_expr(operand)?;
                 let rhs = match rhs {
                     InRhs::Select(select) => {
@@ -3854,6 +3869,17 @@ impl<'a> Binder<'a> {
         left: ExprId,
         right: ExprId,
     ) -> Result<BoundExpr, ParseError> {
+        // **A row-value comparison is a comparison of its parts.** `(a, b) =
+        // (1, 2)` is `a = 1 AND b = 2`, and the ordering operators are
+        // lexicographic - `(a, b) < (x, y)` is `a < x OR (a = x AND b < y)`,
+        // which is where the NULL behaviour comes from rather than being a rule
+        // of its own. It is desugared here rather than carried into the plan
+        // because there is nothing about it the executor would do differently:
+        // the parts are ordinary comparisons over ordinary expressions.
+        if let (Some(lefts), Some(rights)) = (self.row_value_parts(left), self.row_value_parts(right))
+        {
+            return self.bind_row_comparison(op, &lefts, &rights, self.ast.expr_span(left));
+        }
         let bound_left = self.bind_expr(left)?;
         let bound_right = self.bind_expr(right)?;
         match op {
@@ -3890,6 +3916,156 @@ impl<'a> Binder<'a> {
                 left: Box::new(bound_left),
                 right: Box::new(bound_right),
             }),
+        }
+    }
+
+    /// Binds `(a, b) IN (VALUES (...), (...))`.
+    ///
+    /// Only the value-list form, because that is what the row-value `IN` is for:
+    /// a written list of tuples. `(a, b) IN (SELECT x, y FROM u)` is a
+    /// correlated membership test over a query and is refused by name.
+    ///
+    /// @param parts - the operand row's parts
+    /// @param rhs - what was written after `IN`
+    /// @param negated - whether `NOT IN` was written
+    /// @param span - where the test was written
+    fn bind_row_in(
+        &mut self,
+        parts: &[ExprId],
+        rhs: &InRhs,
+        negated: bool,
+        span: Span,
+    ) -> Result<BoundExpr, ParseError> {
+        let rows = self.row_value_list(rhs).ok_or_else(|| {
+            ParseError::new(
+                ParseErrorKind::Unsupported("a row value IN a query rather than a value list"),
+                span,
+            )
+        })?;
+        let mut bound_lefts = Vec::with_capacity(parts.len());
+        for part in parts {
+            bound_lefts.push(self.bind_expr(*part)?);
+        }
+        let mut chain: Option<BoundExpr> = None;
+        for row in &rows {
+            if row.len() != parts.len() {
+                return Err(ParseError::new(
+                    ParseErrorKind::Refused(format!(
+                        "row value misused: {} values on the left and {} on the right",
+                        parts.len(),
+                        row.len()
+                    )),
+                    span,
+                ));
+            }
+            let mut bound_rights = Vec::with_capacity(row.len());
+            for value in row {
+                bound_rights.push(self.bind_expr(*value)?);
+            }
+            let one = equality_chain(&bound_lefts, &bound_rights);
+            chain = Some(match chain {
+                None => one,
+                Some(held) => BoundExpr::Or(Box::new(held), Box::new(one)),
+            });
+        }
+        // An empty list is false, and `NOT IN ()` is true, whatever the
+        // operand - including a NULL one. That is SQLite's rule and it is the
+        // one place `IN` is not three-valued.
+        let bound = chain.unwrap_or(BoundExpr::Integer(0));
+        Ok(if negated {
+            BoundExpr::Not(Box::new(bound))
+        } else {
+            bound
+        })
+    }
+
+    /// Returns the rows of a written `VALUES` list, when the right-hand side is
+    /// one.
+    ///
+    /// @param rhs - what was written after `IN`
+    fn row_value_list(&self, rhs: &InRhs) -> Option<Vec<Vec<ExprId>>> {
+        match rhs {
+            InRhs::Select(select) => {
+                let held = self.ast.select(*select)?;
+                if !held.compounds.is_empty() || !held.with.ctes.is_empty() {
+                    return None;
+                }
+                let core = self.ast.core(held.first)?;
+                match &core.body {
+                    SelectBody::Values(rows) => Some(rows.clone()),
+                    _ => None,
+                }
+            }
+            // `IN ((1,2), (3,4))` is a list of row values rather than a
+            // `VALUES` clause, and means the same thing.
+            InRhs::List(items) => {
+                let mut rows = Vec::with_capacity(items.len());
+                for item in items {
+                    rows.push(self.row_value_parts(*item)?);
+                }
+                Some(rows)
+            }
+            InRhs::Table { .. } => None,
+        }
+    }
+
+    /// Returns the parts of a row value, or `None` when the expression is not
+    /// one.
+    ///
+    /// @param id - the expression
+    fn row_value_parts(&self, id: ExprId) -> Option<Vec<ExprId>> {
+        match self.ast.expr(id)? {
+            Expr::RowValue(parts) => Some(parts.clone()),
+            _ => None,
+        }
+    }
+
+    /// Binds a comparison between two row values.
+    ///
+    /// @param op - the operator
+    /// @param lefts - the left row's parts
+    /// @param rights - the right row's parts
+    /// @param span - where the comparison was written
+    fn bind_row_comparison(
+        &mut self,
+        op: BinaryOp,
+        lefts: &[ExprId],
+        rights: &[ExprId],
+        span: Span,
+    ) -> Result<BoundExpr, ParseError> {
+        if lefts.len() != rights.len() || lefts.is_empty() {
+            return Err(ParseError::new(
+                ParseErrorKind::Refused(format!(
+                    "row value misused: {} values on the left and {} on the right",
+                    lefts.len(),
+                    rights.len()
+                )),
+                span,
+            ));
+        }
+        let mut bound_lefts = Vec::with_capacity(lefts.len());
+        let mut bound_rights = Vec::with_capacity(rights.len());
+        for (left, right) in lefts.iter().zip(rights.iter()) {
+            bound_lefts.push(self.bind_expr(*left)?);
+            bound_rights.push(self.bind_expr(*right)?);
+        }
+        match op {
+            BinaryOp::Equal => Ok(equality_chain(&bound_lefts, &bound_rights)),
+            // `<>` is the negation of `=` rather than an inequality of its own,
+            // which is what makes `(1, NULL) <> (1, 2)` unknown rather than
+            // true: the equality is unknown, and NOT of unknown is unknown.
+            BinaryOp::NotEqual => Ok(BoundExpr::Not(Box::new(equality_chain(
+                &bound_lefts,
+                &bound_rights,
+            )))),
+            BinaryOp::Less
+            | BinaryOp::LessEqual
+            | BinaryOp::Greater
+            | BinaryOp::GreaterEqual => Ok(lexicographic_chain(op, &bound_lefts, &bound_rights, 0)),
+            _ => Err(ParseError::new(
+                ParseErrorKind::Refused("row value misused".to_string()),
+                span,
+            )),
         }
     }
 
@@ -4351,4 +4527,82 @@ fn no_such_window(name: &[u8], span: Span) -> ParseError {
 /// Returns an authorizer refusal.
 fn denied(what: &'static str, span: Span) -> ParseError {
     ParseError::new(ParseErrorKind::Unsupported(what), span)
+}
+
+/// Returns the `AND` chain that a row-value equality means.
+///
+/// @param lefts - the left row's parts, bound
+/// @param rights - the right row's parts, bound
+fn equality_chain(lefts: &[BoundExpr], rights: &[BoundExpr]) -> BoundExpr {
+    let mut chain: Option<BoundExpr> = None;
+    for (left, right) in lefts.iter().zip(rights.iter()) {
+        let (affinity, collation) = comparison_rules(left, right);
+        let one = BoundExpr::Compare {
+            op: BinaryOp::Equal,
+            left: Box::new(left.clone()),
+            right: Box::new(right.clone()),
+            affinity,
+            collation,
+        };
+        chain = Some(match chain {
+            None => one,
+            Some(held) => BoundExpr::And(Box::new(held), Box::new(one)),
+        });
+    }
+    chain.unwrap_or(BoundExpr::Null)
+}
+
+/// Returns the chain a lexicographic row-value comparison means.
+///
+/// `(a, b, c) < (x, y, z)` is `a < x OR (a = x AND (b < y OR (b = y AND c <
+/// z)))`, and the strictness only ever applies to the last part: everything
+/// before it is compared for equality to decide whether the next part matters.
+///
+/// @param op - the operator
+/// @param lefts - the left row's parts, bound
+/// @param rights - the right row's parts, bound
+/// @param at - which part this level compares
+fn lexicographic_chain(
+    op: BinaryOp,
+    lefts: &[BoundExpr],
+    rights: &[BoundExpr],
+    at: usize,
+) -> BoundExpr {
+    let (Some(left), Some(right)) = (lefts.get(at), rights.get(at)) else {
+        return BoundExpr::Null;
+    };
+    let (affinity, collation) = comparison_rules(left, right);
+    let last = at.saturating_add(1) >= lefts.len();
+    // The last part carries the operator as written, including its
+    // or-equal half; every earlier part is compared strictly, with the
+    // equal case handled by the branch beside it.
+    let strict = match op {
+        BinaryOp::LessEqual if !last => BinaryOp::Less,
+        BinaryOp::GreaterEqual if !last => BinaryOp::Greater,
+        other => other,
+    };
+    let decided = BoundExpr::Compare {
+        op: strict,
+        left: Box::new(left.clone()),
+        right: Box::new(right.clone()),
+        affinity,
+        collation,
+    };
+    if last {
+        return decided;
+    }
+    let same = BoundExpr::Compare {
+        op: BinaryOp::Equal,
+        left: Box::new(left.clone()),
+        right: Box::new(right.clone()),
+        affinity,
+        collation,
+    };
+    BoundExpr::Or(
+        Box::new(decided),
+        Box::new(BoundExpr::And(
+            Box::new(same),
+            Box::new(lexicographic_chain(op, lefts, rights, at.saturating_add(1))),
+        )),
+    )
 }
