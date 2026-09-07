@@ -26,6 +26,15 @@ earlier ticket rather than re-measured, the ticket is named and the reason is gi
 
 ## Where it stands against the goal
 
+> **[`feature-comparison.md`](feature-comparison.md) is the side-by-side scorecard**: every SQLite
+> feature against inillucent, in tables, plus the retrieval engine against PostgreSQL + pgvector.
+> It was written by task-1858 from a 416-case differential probe run at commit `382eb78` - both
+> shells, one fresh database each, every byte compared - and it is the document to read before
+> asking whether something works. **302 of the 416 agree**; the rest, and the fourteen differences
+> nothing tells the caller about, are named there. The implementation ticket for its gaps is
+> task-1859.
+
+
 The goal is a highly performant SQLite replacement offering the same features, plus embedding search
 similar to pgvector. Measured against that, today:
 
@@ -605,7 +614,8 @@ opens-and-recovers, `import` reads a SQLite file, `connect` gives a `Connection`
 `query`, `prepare_with_tail` and `explain`. `inillucent::Database` is a re-export of it — the two
 surfaces no longer differ, so there is no wrapper. `architecture.md` and `product-overview.md` describe
 the retrieval engine; `tasks/task-1816-rearchitecture-tdd.md` is the design the new engine follows;
-`docs/invariants/layering.toml` is the dependency contract a test enforces.
+`docs/invariants/layering.toml` is the dependency contract a test enforces. `feature-comparison.md`
+is the measured side-by-side against SQLite and against pgvector.
 
 **`drivers/` is a workspace member that is not in the repository.** `drivers/inillucent-driver` and
 `drivers/inillucent-driver-capi` are named in `Cargo.toml` and exist only on the machine task-1837 is
