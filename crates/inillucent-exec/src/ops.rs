@@ -414,6 +414,18 @@ pub struct AggregateSpec {
     /// The collation each distinct value is compared under, when the call said
     /// `DISTINCT`.
     pub distinct: Option<Collation>,
+    /// The call's `FILTER (WHERE ...)`, when it had one.
+    ///
+    /// A row it does not keep is not folded in at all: it does not count, it
+    /// does not sum, and it does not appear in a `group_concat`.
+    pub filter: Option<Box<dyn Eval>>,
+    /// The call's own `ORDER BY`, as one expression per term with its
+    /// direction.
+    ///
+    /// Empty for nearly every call. When it is not, the accumulator collects
+    /// its rows and sorts them before folding, because the answer of a
+    /// `group_concat` or a `json_group_array` is the order the rows arrived in.
+    pub order_by: Vec<(Box<dyn Eval>, bool)>,
 }
 
 impl AggregateSpec {
@@ -423,6 +435,18 @@ impl AggregateSpec {
     /// stream aggregate forgot would count duplicates in exactly the groups
     /// nobody looked at.
     pub fn accumulator(&self) -> Accumulator {
+        let mut built = self.fresh();
+        if !self.order_by.is_empty() {
+            built.sort_by(
+                self.argument.is_some() as usize + self.extra.len(),
+                self.order_by.iter().map(|(_, down)| *down).collect(),
+            );
+        }
+        built
+    }
+
+    /// Returns a fresh accumulator, before the sort is attached.
+    fn fresh(&self) -> Accumulator {
         match self.distinct {
             Some(collation) => Accumulator::distinct(self.kind.clone(), collation),
             None => Accumulator::new(self.kind.clone()),
@@ -435,7 +459,51 @@ impl AggregateSpec {
     /// keeps the three operators that feed accumulators from each carrying a
     /// copy of the rule.
     pub fn takes_whole_row(&self) -> bool {
+        // A JSON group aggregate too, whatever its arity: a NULL is a member of
+        // the document it builds rather than a row to skip, and the
+        // single-value path drops NULLs before the accumulator sees them. And
+        // any call with its own `ORDER BY`, whose rows have to be kept until
+        // there is something to sort them by.
         !self.extra.is_empty()
+            || !self.order_by.is_empty()
+            || matches!(
+                self.kind,
+                AggregateKind::JsonGroupArray(_)
+                    | AggregateKind::JsonGroupObject(_)
+                    | AggregateKind::Bare(_)
+            )
+    }
+
+    /// Folds one row into an accumulator, applying the call's own clauses.
+    ///
+    /// **The one place the three aggregate operators agree.** Each of them used
+    /// to choose between the whole-row path and the single-value one for
+    /// itself; adding `FILTER` to three copies of that choice is how one of
+    /// them ends up not applying it.
+    ///
+    /// @param accumulator - the group's accumulator
+    /// @param batch - the batch being consumed
+    /// @param nth - the row's position among the live rows
+    pub fn feed(
+        &self,
+        accumulator: &mut Accumulator,
+        batch: &Batch<'_>,
+        nth: usize,
+    ) -> DbResult<()> {
+        if let Some(filter) = &self.filter {
+            let verdict = filter.value(batch, nth)?;
+            if crate::expr::truth(&verdict.get()) != Some(true) {
+                return Ok(());
+            }
+        }
+        if self.takes_whole_row() {
+            return self.feed_row(accumulator, batch, nth);
+        }
+        match &self.argument {
+            None => accumulator.push(&Datum::Null),
+            Some(argument) => accumulator.push(&argument.value(batch, nth)?.get()),
+        }
+        Ok(())
     }
 
     /// Folds one row of arguments into an accumulator.
@@ -455,6 +523,12 @@ impl AggregateSpec {
         }
         for argument in &self.extra {
             values.push(crate::scalar::to_value(argument.value(batch, nth)?.get()));
+        }
+        // The sort keys go on the end, where `Accumulator::finish` knows to
+        // find them: it is told how many there are when the accumulator is
+        // built.
+        for (key, _) in &self.order_by {
+            values.push(crate::scalar::to_value(key.value(batch, nth)?.get()));
         }
         accumulator.push_values(values);
         Ok(())
@@ -503,9 +577,12 @@ impl Sink for SimpleAggregate {
             let Some(accumulator) = self.accumulators.get_mut(index) else {
                 continue;
             };
-            if spec.takes_whole_row() {
+            // A filter or a whole-row call is fed a row at a time; the
+            // vectorised paths below read a whole mini-column and cannot skip
+            // rows.
+            if spec.takes_whole_row() || spec.filter.is_some() {
                 for nth in 0..live {
-                    spec.feed_row(accumulator, batch, nth)?;
+                    spec.feed(accumulator, batch, nth)?;
                 }
                 continue;
             }
@@ -645,11 +722,7 @@ impl Sink for HashAggregate {
                 let Some(accumulator) = entry.1.get_mut(index) else {
                     continue;
                 };
-                match &spec.argument {
-                    _ if spec.takes_whole_row() => spec.feed_row(accumulator, batch, nth)?,
-                    None => accumulator.push(&Datum::Null),
-                    Some(argument) => accumulator.push(&argument.value(batch, nth)?.get()),
-                }
+                spec.feed(accumulator, batch, nth)?;
             }
         }
         Ok(Flow::Continue)
@@ -765,6 +838,15 @@ impl StreamAggregate {
             let Some(accumulator) = self.accumulators.get_mut(index) else {
                 continue;
             };
+            // A filter or a whole-row call is fed a row at a time; the
+            // vectorised paths below read a whole mini-column and cannot skip
+            // rows.
+            if spec.takes_whole_row() || spec.filter.is_some() {
+                for nth in start..start.saturating_add(len) {
+                    spec.feed(accumulator, batch, nth)?;
+                }
+                continue;
+            }
             match &spec.argument {
                 None => {
                     // `count(*)` over a run: the length, no value read at all.
@@ -928,6 +1010,10 @@ fn read_int(bytes: &[u8], row: usize) -> i64 {
 pub struct AdjacentDistinct {
     /// The collation of each compared column.
     collations: Vec<Collation>,
+    /// How many of the row's leading columns decide duplication.
+    ///
+    /// See [`Distinct::over`] for why a row may be wider than that.
+    compared: usize,
     previous: Option<Vec<OwnedDatum>>,
     rows: Vec<Vec<OwnedDatum>>,
     downstream: Box<dyn Sink>,
@@ -942,8 +1028,22 @@ impl AdjacentDistinct {
     /// @param collations - the collation of each compared column
     /// @param downstream - what to push the surviving rows into
     pub fn new(collations: Vec<Collation>, downstream: Box<dyn Sink>) -> AdjacentDistinct {
+        AdjacentDistinct::over(collations, usize::MAX, downstream)
+    }
+
+    /// Returns one that compares only the row's leading columns.
+    ///
+    /// @param collations - the collation of each compared column
+    /// @param compared - how many leading columns decide duplication
+    /// @param downstream - what to push the surviving rows into
+    pub fn over(
+        collations: Vec<Collation>,
+        compared: usize,
+        downstream: Box<dyn Sink>,
+    ) -> AdjacentDistinct {
         AdjacentDistinct {
             collations,
+            compared,
             previous: None,
             rows: Vec::new(),
             downstream,
@@ -954,10 +1054,11 @@ impl AdjacentDistinct {
 impl Sink for AdjacentDistinct {
     fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
         let width = batch.columns.len();
+        let compared = width.min(self.compared);
         for nth in 0..batch.live() {
             let mut same = self.previous.is_some();
             if same {
-                for column in 0..width {
+                for column in 0..compared {
                     let value = batch.value(nth, column)?;
                     let held = self
                         .previous
@@ -1317,19 +1418,41 @@ fn compare_batch_row(
 /// Drops duplicate rows, keeping the first of each.
 pub struct Distinct {
     collations: Vec<Collation>,
+    /// How many of the row's leading columns decide whether it is a duplicate.
+    ///
+    /// Every column, unless the statement is carrying an extra one through -
+    /// `SELECT DISTINCT a FROM t ORDER BY b` sorts by a `b` that is not in the
+    /// result and must not be part of what makes a row distinct. SQLite answers
+    /// that query; this used to refuse it, because comparing the carried column
+    /// too would have de-duplicated on something the caller never selected.
+    compared: usize,
     seen: std::collections::HashSet<Vec<u8>>,
     rows: Vec<Vec<OwnedDatum>>,
     downstream: Box<dyn Sink>,
 }
 
 impl Distinct {
-    /// Returns a de-duplicating operator.
+    /// Returns a de-duplicating operator over every column of the row.
     ///
     /// @param collations - the collation of each compared column
     /// @param downstream - what to push the surviving rows into
     pub fn new(collations: Vec<Collation>, downstream: Box<dyn Sink>) -> Distinct {
+        Distinct::over(collations, usize::MAX, downstream)
+    }
+
+    /// Returns one that compares only the row's leading columns.
+    ///
+    /// @param collations - the collation of each compared column
+    /// @param compared - how many leading columns decide duplication
+    /// @param downstream - what to push the surviving rows into
+    pub fn over(
+        collations: Vec<Collation>,
+        compared: usize,
+        downstream: Box<dyn Sink>,
+    ) -> Distinct {
         Distinct {
             collations,
+            compared,
             seen: std::collections::HashSet::new(),
             rows: Vec::new(),
             downstream,
@@ -1345,14 +1468,18 @@ impl Sink for Distinct {
             let mut row = Vec::with_capacity(batch.columns.len());
             for column in 0..batch.columns.len() {
                 let value = batch.value(nth, column)?;
-                key::encode_into_with(
-                    &value,
-                    self.collations
-                        .get(column)
-                        .copied()
-                        .unwrap_or(Collation::Binary),
-                    &mut encoded,
-                );
+                // A carried column is kept in the row and left out of the key,
+                // so it reaches the sort without deciding what is a duplicate.
+                if column < self.compared {
+                    key::encode_into_with(
+                        &value,
+                        self.collations
+                            .get(column)
+                            .copied()
+                            .unwrap_or(Collation::Binary),
+                        &mut encoded,
+                    );
+                }
                 row.push(OwnedDatum::from_datum(&value));
             }
             if self.seen.insert(encoded.clone()) {

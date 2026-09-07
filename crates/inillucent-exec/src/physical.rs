@@ -1985,11 +1985,13 @@ fn build_chain<'t>(
         let column = match existing {
             Some(index) => index,
             None => {
-                if select.distinct {
-                    return unsupported(
-                        "ORDER BY over an expression not in a DISTINCT select list",
-                    );
-                }
+                // **Carried through the sort, and left out of what makes a row
+                // distinct.** `SELECT DISTINCT a FROM t ORDER BY b` is an
+                // ordinary query SQLite answers; refusing it was the safe thing
+                // to do while the de-duplication compared every column of the
+                // row, because the carried `b` would have made rows distinct
+                // that the caller's select list does not. `Distinct::over`
+                // compares the leading `result_width` columns instead.
                 projected.push(translated);
                 projected.len().saturating_sub(1)
             }
@@ -2157,10 +2159,18 @@ fn build_chain<'t>(
             && !prepared.forced.hash_distinct
             && is_scan_prefix(&projected, scan_order)
         {
-            chain = Box::new(AdjacentDistinct::new(output_collations.clone(), chain));
+            chain = Box::new(AdjacentDistinct::over(
+                output_collations.clone(),
+                result_width,
+                chain,
+            ));
             operators.push("DISTINCT ADJACENT".to_string());
         } else {
-            chain = Box::new(Distinct::new(output_collations.clone(), chain));
+            chain = Box::new(Distinct::over(
+                output_collations.clone(),
+                result_width,
+                chain,
+            ));
             operators.push("DISTINCT HASH".to_string());
         }
     }
@@ -2497,7 +2507,7 @@ fn source_for<'t>(
                     describe_source(prepared),
                 ));
             }
-            let rows = materialise_stage(plan, catalog, params, stage)?;
+            let rows = materialise_stage(plan, catalog, params, stage, limit)?;
             Ok((Source::Rows(rows), describe_source(prepared)))
         }
         Some(stage) => Ok((
@@ -2964,7 +2974,11 @@ fn build_materialised_join<'t>(
         .sources
         .get(stage.term)
         .ok_or_else(|| misuse("a stage names a FROM term the plan does not have"))?;
-    let rows = materialise_stage(plan, catalog, params, stage)?;
+    // An inner term's rows are all read: the `LIMIT` above counts *joined*
+    // rows, and a join may drop any of them, so stopping the inner side early
+    // would be stopping it on a count that is not the one the statement asked
+    // about.
+    let rows = materialise_stage(plan, catalog, params, stage, None)?;
     // The condition is compiled over the *joined* row - every column produced
     // so far, then this stage's - which is exactly the space the pipeline
     // already describes, so an `ON` naming either side needs no special case.
@@ -3011,11 +3025,13 @@ fn join_kind_of(join: inillucent_sql::ast::JoinKind) -> JoinKind {
 /// @param catalog - where the trees and layouts come from
 /// @param params - the bound parameters
 /// @param stage - the stage to read
+/// @param limit - the rows the statement above will keep, when it says
 fn materialise_stage(
     plan: &PhysicalPlan,
     catalog: &dyn TreeCatalog,
     params: &Params,
     stage: &PreparedStage,
+    limit: Option<usize>,
 ) -> DbResult<Vec<Vec<OwnedDatum>>> {
     let source_term = plan
         .sources
@@ -3036,7 +3052,7 @@ fn materialise_stage(
             seeds,
             steps,
             width,
-        } => run_recursive(source_term.id, seeds, steps, *width, catalog, params),
+        } => run_recursive(source_term.id, seeds, steps, *width, catalog, params, limit),
         // The queue the fill loop is on, handed in by `run_recursive` through a
         // catalog that answers it. A plan reaching this outside such a loop is
         // a plan the binder should not have produced.
@@ -3089,6 +3105,7 @@ const MAX_RECURSIVE_PASSES: usize = 1_000_000;
 /// @param width - how many columns a row holds
 /// @param catalog - where the trees and layouts come from
 /// @param params - the bound parameters
+/// @param limit - the rows the statement above will keep, when it says
 fn run_recursive(
     cte: usize,
     seeds: &[(inillucent_sql::ast::CompoundOp, PhysicalPlan)],
@@ -3096,6 +3113,7 @@ fn run_recursive(
     width: usize,
     catalog: &dyn TreeCatalog,
     params: &Params,
+    limit: Option<usize>,
 ) -> DbResult<Vec<Vec<OwnedDatum>>> {
     let distinct = seeds
         .iter()
@@ -3112,8 +3130,17 @@ fn run_recursive(
     }
     let mut answer = produced.clone();
     let mut working = produced;
+    // **A recursion with no base case is stopped by the `LIMIT` above it.**
+    // `WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n)
+    //  SELECT ... FROM (SELECT x FROM n LIMIT 1000)` is how every counter and
+    // every series generator is written, and it never terminates on its own -
+    // the step arm always produces a row. This ran it to the million-pass guard
+    // and then refused a query SQLite answers, which is the same shape
+    // task-1845 fixed for a virtual table's scan: a producer has to be
+    // stoppable by the consumer above it rather than run to completion first.
+    let enough = |answer: &Vec<Vec<OwnedDatum>>| limit.is_some_and(|want| answer.len() >= want);
     for _ in 0..MAX_RECURSIVE_PASSES {
-        if working.is_empty() {
+        if working.is_empty() || enough(&answer) {
             return Ok(answer);
         }
         let queued = WithQueue {
@@ -3133,6 +3160,9 @@ fn run_recursive(
             return Ok(answer);
         }
         answer.extend(fresh.clone());
+        if enough(&answer) {
+            return Ok(answer);
+        }
         working = fresh;
     }
     Err(misuse(
@@ -4649,13 +4679,26 @@ fn translate(
         if let Some(position) = select.group_by.iter().position(|key| key == expr) {
             return Ok(Expr::Column(position));
         }
-        // A column read outside an aggregate in a grouped query is what SQLite
-        // calls a "bare column", and it answers with an arbitrary row of the
-        // group. Refusing is the honest thing to do rather than picking one.
+        // **A bare column is one SQLite answers, by a rule rather than by
+        // luck.** `SELECT id, max(a) FROM t` gives the `id` of the row that
+        // produced the maximum; with no single `min` or `max` in the query it
+        // gives an arbitrary row's, which SQLite takes as the last. Refusing
+        // was the honest thing to do while nothing implemented the rule, and it
+        // refused a query every "the row with the highest score" report is
+        // written as. Each bare column gets an accumulator of its own, after
+        // the aggregates - see `bare_columns` and `aggregate_specs`.
         if matches!(expr, BoundExpr::Column { .. } | BoundExpr::Rowid { .. }) {
-            return unsupported(&format!(
-                "the expression {} outside an aggregate",
-                name_of(expr)
+            let bare = bare_columns(select);
+            let Some(at) = bare.iter().position(|held| held == expr) else {
+                return unsupported(&format!(
+                    "the expression {} outside an aggregate",
+                    name_of(expr)
+                ));
+            };
+            return Ok(Expr::Column(
+                group_width
+                    .saturating_add(select.aggregates.len())
+                    .saturating_add(at),
             ));
         }
     }
@@ -5122,6 +5165,79 @@ fn static_type_of(expr: &Expr, types: &[StaticType]) -> StaticType {
     }
 }
 
+/// Returns the bare columns an aggregating query reads, in a stable order.
+///
+/// A **bare column** is a column or rowid reference that appears outside every
+/// aggregate and is not a `GROUP BY` key. SQLite answers one; standard SQL
+/// refuses it. The order here is the order they are met in - result columns,
+/// then `HAVING`, then `ORDER BY` - and it has to be the same order twice,
+/// because `translate` looks a column up in this list and `aggregate_specs`
+/// builds one accumulator per entry.
+///
+/// Deriving it rather than storing it on the plan is what keeps the two in
+/// step: there is one function, and a caller that forgot to call it gets a
+/// refusal rather than a wrong column.
+///
+/// @param select - the bound statement
+fn bare_columns(select: &BoundSelect) -> Vec<BoundExpr> {
+    let mut found: Vec<BoundExpr> = Vec::new();
+    let mut visit = |expr: &BoundExpr, found: &mut Vec<BoundExpr>| {
+        let mut stack = vec![expr.clone()];
+        while let Some(node) = stack.pop() {
+            // An aggregate's arguments are read *inside* it, so nothing under
+            // one is bare.
+            if matches!(node, BoundExpr::Aggregate { .. } | BoundExpr::WindowRef { .. }) {
+                continue;
+            }
+            if matches!(node, BoundExpr::Column { .. } | BoundExpr::Rowid { .. }) {
+                if !select.group_by.iter().any(|key| *key == node)
+                    && !found.iter().any(|held| *held == node)
+                {
+                    found.push(node);
+                }
+                continue;
+            }
+            for child in node.children() {
+                stack.push(child.clone());
+            }
+        }
+    };
+    for column in &select.columns {
+        visit(&column.expr, &mut found);
+    }
+    if let Some(having) = &select.having {
+        visit(having, &mut found);
+    }
+    for term in &select.order_by {
+        visit(&term.expr, &mut found);
+    }
+    found
+}
+
+/// Returns the witness a bare column follows, when the query has exactly one.
+///
+/// SQLite's rule: with one `min` or one `max` in the query, a bare column comes
+/// from the row that produced it. With none, or with more than one, the row is
+/// arbitrary and this answers `None` - which the accumulator reads as "keep the
+/// last".
+///
+/// @param select - the bound statement
+fn bare_witness(select: &BoundSelect) -> Option<(BoundExpr, std::cmp::Ordering)> {
+    let mut extremes = select.aggregates.iter().filter(|call| {
+        matches!(call.func, AggregateFunc::Min | AggregateFunc::Max) && !call.arguments.is_empty()
+    });
+    let only = extremes.next()?;
+    if extremes.next().is_some() {
+        return None;
+    }
+    let wanted = if only.func == AggregateFunc::Min {
+        std::cmp::Ordering::Less
+    } else {
+        std::cmp::Ordering::Greater
+    };
+    Some((only.arguments.first()?.clone(), wanted))
+}
+
 /// Builds the accumulator specifications for an aggregating query.
 ///
 /// @param select - the bound statement
@@ -5152,6 +5268,10 @@ fn aggregate_specs(
                 };
                 AggregateKind::GroupConcat(separator)
             }
+            AggregateFunc::JsonGroupArray => AggregateKind::JsonGroupArray(false),
+            AggregateFunc::JsonbGroupArray => AggregateKind::JsonGroupArray(true),
+            AggregateFunc::JsonGroupObject => AggregateKind::JsonGroupObject(false),
+            AggregateFunc::JsonbGroupObject => AggregateKind::JsonGroupObject(true),
             AggregateFunc::External => {
                 let name = call.external.clone().unwrap_or_default();
                 let Some(body) = space
@@ -5170,7 +5290,11 @@ fn aggregate_specs(
         // Only a registered aggregate reads past the first argument; every
         // built-in reduces one value per row.
         let extra = match &kind {
-            AggregateKind::External(_) => call
+            // The object form's second argument. It rides in `extra` for the
+            // same reason a registered aggregate's do: the accumulator is
+            // handed the whole row, and the vectorised single-value path stays
+            // exactly as it was for everything that reduces one value.
+            AggregateKind::JsonGroupObject(_) | AggregateKind::External(_) => call
                 .arguments
                 .iter()
                 .skip(1)
@@ -5201,11 +5325,53 @@ fn aggregate_specs(
         } else {
             None
         };
+        let filter = match &call.filter {
+            Some(expr) => {
+                let translated = translate_scan(expr, space, params)?;
+                Some(compile(&translated, types)?)
+            }
+            None => None,
+        };
+        let mut order_by = Vec::with_capacity(call.order_by.len());
+        for term in &call.order_by {
+            let translated = translate_scan(&term.expr, space, params)?;
+            order_by.push((
+                compile(&translated, types)?,
+                term.order == SortOrder::Descending,
+            ));
+        }
         specs.push(AggregateSpec {
             kind,
             argument,
             extra,
             distinct,
+            filter,
+            order_by,
+        });
+    }
+    // **The bare columns, after the aggregates and in the same order
+    // `translate` looks them up in.** Each keeps one row's value; the witness
+    // is what says which row, and it is compiled once per bare column rather
+    // than shared, so an accumulator never has to see inside another.
+    let witness = bare_witness(select);
+    for expr in bare_columns(select) {
+        let translated = translate_scan(&expr, space, params)?;
+        let mut extra = Vec::new();
+        let wanted = match &witness {
+            Some((seen, wanted)) => {
+                let translated = translate_scan(seen, space, params)?;
+                extra.push(compile(&translated, types)?);
+                Some(*wanted)
+            }
+            None => None,
+        };
+        specs.push(AggregateSpec {
+            kind: AggregateKind::Bare(wanted),
+            argument: Some(compile(&translated, types)?),
+            extra,
+            distinct: None,
+            filter: None,
+            order_by: Vec::new(),
         });
     }
     Ok(specs)

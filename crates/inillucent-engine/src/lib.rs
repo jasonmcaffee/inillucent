@@ -2069,6 +2069,7 @@ impl ImportedDatabase {
     /// @param sql - the statement text
     pub fn describe_cached(&self, sql: &str) -> DbResult<Vec<String>> {
         match &*self.compiled(sql)? {
+            Cached::Nothing => Ok(vec!["nothing".to_string()]),
             Cached::Select(_, prepared) => Ok(prepared.describe()),
             Cached::Ddl(_) => Ok(vec!["a directive".to_string()]),
             Cached::QueryPlan(_) => Ok(vec!["a query plan".to_string()]),
@@ -3605,7 +3606,8 @@ impl ImportedDatabase {
         let cached = std::rc::Rc::clone(&statement.0);
         let found = std::time::Instant::now();
         let rows = match &*cached {
-            Cached::Ddl(_)
+            Cached::Nothing
+            | Cached::Ddl(_)
             | Cached::QueryPlan(_)
             | Cached::VirtualDelete(..)
             | Cached::VirtualInsert(_)
@@ -3621,6 +3623,7 @@ impl ImportedDatabase {
         let find = found.elapsed().as_nanos();
         let applied = std::time::Instant::now();
         match &*cached {
+            Cached::Nothing => {}
             Cached::Ddl(sql) => {
                 self.execute_ddl(sql)?;
             }
@@ -4097,6 +4100,7 @@ impl ImportedDatabase {
             // including the DDL path emptying the plan cache. Cloning it was a
             // whole bound statement copied per execution, and for a module
             // insert that is once per row.
+            Cached::Nothing => Ok(Outcome::empty()),
             Cached::Ddl(sql) => self.execute_ddl(sql),
             Cached::QueryPlan(lines) => Ok(query_plan_rows(lines)),
             Cached::VirtualInsert(statement) => self.insert_into_module(statement, params),
@@ -4458,6 +4462,13 @@ impl ImportedDatabase {
             // the execution re-binds against the schema as it is at that
             // moment.
             BoundStatement::Directive(_) => Ok(Cached::Ddl(sql.to_string())),
+            // **Text that is only a comment is a statement that does nothing,
+            // not a statement that cannot be run.** A `-- comment` after the
+            // last `;` of a script is the ordinary way to end a file, and it
+            // was refused with "`-- trailing` binds to nothing, which the new
+            // engine does not run yet" - which stops the script rather than the
+            // comment. SQLite runs it as a no-op and so does this.
+            BoundStatement::Empty => Ok(Cached::Nothing),
             other => Err(refusal(format!(
                 "{sql} binds to {}, which the new engine does not run yet",
                 describe_statement(&other)
@@ -4891,6 +4902,12 @@ pub struct Statement(std::rc::Rc<Cached>);
 /// `WHERE id = ?1` reaches the same point probe on the second execution as on
 /// the first.
 enum Cached {
+    /// Text that carries no statement at all.
+    ///
+    /// A `-- comment` after the last `;`, an empty string, whitespace. Running
+    /// it produces no rows and changes nothing, which is what SQLite does with
+    /// the same text.
+    Nothing,
     /// A statement the session carries out itself, held as its own text.
     ///
     /// Re-bound on every execution, because binding a `DROP TABLE` resolves
