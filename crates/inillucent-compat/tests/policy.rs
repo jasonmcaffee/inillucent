@@ -73,7 +73,7 @@ const UNSAFE_CRATES: [&str; 1] = ["inillucent-capi"];
 /// about what the engine is made of, and a baseline tool that never ships is
 /// not part of it - but a file with `unsafe` in it should still have to say
 /// why, in writing, in a list somebody reads.
-const UNSAFE_ALLOWED: [&str; 5] = [
+const UNSAFE_ALLOWED: [&str; 6] = [
     "crates/inillucent-vfs/src/os/windows.rs",
     "crates/inillucent-vfs/src/os/unix.rs",
     "crates/inillucent-compat/src/bin/sqlperf.rs",
@@ -81,6 +81,14 @@ const UNSAFE_ALLOWED: [&str; 5] = [
     // The same counting global allocator as the two profiling binaries above:
     // every method forwards to the system allocator and only adds a counter.
     "crates/inillucent-compat/src/bin/hotprofile.rs",
+    // The gate's memory and processor accounting (task-1838 Part 6). What a
+    // *process* costs is something only the operating system can say, and the
+    // reference arm is a separate program this workspace cannot instrument at
+    // all - so the numbers come from `GetProcessMemoryInfo`/`GetProcessTimes`
+    // and `getrusage`, each of which is an FFI call and nothing else. It is
+    // measurement rather than engine, which is the same ground the three above
+    // stand on, and every call site carries its own SAFETY note.
+    "crates/inillucent-compat/src/procstat.rs",
 ];
 
 /// Returns every `.rs` file under a directory.

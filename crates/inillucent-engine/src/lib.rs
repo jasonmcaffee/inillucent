@@ -1297,6 +1297,16 @@ impl ImportedDatabase {
         self.database.pool().page_count()
     }
 
+    /// Returns how many pool frames hold a page right now.
+    ///
+    /// The measurable half of "what does the engine have in memory": the pool
+    /// is where a database's pages live, and a frame count times the page size
+    /// is the part of the resident set the engine chose rather than the part
+    /// the allocator happens to be holding.
+    pub fn frames_resident(&self) -> usize {
+        self.database.pool().resident()
+    }
+
     /// Returns what the pool has done since the last reset.
     pub fn pool_stats(&self) -> inillucent_pool::PoolStats {
         self.database.pool().stats()

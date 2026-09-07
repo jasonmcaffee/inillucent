@@ -648,6 +648,8 @@ dependencies = [
  "inillucent-vfs",
  "inillucent-vm",
  "inillucent-wal",
+ "libc",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

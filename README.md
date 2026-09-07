@@ -27,8 +27,8 @@ similar to pgvector. Measured against that:
 | goal | state | evidence |
 |---|---|---|
 | Faster than SQLite | **Yes on Windows at 100k rows and up, on the bar, not above it.** Weighted geomean lower bound 3.00x to 3.08x across four 30-round runs at medium (bar 3.00x); 3.72x at large; 2.29x at small. On Linux the same binary is 1.42x at medium. | task-1834 §5e, §5h |
-| No family slower than SQLite | **No.** `open.prepare` 0.70x, `schema` 0.54x, `extension` 0.35x at medium; `write` 0.38x at small. The contract's 1.00x floor is not met. | task-1834 §5e |
-| Same features as SQLite | **No.** The new engine runs 44 of 50 inventoried constructs; the repointed qualification suites are 24 pass / 81 fail. Missing: foreign key enforcement, triggers, outer joins, recursive CTEs, temp tables, `ATTACH`, `VACUUM`, user functions and collations, correlated subqueries, and one wrong answer (a `VIRTUAL` generated column shifts later columns). | task-1834 §5m, §13 |
+| No family slower than SQLite | **No, but four families are now down to three.** At medium over 30 rounds the lower bounds are `open.prepare` 0.81x, `transaction` 0.99x, `schema` 0.53x, `extension` 0.41x; `read.range` and `write` have cleared their bars. The contract's 1.00x floor is not met. | task-1838 §4 |
+| Same features as SQLite | **Not yet, but the list is short.** The new engine runs 46 of 50 inventoried constructs. Shipped by task-1838: trigger firing and foreign key enforcement (immediate and deferred), `LEFT`/`RIGHT`/`FULL OUTER JOIN`, derived tables in `FROM`, recursive CTEs, correlated subqueries, user-defined scalar and aggregate functions and collations, and the `VIRTUAL` generated column that used to shift later columns. Still missing: temp tables, `ATTACH`, `VACUUM`, plain `EXPLAIN`, and the table-valued pragma form. | task-1838 §1-3, `new_engine_surface.rs` |
 | Same durability and isolation | **Yes, single process, one writer.** WAL with group commit, snapshot isolation, ARIES-style redo recovery, undo for `ROLLBACK`/`SAVEPOINT`, crash campaigns under a deterministic simulator. Multi-process access and SQLite's file format are deliberate non-goals. | task-1832, task-1816 |
 | Embedding search like pgvector | **Yes, and graded better than pgvector on 15 of 17 primary comparisons** with zero worse; in production on a 598,560-chunk mailbox at recall 1.000 and 27 ms p95. Reachable from SQL only through the `inillucent_search` virtual table: there is no `vector` column type or distance operator in the grammar yet. | `inillucent-scorecard.md`, task-1775 |
 | Old engine deleted, one engine shipped | **No.** The SQLite-file-format engine (`inillucent-storage`, `-transaction`, `-vm`, `-session`, the `inillucent` facade, `inillucent-capi`) is still in the tree and is still what `inillucent::Database::open` reaches. The CLI and the migrator run on the new engine. | code audit, task-1834 §8 |
@@ -190,20 +190,67 @@ The workloads that hold the slow families down, medium unless stated:
 | | inillucent (new engine) | SQLite 3.53.4 |
 |---|---|---|
 | page size | 32 KiB default, 8 to 64 KiB | 4 KiB default |
-| cache | a buffer pool of frames times page size; 4,096 frames = 128 MiB by default, set at open | `cache_size`, 2 MiB by default |
+| cache | a buffer pool of frames times page size; 4,096 frames = 128 MiB by default, set at open. The budget is a **ceiling**: a frame's page is allocated the first time that frame is claimed (task-1838) | `cache_size`, 2 MiB by default, also grown into |
 | what the gates matched | 32 MiB on both arms (write and full gates), 128 MiB on both (read gates) | same |
 | a transaction larger than the pool | must fit: the pool is no-steal, so dirty pages cannot be evicted before commit; documented limit (task-1816) | spills to the journal |
 | a `SELECT` result | materialised on the first `step`; `Statement::step` walks rows already produced (task-1834 §9) | streamed one row per `step` |
 
-**No sprint ticket measured the process's resident memory or CPU time for either engine.** The gates
-hold both engines to one cache budget and report wall-clock on a single thread, so a memory
-comparison at the process level does not exist yet and is the first measurement the Phase 2 TDD
-asks for. What is known: the Phase 1 numbers were taken with inillucent's trees fully resident
-against SQLite at a 2 MiB cache and were corrected downwards when the caches were matched
+**Measured, task-1838.** Two instruments, one defect they found, and one they exposed.
+
+`inillucent-fullgate` now runs this engine in a **child process of its own**, so both arms are whole
+processes measured the same way. Each child opens a finished database the parent built and runs one
+round of the same plan; neither figure is a delta. At medium with a 4,096-frame 32 KiB pool matched
+to a 128 MiB SQLite cache:
+
+| | peak working set | user CPU | kernel CPU |
+|---|---|---|---|
+| `sqlite-bench` (whole child) | 37.2 MiB | 461 ms | 570 ms |
+| inillucent (whole child) | 82.5 MiB | 313 ms | 78 ms |
+
+**2.22x SQLite's peak at a matched cache budget.** The first reading was **4.75x**, and the
+difference is a defect this measurement found: the buffer pool allocated and zeroed every frame at
+open, so a 128 MiB budget was 128 MiB of resident memory from the first statement whether the
+database needed it or not. Three pool sizes made the cause unambiguous - 256 frames 55.5 MiB, 1,024
+frames 80.7 MiB, 4,096 frames 176.9 MiB, moving byte for byte with the budget. Frames now allocate on
+first claim (`Pool::claim_frame`), which is how SQLite grows into `cache_size`; the child's peak fell
+to 82.5 MiB and every family's ratio stayed inside the run-to-run spread. What is left is the ~33 MiB
+of pages this fixture actually touches plus the gate binary, which is a much larger program than
+`sqlite-bench` and is counted here.
+
+`inillucent-shellrss` asks the same question of two shells rather than two harnesses, and gets a
+worse answer for a reason worth stating. Each shell builds its own copy of the same 200,000-row table
+from the same SQL - there is no one file both can open - checkpoints it, then opens it fresh and runs
+a count, a point lookup, a grouped aggregate and a sum over every row:
+
+| shell | peak working set | user CPU | kernel CPU |
+|---|---|---|---|
+| `sqlite3` 3.53.4 | 7.20 MiB | 15.6 ms | 15.6 ms |
+| `inillucent-shell` | 65.05 MiB | 93.8 ms | 46.9 ms |
+
+**9.0x, and none of it is the reads.** Running only `SELECT 1` against the same file costs the same
+65.03 MiB, so the figure is the cost of *opening* what this engine wrote. The file is the reason: the
+same 200,000 rows are 10.7 MB as a SQLite database and **221 MB** as an `.rdb`, because inserting from
+a query puts every row through a leaf's delta area and splits the leaf at `DELTA_LIMIT` - 32 rows to a
+32 KiB page, where the same table built another way holds 962. `INSERT INTO w SELECT id, v FROM u`
+over 100,000 rows is 3,130 pages for 104 pages of data, and it reproduces byte for byte at `5eeb269`,
+before this ticket - it is the space half of the `write.insert.batch` 0.35x and `txn.large` 0.18x that
+the floor work owes. Without the checkpoint it is worse again: the build leaves 940 MB of WAL segments
+and the next open replays all of them, 1,026 MiB and 2.9 s of processor time.
+
+The gate also reports, per round, what this engine costs *inside* the gate process: +9.9 MiB of
+working set, 328 ms user, 62 ms kernel. That is a delta over a region rather than a process's peak,
+and the gate prints the distinction under the table so the two are not quoted as one measurement.
+Per workload the heap moves only where a write does - `write.insert.batch` grows it by 9.9 MiB, every
+read workload by 0.00 MiB - and pool residency over a round goes **722 to 1,072 frames**, 22.6 MiB to
+33.5 MiB of the 128 MiB budget.
+
+What was already known and still holds: the Phase 1 numbers were taken with inillucent's trees fully
+resident against SQLite at a 2 MiB cache and were corrected downwards when the caches were matched
 (`read.analytical` 6.25x to 4.10x, `scan.sort` 7.58x to 3.20x, task-1817), so every number above is
-under a matched budget. On disk the Phase 3 fixtures are 16.8 MB as a SQLite file and 23.7 MB as an
-`.rdb` at medium, 93.7 MB against 131.2 MB at large: about 1.4x larger, at 32 KiB page granularity.
-That is a listing of the fixture directory, not a gate measurement.
+under a matched budget. On disk the Phase 3 fixtures - which are **imported**, not built through
+`INSERT` - are 16.8 MB as a SQLite file and 23.7 MB as an `.rdb` at medium, 93.7 MB against 131.2 MB
+at large: about 1.4x, at 32 KiB page granularity. The 20x above is what the write path does to a
+database built with SQL, and the two numbers are not in conflict; they are two paths into a file.
 
 ### CPU
 
@@ -213,8 +260,19 @@ CPU-bound; `write.insert.autocommit`, `txn.autocommit` and `large.write` are bou
 per commit under `synchronous = FULL`, and both engines pay it identically (20.3 ms against 134.4 ms
 for 2,000 autocommit inserts on Windows, both far slower on WSL2). The new engine is single-threaded
 by construction: its pool and trees are `RefCell`, a `Connection` borrows the `Database`, and there is
-no parallel scan (task-1816 lists parallel scans as after-scope). No ticket reported CPU utilisation
-as a percentage for either engine.
+no parallel scan (task-1816 lists parallel scans as after-scope).
+
+**Measured, task-1838.** One round of the medium plan, each engine in its own child process:
+inillucent spends **313 ms user and 78 ms kernel**, `sqlite-bench` **461 ms user and 570 ms kernel**.
+The user-time ratio, 1.47x, is the one that tracks the wall-clock headline, because both arms are one
+thread with no idle in it. The kernel time is the interesting half: SQLite pays **7x** what this
+engine pays, which is where a WAL that writes whole 32 KiB pages once per commit differs from a
+rollback journal plus a WAL under `synchronous = FULL`.
+
+Per-workload CPU is reported too, but **it is quantised to the Windows scheduler tick (15.625 ms)**
+and the gate says so above the table: a workload that runs for 3 ms reads as either 0 or 15.6 ms, so
+only the per-round totals should be quoted. Neither engine is reported as a percentage of a core:
+both are one thread, so a percentage would only restate the wall clock.
 
 ### Features and semantics
 
@@ -228,7 +286,7 @@ as a percentage for either engine.
 | writers | one at a time, readers never block (snapshot isolation) | one at a time; readers block in rollback mode, not in WAL |
 | threads | single-threaded | serialised or multi-thread |
 | rollback | undo buffer of before-images, rows and schema; a `DROP` cannot be undone inside a transaction yet | rollback journal or WAL |
-| triggers, foreign keys | not yet (see refusals) | yes |
+| triggers, foreign keys | yes; `BEFORE`/`AFTER`/`INSTEAD OF`, `FOR EACH ROW`, `WHEN`, `RAISE`, recursion capped at 1,000 frames. Foreign keys compile to triggers, so `PRAGMA foreign_keys`, `DEFERRABLE INITIALLY DEFERRED`, `ON DELETE CASCADE`/`SET NULL`/`SET DEFAULT`/`RESTRICT` and `PRAGMA foreign_key_check` all run through the one mechanism (task-1838 §1) | yes |
 | extensions | JSON, FTS5, R-Tree, `json_each`, `generate_series`, `inillucent_search` | JSON1, FTS3/4/5, R-Tree, geopoly, session, RBU, ... |
 | C API | `inillucent-capi` exports 133 `sqlite3_*` symbols, over the **old** engine; a driver and C ABI for the new engine is task-1837 | `sqlite3.h` |
 | shell | `inillucent-shell`, 12 of 15 scripts byte-identical to `sqlite3` | `sqlite3` |
@@ -295,24 +353,30 @@ reached here as `CREATE VIRTUAL TABLE t USING inillucent_search(..., dims = 768)
 ## What is not there yet
 
 In priority order, each with a failing test or a measured number already in the tree. The plan for
-each is `tasks/rust-db-phase-2-tdd.md`.
+each is `tasks/rust-db-phase-2-tdd.md`. Items 1 through 4 and 7 were closed by task-1838 and are
+struck below rather than deleted, so the list still reads as a record of what was owed.
 
-1. **Two silent wrong answers**: the `VIRTUAL` generated column shift, and foreign keys accepted and
-   not enforced.
-2. **Triggers**, which are also the foreign-key mechanism.
-3. **Outer joins**, derived tables in `FROM`, recursive CTEs, correlated subqueries as values.
-4. **User-defined functions and collations** on the new connection.
-5. **The floor**: `open.prepare` 0.70x, `schema` 0.54x, `extension` 0.35x, `write` at small 0.38x,
-   `txn.large` 0.24x.
-6. **Linux**: 1.45x weighted where Windows is 3.05x, because SQLite is much faster there and the new
+1. ~~**Two silent wrong answers**: the `VIRTUAL` generated column shift, and foreign keys accepted
+   and not enforced.~~ Both fixed, task-1838 §1.
+2. ~~**Triggers**, which are also the foreign-key mechanism.~~ Shipped, task-1838 §1.
+3. ~~**Outer joins**, derived tables in `FROM`, recursive CTEs, correlated subqueries as values.~~
+   Shipped, task-1838 §2.
+4. ~~**User-defined functions and collations** on the new connection.~~ Shipped, task-1838 §3.
+5. **The floor**: `open.prepare` 0.81x, `transaction` 0.99x, `schema` 0.53x, `extension` 0.41x at
+   medium; `write` at small; `txn.large` 0.18x. The same write path has a **space** cost nothing had
+   measured: `INSERT INTO w SELECT id, v FROM u` over 100,000 rows writes 3,130 pages for 104 pages
+   of data, 32 rows to a 32 KiB page, because every row goes through a leaf's delta area and the
+   leaf splits at `DELTA_LIMIT` rather than compacting (task-1838 §6; reproduces at `5eeb269`).
+6. **Linux**: 1.45x weighted where Windows is 3.02x, because SQLite is much faster there and the new
    engine is not much faster there.
-7. **Process-level memory and CPU** for both engines, unmeasured.
-8. **Temp tables and `ATTACH`**, `VACUUM`, `STRICT` enforcement, `ADD COLUMN ... DEFAULT` backfill,
-   views on import, table-valued pragmas.
+7. ~~**Process-level memory and CPU** for both engines, unmeasured.~~ Measured, task-1838 §6: see
+   [Memory](#memory) and [CPU](#cpu). 1.31x SQLite's peak working set for the same data, 1.43x its
+   user CPU per gate round, one tenth its kernel time.
+8. **Temp tables and `ATTACH`**, `VACUUM`, `STRICT` enforcement, plain `EXPLAIN`, table-valued
+   pragmas. (`ADD COLUMN ... DEFAULT` backfill and views on import were done in task-1838 §1-2.)
 9. **Vector search as SQL**: a vector type, distance functions, `ORDER BY distance LIMIT k` planned
    onto the retrieval engine.
-10. **Deleting the old engine** and re-rooting `inillucent::Database` onto the new one, which waits
-    on 1 through 4.
+10. **Deleting the old engine** and re-rooting `inillucent::Database` onto the new one.
 11. **The retrieval index's footprint**: 3.80 GB resident for 598k chunks, BM25 rebuilt on load,
     single-threaded graph build.
 12. **Multi-process and multi-thread access**, deliberate non-goals of task-1816 that a SQLite
@@ -351,6 +415,8 @@ target/release/inillucent-fullgate $F/medium.db --scale medium --rounds 30 --pag
 target/release/inillucent-readgate $F/medium.db --scale medium
 target/release/inillucent-probeprofile $F/medium.db --scale medium --page-size 32768 --frames 4096
 target/release/inillucent-searchgate --documents 500 --rounds 30
+target/release/inillucent-shellrss                   # peak RSS, one shell each, same data
+target/release/inillucent-prepareprofile $F/medium.db --iterations 4000   # where a compile goes
 target/release/inillucent-shell my.rdb
 
 cargo run -p inillucent-compat --bin inillucent-manifest -- check      # validate the parity manifest

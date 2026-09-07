@@ -53,6 +53,7 @@ use inillucent_compat::perf::{
     plan_for, qualified_rounds, weighted_headline, Bind, Contract, Digest, Grouping, Paired,
     Sample, Workload,
 };
+use inillucent_compat::procstat::ProcessCost;
 use inillucent_compat::workspace_root;
 use inillucent_exec::physical::Params;
 use inillucent_tree::datum::OwnedDatum;
@@ -92,6 +93,21 @@ struct Settings {
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    // **A child of this same program, spawned by the parent for the memory
+    // measurement and nothing else.** The reference arm is a whole child
+    // process, so the only way to put this engine's residency beside it is to
+    // make this engine a whole child process too - the parent's own peak holds
+    // the harness, the plan and thirty rounds of both arms, and is not a number
+    // about the engine at all.
+    if let Some(database) = flag(&arguments, "--memory-round") {
+        return match memory_round(Path::new(&database), &settings_from(&arguments)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(reason) => {
+                eprintln!("memory round: {reason}");
+                ExitCode::from(2)
+            }
+        };
+    }
     let Some(fixture) = arguments.first().filter(|first| !first.starts_with("--")) else {
         eprintln!(
             "usage: inillucent-fullgate <sqlite fixture> [--rounds N] [--page-size N] \
@@ -99,8 +115,23 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     };
-    let settings = Settings {
-        rounds: flag(&arguments, "--rounds")
+    let settings = settings_from(&arguments);
+    match run(Path::new(fixture), &settings) {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::from(1),
+        Err(reason) => {
+            eprintln!("full gate: {reason}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Reads the settings off a command line.
+///
+/// @param arguments - the command line, without the program name
+fn settings_from(arguments: &[String]) -> Settings {
+    Settings {
+        rounds: flag(arguments, "--rounds")
             .and_then(|value| value.parse().ok())
             .unwrap_or(30),
         // **32 KiB, because that is the page size this engine has.**
@@ -127,26 +158,65 @@ fn main() -> ExitCode {
         // only the page size, and it reproduces the third. So the variable is
         // the page size and not the memory, and the cache stays matched either
         // way - SQLite's `cache_size` is derived from the pool's bytes below.
-        page_size: flag(&arguments, "--page-size")
+        page_size: flag(arguments, "--page-size")
             .and_then(|value| value.parse().ok())
             .unwrap_or(32_768),
-        frames: flag(&arguments, "--frames")
+        frames: flag(arguments, "--frames")
             .and_then(|value| value.parse().ok())
             .unwrap_or(4_096),
-        scale: flag(&arguments, "--scale").unwrap_or_else(|| "medium".to_string()),
-        families: flag(&arguments, "--families")
+        scale: flag(arguments, "--scale").unwrap_or_else(|| "medium".to_string()),
+        families: flag(arguments, "--families")
             .map(|value| value.split(',').map(str::to_string).collect())
             .unwrap_or_else(|| FAMILIES.iter().map(|(name, _)| name.to_string()).collect()),
-        repeat_override: flag(&arguments, "--repeat").and_then(|value| value.parse().ok()),
-    };
-    match run(Path::new(fixture), &settings) {
-        Ok(true) => ExitCode::SUCCESS,
-        Ok(false) => ExitCode::from(1),
-        Err(reason) => {
-            eprintln!("full gate: {reason}");
-            ExitCode::from(2)
+        repeat_override: flag(arguments, "--repeat").and_then(|value| value.parse().ok()),
+    }
+}
+
+/// Runs one round of the plan in a child process, for the memory measurement.
+///
+/// The file is **opened**, not imported: the parent built it, so what this
+/// process pays for is holding the data and running the plan, which is what the
+/// reference child pays for too. Nothing is printed; the parent reads the
+/// operating system's accounting for this process once it has exited.
+///
+/// @param database - the `.rdb` the parent built
+/// @param settings - the page size, frame count, scale and family filter
+fn memory_round(database: &Path, settings: &Settings) -> Result<(), String> {
+    let plan = filtered_plan(settings)?;
+    let mut opened =
+        ImportedDatabase::open(database.to_path_buf(), settings.page_size, settings.frames)
+            .map_err(|error| format!("open failed: {}", why(&error)))?;
+    round_on(&mut opened, &plan)?;
+    Ok(())
+}
+
+/// Returns the plan for the scale, filtered to the families asked for.
+///
+/// One function, because the parent and the memory child have to run the same
+/// workloads in the same order or the child's number is about something else.
+///
+/// @param settings - the scale, the family filter and any repeat override
+fn filtered_plan(settings: &Settings) -> Result<inillucent_compat::perf::Plan, String> {
+    let mut plan = plan_for(&settings.scale);
+    plan.setup.clear();
+    plan.workloads.retain(|workload| {
+        settings
+            .families
+            .iter()
+            .any(|name| *name == workload.family)
+    });
+    if let Some(repeat) = settings.repeat_override {
+        for workload in &mut plan.workloads {
+            workload.repeat = repeat;
         }
     }
+    if plan.workloads.is_empty() {
+        return Err(format!(
+            "no workload is in the families {:?}",
+            settings.families
+        ));
+    }
+    Ok(plan)
 }
 
 /// Returns a flag's value, when it was given.
@@ -186,25 +256,7 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         "sqlite-bench is not built; run tools/sqlite-reference.ps1 first".to_string()
     })?;
 
-    let mut plan = plan_for(&settings.scale);
-    plan.setup.clear();
-    plan.workloads.retain(|workload| {
-        settings
-            .families
-            .iter()
-            .any(|name| *name == workload.family)
-    });
-    if let Some(repeat) = settings.repeat_override {
-        for workload in &mut plan.workloads {
-            workload.repeat = repeat;
-        }
-    }
-    if plan.workloads.is_empty() {
-        return Err(format!(
-            "no workload is in the families {:?}",
-            settings.families
-        ));
-    }
+    let mut plan = filtered_plan(settings)?;
     let pool_bytes = settings.frames.saturating_mul(settings.page_size);
     plan.cache_size = -((pool_bytes / 1024) as i32);
 
@@ -279,11 +331,13 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     println!();
     println!("## {} paired rounds, interleaved", settings.rounds);
     let started = Instant::now();
+    let mut our_rounds: Vec<RoundCost> = Vec::with_capacity(settings.rounds as usize);
+    let mut their_rounds: Vec<ProcessCost> = Vec::with_capacity(settings.rounds as usize);
     for round in 0..settings.rounds {
         // The engine order alternates by round so a warm cache or a busy machine
         // does not systematically favour whichever went first.
         let ours_first = round % 2 == 0;
-        let ((ours, our_state), (theirs, their_state)) = if ours_first {
+        let ((ours, our_state, our_cost), (theirs, their_state, their_cost)) = if ours_first {
             let ours = time_new_engine(fixture, &scratch, &plan, settings)?;
             let theirs = time_sqlite(&bench, &plan_path, fixture, &scratch)?;
             (ours, theirs)
@@ -292,6 +346,8 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
             let ours = time_new_engine(fixture, &scratch, &plan, settings)?;
             (ours, theirs)
         };
+        our_rounds.push(our_cost);
+        their_rounds.push(their_cost);
         // **The clock is read only after the two engines agree about the data.**
         if our_state != their_state {
             for entry in &mut measured {
@@ -339,6 +395,11 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
             );
         }
     }
+
+    // Once, not per round: it is a residency measurement, and thirty of them
+    // would say the same thing thirty times for the price of another gate.
+    let child = measure_in_a_child(fixture, &scratch, settings);
+    report_costs(&plan, &our_rounds, &their_rounds, child.as_ref());
 
     println!();
     println!("## result");
@@ -580,10 +641,26 @@ fn time_new_engine(
     scratch: &Path,
     plan: &inillucent_compat::perf::Plan,
     settings: &Settings,
-) -> Result<(Vec<Sample>, Vec<String>), String> {
+) -> Result<(Vec<Sample>, Vec<String>, RoundCost), String> {
     let copy = restore(fixture, scratch, "ours")?;
     let mut database = ImportedDatabase::import_with(copy, settings.page_size, settings.frames)
         .map_err(|error| format!("import failed: {}", why(&error)))?;
+    round_on(&mut database, plan)
+}
+
+/// Runs one round of the plan against an open database.
+///
+/// Split out of `time_new_engine` so that the memory child can run exactly the
+/// same round against a file it opened rather than imported - which is what
+/// makes its peak comparable to the reference child's, since that one opens a
+/// finished file too.
+///
+/// @param database - the engine to run against
+/// @param plan - the workloads
+fn round_on(
+    database: &mut ImportedDatabase,
+    plan: &inillucent_compat::perf::Plan,
+) -> Result<(Vec<Sample>, Vec<String>, RoundCost), String> {
     // **The pool is filled before the clock starts, which is what the read gate
     // does and what makes these numbers comparable to Phase 2's and Phase 3's.**
     // It is an asymmetry and the configuration says so: SQLite's arm has no
@@ -595,33 +672,43 @@ fn time_new_engine(
         .warm()
         .map_err(|error| format!("warming failed: {}", why(&error)))?;
     let mut samples = Vec::with_capacity(plan.workloads.len());
+    let opened = ProcessCost::now();
+    let mut costs: Vec<(String, ProcessCost, usize)> = Vec::with_capacity(plan.workloads.len());
     for workload in &plan.workloads {
         // `pre` and `post` are setup, not work: `sqlite_bench.c` runs them
         // either side of the timed region and so does this.
         if let Some(pre) = &workload.pre {
-            if let Err(reason) = run_batch(&mut database, pre) {
+            if let Err(reason) = run_batch(database, pre) {
                 eprintln!("  {}: pre refused: {reason}", workload.name);
                 continue;
             }
         }
+        // Read either side of the timed region, exactly where the clock is.
+        // The `pre` above and the `post` below are setup and are outside both.
+        let before = ProcessCost::now();
         let timed = if workload.mutates {
-            time_write(&mut database, workload, plan.rows)
+            time_write(database, workload, plan.rows)
         } else {
-            time_read(&database, workload, plan.rows)
+            time_read(database, workload, plan.rows)
         };
+        let spent = ProcessCost::now().since(&before);
         match timed {
-            Ok(sample) => samples.push(sample),
+            Ok(sample) => {
+                costs.push((workload.name.clone(), spent, database.frames_resident()));
+                samples.push(sample)
+            }
             // A workload the engine refuses is *absent* rather than zero. A
             // sample of zero would roll into its family as an infinitely fast
             // one, which is the shape of lie a gate exists to prevent.
             Err(reason) => eprintln!("  {}: refused: {reason}", workload.name),
         }
         if let Some(post) = &workload.post {
-            if let Err(reason) = run_batch(&mut database, post) {
+            if let Err(reason) = run_batch(database, post) {
                 eprintln!("  {}: post refused: {reason}", workload.name);
             }
         }
     }
+    let round = ProcessCost::now().since(&opened);
     let mut state = Vec::with_capacity(AGREEMENT.len());
     for question in AGREEMENT {
         let answer = database
@@ -629,7 +716,267 @@ fn time_new_engine(
             .map_err(|error| format!("{question}: {}", why(&error)))?;
         state.push(render_row(&answer.rows));
     }
-    Ok((samples, state))
+    Ok((samples, state, RoundCost { round, costs }))
+}
+
+/// What one round of this engine's arm cost, besides time.
+///
+/// **Per workload for this arm and per round for the reference, because that
+/// is what each one can honestly say.** This engine runs inside the gate, so a
+/// reading either side of a workload's timed region is that workload's; the
+/// reference is a child process running the whole plan, so the operating
+/// system's accounting for it covers the round and nothing finer. Reporting
+/// them as though they were the same measurement would be the more comfortable
+/// lie.
+struct RoundCost {
+    /// What the round cost, from the first workload to the last.
+    round: ProcessCost,
+    /// Per workload: the name, what its timed region cost, and how many pool
+    /// frames were resident when it finished.
+    costs: Vec<(String, ProcessCost, usize)>,
+}
+
+/// Prints what each arm cost besides time.
+///
+/// **Two tables rather than one, because the two arms can say different
+/// things.** This engine runs inside the gate, so a reading either side of a
+/// workload's timed region is that workload's; the reference is a child process
+/// running the whole plan, so its accounting covers a round. Printing them in
+/// one table under one heading would invite a comparison neither number
+/// supports.
+///
+/// The medians are over rounds, so one round that happened to grow the heap
+/// does not become the reported figure.
+///
+/// @param plan - the workloads, for their order
+/// @param ours - what each of this engine's rounds cost
+/// @param theirs - what each of the reference's rounds cost
+fn report_costs(
+    plan: &inillucent_compat::perf::Plan,
+    ours: &[RoundCost],
+    theirs: &[ProcessCost],
+    child: Option<&ProcessCost>,
+) {
+    use inillucent_compat::procstat::{mebibytes, millis};
+    if ours.is_empty() {
+        return;
+    }
+    println!();
+    println!("## memory and CPU, this engine, per workload   (median over rounds)");
+    println!(
+        "  {:<24} {:>12} {:>12} {:>10} {:>10}",
+        "workload", "rss delta MiB", "peak rise MiB", "cpu ms", "pool frames"
+    );
+    for workload in &plan.workloads {
+        let mut rss: Vec<f64> = Vec::new();
+        let mut peak: Vec<f64> = Vec::new();
+        let mut cpu: Vec<f64> = Vec::new();
+        let mut frames: Vec<f64> = Vec::new();
+        for round in ours {
+            let Some((_, cost, resident)) = round
+                .costs
+                .iter()
+                .find(|(name, _, _)| *name == workload.name)
+            else {
+                continue;
+            };
+            rss.push(mebibytes(cost.working_set));
+            peak.push(mebibytes(cost.peak_working_set));
+            cpu.push(millis(cost.cpu_nanos()));
+            frames.push(*resident as f64);
+        }
+        if cpu.is_empty() {
+            continue;
+        }
+        println!(
+            "  {:<24} {:>12.2} {:>12.2} {:>10.2} {:>10.0}",
+            workload.name,
+            middle(&mut rss),
+            middle(&mut peak),
+            middle(&mut cpu),
+            middle(&mut frames)
+        );
+    }
+
+    println!();
+    println!("## memory and CPU, per round, both arms   (median over rounds)");
+    println!(
+        "  {:<24} {:>12} {:>12} {:>10} {:>10}",
+        "arm", "rss delta MiB", "peak rise MiB", "user ms", "kernel ms"
+    );
+    let mut our_rss: Vec<f64> = ours
+        .iter()
+        .map(|r| mebibytes(r.round.working_set))
+        .collect();
+    let mut our_peak: Vec<f64> = ours
+        .iter()
+        .map(|r| mebibytes(r.round.peak_working_set))
+        .collect();
+    let mut our_user: Vec<f64> = ours.iter().map(|r| millis(r.round.user_nanos)).collect();
+    let mut our_kernel: Vec<f64> = ours.iter().map(|r| millis(r.round.kernel_nanos)).collect();
+    println!(
+        "  {:<24} {:>12.2} {:>12.2} {:>10.2} {:>10.2}",
+        "inillucent (in process)",
+        middle(&mut our_rss),
+        middle(&mut our_peak),
+        middle(&mut our_user),
+        middle(&mut our_kernel)
+    );
+    // The reference's numbers are the *whole* child, not a delta: a fresh
+    // process per round, so its peak is its peak and its time is all of it.
+    let mut their_peak: Vec<f64> = theirs
+        .iter()
+        .map(|c| mebibytes(c.peak_working_set))
+        .collect();
+    let mut their_user: Vec<f64> = theirs.iter().map(|c| millis(c.user_nanos)).collect();
+    let mut their_kernel: Vec<f64> = theirs.iter().map(|c| millis(c.kernel_nanos)).collect();
+    println!(
+        "  {:<24} {:>12} {:>12.2} {:>10.2} {:>10.2}",
+        "sqlite (whole child)",
+        "-",
+        middle(&mut their_peak),
+        middle(&mut their_user),
+        middle(&mut their_kernel)
+    );
+    println!(
+        "  process peak {:.2} MiB for the gate, which holds the harness and the plan too",
+        mebibytes(ProcessCost::now().peak_working_set)
+    );
+    println!("  the engine's figures are deltas over a region of one process; the reference's");
+    println!("  are the whole of a child that ran the whole plan. They are not one measurement.");
+    println!();
+    println!("## peak resident set, one child process each, one round of the same plan");
+    match child {
+        Some(cost) => {
+            println!(
+                "  {:<24} {:>12} {:>12} {:>10} {:>10}",
+                "arm", "", "peak MiB", "user ms", "kernel ms"
+            );
+            println!(
+                "  {:<24} {:>12} {:>12.2} {:>10.2} {:>10.2}",
+                "inillucent (whole child)",
+                "",
+                mebibytes(cost.peak_working_set),
+                millis(cost.user_nanos),
+                millis(cost.kernel_nanos)
+            );
+            let mut their_peak: Vec<f64> = theirs
+                .iter()
+                .map(|c| mebibytes(c.peak_working_set))
+                .collect();
+            let mut their_user: Vec<f64> = theirs.iter().map(|c| millis(c.user_nanos)).collect();
+            let mut their_kernel: Vec<f64> =
+                theirs.iter().map(|c| millis(c.kernel_nanos)).collect();
+            let peak = middle(&mut their_peak);
+            println!(
+                "  {:<24} {:>12} {:>12.2} {:>10.2} {:>10.2}",
+                "sqlite (whole child)",
+                "",
+                peak,
+                middle(&mut their_user),
+                middle(&mut their_kernel)
+            );
+            if peak > 0.0 {
+                println!(
+                    "  inillucent holds {:.2}x what sqlite holds, running the same plan",
+                    mebibytes(cost.peak_working_set) / peak
+                );
+            }
+            println!("  both open a finished file the parent built; both run one round of the");
+            println!("  plan; neither figure is a delta. This is the comparable pair.");
+        }
+        None => println!("  not measured: the child could not be run"),
+    }
+    // **The per-workload CPU column is at the clock's resolution and says so.**
+    // `GetProcessTimes` advances in scheduler ticks - 15.625 ms on this
+    // platform - so a workload that runs for five is reported as zero or as one
+    // tick, and reading those as measurements would be reading the quantiser.
+    // The per-round totals are hundreds of ticks and are the honest figures.
+    println!("  per-workload CPU is quantised to the scheduler tick; read the per-round totals");
+}
+
+/// Runs one round of this engine in a child process, and returns what it cost.
+///
+/// **The comparable half of the memory question.** The gate's own process holds
+/// the harness, the plan and both arms' thirty rounds, so its peak says nothing
+/// about the engine; the reference arm, by contrast, is a fresh child per round
+/// and its peak is exactly its own. Spawning this engine the same way puts the
+/// two on one footing: a process that opens a finished file, runs the plan once,
+/// and exits.
+///
+/// The import is done here, in the parent, for the same reason - the reference
+/// child is handed a `.db` it did not have to build, so this child is handed an
+/// `.rdb` it did not have to build either.
+///
+/// Returns `None` rather than failing the gate: a memory reading that could not
+/// be taken must not turn a passing set of ratios into a failure.
+///
+/// @param fixture - the SQLite fixture to build the round's database from
+/// @param scratch - where to put the copy
+/// @param settings - the page size, frame count, scale and family filter
+fn measure_in_a_child(fixture: &Path, scratch: &Path, settings: &Settings) -> Option<ProcessCost> {
+    let copy = restore(fixture, scratch, "ours-memory").ok()?;
+    let target = scratch.join("ours-memory.rdb");
+    let built =
+        ImportedDatabase::import_into(copy, target.clone(), settings.page_size, settings.frames);
+    if let Err(error) = built {
+        eprintln!("  memory child: import failed: {}", why(&error));
+        return None;
+    }
+    // Closed before the child opens it: two processes on one file is a thing
+    // this engine does not do, and the parent holding it open would be that.
+    drop(built);
+    let exe = std::env::current_exe().ok()?;
+    let mut child = Command::new(exe)
+        .arg("--memory-round")
+        .arg(&target)
+        .arg("--scale")
+        .arg(&settings.scale)
+        .arg("--page-size")
+        .arg(settings.page_size.to_string())
+        .arg("--frames")
+        .arg(settings.frames.to_string())
+        .arg("--families")
+        .arg(settings.families.join(","))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    let mut err = String::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let mut sink = String::new();
+        let _ = std::io::Read::read_to_string(&mut pipe, &mut sink);
+    }
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = std::io::Read::read_to_string(&mut pipe, &mut err);
+    }
+    let status = child.wait().ok()?;
+    // Read while the handle is open, as `time_sqlite` does and for the same
+    // reason: dropping the `Child` closes it and the accounting goes with it.
+    let cost = inillucent_compat::procstat::child_cost(&child);
+    if !status.success() {
+        eprintln!("  memory child: {}", err.trim());
+        return None;
+    }
+    Some(cost)
+}
+
+/// Returns the median of a list, sorting it in place.
+///
+/// @param values - the samples
+fn middle(values: &mut [f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let at = values.len() / 2;
+    if values.len() % 2 == 1 {
+        values.get(at).copied().unwrap_or(0.0)
+    } else {
+        let low = values.get(at.saturating_sub(1)).copied().unwrap_or(0.0);
+        let high = values.get(at).copied().unwrap_or(0.0);
+        (low + high) / 2.0
+    }
 }
 
 /// Runs a semicolon-separated setup script.
@@ -869,29 +1216,51 @@ fn time_sqlite(
     plan: &Path,
     fixture: &Path,
     scratch: &Path,
-) -> Result<(Vec<Sample>, Vec<String>), String> {
+) -> Result<
+    (
+        Vec<Sample>,
+        Vec<String>,
+        inillucent_compat::procstat::ProcessCost,
+    ),
+    String,
+> {
     let copy = restore(fixture, scratch, "theirs")?;
-    let output = Command::new(bench)
+    // **Spawned rather than `output()`ed, so the process can be asked what it
+    // cost.** `output()` reaps the child, and a reaped process has no handle
+    // left to read its peak resident set or its processor time from. The pipes
+    // are drained before the wait for the ordinary reason: a child that fills
+    // one blocks, and a parent that waits first would deadlock with it.
+    let mut child = Command::new(bench)
         .arg("run")
         .arg(plan)
         .arg(&copy)
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|error| format!("sqlite-bench did not start: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "sqlite-bench failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+    let mut out = String::new();
+    let mut err = String::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = std::io::Read::read_to_string(&mut pipe, &mut out);
     }
-    let samples: Vec<Sample> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(Sample::parse)
-        .collect();
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = std::io::Read::read_to_string(&mut pipe, &mut err);
+    }
+    let status = child
+        .wait()
+        .map_err(|error| format!("sqlite-bench did not finish: {error}"))?;
+    // Read while the handle is still open, which is the whole reason for the
+    // spawn: dropping the `Child` closes it and the accounting goes with it.
+    let cost = inillucent_compat::procstat::child_cost(&child);
+    if !status.success() {
+        return Err(format!("sqlite-bench failed: {err}"));
+    }
+    let samples: Vec<Sample> = out.lines().filter_map(Sample::parse).collect();
     let mut state = Vec::with_capacity(AGREEMENT.len());
     for question in AGREEMENT {
         state.push(ask_sqlite(&copy, question)?);
     }
-    Ok((samples, state))
+    Ok((samples, state, cost))
 }
 
 /// Asks SQLite one question about the database it just wrote.

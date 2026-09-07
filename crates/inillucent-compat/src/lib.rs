@@ -45,6 +45,7 @@ pub use inillucent_engine as newengine;
 pub mod obligations;
 pub mod oracle;
 pub mod perf;
+pub mod procstat;
 pub mod report;
 pub mod results;
 pub mod slt;

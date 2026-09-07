@@ -561,15 +561,21 @@ may_depend_on = ["inillucent-core", "inillucent-base"]
 # `docs/dependency-policy.md` records the argument for each one.
 # ---------------------------------------------------------------------------
 
+# `inillucent-compat` is on both lists for one reason and one only: what a
+# *process* cost - its peak resident set and its processor time - is something
+# only the operating system can say, and the gate has to be able to say it about
+# both arms (task-1838 Part 6). It is a test-only crate, the calls live in one
+# module (`procstat.rs`), and that module is on `policy.rs`'s `UNSAFE_ALLOWED`
+# list with a SAFETY note per call. No production crate gains an edge here.
 [[external]]
 name = "libc"
 category = "os-boundary"
-allowed_in = ["inillucent-vfs"]
+allowed_in = ["inillucent-vfs", "inillucent-compat"]
 
 [[external]]
 name = "windows-sys"
 category = "os-boundary"
-allowed_in = ["inillucent-vfs"]
+allowed_in = ["inillucent-vfs", "inillucent-compat"]
 
 [[external]]
 name = "anyhow"

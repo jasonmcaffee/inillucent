@@ -269,7 +269,17 @@ impl Drop for PageGuard<'_> {
 pub struct Pool {
     /// The page size every frame holds.
     page_size: usize,
-    /// The frame buffers, allocated once and never resized.
+    /// The frame buffers, each allocated the first time its frame is claimed
+    /// and never resized after that.
+    ///
+    /// **Empty until claimed, which is what keeps a pool a budget rather than a
+    /// reservation.** Allocating and zeroing every frame at open made the pool's
+    /// configured size the process's resident set from the first statement:
+    /// task-1838 measured a 128 MiB pool as 128 MiB of resident memory against
+    /// SQLite's 37 MiB at the same `cache_size`, on a fixture that only ever
+    /// touched a quarter of it. SQLite grows into its cache and so does this
+    /// now. A frame is sized once, in `claim_frame`, and an evicted frame keeps
+    /// its buffer for the next page, so the steady state costs nothing.
     buffers: Vec<RefCell<Vec<u8>>>,
     /// One version latch per frame, so a descent can read optimistically.
     ///
@@ -412,7 +422,9 @@ impl Pool {
         pins.try_reserve(frames)
             .map_err(|_| no_mem(format!("{frames} pin counters")))?;
         for _ in 0..frames {
-            buffers.push(RefCell::new(vec![0u8; page_size]));
+            // Empty: `claim_frame` gives a frame its page-sized buffer the
+            // first time the frame is used. See the field's own note.
+            buffers.push(RefCell::new(Vec::new()));
             latches.push(VersionLatch::new());
             pins.push(Cell::new(0));
         }
@@ -778,7 +790,19 @@ impl Pool {
     }
 
     /// Returns a frame holding nothing, cooling and evicting to get one.
+    ///
+    /// The one place a frame is handed out for a page it does not yet hold, and
+    /// therefore the one place its buffer has to exist by. Every caller - the
+    /// read path through `fill_frame`, and `install` for a page built in memory
+    /// - comes through here.
     fn claim_frame(&self) -> DbResult<u32> {
+        let frame = self.take_frame()?;
+        self.give_the_frame_a_buffer(frame)?;
+        Ok(frame)
+    }
+
+    /// Returns a free frame's index, cooling and evicting to get one.
+    fn take_frame(&self) -> DbResult<u32> {
         if let Some(frame) = self.state.borrow_mut().free.pop() {
             return Ok(frame);
         }
@@ -789,6 +813,34 @@ impl Pool {
         Err(no_mem(
             "every frame in the buffer pool is pinned; nothing can be evicted",
         ))
+    }
+
+    /// Makes sure a claimed frame has a page-sized buffer.
+    ///
+    /// Costs a length check on every claim and an allocation on the first one
+    /// per frame; a pool that has been full once never allocates again, because
+    /// an evicted frame keeps its buffer.
+    ///
+    /// @param frame - the frame just claimed
+    fn give_the_frame_a_buffer(&self, frame: u32) -> DbResult<()> {
+        let cell = self
+            .buffers
+            .get(frame as usize)
+            .ok_or_else(|| misuse("frame index out of range"))?;
+        let mut bytes = cell
+            .try_borrow_mut()
+            .map_err(|_| misuse("a frame chosen for a new page was still borrowed"))?;
+        if bytes.len() == self.page_size {
+            return Ok(());
+        }
+        // `try_reserve` rather than `resize`, so a pool that cannot grow says
+        // so as an error instead of aborting the process.
+        let wanted = self.page_size.saturating_sub(bytes.len());
+        bytes
+            .try_reserve_exact(wanted)
+            .map_err(|_| no_mem(format!("a frame of {} bytes", self.page_size)))?;
+        bytes.resize(self.page_size, 0);
+        Ok(())
     }
 
     /// Moves a share of the pool into the cooling FIFO.
