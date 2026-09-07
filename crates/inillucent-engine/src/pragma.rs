@@ -48,13 +48,20 @@ impl ImportedDatabase {
         name: &[u8],
         argument: Option<&PragmaArgument>,
     ) -> DbResult<Outcome> {
+        // **The read-only pragmas first, and through the same function the
+        // table-valued form uses.** `PRAGMA table_info(t)` and `SELECT * FROM
+        // pragma_table_info('t')` are the same question; if they were two
+        // implementations they would eventually be two answers, and the one
+        // nobody tested would be the wrong one.
+        if let Some(outcome) = self.pragma_rows(name, argument)? {
+            return Ok(outcome);
+        }
         match name {
             b"cache_size" => self.pragma_cache_size(argument),
             b"synchronous" => self.pragma_synchronous(argument),
             b"busy_timeout" => self.pragma_busy_timeout(argument),
             b"foreign_keys" => self.pragma_flag(argument),
             b"defer_foreign_keys" => self.pragma_defer(argument),
-            b"foreign_key_list" => self.pragma_foreign_key_list(argument),
             b"foreign_key_check" => self.pragma_foreign_key_check(argument),
             b"journal_mode" => self.pragma_fixed_word(argument, b"wal"),
             b"encoding" => self.pragma_fixed_word(argument, b"UTF-8"),
@@ -64,19 +71,64 @@ impl ImportedDatabase {
             b"page_size" => Ok(one_integer(self.page_size as i64)),
             b"page_count" => Ok(one_integer(self.database.pool().page_count() as i64)),
             b"freelist_count" => Ok(one_integer(self.database.free_pages() as i64)),
-            b"table_info" | b"table_xinfo" => self.pragma_table_info(argument),
-            b"index_list" => self.pragma_index_list(argument),
-            b"index_info" | b"index_xinfo" => self.pragma_index_info(argument),
-            b"table_list" => self.pragma_table_list(),
-            b"database_list" => Ok(Outcome {
-                rows: self.database_list(),
-                names: vec!["seq".into(), "name".into(), "file".into()],
-                changes: Default::default(),
-            }),
             // SQLite's own answer to a pragma it does not know: no rows, no
             // error, and the next statement runs.
             _ => Ok(Outcome::empty()),
         }
+    }
+
+    /// Answers the pragmas that only read, under `&self`.
+    ///
+    /// **The shared half of "one implementation, two spellings".** The directive
+    /// form reaches it through [`ImportedDatabase::pragma`]; the table-valued
+    /// form - `SELECT * FROM pragma_table_info('t')` - reaches it from inside a
+    /// virtual-table scan, which runs under `&self` and so cannot go through the
+    /// `&mut self` dispatcher at all. Splitting them by mutability rather than
+    /// by name is what keeps the two spellings on one answer: a pragma that only
+    /// reads is here and is reachable both ways, and one that changes something
+    /// is a directive and has no table-valued form, which is SQLite's rule too.
+    ///
+    /// `Ok(None)` means this pragma is not one of the read-only ones.
+    ///
+    /// @param name - the pragma's folded name
+    /// @param argument - the value it was given, when it was given one
+    pub(super) fn pragma_rows(
+        &self,
+        name: &[u8],
+        argument: Option<&PragmaArgument>,
+    ) -> DbResult<Option<Outcome>> {
+        Ok(Some(match name {
+            b"foreign_key_list" => self.pragma_foreign_key_list(argument)?,
+            b"table_info" | b"table_xinfo" => self.pragma_table_info(argument)?,
+            b"index_list" => self.pragma_index_list(argument)?,
+            b"index_info" | b"index_xinfo" => self.pragma_index_info(argument)?,
+            b"table_list" => self.pragma_table_list()?,
+            b"database_list" => Outcome {
+                rows: self.database_list(),
+                names: vec!["seq".into(), "name".into(), "file".into()],
+                changes: Default::default(),
+            },
+            _ => return Ok(None),
+        }))
+    }
+
+    /// Returns the names of every pragma with a table-valued form.
+    ///
+    /// One per read-only pragma above, which is the set that has rows to be a
+    /// function *of*. A pragma whose whole content is a setting is a directive
+    /// and nothing else, and a function that answered nothing would be
+    /// indistinguishable from one that found nothing.
+    pub(super) fn pragma_function_names() -> &'static [&'static str] {
+        &[
+            "pragma_database_list",
+            "pragma_foreign_key_list",
+            "pragma_index_info",
+            "pragma_index_list",
+            "pragma_index_xinfo",
+            "pragma_table_info",
+            "pragma_table_list",
+            "pragma_table_xinfo",
+        ]
     }
 
     /// Returns one row per database this connection holds, in schema order.
@@ -395,8 +447,21 @@ impl ImportedDatabase {
 
     /// Describes one table's columns.
     fn pragma_table_info(&self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+        // **The names come first and are answered even when nothing matched.**
+        // A statement's result columns are a fact about the *pragma*, not about
+        // whether the table it was asked about exists - and the table-valued
+        // form reads them at catalog time, with no argument at all, to learn
+        // what columns `pragma_table_info` declares.
+        let names: Vec<String> = ["cid", "name", "type", "notnull", "dflt_value", "pk"]
+            .iter()
+            .map(|held| (*held).to_string())
+            .collect();
         let Some(table) = self.named_table(argument) else {
-            return Ok(Outcome::empty());
+            return Ok(Outcome {
+                rows: Vec::new(),
+                names,
+                changes: Default::default(),
+            });
         };
         let rows = table
             .columns
@@ -421,22 +486,23 @@ impl ImportedDatabase {
             .collect();
         Ok(Outcome {
             rows,
-            names: vec![
-                "cid".into(),
-                "name".into(),
-                "type".into(),
-                "notnull".into(),
-                "dflt_value".into(),
-                "pk".into(),
-            ],
+            names,
             changes: Default::default(),
         })
     }
 
     /// Lists one table's indexes, newest first, as SQLite does.
     fn pragma_index_list(&self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+        let names: Vec<String> = ["seq", "name", "unique", "origin", "partial"]
+            .iter()
+            .map(|held| (*held).to_string())
+            .collect();
         let Some(table) = self.named_table(argument) else {
-            return Ok(Outcome::empty());
+            return Ok(Outcome {
+                rows: Vec::new(),
+                names,
+                changes: Default::default(),
+            });
         };
         let count = table.indexes.len();
         let rows = table
@@ -462,21 +528,24 @@ impl ImportedDatabase {
         let _ = count;
         Ok(Outcome {
             rows,
-            names: vec![
-                "seq".into(),
-                "name".into(),
-                "unique".into(),
-                "origin".into(),
-                "partial".into(),
-            ],
+            names,
             changes: Default::default(),
         })
     }
 
     /// Describes one index's key columns.
     fn pragma_index_info(&self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+        let names: Vec<String> = ["seqno", "cid", "name"]
+            .iter()
+            .map(|held| (*held).to_string())
+            .collect();
+        let empty = Outcome {
+            rows: Vec::new(),
+            names: names.clone(),
+            changes: Default::default(),
+        };
         let Some(argument) = argument else {
-            return Ok(Outcome::empty());
+            return Ok(empty);
         };
         let wanted = argument_text(argument).to_ascii_lowercase().into_bytes();
         let found = self.tables.iter().find_map(|table| {
@@ -487,7 +556,7 @@ impl ImportedDatabase {
                 .map(|index| (table, index))
         });
         let Some((table, index)) = found else {
-            return Ok(Outcome::empty());
+            return Ok(empty);
         };
         let rows = index
             .columns
@@ -506,7 +575,7 @@ impl ImportedDatabase {
             .collect();
         Ok(Outcome {
             rows,
-            names: vec!["seqno".into(), "cid".into(), "name".into()],
+            names,
             changes: Default::default(),
         })
     }

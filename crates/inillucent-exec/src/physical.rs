@@ -156,18 +156,59 @@ pub trait TreeCatalog {
     ///
     /// It is also the shape the TDD's **batch-aware vtab contract** asks for. A
     /// row-at-a-time cursor pulled through the operator chain would put a
-    /// virtual call between every row and every batch; handing back rows the
-    /// pipeline turns into batches puts the module's own loop inside the module,
-    /// where it can produce a run at a time. The cost is that a virtual scan
-    /// does not stream, which for the shapes a module answers - a MATCH, a
-    /// bounding box - is a result set that fits in memory by construction.
+    /// virtual call between every row and every batch; producing a batch at a
+    /// time keeps the module's own loop inside the module, where it can produce
+    /// a run at a time.
     ///
-    /// `None` means the caller has no virtual tables at all, which is what makes
-    /// this a defaulted method rather than one every catalog has to write.
+    /// **And it pushes rather than materialising, which is Phase 3's Part C.**
+    /// This used to be `virtual_rows`, returning `Option<Vec<Vec<OwnedDatum>>>`,
+    /// whose doc comment argued that a materialised scan is safe "for the shapes
+    /// a module answers - a MATCH, a bounding box - a result set that fits in
+    /// memory by construction". `generate_series` ships in the same registry and
+    /// is a counter-example: with no `stop` constraint it is 4,294,967,295 rows,
+    /// so `SELECT value FROM gs LIMIT 3` neither returned nor could be stopped -
+    /// three shapes measured past a 25-second timeout on task-1843, one of them
+    /// holding about 1.2 cores for ten minutes. A `LIMIT` above the scan cannot
+    /// stop a scan that has already run to completion before the operator above
+    /// it sees a row.
+    ///
+    /// So the rows go *down* the chain in batches and the answer that comes back
+    /// is [`Flow`]: `Flow::Stop` means the pipeline has what it needs, and the
+    /// module's loop abandons the cursor - the same way `scan.rs` abandons a
+    /// b-tree scan.
+    ///
+    /// `Ok(false)` means the caller has no virtual tables at all, which is what
+    /// makes this a defaulted method rather than one every catalog has to write.
     ///
     /// @param table - the FROM term's table, which names the module's instance
     /// @param path - the access path the planner chose for it
     /// @param params - the values bound to `?1`, `?2`, ...
+    /// @param needed - which of the term's columns the query reads
+    /// @param downstream - where the batches go
+    fn virtual_cursor(
+        &self,
+        table: &TableInfo,
+        path: &AccessPath,
+        params: &Params,
+        needed: &inillucent_sql::bind::ColumnUse,
+        downstream: &mut dyn crate::ops::Sink,
+    ) -> DbResult<bool> {
+        let _ = (table, path, params, needed, downstream);
+        Ok(false)
+    }
+
+    /// Returns every row of a virtual scan, materialised.
+    ///
+    /// For the one caller that genuinely needs the whole answer at once: a
+    /// virtual table standing as a *materialised stage* of a join, which is read
+    /// many times and so cannot be a cursor that is consumed once. It is written
+    /// in terms of [`TreeCatalog::virtual_cursor`] rather than beside it, so
+    /// there is one implementation of what a module's scan means.
+    ///
+    /// @param table - the FROM term's table, which names the module's instance
+    /// @param path - the access path the planner chose for it
+    /// @param params - the values bound to `?1`, `?2`, ...
+    /// @param needed - which of the term's columns the query reads
     fn virtual_rows(
         &self,
         table: &TableInfo,
@@ -175,8 +216,13 @@ pub trait TreeCatalog {
         params: &Params,
         needed: &inillucent_sql::bind::ColumnUse,
     ) -> DbResult<Option<Vec<Vec<OwnedDatum>>>> {
-        let _ = (table, path, params, needed);
-        Ok(None)
+        let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut sink = crate::ops::CollectInto::new(std::rc::Rc::clone(&collected));
+        if !self.virtual_cursor(table, path, params, needed, &mut sink)? {
+            return Ok(None);
+        }
+        let rows = collected.borrow().clone();
+        Ok(Some(rows))
     }
 
     /// Returns the index trees that might cover a query over one table.
@@ -296,14 +342,16 @@ impl TreeCatalog for WithQueue<'_> {
         self.inner.covering_candidates(table_root)
     }
 
-    fn virtual_rows(
+    fn virtual_cursor(
         &self,
         table: &TableInfo,
         path: &AccessPath,
         params: &Params,
         needed: &inillucent_sql::bind::ColumnUse,
-    ) -> DbResult<Option<Vec<Vec<OwnedDatum>>>> {
-        self.inner.virtual_rows(table, path, params, needed)
+        downstream: &mut dyn crate::ops::Sink,
+    ) -> DbResult<bool> {
+        self.inner
+            .virtual_cursor(table, path, params, needed, downstream)
     }
 
     fn user_scalar(&self, name: &[u8], argc: usize) -> Option<crate::expr::ScalarBody> {
@@ -795,6 +843,13 @@ pub enum Source<'t> {
     Vector(PointProbe<'t>, Vec<i64>),
     /// Rows a nested query produced, already materialised.
     Rows(Vec<Vec<OwnedDatum>>),
+    /// A module's scan, driven a batch at a time and abandoned on `Flow::Stop`.
+    ///
+    /// The catalog rather than the rows, because the rows do not exist yet -
+    /// that is the whole point. `generate_series` with no `stop` constraint is
+    /// 4,294,967,295 rows, and materialising it before the `LIMIT` above it runs
+    /// is a query that does not return (task-1843).
+    Virtual(Box<VirtualScanSource<'t>>),
     /// A fixed number of rows of no columns at all.
     ///
     /// What drives `SELECT 1`, `SELECT date('now')` and every other query with
@@ -807,6 +862,25 @@ pub enum Source<'t> {
     /// The Phase 2 pass refused these, and nineteen of the read-only SLT
     /// corpus's thirty-seven refusals were exactly this shape.
     Constant(usize),
+}
+
+/// Everything a module's scan needs, kept so it can be driven at run time.
+///
+/// Boxed inside [`Source::Virtual`] because it is the largest variant by a wide
+/// margin and every other source is a handful of words; a `Source` that grew to
+/// the size of a `TableInfo` would be copied around the hot read path for the
+/// benefit of the one arm that reads a virtual table.
+pub struct VirtualScanSource<'t> {
+    /// Where the module is resolved from.
+    pub catalog: &'t dyn TreeCatalog,
+    /// The FROM term's table, which names the module's instance.
+    pub table: TableInfo,
+    /// The access path the planner chose, carrying the pushed-down offer.
+    pub path: AccessPath,
+    /// The values this execution bound.
+    pub params: Params,
+    /// Which of the term's columns the query reads.
+    pub needed: inillucent_sql::bind::ColumnUse,
 }
 
 /// Returns the pool a source that reads a tree must have been given.
@@ -872,6 +946,16 @@ impl Source<'_> {
                 crate::ops::emit_rows(rows, downstream)?;
                 downstream.finish()
             }
+            Source::Virtual(scan) => {
+                scan.catalog.virtual_cursor(
+                    &scan.table,
+                    &scan.path,
+                    &scan.params,
+                    &scan.needed,
+                    downstream,
+                )?;
+                downstream.finish()
+            }
             Source::Constant(rows) => {
                 if *rows > 0 {
                     let batch = Batch::new(*rows, Vec::new());
@@ -892,6 +976,7 @@ impl Source<'_> {
             Source::Point(_, _) => "POINT PROBE",
             Source::Vector(_, _) => "VECTOR SEARCH",
             Source::Rows(_) => "SCAN SUBQUERY",
+            Source::Virtual(_) => "SCAN VIRTUAL TABLE",
             Source::Constant(_) => "CONSTANT ROW",
         }
     }
@@ -2274,10 +2359,16 @@ fn source_for<'t>(
                 // same bound statement, so a column that is read is a column
                 // that is materialised.
                 let needed = plan.select.columns_read(term.id);
-                let rows = catalog
-                    .virtual_rows(&term.table, &term.path, params, &needed)?
-                    .ok_or_else(|| misuse("a virtual table the caller does not have"))?;
-                return Ok((Source::Rows(rows), describe_source(prepared)));
+                return Ok((
+                    Source::Virtual(Box::new(VirtualScanSource {
+                        catalog,
+                        table: term.table.clone(),
+                        path: term.path.clone(),
+                        params: params.clone(),
+                        needed,
+                    })),
+                    describe_source(prepared),
+                ));
             }
             let rows = materialise_stage(plan, catalog, params, stage)?;
             Ok((Source::Rows(rows), describe_source(prepared)))

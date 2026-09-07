@@ -415,9 +415,110 @@ impl ImportedDatabase {
             catalog = catalog.with_table(temp_schema);
             catalog = catalog.with_table(temp_master);
         }
+        // **The eponymous modules, last.** `generate_series`, `json_each`,
+        // `json_tree` and the `pragma_*` set are names rather than tables: they
+        // belong to no database, have no `sqlite_schema` row, and the binder is
+        // already written to turn `FROM generate_series(1,10)` into `Eq`
+        // constraints on their hidden columns. The one thing missing was
+        // anything putting them in the catalog, so every one of them was
+        // `no such table` (task-1843). They go on last, so a real table of the
+        // same name shadows the module.
+        for table in self.eponymous_tables() {
+            catalog = catalog.with_eponymous(table);
+        }
         self.catalog = catalog;
         self.forget_compiled_statements();
         self.catalog_generation = self.catalog_generation.saturating_add(1);
+    }
+
+    /// Returns one `TableInfo` per eponymous module the registry holds.
+    ///
+    /// The columns come from the module's own `connect`, for the same reason a
+    /// `CREATE VIRTUAL TABLE`'s do: what the columns are is the module's answer,
+    /// and deriving them anywhere else would be a second implementation of its
+    /// declaration that agreed with the module until the day it did not.
+    ///
+    /// A module whose `connect` fails with no arguments is skipped rather than
+    /// reported: it is a module that cannot be used eponymously, which is not
+    /// an error in the schema this is refreshing.
+    fn eponymous_tables(&self) -> Vec<inillucent_sql::catalog_view::TableInfo> {
+        let mut tables = Vec::new();
+        for name in self.registry.module_names() {
+            let Some(module) = self.registry.eponymous(name.as_bytes()) else {
+                continue;
+            };
+            let arguments = inillucent_sql::vtab::ModuleArguments {
+                database: 0,
+                schema: b"main".to_vec(),
+                table: name.as_bytes().to_vec(),
+                module: name.as_bytes().to_vec(),
+                arguments: Vec::new(),
+                shadows: Vec::new(),
+            };
+            let Ok(connected) = module.connect(&arguments, false) else {
+                continue;
+            };
+            let declaration = connected.declaration();
+            tables.push(inillucent_sql::catalog_view::TableInfo::eponymous(
+                name.as_bytes().to_vec(),
+                inillucent_sql::declare::declared_columns(declaration),
+                inillucent_sql::vtab::ModuleRef {
+                    name: name.as_bytes().to_vec(),
+                    folded: name.to_ascii_lowercase().into_bytes(),
+                    arguments: Vec::new(),
+                },
+                declaration.without_rowid,
+            ));
+        }
+        // **The `pragma_*` functions are the same mechanism over the pragma
+        // set.** They are not registry modules - a module reaches its rows
+        // through a `Context`, and a pragma's rows come from the connection
+        // itself - so their columns are read straight off
+        // `ImportedDatabase::pragma_rows`, which is the same function the
+        // directive form runs. Two hidden columns follow, `arg` and `schema`,
+        // which is SQLite's shape and is what makes
+        // `SELECT * FROM pragma_table_info(name)` over a list of table names a
+        // join rather than a loop.
+        for name in Self::pragma_function_names() {
+            let Some(table) = self.pragma_function_table(name) else {
+                continue;
+            };
+            tables.push(table);
+        }
+        tables.sort_by(|left, right| left.folded.cmp(&right.folded));
+        tables
+    }
+
+    /// Returns the eponymous table one `pragma_*` function presents.
+    ///
+    /// `None` when the pragma answers no columns, which is how a name that has
+    /// no read form is left out rather than presented as a function that always
+    /// finds nothing.
+    ///
+    /// @param name - the function's name, `pragma_` and the pragma's own
+    fn pragma_function_table(&self, name: &str) -> Option<inillucent_sql::catalog_view::TableInfo> {
+        let pragma = name.strip_prefix("pragma_")?;
+        let shape = self.pragma_rows(pragma.as_bytes(), None).ok()??;
+        if shape.names.is_empty() {
+            return None;
+        }
+        let mut columns: Vec<inillucent_sql::catalog_view::ColumnInfo> = shape
+            .names
+            .iter()
+            .map(|held| pragma_column(held.as_bytes(), false))
+            .collect();
+        columns.push(pragma_column(b"arg", true));
+        columns.push(pragma_column(b"schema", true));
+        Some(inillucent_sql::catalog_view::TableInfo::eponymous(
+            name.as_bytes().to_vec(),
+            columns,
+            inillucent_sql::vtab::ModuleRef {
+                name: name.as_bytes().to_vec(),
+                folded: name.as_bytes().to_ascii_lowercase(),
+                arguments: Vec::new(),
+            },
+            false,
+        ))
     }
 
     /// Throws away every statement compiled against the catalog as it was.
@@ -1972,4 +2073,29 @@ enum Fill {
     Constant(OwnedDatum),
     /// Nothing: a new column with no default, which is NULL.
     Absent,
+}
+
+/// Returns one column of a `pragma_*` function's declaration.
+///
+/// Everything about it is the default: a pragma's answer is untyped, so BLOB
+/// affinity and BINARY collation are what SQLite gives it too.
+///
+/// @param name - the column's name
+/// @param hidden - whether it is one of the two argument columns
+fn pragma_column(name: &[u8], hidden: bool) -> inillucent_sql::catalog_view::ColumnInfo {
+    inillucent_sql::catalog_view::ColumnInfo {
+        name: name.to_vec(),
+        folded: name.to_ascii_lowercase(),
+        declared_type: Vec::new(),
+        affinity: inillucent_value::Affinity::Blob,
+        collation: Vec::new(),
+        not_null: false,
+        not_null_conflict: None,
+        default_sql: None,
+        primary_key_position: None,
+        hidden,
+        generated: false,
+        stored: true,
+        generated_sql: None,
+    }
 }

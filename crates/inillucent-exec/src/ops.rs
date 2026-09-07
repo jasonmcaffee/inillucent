@@ -1454,7 +1454,7 @@ impl Sink for Limit {
 ///
 /// @param rows - the rows to emit
 /// @param downstream - what to push them into
-pub(crate) fn emit_rows(rows: &[Vec<OwnedDatum>], downstream: &mut dyn Sink) -> DbResult<Flow> {
+pub fn emit_rows(rows: &[Vec<OwnedDatum>], downstream: &mut dyn Sink) -> DbResult<Flow> {
     let width = rows.first().map(|row| row.len()).unwrap_or(0);
     if width == 0 {
         return Ok(Flow::Continue);
