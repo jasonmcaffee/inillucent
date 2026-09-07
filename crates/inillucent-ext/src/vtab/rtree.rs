@@ -246,6 +246,7 @@ impl Module for RTreeModule {
                 suffix: b"node".to_vec(),
                 create_sql: "CREATE TABLE \"%_node\"(nodeno INTEGER PRIMARY KEY, data BLOB)"
                     .to_string(),
+                owner: None,
             },
             ShadowTable {
                 suffix: b"rowid".to_vec(),
@@ -260,12 +261,14 @@ impl Module for RTreeModule {
                         .map(|at| format!(", a{at}"))
                         .collect::<String>()
                 ),
+                owner: None,
             },
             ShadowTable {
                 suffix: b"parent".to_vec(),
                 create_sql:
                     "CREATE TABLE \"%_parent\"(nodeno INTEGER PRIMARY KEY, parentnode INTEGER)"
                         .to_string(),
+                owner: None,
             },
         ])
     }

@@ -539,6 +539,18 @@ impl ImportedDatabase {
             shadows: Vec::new(),
         };
         for shadow in found.shadow_tables(&connect)? {
+            // **A shadow with an owner already exists.** It belongs to another
+            // table and is being *read*, not made - see `ShadowTable::owner`.
+            // Creating it would put a second, empty copy of somebody else's
+            // storage beside the real one.
+            if let Some(owner) = &shadow.owner {
+                let root = self.existing_shadow_root(owner, &shadow.suffix)?;
+                connect.shadows.push(ShadowRoot {
+                    suffix: shadow.suffix.clone(),
+                    root,
+                });
+                continue;
+            }
             // `%` stands for the virtual table's own name, which is what makes
             // one declaration serve every table the module ever creates.
             let text = shadow
@@ -605,7 +617,7 @@ impl ImportedDatabase {
                 store: Some(&mut store),
                 database: 0,
                 limits: &self.limits,
-                catalog: None,
+                catalog: Some(&self.catalog),
             };
             let mut table = found.connect(&connect, true)?;
             table.begin(&mut context)?;
@@ -634,6 +646,29 @@ impl ImportedDatabase {
     /// @param path - the access path the planner chose for it
     /// @param params - the values bound to `?1`, `?2`, ...
     #[allow(clippy::too_many_arguments)]
+    /// Returns the root of a shadow table another object already owns.
+    ///
+    /// The catalog rows are the authority, as they are at open time, and a name
+    /// that is not there is a refusal: a module that was handed a root it could
+    /// not find would either answer nothing or make its own copy, and both are
+    /// worse than saying so.
+    ///
+    /// @param owner - the table the shadows belong to
+    /// @param suffix - which shadow
+    fn existing_shadow_root(&self, owner: &[u8], suffix: &[u8]) -> DbResult<u32> {
+        let wanted = shadow_table_name(owner, suffix).to_ascii_lowercase();
+        self.entries
+            .iter()
+            .find(|recorded| recorded.entry.name.to_ascii_lowercase() == wanted)
+            .map(|recorded| recorded.root)
+            .ok_or_else(|| {
+                refusal(format!(
+                    "no such table: {}",
+                    String::from_utf8_lossy(&wanted)
+                ))
+            })
+    }
+
     pub(super) fn rows_of_module(
         &self,
         table: &inillucent_sql::catalog_view::TableInfo,
@@ -746,7 +781,7 @@ impl ImportedDatabase {
             store: Some(&mut store),
             database: 0,
             limits: &self.limits,
-            catalog: None,
+            catalog: Some(&self.catalog),
         };
         let width = connected.table.declaration().columns.len();
         // **Only the columns something reads.** `needed` is what the bound
@@ -1088,7 +1123,8 @@ impl ImportedDatabase {
                 // `table_root`, which answers over the tables the *planner* can
                 // see. A shadow table is a real tree either way, and the row is
                 // the authority for what it is registered under.
-                let shadow_name = shadow_table_name(&name, &shadow.suffix).to_ascii_lowercase();
+                let owned = shadow.owner.clone().unwrap_or_else(|| name.clone());
+                let shadow_name = shadow_table_name(&owned, &shadow.suffix).to_ascii_lowercase();
                 let Some(recorded) = self
                     .entries
                     .iter()
@@ -1165,7 +1201,7 @@ impl ImportedDatabase {
                 store: Some(&mut store),
                 database: 0,
                 limits: &self.limits,
-                catalog: None,
+                catalog: Some(&self.catalog),
             };
             connected.table.update(&mut context, change)
         };
@@ -1464,7 +1500,7 @@ impl ImportedDatabase {
                     store: Some(&mut store),
                     database: 0,
                     limits: &self.limits,
-                    catalog: None,
+                    catalog: Some(&self.catalog),
                 };
                 connected
                     .table

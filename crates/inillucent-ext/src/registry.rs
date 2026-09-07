@@ -195,6 +195,9 @@ impl Registry {
         registry.register_module(Arc::new(RTreeModule::float()));
         registry.register_module(Arc::new(RTreeModule::integer()));
         registry.register_module(Arc::new(Fts5Module));
+        registry.register_module(Arc::new(
+            crate::vtab::fts5::vocab::Fts5VocabModule,
+        ));
         registry
     }
 

@@ -61,11 +61,17 @@ pub struct Context<'host> {
     pub limits: &'host Limits,
     /// The schema the statement was compiled against.
     ///
-    /// It is here for the modules that introspect: `pragma_table_info` is a
-    /// table-valued function over exactly this, and a module that had to be
-    /// handed a schema through its arguments could not be one. Everything else
-    /// ignores it.
-    pub catalog: Option<&'host inillucent_catalog::snapshot::CatalogSnapshot>,
+    /// It is here for the modules that introspect. `fts5vocab` is the one that
+    /// needs it: the index it reads stores column *numbers*, and the names it
+    /// has to report are in the target's declaration - so a module that had to
+    /// be handed a schema through its arguments could not be written.
+    ///
+    /// **Read-only, and it is the binder's view rather than the file's.** A
+    /// module can see what tables exist and what columns they declare; it
+    /// cannot reach a row of one through this, which is the line the module
+    /// contract draws. Reaching another table's *rows* is `ShadowTable::owner`,
+    /// and that is a grant made by name at connect time.
+    pub catalog: Option<&'host inillucent_sql::catalog_view::StaticCatalog>,
 }
 
 /// What a module may ask the connection for.

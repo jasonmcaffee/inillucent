@@ -37,6 +37,7 @@
 pub mod bm25;
 pub mod expr;
 pub mod tokenize;
+pub mod vocab;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -188,25 +189,30 @@ impl Module for Fts5Module {
                 suffix: b"data".to_vec(),
                 create_sql: "CREATE TABLE \"%_data\"(id INTEGER PRIMARY KEY, block BLOB)"
                     .to_string(),
+                owner: None,
             },
             ShadowTable {
                 suffix: b"idx".to_vec(),
                 create_sql: "CREATE TABLE \"%_idx\"(segid, term, pgno, PRIMARY KEY(segid, term)) \
                              WITHOUT ROWID"
                     .to_string(),
+                owner: None,
             },
             ShadowTable {
                 suffix: b"content".to_vec(),
                 create_sql: content,
+                owner: None,
             },
             ShadowTable {
                 suffix: b"docsize".to_vec(),
                 create_sql: "CREATE TABLE \"%_docsize\"(id INTEGER PRIMARY KEY, sz BLOB)"
                     .to_string(),
+                owner: None,
             },
             ShadowTable {
                 suffix: b"config".to_vec(),
                 create_sql: "CREATE TABLE \"%_config\"(k PRIMARY KEY, v) WITHOUT ROWID".to_string(),
+                owner: None,
             },
         ])
     }
