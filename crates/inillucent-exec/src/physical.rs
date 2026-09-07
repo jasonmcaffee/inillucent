@@ -225,6 +225,30 @@ pub trait TreeCatalog {
         let _ = cte;
         None
     }
+
+    /// Returns the rowids an index a module owns says are nearest a vector.
+    ///
+    /// **The one thing the executor cannot work out for itself.** The index's
+    /// rows live in a virtual table and the module that owns it is registered
+    /// on the connection, which is above this layer - so the executor asks, the
+    /// same way it asks for a module's rows, and gets back the row numbers of
+    /// the *table* rather than anything module-shaped (task-1838 §7).
+    ///
+    /// `None` means there is no such index, which the caller turns into a
+    /// refusal rather than an empty answer: a search that quietly found nothing
+    /// is the worst of the three possible outcomes.
+    ///
+    /// @param _index - the store's name
+    /// @param _probe - the vector to measure against
+    /// @param _depth - how many candidates to ask for
+    fn vector_candidates(
+        &self,
+        _index: &[u8],
+        _probe: &Datum<'_>,
+        _depth: usize,
+    ) -> DbResult<Option<Vec<i64>>> {
+        Ok(None)
+    }
 }
 
 /// A catalog that also answers one recursive CTE's queue.
@@ -581,6 +605,13 @@ pub enum AccessKind {
     Point,
     /// A probe of this tree once per row of the stage before it.
     Nested,
+    /// The rows an index a module owns named, read out of the tree by rowid.
+    ///
+    /// The tree is the table's, so the layout and every column slot are the
+    /// ordinary ones; what is different is *which* rows and in what order -
+    /// the module chose them, and the plan's own `ORDER BY` then rescores them
+    /// (task-1838 §7).
+    Vector,
     /// The rows a nested query produced, materialised once before the pipeline
     /// runs.
     ///
@@ -597,6 +628,7 @@ impl AccessKind {
     pub fn describe(self) -> &'static str {
         match self {
             AccessKind::Full => "SCAN",
+            AccessKind::Vector => "VECTOR SEARCH",
             AccessKind::Span => "RANGE",
             AccessKind::Reverse => "RANGE REVERSE",
             AccessKind::Skip => "SKIP SCAN",
@@ -740,6 +772,8 @@ pub enum Source<'t> {
     Skip(SkipScan<'t>),
     /// One row by key.
     Point(PointProbe<'t>, Vec<OwnedDatum>),
+    /// The rows an index a module owns named, by rowid, in its order.
+    Vector(PointProbe<'t>, Vec<i64>),
     /// Rows a nested query produced, already materialised.
     Rows(Vec<Vec<OwnedDatum>>),
     /// A fixed number of rows of no columns at all.
@@ -787,6 +821,20 @@ impl Source<'_> {
                 };
                 probe.run(pool, borrowed, downstream)
             }
+            Source::Vector(probe, keys) => {
+                // One descent per candidate, and the candidates are already the
+                // few the index chose - so this is `k` probes rather than a
+                // scan, which is the whole point of the path.
+                let mut buffer: Vec<OwnedDatum> = Vec::new();
+                let mut rows: Vec<Vec<OwnedDatum>> = Vec::with_capacity(keys.len());
+                for key in keys {
+                    if probe.lookup(pool, &[Datum::Int(*key)], &mut buffer)? {
+                        rows.push(buffer.clone());
+                    }
+                }
+                crate::ops::emit_rows(&rows, downstream)?;
+                downstream.finish()
+            }
             Source::Rows(rows) => {
                 crate::ops::emit_rows(rows, downstream)?;
                 downstream.finish()
@@ -809,6 +857,7 @@ impl Source<'_> {
             Source::Reverse(_) => "RANGE REVERSE",
             Source::Skip(_) => "SKIP SCAN",
             Source::Point(_, _) => "POINT PROBE",
+            Source::Vector(_, _) => "VECTOR SEARCH",
             Source::Rows(_) => "SCAN SUBQUERY",
             Source::Constant(_) => "CONSTANT ROW",
         }
@@ -1201,6 +1250,21 @@ fn plan_stages(
             // A virtual table is a *materialised* stage: the module produces
             // its rows on the caller's side and the pipeline reads them, which
             // is the same shape a subquery already has.
+            // The candidates come from the module, and the rows come out of
+            // the table's own tree by rowid - so this is a table stage with an
+            // unusual source rather than a materialised one.
+            AccessPath::VectorProbe { root, .. } => {
+                push_stage(
+                    &mut stages,
+                    catalog,
+                    *root,
+                    AccessKind::Vector,
+                    source.id,
+                    position,
+                    false,
+                    &mut offset,
+                )?;
+            }
             AccessPath::VirtualScan { .. } => {
                 // A module is asked once, whether it is the outermost term or
                 // an inner one: the plan it chose was chosen for one set of
@@ -2309,6 +2373,25 @@ fn build_source<'t>(
             Ok(Source::Reverse(ReverseScan::new(
                 tree, projection, bounds, limit,
             )))
+        }
+        AccessKind::Vector => {
+            let AccessPath::VectorProbe {
+                index,
+                probe,
+                depth,
+                ..
+            } = path
+            else {
+                return Err(misuse("a vector stage over a path that is not one"));
+            };
+            let wanted = literal_value(probe, params)?;
+            let Some(keys) = catalog.vector_candidates(index, &wanted.borrow(), *depth)? else {
+                return Err(misuse(format!(
+                    "no vector index named {}",
+                    String::from_utf8_lossy(index)
+                )));
+            };
+            Ok(Source::Vector(PointProbe::new(tree, projection), keys))
         }
         AccessKind::Nested => Err(misuse("a nested stage cannot drive a pipeline")),
         // Unreachable: `source_for` answers a materialised stage before it gets

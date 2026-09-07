@@ -2504,6 +2504,12 @@ impl Compiler {
             | AccessPath::RecursiveSelf { .. } => {
                 return Err(error::misuse("a materialised path reached the table loop"));
             }
+            // The old engine has no vector index and never plans one: the
+            // planner only offers this path for a table whose catalog carries
+            // one, and only the new engine's catalog ever does.
+            AccessPath::VectorProbe { .. } => {
+                return Err(error::misuse("a vector index on the bytecode engine"));
+            }
         }
         Ok(())
     }

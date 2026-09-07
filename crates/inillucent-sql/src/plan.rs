@@ -134,6 +134,25 @@ pub enum AccessPath {
         /// The FROM term whose store holds the queue.
         cte: usize,
     },
+    /// The k nearest vectors, from an index a module owns.
+    ///
+    /// **A `TopN` over a distance is a different question from a scan.** The
+    /// rows are chosen by the index rather than filtered out of a walk, so the
+    /// path carries the probe and the depth rather than a range: the module is
+    /// asked for `k` candidates and the plan's own `ORDER BY` then rescores
+    /// them exactly, which is what keeps the answer the answer an exhaustive
+    /// cosine gives (task-1838 §7).
+    VectorProbe {
+        /// The table's root page, whose rows the candidates name.
+        root: u32,
+        /// The store holding the vectors, by the name the index was created
+        /// with.
+        index: Vec<u8>,
+        /// The vector to measure against, which reads no column of this query.
+        probe: Box<BoundExpr>,
+        /// How many candidates to ask the index for.
+        depth: usize,
+    },
     /// Rows produced by a virtual table's module.
     VirtualScan {
         /// The module and the arguments its `CREATE` gave it.
@@ -201,6 +220,10 @@ impl AccessPath {
             }
             AccessPath::Recursive { .. } => format!("SCAN {table} USING RECURSIVE QUEUE"),
             AccessPath::RecursiveSelf { .. } => format!("SCAN {table}"),
+            AccessPath::VectorProbe { index, depth, .. } => format!(
+                "SEARCH {table} USING VECTOR INDEX {} (k={depth})",
+                String::from_utf8_lossy(index)
+            ),
             AccessPath::VirtualScan { .. } => format!("SCAN {table} VIRTUAL TABLE INDEX"),
             AccessPath::Subquery { correlated, .. } => {
                 if *correlated {
@@ -1129,6 +1152,110 @@ fn order_cost(select: &BoundSelect, terms: &[BoundExpr], order: &[usize], levers
     total
 }
 
+/// Returns the vector probe a `TopN` over a distance can use, when it can.
+///
+/// **Every condition here is a way the rewrite would change the answer.** The
+/// index returns `k` candidates and nothing else, so the query has to be asking
+/// for the nearest `k` of *this* table by *this* measure and by nothing else:
+///
+/// - one FROM term, because a join's other side may multiply or drop rows and
+///   the k the index was asked for would then be the wrong k;
+/// - the only `ORDER BY` term, ascending, so the index's order and the query's
+///   are the same order;
+/// - a `LIMIT` that is a literal, because the index has to be told how deep to
+///   go before the statement runs;
+/// - no `OFFSET`, no `GROUP BY`, no aggregate and no `DISTINCT`, each of which
+///   reads rows the top k does not contain;
+/// - and a probe that reads no column, because a per-row probe is a different
+///   query - the index answers one question, not one per row.
+///
+/// A `WHERE` clause is *allowed*: the residual is tested over the candidates,
+/// which is what SQLite does with a partial index and what pgvector's own
+/// documentation warns about - a narrow filter over an approximate index can
+/// return fewer than `k` rows. It is the caller's query and this does not
+/// second-guess it.
+///
+/// @param id - the FROM term's statement-wide number
+/// @param position - where it sits in the join order
+/// @param source - the term
+/// @param select - the whole statement, for its `ORDER BY` and `LIMIT`
+fn vector_path(
+    id: usize,
+    position: usize,
+    source: &BoundSource,
+    select: &BoundSelect,
+) -> Option<AccessPath> {
+    if position != 0 || select.sources.len() != 1 {
+        return None;
+    }
+    if select.distinct
+        || !select.group_by.is_empty()
+        || !select.aggregates.is_empty()
+        || select.offset.is_some()
+        || !select.compounds.is_empty()
+    {
+        return None;
+    }
+    let [term] = select.order_by.as_slice() else {
+        return None;
+    };
+    if term.order != crate::ast::SortOrder::Ascending {
+        return None;
+    }
+    let Some(BoundExpr::Integer(depth)) = select.limit.as_ref() else {
+        return None;
+    };
+    let depth = usize::try_from(*depth).ok().filter(|held| *held > 0)?;
+    let BoundExpr::Function {
+        func: crate::function::ScalarFunc::VectorDistanceCos,
+        arguments,
+        ..
+    } = &term.expr
+    else {
+        return None;
+    };
+    let [BoundExpr::Column {
+        source: held,
+        column,
+        ..
+    }, probe] = arguments.as_slice()
+    else {
+        return None;
+    };
+    if *held != id || reads_a_column(probe) {
+        return None;
+    }
+    let index = source.table.indexes.iter().find(|held| {
+        held.origin == crate::catalog_view::IndexOrigin::Module
+            && held
+                .columns
+                .first()
+                .is_some_and(|first| first.column == Some(*column))
+    })?;
+    Some(AccessPath::VectorProbe {
+        root: source.table.root,
+        index: index.name.clone(),
+        probe: Box::new(probe.clone()),
+        depth,
+    })
+}
+
+/// Reports whether an expression reads any column or rowid.
+///
+/// A probe that did would be a different question per row, and the index
+/// answers one.
+///
+/// @param expr - the expression to look through
+fn reads_a_column(expr: &BoundExpr) -> bool {
+    if matches!(
+        expr,
+        BoundExpr::Column { .. } | BoundExpr::Rowid { .. } | BoundExpr::VirtualFunction { .. }
+    ) {
+        return true;
+    }
+    expr.children().into_iter().any(reads_a_column)
+}
+
 /// Returns what one term's path costs, and how many rows it produces.
 fn path_cost(source: &BoundSource, path: &AccessPath) -> (f64, f64) {
     let rows = estimated_rows(&source.table);
@@ -1146,6 +1273,14 @@ fn path_cost(source: &BoundSource, path: &AccessPath) -> (f64, f64) {
                 rows / (usable as f64 * 8.0)
             };
             (cost::scan_cost(rows.max(1.0)), rows.max(1.0))
+        }
+        // The index returns `depth` rows and the walk visits exactly those, so
+        // the cost is a descent per candidate and the row count is the depth -
+        // which is what makes it beat a scan on a table of any size and lose to
+        // one on a table smaller than `k`.
+        AccessPath::VectorProbe { depth, .. } => {
+            let matches = (*depth as f64).min(rows).max(1.0);
+            (cost::search_cost(rows, matches, true), matches)
         }
         AccessPath::RowidSeek { .. } => (cost::search_cost(rows, 1.0, true), 1.0),
         AccessPath::RowidRange { low, high, .. } => {
@@ -1386,6 +1521,13 @@ fn choose_path(
     }
     let id = ids.get(position).copied().unwrap_or(position);
     let table = &source.table;
+    // **The k nearest, when the query asked exactly that.** Tried before the
+    // b-tree paths because none of them apply: an index a module owns has no
+    // key to seek and no range to walk, and the shape it answers - a distance
+    // ordered ascending with a `LIMIT` - is one no other path can improve on.
+    if let Some(path) = vector_path(id, position, source, select) {
+        return path;
+    }
     if let Some(module) = table.module.clone() {
         return virtual_path(id, position, ids, source, select, module, terms, consumed);
     }
@@ -1841,6 +1983,12 @@ fn index_path(
     let table = &source.table;
     let mut best: Option<(f64, AccessPath, Vec<usize>)> = None;
     for index in &table.indexes {
+        // An index a module owns is not a b-tree: it has no root to seek into
+        // and no key order to walk. `vector_path` is the only path that can use
+        // one, and it was tried before this.
+        if index.origin == crate::catalog_view::IndexOrigin::Module {
+            continue;
+        }
         if index.partial_sql.is_some() {
             // A partial index only holds the rows its predicate accepts. Using
             // one without proving the query implies that predicate would lose

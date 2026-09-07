@@ -449,6 +449,98 @@ fn an_index_using_the_module_is_built_and_maintained() {
     );
 }
 
+/// The plan uses the index, and the index's answer is the exhaustive answer.
+///
+/// **The acceptance for Part 7, in one test.** `EXPLAIN QUERY PLAN` has to say
+/// the index was used - a rule that silently did not fire would leave every
+/// other assertion passing over a scan - and the rows have to be the rows an
+/// exhaustive cosine picks, in order, over five hundred vectors and twenty
+/// probes.
+#[test]
+fn the_plan_uses_the_index_and_the_index_agrees_with_exhaustive_cosine() {
+    let held = database("planned");
+    let connection = held.connect();
+    connection
+        .execute_batch("CREATE TABLE embedding (id INTEGER PRIMARY KEY, v VECTOR(32))")
+        .expect("the table is created");
+    let corpus: Vec<Vec<f32>> = (0..VECTORS).map(|index| vector_of(index as u64)).collect();
+    let mut batch = String::new();
+    for (index, vector) in corpus.iter().enumerate() {
+        batch.push_str(&format!(
+            "INSERT INTO embedding(id, v) VALUES ({index}, {}); ",
+            literal(vector)
+        ));
+    }
+    connection.execute_batch(&batch).expect("the corpus loads");
+    connection
+        .execute_batch("CREATE INDEX ix ON embedding USING inillucent_hnsw (v)")
+        .expect("the index is built");
+
+    let probe = vector_of(30_000);
+    // `EXPLAIN QUERY PLAN` answers four columns and the detail is the last, so
+    // the whole row is rendered rather than its first column.
+    let plan: Vec<String> = connection
+        .query(&format!(
+            "EXPLAIN QUERY PLAN SELECT id FROM embedding              ORDER BY vector_distance_cos(v, {}) LIMIT 10",
+            literal(&probe)
+        ))
+        .expect("the plan is explained")
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|value| match value {
+                    OwnedDatum::Text(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+                    other => format!("{other:?}"),
+                })
+                .collect::<Vec<String>>()
+                .join(" ")
+        })
+        .collect();
+    assert!(
+        plan.iter()
+            .any(|line| line.contains("USING VECTOR INDEX ix")),
+        "the plan uses the index: {plan:?}"
+    );
+
+    let mut hits = 0usize;
+    let mut wanted_total = 0usize;
+    for query in 0..20u64 {
+        let probe = vector_of(30_000 + query);
+        let mut ranked: Vec<(usize, f64)> = corpus
+            .iter()
+            .enumerate()
+            .map(|(index, held)| (index, cosine(held, &probe)))
+            .collect();
+        ranked.sort_by(|left, right| {
+            left.1
+                .partial_cmp(&right.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(left.0.cmp(&right.0))
+        });
+        let wanted: Vec<i64> = ranked
+            .iter()
+            .take(10)
+            .map(|(index, _)| *index as i64)
+            .collect();
+        wanted_total += wanted.len();
+        let got = integers(
+            &connection,
+            &format!(
+                "SELECT id FROM embedding ORDER BY vector_distance_cos(v, {}) LIMIT 10",
+                literal(&probe)
+            ),
+        );
+        assert_eq!(got.len(), 10, "query {query} returned ten rows");
+        hits += got.iter().filter(|id| wanted.contains(id)).count();
+    }
+    // The store's default mode is exact, so recall below 1.000 is a defect
+    // rather than the approximation working as designed.
+    assert_eq!(
+        hits, wanted_total,
+        "recall through the planned index: {hits} of {wanted_total}"
+    );
+}
+
 /// An index over a column that never said how wide its vectors are is refused.
 #[test]
 fn an_index_needs_a_declared_width() {
