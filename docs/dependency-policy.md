@@ -29,7 +29,7 @@ per crate, naming the crates that may use it. The categories are:
 |---|---|
 | error and data plumbing | carries values around; decides nothing about SQL or storage |
 | synchronization | wrapped behind inillucent types; the locking protocol is ours |
-| OS boundary | `libc` and `windows-sys`, used only inside `inillucent-vfs`, every call audited |
+| OS boundary | `libc` and `windows-sys`, used only inside `inillucent-vfs` and, test-only, inside `inillucent-compat`'s `procstat.rs`; every call audited |
 | hash and checksum | the algorithm and its on-disk use are specified by inillucent |
 | async adaptation | the core owns polling and cancellation; an adapter only drives it |
 | unicode helpers | tables and normalisation data; never SQL or collation semantics |
@@ -65,8 +65,8 @@ that quietly implements a piece of the engine".
 
 | Crate | Category | Reason |
 |---|---|---|
-| `libc` | OS boundary | `fcntl` byte-range locking and nothing else; `inillucent-vfs` only |
-| `windows-sys` | OS boundary | `LockFileEx`, `GetFileInformationByHandle`, `BCryptGenRandom`; `inillucent-vfs` only |
+| `libc` | OS boundary | `fcntl` byte-range locking in `inillucent-vfs`; `getrusage` in `inillucent-compat`'s `procstat.rs`, so the gate can report what each arm's process cost (task-1838) |
+| `windows-sys` | OS boundary | `LockFileEx`, `GetFileInformationByHandle`, `BCryptGenRandom` in `inillucent-vfs`; `GetProcessMemoryInfo` and `GetProcessTimes` in `inillucent-compat`'s `procstat.rs` (task-1838) |
 
 Nothing else was added. SHA-256, SHA3-256, CRC-32, the WAL checksum, the varint
 codec, the deterministic generator, the TOML subset reader and the JSON the

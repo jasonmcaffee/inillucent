@@ -113,6 +113,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_SystemInformation",
     "Win32_Security_Cryptography",
     "Win32_System_Threading",
+    # `GetProcessMemoryInfo`, for the gate's memory accounting (task-1838).
+    "Win32_System_ProcessStatus",
 ] }
 # ONNX inference. `load-dynamic` loads libonnxruntime at runtime through dlopen
 # rather than linking it, because ort's system linking strategy wants a static

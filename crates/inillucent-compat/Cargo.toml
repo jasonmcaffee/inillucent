@@ -27,6 +27,13 @@ inillucent-wal = { workspace = true }
 inillucent-txn = { workspace = true }
 inillucent-engine = { workspace = true }
 inillucent-migrate = { workspace = true }
+# The gate's memory and processor accounting (task-1838 Part 6). The operating
+# system is the only thing that can say what a *process* cost, and the
+# reference arm is a separate program this workspace cannot instrument.
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
 
 [[bin]]
 name = "inillucent-sqlperf"
@@ -79,6 +86,10 @@ path = "src/bin/probeprofile.rs"
 [[bin]]
 name = "inillucent-prepareprofile"
 path = "src/bin/prepareprofile.rs"
+
+[[bin]]
+name = "inillucent-shellrss"
+path = "src/bin/shellrss.rs"
 
 [[bin]]
 name = "inillucent-exprperf"
