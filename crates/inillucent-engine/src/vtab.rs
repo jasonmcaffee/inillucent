@@ -1164,6 +1164,97 @@ impl ImportedDatabase {
     ///
     /// @param statement - the bound insert
     /// @param params - the values bound to `?1`, `?2`, ...
+    /// Applies an `UPDATE` to a virtual table, one row at a time.
+    ///
+    /// **A module owns its storage, so an update is a replacement.** The row is
+    /// read back through an ordinary query - which is the module's own cursor,
+    /// so there is no second reader of its format - the assignments are applied
+    /// over it, and the whole row is handed back as one `Change::Update`. That
+    /// is what `xUpdate` takes and what an append-only index does with an edit:
+    /// tombstone the old version, append the new one.
+    ///
+    /// The hidden columns are left NULL. They are the module's query interface -
+    /// `k`, `vector`, `rank` on a search table - and are not values a row holds.
+    ///
+    /// @param statement - the bound update
+    /// @param keys - the rowid of each row the `WHERE` selected
+    /// @param params - the bound parameters
+    pub(super) fn update_module(
+        &mut self,
+        statement: &inillucent_sql::dml::BoundUpdate,
+        keys: &[Vec<inillucent_tree::datum::OwnedDatum>],
+        params: &inillucent_exec::physical::Params,
+    ) -> DbResult<usize> {
+        let table = statement.table.clone();
+        let width = table.columns.len();
+        // The columns a row actually holds, by declared position, and the query
+        // that reads them.
+        let visible: Vec<usize> = (0..width)
+            .filter(|at| {
+                table
+                    .column(*at as u16)
+                    .is_some_and(|column| !column.hidden)
+            })
+            .collect();
+        let projection = visible
+            .iter()
+            .filter_map(|at| table.column(*at as u16))
+            .map(|column| {
+                format!(
+                    "\"{}\"",
+                    String::from_utf8_lossy(&column.name).replace('"', "\"\"")
+                )
+            })
+            .collect::<Vec<String>>()
+            .join(", ");
+        let quoted = String::from_utf8_lossy(&table.name).replace('"', "\"\"");
+        let mut changed = 0usize;
+        for key in keys {
+            let Some(&inillucent_tree::datum::OwnedDatum::Int(rowid)) = key.first() else {
+                continue;
+            };
+            let held = self.execute_any(
+                &format!("SELECT {projection} FROM \"{quoted}\" WHERE rowid = {rowid}"),
+                &inillucent_exec::physical::Params::new(),
+            )?;
+            let mut values = vec![Value::Null; width];
+            if let Some(row) = held.rows.first() {
+                for (position, at) in visible.iter().enumerate() {
+                    if let (Some(slot), Some(value)) = (values.get_mut(*at), row.get(position)) {
+                        *slot = inillucent_exec::scalar::to_value(value.borrow());
+                    }
+                }
+            }
+            for assignment in &statement.assignments {
+                // **A constant, because a module's row is not in scope here.**
+                // `SET body = body || '!'` reads the row being replaced, which
+                // the ordinary write path evaluates against the row image it
+                // holds; this path has no such image, and answering with the
+                // wrong value would be worse than saying so.
+                let value = inillucent_exec::physical::literal_value(&assignment.value, params)
+                    .map_err(|_| {
+                        refusal(
+                            "an UPDATE of a virtual table assigns a constant; \
+                             an expression over the row being replaced is not supported",
+                        )
+                    })?;
+                if let Some(slot) = values.get_mut(usize::from(assignment.column)) {
+                    *slot = inillucent_exec::scalar::to_value(value.borrow());
+                }
+            }
+            self.change_module(
+                &table.name,
+                &Change::Update {
+                    old_rowid: Value::Integer(rowid),
+                    new_rowid: Value::Integer(rowid),
+                    values,
+                },
+            )?;
+            changed = changed.saturating_add(1);
+        }
+        Ok(changed)
+    }
+
     pub(super) fn insert_into_module(
         &mut self,
         statement: &inillucent_sql::dml::BoundInsert,

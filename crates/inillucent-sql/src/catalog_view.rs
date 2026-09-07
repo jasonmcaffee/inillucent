@@ -221,7 +221,10 @@ impl ColumnInfo {
         let Some(rest) = declared.strip_prefix(b"vector".as_slice()) else {
             return false;
         };
-        rest.is_empty() || rest.first().is_some_and(|byte| !byte.is_ascii_alphanumeric())
+        rest.is_empty()
+            || rest
+                .first()
+                .is_some_and(|byte| !byte.is_ascii_alphanumeric())
     }
 
     /// Returns how many dimensions a `VECTOR(N)` column declares.

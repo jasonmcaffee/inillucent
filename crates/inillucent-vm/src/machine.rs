@@ -872,6 +872,9 @@ impl Machine {
                     total_changes: self.reported_total_changes,
                     last_insert_rowid: self.last_insert_rowid,
                     seed: self.entropy,
+                    // The bytecode engine has no `case_sensitive_like` of its
+                    // own; the new engine reads the pragma and compiles it in.
+                    like_case_sensitive: false,
                 };
                 // A vector measure over a mismatched pair refuses rather than
                 // answering NULL, so a ranking query cannot come back ordered

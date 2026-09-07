@@ -76,13 +76,7 @@ fn probe(name: &str, setup: &[&str], sql: &str, want_value: bool) -> Outcome {
 /// @param sql - the statement under test
 /// @param want_value - whether the probe reads a value rather than an outcome
 /// @param register - whether to register the probe function and collation first
-fn probe_with(
-    name: &str,
-    setup: &[&str],
-    sql: &str,
-    want_value: bool,
-    register: bool,
-) -> Outcome {
+fn probe_with(name: &str, setup: &[&str], sql: &str, want_value: bool, register: bool) -> Outcome {
     let path = scratch(name);
     let database = Database::open(&path).expect("the scratch database opens");
     let connection = database.connect();
@@ -245,21 +239,27 @@ fn an_unimplemented_construct_refuses_by_name_and_a_typo_does_not() {
         .expect("the fixture is made");
 
     // **The example moves as the engine grows, and that is the point.** It was
-    // a `LEFT JOIN` until task-1838 implemented that, and `ATTACH` until
-    // task-1844 implemented that; the assertion is about the *classification*,
-    // so it is repointed at a construct that is still unimplemented rather than
-    // weakened. `VACUUM` is one, and the capability table says so in the row
-    // beside this one.
+    // a `LEFT JOIN` until task-1838 implemented that, `ATTACH` until task-1844,
+    // and `VACUUM` until task-1859; the assertion is about the
+    // *classification*, so it is repointed at a construct that is still
+    // unimplemented rather than weakened. A second `ON CONFLICT` clause on one
+    // statement is one: the conflict a write hits does not carry which
+    // constraint reported it, so there is nothing to match a second clause's
+    // target against.
     let refused = connection
-        .query("VACUUM", &[], 10)
-        .expect_err("VACUUM is refused");
+        .query(
+            "INSERT INTO people VALUES (1) ON CONFLICT(a) DO NOTHING ON CONFLICT DO NOTHING",
+            &[],
+            10,
+        )
+        .expect_err("a second ON CONFLICT clause is refused");
     assert_eq!(
         refused.status,
         Status::Unsupported,
-        "VACUUM is a capability gap, not a syntax error: {refused}"
+        "a second ON CONFLICT clause is a capability gap, not a syntax error: {refused}"
     );
     let named = refused.feature.expect("the refusal names the construct");
-    assert!(named.contains("VACUUM"), "it named `{named}`");
+    assert!(named.contains("ON CONFLICT"), "it named `{named}`");
 
     let typo = connection
         .query("SELECT a FROM peple", &[], 10)

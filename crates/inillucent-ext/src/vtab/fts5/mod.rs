@@ -100,6 +100,20 @@ fn parse_options(arguments: &[Vec<u8>]) -> DbResult<Options> {
         if let Some((name, value)) = split_option(&text) {
             match name.to_ascii_lowercase().as_str() {
                 "tokenize" => tokenizer = tokenize::parse_specification(&value),
+                // An *external content* table keeps its rows in a table this
+                // module cannot read: a module reaches its own shadow tables
+                // and nothing else, so `rebuild` would find nothing and the
+                // table would answer no rows at all. Refusing by name is the
+                // honest form of that - an empty index that looks like a
+                // working one is the difference a caller cannot see.
+                //
+                // `content=''` is a *contentless* table, which is a different
+                // thing and is supported: it stores no rows on purpose.
+                "content" if !unquote_option(&value).is_empty() => {
+                    return Err(failure(
+                        "fts5: an external content table (content=) is not supported",
+                    ))
+                }
                 // The options this build understands and the ones it does not
                 // are both accepted, because refusing one would make a schema
                 // SQLite wrote unreadable. What is not understood is recorded
@@ -128,6 +142,21 @@ fn parse_options(arguments: &[Vec<u8>]) -> DbResult<Options> {
         return Err(failure("an fts5 table needs at least one column"));
     }
     Ok(Options { columns, tokenizer })
+}
+
+/// Strips the quotes an option's value is written inside.
+///
+/// FTS5 takes `content='c'`, `content="c"` and a bare `content=c` as the same
+/// thing, and the difference between the empty value and a name is what decides
+/// whether a table is contentless or external.
+fn unquote_option(value: &str) -> &str {
+    let text = value.trim();
+    for quote in ['\'', '"', '`'] {
+        if text.len() >= 2 && text.starts_with(quote) && text.ends_with(quote) {
+            return &text[1..text.len() - 1];
+        }
+    }
+    text
 }
 
 /// Splits `name = value`, which is how an option is written.

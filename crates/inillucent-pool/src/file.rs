@@ -433,16 +433,29 @@ mod tests {
     use inillucent_vfs::MemoryVfs;
 
     /// A fresh database has its two meta pages, a free map, and nothing else.
+    ///
+    /// **And no free pages.** Every page the file has is one of those three, so
+    /// there is nothing free in it - which is what `PRAGMA freelist_count`
+    /// reports, and what the reference reports for the same file. This used to
+    /// assert the opposite, because `free_pages` counted every bit the map had
+    /// room for rather than the pages the file holds: six figures on a
+    /// three-page database (task-1859 Part C).
     #[test]
     fn a_fresh_database_is_two_meta_pages_and_a_map() {
         let vfs = MemoryVfs::new();
         let path = DbPath::new("fresh.rdb");
-        let database =
+        let mut database =
             Database::create(&vfs, &path, Options::default().with_page_size(512)).unwrap();
         assert_eq!(database.page_size(), 512);
         assert_eq!(database.meta().free_map, PageId(2));
         assert!(database.catalog_root().is_none());
-        assert!(database.free_pages() > 0);
+        assert_eq!(database.free_pages(), 0);
+        // And a page that is allocated and given back is free again, which is
+        // the other half of the definition.
+        let page = database.allocate(1).unwrap();
+        assert_eq!(database.free_pages(), 0);
+        database.release(page, 1).unwrap();
+        assert_eq!(database.free_pages(), 1);
     }
 
     /// Allocation hands out pages nobody else has, and freeing gives them back.

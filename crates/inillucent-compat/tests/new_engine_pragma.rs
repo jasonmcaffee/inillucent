@@ -291,23 +291,47 @@ fn an_unknown_pragma_is_silent_on_the_new_engine() {
         return no_oracle();
     };
     // SQLite's own answer to a pragma it has never heard of: no rows, no error.
-    // The pragmas whose *subject* the rearchitecture removed answer the same
-    // way, which is why they are listed here beside a made-up one.
-    for sql in [
-        "PRAGMA nonesuch",
-        "PRAGMA nonesuch = 4",
-        "PRAGMA auto_vacuum",
-        "PRAGMA auto_vacuum = FULL",
-        "PRAGMA incremental_vacuum",
-        "PRAGMA temp_store = MEMORY",
-        "PRAGMA mmap_size = 268435456",
-        "PRAGMA legacy_file_format",
-    ] {
+    //
+    // **Only a pragma nobody has heard of, since task-1859.** The pragmas on
+    // SQLite's own list used to answer this way too - 38 of them - and a caller
+    // cannot tell a silent pragma from one that returned no rows. Each of them
+    // now answers or refuses; this list is the two that stayed silent, which
+    // are the ones a name on nobody's list gets.
+    for sql in ["PRAGMA nonesuch", "PRAGMA nonesuch = 4"] {
         assert!(
             ask(&mut engine, sql).is_empty(),
             "{sql} should have answered with no rows"
         );
     }
+    // The ones that now report, and the value each reports.
+    for (sql, answer) in [
+        ("PRAGMA auto_vacuum", "0"),
+        ("PRAGMA temp_store", "0"),
+        ("PRAGMA query_only", "0"),
+        ("PRAGMA mmap_size", "0"),
+        ("PRAGMA data_version", "1"),
+    ] {
+        assert_eq!(
+            ask(&mut engine, sql)
+                .first()
+                .and_then(|row| row.first())
+                .map(String::as_str),
+            Some(answer),
+            "{sql}"
+        );
+    }
+    // And the ones that refuse a value this engine cannot be, rather than
+    // accepting it and dropping it.
+    for sql in ["PRAGMA auto_vacuum = FULL", "PRAGMA temp_store = FILE"] {
+        assert!(
+            engine.execute_any(sql, &Params::new()).is_err(),
+            "{sql} should have refused"
+        );
+    }
+    // `incremental_vacuum` does nothing here and nothing observable in SQLite
+    // either, so it stays a silent no-op rather than becoming a refusal
+    // invented by the rule.
+    assert!(ask(&mut engine, "PRAGMA incremental_vacuum").is_empty());
     // And the statement after one still runs, which is the property a caller
     // relies on when a pragma is a hint.
     assert_eq!(

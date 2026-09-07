@@ -346,6 +346,17 @@ pub struct ImportedDatabase {
     /// emptied when it changes so a compiled `LIKE` is never run under the
     /// other setting.
     pub(crate) case_sensitive_like: bool,
+    /// What `PRAGMA analysis_limit` was set to, in rows.
+    ///
+    /// Recorded and exceeded: `ANALYZE` walks the whole table, which is more
+    /// than any cap asks for.
+    pub(crate) analysis_limit: i64,
+    /// What `PRAGMA writable_schema` was set to.
+    ///
+    /// Recorded and reported. There is nothing for it to unlock: the binder
+    /// refuses a write to a reserved-prefix table whatever it says, and a
+    /// module's shadow table is an ordinary table a write reaches without it.
+    pub(crate) writable_schema: bool,
     /// Whether this connection refuses to write, set by `PRAGMA query_only`.
     ///
     /// Honoured rather than remembered: a caller sets it to make a mistake
@@ -1526,6 +1537,8 @@ impl ImportedDatabase {
             levers: Levers::default(),
             case_sensitive_like: false,
             cache_size: None,
+            analysis_limit: 0,
+            writable_schema: false,
             query_only: false,
             recursive_triggers: false,
             max_page_count: crate::pragma::DEFAULT_MAX_PAGE_COUNT,
@@ -1710,6 +1723,8 @@ impl ImportedDatabase {
             levers: Levers::default(),
             case_sensitive_like: false,
             cache_size: None,
+            analysis_limit: 0,
+            writable_schema: false,
             query_only: false,
             recursive_triggers: false,
             max_page_count: crate::pragma::DEFAULT_MAX_PAGE_COUNT,
@@ -2075,6 +2090,7 @@ impl ImportedDatabase {
             Cached::QueryPlan(_) => Ok(vec!["a query plan".to_string()]),
             Cached::Insert(..) => Ok(vec!["an insert".to_string()]),
             Cached::VirtualInsert(_) => Ok(vec!["an insert into a module".to_string()]),
+            Cached::VirtualUpdate(..) => Ok(vec!["an update of a module".to_string()]),
             Cached::VirtualDelete(..) => Ok(vec!["a delete from a module".to_string()]),
             Cached::Update(..) => Ok(vec!["an update".to_string()]),
             Cached::Delete(..) => Ok(vec!["a delete".to_string()]),
@@ -3635,6 +3651,7 @@ impl ImportedDatabase {
             Cached::Nothing
             | Cached::Ddl(_)
             | Cached::QueryPlan(_)
+            | Cached::VirtualUpdate(..)
             | Cached::VirtualDelete(..)
             | Cached::VirtualInsert(_)
             | Cached::Select(..)
@@ -3659,7 +3676,7 @@ impl ImportedDatabase {
             Cached::QueryPlan(_) => {}
             // A module's own write, which this harness does not time: what it
             // costs is the module's business and not the engine's.
-            Cached::VirtualDelete(..) => {}
+            Cached::VirtualDelete(..) | Cached::VirtualUpdate(..) => {}
             Cached::VirtualInsert(statement) => {
                 self.insert_into_module(statement, params)?;
             }
@@ -4203,6 +4220,22 @@ impl ImportedDatabase {
                     |target, params| dml::update(statement, target, params, &keys),
                 )
             }
+            Cached::VirtualUpdate(statement, plan, prepared) => {
+                let keys = physical::run_any_prepared(plan, self, prepared, params)?.0;
+                let changed = self.update_module(statement, &keys, params)?;
+                if self.batch.get().is_none() {
+                    self.sync_modules()?;
+                    self.seal()?;
+                }
+                Ok(Outcome {
+                    rows: Vec::new(),
+                    names: Vec::new(),
+                    changes: Changes {
+                        rows: changed,
+                        ..Default::default()
+                    },
+                })
+            }
             Cached::VirtualDelete(statement, plan, prepared) => {
                 let keys = physical::run_any_prepared(plan, self, prepared, params)?.0;
                 let mut changed = 0usize;
@@ -4439,6 +4472,30 @@ impl ImportedDatabase {
                     inillucent_sql::dml::BoundInsertSource::Select(_) => false,
                 };
                 Ok(Cached::Insert(statement, source, values_hold_subquery))
+            }
+            // **A write to a virtual table is the module's to make**, the same
+            // way an insert and a delete already are. `UPDATE f SET body=...`
+            // reached the ordinary path, asked for the layout of a table with
+            // no tree, and answered "no layout imported for the table being
+            // written" - so an fts5 table could be inserted into and deleted
+            // from and never corrected.
+            BoundStatement::Update(statement)
+                if statement.table.kind == inillucent_sql::catalog_view::TableKind::Virtual =>
+            {
+                let select = inillucent_exec::dml::module_keys_query(
+                    &statement.table,
+                    statement.source,
+                    statement.filter.as_ref(),
+                    statement.limit.as_ref(),
+                    statement.offset.as_ref(),
+                );
+                let plan = plan_select_with(select, self.levers);
+                let prepared = physical::prepare_any(&plan, self)?;
+                Ok(Cached::VirtualUpdate(
+                    statement,
+                    Box::new(plan),
+                    Box::new(prepared),
+                ))
             }
             BoundStatement::Update(statement) => {
                 let (plan, prepared) = self.update_keys_plan(&statement)?;
@@ -4970,6 +5027,16 @@ enum Cached {
         Box<PhysicalPlan>,
         Box<physical::Prepared>,
     ),
+    /// An update of a virtual table, with the query that finds its rowids.
+    ///
+    /// The same shape as [`Cached::VirtualDelete`] and for the same reason: a
+    /// module owns its storage, so the only handle on one of its rows is the
+    /// rowid it answers with.
+    VirtualUpdate(
+        Box<inillucent_sql::dml::BoundUpdate>,
+        Box<PhysicalPlan>,
+        Box<physical::Prepared>,
+    ),
     /// A query.
     Select(Box<PhysicalPlan>, Box<physical::Prepared>),
     /// An insert, with the plan for its `SELECT` source when it has one.
@@ -5065,7 +5132,6 @@ fn describe_statement(statement: &BoundStatement) -> &'static str {
         BoundStatement::Empty => "nothing",
     }
 }
-
 
 /// The logs one statement writes through, indexed by schema number.
 ///
@@ -5879,10 +5945,9 @@ fn is_shadow_of(owners: &[Vec<u8>], folded: &[u8]) -> bool {
 /// @param cached - the compiled statement
 fn writes_something(cached: &Cached) -> bool {
     match cached {
-        Cached::Insert(..)
-        | Cached::VirtualInsert(_)
-        | Cached::Update(..)
-        | Cached::Delete(..) => true,
+        Cached::Insert(..) | Cached::VirtualInsert(_) | Cached::Update(..) | Cached::Delete(..) => {
+            true
+        }
         Cached::Ddl(sql) => {
             let head = sql
                 .trim_start()

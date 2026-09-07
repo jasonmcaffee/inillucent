@@ -219,9 +219,7 @@ impl Shell {
                     // The reference prints both counters, aligned with three
                     // spaces between them.
                     let total = self.connection().total_changes();
-                    self.say(&format!(
-                        "changes: {changes}   total_changes: {total}"
-                    ));
+                    self.say(&format!("changes: {changes}   total_changes: {total}"));
                 }
             }
         }
@@ -628,9 +626,15 @@ pub fn datum_of(value: &Value<'static>) -> OwnedDatum {
 /// @param sql - the statement as typed
 fn is_query_plan(sql: &str) -> bool {
     let mut words = sql.split_whitespace();
-    words.next().is_some_and(|word| word.eq_ignore_ascii_case("explain"))
-        && words.next().is_some_and(|word| word.eq_ignore_ascii_case("query"))
-        && words.next().is_some_and(|word| word.eq_ignore_ascii_case("plan"))
+    words
+        .next()
+        .is_some_and(|word| word.eq_ignore_ascii_case("explain"))
+        && words
+            .next()
+            .is_some_and(|word| word.eq_ignore_ascii_case("query"))
+        && words
+            .next()
+            .is_some_and(|word| word.eq_ignore_ascii_case("plan"))
 }
 
 /// Renders `EXPLAIN QUERY PLAN`'s four columns as the tree the reference draws.
@@ -684,10 +688,8 @@ fn plan_children(
     let field = |row: &Vec<Value<'static>>, at: usize| -> i64 {
         row.get(at).and_then(Value::as_integer).unwrap_or(0)
     };
-    let children: Vec<&Vec<Value<'static>>> = rows
-        .iter()
-        .filter(|row| field(row, 1) == parent)
-        .collect();
+    let children: Vec<&Vec<Value<'static>>> =
+        rows.iter().filter(|row| field(row, 1) == parent).collect();
     for (at, row) in children.iter().enumerate() {
         let last = at.saturating_add(1) == children.len();
         let detail = row
@@ -705,7 +707,13 @@ fn plan_children(
         // has id 0 and parent 0. It is selected as a child of the root and must
         // not then be expanded as its own parent.
         if field(row, 0) != parent {
-            plan_children(rows, field(row, 0), &carried, depth.saturating_add(1), lines);
+            plan_children(
+                rows,
+                field(row, 0),
+                &carried,
+                depth.saturating_add(1),
+                lines,
+            );
         }
     }
 }

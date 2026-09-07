@@ -18,6 +18,20 @@
 pub enum Tokenizer {
     /// `ascii`: bytes outside `A-Za-z0-9` separate, `A-Z` folds.
     Ascii,
+    /// `porter`: another tokenizer's tokens, each reduced to its stem.
+    ///
+    /// **A wrapper, which is what it is in SQLite too**: `tokenize='porter'`
+    /// stems `unicode61`'s tokens and `tokenize='porter ascii'` stems `ascii`'s.
+    /// It is what makes a search for `run` find `running`, and it was accepted
+    /// and read as `unicode61` - a declaration the application trusts, doing
+    /// nothing, which is the same shape as `CHECK` before task-1845 and
+    /// `STRICT` before it.
+    ///
+    /// The stemmer is Snowball English, which is Porter2 rather than the
+    /// original Porter that SQLite ships. They agree on the ordinary
+    /// inflections - `running`, `runs` and `run` all reduce to `run` in both -
+    /// and differ on a handful of rare words; `feature-comparison.md` says so.
+    Porter(Box<Tokenizer>),
     /// `unicode61`: Unicode letters and numbers are tokens.
     Unicode61 {
         /// Whether diacritics are removed, which `remove_diacritics` decides.
@@ -41,6 +55,12 @@ impl Tokenizer {
             .first()
             .map(|part| String::from_utf8_lossy(part).to_ascii_lowercase())
             .unwrap_or_default();
+        if name == "porter" {
+            // Whatever follows `porter` is the tokenizer it wraps, and nothing
+            // following it means the default one.
+            let inner = specification.get(1..).unwrap_or(&[]);
+            return Tokenizer::Porter(Box::new(Tokenizer::named(inner)));
+        }
         if name == "ascii" {
             return Tokenizer::Ascii;
         }
@@ -70,6 +90,17 @@ impl Tokenizer {
 
     /// Returns the tokens of one piece of text, in the order they appear.
     pub fn tokens(&self, text: &[u8]) -> Vec<Vec<u8>> {
+        if let Tokenizer::Porter(inner) = self {
+            let stemmer = rust_stemmers::Stemmer::create(rust_stemmers::Algorithm::English);
+            return inner
+                .tokens(text)
+                .into_iter()
+                .map(|token| {
+                    let word = String::from_utf8_lossy(&token).into_owned();
+                    stemmer.stem(&word).into_owned().into_bytes()
+                })
+                .collect();
+        }
         let text = String::from_utf8_lossy(text);
         let mut tokens = Vec::new();
         let mut current = String::new();
@@ -91,6 +122,9 @@ impl Tokenizer {
     /// Returns whether a character is part of a token.
     fn is_token_character(&self, character: char) -> bool {
         match self {
+            // Unreachable: `tokens` answers a porter tokenizer from the
+            // tokenizer it wraps and never walks the text itself.
+            Tokenizer::Porter(inner) => inner.is_token_character(character),
             Tokenizer::Ascii => character.is_ascii_alphanumeric(),
             Tokenizer::Unicode61 {
                 extra_tokens,
@@ -125,6 +159,9 @@ impl Tokenizer {
     /// @param out - the token being built
     fn fold_into(&self, character: char, out: &mut String) {
         match self {
+            // Unreachable for the same reason as `is_token_character`: a porter
+            // tokenizer stems what the tokenizer it wraps produced.
+            Tokenizer::Porter(inner) => inner.fold_into(character, out),
             Tokenizer::Ascii => out.push(character.to_ascii_lowercase()),
             Tokenizer::Unicode61 {
                 remove_diacritics, ..

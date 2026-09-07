@@ -101,6 +101,217 @@ struct Case {
 /// task-1849's seven `UNIQUE`-under-`UPDATE` shapes, and task-1846's - two over
 /// a table that has been written to, and five where the two tickets meet.
 const CASES: &[Case] = &[
+    // task-1859 Part E: the silent differences. Every one of these answered,
+    // and answered something else.
+    //
+    // A `CHECK` containing a subquery is *not* here, and the reason is the
+    // shell rather than the engine: both refuse it, in the same words, and the
+    // reference's shell then draws a caret under the offending token in a
+    // spelling this one does not use. The refusal is what the ticket is about
+    // and the probe records it as agreement; a case here would be asserting on
+    // the reference's caret art. `feature-comparison.md` names it.
+    Case {
+        name: "upsert.arm.where",
+        kind: "write",
+        script: "CREATE TABLE t(a INTEGER PRIMARY KEY, n INTEGER);\nINSERT INTO t VALUES(1,100),(2,600);\nINSERT INTO t VALUES(1,7) ON CONFLICT(a) DO UPDATE SET n=999 WHERE t.n > 500;\nINSERT INTO t VALUES(2,7) ON CONFLICT(a) DO UPDATE SET n=999 WHERE t.n > 500;\nSELECT * FROM t ORDER BY a;\nSELECT changes();",
+        expect: Agrees,
+    },
+    Case {
+        name: "trigger.recursive",
+        kind: "trigger",
+        script: "PRAGMA recursive_triggers=ON;\nCREATE TABLE t(a INTEGER);\nCREATE TRIGGER r AFTER INSERT ON t WHEN new.a < 5 BEGIN INSERT INTO t VALUES(new.a+1); END;\nINSERT INTO t VALUES(1);\nSELECT group_concat(a) FROM (SELECT a FROM t ORDER BY a);",
+        expect: Agrees,
+    },
+    // And with the pragma off, which is the default: the trigger fires once.
+    Case {
+        name: "trigger.recursive.off",
+        kind: "trigger",
+        script: "CREATE TABLE t(a INTEGER);\nCREATE TRIGGER r AFTER INSERT ON t WHEN new.a < 5 BEGIN INSERT INTO t VALUES(new.a+1); END;\nINSERT INTO t VALUES(1);\nSELECT group_concat(a) FROM (SELECT a FROM t ORDER BY a);",
+        expect: Agrees,
+    },
+    Case {
+        name: "like.case.sensitive",
+        kind: "operator",
+        script: "SELECT 'ABC' LIKE 'a%';\nPRAGMA case_sensitive_like=ON;\nSELECT 'ABC' LIKE 'a%', 'ABC' LIKE 'A%', like('a%','ABC');\nPRAGMA case_sensitive_like=OFF;\nSELECT 'ABC' LIKE 'a%';",
+        expect: Agrees,
+    },
+    Case {
+        name: "is.distinct.from",
+        kind: "operator",
+        script: "SELECT 1 IS DISTINCT FROM NULL, 1 IS NOT DISTINCT FROM 1, NULL IS NOT DISTINCT FROM NULL, NULL IS DISTINCT FROM NULL, 1 IS 1, 1 IS NOT 2, 1 IS NULL;",
+        expect: Agrees,
+    },
+    Case {
+        name: "types.min.integer",
+        kind: "types",
+        script: "SELECT typeof(-9223372036854775808), -9223372036854775808, typeof(-1), -1, -0x10, typeof(9223372036854775808), -9223372036854775809;",
+        expect: Agrees,
+    },
+    Case {
+        name: "agg.sum.overflow",
+        kind: "read",
+        script: "CREATE TABLE b(x);\nINSERT INTO b VALUES(9223372036854775807),(9223372036854775807);\nSELECT total(x) FROM b;\nSELECT avg(x) FROM b;\nSELECT sum(x) FROM b;",
+        expect: Agrees,
+    },
+    // A real anywhere in the column makes the sum a real, which has no
+    // overflow to report.
+    Case {
+        name: "agg.sum.overflow.real",
+        kind: "read",
+        script: "CREATE TABLE b(x);\nINSERT INTO b VALUES(9223372036854775807),(9223372036854775807),(0.5);\nSELECT sum(x) FROM b;",
+        expect: Agrees,
+    },
+    Case {
+        name: "types.nan",
+        kind: "types",
+        script: "SELECT 1e999, -1e999, 1e999-1e999, typeof(1e999), 0.0/0.0;",
+        expect: Agrees,
+    },
+    Case {
+        name: "fn.jsonb.extract",
+        kind: "json",
+        script: "SELECT jsonb_extract(jsonb('{\"a\":2}'), '$.a'), json_extract(jsonb('{\"a\":2}'), '$.a'), typeof(jsonb_extract(jsonb('{\"b\":[1,2]}'), '$.b')), hex(jsonb_extract(jsonb('{\"b\":[1,2]}'), '$.b')), typeof(jsonb_extract(jsonb('{\"s\":\"x\"}'),'$.s'));",
+        expect: Agrees,
+    },
+    // **The whole specifier family, not the three that were reported.** That is
+    // task-1856's lesson written down: fixing one member of a family and
+    // assuming the rest is how the next three stay hidden.
+    Case {
+        name: "fn.strftime.family",
+        kind: "time",
+        script: "SELECT strftime('%d %e %f %F %H %I %j %k %l %m %M %p %P %R %s %S %u %U %V %w %W %G %g %Y %%','2024-03-01 09:05:07');",
+        expect: Agrees,
+    },
+    Case {
+        name: "fn.strftime.unknown",
+        kind: "time",
+        script: "SELECT quote(strftime('%y','2024-03-01')), quote(strftime('%Z','2024-03-01')), quote(strftime('%J','2024-03-01 09:05:07'));",
+        expect: Agrees,
+    },
+    Case {
+        name: "fn.time.subsec",
+        kind: "time",
+        script: "SELECT datetime('2024-03-01 12:00:00','subsec'), datetime('2024-03-01 12:00:00.123','subsec'), time('2024-03-01 12:00:00','subsec'), unixepoch('2024-03-01 09:05:07'), strftime('%s','2024-03-01 09:05:07');",
+        expect: Agrees,
+    },
+    Case {
+        name: "fn.round.huge",
+        kind: "read",
+        script: "SELECT round(1e308,2), round(2.5), round(-2.5), round(1.005,2);",
+        expect: Agrees,
+    },
+    Case {
+        name: "fn.length.nul",
+        kind: "read",
+        script: "SELECT length(char(0)), length(char(65,0,66)), hex(char(0)), hex(char(65,0,66)), length('abc');",
+        expect: Agrees,
+    },
+    Case {
+        name: "ddl.pk.desc.index",
+        kind: "ddl",
+        script: "CREATE TABLE pd(a INTEGER PRIMARY KEY DESC, b);\nINSERT INTO pd VALUES(1,'x'),(2,'y');\nSELECT count(*) FROM sqlite_schema WHERE type='index' AND tbl_name='pd';\nSELECT a,b FROM pd ORDER BY a;\nSELECT typeof(a) FROM pd LIMIT 1;\nCREATE TABLE pa(a INTEGER PRIMARY KEY, b);\nSELECT count(*) FROM sqlite_schema WHERE type='index' AND tbl_name='pa';",
+        expect: Agrees,
+    },
+    // The stored declaration is the *affinity*, in the reference's own layout -
+    // including its under-fifty-characters-one-line rule.
+    Case {
+        name: "ddl.ctas.declared",
+        kind: "ddl",
+        script: "CREATE TABLE s(a INTEGER, b INT, c BIGINT, d TEXT, e VARCHAR(3), f CHAR(5), g BLOB, h REAL, i DOUBLE, j NUMERIC, k DECIMAL(4,2), l, m DATETIME);\nCREATE TABLE d1 AS SELECT a,b,c,d,e,f,g,h,i,j,k,l,m FROM s;\nSELECT sql FROM sqlite_schema WHERE name='d1';\nCREATE TABLE d4 AS SELECT g FROM s;\nSELECT sql FROM sqlite_schema WHERE name='d4';",
+        expect: Agrees,
+    },
+    // task-1859 Part F: the refusals an ordinary query hits.
+    Case {
+        name: "select.bare.column",
+        kind: "read",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT);\nINSERT INTO t VALUES (1,10,'p'),(2,30,'q'),(3,20,'r'),(4,30,'s');\nSELECT id, max(a) FROM t;\nSELECT id, min(a) FROM t;\nSELECT id, b, max(a) FROM t;\nSELECT id, count(*) FROM t;\nSELECT id+100, max(a) FROM t;",
+        expect: Agrees,
+    },
+    Case {
+        name: "select.bare.column.grouped",
+        kind: "read",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT);\nINSERT INTO t VALUES (1,10,'p'),(2,30,'q'),(3,20,'r'),(4,30,'s');\nSELECT b, id, max(a) FROM t GROUP BY (a>15) ORDER BY 1;",
+        expect: Agrees,
+    },
+    Case {
+        name: "select.distinct.carried",
+        kind: "read",
+        script: "CREATE TABLE t(a INTEGER, b TEXT);\nINSERT INTO t VALUES(10,'z'),(20,'y'),(30,'x'),(10,'w');\nSELECT DISTINCT a FROM t ORDER BY b;\nSELECT DISTINCT a FROM t ORDER BY a;\nSELECT DISTINCT a, b FROM t ORDER BY b;",
+        expect: Agrees,
+    },
+    Case {
+        name: "agg.filter",
+        kind: "read",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT);\nINSERT INTO t VALUES (1,10,'p'),(2,30,'q'),(3,20,'r'),(4,30,'s');\nSELECT count(*) FILTER (WHERE a>15) FROM t;\nSELECT count(*) FILTER (WHERE a>15), count(*), sum(a) FILTER (WHERE a<25) FROM t;\nSELECT b, count(*) FILTER (WHERE a>15) FROM t GROUP BY b ORDER BY b;",
+        expect: Agrees,
+    },
+    Case {
+        name: "agg.order.by",
+        kind: "read",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT);\nINSERT INTO t VALUES (1,10,'p'),(2,30,'q'),(3,20,'r'),(4,30,'s');\nSELECT group_concat(b ORDER BY a DESC) FROM t;\nSELECT group_concat(b ORDER BY a) FROM t;\nSELECT group_concat(b, '-' ORDER BY a DESC) FROM t;\nSELECT json_group_array(a ORDER BY a DESC) FROM t;",
+        expect: Agrees,
+    },
+    Case {
+        name: "agg.json.group",
+        kind: "json",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT);\nINSERT INTO t VALUES(1,10,'p'),(2,20,'q'),(3,NULL,'r');\nSELECT json_group_array(a) FROM t;\nSELECT json_group_object(b, a) FROM t;\nSELECT b, json_group_array(a) FROM t GROUP BY b ORDER BY b;\nSELECT typeof(jsonb_group_array(a)) FROM t;",
+        expect: Agrees,
+    },
+    Case {
+        name: "select.row.value.query",
+        kind: "read",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT);\nINSERT INTO t VALUES (1,10,'p'),(2,30,'q'),(3,20,'r'),(4,30,'s');\nSELECT id FROM t WHERE (a,b) = (SELECT a,b FROM t WHERE id=3);\nSELECT id FROM t WHERE (a,b) <> (SELECT a,b FROM t WHERE id=3) ORDER BY id;\nSELECT id FROM t WHERE (a,b) < (SELECT a,b FROM t WHERE id=3) ORDER BY id;\nSELECT id FROM t WHERE (a,b) = (SELECT a,b FROM t WHERE id=99);",
+        expect: Agrees,
+    },
+    Case {
+        name: "cte.recursive.limit",
+        kind: "read",
+        script: "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n) SELECT count(*), max(x) FROM (SELECT x FROM n LIMIT 1000);\nWITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM c WHERE n < 5) SELECT sum(n) FROM c;",
+        expect: Agrees,
+    },
+    Case {
+        name: "syntax.trailing.comment",
+        kind: "syntax",
+        script: "SELECT 1;\n-- trailing",
+        expect: Agrees,
+    },
+    // task-1859 Part G and H.
+    Case {
+        name: "fts5.update",
+        kind: "fts5",
+        script: "CREATE VIRTUAL TABLE f USING fts5(body, tag);\nINSERT INTO f(body, tag) VALUES('the quick brown fox','a'),('jumps over','b');\nUPDATE f SET body='the quick red fox' WHERE rowid=1;\nSELECT rowid, body, tag FROM f ORDER BY rowid;\nSELECT rowid FROM f WHERE f MATCH 'red';\nSELECT rowid FROM f WHERE f MATCH 'brown';",
+        expect: Agrees,
+    },
+    Case {
+        name: "fts5.porter",
+        kind: "fts5",
+        script: "CREATE VIRTUAL TABLE fp USING fts5(body, tokenize='porter unicode61');\nINSERT INTO fp(body) VALUES('running quickly');\nSELECT body FROM fp WHERE fp MATCH 'run';\nCREATE VIRTUAL TABLE fq USING fts5(body);\nINSERT INTO fq(body) VALUES('running quickly');\nSELECT body FROM fq WHERE fq MATCH 'run';\nSELECT body FROM fq WHERE fq MATCH 'running';",
+        expect: Agrees,
+    },
+    Case {
+        name: "vacuum.into",
+        kind: "shell",
+        script: "CREATE TABLE t(a);\nINSERT INTO t VALUES(1),(2);\nVACUUM;\nSELECT count(*) FROM t;\nVACUUM INTO 'copy.db';\nVACUUM INTO 'copy.db';",
+        expect: Agrees,
+    },
+    Case {
+        name: "vacuum.in.transaction",
+        kind: "shell",
+        script: "CREATE TABLE t(a);\nBEGIN;\nVACUUM;\nCOMMIT;\nSELECT 'after';",
+        expect: Agrees,
+    },
+    Case {
+        name: "shell.parameter",
+        kind: "shell",
+        script: ".parameter init\n.parameter set $x 42\n.parameter set @y 'hi'\n.parameter list\nSELECT $x, @y;\n.parameter unset $x\nSELECT $x;\n.parameter clear\n.parameter list",
+        expect: Agrees,
+    },
+    Case {
+        name: "shell.plan.tree",
+        kind: "shell",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a);\nCREATE TABLE u(id INTEGER PRIMARY KEY, tid);\nCREATE INDEX ia ON t(a);\nEXPLAIN QUERY PLAN SELECT t.id, u.id FROM t JOIN u ON u.tid=t.id ORDER BY t.a;\nEXPLAIN QUERY PLAN SELECT id FROM t WHERE a = 1;",
+        expect: Agrees,
+    },
     // task-1859 Part C: the pragma surface. Every one of these answered
     // nothing at all before - no value and no error, which a caller cannot
     // tell from an empty result.

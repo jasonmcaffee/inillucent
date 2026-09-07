@@ -218,7 +218,7 @@ own thread and fails on the deadline.
 
 | construct | state |
 |---|---|
-| `VACUUM`, `VACUUM INTO` | refused, and named in the message |
+| `VACUUM`, `VACUUM INTO` | `VACUUM` checkpoints; `VACUUM INTO` writes a verified copy and refuses to overwrite (task-1859) |
 | plain `EXPLAIN` | refused on purpose: there is no bytecode to list. `EXPLAIN QUERY PLAN` is answered |
 | a second process on the same file, a second writer, SQLite's file format, the C ABI on the new engine | design non-goals of task-1816 |
 
@@ -449,7 +449,7 @@ two paths.
 | | inillucent (new engine) | SQLite 3.53.4 |
 |---|---|---|
 | SQL dialect | SQLite's; 60 of 60 grammar productions parse (`compat/syntax-report.md`) | reference |
-| inventoried constructs | 47 of 50 run (`new_engine_surface.rs`); the three that do not are `VACUUM`, plain `EXPLAIN` and the table-valued pragma form | reference |
+| inventoried constructs | 48 of 50 run (`new_engine_surface.rs`); the two that do not are plain `EXPLAIN` and the table-valued pragma form | reference |
 | differential probe, 61 scripts | 35 agree, 26 differ: **9 wrong answers**, 17 refusals | reference |
 | type affinity | **not applied on write**: a column stores the class it was given | applied on write |
 | `CHECK`, `STRICT` | **accepted and not enforced** | enforced |

@@ -65,13 +65,12 @@ fn details(connection: &Connection<'_>, sql: &str) -> Vec<String> {
 
 /// The plan lines are the ones SQLite prints for the same schema.
 ///
-/// One divergence is deliberate and recorded here rather than hidden: SQLite
-/// writes `(a=?)` for an index seek and this engine writes `(?=?)`, because
-/// `AccessPath::describe` is given the table's alias and not its column names.
-/// Naming the column would mean threading the table's metadata into a renderer
-/// several callers share, which is a change worth making on purpose rather than
-/// as a side effect of this test. SQLite documents its own `EXPLAIN QUERY PLAN`
-/// text as unstable between releases, so this was never the comparable part.
+/// **The one divergence this test used to record is closed.** It said SQLite
+/// writes `(a=?)` for an index seek where this engine wrote `(?=?)`, because
+/// the renderer was given the table's alias and not its columns - and named
+/// threading the declaration into it as "a change worth making on purpose".
+/// task-1859 made it: `AccessPath::describe_over` takes the declaration, the
+/// key column is named, and the line is the reference's line.
 #[test]
 fn a_query_plan_reads_the_way_sqlite_s_reads() {
     let database = fixture("shape");
@@ -101,15 +100,14 @@ fn a_query_plan_reads_the_way_sqlite_s_reads() {
         "the grouping pass is named only when there is one"
     );
 
-    // The recorded divergence, asserted so that closing it fails this test and
-    // brings someone here to read the paragraph above.
+    // The key column is named, which is the part a reader uses to tell one
+    // index on a table from another.
     assert_eq!(
         details(
             &connection,
             "EXPLAIN QUERY PLAN SELECT a FROM t WHERE a = 'x'"
         ),
-        vec!["SEARCH t USING COVERING INDEX ix (?=?)".to_string()],
-        "SQLite writes (a=?) here; see this test's documentation"
+        vec!["SEARCH t USING COVERING INDEX ix (a=?)".to_string()],
     );
 }
 

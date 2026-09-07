@@ -435,10 +435,9 @@ impl PhysicalPlan {
         let mut lines = Vec::new();
         for source in &self.sources {
             lines.push(
-                source.path.describe_over(
-                    &String::from_utf8_lossy(&source.alias),
-                    Some(&source.table),
-                ),
+                source
+                    .path
+                    .describe_over(&String::from_utf8_lossy(&source.alias), Some(&source.table)),
             );
         }
         for (op, arm) in &self.compounds {

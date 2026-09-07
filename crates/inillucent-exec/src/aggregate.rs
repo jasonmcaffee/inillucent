@@ -269,7 +269,9 @@ impl Accumulator {
             // has yet been chosen at all.
             let replace = match &self.extreme {
                 None => true,
-                Some(held) => !seen.borrow().is_null() && seen.borrow().compare(&held.borrow()) == wanted,
+                Some(held) => {
+                    !seen.borrow().is_null() && seen.borrow().compare(&held.borrow()) == wanted
+                }
             };
             if replace {
                 self.extreme = Some(seen);
@@ -700,14 +702,16 @@ impl Accumulator {
                 // Everything else reduces one value, and a NULL is a row it
                 // skips - which `push` already knows.
                 _ => {
-                    let value = row.first().cloned().unwrap_or(inillucent_value::value::Value::Null);
+                    let value = row
+                        .first()
+                        .cloned()
+                        .unwrap_or(inillucent_value::value::Value::Null);
                     folded.push(&crate::scalar::from_value(value).borrow());
                 }
             }
         }
         folded.finish()
     }
-
 }
 
 /// Renders a value as text, the way the dialect's text conversion does.
@@ -799,9 +803,28 @@ mod tests {
             fold(AggregateKind::Sum, &[Datum::Int(i64::MAX), Datum::Int(0)]),
             OwnedDatum::Int(i64::MAX)
         ));
-        match fold(AggregateKind::Sum, &[Datum::Int(i64::MAX), Datum::Int(1)]) {
+        // **An integer sum that will not fit is an error, not a bigger
+        // number.** It used to become a double, which is a total that is wrong
+        // by a rounding and that a caller reading an integer column has no
+        // reason to suspect; the reference raises `integer overflow`
+        // (task-1859 Part E). `total` and `avg` are documented doubles and
+        // still answer one over the same values.
+        let mut over = Accumulator::new(AggregateKind::Sum);
+        over.push(&Datum::Int(i64::MAX));
+        over.push(&Datum::Int(1));
+        assert!(over.finish().is_err(), "an overflowing sum must refuse");
+        match fold(AggregateKind::Total, &[Datum::Int(i64::MAX), Datum::Int(1)]) {
             OwnedDatum::Real(number) => assert_eq!(number, i64::MAX as f64 + 1.0),
-            other => panic!("overflowing sum was {other:?}"),
+            other => panic!("overflowing total was {other:?}"),
+        }
+        // A real anywhere in the input makes the sum a real, which has no
+        // overflow to report.
+        match fold(
+            AggregateKind::Sum,
+            &[Datum::Int(i64::MAX), Datum::Int(1), Datum::Real(0.0)],
+        ) {
+            OwnedDatum::Real(number) => assert_eq!(number, i64::MAX as f64 + 1.0),
+            other => panic!("a mixed overflowing sum was {other:?}"),
         }
     }
 
@@ -880,8 +903,16 @@ mod tests {
                 }
                 let mut dense = Accumulator::new(kind.clone());
                 dense.push_dense_ints(&bytes);
-                let a = per_row.finish().unwrap();
-                let b = dense.finish().unwrap();
+                // **A refusal is an answer the two paths have to agree on
+                // too.** `sum` over `[i64::MAX, 1, 1]` raises `integer
+                // overflow` now, and the point of this sweep is that the
+                // vectorised path and the per-row one cannot disagree - about
+                // that as much as about a number.
+                let (a, b) = match (per_row.finish(), dense.finish()) {
+                    (Ok(a), Ok(b)) => (a, b),
+                    (Err(_), Err(_)) => continue,
+                    (a, b) => panic!("{kind:?} over {run:?}: per-row {a:?}, dense {b:?}"),
+                };
                 assert_eq!(
                     a.borrow().compare(&b.borrow()),
                     std::cmp::Ordering::Equal,

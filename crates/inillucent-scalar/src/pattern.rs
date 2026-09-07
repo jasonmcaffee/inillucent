@@ -30,12 +30,7 @@ pub fn like(pattern: &[u8], subject: &[u8], escape: Option<u8>) -> bool {
 /// @param subject - the text being matched
 /// @param escape - the `ESCAPE` character, when one was given
 /// @param fold_case - whether ASCII letters match either case
-pub fn like_folding(
-    pattern: &[u8],
-    subject: &[u8],
-    escape: Option<u8>,
-    fold_case: bool,
-) -> bool {
+pub fn like_folding(pattern: &[u8], subject: &[u8], escape: Option<u8>, fold_case: bool) -> bool {
     matches(pattern, subject, escape, true, fold_case)
 }
 

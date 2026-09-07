@@ -1112,6 +1112,7 @@ mod tests {
             operand: column(0, 2),
             pattern: column(1, 2),
             escape: None,
+            case_sensitive: false,
         };
         assert_eq!(
             eval_one(&like, &[Datum::Text(b"Hello"), Datum::Text(b"h%o")]),
@@ -1124,6 +1125,7 @@ mod tests {
             operand: column(0, 2),
             pattern: column(1, 2),
             escape: None,
+            case_sensitive: false,
         };
         assert_eq!(
             eval_one(&glob, &[Datum::Text(b"Hello"), Datum::Text(b"h*o")]),
@@ -1136,6 +1138,7 @@ mod tests {
             operand: column(0, 2),
             pattern: column(1, 2),
             escape: None,
+            case_sensitive: false,
         };
         assert_eq!(
             eval_one(&not_like, &[Datum::Text(b"Hello"), Datum::Text(b"h%o")]),

@@ -235,7 +235,9 @@ pub fn fire(
             }
         }
         for statement in &trigger.body {
-            match run_body(statement, trigger, rows, slots, rowid, target, params, deeper) {
+            match run_body(
+                statement, trigger, rows, slots, rowid, target, params, deeper,
+            ) {
                 Ok(()) => {}
                 Err(error) if is_ignore(&error) => return Ok(Fired::SkipRow),
                 Err(error) => return Err(named(error, trigger)),

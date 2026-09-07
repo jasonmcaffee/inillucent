@@ -203,7 +203,9 @@ const SURFACE: &[(&str, &str, Answers)] = &[
         Yes,
     ),
     ("attach", "ATTACH DATABASE ':memory:' AS other", Yes),
-    ("vacuum", "VACUUM", NotYet),
+    // task-1859 Part H: `VACUUM` folds the log into the file and `VACUUM INTO`
+    // writes a verified copy, which is how a backup is taken.
+    ("vacuum", "VACUUM", Yes),
     // Plain EXPLAIN is refused for a reason that is not "yet": see the two
     // classes of refusal above.
     ("explain", "EXPLAIN SELECT a FROM t", NotYet),
@@ -344,7 +346,7 @@ fn count_of(connection: &Connection<'_>, table: &str) -> i64 {
 /// It shows up as `.schema` printing `/* loud() */` where SQLite prints
 /// `/* loud(shout) */`, which is how it was found.
 #[test]
-fn a_views_columns_are_not_reported() {
+fn a_views_columns_are_reported() {
     let database = fresh("viewcols");
     let connection = database.connect();
     connection
@@ -359,12 +361,17 @@ fn a_views_columns_are_not_reported() {
         2,
         "the view itself does not resolve"
     );
-    assert!(
+    // **They are reported now.** `PRAGMA table_info` on a view answered nothing
+    // at all, so an ORM reading it could not see a view's shape; task-1859
+    // Part C binds the view's `SELECT` and answers its columns, which is what
+    // the reference does.
+    assert_eq!(
         connection
             .query("PRAGMA table_info(loud)")
             .expect("the pragma runs")
-            .is_empty(),
-        "a view's columns are reported now - retire this test's premise"
+            .len(),
+        1,
+        "a view has the columns its SELECT produces"
     );
 }
 
