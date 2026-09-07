@@ -92,6 +92,10 @@ name = "inillucent-shellrss"
 path = "src/bin/shellrss.rs"
 
 [[bin]]
+name = "inillucent-indexprofile"
+path = "src/bin/indexprofile.rs"
+
+[[bin]]
 name = "inillucent-exprperf"
 path = "src/bin/exprperf.rs"
 
