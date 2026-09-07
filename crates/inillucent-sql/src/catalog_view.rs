@@ -23,6 +23,14 @@ pub enum IndexOrigin {
     Unique,
     /// A `PRIMARY KEY` constraint on a rowid table.
     PrimaryKey,
+    /// An index a module owns, named by `CREATE INDEX ... USING <module>`.
+    ///
+    /// **Not a b-tree, and the planner has to know that.** Its rows live in a
+    /// virtual table, its `root` is that table's own root, and none of the
+    /// b-tree paths apply to it - there is nothing to seek and nothing to
+    /// range-scan. What it can do is answer "the k nearest to this vector",
+    /// which is a whole access path of its own (task-1838 §7).
+    Module,
 }
 
 /// One column of a table or view.

@@ -100,6 +100,10 @@ name = "inillucent-allocarm"
 path = "src/bin/allocarm.rs"
 
 [[bin]]
+name = "inillucent-vectorprobe"
+path = "src/bin/vectorprobe.rs"
+
+[[bin]]
 name = "inillucent-exprperf"
 path = "src/bin/exprperf.rs"
 

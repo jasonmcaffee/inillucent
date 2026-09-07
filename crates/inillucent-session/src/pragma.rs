@@ -455,6 +455,10 @@ pub fn index_list(
                 IndexOrigin::Created => b"c".as_slice(),
                 IndexOrigin::Unique => b"u".as_slice(),
                 IndexOrigin::PrimaryKey => b"pk".as_slice(),
+                // SQLite has no letter for this because SQLite has no such
+                // index; `m` is this engine's, and `PRAGMA index_list` is the
+                // one place a caller can see that a table carries one.
+                IndexOrigin::Module => b"m".as_slice(),
             })?,
             Value::Integer(i64::from(index.partial_sql.is_some())),
         ]);

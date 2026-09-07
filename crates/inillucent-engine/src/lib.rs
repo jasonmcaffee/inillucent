@@ -342,6 +342,15 @@ impl TreeCatalog for ImportedDatabase {
         self.rows_of_module(table, path, params, needed)
     }
 
+    fn vector_candidates(
+        &self,
+        index: &[u8],
+        probe: &inillucent_tree::datum::Datum<'_>,
+        depth: usize,
+    ) -> DbResult<Option<Vec<i64>>> {
+        self.nearest_rowids(index, probe, depth)
+    }
+
     fn user_scalar(&self, name: &[u8], argc: usize) -> Option<inillucent_exec::expr::ScalarBody> {
         match self.user_function(name, argc)?.body.clone() {
             inillucent_ext::registry::UserBody::Scalar(body) => {
@@ -405,6 +414,8 @@ pub struct VectorIndex {
     column: usize,
     /// Which tree column holds the row's rowid, which is the store's key too.
     rowid: usize,
+    /// The indexed column's declared position, which is what a plan names.
+    declared: u16,
 }
 
 impl VectorIndex {
@@ -422,6 +433,7 @@ impl VectorIndex {
             name,
             column,
             rowid,
+            declared: 0,
         }
     }
 }
@@ -1725,6 +1737,141 @@ impl ImportedDatabase {
         Ok(())
     }
 
+    /// Asks an index a module owns for the rowids nearest a vector.
+    ///
+    /// **The store's rowid is the table's rowid**, which is what makes this an
+    /// answer rather than a lookup table: the index was written with the source
+    /// row's number as its own, so the candidates come back ready to probe the
+    /// table with.
+    ///
+    /// The query is the module's own vector-only shape - no query text, a
+    /// vector, and a depth - and it is put through the ordinary planner, so
+    /// there is one implementation of what asking this module means.
+    ///
+    /// @param index - the store's name
+    /// @param probe - the vector to measure against
+    /// @param depth - how many candidates to ask for
+    fn nearest_rowids(
+        &self,
+        index: &[u8],
+        probe: &inillucent_tree::datum::Datum<'_>,
+        depth: usize,
+    ) -> DbResult<Option<Vec<i64>>> {
+        let folded = index.to_ascii_lowercase();
+        let Some(connected) = self.virtual_tables.get(&folded) else {
+            return Ok(None);
+        };
+        let (inillucent_tree::datum::Datum::Blob(bytes)
+        | inillucent_tree::datum::Datum::Text(bytes)) = probe
+        else {
+            // A probe that is not bytes cannot be a vector, and an index asked
+            // for the nearest to a number has no answer rather than a wrong
+            // one.
+            return Ok(Some(Vec::new()));
+        };
+        Ok(Some(self.probe_module(connected, bytes, depth)?))
+    }
+
+    /// Puts the module's own vector-only query to one connected store.
+    ///
+    /// **Built here rather than compiled from text**, because this runs inside
+    /// a read: the executor is holding the catalog, and compiling a statement
+    /// would want the connection mutably. The constraints are exactly the three
+    /// the module documents - no query text, a vector, and a depth - offered
+    /// through `best_index` the way the planner offers them, so the module
+    /// chooses its own plan rather than being told one.
+    ///
+    /// @param connected - the store
+    /// @param probe - the vector's bytes
+    /// @param depth - how many candidates to ask for
+    fn probe_module(
+        &self,
+        connected: &vtab::Connected,
+        probe: &[u8],
+        depth: usize,
+    ) -> DbResult<Vec<i64>> {
+        use inillucent_sql::vtab::{ConstraintOp, ConstraintSpec, IndexQuery, OrderSpec};
+        let declaration = connected.table.declaration();
+        let column_of = |wanted: &[u8]| -> Option<i32> {
+            declaration
+                .columns
+                .iter()
+                .position(|held| held.name.eq_ignore_ascii_case(wanted))
+                .and_then(|at| i32::try_from(at).ok())
+        };
+        // The query column is the table's own name; the rest are named.
+        let (Some(query), Some(k), Some(vector), Some(rank)) = (
+            column_of(&connected.arguments.table),
+            column_of(b"k"),
+            column_of(b"vector"),
+            column_of(b"rank"),
+        ) else {
+            return Err(misuse("the index's store is not a search table"));
+        };
+        let specs = vec![
+            ConstraintSpec {
+                column: query,
+                op: ConstraintOp::Match,
+                usable: true,
+            },
+            ConstraintSpec {
+                column: vector,
+                op: ConstraintOp::Eq,
+                usable: true,
+            },
+            ConstraintSpec {
+                column: k,
+                op: ConstraintOp::Eq,
+                usable: true,
+            },
+        ];
+        let values = [
+            inillucent_value::Value::owned_text(b"")?,
+            inillucent_value::Value::owned_blob(probe)?,
+            inillucent_value::Value::Integer(depth as i64),
+        ];
+        let mut query_plan = IndexQuery::new(
+            specs,
+            vec![OrderSpec {
+                column: rank,
+                descending: false,
+            }],
+        );
+        connected.table.best_index(&mut query_plan)?;
+        let mut arguments: Vec<inillucent_value::Value<'static>> = Vec::new();
+        for position in query_plan.argument_order() {
+            let Some(value) = values.get(position) else {
+                continue;
+            };
+            arguments.push(value.clone());
+        }
+        let plan = inillucent_ext::vtab::FilterPlan {
+            index_number: query_plan.index_number,
+            index_string: query_plan.index_string.clone(),
+            arguments,
+        };
+        let mut cursor = connected.table.open()?;
+        let mut nowhere = vtab::Nowhere;
+        let mut store = vtab::ReadStore {
+            pool: self.database.pool(),
+            trees: &self.trees,
+        };
+        let mut context = inillucent_ext::vtab::Context {
+            host: &mut nowhere,
+            store: Some(&mut store),
+            database: 0,
+            limits: &self.limits,
+            catalog: None,
+        };
+        cursor.filter(&mut context, &plan)?;
+        let mut found = Vec::with_capacity(depth);
+        while !cursor.eof() {
+            found.push(cursor.rowid()?);
+            cursor.next(&mut context)?;
+        }
+        Ok(found)
+    }
+
     /// Rebuilds the map of indexes a module owns from the connected tables.
     ///
     /// Called wherever the catalog changes. The association is read back out of
@@ -1760,7 +1907,39 @@ impl ImportedDatabase {
                 name: name.clone(),
                 column: slot,
                 rowid,
+                declared: position as u16,
             });
+        }
+        // **Published into the catalog as well, because the planner reads the
+        // catalog and not this map.** An index a module owns is an `IndexInfo`
+        // with `IndexOrigin::Module` on the table it indexes: none of the
+        // b-tree paths apply to it, and the one path that does looks for
+        // exactly that origin.
+        for table in &mut self.tables {
+            table
+                .indexes
+                .retain(|held| held.origin != inillucent_sql::catalog_view::IndexOrigin::Module);
+            let Some(indexes) = found.get(&table.root) else {
+                continue;
+            };
+            for index in indexes {
+                table.indexes.push(inillucent_sql::catalog_view::IndexInfo {
+                    folded: index.name.to_ascii_lowercase(),
+                    name: index.name.clone(),
+                    root: 0,
+                    unique: false,
+                    columns: vec![inillucent_sql::catalog_view::IndexColumnInfo {
+                        column: Some(index.declared),
+                        collation: b"binary".to_vec(),
+                        descending: false,
+                        expr_sql: None,
+                    }],
+                    partial_sql: None,
+                    origin: inillucent_sql::catalog_view::IndexOrigin::Module,
+                    conflict: None,
+                    prefix_rows: Vec::new(),
+                });
+            }
         }
         self.vector_indexes = found;
     }

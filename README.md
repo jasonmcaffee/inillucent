@@ -30,7 +30,7 @@ similar to pgvector. Measured against that:
 | No family slower than SQLite | **Not yet: three families, down from six.** At medium over 30 rounds the lower bounds are `open.prepare` 0.79x, `schema` 0.56x, `extension` 0.50x. `write`, `transaction`, `read.range` and `large.values` have cleared. The contract's 1.00x floor is not met. | task-1838 §4 |
 | Same features as SQLite | **Not yet, but the list is short.** The new engine runs 46 of 50 inventoried constructs. Shipped by task-1838: trigger firing and foreign key enforcement (immediate and deferred), `LEFT`/`RIGHT`/`FULL OUTER JOIN`, derived tables in `FROM`, recursive CTEs, correlated subqueries, user-defined scalar and aggregate functions and collations, and the `VIRTUAL` generated column that used to shift later columns. Still missing: temp tables, `ATTACH`, `VACUUM`, plain `EXPLAIN`, and the table-valued pragma form. | task-1838 §1-3, `new_engine_surface.rs` |
 | Same durability and isolation | **Yes, single process, one writer.** WAL with group commit, snapshot isolation, ARIES-style redo recovery, undo for `ROLLBACK`/`SAVEPOINT`, crash campaigns under a deterministic simulator. Multi-process access and SQLite's file format are deliberate non-goals. | task-1832, task-1816 |
-| Embedding search like pgvector | **Yes, and graded better than pgvector on 15 of 17 primary comparisons** with zero worse; in production on a 598,560-chunk mailbox at recall 1.000 and 27 ms p95. Reachable from SQL only through the `inillucent_search` virtual table: there is no `vector` column type or distance operator in the grammar yet. | `inillucent-scorecard.md`, task-1775 |
+| Embedding search like pgvector | **Yes, and graded better than pgvector on 15 of 17 primary comparisons** with zero worse; in production on a 598,560-chunk mailbox at recall 1.000 and 27 ms p95. **Reachable from ordinary SQL since task-1838 §7**: a `VECTOR(N)` column, `vector_distance_cos`/`_l2`/`vector_dot`, `CREATE INDEX ... USING inillucent_hnsw`, and `ORDER BY vector_distance_cos(v, ?) LIMIT k` planned onto the index. | `inillucent-scorecard.md`, task-1775, task-1838 §7 |
 | Old engine deleted, one engine shipped | **No.** The SQLite-file-format engine (`inillucent-storage`, `-transaction`, `-vm`, `-session`, the `inillucent` facade, `inillucent-capi`) is still in the tree and is still what `inillucent::Database::open` reaches. The CLI and the migrator run on the new engine. | code audit, task-1834 §8 |
 
 The improvement plan for every row that is not green is `tasks/rust-db-phase-2-tdd.md`.
@@ -309,6 +309,7 @@ both are one thread, so a percentage would only restate the wall clock.
 | rollback | undo buffer of before-images, rows and schema; a `DROP` cannot be undone inside a transaction yet | rollback journal or WAL |
 | triggers, foreign keys | yes; `BEFORE`/`AFTER`/`INSTEAD OF`, `FOR EACH ROW`, `WHEN`, `RAISE`, recursion capped at 1,000 frames. Foreign keys compile to triggers, so `PRAGMA foreign_keys`, `DEFERRABLE INITIALLY DEFERRED`, `ON DELETE CASCADE`/`SET NULL`/`SET DEFAULT`/`RESTRICT` and `PRAGMA foreign_key_check` all run through the one mechanism (task-1838 §1) | yes |
 | extensions | JSON, FTS5, R-Tree, `json_each`, `generate_series`, `inillucent_search` | JSON1, FTS3/4/5, R-Tree, geopoly, session, RBU, ... |
+| vector search | `VECTOR(N)` columns, `vector_distance_cos`/`_l2`/`vector_dot`, `CREATE INDEX ... USING inillucent_hnsw`, and a planner rule that turns `ORDER BY vector_distance_cos(v, ?) LIMIT k` into a probe of that index followed by an exact rescore. Graded at recall **1.000** against an exhaustive cosine (task-1838 §7) | none; pgvector is an extension PostgreSQL loads |
 | C API | `inillucent-capi` exports 133 `sqlite3_*` symbols, over the **old** engine; a driver and C ABI for the new engine is task-1837 | `sqlite3.h` |
 | shell | `inillucent-shell`, 12 of 15 scripts byte-identical to `sqlite3` | `sqlite3` |
 
@@ -394,8 +395,10 @@ struck below rather than deleted, so the list still reads as a record of what wa
    user CPU per gate round, one tenth its kernel time.
 8. **Temp tables and `ATTACH`**, `VACUUM`, `STRICT` enforcement, plain `EXPLAIN`, table-valued
    pragmas. (`ADD COLUMN ... DEFAULT` backfill and views on import were done in task-1838 §1-2.)
-9. **Vector search as SQL**: a vector type, distance functions, `ORDER BY distance LIMIT k` planned
-   onto the retrieval engine.
+9. ~~**Vector search as SQL**: a vector type, distance functions, `ORDER BY distance LIMIT k`
+   planned onto the retrieval engine.~~ Shipped, task-1838 §7. What is left of it: the `<=>`/`<->`
+   operator spellings, and `vector_distance_l2` as an *ordering* the planner recognises - only the
+   cosine is wired to the index, because that is the measure the store is built on.
 10. **Deleting the old engine** and re-rooting `inillucent::Database` onto the new one.
 11. **The retrieval index's footprint**: 3.80 GB resident for 598k chunks, BM25 rebuilt on load,
     single-threaded graph build.
@@ -436,6 +439,7 @@ target/release/inillucent-readgate $F/medium.db --scale medium
 target/release/inillucent-probeprofile $F/medium.db --scale medium --page-size 32768 --frames 4096
 target/release/inillucent-searchgate --documents 500 --rounds 30
 target/release/inillucent-shellrss                   # peak RSS, one shell each, same data
+target/release/inillucent-vectorprobe --rows 20000 --dims 256   # what the SQL vector path costs
 target/release/inillucent-prepareprofile $F/medium.db --iterations 4000   # where a compile goes
 target/release/inillucent-shell my.rdb
 

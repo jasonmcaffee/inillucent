@@ -298,6 +298,12 @@ impl ImportedDatabase {
             b"main",
             &inillucent_base::limits::Limits::default(),
         );
+        // **Before the snapshot, because the snapshot is what the planner
+        // reads.** An index a module owns is published onto its table's
+        // `indexes` list, and a catalog built before that happened describes a
+        // table with no such index - so the one path that can use it is never
+        // offered (task-1838 §7).
+        self.refresh_vector_indexes();
         let mut catalog = StaticCatalog::empty();
         for table in &self.tables {
             catalog = catalog.with_table(table.clone());
@@ -306,7 +312,6 @@ impl ImportedDatabase {
         catalog = catalog.with_table(super::schema_alias_of(&self.schema_info));
         self.catalog = catalog;
         self.forget_compiled_statements();
-        self.refresh_vector_indexes();
         self.catalog_generation = self.catalog_generation.saturating_add(1);
     }
 
