@@ -73,7 +73,7 @@ const UNSAFE_CRATES: [&str; 1] = ["inillucent-capi"];
 /// about what the engine is made of, and a baseline tool that never ships is
 /// not part of it - but a file with `unsafe` in it should still have to say
 /// why, in writing, in a list somebody reads.
-const UNSAFE_ALLOWED: [&str; 6] = [
+const UNSAFE_ALLOWED: [&str; 8] = [
     "crates/inillucent-vfs/src/os/windows.rs",
     "crates/inillucent-vfs/src/os/unix.rs",
     "crates/inillucent-compat/src/bin/sqlperf.rs",
@@ -89,6 +89,15 @@ const UNSAFE_ALLOWED: [&str; 6] = [
     // measurement rather than engine, which is the same ground the three above
     // stand on, and every call site carries its own SAFETY note.
     "crates/inillucent-compat/src/procstat.rs",
+    // The allocator arm (task-1838 Part 5). A `GlobalAlloc` is the only way to
+    // ask what the system allocator costs, and the question had to be asked:
+    // the TDD expected the Linux gap to be the heap. Every path either forwards
+    // to the system allocator unchanged or hands back a block obtained from it
+    // for the same size class, and each one carries its own SAFETY note.
+    "crates/inillucent-compat/src/bin/allocarm.rs",
+    // The same counting allocator again, in the profiler that says which stage
+    // of a compile allocates (task-1838 Part 4/5).
+    "crates/inillucent-compat/src/bin/prepareprofile.rs",
 ];
 
 /// Returns every `.rs` file under a directory.

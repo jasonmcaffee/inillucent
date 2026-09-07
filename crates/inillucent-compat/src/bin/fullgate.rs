@@ -89,6 +89,8 @@ struct Settings {
     scale: String,
     families: Vec<String>,
     repeat_override: Option<u32>,
+    /// The locking mode SQLite's arm runs in: `normal` or `exclusive`.
+    locking: String,
 }
 
 fn main() -> ExitCode {
@@ -111,7 +113,7 @@ fn main() -> ExitCode {
     let Some(fixture) = arguments.first().filter(|first| !first.starts_with("--")) else {
         eprintln!(
             "usage: inillucent-fullgate <sqlite fixture> [--rounds N] [--page-size N] \
-             [--scale S] [--frames N] [--families a,b] [--repeat N]"
+             [--scale S] [--frames N] [--families a,b] [--repeat N] [--locking normal|exclusive]"
         );
         return ExitCode::from(2);
     };
@@ -169,6 +171,7 @@ fn settings_from(arguments: &[String]) -> Settings {
             .map(|value| value.split(',').map(str::to_string).collect())
             .unwrap_or_else(|| FAMILIES.iter().map(|(name, _)| name.to_string()).collect()),
         repeat_override: flag(arguments, "--repeat").and_then(|value| value.parse().ok()),
+        locking: flag(arguments, "--locking").unwrap_or_else(|| "normal".to_string()),
     }
 }
 
@@ -257,6 +260,7 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     })?;
 
     let mut plan = filtered_plan(settings)?;
+    plan.locking.clone_from(&settings.locking);
     let pool_bytes = settings.frames.saturating_mul(settings.page_size);
     plan.cache_size = -((pool_bytes / 1024) as i32);
 
@@ -275,6 +279,10 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         -(plan.cache_size as f64) / 1024.0
     );
     println!("  fairness    : matched - one memory budget, both engines");
+    println!(
+        "  sqlite lock : locking_mode = {} (this engine takes no file lock at all)",
+        settings.locking
+    );
     println!("  plan cache  : declared, and NOT used by either arm of this gate");
     println!(
         "                inillucent keeps a prepared plan per statement text, and the TDD names"
@@ -673,7 +681,8 @@ fn round_on(
         .map_err(|error| format!("warming failed: {}", why(&error)))?;
     let mut samples = Vec::with_capacity(plan.workloads.len());
     let opened = ProcessCost::now();
-    let mut costs: Vec<(String, ProcessCost, usize)> = Vec::with_capacity(plan.workloads.len());
+    let mut costs: Vec<(String, ProcessCost, usize, LogCost)> =
+        Vec::with_capacity(plan.workloads.len());
     for workload in &plan.workloads {
         // `pre` and `post` are setup, not work: `sqlite_bench.c` runs them
         // either side of the timed region and so does this.
@@ -686,15 +695,26 @@ fn round_on(
         // Read either side of the timed region, exactly where the clock is.
         // The `pre` above and the `post` below are setup and are outside both.
         let before = ProcessCost::now();
+        let log_before = database.wal().stats();
         let timed = if workload.mutates {
             time_write(database, workload, plan.rows)
         } else {
             time_read(database, workload, plan.rows)
         };
         let spent = ProcessCost::now().since(&before);
+        let log_after = database.wal().stats();
         match timed {
             Ok(sample) => {
-                costs.push((workload.name.clone(), spent, database.frames_resident()));
+                costs.push((
+                    workload.name.clone(),
+                    spent,
+                    database.frames_resident(),
+                    LogCost {
+                        writes: log_after.writes.saturating_sub(log_before.writes),
+                        syncs: log_after.syncs.saturating_sub(log_before.syncs),
+                        bytes: log_after.bytes.saturating_sub(log_before.bytes),
+                    },
+                ));
                 samples.push(sample)
             }
             // A workload the engine refuses is *absent* rather than zero. A
@@ -731,9 +751,26 @@ fn round_on(
 struct RoundCost {
     /// What the round cost, from the first workload to the last.
     round: ProcessCost,
-    /// Per workload: the name, what its timed region cost, and how many pool
-    /// frames were resident when it finished.
-    costs: Vec<(String, ProcessCost, usize)>,
+    /// Per workload: the name, what its timed region cost, how many pool frames
+    /// were resident when it finished, and what it put in the log.
+    costs: Vec<(String, ProcessCost, usize, LogCost)>,
+}
+
+/// What one workload asked of the write-ahead log.
+///
+/// **Because a write family's ratio is a durability ratio, not a code one.**
+/// task-1838 §5 measured this engine three to four times slower on Linux than
+/// on Windows on exactly the three workloads that `fsync` per commit, and
+/// nowhere else - so "how many syncs, and how many bytes" is the question those
+/// numbers raise, and nothing printed it.
+#[derive(Clone, Copy, Default)]
+struct LogCost {
+    /// Calls to the log file's `write_all_at`.
+    writes: u64,
+    /// Calls to the log file's `sync`.
+    syncs: u64,
+    /// Bytes appended to the log.
+    bytes: u64,
 }
 
 /// Prints what each arm cost besides time.
@@ -764,37 +801,43 @@ fn report_costs(
     println!();
     println!("## memory and CPU, this engine, per workload   (median over rounds)");
     println!(
-        "  {:<24} {:>12} {:>12} {:>10} {:>10}",
-        "workload", "rss delta MiB", "peak rise MiB", "cpu ms", "pool frames"
+        "  {:<24} {:>12} {:>10} {:>10} {:>8} {:>8} {:>10}",
+        "workload", "rss delta MiB", "cpu ms", "pool frames", "log wr", "log sync", "log KiB"
     );
     for workload in &plan.workloads {
         let mut rss: Vec<f64> = Vec::new();
-        let mut peak: Vec<f64> = Vec::new();
         let mut cpu: Vec<f64> = Vec::new();
         let mut frames: Vec<f64> = Vec::new();
+        let mut writes: Vec<f64> = Vec::new();
+        let mut syncs: Vec<f64> = Vec::new();
+        let mut bytes: Vec<f64> = Vec::new();
         for round in ours {
-            let Some((_, cost, resident)) = round
+            let Some((_, cost, resident, log)) = round
                 .costs
                 .iter()
-                .find(|(name, _, _)| *name == workload.name)
+                .find(|(name, _, _, _)| *name == workload.name)
             else {
                 continue;
             };
             rss.push(mebibytes(cost.working_set));
-            peak.push(mebibytes(cost.peak_working_set));
             cpu.push(millis(cost.cpu_nanos()));
             frames.push(*resident as f64);
+            writes.push(log.writes as f64);
+            syncs.push(log.syncs as f64);
+            bytes.push(log.bytes as f64 / 1024.0);
         }
         if cpu.is_empty() {
             continue;
         }
         println!(
-            "  {:<24} {:>12.2} {:>12.2} {:>10.2} {:>10.0}",
+            "  {:<24} {:>12.2} {:>10.2} {:>10.0} {:>8.0} {:>8.0} {:>10.1}",
             workload.name,
             middle(&mut rss),
-            middle(&mut peak),
             middle(&mut cpu),
-            middle(&mut frames)
+            middle(&mut frames),
+            middle(&mut writes),
+            middle(&mut syncs),
+            middle(&mut bytes)
         );
     }
 

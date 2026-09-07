@@ -96,6 +96,10 @@ name = "inillucent-indexprofile"
 path = "src/bin/indexprofile.rs"
 
 [[bin]]
+name = "inillucent-allocarm"
+path = "src/bin/allocarm.rs"
+
+[[bin]]
 name = "inillucent-exprperf"
 path = "src/bin/exprperf.rs"
 
