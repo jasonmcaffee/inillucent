@@ -51,7 +51,7 @@ use std::sync::Arc;
 use inillucent_base::error::{corrupt, misuse, no_mem};
 use inillucent_base::rng::Rng;
 use inillucent_base::DbResult;
-use inillucent_vfs::{SyncMode, VfsFile};
+use inillucent_vfs::{FileLock, SyncMode, VfsFile};
 
 use crate::latch::{Observed, VersionLatch};
 use crate::meta::{Meta, FIRST_DATA_PAGE, META_PAGE, SHADOW_PAGE};
@@ -222,6 +222,15 @@ struct State {
     /// frames.
     clock: Rng,
 }
+
+/// How long a lock request waits before it reports the file as busy.
+///
+/// SQLite's own default is zero - it reports `SQLITE_BUSY` at once and leaves
+/// the waiting to a busy handler the application installs. This waits by
+/// default because an application that has not thought about concurrency is
+/// better served by taking turns than by an error it does not handle, and
+/// `PRAGMA busy_timeout` moves it either way.
+const DEFAULT_BUSY_MILLIS: u64 = 5_000;
 
 /// A pinned, borrowed page.
 pub struct PageGuard<'p> {
@@ -1630,6 +1639,114 @@ impl Pool {
             Some(journal) => journal.finish(),
             None => Ok(()),
         }
+    }
+
+    /// Raises the lock on the database file.
+    ///
+    /// **The pool owns the file, so the pool owns the lock.** The protocol
+    /// itself is `inillucent-vfs`'s - it has been implemented and conformance
+    /// tested since Phase 2 and nothing used it, because the engine assumed it
+    /// was the only process on the file. Using it is what makes
+    /// `PRAGMA locking_mode = normal` a description rather than a claim.
+    ///
+    /// @param level - the level to raise to
+    pub fn lock(&self, level: FileLock) -> DbResult<()> {
+        self.lock_within(level, DEFAULT_BUSY_MILLIS)
+    }
+
+    /// Raises the lock, waiting up to a budget for the holder to let go.
+    ///
+    /// **Waiting is the whole of what a busy timeout is.** A lock another
+    /// process holds is not an error - it is a lock that will be released - and
+    /// an engine that reported failure immediately would make every concurrent
+    /// pair of writers fail rather than take turns. The sleep grows so that a
+    /// long wait is not a spin, and the last attempt reports what it found.
+    ///
+    /// @param level - the level to raise to
+    /// @param budget_millis - how long to keep trying
+    pub fn lock_within(&self, level: FileLock, budget_millis: u64) -> DbResult<()> {
+        if self.file.lock_level() >= level {
+            return Ok(());
+        }
+        let mut waited = 0u64;
+        let mut pause = 1u64;
+        loop {
+            match self.file.lock(level) {
+                Ok(()) => return Ok(()),
+                Err(error) if waited >= budget_millis => {
+                    return Err(error.into_db_error());
+                }
+                Err(_) => {}
+            }
+            std::thread::sleep(std::time::Duration::from_millis(pause));
+            waited = waited.saturating_add(pause);
+            pause = pause.saturating_mul(2).min(50);
+        }
+    }
+
+    /// Lowers the lock on the database file.
+    ///
+    /// @param level - the level to drop to, `None` to release entirely
+    pub fn unlock(&self, level: FileLock) -> DbResult<()> {
+        if self.file.lock_level() <= level {
+            return Ok(());
+        }
+        self.file
+            .unlock(level)
+            .map_err(|error| error.into_db_error())
+    }
+
+    /// Returns the level currently held.
+    pub fn lock_level(&self) -> FileLock {
+        self.file.lock_level()
+    }
+
+    /// Reads the two meta slots straight from the file.
+    ///
+    /// **Past the pool, deliberately.** A connection asking whether another
+    /// process has committed cannot ask its own cache: the whole question is
+    /// whether the cache is stale.
+    ///
+    /// @param page_size - how big a page is
+    pub fn read_meta_slots(&self, page_size: usize) -> DbResult<(Vec<u8>, Vec<u8>)> {
+        let mut primary = vec![0u8; page_size];
+        let mut shadow = vec![0u8; page_size];
+        self.file
+            .read_exact_at(0, &mut primary)
+            .map_err(|error| error.into_db_error())?;
+        self.file
+            .read_exact_at(page_size as u64, &mut shadow)
+            .map_err(|error| error.into_db_error())?;
+        Ok((primary, shadow))
+    }
+
+    /// Drops every cached page, so the next read comes from the file.
+    ///
+    /// **What a connection does when another process has committed.** Every
+    /// frame is written back if it is dirty and then released, and every
+    /// swizzled pointer into it is put back to a page id on the way - which is
+    /// `evict_one`'s job and the reason this is written in terms of it rather
+    /// than by clearing the tables. Clearing them directly would leave a parent
+    /// page holding a pointer to a frame that now holds something else, which
+    /// is the single worst thing this engine can do.
+    ///
+    /// Returns how many frames went.
+    pub fn discard_all(&self) -> DbResult<usize> {
+        let mut gone = 0usize;
+        // Bounded by the frame count: a pinned frame cannot be evicted, and a
+        // caller that still holds a guard gets fewer frames dropped rather than
+        // an endless sweep.
+        for _ in 0..self.frames().saturating_mul(2) {
+            if self.resident() == 0 {
+                break;
+            }
+            self.cool()?;
+            match self.evict_one()? {
+                Some(_) => gone = gone.saturating_add(1),
+                None => break,
+            }
+        }
+        Ok(gone)
     }
 
     /// Grows the file by one page and returns its id.

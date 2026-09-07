@@ -15,7 +15,7 @@
 
 use inillucent_base::error::{corrupt, misuse};
 use inillucent_base::DbResult;
-use inillucent_vfs::{DbPath, OpenOptions, Vfs};
+use inillucent_vfs::{DbPath, FileLock, OpenOptions, Vfs};
 
 use crate::freemap::FreeMap;
 use crate::meta::{Meta, FIRST_DATA_PAGE, META_PAGE, SHADOW_PAGE};
@@ -86,6 +86,14 @@ impl Database {
         let file = vfs
             .open(path, OpenOptions::main_db())
             .map_err(|error| error.into_db_error())?;
+        // **Exclusively, for the length of the creation.** A file that has been
+        // opened but not yet written is not an empty database - it has no meta
+        // record at all - so a second process reading it reports corruption
+        // rather than waiting. Holding the file until the two meta pages exist
+        // is what turns that race into a wait.
+        wait_for_lock(file.as_ref(), FileLock::Shared)?;
+        wait_for_lock(file.as_ref(), FileLock::Reserved)?;
+        wait_for_lock(file.as_ref(), FileLock::Exclusive)?;
         file.truncate(0).map_err(|error| error.into_db_error())?;
         let mut uuid = [0u8; 16];
         vfs.randomness(&mut uuid)
@@ -134,10 +142,34 @@ impl Database {
         // trying page sizes, and then it accepts a candidate only when the
         // record it decodes agrees with the size it was decoded at, so an
         // ambiguous answer is impossible rather than merely unlikely.
-        let page_size = match declared_page_size(file.as_ref()) {
-            Some(size) => size,
-            None => discover_page_size(file.as_ref())
-                .ok_or_else(|| corrupt("neither meta page is readable"))?,
+        // **A shared lock before the first read.** The meta pages are being
+        // rewritten by any process that is committing, and a reader that took
+        // no lock could read one of them halfway through - which reports as a
+        // malformed image rather than as the contention it is. Held for the
+        // rest of the open; the connection's `locking_mode` decides what
+        // happens to it after that.
+        wait_for_lock(file.as_ref(), FileLock::Shared)?;
+        // **A file with no readable meta record may be one being created**, and
+        // the two are told apart by waiting: a creation finishes, and damage
+        // does not. The budget is the same one a busy lock waits out, and the
+        // message at the end of it is the one this always reported.
+        let mut waited = 0u64;
+        let page_size = loop {
+            if let Some(size) = declared_page_size(file.as_ref()) {
+                break size;
+            }
+            if let Some(size) = discover_page_size(file.as_ref()) {
+                break size;
+            }
+            if waited >= BUSY_BUDGET_MILLIS {
+                return Err(corrupt("neither meta page is readable"));
+            }
+            // Released while waiting, because the process finishing the
+            // creation needs the file to do it.
+            let _ = file.unlock(FileLock::None);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            waited = waited.saturating_add(5);
+            wait_for_lock(file.as_ref(), FileLock::Shared)?;
         };
         let mut primary = vec![0u8; page_size];
         let mut shadow = vec![0u8; page_size];
@@ -332,6 +364,151 @@ impl Database {
         Ok(())
     }
 
+    /// Takes the file lock a read needs, and reloads if the file has moved.
+    ///
+    /// **Both halves, together, because either alone is wrong.** Taking the
+    /// lock without checking would read a cache describing a database another
+    /// process has since rewritten; checking without the lock would race the
+    /// process doing the rewriting. The lock is taken first and the check is
+    /// made under it, which is the order that makes the answer stable for as
+    /// long as the lock is held.
+    ///
+    /// Returns whether the cache was thrown away, which the caller reports.
+    pub fn begin_read(&mut self) -> DbResult<bool> {
+        self.pool.lock(FileLock::Shared)?;
+        self.reload_if_moved()
+    }
+
+    /// Raises the lock to the one a write needs.
+    ///
+    /// `Exclusive` rather than `Reserved`: this engine writes pages in place
+    /// under a rollback journal and appends to a log under a write-ahead one,
+    /// and neither is safe to interleave with another process's reads without
+    /// the shared-memory index that would let a reader find the log. Taking the
+    /// stronger lock is the honest version of that - writers serialise with
+    /// readers, and nobody is told otherwise.
+    pub fn begin_write(&mut self) -> DbResult<bool> {
+        self.begin_write_within(true)
+    }
+
+    /// Raises the lock to the one a write needs, optionally without letting go.
+    ///
+    /// **`may_release` is false inside a transaction, and that is not a
+    /// tuning knob.** The release-and-retry below is what breaks a deadlock
+    /// between two connections that each hold a shared lock and each want to
+    /// raise it - but releasing is only safe when nothing has been written yet.
+    /// Inside a transaction the file has already changed under this lock, and
+    /// letting go would let another process write through the middle of it.
+    /// So a transaction that cannot raise reports the file as busy, which is
+    /// what SQLite does with the same deadlock and is a caller's cue to retry
+    /// the whole transaction.
+    ///
+    /// @param may_release - whether the shared lock may be dropped to retry
+    pub fn begin_write_within(&mut self, may_release: bool) -> DbResult<bool> {
+        if !may_release {
+            let reloaded = self.begin_read()?;
+            self.pool.lock(FileLock::Reserved)?;
+            self.pool.lock(FileLock::Exclusive)?;
+            return Ok(reloaded);
+        }
+        self.begin_write_retrying()
+    }
+
+    /// Raises the lock, letting go and coming back when it cannot.
+    ///
+    /// **Every failure inside the loop goes to the backoff**, including the one
+    /// that reacquires the shared lock. That is the whole correction over the
+    /// first attempt: a writer that has just released to break a deadlock finds
+    /// the other side holding PENDING, which is exactly the state PENDING
+    /// exists to produce - it stops new readers so the writer can drain them -
+    /// and returning that as an error made the loop give up on the first round
+    /// nine times out of ten. It is not a failure; it is the other writer
+    /// working.
+    fn begin_write_retrying(&mut self) -> DbResult<bool> {
+        let mut waited = 0u64;
+        let mut pause = 1u64;
+        loop {
+            let attempt = self.attempt_write();
+            match attempt {
+                Ok(reloaded) => return Ok(reloaded),
+                Err(error) if waited >= BUSY_BUDGET_MILLIS => {
+                    let _ = self.pool.unlock(FileLock::None);
+                    return Err(error);
+                }
+                Err(_) => {}
+            }
+            let _ = self.pool.unlock(FileLock::None);
+            std::thread::sleep(std::time::Duration::from_millis(pause));
+            waited = waited.saturating_add(pause);
+            // Jittered, so two writers that started together do not keep
+            // colliding on the same schedule for ever.
+            pause = pause.saturating_mul(2).min(50).saturating_add(waited % 3);
+        }
+    }
+
+    /// One attempt at taking the write lock, from nothing.
+    ///
+    /// The reload happens after the shared lock and before the upgrade, so the
+    /// cache is refreshed on the round the lock is actually won on rather than
+    /// on some earlier round the writer then lost.
+    fn attempt_write(&mut self) -> DbResult<bool> {
+        self.pool.unlock(FileLock::None)?;
+        self.pool.lock_within(FileLock::Shared, 0)?;
+        let reloaded = self.reload_if_moved()?;
+        self.pool.lock_within(FileLock::Reserved, 0)?;
+        self.pool.lock_within(FileLock::Exclusive, 0)?;
+        Ok(reloaded)
+    }
+
+    /// Releases the file lock, which is what `locking_mode = normal` does.
+    pub fn end_access(&mut self) -> DbResult<()> {
+        self.pool.unlock(FileLock::None)
+    }
+
+    /// Returns the lock level currently held.
+    pub fn lock_level(&self) -> FileLock {
+        self.pool.lock_level()
+    }
+
+    /// Throws the cache away when the file's meta record has moved on.
+    ///
+    /// The generation is bumped by every checkpoint, so a generation greater
+    /// than the one in memory means another process has committed since this
+    /// one last looked. Every cached page may then describe a database that no
+    /// longer exists - including the free map, which is why it is rebuilt from
+    /// the new record rather than kept.
+    ///
+    /// Returns whether anything was thrown away.
+    fn reload_if_moved(&mut self) -> DbResult<bool> {
+        let page_size = self.pool.page_size();
+        let (primary, shadow) = self.pool.read_meta_slots(page_size)?;
+        let Ok(found) = Meta::choose(&primary, &shadow) else {
+            // An unreadable meta record is not this function's problem to
+            // report: the read that follows will say so, with the message the
+            // open path uses.
+            return Ok(false);
+        };
+        if found.generation <= self.meta.generation {
+            return Ok(false);
+        }
+        self.pool.discard_all()?;
+        self.pool.set_page_count(found.page_count);
+        self.meta = found;
+        let mut free = FreeMap::new(page_size);
+        let mut next = self.meta.free_map;
+        while !next.is_none() {
+            let image = {
+                let guard = self.pool.fetch(next)?;
+                guard.bytes().to_vec()
+            };
+            let after = crate::page::right_of(&image)?;
+            free.push_page(next, image)?;
+            next = after;
+        }
+        self.free = free;
+        Ok(true)
+    }
+
     /// Installs a page image the caller built.
     ///
     /// @param page - the page id, already allocated
@@ -364,6 +541,38 @@ impl Database {
         self.meta.generation = self.meta.generation.saturating_add(1);
         let meta = self.meta;
         self.pool.checkpoint(&meta)
+    }
+}
+
+/// How long a writer keeps trying before it reports the file as busy.
+///
+/// The same budget the pool's own waiting uses; it is stated twice because the
+/// open path runs before a pool exists and this one runs inside a retry loop
+/// that has to own its own clock.
+const BUSY_BUDGET_MILLIS: u64 = 5_000;
+
+/// Takes a lock on a file, waiting for whoever holds it to finish.
+///
+/// The same waiting `Pool::lock_within` does, written here because the file is
+/// not in a pool yet: this runs before one exists.
+///
+/// @param file - the database file
+/// @param level - the level to reach
+fn wait_for_lock(file: &dyn inillucent_vfs::VfsFile, level: FileLock) -> DbResult<()> {
+    if file.lock_level() >= level {
+        return Ok(());
+    }
+    let mut waited = 0u64;
+    let mut pause = 1u64;
+    loop {
+        match file.lock(level) {
+            Ok(()) => return Ok(()),
+            Err(error) if waited >= BUSY_BUDGET_MILLIS => return Err(error.into_db_error()),
+            Err(_) => {}
+        }
+        std::thread::sleep(std::time::Duration::from_millis(pause));
+        waited = waited.saturating_add(pause);
+        pause = pause.saturating_mul(2).min(50);
     }
 }
 
