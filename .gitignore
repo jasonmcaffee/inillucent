@@ -51,3 +51,8 @@ corpus.jsonl
 # promised is still on disk and readable. Nothing here is compiled: cargo only
 # looks in `tests/`.
 /_junk/
+
+# The reference Python binding is run from its own directory, and CPython
+# writes its bytecode cache beside it.
+__pycache__/
+*.pyc

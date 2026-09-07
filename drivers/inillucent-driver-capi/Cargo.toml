@@ -6,7 +6,13 @@ license.workspace = true
 description = "The C ABI over inillucent-driver: how every language that is not Rust reaches the engine."
 
 [lib]
-name = "inillucent_driver"
+# The library is named for the crate rather than for the header, and that is a
+# correction rather than a preference: with both named `inillucent_driver`, this
+# crate's own test could not name it - the rlib collided with the
+# `inillucent-driver` it depends on, and cargo reported "multiple candidates".
+# Naming the artifact after the crate also means somebody looking in
+# `target/debug` finds what they expected to find.
+name = "inillucent_driver_capi"
 # `cdylib` is what a binding loads at run time - Python's ctypes, Node's koffi,
 # Go's purego, Java's FFM, C#'s DllImport. `staticlib` is for a C or C++ program
 # that would rather link it. `lib` is what this crate's own tests use, because a

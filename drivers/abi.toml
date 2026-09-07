@@ -1,0 +1,296 @@
+# Every symbol the C ABI exports, and what it promises.
+#
+# This file is CHECKED, not documented: `tests/abi.rs` parses
+# `include/inillucent_driver.h`, parses this manifest, and reads the crate's own
+# `#[no_mangle]` functions, and fails on a symbol that is in any one of the
+# three and not the other two. A header that declares a function nobody
+# implemented is a linker error for whoever binds to it; a function exported
+# with no declaration is a symbol nobody can use and nobody knows is a promise.
+#
+# `stability` is the promise, and it is per symbol rather than per library -
+# which is the shape DuckDB v2.0 moved its C API to in August 2026, and the one
+# thing from that design worth copying wholesale.
+#
+#   stable       the signature will not change and the symbol will not be
+#                removed. A binding may rely on it.
+#   provisional  it exists and may change in a minor version. A binding may
+#                call it and should expect to revisit it.
+#
+# `since` is the ABI version the symbol appeared in, in the same
+# major*1000000 + minor*1000 + patch encoding `inillucent_abi_version` returns.
+#
+# The test refuses a stability that has been WEAKENED - stable back to
+# provisional - because that is a promise being taken back, and it should be a
+# decision somebody made rather than a line somebody edited.
+
+schema_version = 1
+abi_version = "1.0.0"
+
+[[symbol]]
+name = "inillucent_abi_version"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_backup_to"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_bind_blob"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_bind_int"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_bind_null"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_bind_real"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_bind_text"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_cancel"
+stability = "provisional"
+since = "1.0.0"
+note = "Returns UNSUPPORTED today: the engine runs a statement whole rather than a
+row at a time, so there is no point at which a cancel flag could be read. It is
+here so a binding can wire it once and have it begin working the day the
+capability flips, which is also why it is the one provisional symbol."
+
+[[symbol]]
+name = "inillucent_capability"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_capability_count"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_checkpoint"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_clear_bindings"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_close"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_conn_free"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_connect"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_error_detail"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_error_feature"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_error_free"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_error_message"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_error_offset"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_error_status"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_execute"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_execute_batch"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_in_transaction"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_integrity_check"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_last_insert_rowid"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_open"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_path"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_prepare"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_rows_affected"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_rows_column_count"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_rows_column_name"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_rows_column_type"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_rows_count"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_rows_elapsed_us"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_rows_free"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_rows_more"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_rows_tag"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_rows_total"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_schema_cookie"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_stmt_execute"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_stmt_free"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_supports"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_total_changes"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_txn_begin"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_txn_commit"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_txn_execute"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_txn_rollback"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_value_bytes"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_value_int"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_value_real"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_value_type"
+stability = "stable"
+since = "1.0.0"
+
+[[symbol]]
+name = "inillucent_version"
+stability = "stable"
+since = "1.0.0"

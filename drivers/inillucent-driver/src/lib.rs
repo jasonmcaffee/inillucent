@@ -539,6 +539,75 @@ impl Connection<'_> {
         })
     }
 
+    /// Registers a function an application wrote, callable from SQL by name.
+    ///
+    /// **The one place a caller's own code runs inside a statement**, so two
+    /// things are true of it that are not true of the rest of this crate. The
+    /// body is handed the arguments already evaluated and answers one value; it
+    /// must not call back into the connection, because the statement that
+    /// called it is part-way through running. And a registration throws away
+    /// every compiled statement on the connection, because which function a
+    /// name resolves to is decided when a statement is bound - so registering
+    /// inside a loop is expensive in a way that is not visible at the call site.
+    ///
+    /// A body that fails returns an [`Error`]; the statement fails with it, and
+    /// a transaction around it rolls back exactly as any other failure would.
+    ///
+    /// The flags are the engine's `external` defaults: the function may be
+    /// called from a statement and not from a schema, which is the safe
+    /// assumption about code the engine did not write. A `DEFAULT`, a `CHECK`,
+    /// a generated column or a view cannot reach it.
+    ///
+    /// @param name - the name SQL calls it by
+    /// @param arity - how many arguments it takes, or -1 for any number
+    /// @param body - what it does
+    pub fn create_scalar_function<F>(&self, name: &str, arity: i32, body: F) -> Result<()>
+    where
+        F: Fn(&[Value]) -> Result<Value> + Send + Sync + 'static,
+    {
+        let wrapped: inillucent_engine::ScalarBody = std::sync::Arc::new(move |arguments| {
+            let given: Vec<Value> = arguments.iter().map(Value::from_expr).collect();
+            match body(&given) {
+                Ok(answer) => answer.to_expr(),
+                Err(why) => Err(inillucent_engine::DbError::primary(
+                    inillucent_engine::PrimaryCode::Error,
+                )
+                .with_message(why.message)),
+            }
+        });
+        self.engine
+            .create_scalar_function(name, arity, inillucent_engine::FunctionFlags::external(), wrapped)
+            .map_err(|error| self.database.classify(&error))
+    }
+
+    /// Removes a function this connection registered.
+    ///
+    /// @param name - the name it was registered under
+    /// @param arity - the arity it was registered for
+    pub fn remove_function(&self, name: &str, arity: i32) -> bool {
+        self.engine.remove_function(name, arity)
+    }
+
+    /// Registers a collating sequence an application wrote.
+    ///
+    /// **A collation decides the order rows are stored in**, not merely the
+    /// order they come back in: an index on a column declared `COLLATE` this is
+    /// built with it. So a comparator that answers differently on two runs makes
+    /// an index that disagrees with itself, and the engine has no way to detect
+    /// that. It must be a total order and it must be stable.
+    ///
+    /// @param name - the name `COLLATE` calls it by
+    /// @param comparator - how it orders two values' bytes
+    pub fn create_collation<F>(&self, name: &str, comparator: F) -> Result<()>
+    where
+        F: Fn(&[u8], &[u8]) -> std::cmp::Ordering + Send + Sync + 'static,
+    {
+        let wrapped: inillucent_engine::Comparator = std::sync::Arc::new(comparator);
+        self.engine
+            .create_collation(name, wrapped)
+            .map_err(|error| self.database.classify(&error))
+    }
+
     // —— introspection ————————————————————————————————————————————
 
     /// Returns the schemas this database has, which is one.
