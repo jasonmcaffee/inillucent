@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 inillucent-alloc = { workspace = true }
 inillucent-base = { workspace = true }
+inillucent-scalar = { workspace = true }
 inillucent-engine = { workspace = true }
 inillucent-value = { workspace = true }
 inillucent-tree = { workspace = true }

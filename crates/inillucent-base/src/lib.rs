@@ -48,6 +48,7 @@ pub mod limits;
 pub mod page;
 pub mod probe;
 pub mod rng;
+pub mod sha3;
 pub mod varint;
 
 pub use error::{DbError, DbResult, ExtendedCode, PrimaryCode, Unwind};

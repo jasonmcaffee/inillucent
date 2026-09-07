@@ -66,6 +66,12 @@ struct Pending {
     highest_node: Option<i64>,
     /// The largest rowid seen, for the same reason.
     highest_rowid: Option<i64>,
+    /// The auxiliary column values of each buffered row.
+    ///
+    /// They ride with the leaf number rather than in a second map keyed the
+    /// same way, because they are written into the same shadow row and a second
+    /// map is a second thing to keep in step.
+    auxiliary: std::collections::HashMap<i64, Vec<Value<'static>>>,
 }
 
 /// The buffer, shared between a table and the cursors it opens.
@@ -98,12 +104,13 @@ impl Pending {
         rowids.sort_unstable();
         for rowid in rowids {
             match self.rowids.get(&rowid) {
-                Some(Some(node)) => shadows.write_row(
-                    context,
-                    b"rowid",
-                    rowid,
-                    &[Value::Null, Value::Integer(*node)],
-                )?,
+                Some(Some(node)) => {
+                    let mut row = vec![Value::Null, Value::Integer(*node)];
+                    if let Some(extra) = self.auxiliary.get(&rowid) {
+                        row.extend(extra.iter().cloned());
+                    }
+                    shadows.write_row(context, b"rowid", rowid, &row)?
+                }
                 _ => shadows.delete_row(context, b"rowid", rowid)?,
             }
         }
@@ -176,30 +183,53 @@ impl RTreeModule {
     }
 }
 
+/// What a `CREATE VIRTUAL TABLE ... USING rtree(...)` declared.
+///
+/// The two lists are genuinely different things and keeping them apart is what
+/// makes the rest of the module simple: the coordinates are *in the tree*, in
+/// the cell, and every query plan is about them; an auxiliary column is a value
+/// carried alongside the row and no query is ever planned on it.
+pub struct RTreeShape {
+    /// The rowid's name, then a minimum and a maximum per dimension.
+    pub coordinates: Vec<Vec<u8>>,
+    /// The `+name` columns, in written order.
+    pub auxiliary: Vec<Vec<u8>>,
+}
+
 /// Returns the column names a `CREATE VIRTUAL TABLE ... USING rtree(...)` gave.
 ///
 /// The first is the rowid's name and the rest come in pairs, one minimum and
 /// one maximum per dimension. One to five dimensions, which is SQLite's limit
 /// and is a limit on the *format*: a cell has to fit in a node.
-fn parse_arguments(arguments: &[Vec<u8>]) -> DbResult<Vec<Vec<u8>>> {
-    let names: Vec<Vec<u8>> = arguments
-        .iter()
-        .map(|argument| {
-            // A column may be written `minX REAL`; only the name is kept, which
-            // is what SQLite does with an R-Tree's declared types.
-            argument
-                .split(|byte| byte.is_ascii_whitespace())
-                .find(|part| !part.is_empty())
-                .unwrap_or(argument)
-                .to_vec()
-        })
-        .collect();
-    if names.len() < 3 || names.len() > 11 || names.len() % 2 == 0 {
+///
+/// **A name written `+label` is an auxiliary column**, and the leading `+` is
+/// the whole of the syntax. It does not count towards the odd-number rule,
+/// because it is not half of a dimension - which is why the count is checked
+/// after the split rather than before it.
+fn parse_arguments(arguments: &[Vec<u8>]) -> DbResult<RTreeShape> {
+    let mut coordinates: Vec<Vec<u8>> = Vec::new();
+    let mut auxiliary: Vec<Vec<u8>> = Vec::new();
+    for argument in arguments {
+        // A column may be written `minX REAL`; only the name is kept, which is
+        // what SQLite does with an R-Tree's declared types.
+        let word = argument
+            .split(|byte| byte.is_ascii_whitespace())
+            .find(|part| !part.is_empty())
+            .unwrap_or(argument);
+        match word.split_first() {
+            Some((b'+', rest)) => auxiliary.push(rest.to_vec()),
+            _ => coordinates.push(word.to_vec()),
+        }
+    }
+    if coordinates.len() < 3 || coordinates.len() > 11 || coordinates.len() % 2 == 0 {
         return Err(failure(
             "an rtree table needs an odd number of columns between 3 and 11",
         ));
     }
-    Ok(names)
+    Ok(RTreeShape {
+        coordinates,
+        auxiliary,
+    })
 }
 
 impl Module for RTreeModule {
@@ -210,7 +240,7 @@ impl Module for RTreeModule {
 
     /// The three shadow tables the format needs.
     fn shadow_tables(&self, arguments: &ModuleArguments) -> DbResult<Vec<ShadowTable>> {
-        parse_arguments(&arguments.arguments)?;
+        let shape = parse_arguments(&arguments.arguments)?;
         Ok(vec![
             ShadowTable {
                 suffix: b"node".to_vec(),
@@ -219,8 +249,17 @@ impl Module for RTreeModule {
             },
             ShadowTable {
                 suffix: b"rowid".to_vec(),
-                create_sql: "CREATE TABLE \"%_rowid\"(rowid INTEGER PRIMARY KEY, nodeno INTEGER)"
-                    .to_string(),
+                // **The auxiliary columns live here**, one `aN` per `+name`,
+                // which is where SQLite puts them: they are per row rather than
+                // per node, and the rowid table is the one shadow with a row per
+                // row. Putting them in the node would grow every cell and shrink
+                // the fan-out of a structure whose whole value is its fan-out.
+                create_sql: format!(
+                    "CREATE TABLE \"%_rowid\"(rowid INTEGER PRIMARY KEY, nodeno INTEGER{})",
+                    (0..shape.auxiliary.len())
+                        .map(|at| format!(", a{at}"))
+                        .collect::<String>()
+                ),
             },
             ShadowTable {
                 suffix: b"parent".to_vec(),
@@ -237,7 +276,8 @@ impl Module for RTreeModule {
         arguments: &ModuleArguments,
         creating: bool,
     ) -> DbResult<Box<dyn VirtualTable>> {
-        let names = parse_arguments(&arguments.arguments)?;
+        let shape = parse_arguments(&arguments.arguments)?;
+        let names = shape.coordinates;
         let dimensions = names.len().saturating_sub(1) / 2;
         let mut columns = vec![DeclaredColumn::visible(&String::from_utf8_lossy(
             names.first().map(Vec::as_slice).unwrap_or(b"id"),
@@ -254,7 +294,13 @@ impl Module for RTreeModule {
                 ),
             );
         }
+        // An auxiliary column is declared with no type, so it keeps whatever
+        // was stored in it - which is the point of it.
+        for name in &shape.auxiliary {
+            columns.push(DeclaredColumn::visible(&String::from_utf8_lossy(name)));
+        }
         Ok(Box::new(RTreeTable {
+            auxiliary: shape.auxiliary.len(),
             coordinates: self.coordinates,
             dimensions,
             shadows: ShadowTables::of(arguments, &[b"node", b"rowid", b"parent"])?,
@@ -271,6 +317,8 @@ impl Module for RTreeModule {
 
 /// One connected R-Tree.
 struct RTreeTable {
+    /// How many `+name` columns follow the coordinates.
+    auxiliary: usize,
     coordinates: Coordinates,
     dimensions: usize,
     shadows: ShadowTables,
@@ -289,6 +337,33 @@ const PLAN_ROWID: i32 = 1;
 const PLAN_BOX: i32 = 2;
 
 impl RTreeTable {
+    /// Records the auxiliary values a write supplied for one row.
+    ///
+    /// The values arrive in declaration order - the rowid, then the
+    /// coordinates, then the auxiliary columns - so the ones wanted here are
+    /// whatever follows the coordinates. A write that supplied fewer is padded
+    /// with NULL rather than refused, which is what a column with no
+    /// constraints on it means.
+    ///
+    /// @param rowid - the row being written
+    /// @param values - the whole row, in declaration order
+    fn remember_auxiliary(&mut self, rowid: i64, values: &[Value<'static>]) {
+        if self.auxiliary == 0 {
+            return;
+        }
+        let first = self.dimensions.saturating_mul(2).saturating_add(1);
+        let mut extra: Vec<Value<'static>> = values
+            .get(first..)
+            .unwrap_or_default()
+            .iter()
+            .cloned()
+            .collect();
+        extra.resize(self.auxiliary, Value::Null);
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.auxiliary.insert(rowid, extra);
+        }
+    }
+
     /// Returns how many bytes one cell takes.
     fn cell_size(&self) -> usize {
         CELL_KEY.saturating_add(self.dimensions.saturating_mul(2).saturating_mul(COORDINATE))
@@ -438,6 +513,7 @@ impl VirtualTable for RTreeTable {
                         .unwrap_or_else(|| self.next_rowid(context)),
                 };
                 let cell = self.cell_of(key, values)?;
+                self.remember_auxiliary(key, values);
                 if self.find_leaf(context, key)?.is_some() {
                     return Err(constraint(format!(
                         "UNIQUE constraint failed: {}",
@@ -457,6 +533,7 @@ impl VirtualTable for RTreeTable {
                 };
                 let new = new_rowid.as_integer().unwrap_or(old);
                 let cell = self.cell_of(new, values)?;
+                self.remember_auxiliary(new, values);
                 self.remove(context, old)?;
                 self.insert_cell(context, &cell)?;
                 Ok(Some(new))
@@ -1121,13 +1198,35 @@ impl VirtualCursor for RTreeCursor {
         self.at >= self.rows.len()
     }
 
-    /// Returns the rowid or one coordinate.
-    fn column(&mut self, _context: &mut Context<'_>, index: usize) -> DbResult<Value<'static>> {
+    /// Returns the rowid, one coordinate, or one auxiliary value.
+    ///
+    /// An auxiliary column costs a read of the row's `%_rowid` entry, which the
+    /// coordinates do not: they are in the cell the descent already loaded, and
+    /// an auxiliary value is not. That is the trade the format makes - the tree
+    /// stays as dense as it would be without them - and it is why a query is
+    /// never planned on one.
+    fn column(&mut self, context: &mut Context<'_>, index: usize) -> DbResult<Value<'static>> {
         let Some(cell) = self.rows.get(self.at) else {
             return Ok(Value::Null);
         };
         if index == 0 {
             return Ok(Value::Integer(cell.key));
+        }
+        let coordinates = self.dimensions.saturating_mul(2);
+        if index > coordinates {
+            let at = index.saturating_sub(coordinates).saturating_add(1);
+            if let Ok(pending) = self.pending.lock() {
+                if let Some(extra) = pending.auxiliary.get(&cell.key) {
+                    return Ok(extra
+                        .get(index.saturating_sub(coordinates).saturating_sub(1))
+                        .cloned()
+                        .unwrap_or(Value::Null));
+                }
+            }
+            let Some(row) = self.shadows.read_row(context, b"rowid", cell.key)? else {
+                return Ok(Value::Null);
+            };
+            return Ok(row.get(at).cloned().unwrap_or(Value::Null));
         }
         let Some(value) = cell.box_.get(index.saturating_sub(1)) else {
             return Ok(Value::Null);

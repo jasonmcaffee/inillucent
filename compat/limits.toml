@@ -46,6 +46,19 @@ minimum = 0
 description = "Maximum depth of the parse tree for any expression."
 
 [[limit]]
+name = "ParserDepth"
+c_name = "SQLITE_LIMIT_PARSER_DEPTH"
+# The recursive-descent parser's own recursion, which is a different thing from
+# the depth of the expression *tree* it builds: `((((1))))` is four levels of
+# parser and one level of tree, because a redundant parenthesis is not a node.
+# SQLite charges these separately - 2500 and 1000 - and charging both against
+# `ExprDepth` refused a thousand-deep parenthesisation the reference accepts.
+default = 2500
+hard_max = 2147483647
+minimum = 1
+description = "Maximum depth of the parser's own recursion."
+
+[[limit]]
 name = "CompoundSelect"
 c_name = "SQLITE_LIMIT_COMPOUND_SELECT"
 default = 500
@@ -99,7 +112,10 @@ description = "Maximum index number of any bound parameter."
 [[limit]]
 name = "TriggerDepth"
 c_name = "SQLITE_LIMIT_TRIGGER_DEPTH"
-default = 1000
+# 100, which is what the pinned build's `sqlite3_limit()` reports and what
+# `.limit` prints. The number here was 1000, taken from the documentation page
+# rather than from the binary.
+default = 100
 hard_max = 1000000
 minimum = 1
 description = "Maximum depth of recursion for triggers."

@@ -580,6 +580,32 @@ impl ImportedDatabase {
             };
             tables.push(table);
         }
+        // **`dbstat` and `sqlite_dbpage` are the engine's too**, and for the
+        // same reason: both are questions about the *pages* under every tree,
+        // and a `Module` sees a shadow store rather than a pager. See
+        // `crate::inspect`.
+        for (name, columns) in [
+            ("dbstat", crate::inspect::DBSTAT_COLUMNS),
+            ("sqlite_dbpage", crate::inspect::DBPAGE_COLUMNS),
+        ] {
+            let mut declared: Vec<inillucent_sql::catalog_view::ColumnInfo> = columns
+                .iter()
+                .map(|held| pragma_column(held.as_bytes(), false))
+                .collect();
+            // `schema` is hidden in SQLite too: it selects which attached
+            // database is described, and it is not part of a `SELECT *`.
+            declared.push(pragma_column(b"schema", true));
+            tables.push(inillucent_sql::catalog_view::TableInfo::eponymous(
+                name.as_bytes().to_vec(),
+                declared,
+                inillucent_sql::vtab::ModuleRef {
+                    name: name.as_bytes().to_vec(),
+                    folded: name.as_bytes().to_ascii_lowercase(),
+                    arguments: Vec::new(),
+                },
+                false,
+            ));
+        }
         tables.sort_by(|left, right| left.folded.cmp(&right.folded));
         tables
     }

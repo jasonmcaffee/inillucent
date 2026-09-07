@@ -669,6 +669,22 @@ impl ImportedDatabase {
         if table.folded.starts_with(b"pragma_") {
             return self.pragma_function_rows(table, offer, params, downstream);
         }
+        // The same arrangement for the two tables that describe the file; see
+        // `crate::inspect`.
+        if table.folded == b"dbstat" || table.folded == b"sqlite_dbpage" {
+            let mut rows = if table.folded == b"dbstat" {
+                self.dbstat_rows()?
+            } else {
+                self.dbpage_rows()?
+            };
+            // The hidden `schema` column, which every row of an eponymous
+            // table carries and no `SELECT *` reads.
+            for row in &mut rows {
+                row.push(OwnedDatum::Text(b"main".to_vec()));
+            }
+            inillucent_exec::ops::emit_rows(&rows, downstream)?;
+            return Ok(true);
+        }
         // **An eponymous module has nothing in `virtual_tables`**, because
         // nothing ever created it: the name is the table. It is connected here,
         // for this scan, with no arguments - which is all `SeriesModule` and
