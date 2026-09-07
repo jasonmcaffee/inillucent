@@ -70,6 +70,7 @@ use inillucent_tree::PagedTree;
 use inillucent_value::collation::Collation;
 
 use crate::batch::{Batch, Vector};
+use crate::declared::WriteDeclarations;
 use crate::expr::{compile, Eval};
 use crate::physical::{translate_scan, AccessKind, HeldSpace, Params, PreparedStage, SourceLayout};
 use crate::trigger::{self, Depth};
@@ -584,6 +585,11 @@ pub fn insert_at(
     }
     let space = RowSpace::new(&sources, &layout);
     let plan = InsertPlan::compile(statement, &layout, &space, params)?;
+    // What the table's declarations require of every row, compiled once: the
+    // affinities that convert a value on the way in, the `STRICT` type classes,
+    // and the `CHECK` predicates. All three were collected by the catalog and
+    // consulted by nobody until task-1845.
+    let declarations = WriteDeclarations::compile(table, &layout, &statement.checks, &space, params)?;
 
     let rows: Vec<Row> = match &statement.source {
         BoundInsertSource::Values(values) => {
@@ -606,12 +612,29 @@ pub fn insert_at(
     // every `INSERT INTO t(id, ...) VALUES (?1, ...)`, the shape the gate's
     // `write.insert.batch` measures. `None` here means "not asked yet".
     let mut next_rowid: Option<i64> = None;
+    // **An `AUTOINCREMENT` table counts up from what it has ever held**, which
+    // is the whole of the difference between it and an ordinary rowid table.
+    // The mark is read once for the statement and written back once, in the
+    // same transaction as the rows, so a rollback takes it with them.
+    let sequence_mark = if table.autoincrement {
+        let floor = highest_rowid(target, table)?;
+        let mark = crate::sequence::read(target, statement.sequence_root, &table.name, floor)?;
+        next_rowid = Some(mark.seq);
+        Some(mark)
+    } else {
+        None
+    };
+    let mut high_water = sequence_mark.as_ref().map_or(0, |mark| mark.seq);
     let mut changes = Changes::default();
     let captured = target.captures(table.root);
     for supplied_row in &rows {
-        let image = plan.build_row(supplied_row, &space, &mut next_rowid, || {
-            highest_rowid(&mut Borrowed(target), table)
-        })?;
+        let image = plan.build_row(
+            supplied_row,
+            &space,
+            &mut next_rowid,
+            || highest_rowid(&mut Borrowed(target), table),
+            table.autoincrement.then_some(table),
+        )?;
         // **`BEFORE` fires on the row as it will be written**, which is where
         // every foreign-key check on the child's side lives: the binder turns
         // `REFERENCES p(id)` into `BEFORE INSERT ... SELECT RAISE(ABORT, ...)
@@ -640,7 +663,17 @@ pub fn insert_at(
         {
             continue;
         }
-        if !declarations_are_met(table, &layout, &image, resolution(statement))? {
+        // **Affinity first, then the constraints.** `NOT NULL`, `STRICT` and
+        // `CHECK` all test the value that will actually be stored, and after
+        // affinity `'42'` in an `INTEGER` column *is* the integer 42.
+        let mut image = image;
+        declarations.apply_affinity(&mut image);
+        let resolution = resolution(statement);
+        if !declarations_are_met(table, &layout, &image, resolution)? {
+            continue;
+        }
+        declarations.types_are_met(table, &image)?;
+        if !declarations.checks_are_met(&space, &image, resolution == Resolution::Skip)? {
             continue;
         }
         let Some(stored) = write_one(
@@ -668,6 +701,9 @@ pub fn insert_at(
         changes.rows = changes.rows.saturating_add(1);
         if let Some(OwnedDatum::Int(assigned)) = layout.rowid.and_then(|at| stored.get(at)) {
             changes.last_rowid = Some(*assigned);
+            // A key the statement supplied raises the mark too: `INSERT INTO t
+            // VALUES (50, ...)` makes the next allocated key 51.
+            high_water = high_water.max(*assigned);
         }
         if captured {
             changes.written.push(stored.clone());
@@ -678,6 +714,17 @@ pub fn insert_at(
                 out.push(space.evaluate(eval.as_ref(), &[stored.as_slice()])?);
             }
             changes.returned.push(out);
+        }
+    }
+    if let Some(mark) = &sequence_mark {
+        if high_water > mark.seq || mark.rowid.is_none() && changes.rows > 0 {
+            crate::sequence::write(
+                target,
+                statement.sequence_root,
+                &table.name,
+                mark,
+                high_water,
+            )?;
         }
     }
     Ok(changes)
@@ -794,12 +841,15 @@ impl InsertPlan {
     /// @param supplied - the values the statement's source produced
     /// @param space - the row space the expressions read
     /// @param next_rowid - the largest rowid handed out so far, advanced here
+    /// @param highest - what the first allocation counts up from
+    /// @param autoincrement - the table, when it never reuses a key
     fn build_row(
         &self,
         supplied: &[OwnedDatum],
         space: &RowSpace,
         next_rowid: &mut Option<i64>,
         highest: impl FnOnce() -> DbResult<i64>,
+        autoincrement: Option<&TableInfo>,
     ) -> DbResult<Row> {
         let mut row: Row = vec![OwnedDatum::Null; space.width];
         for planned in &self.columns {
@@ -823,6 +873,13 @@ impl InsertPlan {
             None => OwnedDatum::Null,
         };
         if let Some(slot) = space.rowid {
+            // **A supplied rowid takes INTEGER affinity first.** `INSERT INTO
+            // t(id) VALUES ('42')` on an `INTEGER PRIMARY KEY` stores row 42 in
+            // SQLite, because the key is a value like any other and affinity is
+            // applied to it on the way in; only what survives the conversion
+            // still un-integral is a mismatch. Applying it here rather than in
+            // `WriteDeclarations` keeps one rule for the key rather than two.
+            let supplied_key = crate::declared::to_key_affinity(supplied_key);
             let rowid = match supplied_key {
                 OwnedDatum::Int(number) => number,
                 // A rowid the statement left out is one past the largest the
@@ -833,7 +890,13 @@ impl InsertPlan {
                         Some(held) => held,
                         None => highest()?,
                     };
-                    let allocated = held.saturating_add(1);
+                    // An `AUTOINCREMENT` table that has reached `i64::MAX` has
+                    // no next key, and handing one out would mean handing out
+                    // one that is already there. SQLite reports `SQLITE_FULL`.
+                    let allocated = match autoincrement {
+                        Some(table) => crate::sequence::allocate(table, held)?,
+                        None => held.saturating_add(1),
+                    };
                     *next_rowid = Some(allocated);
                     allocated
                 }
@@ -1221,6 +1284,7 @@ pub fn update_at(
     for column in &statement.returning {
         projected.push(space.compile(&column.expr, params)?);
     }
+    let declarations = WriteDeclarations::compile(table, &layout, &statement.checks, &space, params)?;
 
     let mut changes = Changes::default();
     let captured = target.captures(table.root);
@@ -1240,6 +1304,10 @@ pub fn update_at(
                 *cell = value;
             }
         }
+        // **Affinity is applied before the key is compared**, because the
+        // converted value is what the key is built from: `UPDATE t SET id =
+        // '7'` moves the row to key 7, not to the text `'7'`.
+        declarations.apply_affinity(&mut after);
         // Changing a key moves the row, so the uniqueness of the new key is an
         // ordinary conflict check; leaving it alone is not, or every update
         // would collide with the row it is updating.
@@ -1281,16 +1349,16 @@ pub fn update_at(
         // was a whole row copied out of the tree and thrown away: `txn.large`
         // is two thousand updates in one transaction and paid for two thousand
         // of them (task-1838 §4).
-        if !declarations_are_met(
-            table,
-            &layout,
-            &after,
-            match statement.on_conflict {
-                Some(ConflictAction::Ignore) => Resolution::Skip,
-                Some(ConflictAction::Replace) => Resolution::Replace,
-                _ => Resolution::Raise,
-            },
-        )? {
+        let resolution = match statement.on_conflict {
+            Some(ConflictAction::Ignore) => Resolution::Skip,
+            Some(ConflictAction::Replace) => Resolution::Replace,
+            _ => Resolution::Raise,
+        };
+        if !declarations_are_met(table, &layout, &after, resolution)? {
+            continue;
+        }
+        declarations.types_are_met(table, &after)?;
+        if !declarations.checks_are_met(&space, &after, resolution == Resolution::Skip)? {
             continue;
         }
         let reread = if statement.triggers.is_empty() {

@@ -43,6 +43,7 @@
 pub mod aggregate;
 pub mod batch;
 pub mod correlate;
+pub mod declared;
 pub mod dml;
 pub mod expr;
 pub mod join;
@@ -51,6 +52,7 @@ pub mod paged;
 pub mod physical;
 pub mod scalar;
 pub mod scan;
+pub mod sequence;
 pub mod setop;
 pub mod subquery;
 pub mod trigger;
