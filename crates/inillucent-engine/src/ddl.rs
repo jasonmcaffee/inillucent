@@ -38,7 +38,7 @@
 
 use std::collections::HashMap;
 
-use inillucent_base::error::misuse;
+use inillucent_base::error::refusal;
 use inillucent_base::DbResult;
 use inillucent_catalog::ddl::canonical_sql;
 use inillucent_catalog::load::{index_from_create_sql, table_from_create_sql};
@@ -116,7 +116,7 @@ impl ImportedDatabase {
     ///   `CREATE` text is sliced out of
     pub fn execute_ddl(&mut self, sql: &str) -> DbResult<Outcome> {
         let BoundStatement::Directive(directive) = self.bind(sql)? else {
-            return Err(misuse(format!("{sql} is not a directive")));
+            return Err(refusal(format!("{sql} is not a directive")));
         };
         // **Which file the statement is about, from the statement's own
         // words.** `CREATE TABLE aux.t` and `CREATE TEMP TABLE t` each bind to a
@@ -327,7 +327,7 @@ impl ImportedDatabase {
             // be able to tell them apart without matching on prose.
             other => {
                 let what = super::describe_directive(&other);
-                Err(misuse(format!(
+                Err(refusal(format!(
                     "{sql} is {what}, which the new engine does not run yet"
                 ))
                 .with_unsupported(what))
@@ -562,7 +562,7 @@ impl ImportedDatabase {
         let open = self.batch.get().is_some();
         let wal = self
             .log_of(at)
-            .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
+            .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
         let catalog_handle = self.catalog_handle_of(at);
         {
             let mut log = WalLog {
@@ -579,7 +579,7 @@ impl ImportedDatabase {
             let tree = self
                 .trees
                 .get_mut(&catalog_handle)
-                .ok_or_else(|| misuse("the catalog tree is not attached"))?;
+                .ok_or_else(|| refusal("the catalog tree is not attached"))?;
             let session = self.session.get();
             let database = super::file_of(
                 &mut self.database,
@@ -591,7 +591,7 @@ impl ImportedDatabase {
             insert_entry(database, tree, &mut log, rowid, &entry)?;
         }
         self.entries_of_mut(at)
-            .ok_or_else(|| misuse("a statement names a database that is not attached"))?
+            .ok_or_else(|| refusal("a statement names a database that is not attached"))?
             .push(Recorded { rowid, root, entry });
         // A schema change is a write, and a transaction that made one in two
         // files commits both or neither like any other.
@@ -659,7 +659,7 @@ impl ImportedDatabase {
             let at = self.ddl_schema;
             let wal = self
                 .log_of(at)
-                .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
+                .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
             let mut log = WalLog {
                 wal,
                 txn,
@@ -675,7 +675,7 @@ impl ImportedDatabase {
             let tree = self
                 .trees
                 .get_mut(&catalog_handle)
-                .ok_or_else(|| misuse("the catalog tree is not attached"))?;
+                .ok_or_else(|| refusal("the catalog tree is not attached"))?;
             let session = self.session.get();
             let database = super::file_of(
                 &mut self.database,
@@ -706,7 +706,7 @@ impl ImportedDatabase {
             let at = self.ddl_schema;
             let wal = self
                 .log_of(at)
-                .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
+                .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
             let mut log = WalLog {
                 wal,
                 txn,
@@ -722,7 +722,7 @@ impl ImportedDatabase {
             let tree = self
                 .trees
                 .get_mut(&catalog_handle)
-                .ok_or_else(|| misuse("the catalog tree is not attached"))?;
+                .ok_or_else(|| refusal("the catalog tree is not attached"))?;
             let session = self.session.get();
             let database = super::file_of(
                 &mut self.database,
@@ -782,7 +782,7 @@ impl ImportedDatabase {
         let local = self.local_of(at, root);
         let wal = self
             .log_of(at)
-            .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
+            .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
         let tree = {
             let open = self.batch.get().is_some();
             let mut log = WalLog {
@@ -830,7 +830,7 @@ impl ImportedDatabase {
         let at = self.schema_of(root);
         let owner = self
             .schema_file(at)
-            .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
+            .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
         let pages = match self.trees.get(&root) {
             Some(tree) => tree.pages(owner.pool())?,
             None => Vec::new(),
@@ -838,7 +838,7 @@ impl ImportedDatabase {
         let txn = self.current_txn();
         let wal = self
             .log_of(at)
-            .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
+            .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
         for page in &pages {
             wal.append(txn, inillucent_wal::record::Body::FreePage { page: page.0 })?;
         }
@@ -889,7 +889,7 @@ impl ImportedDatabase {
         let at = self.ddl_schema;
         let wal = self
             .log_of(at)
-            .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
+            .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
         wal.append(
             txn,
             inillucent_wal::record::Body::CatalogChange { delta: &[] },
@@ -925,7 +925,7 @@ impl ImportedDatabase {
             if if_not_exists {
                 return Ok(Outcome::empty());
             }
-            return Err(misuse(format!(
+            return Err(refusal(format!(
                 "table {} already exists",
                 String::from_utf8_lossy(name)
             )));
@@ -1014,7 +1014,7 @@ impl ImportedDatabase {
         let at = self.schema_of(root);
         let wal = self
             .log_of(at)
-            .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
+            .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
         let mut log = WalLog {
             wal,
             txn,
@@ -1058,7 +1058,7 @@ impl ImportedDatabase {
             if if_not_exists {
                 return Ok(Outcome::empty());
             }
-            return Err(misuse(format!(
+            return Err(refusal(format!(
                 "table {} already exists",
                 String::from_utf8_lossy(name)
             )));
@@ -1191,7 +1191,7 @@ impl ImportedDatabase {
             if if_not_exists {
                 return Ok(Outcome::empty());
             }
-            return Err(misuse(format!(
+            return Err(refusal(format!(
                 "index {} already exists",
                 String::from_utf8_lossy(name)
             )));
@@ -1207,24 +1207,24 @@ impl ImportedDatabase {
             .tables
             .iter()
             .position(|held| held.folded == folded)
-            .ok_or_else(|| misuse(format!("no such table: {}", String::from_utf8_lossy(table))))?;
+            .ok_or_else(|| refusal(format!("no such table: {}", String::from_utf8_lossy(table))))?;
         let owner = self
             .tables
             .get(position)
             .cloned()
-            .ok_or_else(|| misuse("the table that was just found is gone"))?;
+            .ok_or_else(|| refusal("the table that was just found is gone"))?;
         if owner.without_rowid {
             // An index on a `WITHOUT ROWID` table has that table's primary key
             // as its trailing entry rather than a rowid, and every tree here
             // appends exactly one rowid column. Building one would produce a
             // tree whose entries point at nothing. Refused by name rather than
             // built wrong - the import refuses the same shape.
-            return Err(misuse("an index on a WITHOUT ROWID table"));
+            return Err(refusal("an index on a WITHOUT ROWID table"));
         }
         let root = self.allocate_root()?;
         let index = index_from_create_sql(&sql, &owner, root)?;
         if index.columns.iter().any(|key| key.column.is_none()) {
-            return Err(misuse("an index on an expression"));
+            return Err(refusal("an index on an expression"));
         }
         let (columns, layout) = index_shape(&owner, &index, root);
         let key_columns = columns.len();
@@ -1301,14 +1301,14 @@ impl ImportedDatabase {
             if if_not_exists {
                 return Ok(Outcome::empty());
             }
-            return Err(misuse(format!(
+            return Err(refusal(format!(
                 "index {} already exists",
                 String::from_utf8_lossy(name)
             )));
         }
         let [key] = columns else {
             return Err(
-                misuse("an index USING inillucent_hnsw takes exactly one column")
+                refusal("an index USING inillucent_hnsw takes exactly one column")
                     .with_unsupported("a multi-column vector index"),
             );
         };
@@ -1318,18 +1318,18 @@ impl ImportedDatabase {
             .iter()
             .find(|held| held.folded == folded)
             .cloned()
-            .ok_or_else(|| misuse(format!("no such table: {}", String::from_utf8_lossy(table))))?;
+            .ok_or_else(|| refusal(format!("no such table: {}", String::from_utf8_lossy(table))))?;
         let column = owner
             .columns
             .get(usize::from(key.column))
-            .ok_or_else(|| misuse("the indexed column is not in the table"))?;
+            .ok_or_else(|| refusal("the indexed column is not in the table"))?;
         // **The width has to be declared.** A store is created with a fixed
         // number of dimensions and every vector it is given is checked against
         // it, so an index over a column that never said how wide its vectors
         // are would have to guess from the first row - and be wrong for the
         // rest of them.
         let dims = column.vector_dimensions().ok_or_else(|| {
-            misuse(format!(
+            refusal(format!(
                 "{}.{} is not declared VECTOR(N), so an index cannot know how wide its vectors are",
                 String::from_utf8_lossy(table),
                 String::from_utf8_lossy(&column.name)
@@ -1404,28 +1404,28 @@ impl ImportedDatabase {
         let layout = self
             .layouts
             .get(&owner.root)
-            .ok_or_else(|| misuse("no layout for the table being indexed"))?;
+            .ok_or_else(|| refusal("no layout for the table being indexed"))?;
         let tree = self
             .trees
             .get(&owner.root)
-            .ok_or_else(|| misuse("no tree for the table being indexed"))?;
+            .ok_or_else(|| refusal("no tree for the table being indexed"))?;
         let mut sources: Vec<usize> = Vec::with_capacity(index.columns.len());
         for key in &index.columns {
             let declared = key
                 .column
                 .map(usize::from)
-                .ok_or_else(|| misuse("an index on an expression"))?;
+                .ok_or_else(|| refusal("an index on an expression"))?;
             let slot = layout
                 .slots
                 .get(declared)
                 .copied()
                 .flatten()
-                .ok_or_else(|| misuse("an index on a column the tree does not carry"))?;
+                .ok_or_else(|| refusal("an index on a column the tree does not carry"))?;
             sources.push(slot);
         }
         let rowid = layout
             .rowid
-            .ok_or_else(|| misuse("an index on a table with no rowid"))?;
+            .ok_or_else(|| refusal("an index on a table with no rowid"))?;
         let width = sources.len().saturating_add(1);
         let mut rows: Vec<Vec<OwnedDatum>> = Vec::with_capacity(tree.row_count() as usize);
         let pool = self.pool_of(owner.root)?;
@@ -1508,7 +1508,7 @@ impl ImportedDatabase {
             if if_not_exists {
                 return Ok(Outcome::empty());
             }
-            return Err(misuse(format!(
+            return Err(refusal(format!(
                 "{} {} already exists",
                 match kind {
                     ObjectKind::View => "view",
@@ -1560,7 +1560,7 @@ impl ImportedDatabase {
             if if_exists {
                 return Ok(Outcome::empty());
             }
-            return Err(misuse(format!(
+            return Err(refusal(format!(
                 "no such {}: {}",
                 match kind {
                     Ast::Table => "table",
@@ -1580,13 +1580,13 @@ impl ImportedDatabase {
                     .iter()
                     .position(|held| held.database == at && held.folded == folded)
                     .ok_or_else(|| {
-                        misuse(format!("no such table: {}", String::from_utf8_lossy(name)))
+                        refusal(format!("no such table: {}", String::from_utf8_lossy(name)))
                     })?;
                 let owner = self
                     .tables
                     .get(position)
                     .cloned()
-                    .ok_or_else(|| misuse("the table that was just found is gone"))?;
+                    .ok_or_else(|| refusal("the table that was just found is gone"))?;
                 // Every row that names the table: the table, its indexes and its
                 // triggers. Collected before anything is removed, because the
                 // list is what decides what to remove.
@@ -1628,7 +1628,7 @@ impl ImportedDatabase {
                         .map(|which| (at, which, table.root))
                 });
                 let Some((table_at, index_at, table_root)) = found else {
-                    return Err(misuse(format!(
+                    return Err(refusal(format!(
                         "no such index: {}",
                         String::from_utf8_lossy(name)
                     )));
@@ -1638,7 +1638,7 @@ impl ImportedDatabase {
                     .get(table_at)
                     .and_then(|table| table.indexes.get(index_at))
                     .map(|index| index.root)
-                    .ok_or_else(|| misuse("the index that was just found is gone"))?;
+                    .ok_or_else(|| refusal("the index that was just found is gone"))?;
                 let rowids: Vec<i64> = self
                     .entries_of(self.ddl_schema)
                     .iter()
@@ -1702,7 +1702,7 @@ impl ImportedDatabase {
             .iter()
             .any(|held| held.database == at && held.folded == folded)
         {
-            return Err(misuse(format!(
+            return Err(refusal(format!(
                 "no such table: {}",
                 String::from_utf8_lossy(table)
             )));
@@ -1749,7 +1749,7 @@ impl ImportedDatabase {
                             continue;
                         }
                         if reads.len() > 1 {
-                            return Err(misuse(format!(
+                            return Err(refusal(format!(
                                 "error in {}: cannot rename a column it reads alongside another table",
                                 String::from_utf8_lossy(&entry.name)
                             )));
@@ -1922,12 +1922,12 @@ impl ImportedDatabase {
             .layouts
             .get(&old_root)
             .cloned()
-            .ok_or_else(|| misuse("no layout for the table being rebuilt"))?;
+            .ok_or_else(|| refusal("no layout for the table being rebuilt"))?;
         let old_rows = {
             let tree = self
                 .trees
                 .get(&old_root)
-                .ok_or_else(|| misuse("no tree for the table being rebuilt"))?;
+                .ok_or_else(|| refusal("no tree for the table being rebuilt"))?;
             tree.rows(self.pool_of(old_root)?)?
         };
         let (columns, key_columns, layout) = if info.without_rowid {
@@ -2078,7 +2078,7 @@ fn refuse_duplicates(
                     format!("{}.{}", String::from_utf8_lossy(&owner.name), name)
                 })
                 .collect();
-            return Err(misuse(format!(
+            return Err(refusal(format!(
                 "UNIQUE constraint failed: {}",
                 columns.join(", ")
             )));

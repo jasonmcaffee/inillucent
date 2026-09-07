@@ -86,6 +86,20 @@ pub enum Probe {
         /// What its first cell must be, rendered.
         expect: &'static str,
     },
+    /// Supported means the query answers this **after** the test has registered
+    /// a function and a collation on the connection.
+    ///
+    /// A separate kind because what is being tested is the registration, not
+    /// the statement: the statement only exists to prove that what was
+    /// registered can be reached from SQL. A registry no statement can read is
+    /// the exact failure this row used to describe, so a probe that only
+    /// checked the registration returned `Ok` would have proved nothing.
+    Registers {
+        /// The query that calls what was registered.
+        sql: &'static str,
+        /// What its first cell must be, rendered.
+        expect: &'static str,
+    },
     /// There is nothing to run, because the driver exposes no entry point for
     /// it. The note has to say why.
     Nothing,
@@ -337,18 +351,29 @@ pub static CAPABILITIES: &[Capability] = &[
     },
     Capability {
         name: "user_functions",
-        support: Support::No,
-        note: "This driver has no call for registering a scalar or aggregate function, \
-               because the binder resolves a name against a static built-in table and \
-               would not reach one: registering into something no statement can read is \
-               a branch no input can take. The call and this row arrive together.",
-        probe: Probe::Nothing,
+        support: Support::Yes,
+        note: "A scalar function an application wrote, registered on the connection and \
+               called from SQL by name. It is registered with the engine's external \
+               flags, so a statement may call it and a schema may not - not a DEFAULT, a \
+               CHECK, a generated column or a view - which is the safe assumption about \
+               code the engine did not write.",
+        probe: Probe::Registers {
+            sql: "SELECT driver_probe(2)",
+            expect: "4",
+        },
     },
     Capability {
         name: "user_collations",
-        support: Support::No,
-        note: "This driver has no call for registering a collation, for the reason \n               `user_functions` has none: the comparison path reads a fixed set and a \n               collation registered anywhere else would never be consulted.",
-        probe: Probe::Nothing,
+        support: Support::Yes,
+        note: "A collating sequence an application wrote, named by COLLATE. It decides \
+               the order rows are STORED in and not merely the order they come back in, \
+               so an index on a column declared with one is built with it - which is why \
+               a comparator that answers differently on two runs is a fault the engine \
+               cannot detect.",
+        probe: Probe::Registers {
+            sql: "SELECT 'B' = 'b' COLLATE driver_probe_ci",
+            expect: "1",
+        },
     },
     Capability {
         name: "cancel",

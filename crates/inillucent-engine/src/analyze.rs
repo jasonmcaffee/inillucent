@@ -16,7 +16,7 @@
 //! **up**, because rounding down claims a prefix is more selective than it is
 //! and that is the direction that picks a bad plan.
 
-use inillucent_base::error::misuse;
+use inillucent_base::error::refusal;
 use inillucent_base::DbResult;
 use inillucent_catalog::analyze::STAT1_SQL;
 use inillucent_catalog::paged::ObjectKind;
@@ -194,7 +194,7 @@ impl ImportedDatabase {
             let tree = self
                 .trees
                 .get(&root)
-                .ok_or_else(|| misuse("sqlite_stat1 has no tree"))?;
+                .ok_or_else(|| refusal("sqlite_stat1 has no tree"))?;
             let mut keys = Vec::new();
             tree.visit_leaves(pool, &mut |leaf| {
                 for row in leaf.live()? {
@@ -215,7 +215,7 @@ impl ImportedDatabase {
         let at = self.schema_of(root);
         let wal = self
             .log_of(at)
-            .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
+            .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
         let mut log = WalLog {
             wal,
             txn,
@@ -226,7 +226,7 @@ impl ImportedDatabase {
         let tree = self
             .trees
             .get_mut(&root)
-            .ok_or_else(|| misuse("sqlite_stat1 has no tree"))?;
+            .ok_or_else(|| refusal("sqlite_stat1 has no tree"))?;
         for rowid in doomed {
             tree.delete(&mut self.database, &mut log, &[Datum::Int(rowid)])?;
         }
@@ -251,7 +251,7 @@ impl ImportedDatabase {
             let tree = self
                 .trees
                 .get(&root)
-                .ok_or_else(|| misuse("sqlite_stat1 has no tree"))?;
+                .ok_or_else(|| refusal("sqlite_stat1 has no tree"))?;
             let mut highest = 0i64;
             tree.visit_leaves(pool, &mut |leaf| {
                 for row in leaf.live()? {
@@ -267,7 +267,7 @@ impl ImportedDatabase {
         let at = self.schema_of(root);
         let wal = self
             .log_of(at)
-            .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
+            .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
         let mut log = WalLog {
             wal,
             txn,
@@ -278,7 +278,7 @@ impl ImportedDatabase {
         let tree = self
             .trees
             .get_mut(&root)
-            .ok_or_else(|| misuse("sqlite_stat1 has no tree"))?;
+            .ok_or_else(|| refusal("sqlite_stat1 has no tree"))?;
         for (table, index, stat) in rows {
             let owned = vec![
                 OwnedDatum::Int(next),
