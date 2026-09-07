@@ -83,9 +83,7 @@ pub fn call_with(
         ScalarFunc::Iif => iif(arguments),
         ScalarFunc::Instr => instr(arguments, encoding),
         ScalarFunc::Length => unary(arguments, length),
-        ScalarFunc::Like => {
-            pattern_call(arguments, true, encoding, !context.like_case_sensitive)
-        }
+        ScalarFunc::Like => pattern_call(arguments, true, encoding, !context.like_case_sensitive),
         ScalarFunc::Likelihood => arguments.first().cloned().unwrap_or(Value::Null),
         ScalarFunc::Lower => unary(arguments, |value| change_case(&value, false, encoding)),
         ScalarFunc::LTrim => trim(arguments, true, false, encoding),

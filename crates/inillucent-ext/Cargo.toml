@@ -6,6 +6,7 @@ license.workspace = true
 description = "Scalar, aggregate, and window functions, collations, virtual tables, and loadable extension policy."
 
 [dependencies]
+rust-stemmers.workspace = true
 inillucent-base = { workspace = true }
 inillucent-value = { workspace = true }
 inillucent-storage = { workspace = true }

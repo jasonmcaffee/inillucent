@@ -663,10 +663,16 @@ name = "rayon"
 category = "numeric-kernel"
 allowed_in = ["inillucent-core", "inillucent-bench"]
 
+# task-1859: also `inillucent-ext`, for the fts5 `porter` tokenizer. SQLite's
+# `tokenize='porter'` stems the tokens of whichever tokenizer it wraps, and this
+# build accepted the declaration and read it as `unicode61` - a promise the
+# index did not keep. The alternative to the crate is a second Porter
+# implementation beside the one `inillucent-core` already uses, which is exactly
+# the duplication this table exists to prevent.
 [[external]]
 name = "rust-stemmers"
 category = "numeric-kernel"
-allowed_in = ["inillucent-core"]
+allowed_in = ["inillucent-core", "inillucent-ext"]
 
 [[external]]
 name = "bytemuck"

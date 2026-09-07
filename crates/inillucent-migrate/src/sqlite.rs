@@ -582,8 +582,7 @@ fn rebuild_full_text(source: &Path, staged: &Path) -> DbResult<Vec<Check>> {
                 &format!("carried.{}", object.name),
                 format!(
                     "{} uses the {module} module, whose storage is SQLite's own; \
-                     this engine has no content table to rebuild it from"
-                ,
+                     this engine has no content table to rebuild it from",
                     object.name
                 ),
             ));
@@ -593,7 +592,10 @@ fn rebuild_full_text(source: &Path, staged: &Path) -> DbResult<Vec<Check>> {
         if columns.is_empty() {
             checks.push(Check::failed(
                 &format!("carried.{}", object.name),
-                format!("{}: no column could be read out of its declaration", object.name),
+                format!(
+                    "{}: no column could be read out of its declaration",
+                    object.name
+                ),
             ));
             continue;
         }
@@ -698,7 +700,10 @@ fn fts5_columns(sql: &str) -> Vec<String> {
         .split(',')
         .map(str::trim)
         .filter(|part| !part.is_empty() && !part.contains('='))
-        .map(|part| part.trim_matches(|byte| byte == '"' || byte == '\'' || byte == '`').to_string())
+        .map(|part| {
+            part.trim_matches(|byte| byte == '"' || byte == '\'' || byte == '`')
+                .to_string()
+        })
         .filter(|part| !part.is_empty())
         .collect()
 }

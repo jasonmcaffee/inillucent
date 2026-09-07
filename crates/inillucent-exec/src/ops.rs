@@ -1731,6 +1731,8 @@ mod tests {
                         argument: Some(compile(&Expr::Column(0), &[StaticType::Int]).unwrap()),
                         extra: Vec::new(),
                         distinct: None,
+                        filter: None,
+                        order_by: Vec::new(),
                     }],
                     Box::new(Collect::new()),
                 );
@@ -1740,6 +1742,8 @@ mod tests {
                         argument: Some(compile(&Expr::Column(0), &[StaticType::Int]).unwrap()),
                         extra: Vec::new(),
                         distinct: None,
+                        filter: None,
+                        order_by: Vec::new(),
                     }],
                     Box::new(Collect::new()),
                 );
@@ -1777,6 +1781,8 @@ mod tests {
                 argument: None,
                 extra: Vec::new(),
                 distinct: None,
+                filter: None,
+                order_by: Vec::new(),
             }],
             Box::new(Collect::new()),
         );
@@ -1908,6 +1914,8 @@ mod tests {
                 argument: None,
                 extra: Vec::new(),
                 distinct: None,
+                filter: None,
+                order_by: Vec::new(),
             }],
             Box::new(Collect::new()),
         );
@@ -1978,6 +1986,8 @@ mod tests {
                             argument: None,
                             extra: Vec::new(),
                             distinct: None,
+                            filter: None,
+                            order_by: Vec::new(),
                         },
                         AggregateSpec {
                             kind: AggregateKind::Sum,
@@ -1986,6 +1996,8 @@ mod tests {
                             ),
                             extra: Vec::new(),
                             distinct: None,
+                            filter: None,
+                            order_by: Vec::new(),
                         },
                     ],
                     Box::new(CollectInto::new(std::rc::Rc::clone(&rows))),

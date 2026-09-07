@@ -715,7 +715,10 @@ fn a_filtered_vector_search_keeps_every_row_the_exhaustive_plan_finds() {
     // The plan really is the indexed one; a test that silently kept scanning
     // would pass while proving nothing at all.
     let explained = connection
-        .query(&format!("EXPLAIN QUERY PLAN {}", query("src LIKE '%t%'", 10)))
+        .query(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            query("src LIKE '%t%'", 10)
+        ))
         .expect("the plan is explained")
         .iter()
         .map(|row| match row.last() {

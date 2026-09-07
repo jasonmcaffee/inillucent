@@ -540,7 +540,6 @@ impl Pool {
         self.page_count.get()
     }
 
-
     /// Returns what the pool has done.
     pub fn stats(&self) -> PoolStats {
         PoolStats {

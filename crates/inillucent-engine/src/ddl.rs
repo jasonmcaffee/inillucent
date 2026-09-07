@@ -386,11 +386,20 @@ impl ImportedDatabase {
             // that is left is making everything durable in the file - which is
             // exactly what a checkpoint does. It is not a lie about the space:
             // `PRAGMA freelist_count` says what is free either way.
+            // Neither form may run inside an explicit transaction, which is
+            // SQLite's rule and is not a formality here either: a checkpoint
+            // folds committed frames into the file, and an open transaction's
+            // are not committed. The message is SQLite's.
+            Directive::Vacuum { .. } if self.batch.get().is_some() => {
+                Err(refusal("cannot VACUUM from within a transaction"))
+            }
             Directive::Vacuum { into: None, .. } => {
                 self.checkpoint()?;
                 Ok(Outcome::empty())
             }
-            Directive::Vacuum { into: Some(path), .. } => {
+            Directive::Vacuum {
+                into: Some(path), ..
+            } => {
                 let path = String::from_utf8_lossy(&path).into_owned();
                 if path.is_empty() {
                     return Err(refusal("VACUUM INTO needs a file to write"));

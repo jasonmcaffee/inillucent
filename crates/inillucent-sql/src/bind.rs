@@ -3986,8 +3986,7 @@ impl<'a> Binder<'a> {
                     // spellings failed on one message. A qualified `b.k` still
                     // reaches the right-hand copy, which is what SQLite does.
                     if table_folded.is_none()
-                        && u16::try_from(index)
-                            .is_ok_and(|slot| source.suppressed.contains(&slot))
+                        && u16::try_from(index).is_ok_and(|slot| source.suppressed.contains(&slot))
                     {
                         continue;
                     }
@@ -4319,10 +4318,10 @@ impl<'a> Binder<'a> {
         let mut bound_rights = Vec::with_capacity(block.columns.len());
         for at in 0..block.columns.len() {
             let mut one = block.clone();
-            one.columns = block.columns.get(at..at.saturating_add(1)).map_or_else(
-                Vec::new,
-                <[crate::bind::BoundResultColumn]>::to_vec,
-            );
+            one.columns = block
+                .columns
+                .get(at..at.saturating_add(1))
+                .map_or_else(Vec::new, <[crate::bind::BoundResultColumn]>::to_vec);
             let collation = one
                 .columns
                 .first()
@@ -4667,7 +4666,11 @@ fn integer_literal(text: &[u8]) -> BoundExpr {
             value = value.wrapping_mul(16).wrapping_add(digit);
         }
         let value = value as i64;
-        return BoundExpr::Integer(if negative { value.wrapping_neg() } else { value });
+        return BoundExpr::Integer(if negative {
+            value.wrapping_neg()
+        } else {
+            value
+        });
     }
     let cleaned: Vec<u8> = text.iter().copied().filter(|byte| *byte != b'_').collect();
     let (value, syntax) =

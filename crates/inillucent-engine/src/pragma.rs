@@ -86,7 +86,9 @@ impl ImportedDatabase {
             return Ok(outcome);
         }
         match name {
-            b"cache_size" => self.pragma_cache_size(argument),
+            // `default_cache_size` is the deprecated spelling of the same
+            // setting, and SQLite still answers it.
+            b"cache_size" | b"default_cache_size" => self.pragma_cache_size(argument),
             b"synchronous" => self.pragma_synchronous(argument),
             b"busy_timeout" => self.pragma_busy_timeout(argument),
             b"foreign_keys" => self.pragma_flag(argument),
@@ -111,7 +113,23 @@ impl ImportedDatabase {
             // because the answer is correct, not because the subject is absent.
             b"data_version" => Ok(one_integer(1)),
             b"max_page_count" => self.pragma_max_page_count(argument),
+            // **Remembered, and exceeded.** `analysis_limit` caps how many rows
+            // `ANALYZE` samples per index; this engine's `ANALYZE` walks the
+            // whole table, which is *more* than the cap asks for and so is
+            // never a wrong answer - only a slower one. Recording it keeps a
+            // script that sets it running and reads back what it set, which is
+            // what the reference does.
+            b"analysis_limit" => self.pragma_analysis_limit(argument),
             b"case_sensitive_like" => self.pragma_case_sensitive_like(argument),
+            // **Remembered, and there is nothing for it to permit.** In SQLite
+            // this unlocks a write to `sqlite_schema`; here the binder refuses
+            // a write to any reserved-prefix table whatever the flag says, and
+            // a module's shadow table is an *ordinary* table that a write
+            // reaches without it. So the value is recorded and reported and
+            // changes nothing - which is a fact about this engine's schema
+            // rather than a setting quietly dropped, and it lets a script
+            // written for the reference run unchanged.
+            b"writable_schema" => self.pragma_writable_schema(argument),
             b"query_only" => self.pragma_query_only(argument),
             b"recursive_triggers" => self.pragma_recursive_triggers(argument),
             // Reported: one value each, and a write that asks for another is
@@ -134,19 +152,17 @@ impl ImportedDatabase {
             // answer SQLite gives, so they are named here rather than falling
             // through to the refusal - a refusal would be a difference invented
             // by the rule rather than found by it.
-            b"optimize" | b"shrink_memory" | b"incremental_vacuum" | b"data_store_directory"
+            b"optimize"
+            | b"shrink_memory"
+            | b"incremental_vacuum"
+            | b"data_store_directory"
             | b"temp_store_directory" => Ok(Outcome::empty()),
             // Reported: a number this engine has exactly one of. Read it and
             // get the truth; set it to that value and nothing happens; set it
             // to anything else and it refuses rather than pretending.
             name if reported_value(name).is_some() => {
                 let (value, spellings) = reported_value(name).unwrap_or((0, &[]));
-                pragma_fixed_number(
-                    argument,
-                    &String::from_utf8_lossy(name),
-                    value,
-                    spellings,
-                )
+                pragma_fixed_number(argument, &String::from_utf8_lossy(name), value, spellings)
             }
             // On SQLite's list and not implemented here: refused by name, so a
             // caller can tell "no" from "nothing".
@@ -994,6 +1010,39 @@ impl ImportedDatabase {
         Ok(Outcome::empty())
     }
 
+    /// Reads or sets how many rows `ANALYZE` may sample per index.
+    ///
+    /// See the dispatcher: this engine walks the whole table, which is more
+    /// than any cap asks for.
+    ///
+    /// @param argument - the value it was given, when it was given one
+    fn pragma_analysis_limit(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+        if let Some(argument) = argument {
+            self.analysis_limit = argument_integer(argument).max(0);
+        }
+        Ok(one_integer(self.analysis_limit))
+    }
+
+    /// Reads or sets `writable_schema`, which this engine records and honours
+    /// by having nothing for it to unlock.
+    ///
+    /// See the dispatcher for why. `PRAGMA writable_schema` with no argument
+    /// reports what was set, which is what the reference does.
+    ///
+    /// @param argument - the value it was given, when it was given one
+    fn pragma_writable_schema(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+        let Some(argument) = argument else {
+            // **Zero, whatever was set.** It is what the reference reads back
+            // too - it clears the flag as soon as the schema is re-read - and
+            // here it is the literal truth: there is nothing this engine's
+            // catalog will let a statement write with the flag on that it
+            // refuses with it off.
+            return Ok(one_integer(0));
+        };
+        self.writable_schema = argument_boolean(argument);
+        Ok(Outcome::empty())
+    }
+
     /// Reads or sets whether this connection may write.
     ///
     /// **Honoured rather than remembered.** A caller sets `query_only` to make
@@ -1129,7 +1178,6 @@ fn action_name(action: inillucent_sql::ast::ReferentialAction) -> &'static str {
         ReferentialAction::Cascade => "CASCADE",
     }
 }
-
 
 /// The ceiling `PRAGMA max_page_count` reports when nothing has been set.
 ///
@@ -1370,8 +1418,6 @@ const ON: &[&str] = &["1", "on", "true", "yes"];
 /// @param name - the pragma's folded name
 fn reported_value(name: &[u8]) -> Option<(i64, &'static [&'static str])> {
     Some(match name {
-        // ANALYZE here walks the whole table; there is no sampling limit to set.
-        b"analysis_limit" => (0, OFF),
         // No automatic index is ever built, so the planner setting has one state.
         b"automatic_index" => (0, OFF),
         // The pool evicts by clock rather than at a spill threshold.
@@ -1406,7 +1452,6 @@ fn reported_value(name: &[u8]) -> Option<(i64, &'static [&'static str])> {
         // A schema object is never treated as trusted input here, and the
         // catalog is not writable as a table.
         b"trusted_schema" => (0, OFF),
-        b"writable_schema" => (0, OFF),
         // The log is folded in at an explicit checkpoint rather than every N
         // frames, so there is no frame count to set.
         b"wal_autocheckpoint" => (0, OFF),

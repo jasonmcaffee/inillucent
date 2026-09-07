@@ -843,9 +843,11 @@ fn rowid_alias(
             // A descending primary key over this column is still a primary key;
             // it simply is not the rowid. Nothing here claims it, and
             // `automatic_indexes` builds its index.
-            if column.constraints.iter().any(|(_, constraint)| {
-                matches!(constraint, ColumnConstraint::PrimaryKey { .. })
-            }) {
+            if column
+                .constraints
+                .iter()
+                .any(|(_, constraint)| matches!(constraint, ColumnConstraint::PrimaryKey { .. }))
+            {
                 return None;
             }
             continue;
@@ -980,8 +982,7 @@ fn automatic_indexes(
                 expr_sql: None,
                 collation,
                 descending: key.order == inillucent_sql::ast::SortOrder::Descending,
-                declared_descending: key.order
-                    == inillucent_sql::ast::SortOrder::Descending,
+                declared_descending: key.order == inillucent_sql::ast::SortOrder::Descending,
             });
         }
         indexes.push(IndexInfo {

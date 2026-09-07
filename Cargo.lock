@@ -732,6 +732,7 @@ dependencies = [
  "inillucent-storage",
  "inillucent-transaction",
  "inillucent-value",
+ "rust-stemmers",
 ]
 
 [[package]]

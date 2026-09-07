@@ -331,6 +331,11 @@ mod tests {
             wal_sequence: 3,
             generation: 11,
             uuid: 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef,
+            // Non-zero, so the round trip proves the three application fields
+            // are written and read rather than defaulted on both sides.
+            user_version: 42,
+            application_id: -7,
+            schema_cookie: 3,
         };
         let mut page = vec![0u8; 32_768];
         meta.encode(&mut page).unwrap();

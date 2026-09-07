@@ -18,7 +18,7 @@ use inillucent_value::Value;
 
 /// Runs one dot command.
 pub fn run(shell: &mut Shell, line: &str) {
-    let words = split(line);
+    let words = split(without_terminator(line));
     let Some(name) = words
         .first()
         .map(|word| word.trim_start_matches('.').to_string())
@@ -38,7 +38,10 @@ pub fn run(shell: &mut Shell, line: &str) {
         "headers" => shell.layout.headers = truthy(arguments.first().copied()),
         "mode" => mode(shell, &arguments),
         "separator" => separator(shell, &arguments),
-        "nullvalue" => shell.layout.null = arguments.first().copied().unwrap_or("").to_string(),
+        "nullvalue" => match arguments.first() {
+            Some(text) => shell.layout.null = (*text).to_string(),
+            None => shell.complain("Usage: .nullvalue STRING"),
+        },
         "width" => width(shell, &arguments),
         "output" => output(shell, &arguments, false),
         "once" => output(shell, &arguments, true),
@@ -200,6 +203,19 @@ fn parameter(shell: &mut Shell, arguments: &[&str]) {
 }
 
 /// Splits a command line into words, honouring quotes.
+/// Drops the semicolon a dot command was typed with.
+///
+/// A dot command is not SQL and does not need a terminator, but it is typed at
+/// the same prompt as SQL and so it gets one anyway. SQLite's shell drops a
+/// single trailing `;` from the line before it splits it - `.print hello;`
+/// prints `hello`, `.print hello;;` prints `hello;`, and `.separator ;` is left
+/// with no argument at all and answers with its usage line. Everything inside
+/// the line is untouched: `.print a;b` still prints `a;b`.
+fn without_terminator(line: &str) -> &str {
+    let trimmed = line.trim_end();
+    trimmed.strip_suffix(';').unwrap_or(trimmed)
+}
+
 fn split(line: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut current = String::new();
@@ -433,12 +449,16 @@ fn columnise(names: &[String]) -> Vec<String> {
 fn indexes(shell: &mut Shell, arguments: &[&str]) {
     let mut sql = String::from("SELECT name FROM sqlite_master WHERE type = 'index'");
     if let Some(pattern) = arguments.first() {
-        // **The argument matches the *index* name, not the table's**, which is
-        // measured rather than read off the help text: against the reference,
-        // `.indexes ia` answers `ia` and `.indexes t` - the table `ia` is on -
-        // answers nothing. Filtering on `tbl_name` made every one-argument
-        // `.indexes` differ.
-        sql.push_str(&format!(" AND name LIKE {}", literal_text(pattern)));
+        // **The argument is a substring of the *index* name, not the table's.**
+        // Measured against the reference rather than read off the help text:
+        // `.indexes people` answers `people_name`, `.indexes name` answers it
+        // too, and `.indexes t` - the table an index called `ia` is on -
+        // answers nothing. `.tables` is the other rule and is left alone:
+        // `.tables people` answers `people` and not `peoples`.
+        sql.push_str(&format!(
+            " AND name LIKE {}",
+            literal_text(&format!("%{pattern}%"))
+        ));
     }
     sql.push_str(" AND name NOT LIKE 'sqlite_%' ORDER BY name");
     let names = shell.column(&sql);
@@ -563,10 +583,17 @@ fn mode(shell: &mut Shell, arguments: &[&str]) {
 }
 
 /// `.separator`: what goes between columns, and optionally between rows.
+///
+/// A command that needs an argument and was given none answers with its usage
+/// line rather than doing nothing, which is what SQLite's shell does and what
+/// makes `.separator ;` - whose only argument is the terminator this shell has
+/// just dropped - say so instead of silently keeping the separator it had.
 fn separator(shell: &mut Shell, arguments: &[&str]) {
-    if let Some(column) = arguments.first() {
-        shell.layout.separator = (*column).to_string();
-    }
+    let Some(column) = arguments.first() else {
+        shell.complain("Usage: .separator COL ?ROW?");
+        return;
+    };
+    shell.layout.separator = (*column).to_string();
     if let Some(row) = arguments.get(1) {
         shell.layout.row_separator = (*row).to_string();
     }

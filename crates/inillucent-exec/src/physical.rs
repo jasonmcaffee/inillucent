@@ -5186,7 +5186,10 @@ fn bare_columns(select: &BoundSelect) -> Vec<BoundExpr> {
         while let Some(node) = stack.pop() {
             // An aggregate's arguments are read *inside* it, so nothing under
             // one is bare.
-            if matches!(node, BoundExpr::Aggregate { .. } | BoundExpr::WindowRef { .. }) {
+            if matches!(
+                node,
+                BoundExpr::Aggregate { .. } | BoundExpr::WindowRef { .. }
+            ) {
                 continue;
             }
             if matches!(node, BoundExpr::Column { .. } | BoundExpr::Rowid { .. }) {
