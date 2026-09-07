@@ -9,7 +9,7 @@
 //! `compat/errors.toml` into `inillucent_base`, which is where the engine already
 //! keeps them, and this module re-exports what the boundary needs.
 
-use inillucent::{DbError, ExtendedCode, PrimaryCode};
+use inillucent_legacy::{DbError, ExtendedCode, PrimaryCode};
 
 /// `SQLITE_OK`.
 pub const SQLITE_OK: i32 = 0;

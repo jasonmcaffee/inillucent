@@ -26,9 +26,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Instant;
 
-use inillucent::{Database, Levers, Value};
 use inillucent_compat::perf::{bootstrap, median, Digest, Sample};
 use inillucent_compat::workspace_root;
+use inillucent_legacy::{Database, Levers, Value};
 
 /// The seed the bootstrap uses, fixed so a report is reproducible.
 const SEED: u64 = 17_900_001;

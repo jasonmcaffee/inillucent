@@ -19,9 +19,9 @@ pub struct sqlite3_backup {
     /// The destination connection, likewise.
     destination: *mut sqlite3,
     /// The backup itself, its borrows erased. See the module comment.
-    inner: Option<inillucent::Backup<'static>>,
+    inner: Option<inillucent_legacy::Backup<'static>>,
     /// What the last step reported, for `remaining` and `pagecount`.
-    progress: inillucent::BackupProgress,
+    progress: inillucent_legacy::BackupProgress,
 }
 
 /// Begins a backup from one connection's database into another's.
@@ -59,8 +59,9 @@ pub unsafe extern "C" fn sqlite3_backup_init(
     };
     // Both borrows are erased, and both are held open by the counts raised
     // below. See the module comment.
-    let source_connection: &'static inillucent::Connection = std::mem::transmute(&*from.connection);
-    let destination_connection: &'static inillucent::Connection =
+    let source_connection: &'static inillucent_legacy::Connection =
+        std::mem::transmute(&*from.connection);
+    let destination_connection: &'static inillucent_legacy::Connection =
         std::mem::transmute(&*to.connection);
     match source_connection.backup_begin(from_index, destination_connection, to_index) {
         Err(error) => {
@@ -91,7 +92,7 @@ unsafe fn index_of(database: &mut sqlite3, name: &[u8]) -> Option<usize> {
     let rows = database.connection.query("PRAGMA database_list").ok()?;
     rows.iter().position(|row| {
         row.get(1)
-            .and_then(inillucent::Value::as_text)
+            .and_then(inillucent_legacy::Value::as_text)
             .is_some_and(|text| text.raw().eq_ignore_ascii_case(&wanted))
     })
 }

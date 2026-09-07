@@ -18,6 +18,7 @@ inillucent-vm = { workspace = true }
 inillucent-session = { workspace = true }
 inillucent-transaction = { workspace = true }
 inillucent = { workspace = true }
+inillucent-legacy = { workspace = true }
 # The rearchitected engine (task-1816), measured beside the old one.
 inillucent-pool = { workspace = true }
 inillucent-tree = { workspace = true }

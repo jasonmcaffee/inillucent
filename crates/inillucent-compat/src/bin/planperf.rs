@@ -23,8 +23,8 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use inillucent::{Connection, Database};
 use inillucent_compat::{platform_name, workspace_root};
+use inillucent_legacy::{Connection, Database};
 
 /// How many allocations have been made since the process started.
 static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);

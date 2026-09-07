@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use inillucent::{Database, Value};
 use inillucent_compat::workspace_root;
+use inillucent_legacy::{Database, Value};
 
 /// How many rows the probe table holds.
 const ROWS: i64 = 5_000;

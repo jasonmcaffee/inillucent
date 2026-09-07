@@ -34,11 +34,11 @@ use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use inillucent::vfs::{
+use inillucent_legacy::vfs::{
     AccessMode, DbPath, DeviceCharacteristics, FileIdentity, FileLock, OpenOptions, SharedMemory,
     SyncMode, Vfs, VfsError, VfsFile, VfsResult,
 };
-use inillucent::{ExtendedCode, PrimaryCode};
+use inillucent_legacy::{ExtendedCode, PrimaryCode};
 
 use crate::codes::{SQLITE_ERROR, SQLITE_OK};
 use crate::handle::{c_str, connection, misuse, sqlite3};
@@ -552,7 +552,7 @@ impl Vfs for ForeignVfs {
 
 /// Turns the engine's open options into the flags `xOpen` expects.
 fn open_flags(options: &OpenOptions) -> c_int {
-    use inillucent::vfs::FileKind;
+    use inillucent_legacy::vfs::FileKind;
     let mut flags = if options.read_only {
         crate::codes::SQLITE_OPEN_READONLY
     } else {

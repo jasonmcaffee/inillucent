@@ -16,7 +16,7 @@
 
 use std::os::raw::{c_char, c_int, c_void};
 
-use inillucent::Value;
+use inillucent_legacy::Value;
 
 use crate::codes::{SQLITE_NULL, SQLITE_OK};
 use crate::handle::{sqlite3_stmt, statement};
@@ -389,7 +389,7 @@ pub unsafe extern "C" fn sqlite3_table_column_metadata(
     for row in &rows {
         let name = row
             .get(1)
-            .and_then(inillucent::Value::as_text)
+            .and_then(inillucent_legacy::Value::as_text)
             .map(|text| text.raw().to_ascii_lowercase())
             .unwrap_or_default();
         if name != wanted {
@@ -397,16 +397,16 @@ pub unsafe extern "C" fn sqlite3_table_column_metadata(
         }
         let declared = row
             .get(2)
-            .and_then(inillucent::Value::as_text)
+            .and_then(inillucent_legacy::Value::as_text)
             .map(|text| text.raw().to_vec())
             .unwrap_or_default();
         let nn = row
             .get(3)
-            .and_then(inillucent::Value::as_integer)
+            .and_then(inillucent_legacy::Value::as_integer)
             .unwrap_or(0);
         let pk = row
             .get(5)
-            .and_then(inillucent::Value::as_integer)
+            .and_then(inillucent_legacy::Value::as_integer)
             .unwrap_or(0);
         write_out(declared_type, collation, connection, &declared, b"BINARY");
         write_flag(not_null, c_int::from(nn != 0));

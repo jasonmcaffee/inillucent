@@ -20,10 +20,10 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use inillucent::Database;
 use inillucent_base::limits::Limits;
 use inillucent_compat::oracle::{Driver, Op};
 use inillucent_compat::{platform_name, workspace_root};
+use inillucent_legacy::Database;
 use inillucent_sql::parser;
 
 /// How many allocations have been made since the process started.

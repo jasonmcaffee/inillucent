@@ -14,10 +14,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use inillucent::{Database, PrimaryCode, Value};
 use inillucent_base::limits::Limits;
 use inillucent_compat::oracle::{Driver, Op, TaggedValue};
 use inillucent_compat::workspace_root;
+use inillucent_legacy::{Database, PrimaryCode, Value};
 use inillucent_vm::machine::Machine;
 use inillucent_vm::program::{Instruction, Opcode, Operand, Program, ProgramDependencies};
 use inillucent_vm::{verify, verify_operands};
@@ -28,7 +28,7 @@ fn fixture() -> PathBuf {
 }
 
 /// Opens a connection onto the corpus fixture.
-fn connect() -> inillucent::Connection {
+fn connect() -> inillucent_legacy::Connection {
     let database = Database::open_with_busy_timeout(fixture(), std::time::Duration::from_secs(5))
         .expect("the fixture opens");
     database.connect().expect("the connection opens")

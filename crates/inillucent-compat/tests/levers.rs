@@ -11,7 +11,7 @@
 //! This is the correctness shard the release scorecard's arms are run against.
 //! Every statement it uses is one the scorecard measures.
 
-use inillucent::{Connection, Database, Levers, Value};
+use inillucent_legacy::{Connection, Database, Levers, Value};
 
 /// The rows the fixture holds.
 const ROWS: i64 = 2_000;

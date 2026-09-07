@@ -24,6 +24,7 @@ members = [
     "crates/inillucent-vm",
     "crates/inillucent-session",
     "crates/inillucent",
+    "crates/inillucent-legacy",
     "crates/inillucent-capi",
     "crates/inillucent-cli",
     "crates/inillucent-search",
@@ -34,6 +35,13 @@ members = [
     "crates/inillucent-model",
     # Test-only assurance tooling.
     "crates/inillucent-compat",
+    # The driver (task-1837): the surface an application outside this workspace
+    # binds to, and the C ABI every language that is not Rust reaches it
+    # through. A sub project rather than two more crates in `crates/` because it
+    # is the one part of the repository written to be read by somebody who is
+    # not working on the engine - `drivers/README.md` is its front door.
+    "drivers/inillucent-driver",
+    "drivers/inillucent-driver-capi",
 ]
 
 # The release profile, which is part of the fairness contract rather than a
@@ -82,9 +90,12 @@ inillucent-ext = { path = "crates/inillucent-ext" }
 inillucent-vm = { path = "crates/inillucent-vm" }
 inillucent-session = { path = "crates/inillucent-session" }
 inillucent = { path = "crates/inillucent" }
+inillucent-legacy = { path = "crates/inillucent-legacy" }
 inillucent-core = { path = "crates/inillucent-core" }
 inillucent-search = { path = "crates/inillucent-search" }
 inillucent-migrate = { path = "crates/inillucent-migrate" }
+inillucent-driver = { path = "drivers/inillucent-driver" }
+inillucent-driver-capi = { path = "drivers/inillucent-driver-capi" }
 
 # ---------------------------------------------------------------------------
 # Third-party dependencies. docs/dependency-policy.md records why each one is

@@ -567,9 +567,9 @@ name = "inillucent"
 version = "0.1.0"
 dependencies = [
  "inillucent-base",
- "inillucent-catalog",
- "inillucent-session",
- "inillucent-storage",
+ "inillucent-engine",
+ "inillucent-sql",
+ "inillucent-tree",
  "inillucent-value",
 ]
 
@@ -598,7 +598,7 @@ dependencies = [
 name = "inillucent-capi"
 version = "0.1.0"
 dependencies = [
- "inillucent",
+ "inillucent-legacy",
 ]
 
 [[package]]
@@ -634,6 +634,7 @@ dependencies = [
  "inillucent-engine",
  "inillucent-exec",
  "inillucent-ext",
+ "inillucent-legacy",
  "inillucent-migrate",
  "inillucent-pool",
  "inillucent-session",
@@ -666,6 +667,20 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokenizers",
+]
+
+[[package]]
+name = "inillucent-driver"
+version = "0.1.0"
+dependencies = [
+ "inillucent-engine",
+]
+
+[[package]]
+name = "inillucent-driver-capi"
+version = "0.1.0"
+dependencies = [
+ "inillucent-driver",
 ]
 
 [[package]]
@@ -710,6 +725,17 @@ dependencies = [
  "inillucent-sql",
  "inillucent-storage",
  "inillucent-transaction",
+ "inillucent-value",
+]
+
+[[package]]
+name = "inillucent-legacy"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+ "inillucent-catalog",
+ "inillucent-session",
+ "inillucent-storage",
  "inillucent-value",
 ]
 

@@ -25,13 +25,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Instant;
 
-use inillucent::{Connection, Database, Levers, Value};
 use inillucent_compat::history;
 use inillucent_compat::perf::{
     plan_for, Bind, Contract, Digest, Grouping, Paired, Plan, Sample, Verdict, Workload,
 };
 use inillucent_compat::report::json_string;
 use inillucent_compat::{platform_name, workspace_root};
+use inillucent_legacy::{Connection, Database, Levers, Value};
 
 /// How many paired rounds a scale is measured over.
 ///
@@ -493,7 +493,7 @@ fn eat(digest: &mut Digest, value: &Value<'static>) {
 
 /// Binds one parameter, by the same formula the reference uses.
 fn bind_one(
-    statement: &mut inillucent::Statement<'_>,
+    statement: &mut inillucent_legacy::Statement<'_>,
     position: u32,
     bind: Bind,
     iteration: u32,

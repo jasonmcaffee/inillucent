@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use inillucent::{Connection, Database};
+use inillucent_legacy::{Connection, Database};
 
 /// How many rows the table holds, which every batch size updates within.
 const ROWS: u32 = 20_000;

@@ -11,7 +11,7 @@
 //!
 //! # The one lifetime that is erased, and why
 //!
-//! `inillucent::Statement<'connection>` borrows the connection that prepared it. C
+//! `inillucent_legacy::Statement<'connection>` borrows the connection that prepared it. C
 //! has no lifetimes, so a `sqlite3_stmt*` cannot carry one. The statement's
 //! borrow is therefore transmuted to `'static` when it goes into the handle,
 //! and the connection is kept behind a `Box` that is never moved and never
@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 
-use inillucent::{Connection, Database, DbError, Statement, Value};
+use inillucent_legacy::{Connection, Database, DbError, Statement, Value};
 
 use crate::codes::{SQLITE_MISUSE, SQLITE_OK};
 
@@ -170,7 +170,7 @@ pub struct sqlite3_blob {
     /// The connection it was opened on.
     pub(crate) owner: *mut sqlite3,
     /// The open blob, its borrow erased the same way a statement's is.
-    pub(crate) blob: inillucent::Blob<'static>,
+    pub(crate) blob: inillucent_legacy::Blob<'static>,
 }
 
 /// Turns a pointer a caller handed in into a reference, or reports misuse.

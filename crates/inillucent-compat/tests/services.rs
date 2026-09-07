@@ -8,8 +8,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use inillucent::{Database, Value};
 use inillucent_compat::workspace_root;
+use inillucent_legacy::{Database, Value};
 
 /// Returns the pinned SQLite shell, or `None` when it has not been downloaded.
 fn pinned_shell() -> Option<PathBuf> {
@@ -72,7 +72,7 @@ fn pages(bytes: &[u8]) -> Vec<u8> {
 }
 
 /// Returns the first column of the first row a query reports.
-fn one(connection: &inillucent::Connection, sql: &str) -> Option<Value<'static>> {
+fn one(connection: &inillucent_legacy::Connection, sql: &str) -> Option<Value<'static>> {
     connection
         .query(sql)
         .ok()

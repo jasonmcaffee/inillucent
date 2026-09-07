@@ -31,7 +31,7 @@ similar to pgvector. Measured against that:
 | Same features as SQLite | **Not yet, but the list is short.** The new engine runs 46 of 50 inventoried constructs. Shipped by task-1838: trigger firing and foreign key enforcement (immediate and deferred), `LEFT`/`RIGHT`/`FULL OUTER JOIN`, derived tables in `FROM`, recursive CTEs, correlated subqueries, user-defined scalar and aggregate functions and collations, and the `VIRTUAL` generated column that used to shift later columns. Still missing: temp tables, `ATTACH`, `VACUUM`, plain `EXPLAIN`, and the table-valued pragma form. | task-1838 §1-3, `new_engine_surface.rs` |
 | Same durability and isolation | **Yes, single process, one writer.** WAL with group commit, snapshot isolation, ARIES-style redo recovery, undo for `ROLLBACK`/`SAVEPOINT`, crash campaigns under a deterministic simulator. Multi-process access and SQLite's file format are deliberate non-goals. | task-1832, task-1816 |
 | Embedding search like pgvector | **Yes, and graded better than pgvector on 15 of 17 primary comparisons** with zero worse; in production on a 598,560-chunk mailbox at recall 1.000 and 27 ms p95. **Reachable from ordinary SQL since task-1838 §7**: a `VECTOR(N)` column, `vector_distance_cos`/`_l2`/`vector_dot`, `CREATE INDEX ... USING inillucent_hnsw`, and `ORDER BY vector_distance_cos(v, ?) LIMIT k` planned onto the index. | `inillucent-scorecard.md`, task-1775, task-1838 §7 |
-| Old engine deleted, one engine shipped | **No.** The SQLite-file-format engine (`inillucent-storage`, `-transaction`, `-vm`, `-session`, the `inillucent` facade, `inillucent-capi`) is still in the tree and is still what `inillucent::Database::open` reaches. The CLI and the migrator run on the new engine. | code audit, task-1834 §8 |
+| Old engine deleted, one engine shipped | **Half.** `inillucent::Database::open` reaches `inillucent-engine` since task-1838 §9 - the facade is a re-export of the new engine and the surface is smaller by exactly the features the new engine does not have. The old engine is still in the tree under `inillucent-legacy`, with one consumer: `inillucent-capi`, the `sqlite3_*` C ABI, whose replacement is **task-1837**'s driver. Deleting `-legacy`, `-capi`, `-session`, `-vm`, `-transaction` and `-storage` before that lands would leave the workspace with no C ABI at all, so it waits. | task-1838 §9, task-1834 §8 |
 
 The improvement plan for every row that is not green is `tasks/rust-db-phase-2-tdd.md`.
 
@@ -310,7 +310,7 @@ both are one thread, so a percentage would only restate the wall clock.
 | triggers, foreign keys | yes; `BEFORE`/`AFTER`/`INSTEAD OF`, `FOR EACH ROW`, `WHEN`, `RAISE`, recursion capped at 1,000 frames. Foreign keys compile to triggers, so `PRAGMA foreign_keys`, `DEFERRABLE INITIALLY DEFERRED`, `ON DELETE CASCADE`/`SET NULL`/`SET DEFAULT`/`RESTRICT` and `PRAGMA foreign_key_check` all run through the one mechanism (task-1838 §1) | yes |
 | extensions | JSON, FTS5, R-Tree, `json_each`, `generate_series`, `inillucent_search` | JSON1, FTS3/4/5, R-Tree, geopoly, session, RBU, ... |
 | vector search | `VECTOR(N)` columns, `vector_distance_cos`/`_l2`/`vector_dot`, `CREATE INDEX ... USING inillucent_hnsw`, and a planner rule that turns `ORDER BY vector_distance_cos(v, ?) LIMIT k` into a probe of that index followed by an exact rescore. Graded at recall **1.000** against an exhaustive cosine (task-1838 §7) | none; pgvector is an extension PostgreSQL loads |
-| C API | `inillucent-capi` exports 133 `sqlite3_*` symbols, over the **old** engine; a driver and C ABI for the new engine is task-1837 | `sqlite3.h` |
+| C API | `inillucent-capi` exports 133 `sqlite3_*` symbols, over the **old** engine, which is now `inillucent-legacy`; a driver and C ABI for the new engine is task-1837 | `sqlite3.h` |
 | shell | `inillucent-shell`, 12 of 15 scripts byte-identical to `sqlite3` | `sqlite3` |
 
 The **old** engine, still in the tree, is the one that reached SQLite file-format parity:
@@ -399,7 +399,13 @@ struck below rather than deleted, so the list still reads as a record of what wa
    planned onto the retrieval engine.~~ Shipped, task-1838 §7. What is left of it: the `<=>`/`<->`
    operator spellings, and `vector_distance_l2` as an *ordering* the planner recognises - only the
    cosine is wired to the index, because that is the measure the store is built on.
-10. **Deleting the old engine** and re-rooting `inillucent::Database` onto the new one.
+10. **Deleting the old engine.** Re-rooting is done (task-1838 §9): `inillucent` is a re-export of
+    `inillucent-engine`, and the old facade is `inillucent-legacy`. What is left is the deletion
+    itself - `inillucent-legacy`, `inillucent-capi`, `inillucent-session`, `inillucent-vm`,
+    `inillucent-transaction` and `inillucent-storage` minus its reader - and it is blocked on
+    **task-1837**'s driver, which is the C ABI that replaces `inillucent-capi`. The seven profiling
+    binaries and seven suites that measure the *old* engine were repointed at `inillucent-legacy`
+    rather than moved onto the new one, because moving them would be measuring something else.
 11. **The retrieval index's footprint**: 3.83 GB resident for 598,560 chunks, measured
     (task-1838 §8). The two things this line used to ask for are done and the measurement says so:
     the BM25 postings and dictionary **are** persisted - `lexical.bin` is 642 MB of terms and

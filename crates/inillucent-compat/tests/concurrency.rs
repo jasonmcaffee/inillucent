@@ -17,8 +17,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use inillucent::{Database, Value};
 use inillucent_compat::workspace_root;
+use inillucent_legacy::{Database, Value};
 use inillucent_session::connection::{Connection, OpenOptions, SessionDatabase};
 use inillucent_sim::media::MediaModel;
 use inillucent_sim::schedule::{explore_two_actors, ActorId, Decisions, Scheduler};
@@ -41,13 +41,13 @@ fn scratch(name: &str) -> std::path::PathBuf {
 }
 
 /// Opens a connection on a real file.
-fn connect(path: &std::path::Path) -> inillucent::Connection {
+fn connect(path: &std::path::Path) -> inillucent_legacy::Connection {
     let database = Database::open(path).expect("the database opens");
     database.connect().expect("the connection opens")
 }
 
 /// Returns the single integer a query reports.
-fn integer(connection: &inillucent::Connection, sql: &str) -> i64 {
+fn integer(connection: &inillucent_legacy::Connection, sql: &str) -> i64 {
     let rows = connection.query(sql).expect("the query runs");
     match rows.first().and_then(|row| row.first()) {
         Some(Value::Integer(value)) => *value,
@@ -60,7 +60,7 @@ fn integer(connection: &inillucent::Connection, sql: &str) -> i64 {
 /// A recursive CTE would say this in one statement, which `INSERT` does not
 /// take yet; doubling the table is the next shortest thing and is what makes
 /// the cross joins below long enough to be worth stopping.
-fn fill(connection: &inillucent::Connection, rows: i64) {
+fn fill(connection: &inillucent_legacy::Connection, rows: i64) {
     connection
         .execute_batch("INSERT INTO t VALUES(1)")
         .expect("the first row");
@@ -72,7 +72,7 @@ fn fill(connection: &inillucent::Connection, rows: i64) {
 }
 
 /// Returns the text a query reports.
-fn text(connection: &inillucent::Connection, sql: &str) -> String {
+fn text(connection: &inillucent_legacy::Connection, sql: &str) -> String {
     let rows = connection.query(sql).expect("the query runs");
     match rows.first().and_then(|row| row.first()) {
         Some(Value::Text(value)) => String::from_utf8_lossy(&value.utf8_bytes()).to_string(),
