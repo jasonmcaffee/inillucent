@@ -633,12 +633,14 @@ impl ImportedDatabase {
     /// @param term - which FROM term of the plan
     /// @param path - the access path the planner chose for it
     /// @param params - the values bound to `?1`, `?2`, ...
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn rows_of_module(
         &self,
         table: &inillucent_sql::catalog_view::TableInfo,
         path: &AccessPath,
         params: &inillucent_exec::physical::Params,
         needed: &inillucent_sql::bind::ColumnUse,
+        supplied: &[inillucent_tree::datum::OwnedDatum],
         downstream: &mut dyn inillucent_exec::ops::Sink,
     ) -> DbResult<bool> {
         // **The constraints are pushed down, and they have to be.** A residual
@@ -708,14 +710,25 @@ impl ImportedDatabase {
             offer.iter().map(|held| held.spec.clone()).collect();
         let mut query = IndexQuery::new(specs, order_by.clone());
         connected.table.best_index(&mut query)?;
+        // **The caller's arguments win when it has any.** A lateral join has
+        // already evaluated them against the outer row - which is the only
+        // place they *can* be evaluated - and folding them again here would
+        // fold an expression reading a column that is not in scope. See
+        // `inillucent_exec::lateral`.
         let mut arguments: Vec<Value<'static>> = Vec::new();
-        for position in query.argument_order() {
-            let Some(constraint) = offer.get(position) else {
-                continue;
-            };
-            arguments.push(inillucent_exec::scalar::to_value(
-                inillucent_exec::physical::literal_value(&constraint.value, params)?.borrow(),
-            ));
+        if supplied.is_empty() {
+            for position in query.argument_order() {
+                let Some(constraint) = offer.get(position) else {
+                    continue;
+                };
+                arguments.push(inillucent_exec::scalar::to_value(
+                    inillucent_exec::physical::literal_value(&constraint.value, params)?.borrow(),
+                ));
+            }
+        } else {
+            for value in supplied {
+                arguments.push(inillucent_exec::scalar::to_value(value.borrow()));
+            }
         }
         let plan = FilterPlan {
             index_number: query.index_number,

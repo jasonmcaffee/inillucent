@@ -984,7 +984,30 @@ impl TreeCatalog for ImportedDatabase {
         needed: &inillucent_sql::bind::ColumnUse,
         downstream: &mut dyn inillucent_exec::ops::Sink,
     ) -> DbResult<bool> {
-        self.rows_of_module(table, path, params, needed, downstream)
+        self.rows_of_module(table, path, params, needed, &[], downstream)
+    }
+
+    /// Runs a module whose arguments a lateral join already evaluated.
+    ///
+    /// The one call site is `inillucent_exec::lateral::LateralModule`, and the
+    /// difference from `virtual_cursor` is entirely in where the arguments came
+    /// from: an ordinary scan folds them out of the statement, and a lateral one
+    /// reads them out of the outer row it is being driven for.
+    fn virtual_rows_supplied(
+        &self,
+        table: &TableInfo,
+        path: &inillucent_sql::plan::AccessPath,
+        params: &Params,
+        needed: &inillucent_sql::bind::ColumnUse,
+        supplied: &[inillucent_tree::datum::OwnedDatum],
+    ) -> DbResult<Option<Vec<Vec<inillucent_tree::datum::OwnedDatum>>>> {
+        let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut sink = inillucent_exec::ops::CollectInto::new(std::rc::Rc::clone(&collected));
+        if !self.rows_of_module(table, path, params, needed, supplied, &mut sink)? {
+            return Ok(None);
+        }
+        let rows = collected.borrow().clone();
+        Ok(Some(rows))
     }
 
     fn vector_candidates(
