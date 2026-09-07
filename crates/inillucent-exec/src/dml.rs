@@ -96,6 +96,23 @@ pub struct Changes {
     /// rather than dug back out of the tree, which is the only place the value
     /// is known without paying a second descent for it.
     pub last_rowid: Option<i64>,
+    /// The row images this statement stored, when the target asked for them.
+    ///
+    /// **An index a module owns is maintained from these.** A vector index is
+    /// not a b-tree: its rows live in a virtual table, the module that owns it
+    /// is registered on the connection, and the connection is exactly what a
+    /// write has split apart - so the write cannot reach the module and the
+    /// module cannot see the write. Reporting what was stored and what was
+    /// removed lets the *engine* apply both to the module after the write and
+    /// inside the same transaction, which is the one place that holds both
+    /// halves (task-1838 §7).
+    ///
+    /// Empty unless [`WriteTarget::captures`] says the table has such an index,
+    /// because the images are clones and every other statement would pay for
+    /// them.
+    pub written: Vec<Row>,
+    /// The row images this statement removed, on the same terms.
+    pub removed: Vec<Row>,
 }
 
 /// A map from root page to tree, whichever map the caller happens to hold.
@@ -158,6 +175,17 @@ pub trait WriteTarget {
     /// `DELETE` typed by hand would, rather than a scan written a second time
     /// inside the write path.
     fn catalog(&self) -> &dyn crate::physical::TreeCatalog;
+
+    /// Reports whether this table's row images have to be reported back.
+    ///
+    /// False for every ordinary table, which is what keeps the clone off the
+    /// common path. True for one an index a module owns is built over: see
+    /// [`Changes::written`].
+    ///
+    /// @param _root - the table's root page id
+    fn captures(&self, _root: u32) -> bool {
+        false
+    }
 }
 
 /// The synthetic column space a write's expressions are translated against.
@@ -566,6 +594,7 @@ pub fn insert_at(
     // `write.insert.batch` measures. `None` here means "not asked yet".
     let mut next_rowid: Option<i64> = None;
     let mut changes = Changes::default();
+    let captured = target.captures(table.root);
     for supplied_row in &rows {
         let image = plan.build_row(supplied_row, &space, &mut next_rowid, || {
             highest_rowid(&mut Borrowed(target), table)
@@ -628,6 +657,9 @@ pub fn insert_at(
         changes.rows = changes.rows.saturating_add(1);
         if let Some(OwnedDatum::Int(assigned)) = layout.rowid.and_then(|at| stored.get(at)) {
             changes.last_rowid = Some(*assigned);
+        }
+        if captured {
+            changes.written.push(stored.clone());
         }
         if !plan.returning.is_empty() {
             let mut out = Vec::with_capacity(plan.returning.len());
@@ -1190,6 +1222,7 @@ pub fn update_at(
     }
 
     let mut changes = Changes::default();
+    let captured = target.captures(table.root);
     for key in keys {
         // A row an earlier statement in the same transaction removed is skipped
         // rather than resurrected, which is what SQLite does.
@@ -1271,6 +1304,10 @@ pub fn update_at(
         let current = reread.as_ref().unwrap_or(&before);
         replace_row(table, &layout, target, log, current, &after)?;
         changes.rows = changes.rows.saturating_add(1);
+        if captured {
+            changes.removed.push(before.clone());
+            changes.written.push(after.clone());
+        }
         if trigger::fire(
             &statement.triggers,
             TriggerTime::After,
@@ -1401,6 +1438,7 @@ pub fn delete_at(
     }
 
     let mut changes = Changes::default();
+    let captured = target.captures(table.root);
     for key in keys {
         let Some(row) = read_row(table, target, key)? else {
             continue;
@@ -1429,6 +1467,9 @@ pub fn delete_at(
             depth,
         )? {
             changes.rows = changes.rows.saturating_add(1);
+            if captured {
+                changes.removed.push(row);
+            }
         }
     }
     Ok(changes)

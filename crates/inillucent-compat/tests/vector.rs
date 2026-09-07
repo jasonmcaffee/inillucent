@@ -373,33 +373,110 @@ fn a_vector_column_refuses_the_wrong_width() {
     );
 }
 
-/// `CREATE INDEX ... USING` parses, and says what it cannot do.
+/// `CREATE INDEX ... USING inillucent_hnsw` builds a store and keeps it in step.
 ///
-/// **A refusal rather than a b-tree, and a refusal rather than silence.** The
-/// syntax is PostgreSQL's, which is how pgvector spells `USING hnsw`; building
-/// an ordinary index instead would give the caller a structure that answers
-/// their `ORDER BY` slowly and correctly and is not what they asked for, and
-/// accepting it and building nothing would give them one that is not there at
-/// all. Both are the shape of wrong answer this ticket exists to remove.
+/// **The index is a store plus a promise.** The store is an ordinary
+/// `inillucent_search` table over the same HNSW the retrieval engine uses, so
+/// there is one implementation of an approximate vector index rather than two;
+/// the promise is that the engine applies the table's writes to it. This is the
+/// promise: rows that were already there when the index was made, and rows
+/// inserted, updated and deleted after it.
 #[test]
-fn an_index_using_a_module_is_refused_by_name() {
+fn an_index_using_the_module_is_built_and_maintained() {
+    let held = database("hnsw");
+    let connection = held.connect();
+    connection
+        .execute_batch(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, v VECTOR(32));              INSERT INTO t(id, v) VALUES (1, {east});              INSERT INTO t(id, v) VALUES (2, {north})"
+                .replace("{east}", &literal(&tilt(0.0)))
+                .replace("{north}", &literal(&tilt(1.0)))
+                .as_str(),
+        )
+        .expect("two rows are stored before the index exists");
+    connection
+        .execute_batch("CREATE INDEX ix ON t USING inillucent_hnsw (v)")
+        .expect("the index is built");
+    // Backfilled: an index made over a table that already holds rows is not an
+    // empty index.
+    assert_eq!(integers(&connection, "SELECT count(*) FROM ix"), vec![2]);
+
+    connection
+        .execute_batch(&format!(
+            "INSERT INTO t(id, v) VALUES (3, {})",
+            literal(&tilt(0.2))
+        ))
+        .expect("a row inserted after the index");
+    assert_eq!(integers(&connection, "SELECT count(*) FROM ix"), vec![3]);
+    assert_eq!(
+        texts(
+            &connection,
+            &format!(
+                "SELECT body FROM ix WHERE ix MATCH '' AND vector = {} AND k = 1 ORDER BY rank",
+                literal(&tilt(0.0))
+            )
+        ),
+        vec!["1".to_string()],
+        "the nearest vector to the first axis is the row that holds it"
+    );
+
+    // An update moves the row in the index rather than leaving the old vector
+    // there, which is the half a delete-then-insert gets wrong.
+    connection
+        .execute_batch(&format!(
+            "UPDATE t SET v = {} WHERE id = 1",
+            literal(&tilt(4.0))
+        ))
+        .expect("a row is updated");
+    assert_eq!(
+        texts(
+            &connection,
+            &format!(
+                "SELECT body FROM ix WHERE ix MATCH '' AND vector = {} AND k = 1 ORDER BY rank",
+                literal(&tilt(0.0))
+            )
+        ),
+        vec!["3".to_string()],
+        "the row that moved is no longer the nearest"
+    );
+
+    connection
+        .execute_batch("DELETE FROM t WHERE id = 2")
+        .expect("a row is deleted");
+    assert_eq!(
+        integers(&connection, "SELECT count(*) FROM ix"),
+        vec![2],
+        "a deleted row leaves the index"
+    );
+}
+
+/// An index over a column that never said how wide its vectors are is refused.
+#[test]
+fn an_index_needs_a_declared_width() {
+    let held = database("width-needed");
+    let connection = held.connect();
+    connection
+        .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v BLOB)")
+        .expect("the table is created");
+    let refused = connection
+        .execute_batch("CREATE INDEX ix ON t USING inillucent_hnsw (v)")
+        .expect_err("a store cannot guess its dimensions");
+    assert!(
+        format!("{refused:?}").contains("VECTOR(N)"),
+        "the refusal says what is missing: {refused:?}"
+    );
+}
+
+/// `CREATE INDEX ... USING` names the one module there is.
+#[test]
+fn an_index_using_an_unknown_module_is_refused_by_name() {
     let held = database("using");
     let connection = held.connect();
     connection
         .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v VECTOR(4))")
         .expect("the table is created");
-
-    let refused = connection
-        .execute_batch("CREATE INDEX ix ON t USING inillucent_hnsw (v)")
-        .expect_err("an index a module owns is refused");
-    let message = format!("{refused:?}");
-    assert!(
-        message.contains("cannot yet maintain"),
-        "the refusal says what is missing: {message}"
-    );
     let other = connection
         .execute_batch("CREATE INDEX ix ON t USING btree (v)")
-        .expect_err("a module this engine has no idea about is refused too");
+        .expect_err("a module this engine has no idea about is refused");
     assert!(
         format!("{other:?}").contains("inillucent_hnsw"),
         "the refusal names the one module there is: {other:?}"
@@ -407,6 +484,25 @@ fn an_index_using_a_module_is_refused_by_name() {
     connection
         .execute_batch("CREATE INDEX ordinary ON t(id)")
         .expect("an ordinary index is unaffected");
+}
+
+/// Returns a vector that leans further off the first axis as `tilt` grows.
+///
+/// **Distinct distances rather than unit axes.** Every pair of axes is
+/// orthogonal, so a test built out of them asks the index to order a set of
+/// ties and then asserts which tie won - which is a coin toss dressed as a
+/// check. Tilting off one axis gives each row its own cosine.
+///
+/// @param tilt - how far off the first axis to lean
+fn tilt(tilt: f32) -> Vec<f32> {
+    let mut out = vec![0.0f32; DIMENSIONS];
+    if let Some(slot) = out.first_mut() {
+        *slot = 1.0;
+    }
+    if let Some(slot) = out.get_mut(1) {
+        *slot = tilt;
+    }
+    out
 }
 
 /// A vector column survives a write and comes back byte for byte.

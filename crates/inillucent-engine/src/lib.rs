@@ -288,6 +288,15 @@ pub struct ImportedDatabase {
     registry: inillucent_ext::registry::Registry,
     /// The virtual tables that have been connected, by folded name.
     virtual_tables: HashMap<Vec<u8>, vtab::Connected>,
+    /// The indexes a module owns, by the root page of the table they index.
+    ///
+    /// **A vector index is a store plus a promise to keep it in step.** The
+    /// store is an ordinary `inillucent_search` virtual table; the promise is
+    /// this map and the code in `write` that reads it. It is rebuilt whenever
+    /// the catalog changes, from the `source=` argument the engine itself wrote
+    /// when the index was created - so an index survives a close without a
+    /// second schema to keep in step with the first (task-1838 §7).
+    vector_indexes: HashMap<u32, Vec<VectorIndex>>,
     /// Where the last `CREATE INDEX` spent its time, in nanoseconds.
     ///
     /// Scan, sort, uniqueness check, pack. On the harness's own type, in a
@@ -352,6 +361,67 @@ impl TreeCatalog for ImportedDatabase {
                 Some(inillucent_exec::expr::AggregateBody(body))
             }
             inillucent_ext::registry::UserBody::Scalar(_) => None,
+        }
+    }
+}
+
+/// Returns the value of one `name=value` module argument, when it is there.
+///
+/// **Only the arguments the engine wrote itself.** Deriving a module's columns
+/// from its `CREATE` text would be a second implementation of its argument
+/// grammar; reading back a marker this engine put there is not, and there is
+/// nowhere else durable to keep the link between an index and the table it
+/// indexes.
+///
+/// @param arguments - the module's arguments, as written
+/// @param name - the argument to find
+fn argument_of(arguments: &[Vec<u8>], name: &[u8]) -> Option<Vec<u8>> {
+    for argument in arguments {
+        let text = String::from_utf8_lossy(argument);
+        let Some((key, value)) = text.split_once('=') else {
+            continue;
+        };
+        if key.trim().as_bytes().eq_ignore_ascii_case(name) {
+            let value = value.trim();
+            if value.is_empty() {
+                return None;
+            }
+            return Some(value.as_bytes().to_vec());
+        }
+    }
+    None
+}
+
+/// One index a module owns, and where its rows come from.
+///
+/// The engine keeps this rather than the module, because it is the engine that
+/// sees the writes: the module is handed rows and has no idea which table they
+/// came out of.
+#[derive(Clone, Debug)]
+pub struct VectorIndex {
+    /// The virtual table holding the vectors, by the name it was created with.
+    name: Vec<u8>,
+    /// Which tree column of the indexed table holds the vector.
+    column: usize,
+    /// Which tree column holds the row's rowid, which is the store's key too.
+    rowid: usize,
+}
+
+impl VectorIndex {
+    /// Returns an index whose slots the caller states.
+    ///
+    /// The backfill's rows come out of a `SELECT rowid, v`, whose columns are
+    /// not the table's layout, so it says where they are rather than deriving
+    /// them from a layout that describes something else.
+    ///
+    /// @param name - the store's name, folded
+    /// @param column - which column of the supplied rows holds the vector
+    /// @param rowid - which column holds the rowid
+    pub(crate) fn at(name: Vec<u8>, column: usize, rowid: usize) -> VectorIndex {
+        VectorIndex {
+            name,
+            column,
+            rowid,
         }
     }
 }
@@ -796,6 +866,7 @@ impl ImportedDatabase {
             collations: Vec::new(),
             registry: modules(),
             virtual_tables: HashMap::new(),
+            vector_indexes: HashMap::new(),
             index_stages: std::cell::Cell::new((0, 0, 0, 0, 0)),
             borrow_nanos: std::cell::Cell::new(0),
             catalog_generation: 0,
@@ -1228,6 +1299,7 @@ impl ImportedDatabase {
             collations: Vec::new(),
             registry: modules(),
             virtual_tables: HashMap::new(),
+            vector_indexes: HashMap::new(),
             index_stages: std::cell::Cell::new((0, 0, 0, 0, 0)),
             borrow_nanos: std::cell::Cell::new(0),
             catalog_generation: 0,
@@ -1588,6 +1660,109 @@ impl ImportedDatabase {
             Cached::Update(..) => Ok(vec!["an update".to_string()]),
             Cached::Delete(..) => Ok(vec!["a delete".to_string()]),
         }
+    }
+
+    /// Applies a statement's row images to every index a module owns.
+    ///
+    /// **The other half of `Changes::written`.** The write path cannot reach a
+    /// module, so it reports what it stored and what it removed; this is where
+    /// those become the module's own inserts and deletes. Removals go first,
+    /// because an `UPDATE` reports both halves of the same key and the store
+    /// would otherwise hold the old row and refuse the new one.
+    ///
+    /// A row whose vector is NULL is not in the index at all, which is what
+    /// makes a partly-populated column work: the rows that have vectors are
+    /// searchable and the rows that do not are simply absent.
+    ///
+    /// @param changes - what the statement stored and removed
+    pub(crate) fn follow_vector_indexes(&mut self, changes: &Changes) -> DbResult<()> {
+        if changes.written.is_empty() && changes.removed.is_empty() {
+            return Ok(());
+        }
+        let indexes: Vec<VectorIndex> = self.vector_indexes.values().flatten().cloned().collect();
+        for index in indexes {
+            for row in &changes.removed {
+                let Some(OwnedDatum::Int(rowid)) = row.get(index.rowid) else {
+                    continue;
+                };
+                self.change_module(
+                    &index.name,
+                    &inillucent_sql::vtab::Change::Delete(inillucent_value::Value::Integer(*rowid)),
+                )?;
+            }
+            for row in &changes.written {
+                let Some(OwnedDatum::Int(rowid)) = row.get(index.rowid) else {
+                    continue;
+                };
+                let Some(vector) = row.get(index.column) else {
+                    continue;
+                };
+                let value = inillucent_exec::scalar::to_value(vector.borrow());
+                if matches!(value, inillucent_value::Value::Null) {
+                    continue;
+                }
+                self.change_module(
+                    &index.name,
+                    &inillucent_sql::vtab::Change::Insert {
+                        rowid: inillucent_value::Value::Integer(*rowid),
+                        // `body` then the hidden query columns: the store's
+                        // first declared column carries the source rowid as
+                        // text, so a hit can name the row it came from, and the
+                        // vector goes in the hidden `vector` column the module
+                        // reads embeddings out of.
+                        values: vec![
+                            inillucent_value::Value::owned_text(rowid.to_string().as_bytes())?,
+                            inillucent_value::Value::Null,
+                            inillucent_value::Value::Null,
+                            value,
+                            inillucent_value::Value::Null,
+                            inillucent_value::Value::Null,
+                        ],
+                    },
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Rebuilds the map of indexes a module owns from the connected tables.
+    ///
+    /// Called wherever the catalog changes. The association is read back out of
+    /// the arguments the engine itself wrote when the index was created, which
+    /// is why this does not have to parse a module's argument grammar in
+    /// general: it only recognises the two arguments it put there.
+    pub(crate) fn refresh_vector_indexes(&mut self) {
+        let mut found: HashMap<u32, Vec<VectorIndex>> = HashMap::new();
+        for (name, connected) in &self.virtual_tables {
+            let Some(source) = argument_of(&connected.arguments.arguments, b"source") else {
+                continue;
+            };
+            let Some(column) = argument_of(&connected.arguments.arguments, b"source_column") else {
+                continue;
+            };
+            let folded = source.to_ascii_lowercase();
+            let Some(table) = self.tables.iter().find(|held| held.folded == folded) else {
+                continue;
+            };
+            let Some(layout) = self.layouts.get(&table.root) else {
+                continue;
+            };
+            let wanted = column.to_ascii_lowercase();
+            let Some(position) = table.columns.iter().position(|held| held.folded == wanted) else {
+                continue;
+            };
+            let (Some(slot), Some(rowid)) =
+                (layout.slots.get(position).copied().flatten(), layout.rowid)
+            else {
+                continue;
+            };
+            found.entry(table.root).or_default().push(VectorIndex {
+                name: name.clone(),
+                column: slot,
+                rowid,
+            });
+        }
+        self.vector_indexes = found;
     }
 
     /// Returns where the last `CREATE INDEX` spent its time.
@@ -2676,8 +2851,7 @@ impl ImportedDatabase {
                     names: Vec::new(),
                     changes: Changes {
                         rows: changed,
-                        returned: Vec::new(),
-                        last_rowid: None,
+                        ..Default::default()
                     },
                 })
             }
@@ -3012,9 +3186,16 @@ impl ImportedDatabase {
                 trees: &mut self.trees,
                 layouts: &self.layouts,
                 covering: &self.covering,
+                indexed: &self.vector_indexes,
             };
             apply(&mut view, &mut log, params)?
         };
+        // **Inside the same transaction, and after the trees rather than
+        // during them.** The module is registered on the connection and the
+        // write borrowed the connection apart, so this is the first moment both
+        // halves exist at once. Doing it before the commit below is what makes
+        // the table and the index it carries one change rather than two.
+        self.follow_vector_indexes(&changes)?;
         if let Some(assigned) = changes.last_rowid {
             self.last_rowid.set(assigned);
         }
@@ -3269,6 +3450,12 @@ struct WriteView<'a> {
     database: &'a mut Database,
     trees: &'a mut HashMap<u32, PagedTree>,
     layouts: &'a HashMap<u32, SourceLayout>,
+    /// The tables an index a module owns is built over, by root page.
+    ///
+    /// The write reports what it stored and removed for these and for nothing
+    /// else, and the engine applies both to the module afterwards. See
+    /// `Changes::written`.
+    indexed: &'a HashMap<u32, Vec<VectorIndex>>,
     /// Which index trees cover which table, so a query a trigger body runs
     /// inside the write reaches the same covering indexes a typed one does.
     covering: &'a HashMap<u32, Vec<u32>>,
@@ -3285,6 +3472,10 @@ impl WriteTarget for WriteView<'_> {
 
     fn catalog(&self) -> &dyn TreeCatalog {
         self
+    }
+
+    fn captures(&self, root: u32) -> bool {
+        self.indexed.contains_key(&root)
     }
 }
 
