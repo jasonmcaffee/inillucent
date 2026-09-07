@@ -198,6 +198,31 @@ pub fn configuration(options: &Options) -> IndexConfig {
         config.hnsw.ef_construction = 2;
         config.hnsw.exhaustive_below = usize::MAX;
     }
+    // **The graph is built on every core this machine has.**
+    //
+    // `HnswParams::build_threads` defaults to one, and that default is right
+    // where it lives: `inillucent-core`'s own gradings compare settings, and a
+    // graph that came out differently because the scheduler interleaved two
+    // inserts differently would make every comparison a comparison of two
+    // things at once. A *store* is not a grading. It is rebuilt whenever
+    // compaction runs, over a corpus of whatever size the application has, and
+    // the sequential build of the 598,560-chunk mailbox this engine is deployed
+    // on takes nine and a half minutes on one core of twenty-four (task-1838
+    // §8).
+    //
+    // The parallel build was written for exactly this and was never switched
+    // on: a lock per adjacency list, neighbours merged rather than assigned so
+    // a concurrent insert's back-edge is not erased, which is what hnswlib and
+    // FAISS do. The graph it produces is valid and is not the sequential one -
+    // the same property an approximate index has anyway.
+    //
+    // One thread when the machine will not say how many it has, which is the
+    // old behaviour rather than a guess.
+    config.hnsw.build_threads = options.threads.unwrap_or_else(|| {
+        std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1)
+    });
     let _ = Metric::Cosine;
     config
 }

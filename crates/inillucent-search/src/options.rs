@@ -138,6 +138,13 @@ pub struct Options {
     pub source: Option<Vec<u8>>,
     /// Which column of that table holds the vector.
     pub source_column: Option<Vec<u8>>,
+    /// How many threads build the graph, when the caller pinned it.
+    ///
+    /// **A measurement affordance, not a tuning knob.** The default is every
+    /// core the machine has, which is what a store wants; pinning it to one is
+    /// how a build is measured against the sequential one it replaced, and how
+    /// a caller who needs the same graph twice gets it (task-1838 §8).
+    pub threads: Option<usize>,
 }
 
 impl Options {
@@ -193,6 +200,10 @@ impl Options {
                     .map(|name| String::from_utf8_lossy(name).into_owned())
                     .unwrap_or_default(),
             ),
+            (
+                "threads".to_string(),
+                self.threads.map(|n| n.to_string()).unwrap_or_default(),
+            ),
         ]
     }
 }
@@ -208,6 +219,7 @@ pub fn parse(arguments: &[Vec<u8>]) -> DbResult<Options> {
     let mut columns: Vec<Vec<u8>> = Vec::new();
     let mut dims = 0usize;
     let mut source: Option<Vec<u8>> = None;
+    let mut threads: Option<usize> = None;
     let mut source_column: Option<Vec<u8>> = None;
     let mut metric = Metric::Cosine;
     let mut mode = Mode::Exact;
@@ -236,6 +248,13 @@ pub fn parse(arguments: &[Vec<u8>]) -> DbResult<Options> {
                 }
             }
             "source" => source = Some(value.clone().into_bytes()),
+            "threads" => {
+                threads = Some(value.parse::<usize>().map_err(|_| {
+                    failure(format!(
+                        "inillucent_search: threads must be a number, not {value}"
+                    ))
+                })?)
+            }
             "source_column" => source_column = Some(value.clone().into_bytes()),
             "metric" | "distance" => metric = Metric::parse(&value)?,
             "mode" => mode = Mode::parse(&value)?,
@@ -273,6 +292,7 @@ pub fn parse(arguments: &[Vec<u8>]) -> DbResult<Options> {
         compact,
         source,
         source_column,
+        threads,
     })
 }
 
@@ -339,6 +359,9 @@ pub fn from_config(rows: &[(String, String)], fallback: &Options) -> DbResult<Op
             .filter(|value| !value.is_empty())
             .map(String::into_bytes)
             .or_else(|| fallback.source_column.clone()),
+        threads: find("threads")
+            .and_then(|value| value.parse::<usize>().ok())
+            .or(fallback.threads),
     })
 }
 

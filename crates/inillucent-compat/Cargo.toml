@@ -104,6 +104,10 @@ name = "inillucent-vectorprobe"
 path = "src/bin/vectorprobe.rs"
 
 [[bin]]
+name = "inillucent-childcost"
+path = "src/bin/childcost.rs"
+
+[[bin]]
 name = "inillucent-exprperf"
 path = "src/bin/exprperf.rs"
 
