@@ -178,6 +178,41 @@ pub struct TriggerInfo {
     pub body: Vec<crate::ast::Statement>,
 }
 
+impl ColumnInfo {
+    /// Returns how many dimensions a `VECTOR(N)` column declares.
+    ///
+    /// **Read out of the declared type rather than stored beside it**, because
+    /// every path that builds a `ColumnInfo` - the catalog loader, a module's
+    /// declaration, the binder's synthetic ones - would otherwise have to know
+    /// about vectors, and a column's declared type is the one place SQLite
+    /// itself keeps what a column was called.
+    ///
+    /// `VECTOR(768)` and `vector( 768 )` both answer 768. A bare `VECTOR`
+    /// answers `None`, which means "a vector of whatever arrives" and is what a
+    /// table holding two models' embeddings needs; anything that is not a
+    /// vector answers `None` too, and its caller then checks nothing.
+    ///
+    /// **The affinity is deliberately left alone.** SQLite gives `VECTOR(768)`
+    /// NUMERIC affinity, and NUMERIC leaves a blob exactly as it arrived - so
+    /// the bytes round-trip without this engine having to disagree with the
+    /// reference about what an affinity is. What the declaration buys is the
+    /// width check on write, and a column an index can be built over.
+    pub fn vector_dimensions(&self) -> Option<usize> {
+        let declared = self.declared_type.to_ascii_lowercase();
+        let rest = declared.strip_prefix(b"vector".as_slice())?;
+        let inside: Vec<u8> = rest
+            .iter()
+            .copied()
+            .skip_while(|byte| byte.is_ascii_whitespace())
+            .collect();
+        let inside = inside.strip_prefix(b"(".as_slice())?;
+        let inside = inside.strip_suffix(b")".as_slice())?;
+        let text = std::str::from_utf8(inside).ok()?.trim();
+        let width: usize = text.parse().ok()?;
+        (width > 0).then_some(width)
+    }
+}
+
 impl TriggerInfo {
     /// Returns whether this trigger fires for one event on one column set.
     ///

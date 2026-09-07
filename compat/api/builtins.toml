@@ -5,7 +5,7 @@
 # `inillucent-compat::obligations::the_registers_match_the_engine` fails if
 # this file and the engine disagree.
 
-count = 145
+count = 148
 
 [[function]]
 name = "abs"
@@ -1155,6 +1155,30 @@ innocuous = true
 name = "upper"
 kind = "s"
 arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "vector_distance_cos"
+kind = "s"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "vector_distance_l2"
+kind = "s"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "vector_dot"
+kind = "s"
+arity = 2
 flags = 526336
 deterministic = true
 innocuous = true
