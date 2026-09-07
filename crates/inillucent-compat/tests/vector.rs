@@ -237,6 +237,107 @@ fn ordering_by_cosine_agrees_with_an_exhaustive_search() {
     }
 }
 
+/// Returns the first column of every row, as text.
+///
+/// @param connection - the connection to ask
+/// @param sql - the query
+fn texts(connection: &Connection<'_>, sql: &str) -> Vec<String> {
+    connection
+        .query(sql)
+        .unwrap_or_else(|error| panic!("{sql}: {error:?}"))
+        .iter()
+        .map(|row| match row.first() {
+            Some(OwnedDatum::Text(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+            other => panic!("{sql} answered {other:?}"),
+        })
+        .collect()
+}
+
+/// The `VECTOR` column and `inillucent_search` answer the same top ten, and
+/// both of them answer what an exhaustive cosine answers.
+///
+/// **This is the equivalence Part 7 is for.** The same vectors go into an
+/// ordinary column and into the retrieval engine's own store, the same twenty
+/// probes are put to both, and the oracle is a cosine this file computes. A
+/// vector index that returned *almost* the right rows would pass a test that
+/// only compared the two engine paths against each other; comparing both
+/// against arithmetic is what makes the recall a number rather than an
+/// agreement.
+#[test]
+fn a_vector_column_and_the_search_store_agree_with_an_exhaustive_cosine() {
+    let held = database("equivalence");
+    let connection = held.connect();
+    connection
+        .execute_batch(
+            "CREATE TABLE embedding (id INTEGER PRIMARY KEY, v VECTOR(32));              CREATE VIRTUAL TABLE store USING inillucent_search(body, dims=32)",
+        )
+        .expect("both stores are created");
+    let corpus: Vec<Vec<f32>> = (0..VECTORS).map(|index| vector_of(index as u64)).collect();
+    let mut batch = String::new();
+    for (index, vector) in corpus.iter().enumerate() {
+        batch.push_str(&format!(
+            "INSERT INTO embedding(id, v) VALUES ({index}, {0});              INSERT INTO store(body, vector) VALUES ('{index}', {0}); ",
+            literal(vector)
+        ));
+    }
+    connection.execute_batch(&batch).expect("both stores load");
+
+    let mut column_hits = 0usize;
+    let mut store_hits = 0usize;
+    let mut wanted_total = 0usize;
+    for query in 0..20u64 {
+        let probe = vector_of(20_000 + query);
+        let mut ranked: Vec<(usize, f64)> = corpus
+            .iter()
+            .enumerate()
+            .map(|(index, held)| (index, cosine(held, &probe)))
+            .collect();
+        ranked.sort_by(|left, right| {
+            left.1
+                .partial_cmp(&right.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(left.0.cmp(&right.0))
+        });
+        let wanted: Vec<i64> = ranked
+            .iter()
+            .take(10)
+            .map(|(index, _)| *index as i64)
+            .collect();
+        wanted_total += wanted.len();
+
+        let by_column = integers(
+            &connection,
+            &format!(
+                "SELECT id FROM embedding ORDER BY vector_distance_cos(v, {}), id LIMIT 10",
+                literal(&probe)
+            ),
+        );
+        assert_eq!(by_column, wanted, "query {query}: the column's order");
+        column_hits += by_column.iter().filter(|id| wanted.contains(id)).count();
+
+        let by_store: Vec<i64> = texts(
+            &connection,
+            &format!(
+                "SELECT body FROM store WHERE store MATCH '' AND vector = {} AND k = 10                  ORDER BY rank",
+                literal(&probe)
+            ),
+        )
+        .iter()
+        .filter_map(|text| text.parse::<i64>().ok())
+        .collect();
+        assert_eq!(by_store.len(), 10, "query {query}: the store returned ten");
+        store_hits += by_store.iter().filter(|id| wanted.contains(id)).count();
+    }
+    // Recall against the exhaustive answer, which is what the TDD asks to be
+    // equal. The store's default mode is exact, so anything below 1.000 is a
+    // defect rather than the approximation working as designed.
+    assert_eq!(
+        (column_hits, store_hits),
+        (wanted_total, wanted_total),
+        "recall against an exhaustive cosine: column {column_hits}, store {store_hits},          of {wanted_total}"
+    );
+}
+
 /// A `VECTOR(N)` column refuses anything that is not N floats.
 #[test]
 fn a_vector_column_refuses_the_wrong_width() {
@@ -270,6 +371,42 @@ fn a_vector_column_refuses_the_wrong_width() {
         vec![2],
         "only the two legal rows are there"
     );
+}
+
+/// `CREATE INDEX ... USING` parses, and says what it cannot do.
+///
+/// **A refusal rather than a b-tree, and a refusal rather than silence.** The
+/// syntax is PostgreSQL's, which is how pgvector spells `USING hnsw`; building
+/// an ordinary index instead would give the caller a structure that answers
+/// their `ORDER BY` slowly and correctly and is not what they asked for, and
+/// accepting it and building nothing would give them one that is not there at
+/// all. Both are the shape of wrong answer this ticket exists to remove.
+#[test]
+fn an_index_using_a_module_is_refused_by_name() {
+    let held = database("using");
+    let connection = held.connect();
+    connection
+        .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v VECTOR(4))")
+        .expect("the table is created");
+
+    let refused = connection
+        .execute_batch("CREATE INDEX ix ON t USING inillucent_hnsw (v)")
+        .expect_err("an index a module owns is refused");
+    let message = format!("{refused:?}");
+    assert!(
+        message.contains("cannot yet maintain"),
+        "the refusal says what is missing: {message}"
+    );
+    let other = connection
+        .execute_batch("CREATE INDEX ix ON t USING btree (v)")
+        .expect_err("a module this engine has no idea about is refused too");
+    assert!(
+        format!("{other:?}").contains("inillucent_hnsw"),
+        "the refusal names the one module there is: {other:?}"
+    );
+    connection
+        .execute_batch("CREATE INDEX ordinary ON t(id)")
+        .expect("an ordinary index is unaffected");
 }
 
 /// A vector column survives a write and comes back byte for byte.

@@ -962,6 +962,14 @@ pub enum Statement {
         name: NameId,
         /// The table it indexes.
         table: NameId,
+        /// The module named by `USING`, when one was.
+        ///
+        /// SQLite has no `USING` on `CREATE INDEX`; PostgreSQL does, and it is
+        /// how pgvector spells `USING hnsw`. This engine borrows the spelling
+        /// for the same purpose: an index whose structure is not a b-tree
+        /// (task-1838 §7). A plain `CREATE INDEX` leaves it `None` and nothing
+        /// downstream changes.
+        using: Option<NameId>,
         /// The key columns.
         columns: Vec<IndexedColumn>,
         /// The partial-index predicate.

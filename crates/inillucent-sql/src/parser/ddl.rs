@@ -482,6 +482,15 @@ impl Parser<'_> {
         let (database, name) = self.parse_qualified_name()?;
         self.expect_keyword(Keyword::ON)?;
         let table = self.parse_name()?;
+        // `USING <module>` between the table and the columns, which is where
+        // PostgreSQL puts it and therefore where anybody writing `USING hnsw`
+        // will look for it. SQLite's grammar has nothing here, so accepting it
+        // adds a form rather than changing one.
+        let using = if self.eat_keyword(Keyword::USING)? {
+            Some(self.parse_name()?)
+        } else {
+            None
+        };
         let columns = self.parse_indexed_column_list()?;
         let filter = if self.eat_keyword(Keyword::WHERE)? {
             Some(self.parse_expr()?)
@@ -494,6 +503,7 @@ impl Parser<'_> {
             database,
             name,
             table,
+            using,
             columns,
             filter,
         })

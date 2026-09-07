@@ -336,6 +336,8 @@ pub enum Directive {
         table: Vec<u8>,
         /// The root page of that table.
         table_root: u32,
+        /// The module named by `USING`, folded, when one was.
+        using: Option<Vec<u8>>,
         /// The key columns.
         columns: Vec<IndexKeyColumn>,
         /// Whether the index already exists.
@@ -443,6 +445,7 @@ impl<'a> Binder<'a> {
                 database,
                 name,
                 table,
+                using,
                 columns,
                 filter,
             } => self.bind_create_index(
@@ -451,6 +454,7 @@ impl<'a> Binder<'a> {
                 *database,
                 *name,
                 *table,
+                *using,
                 columns,
                 *filter,
             ),
@@ -1492,12 +1496,30 @@ impl<'a> Binder<'a> {
         database: Option<ast::NameId>,
         name: ast::NameId,
         table: ast::NameId,
+        using: Option<ast::NameId>,
         columns: &[ast::IndexedColumn],
         filter: Option<ast::ExprId>,
     ) -> Result<Directive, ParseError> {
         if filter.is_some() {
             return Err(unsupported("partial indexes", Span::default()));
         }
+        // Only one module can back an index, and naming another is refused here
+        // rather than accepted and ignored - an index that silently was not the
+        // structure it asked for is the shape of wrong answer this ticket keeps
+        // finding.
+        let using = match using {
+            None => None,
+            Some(named) => {
+                let folded = self.ast.folded(named).to_vec();
+                if folded != b"inillucent_hnsw" {
+                    return Err(unsupported(
+                        "an index USING a module other than inillucent_hnsw",
+                        Span::default(),
+                    ));
+                }
+                Some(folded)
+            }
+        };
         let index = self.resolve_database(database)?;
         let database_name = self.catalog.database_name(index).to_vec();
         let table_folded = self.ast.folded(table).to_vec();
@@ -1570,6 +1592,7 @@ impl<'a> Binder<'a> {
             name_offset: self.name_offset(name),
             table: target.name.clone(),
             table_root: target.root,
+            using,
             columns: keys,
             exists,
         })

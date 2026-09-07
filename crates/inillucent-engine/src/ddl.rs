@@ -99,6 +99,29 @@ impl ImportedDatabase {
                 exists,
                 ..
             } => self.create_table(source, name_offset, &name, exists, if_not_exists),
+            // **`USING inillucent_hnsw` parses, and is refused rather than
+            // built.** Everything under it works and is graded - the vector
+            // functions, the `VECTOR(N)` declaration, and
+            // `inillucent_search`'s own KNN, which returns the exhaustive top
+            // ten at recall 1.000 from SQL today (task-1838 §7). What is
+            // missing is the *maintenance*: an index over a table has to follow
+            // that table's writes, and the obvious mechanism - the trigger
+            // firing point Part 1 built - cannot write a virtual table, because
+            // `inillucent-exec` sits below the module registry and
+            // `WriteTarget` has a read hook for modules (`virtual_rows`) and no
+            // write one. Accepting the syntax and building a b-tree instead, or
+            // accepting it and building nothing, are both the shape of wrong
+            // answer this ticket keeps finding, so it says what is missing.
+            Directive::CreateIndex {
+                using: Some(module),
+                name,
+                ..
+            } => Err(misuse(format!(
+                "CREATE INDEX {} USING {}: this engine cannot yet maintain an index a module owns; load the vectors into an inillucent_search table and query it directly, which is the same store and the same recall",
+                String::from_utf8_lossy(&name),
+                String::from_utf8_lossy(&module)
+            ))
+            .with_unsupported("an index USING a module")),
             Directive::CreateIndex {
                 unique,
                 if_not_exists,
