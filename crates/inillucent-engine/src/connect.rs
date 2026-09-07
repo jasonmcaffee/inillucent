@@ -370,6 +370,16 @@ impl<'d> Connection<'d> {
         self.engine().schema_generation()
     }
 
+    /// Returns the named parameters one statement declares, with their indexes.
+    ///
+    /// What a shell needs to bind `.parameter set :name value` onto a statement
+    /// it did not write.
+    ///
+    /// @param sql - the statement text
+    pub fn parameter_names(&self, sql: &str) -> DbResult<Vec<(Vec<u8>, u32)>> {
+        self.database.engine.borrow().parameter_names(sql)
+    }
+
     /// Compiles a statement to be bound and stepped.
     ///
     /// @param sql - the statement

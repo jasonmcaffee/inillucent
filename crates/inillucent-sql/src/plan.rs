@@ -216,6 +216,21 @@ impl AccessPath {
     /// Returns a one-line description, which is what `EXPLAIN QUERY PLAN`
     /// renders and what a performance test asserts on.
     pub fn describe(&self, table: &str) -> String {
+        self.describe_over(table, None)
+    }
+
+    /// Returns the same line, naming the columns an index seek compares.
+    ///
+    /// **`(a=?)` rather than `(?=?)`.** The reference names the key column, and
+    /// it is the one part of the line a reader uses to tell "this index" from
+    /// "the other index on the same table". The declaration is passed in
+    /// because an access path carries the index's *name* and not its columns -
+    /// which is the right thing for a plan to carry, and the wrong thing to
+    /// render a description from.
+    ///
+    /// @param table - the name the query calls the term
+    /// @param info - the table's declaration, when the caller has it
+    pub fn describe_over(&self, table: &str, info: Option<&TableInfo>) -> String {
         match self {
             AccessPath::TableScan { .. } => format!("SCAN {table}"),
             AccessPath::RowidSeek { .. } => {
@@ -257,18 +272,31 @@ impl AccessPath {
                 } else {
                     "INDEX"
                 };
+                let keyed = info.and_then(|held| {
+                    held.indexes
+                        .iter()
+                        .find(|candidate| candidate.name == *index_name)
+                });
+                let named = |position: usize| -> String {
+                    keyed
+                        .and_then(|index| index.columns.get(position))
+                        .and_then(|key| key.column)
+                        .and_then(|at| info.and_then(|held| held.column(at)))
+                        .map(|column| String::from_utf8_lossy(&column.name).into_owned())
+                        .unwrap_or_else(|| "?".to_string())
+                };
                 let mut detail = String::new();
                 for index in 0..equalities.len() {
                     if index > 0 {
                         detail.push_str(" AND ");
                     }
-                    detail.push_str("?=?");
+                    detail.push_str(&format!("{}=?", named(index)));
                 }
                 if low.is_some() || high.is_some() {
                     if !detail.is_empty() {
                         detail.push_str(" AND ");
                     }
-                    detail.push_str("?>?");
+                    detail.push_str(&format!("{}>?", named(equalities.len())));
                 }
                 format!(
                     "SEARCH {table} USING {kind} {} ({detail})",
@@ -407,9 +435,10 @@ impl PhysicalPlan {
         let mut lines = Vec::new();
         for source in &self.sources {
             lines.push(
-                source
-                    .path
-                    .describe(&String::from_utf8_lossy(&source.alias)),
+                source.path.describe_over(
+                    &String::from_utf8_lossy(&source.alias),
+                    Some(&source.table),
+                ),
             );
         }
         for (op, arm) in &self.compounds {

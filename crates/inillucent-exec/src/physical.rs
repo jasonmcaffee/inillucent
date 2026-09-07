@@ -5181,7 +5181,7 @@ fn static_type_of(expr: &Expr, types: &[StaticType]) -> StaticType {
 /// @param select - the bound statement
 fn bare_columns(select: &BoundSelect) -> Vec<BoundExpr> {
     let mut found: Vec<BoundExpr> = Vec::new();
-    let mut visit = |expr: &BoundExpr, found: &mut Vec<BoundExpr>| {
+    let visit = |expr: &BoundExpr, found: &mut Vec<BoundExpr>| {
         let mut stack = vec![expr.clone()];
         while let Some(node) = stack.pop() {
             // An aggregate's arguments are read *inside* it, so nothing under
@@ -5285,7 +5285,6 @@ fn aggregate_specs(
                 };
                 AggregateKind::External(body)
             }
-            other => return unsupported(&format!("the aggregate {other:?}")),
         };
         // Only a registered aggregate reads past the first argument; every
         // built-in reduces one value per row.

@@ -72,9 +72,10 @@ mod at {
     /// The application's `PRAGMA application_id`, 4 bytes.
     pub const APPLICATION_ID: usize = 96;
     /// The schema cookie `PRAGMA schema_version` reports, 4 bytes.
+    ///
+    /// The last field named here; the region continues at 104 for whatever
+    /// comes next.
     pub const SCHEMA_COOKIE: usize = 100;
-    /// The first byte after the fields named here.
-    pub const AFTER_FIELDS: usize = 104;
 }
 
 /// The smallest a meta page can be and still hold every field.

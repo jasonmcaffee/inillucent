@@ -3118,6 +3118,32 @@ impl ImportedDatabase {
 
     /// Checks every tree's structure: key order, separators and fill.
     ///
+    /// Writes a verified copy of this database into a new file.
+    ///
+    /// **What `VACUUM INTO` does**, and the same thing
+    /// `connect::Database::backup_to` does for a caller with a handle: fold the
+    /// log into the file, copy the file, then open the copy and walk it. A
+    /// backup nobody checked is a file that is assumed to be a database, and
+    /// the cost of finding out otherwise is paid at the worst possible moment.
+    ///
+    /// It is a copy rather than a page-by-page rebuild because this engine is
+    /// single threaded and one file is one pool: there is no second writer to
+    /// race, which is the whole reason SQLite's backup API is incremental.
+    ///
+    /// @param path - where the copy goes
+    pub(crate) fn backup_into(&mut self, path: &std::path::Path) -> DbResult<()> {
+        self.checkpoint()?;
+        std::fs::copy(&self.path, path).map_err(|error| {
+            inillucent_base::error::misuse(format!(
+                "cannot copy {} to {}: {error}",
+                self.path.display(),
+                path.display()
+            ))
+        })?;
+        let copy = ImportedDatabase::open(path.to_path_buf(), self.page_size, self.frames)?;
+        copy.check_trees()
+    }
+
     /// The campaign tests run this after every statement. A tree that has
     /// drifted structurally still answers a scan correctly for a long time,
     /// which is precisely why the check has to be a check rather than a query.
@@ -3790,6 +3816,22 @@ impl ImportedDatabase {
             .unwrap_or_else(inillucent_sql::ast::Ast::new);
         inillucent_sql::parser::parse_next_statement_into(sql.as_bytes(), 0, &self.limits, arena)
             .map_err(refused)
+    }
+
+    /// Returns the named parameters one statement declares, with their indexes.
+    ///
+    /// **A question about the text, answered by parsing it.** The compiled form
+    /// does not carry the names - a plan is cached by its SQL and the values
+    /// arrive later - and the caller that needs them is a *shell*, binding what
+    /// a person typed into `.parameter set`. Parsing again costs one parse of
+    /// one statement and keeps the name table out of every cached plan.
+    ///
+    /// @param sql - the statement text
+    pub fn parameter_names(&self, sql: &str) -> DbResult<Vec<(Vec<u8>, u32)>> {
+        let parsed = self.parse_once(sql)?;
+        let names = parsed.parameters.names.clone();
+        self.recycle(parsed);
+        Ok(names)
     }
 
     /// Puts a finished parse's arena back for the next statement to fill.
@@ -4469,10 +4511,6 @@ impl ImportedDatabase {
             // engine does not run yet" - which stops the script rather than the
             // comment. SQLite runs it as a no-op and so does this.
             BoundStatement::Empty => Ok(Cached::Nothing),
-            other => Err(refusal(format!(
-                "{sql} binds to {}, which the new engine does not run yet",
-                describe_statement(&other)
-            ))),
         }
     }
 
@@ -5028,33 +5066,6 @@ fn describe_statement(statement: &BoundStatement) -> &'static str {
     }
 }
 
-/// Names the kind of directive a refusal is about.
-///
-/// @param directive - the bound directive
-fn describe_directive(directive: &inillucent_sql::directive::Directive) -> &'static str {
-    use inillucent_sql::directive::Directive;
-    match directive {
-        Directive::Begin(_) => "BEGIN",
-        Directive::Commit => "COMMIT",
-        Directive::Rollback { .. } => "ROLLBACK",
-        Directive::Savepoint(_) => "SAVEPOINT",
-        Directive::Release(_) => "RELEASE",
-        Directive::CreateTable { .. } => "CREATE TABLE",
-        Directive::CreateTableAsSelect { .. } => "CREATE TABLE ... AS SELECT",
-        Directive::CreateVirtualTable { .. } => "CREATE VIRTUAL TABLE",
-        Directive::CreateView { .. } => "CREATE VIEW",
-        Directive::CreateTrigger { .. } => "CREATE TRIGGER",
-        Directive::CreateIndex { .. } => "CREATE INDEX",
-        Directive::Drop { .. } => "DROP",
-        Directive::Alter { .. } => "ALTER TABLE",
-        Directive::Reindex { .. } => "REINDEX",
-        Directive::Vacuum { .. } => "VACUUM",
-        Directive::Attach { .. } => "ATTACH",
-        Directive::Detach { .. } => "DETACH",
-        Directive::Analyze { .. } => "ANALYZE",
-        Directive::Pragma { .. } => "PRAGMA",
-    }
-}
 
 /// The logs one statement writes through, indexed by schema number.
 ///

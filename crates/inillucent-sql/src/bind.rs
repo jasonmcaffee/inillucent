@@ -4389,17 +4389,6 @@ impl<'a> Binder<'a> {
         }
     }
 
-    /// Binds a function call, scalar or aggregate.
-    fn bind_call(
-        &mut self,
-        name: ast::NameId,
-        distinct: bool,
-        arguments: Option<Vec<ExprId>>,
-        span: Span,
-    ) -> Result<BoundExpr, ParseError> {
-        self.bind_call_with(name, distinct, arguments, None, &[], span)
-    }
-
     /// Binds a call that may carry a `FILTER` and an in-argument `ORDER BY`.
     ///
     /// Both belong to an *aggregate* call and are dropped for anything else,

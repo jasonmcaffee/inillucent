@@ -374,17 +374,34 @@ impl ImportedDatabase {
                 self.detach(&schema)?;
                 Ok(Outcome::empty())
             }
-            // **Marked as a capability gap, not as misuse.** A directive this
-            // engine has not implemented - `ATTACH`, `DETACH`, `VACUUM` - is a
-            // construct it does not do yet, which is a different thing from a
-            // statement the caller got wrong, and a caller in front of it has to
-            // be able to tell them apart without matching on prose.
-            other => {
-                let what = super::describe_directive(&other);
-                Err(refusal(format!(
-                    "{sql} is {what}, which the new engine does not run yet"
-                ))
-                .with_unsupported(what))
+            // **`VACUUM` folds the log into the file; `VACUUM INTO` writes a
+            // verified copy.** Both were refused by name, and `VACUUM INTO` is
+            // how a backup is taken - the one form an application cannot do
+            // without, because there is no other statement that produces a
+            // second file.
+            //
+            // What `VACUUM` means here is a checkpoint. SQLite's rebuilds the
+            // file to reclaim free pages and to defragment; this engine's pages
+            // are reclaimed by the free map as they are released, so the part
+            // that is left is making everything durable in the file - which is
+            // exactly what a checkpoint does. It is not a lie about the space:
+            // `PRAGMA freelist_count` says what is free either way.
+            Directive::Vacuum { into: None, .. } => {
+                self.checkpoint()?;
+                Ok(Outcome::empty())
+            }
+            Directive::Vacuum { into: Some(path), .. } => {
+                let path = String::from_utf8_lossy(&path).into_owned();
+                if path.is_empty() {
+                    return Err(refusal("VACUUM INTO needs a file to write"));
+                }
+                if std::path::Path::new(&path).exists() {
+                    // SQLite's own rule, and the one that makes the statement
+                    // safe to put in a backup script: it never overwrites.
+                    return Err(refusal("output file already exists"));
+                }
+                self.backup_into(std::path::Path::new(&path))?;
+                Ok(Outcome::empty())
             }
         }
     }
