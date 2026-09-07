@@ -126,6 +126,18 @@ pub struct Options {
     /// How many delta rows may accumulate before a commit folds them in, or
     /// zero to compact only when asked.
     pub compact: Option<u64>,
+    /// The table this store is an index *over*, when it is one.
+    ///
+    /// **How a vector index survives being closed.** `CREATE INDEX ix ON t
+    /// USING inillucent_hnsw (v)` is sugar for a store like this one plus the
+    /// engine keeping it in step with `t`'s writes, and the engine has to be
+    /// able to work out on the next open which stores those are. Recording the
+    /// source here puts it in `%_config`, which is written once and read back
+    /// with everything else - so the association is durable without a second
+    /// place to keep a schema (task-1838 §7).
+    pub source: Option<Vec<u8>>,
+    /// Which column of that table holds the vector.
+    pub source_column: Option<Vec<u8>>,
 }
 
 impl Options {
@@ -167,6 +179,20 @@ impl Options {
                 "compact".to_string(),
                 self.compact.map(|n| n.to_string()).unwrap_or_default(),
             ),
+            (
+                "source".to_string(),
+                self.source
+                    .as_ref()
+                    .map(|name| String::from_utf8_lossy(name).into_owned())
+                    .unwrap_or_default(),
+            ),
+            (
+                "source_column".to_string(),
+                self.source_column
+                    .as_ref()
+                    .map(|name| String::from_utf8_lossy(name).into_owned())
+                    .unwrap_or_default(),
+            ),
         ]
     }
 }
@@ -181,6 +207,8 @@ impl Options {
 pub fn parse(arguments: &[Vec<u8>]) -> DbResult<Options> {
     let mut columns: Vec<Vec<u8>> = Vec::new();
     let mut dims = 0usize;
+    let mut source: Option<Vec<u8>> = None;
+    let mut source_column: Option<Vec<u8>> = None;
     let mut metric = Metric::Cosine;
     let mut mode = Mode::Exact;
     let mut compact: Option<u64> = None;
@@ -207,6 +235,8 @@ pub fn parse(arguments: &[Vec<u8>]) -> DbResult<Options> {
                     )));
                 }
             }
+            "source" => source = Some(value.clone().into_bytes()),
+            "source_column" => source_column = Some(value.clone().into_bytes()),
             "metric" | "distance" => metric = Metric::parse(&value)?,
             "mode" => mode = Mode::parse(&value)?,
             "tokenize" | "tokenizer" => {
@@ -241,6 +271,8 @@ pub fn parse(arguments: &[Vec<u8>]) -> DbResult<Options> {
         metric,
         mode,
         compact,
+        source,
+        source_column,
     })
 }
 
@@ -296,6 +328,17 @@ pub fn from_config(rows: &[(String, String)], fallback: &Options) -> DbResult<Op
         metric,
         mode,
         compact: compact.or(fallback.compact),
+        // An empty stored value is "no source", not a table called nothing:
+        // every row of `%_config` is written, including the ones that were
+        // never set.
+        source: find("source")
+            .filter(|value| !value.is_empty())
+            .map(String::into_bytes)
+            .or_else(|| fallback.source.clone()),
+        source_column: find("source_column")
+            .filter(|value| !value.is_empty())
+            .map(String::into_bytes)
+            .or_else(|| fallback.source_column.clone()),
     })
 }
 
