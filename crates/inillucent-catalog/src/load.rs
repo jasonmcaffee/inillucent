@@ -4,8 +4,29 @@
 //! `CREATE` text SQLite stored, parsed with the first-party parser. There is no
 //! second source of truth — no side table of affinities, no cached column list
 //! — so a schema written by SQLite and a schema written by inillucent are read the
-//! same way, and a schema that cannot be parsed is reported as corruption
-//! naming the object rather than silently producing a table with no columns.
+//! same way, and a schema that cannot be read is reported by name rather than
+//! silently producing a table with no columns.
+//!
+//! **A statement this engine cannot parse is not a damaged file, and reporting
+//! it as one cost somebody an afternoon.** Until task-1847 every failure here
+//! was built with [`inillucent_base::error::corrupt`], which means *malformed
+//! persistent bytes* and attaches what it is given as `detail` rather than as
+//! `message` — so a caller reading `message()`, the field it is told to read,
+//! got the primary code's canned text, `database disk image is malformed`, for
+//! a file SQLite reads perfectly. The reader then goes looking for corruption,
+//! runs `PRAGMA integrity_check` on a healthy database and finds nothing.
+//!
+//! The two failures are therefore separated here and reported differently:
+//!
+//! - The bytes were read and the **statement** could not be understood —
+//!   [`unparseable_schema`]. That is a refusal carrying the parser's own words
+//!   and offset, and it keeps the `Unsupported` marker when the parser set one,
+//!   so a construct this engine has not implemented reaches a caller as exactly
+//!   that rather than as damage.
+//! - The row is **structurally** wrong — a `table` row holding a `CREATE
+//!   INDEX`, a `CREATE TABLE` with no column list — [`corrupt_schema`]. That
+//!   really is corruption, and it now says so in the message as well as the
+//!   detail.
 //!
 //! An automatic index has no SQL of its own: SQLite writes
 //! `sqlite_autoindex_<table>_<n>` with a NULL statement and expects the reader
@@ -223,7 +244,7 @@ fn table_from_row(row: &SchemaObject, database: usize) -> DbResult<TableInfo> {
         // and - the reason it has to be here rather than in the binder - the
         // arena outlives every statement bound against this snapshot.
         let view = view_from_create_sql(&create_sql)
-            .map_err(|error| error.with_detail(format!("in view {}", row.name)))?;
+            .map_err(|error| in_object("view", &row.name, error))?;
         return Ok(TableInfo {
             name: row.name.clone().into_bytes(),
             folded: row.name.to_ascii_lowercase().into_bytes(),
@@ -272,7 +293,7 @@ fn table_from_row(row: &SchemaObject, database: usize) -> DbResult<TableInfo> {
         });
     }
     let mut table = table_from_create_sql(sql.as_bytes(), database, root)
-        .map_err(|error| error.with_detail(format!("in object {}", row.name)))?;
+        .map_err(|error| in_object("object", &row.name, error))?;
     table.name = row.name.clone().into_bytes();
     table.folded = row.name.to_ascii_lowercase().into_bytes();
     Ok(table)
@@ -286,12 +307,14 @@ fn table_from_row(row: &SchemaObject, database: usize) -> DbResult<TableInfo> {
 pub fn view_from_create_sql(sql: &[u8]) -> DbResult<inillucent_sql::catalog_view::ViewBody> {
     let limits = Limits::default();
     let parsed = parse_next_statement(sql, 0, &limits)
-        .map_err(|error| error::corrupt(format!("malformed view SQL: {}", error.message())))?;
+        .map_err(|error| unparseable_schema("CREATE VIEW", error))?;
     let Statement::CreateView {
         columns, select, ..
     } = &parsed.statement
     else {
-        return Err(error::corrupt("schema SQL is not a CREATE VIEW"));
+        return Err(corrupt_schema(
+            "the schema SQL for this view is not a CREATE VIEW",
+        ));
     };
     let names = columns
         .iter()
@@ -329,7 +352,7 @@ fn attach_trigger_if_present(tables: &mut [TableInfo], row: &SchemaObject) -> Db
         return Ok(true);
     };
     let trigger = trigger_from_create_sql(sql.as_bytes())
-        .map_err(|error| error.with_detail(format!("in trigger {}", row.name)))?;
+        .map_err(|error| in_object("trigger", &row.name, error))?;
     // Newest first. SQLite pushes each trigger onto the front of the table's
     // list as it reads the schema, and fires them in that order, so the most
     // recently created one runs first. Measured against 3.53.4: three AFTER
@@ -342,7 +365,7 @@ fn attach_trigger_if_present(tables: &mut [TableInfo], row: &SchemaObject) -> Db
 pub fn trigger_from_create_sql(sql: &[u8]) -> DbResult<TriggerInfo> {
     let limits = Limits::default();
     let parsed = parse_next_statement(sql, 0, &limits)
-        .map_err(|error| error::corrupt(format!("malformed trigger SQL: {}", error.message())))?;
+        .map_err(|error| unparseable_schema("CREATE TRIGGER", error))?;
     let Statement::CreateTrigger {
         name,
         time,
@@ -352,7 +375,9 @@ pub fn trigger_from_create_sql(sql: &[u8]) -> DbResult<TriggerInfo> {
         ..
     } = &parsed.statement
     else {
-        return Err(error::corrupt("schema SQL is not a CREATE TRIGGER"));
+        return Err(corrupt_schema(
+            "the schema SQL for this trigger is not a CREATE TRIGGER",
+        ));
     };
     let text = parsed.ast.text(*name).to_vec();
     let event = match event {
@@ -384,7 +409,7 @@ pub fn trigger_from_create_sql(sql: &[u8]) -> DbResult<TriggerInfo> {
 pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult<TableInfo> {
     let limits = Limits::default();
     let parsed = parse_next_statement(sql, 0, &limits)
-        .map_err(|error| error::corrupt(format!("malformed schema SQL: {}", error.message())))?;
+        .map_err(|error| unparseable_schema("CREATE TABLE", error))?;
     let Statement::CreateTable { name, body, .. } = &parsed.statement else {
         if let Statement::CreateVirtualTable {
             name,
@@ -425,7 +450,9 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
                 }),
             });
         }
-        return Err(error::corrupt("schema SQL is not a CREATE TABLE"));
+        return Err(corrupt_schema(
+            "the schema SQL for this table is not a CREATE TABLE",
+        ));
     };
     let text = parsed.ast.text(*name).to_vec();
     let CreateTableBody::Columns {
@@ -435,7 +462,7 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
         strict,
     } = body
     else {
-        return Err(error::corrupt("a stored CREATE TABLE has no column list"));
+        return Err(corrupt_schema("a stored CREATE TABLE has no column list"));
     };
     let mut info = TableInfo {
         folded: text.to_ascii_lowercase(),
@@ -953,7 +980,7 @@ fn attach_index(tables: &mut [TableInfo], row: &SchemaObject) -> DbResult<()> {
         return Ok(());
     };
     let index = index_from_create_sql(sql.as_bytes(), table, root)
-        .map_err(|error| error.with_detail(format!("in index {}", row.name)))?;
+        .map_err(|error| in_object("index", &row.name, error))?;
     table.indexes.push(index);
     Ok(())
 }
@@ -962,7 +989,7 @@ fn attach_index(tables: &mut [TableInfo], row: &SchemaObject) -> DbResult<()> {
 pub fn index_from_create_sql(sql: &[u8], table: &TableInfo, root: u32) -> DbResult<IndexInfo> {
     let limits = Limits::default();
     let parsed = parse_next_statement(sql, 0, &limits)
-        .map_err(|error| error::corrupt(format!("malformed index SQL: {}", error.message())))?;
+        .map_err(|error| unparseable_schema("CREATE INDEX", error))?;
     let Statement::CreateIndex {
         unique,
         name,
@@ -971,7 +998,9 @@ pub fn index_from_create_sql(sql: &[u8], table: &TableInfo, root: u32) -> DbResu
         ..
     } = &parsed.statement
     else {
-        return Err(error::corrupt("index SQL is not a CREATE INDEX"));
+        return Err(corrupt_schema(
+            "the schema SQL for this index is not a CREATE INDEX",
+        ));
     };
     let text = parsed.ast.text(*name).to_vec();
     let mut key_columns = Vec::with_capacity(columns.len());
@@ -1027,9 +1056,78 @@ pub fn index_from_create_sql(sql: &[u8], table: &TableInfo, root: u32) -> DbResu
     })
 }
 
-/// Returns the error a caller sees when a schema cannot be understood.
+/// Returns the error a caller sees when a schema row is structurally wrong.
+///
+/// This is for a row that cannot be what it claims to be — a `table` row whose
+/// SQL is a `CREATE INDEX`, a `CREATE TABLE` with no column list. Those are
+/// corruption and are reported as corruption.
+///
+/// The sentence goes in the **message** as well as the detail. `error::corrupt`
+/// attaches its argument as detail only, so an error built with it alone
+/// answers `message()` with "database disk image is malformed" and the
+/// explanation never leaves the process. A sentence about a schema object's own
+/// shape names no path, no bound value and no page bytes, so it is safe where
+/// `DbError::with_message` requires safety.
+///
+/// @param detail - what is wrong with the row, safe for a caller to read
 pub fn corrupt_schema(detail: impl Into<String>) -> DbError {
-    error::corrupt(detail)
+    let detail = detail.into();
+    error::corrupt(detail.clone()).with_message(detail)
+}
+
+/// Returns the error a caller sees when stored schema SQL will not parse.
+///
+/// **Not corruption.** The row's bytes were read; it is the statement that
+/// could not be understood, and the two are different facts about a file. A
+/// `CREATE TABLE` SQLite wrote and this parser refuses is a gap in this engine,
+/// not damage to the disk — `CREATE TABLE pairs (left TEXT, right TEXT)` was
+/// exactly that until task-1847, and it reported the file as malformed.
+///
+/// So the failure keeps the parser's own code, words and offset, and keeps the
+/// `Unsupported` marker when the parser set one. `inillucent-driver` reads that
+/// marker rather than the wording, so a construct this engine has not
+/// implemented arrives as `Status::Unsupported` naming the construct, and
+/// anything else as `Status::Syntax` naming the word — which is what a person
+/// can act on.
+///
+/// @param what - the statement being read, as `CREATE TABLE`
+/// @param error - the parser's failure
+pub(crate) fn unparseable_schema(
+    what: &str,
+    error: inillucent_sql::diagnostic::ParseError,
+) -> DbError {
+    let said = format!(
+        "cannot parse the {what} stored in the schema: {}",
+        error.message()
+    );
+    let built = DbError::primary(error.code())
+        .with_message(said.clone())
+        .with_detail(said)
+        .with_sql_offset(error.offset());
+    match error.kind {
+        inillucent_sql::diagnostic::ParseErrorKind::Unsupported(construct) => {
+            built.with_unsupported(construct)
+        }
+        _ => built,
+    }
+}
+
+/// Names the schema object a failure was reading, in the message.
+///
+/// The name used to be attached with `with_detail`, which **replaced** the
+/// detail the parse site had just written — so the object was named and the
+/// reason was destroyed, and neither of them was in `message()`. Composing them
+/// keeps both, in the field a caller reads.
+///
+/// A schema object's own name is the caller's own word and carries no path or
+/// bound value, so it is safe in a message.
+///
+/// @param kind - what the object is, as `table` or `index`
+/// @param name - the object's name, as `sqlite_schema` records it
+/// @param error - the failure to name
+fn in_object(kind: &str, name: &str, error: DbError) -> DbError {
+    let said = format!("in {kind} {name}: {}", error.message());
+    error.with_message(said.clone()).with_detail(said)
 }
 
 #[cfg(test)]
@@ -1156,11 +1254,79 @@ mod tests {
         );
     }
 
-    /// Schema SQL that does not parse is corruption naming the object, not a
-    /// table with no columns.
+    /// Schema SQL that does not parse says what it could not parse and why -
+    /// it does not claim the file is damaged.
+    ///
+    /// The message is asserted, not the detail: `message()` is the field
+    /// `inillucent-driver` shows a caller, and putting the sentence only in
+    /// `detail()` is the defect this replaces. A reader who is told "database
+    /// disk image is malformed" runs `PRAGMA integrity_check` on a healthy
+    /// database and learns nothing.
     #[test]
-    fn unparseable_schema_sql_is_corruption() {
+    fn unparseable_schema_sql_names_the_statement_and_the_reason() {
         let error = table_from_create_sql(b"CREATE TABLE t(", 0, 2).expect_err("it must not parse");
+        assert_eq!(error.code(), inillucent_base::PrimaryCode::Error);
+        assert!(
+            error.message().contains("cannot parse the CREATE TABLE"),
+            "{error:?}"
+        );
+        assert!(
+            !error.message().contains("disk image is malformed"),
+            "{error:?}"
+        );
+        assert_eq!(error.detail(), Some(error.message()));
+    }
+
+    /// A row that cannot be what it claims to be is still corruption, and now
+    /// says so where a caller can read it.
+    #[test]
+    fn a_row_whose_sql_is_the_wrong_statement_is_corruption() {
+        let error = table_from_create_sql(b"CREATE INDEX i ON t (a)", 0, 2)
+            .expect_err("an index is not a table");
         assert_eq!(error.code(), inillucent_base::PrimaryCode::Corrupt);
+        assert!(
+            error.message().contains("is not a CREATE TABLE"),
+            "{error:?}"
+        );
+    }
+
+    /// A construct the parser marks as one it has not implemented keeps that
+    /// mark, so a caller can tell "this engine cannot do that yet" from "your
+    /// schema is wrong" without matching on a sentence.
+    ///
+    /// `inillucent-driver` reads exactly this marker to answer
+    /// `Status::Unsupported` with the construct named, which is the shape
+    /// task-1847 asked schema failures to have.
+    #[test]
+    fn an_unimplemented_construct_in_schema_sql_keeps_its_marker() {
+        let error = trigger_from_create_sql(
+            b"CREATE TRIGGER r AFTER INSERT ON t BEGIN INSERT INTO u VALUES (1) RETURNING 1; END",
+        )
+        .expect_err("RETURNING is refused inside a trigger");
+        assert_eq!(
+            error.unsupported(),
+            Some("RETURNING is not available in triggers"),
+            "{error:?}"
+        );
+        assert_eq!(error.code(), inillucent_base::PrimaryCode::Error);
+        assert!(
+            error.message().contains("cannot parse the CREATE TRIGGER"),
+            "{error:?}"
+        );
+    }
+
+    /// The reserved-word column names that started task-1847. `left` and
+    /// `right` are ordinary names in SQLite - a diff table, a tree, a stereo
+    /// channel - and a schema SQLite writes has to load here.
+    #[test]
+    fn a_column_named_left_loads() {
+        let table = table_from_create_sql(b"CREATE TABLE pairs (left TEXT, right TEXT)", 0, 2)
+            .expect("it parses");
+        let names: Vec<String> = table
+            .columns
+            .iter()
+            .map(|column| String::from_utf8_lossy(&column.name).into_owned())
+            .collect();
+        assert_eq!(names, vec!["left".to_string(), "right".to_string()]);
     }
 }

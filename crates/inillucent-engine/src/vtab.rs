@@ -29,7 +29,7 @@
 
 use std::collections::HashMap;
 
-use inillucent_base::error::misuse;
+use inillucent_base::error::refusal;
 use inillucent_base::DbResult;
 use inillucent_catalog::paged::{ObjectKind, SchemaEntry};
 use inillucent_ext::vtab::{Context, Host, VirtualTable};
@@ -239,7 +239,7 @@ fn highest(pool: &Pool, tree: &PagedTree) -> DbResult<i64> {
 
 /// Returns the error a read-only store gives a module that tried to write.
 fn read_only() -> inillucent_base::DbError {
-    misuse("a module wrote to a shadow table while answering a query")
+    refusal("a module wrote to a shadow table while answering a query")
 }
 
 impl ShadowStore for ReadStore<'_> {
@@ -340,7 +340,7 @@ impl ShadowStore for WriteStore<'_> {
         let tree = self
             .trees
             .get_mut(&root)
-            .ok_or_else(|| misuse("no shadow table for that root"))?;
+            .ok_or_else(|| refusal("no shadow table for that root"))?;
         // **`put`, not `insert`.** `insert` copies out the row it replaced -
         // every column of it, allocating per text and per blob - and this
         // caller throws that away. On FTS5's `%_data` the replaced row is the
@@ -405,7 +405,7 @@ impl ShadowStore for WriteStore<'_> {
         let tree = self
             .trees
             .get_mut(&root)
-            .ok_or_else(|| misuse("no shadow table for that root"))?;
+            .ok_or_else(|| refusal("no shadow table for that root"))?;
         // **`put`, not `insert`.** `insert` copies out the row it replaced -
         // every column of it, allocating per text and per blob - and this
         // caller throws that away. On FTS5's `%_data` the replaced row is the
@@ -468,19 +468,19 @@ impl ImportedDatabase {
             if if_not_exists {
                 return Ok(Outcome::empty());
             }
-            return Err(misuse(format!(
+            return Err(refusal(format!(
                 "table {} already exists",
                 String::from_utf8_lossy(name)
             )));
         }
         let found = self.registry.module(module).ok_or_else(|| {
-            misuse(format!(
+            refusal(format!(
                 "no such module: {}",
                 String::from_utf8_lossy(module)
             ))
         })?;
         if !found.constructible() {
-            return Err(misuse(format!(
+            return Err(refusal(format!(
                 "{} may not be used with CREATE VIRTUAL TABLE",
                 String::from_utf8_lossy(module)
             )));
@@ -535,7 +535,7 @@ impl ImportedDatabase {
             let session = self.session.get();
             let wal = self
                 .log_of(at)
-                .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
+                .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
             let mut log = WalLog {
                 wal,
                 txn,
@@ -737,7 +737,7 @@ impl ImportedDatabase {
             // carry: the module's declared columns are all a row holds. Such a
             // constraint has to have been the module's to apply.
             let Ok(column) = usize::try_from(constraint.spec.column) else {
-                return Err(misuse(
+                return Err(refusal(
                     "the module did not apply a rowid constraint and the engine cannot",
                 ));
             };
@@ -1017,7 +1017,7 @@ impl ImportedDatabase {
                     // the catalog does not name stops the open and says which
                     // one. This is how a catalog that had lost rows was found:
                     // the connect went ahead without them.
-                    return Err(misuse(format!(
+                    return Err(refusal(format!(
                         "the catalog does not name {}, which {} needs",
                         String::from_utf8_lossy(&shadow_name),
                         String::from_utf8_lossy(&name)
@@ -1049,14 +1049,14 @@ impl ImportedDatabase {
         let mut connected = self
             .virtual_tables
             .remove(&key)
-            .ok_or_else(|| misuse(format!("no such table: {}", String::from_utf8_lossy(name))))?;
+            .ok_or_else(|| refusal(format!("no such table: {}", String::from_utf8_lossy(name))))?;
         let outcome = {
             let txn = self.current_txn();
             let at = self.ddl_schema;
             let session = self.session.get();
             let wal = self
                 .log_of(at)
-                .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
+                .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
             let mut log = WalLog {
                 wal,
                 txn,
@@ -1125,7 +1125,7 @@ impl ImportedDatabase {
         params: &inillucent_exec::physical::Params,
     ) -> DbResult<Outcome> {
         let inillucent_sql::dml::BoundInsertSource::Values(values) = &statement.source else {
-            return Err(misuse("an INSERT ... SELECT into a virtual table"));
+            return Err(refusal("an INSERT ... SELECT into a virtual table"));
         };
         let width = statement.table.columns.len();
         let mut changed = 0usize;
@@ -1236,7 +1236,7 @@ fn satisfies(
         ConstraintOp::Gt => order == Ordering::Greater,
         ConstraintOp::Ge => order != Ordering::Less,
         other => {
-            return Err(misuse(format!(
+            return Err(refusal(format!(
                 "the module did not apply a {other:?} constraint and the engine cannot"
             )))
         }
@@ -1264,7 +1264,7 @@ impl ImportedDatabase {
                 let session = self.session.get();
                 let wal = self
                     .log_of(at)
-                    .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
+                    .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
                 let mut log = WalLog {
                     wal,
                     txn,

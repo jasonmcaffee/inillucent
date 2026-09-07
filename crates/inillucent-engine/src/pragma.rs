@@ -29,7 +29,7 @@
 //! given a value the engine cannot honour is **refused**, because accepting it
 //! would be answering a question wrongly.
 
-use inillucent_base::error::misuse;
+use inillucent_base::error::refusal;
 use inillucent_base::DbResult;
 use inillucent_sql::declare::{argument_boolean, argument_integer, argument_text};
 use inillucent_sql::directive::PragmaArgument;
@@ -206,7 +206,7 @@ impl ImportedDatabase {
             // rather than refused, because refusing would break a caller that
             // asked for *more* durability than the engine can distinguish.
             "3" | "extra" => Synchronous::Full,
-            other => return Err(misuse(format!("no such synchronous setting: {other}"))),
+            other => return Err(refusal(format!("no such synchronous setting: {other}"))),
         };
         self.set_synchronous(policy);
         Ok(Outcome::empty())
@@ -384,7 +384,7 @@ impl ImportedDatabase {
         if let Some(argument) = argument {
             let asked = argument_text(argument);
             if !asked.eq_ignore_ascii_case(&String::from_utf8_lossy(fixed)) {
-                return Err(misuse(format!(
+                return Err(refusal(format!(
                     "this engine is {} only, and cannot be set to {asked}",
                     String::from_utf8_lossy(fixed)
                 )));

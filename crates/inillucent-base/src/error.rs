@@ -391,8 +391,44 @@ pub fn no_mem(detail: impl Into<String>) -> DbError {
 }
 
 /// Builds a `SQLITE_MISUSE` error for an API contract the caller broke.
+///
+/// **What it is given becomes the internal detail and not the message**, so an
+/// error built this way answers `message()` with its primary code's own text:
+/// "bad parameter or other API misuse". That is right for the thing the name
+/// says - a contract the *caller* broke, whose explanation may name a file or a
+/// value - and wrong for a refusal about a statement, which is what most of the
+/// engine uses it for. [`refusal`] is the one to use for those.
 pub fn misuse(detail: impl Into<String>) -> DbError {
     DbError::primary(PrimaryCode::Misuse).with_detail(detail)
+}
+
+/// Builds a `SQLITE_MISUSE` error whose sentence is about the caller's own
+/// statement, so it is the message **and** the detail.
+///
+/// The distinction from [`misuse`] is which field the sentence lands in, and it
+/// was a real defect for as long as only one of them existed. `no such table:
+/// peple`, `table t already exists` and `UNIQUE constraint failed: t.a` are all
+/// things a person needs to read, and they were all going into the field this
+/// module documents as staying inside the process - so a caller reading
+/// `message()`, which is the field it is *told* to read, got "bad parameter or
+/// other API misuse" for every one of them. `inillucent-cli::shell::reason` and
+/// `inillucent-compat`'s `readgate::why` had each independently worked around
+/// it with `detail().unwrap_or(message())`.
+///
+/// A refusal built this way must stay free of paths, bound values and page
+/// bytes, exactly as [`DbError::with_message`] requires - which a sentence about
+/// a statement's own tables, columns and constructs is. Anything naming a file
+/// belongs in [`misuse`].
+///
+/// The detail is set as well as the message so that every existing reader of
+/// `detail()` sees exactly what it saw before.
+///
+/// @param said - the sentence, safe for a caller to read
+pub fn refusal(said: impl Into<String>) -> DbError {
+    let said = said.into();
+    DbError::primary(PrimaryCode::Misuse)
+        .with_message(said.clone())
+        .with_detail(said)
 }
 
 #[cfg(test)]

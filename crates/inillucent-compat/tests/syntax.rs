@@ -297,6 +297,162 @@ fn the_register_agrees_with_the_pinned_release() {
     assert!(divergences.is_empty(), "{divergences:#?}");
 }
 
+/// Statements the pinned release accepts, in which a word that is a keyword
+/// stands where a **name** is expected.
+///
+/// `LEFT`, `RIGHT`, `FULL`, `INNER`, `CROSS`, `NATURAL`, `OUTER` and `INDEXED`
+/// are absent from SQLite's `%fallback` declaration and are still legal names,
+/// because its name production accepts the `idj` token class directly:
+/// `nm ::= idj | STRING` with `idj ::= ID|INDEXED|JOIN_KW`. A diff table, a
+/// tree, a stereo channel and a page layout all use `left` and `right`, so this
+/// is ordinary SQL rather than an exotic corner.
+const NAMES_SQLITE_ACCEPTS: &[&str] = &[
+    "CREATE TABLE pairs (left TEXT, right TEXT)",
+    "CREATE TABLE sides (full TEXT, inner TEXT, cross TEXT, natural TEXT, outer TEXT)",
+    "CREATE TABLE hinted (indexed TEXT)",
+    "CREATE TABLE left (a INT)",
+    "CREATE TABLE indexed (a INT)",
+    "SELECT left, right FROM t",
+    "SELECT t.left FROM t",
+    "SELECT main.t.left FROM t",
+    "SELECT a FROM t AS left",
+    "SELECT a FROM t AS indexed",
+    "SELECT 1 AS left",
+    "SELECT sum(left) FROM t GROUP BY left HAVING left > 0",
+    "SELECT left FROM t ORDER BY left",
+    "CREATE INDEX left ON t (a)",
+    "CREATE VIEW left AS SELECT 1",
+    "UPDATE t SET left = 2",
+    "INSERT INTO t (left) VALUES (1)",
+    "ALTER TABLE t ADD COLUMN left TEXT",
+    "ALTER TABLE t RENAME TO left",
+    "WITH left AS (SELECT 1) SELECT * FROM left",
+    // A fallback keyword IS a type name, because it lexes as `ID`.
+    "CREATE TABLE typed (a key)",
+    "CREATE TABLE typed (left key)",
+];
+
+/// Statements the pinned release **refuses**, and which a careless widening of
+/// the name rule would make parse.
+///
+/// Two positions take `ids` (`ID|STRING`) rather than `idj`: a bare alias and a
+/// declared type name. That is not a detail. The alias rule is what stops
+/// `FROM t LEFT JOIN u` reading `LEFT` as the alias of `t` and `FROM t INDEXED
+/// BY i` reading `INDEXED` as one; the type rule is why `CREATE TABLE t (a
+/// left)` is a syntax error in SQLite while `CREATE TABLE t (left TEXT)` is
+/// not.
+const NARROW_POSITIONS_SQLITE_REFUSES: &[&str] = &[
+    // A bare alias, `as ::= ids`.
+    "SELECT a left FROM t",
+    "SELECT a right FROM t",
+    "SELECT a indexed FROM t",
+    "SELECT a FROM t left",
+    "SELECT a FROM t indexed",
+    // A declared type, `typename ::= ids`. The column *name* beside it takes
+    // the wide class, which is why `left TEXT` parses and `a left` does not -
+    // and why widening one predicate for both positions would have traded one
+    // divergence from the pinned release for another.
+    "CREATE TABLE typed (a left)",
+    "CREATE TABLE typed (a indexed)",
+    "CREATE TABLE typed (left left)",
+    "CREATE TABLE typed (a unsigned big left)",
+];
+
+/// Statements whose join keyword must still be a join keyword.
+const JOINS_THAT_MUST_STILL_JOIN: &[&str] = &[
+    "SELECT * FROM t LEFT JOIN u ON t.a = u.x",
+    "SELECT * FROM t LEFT OUTER JOIN u ON t.a = u.x",
+    "SELECT * FROM t INNER JOIN u ON t.a = u.x",
+    "SELECT * FROM t CROSS JOIN u",
+    "SELECT * FROM t NATURAL JOIN u",
+    "SELECT * FROM t INDEXED BY i WHERE b = 'x'",
+    "SELECT * FROM t NOT INDEXED WHERE b = 'x'",
+    "SELECT a, count(*) OVER w FROM t WINDOW w AS (ORDER BY a)",
+];
+
+/// A keyword SQLite allows as a name parses as one here, in every position it
+/// allows one.
+///
+/// This is the ticket-1847 parity gap: `CREATE TABLE pairs (left TEXT, right
+/// TEXT)` is a schema SQLite writes and this parser refused, which made an
+/// import of an ordinary database fail. The list is deliberately wider than the
+/// reproduction, because the rule is per *position* and fixing only the column
+/// declaration would have left every other name position broken.
+#[test]
+fn a_keyword_sqlite_allows_as_a_name_parses_as_one() {
+    let mut failures = Vec::new();
+    for statement in NAMES_SQLITE_ACCEPTS {
+        if let Err(failure) = parse(statement) {
+            failures.push(format!("`{statement}` should parse: {}", failure.message()));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// The other half, which is the half a flat widening breaks.
+///
+/// The two `ids` positions take the fallback set and not the token class, so
+/// these are syntax errors in the pinned release and must stay syntax errors
+/// here. Were the alias half to parse, `FROM t LEFT JOIN u` would silently
+/// become a cross join of `t` aliased `left` against a table named `join` - a
+/// wrong answer rather than a refusal.
+#[test]
+fn a_join_keyword_is_still_not_a_bare_alias_or_a_type_name() {
+    let mut failures = Vec::new();
+    for statement in NARROW_POSITIONS_SQLITE_REFUSES {
+        if parse(statement).is_ok() {
+            failures.push(format!("`{statement}` should not parse"));
+        }
+    }
+    for statement in JOINS_THAT_MUST_STILL_JOIN {
+        if let Err(failure) = parse(statement) {
+            failures.push(format!("`{statement}` should parse: {}", failure.message()));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// Both lists are put to the pinned release, so the claim about what SQLite
+/// does is measured rather than remembered.
+#[test]
+fn the_reserved_word_lists_agree_with_the_pinned_release() {
+    let Some(mut driver) = start_oracle() else {
+        eprintln!("the pinned SQLite oracle is not built; skipping");
+        return;
+    };
+    let mut divergences = Vec::new();
+    let mut compared = 0;
+    for (statement, expected) in NAMES_SQLITE_ACCEPTS
+        .iter()
+        .chain(JOINS_THAT_MUST_STILL_JOIN.iter())
+        .map(|statement| (statement, true))
+        .chain(
+            NARROW_POSITIONS_SQLITE_REFUSES
+                .iter()
+                .map(|statement| (statement, false)),
+        )
+    {
+        // A statement naming an object the oracle's small schema does not have
+        // still answers a *syntax* verdict, which is the only thing compared.
+        let Some(accepted) = oracle_syntax_verdict(&mut driver, statement) else {
+            continue;
+        };
+        compared += 1;
+        if accepted != expected {
+            divergences.push(format!(
+                "the list says sqlite={expected} for `{statement}`, the oracle says {accepted}"
+            ));
+        }
+        let ours = parse(&explained(statement)).is_ok();
+        if ours != accepted {
+            divergences.push(format!("`{statement}` sqlite={accepted} inillucent={ours}"));
+        }
+    }
+    let _ = driver.send(&Op::Bye);
+    assert!(compared > 20, "only {compared} statements had a verdict");
+    assert!(divergences.is_empty(), "{divergences:#?}");
+}
+
 /// The fragments the fuzzer builds statements out of.
 const FRAGMENTS: [&str; 40] = [
     "SELECT", "FROM", "WHERE", "t", "u", "a", "b", "*", "(", ")", ",", "1", "'x'", "+", "-", "*",

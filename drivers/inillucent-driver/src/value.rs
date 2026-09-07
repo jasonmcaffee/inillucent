@@ -128,6 +128,46 @@ impl Value {
     }
 }
 
+impl Value {
+    /// Copies a value an application-defined function was handed.
+    ///
+    /// The engine's expression value is a different type from the one a row
+    /// carries: it borrows, it records a text encoding, and it is what runs
+    /// inside a statement. Converting once here is what lets a caller write a
+    /// function against the same five variants it reads rows in.
+    ///
+    /// @param value - the engine's expression value
+    pub fn from_expr(value: &inillucent_engine::ExprValue<'_>) -> Value {
+        match value {
+            inillucent_engine::ExprValue::Null => Value::Null,
+            inillucent_engine::ExprValue::Integer(number) => Value::Integer(*number),
+            inillucent_engine::ExprValue::Real(number) => Value::Real(*number),
+            inillucent_engine::ExprValue::Text(text) => {
+                match std::str::from_utf8(text.raw()) {
+                    Ok(said) => Value::Text(said.to_owned()),
+                    Err(_) => Value::Blob(text.raw().to_vec()),
+                }
+            }
+            inillucent_engine::ExprValue::Blob(bytes) => Value::Blob(bytes.raw().to_vec()),
+        }
+    }
+
+    /// Copies a value an application-defined function is answering with.
+    ///
+    /// Owned rather than borrowed, because the caller's function has returned
+    /// by the time the engine reads it and anything borrowed would be borrowed
+    /// from a frame that is gone.
+    pub fn to_expr(&self) -> inillucent_engine::DbResult<inillucent_engine::ExprValue<'static>> {
+        match self {
+            Value::Null => Ok(inillucent_engine::ExprValue::Null),
+            Value::Integer(number) => Ok(inillucent_engine::ExprValue::Integer(*number)),
+            Value::Real(number) => Ok(inillucent_engine::ExprValue::Real(*number)),
+            Value::Text(text) => inillucent_engine::ExprValue::owned_text(text.as_bytes()),
+            Value::Blob(bytes) => inillucent_engine::ExprValue::owned_blob(bytes),
+        }
+    }
+}
+
 /// One column of a result.
 ///
 /// Two fields, because two are all the engine can honestly answer for an

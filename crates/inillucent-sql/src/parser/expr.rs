@@ -483,9 +483,16 @@ impl Parser<'_> {
     /// SQLite accepts `UNSIGNED BIG INT` and `VARCHAR(255)` and keeps the whole
     /// written text, because affinity is decided by reading that text as
     /// characters rather than by recognising a type.
+    ///
+    /// The words are `ids`, not `idj`: `typename ::= ids` and
+    /// `typename ::= typename ids`, so a join keyword or `INDEXED` is **not** a
+    /// type name even though either is a column *name*. Measured against the
+    /// pinned release: `CREATE TABLE t (a key)` parses and `CREATE TABLE t (a
+    /// left)` does not, while `CREATE TABLE t (left TEXT)` parses because the
+    /// two positions take different classes.
     pub(super) fn parse_type_name(&mut self) -> Result<crate::ast::NameId, ParseError> {
         let first = self.peek()?;
-        if !Parser::token_is_name(first) {
+        if !Parser::token_is_plain_name(first) {
             return Err(self.unexpected(&["a type name"])?);
         }
         let mut end = first.span;
@@ -495,7 +502,7 @@ impl Parser<'_> {
         // ALWAYS AS (...)` had the declared type `BLOB GENERATED ALWAYS` -
         // which `PRAGMA table_xinfo` then reported and which decides the
         // column's affinity.
-        while self.at_name()? && !self.at_constraint_keyword()? {
+        while self.at_plain_name()? && !self.at_constraint_keyword()? {
             end = self.bump()?.span;
         }
         if self.at(Punctuator::LeftParen)? {

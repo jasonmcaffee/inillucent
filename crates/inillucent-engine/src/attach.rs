@@ -28,7 +28,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use inillucent_base::error::misuse;
+use inillucent_base::error::refusal;
 use inillucent_base::DbResult;
 use inillucent_pool::{Database, Options};
 use inillucent_vfs::memory::MemoryVfs;
@@ -72,7 +72,7 @@ impl ImportedDatabase {
     /// @param name - the name it will be known by
     pub(crate) fn attach(&mut self, file: &[u8], name: &[u8]) -> DbResult<()> {
         if name.eq_ignore_ascii_case(b"main") || name.eq_ignore_ascii_case(TEMP) {
-            return Err(misuse(format!(
+            return Err(refusal(format!(
                 "database {} is already in use",
                 String::from_utf8_lossy(name)
             )));
@@ -82,13 +82,13 @@ impl ImportedDatabase {
             .iter()
             .any(|held| held.name.eq_ignore_ascii_case(name))
         {
-            return Err(misuse(format!(
+            return Err(refusal(format!(
                 "database {} is already in use",
                 String::from_utf8_lossy(name)
             )));
         }
         if self.attached.len() >= MAX_ATTACHED {
-            return Err(misuse("too many attached databases"));
+            return Err(refusal("too many attached databases"));
         }
         let (vfs, path, held) = if file == IN_MEMORY || file.is_empty() {
             let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
@@ -177,7 +177,7 @@ impl ImportedDatabase {
             &mut |_local| take(1),
         )?;
         if next <= self.next_handle {
-            return Err(misuse(
+            return Err(refusal(
                 "this connection holds too many attached objects to name them all",
             ));
         }
@@ -228,25 +228,25 @@ impl ImportedDatabase {
     /// @param name - the name it was attached under
     pub(crate) fn detach(&mut self, name: &[u8]) -> DbResult<()> {
         if name.eq_ignore_ascii_case(b"main") || name.eq_ignore_ascii_case(TEMP) {
-            return Err(misuse(format!(
+            return Err(refusal(format!(
                 "cannot detach database {}",
                 String::from_utf8_lossy(name)
             )));
         }
         let Some(at) = self.schema_named(name) else {
-            return Err(misuse(format!(
+            return Err(refusal(format!(
                 "no such database: {}",
                 String::from_utf8_lossy(name)
             )));
         };
         if self.batch.get().is_some() {
-            return Err(misuse("cannot DETACH database within transaction"));
+            return Err(refusal("cannot DETACH database within transaction"));
         }
         let Some(nth) = at.checked_sub(FIRST_ATTACHED) else {
-            return Err(misuse("cannot detach database main"));
+            return Err(refusal("cannot detach database main"));
         };
         let Some(mut held) = (nth < self.attached.len()).then(|| self.attached.remove(nth)) else {
-            return Err(misuse(format!(
+            return Err(refusal(format!(
                 "no such database: {}",
                 String::from_utf8_lossy(name)
             )));

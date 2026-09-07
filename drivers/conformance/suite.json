@@ -1,0 +1,291 @@
+{
+  "version": 1,
+  "about": [
+    "The driver's behaviour, as data rather than as prose.",
+    "",
+    "A specification nobody can run is a specification every implementation reads",
+    "differently. So this file is what 'the Python binding is correct' means, and",
+    "the Rust driver runs exactly the same file - which is what stops the reference",
+    "implementation and the specification drifting apart, because there is only one",
+    "of them.",
+    "",
+    "A runner is about forty lines in any language: open a scratch database, run",
+    "each case's setup, run each step, compare. drivers/README.md walks through it.",
+    "",
+    "VALUES are one-key objects so that NULL and the empty string can never be",
+    "confused, which is the same reason the driver has a Null variant:",
+    "  {\"null\": true}   {\"int\": 7}   {\"real\": 0.5}",
+    "  {\"text\": \"one\"}   {\"blob\": [0, 255, 1]}",
+    "A blob is a byte array rather than base64 so that no runner needs a decoder.",
+    "",
+    "A STEP asserts whatever keys it carries and ignores the rest, so a case can",
+    "check a row count without pinning the rows, or a status without pinning the",
+    "message. The keys are:",
+    "  sql               the statement (required)",
+    "  params            values bound to ?1, ?2, ...",
+    "  limit             rows to hand back; absent means all",
+    "  columns           the result column names, in order",
+    "  rows              every row handed back, in order",
+    "  affected          rows changed; use null to assert it is a query",
+    "  total             rows produced before the limit - exact, not an estimate",
+    "  more              whether the limit cut anything off",
+    "  status            the failure's status name; absent means it must succeed",
+    "  message_contains  a substring of the failure's message",
+    "  feature_contains  a substring of the construct named by an unsupported refusal"
+  ],
+  "cases": [
+    {
+      "name": "insert_then_select",
+      "about": "The shape everything else rests on: a write reports what it changed, and a read gives it back.",
+      "setup": ["CREATE TABLE t (a INTEGER PRIMARY KEY, b TEXT)"],
+      "steps": [
+        { "sql": "INSERT INTO t VALUES (1, 'one')", "affected": 1 },
+        { "sql": "INSERT INTO t VALUES (2, 'two')", "affected": 1 },
+        {
+          "sql": "SELECT a, b FROM t ORDER BY a",
+          "columns": ["a", "b"],
+          "rows": [
+            [{ "int": 1 }, { "text": "one" }],
+            [{ "int": 2 }, { "text": "two" }]
+          ],
+          "affected": null,
+          "total": 2,
+          "more": false
+        }
+      ]
+    },
+    {
+      "name": "every_value_kind_round_trips",
+      "about": "All five kinds, including the two that are easy to get wrong: a blob holding a NUL byte, and text that is not ASCII. A driver that renders values as text loses the first; one that uses C strings truncates it.",
+      "setup": ["CREATE TABLE v (k TEXT PRIMARY KEY, value BLOB)"],
+      "steps": [
+        { "sql": "INSERT INTO v VALUES ('null', ?1)", "params": [{ "null": true }], "affected": 1 },
+        { "sql": "INSERT INTO v VALUES ('int', ?1)", "params": [{ "int": -9223372036854775808 }], "affected": 1 },
+        { "sql": "INSERT INTO v VALUES ('real', ?1)", "params": [{ "real": 0.5 }], "affected": 1 },
+        { "sql": "INSERT INTO v VALUES ('text', ?1)", "params": [{ "text": "héllo wörld" }], "affected": 1 },
+        { "sql": "INSERT INTO v VALUES ('blob', ?1)", "params": [{ "blob": [0, 255, 0, 1, 127] }], "affected": 1 },
+        { "sql": "SELECT value FROM v WHERE k = 'null'", "rows": [[{ "null": true }]] },
+        { "sql": "SELECT value FROM v WHERE k = 'int'", "rows": [[{ "int": -9223372036854775808 }]] },
+        { "sql": "SELECT value FROM v WHERE k = 'real'", "rows": [[{ "real": 0.5 }]] },
+        { "sql": "SELECT value FROM v WHERE k = 'text'", "rows": [[{ "text": "héllo wörld" }]] },
+        { "sql": "SELECT value FROM v WHERE k = 'blob'", "rows": [[{ "blob": [0, 255, 0, 1, 127] }]] }
+      ]
+    },
+    {
+      "name": "null_is_not_the_empty_string",
+      "about": "The fault a grid drawing both as nothing would hide: a column never filled in and one filled in with nothing are not the same fact about a row.",
+      "setup": ["CREATE TABLE n (a INTEGER PRIMARY KEY, b TEXT)"],
+      "steps": [
+        { "sql": "INSERT INTO n VALUES (1, ?1)", "params": [{ "null": true }], "affected": 1 },
+        { "sql": "INSERT INTO n VALUES (2, ?1)", "params": [{ "text": "" }], "affected": 1 },
+        { "sql": "SELECT b FROM n WHERE a = 1", "rows": [[{ "null": true }]] },
+        { "sql": "SELECT b FROM n WHERE a = 2", "rows": [[{ "text": "" }]] }
+      ]
+    },
+    {
+      "name": "a_limit_cuts_the_rows_handed_back_and_total_stays_exact",
+      "about": "The engine materialises, so `total` was counted rather than estimated. That is what lets a grid say `1-2 of 5` and mean it.",
+      "setup": [
+        "CREATE TABLE many (a INTEGER PRIMARY KEY)",
+        "INSERT INTO many VALUES (1)",
+        "INSERT INTO many VALUES (2)",
+        "INSERT INTO many VALUES (3)",
+        "INSERT INTO many VALUES (4)",
+        "INSERT INTO many VALUES (5)"
+      ],
+      "steps": [
+        {
+          "sql": "SELECT a FROM many ORDER BY a",
+          "limit": 2,
+          "rows": [[{ "int": 1 }], [{ "int": 2 }]],
+          "total": 5,
+          "more": true
+        },
+        {
+          "sql": "SELECT a FROM many ORDER BY a",
+          "limit": 5,
+          "total": 5,
+          "more": false
+        }
+      ]
+    },
+    {
+      "name": "parameters_are_bound_not_pasted",
+      "about": "A value that would be syntax if it were pasted into the statement.",
+      "setup": ["CREATE TABLE p (a INTEGER PRIMARY KEY, b TEXT)"],
+      "steps": [
+        {
+          "sql": "INSERT INTO p VALUES (1, ?1)",
+          "params": [{ "text": "'); DROP TABLE p; --" }],
+          "affected": 1
+        },
+        {
+          "sql": "SELECT b FROM p WHERE a = ?1",
+          "params": [{ "int": 1 }],
+          "rows": [[{ "text": "'); DROP TABLE p; --" }]]
+        },
+        { "sql": "SELECT count(*) FROM p", "rows": [[{ "int": 1 }]] }
+      ]
+    },
+    {
+      "name": "a_missing_table_is_not_found_and_a_typo_is_syntax",
+      "about": "The three refusals a caller has to be able to tell apart. This case and the next are the whole point of the driver.",
+      "setup": ["CREATE TABLE people (a INTEGER PRIMARY KEY)"],
+      "steps": [
+        {
+          "sql": "SELECT a FROM peple",
+          "status": "not_found",
+          "message_contains": "no such table"
+        },
+        { "sql": "SELECT a FORM people", "status": "syntax" }
+      ]
+    },
+    {
+      "name": "an_unimplemented_construct_refuses_by_name",
+      "about": "A construct the engine has not built reports `unsupported` and names itself, which is a different thing from a statement that is wrong. A binding that folds this into its general error type has thrown the design away. VACUUM is the example because it is still unimplemented; when it is built, repoint this at whatever still is rather than deleting the case.",
+      "setup": [],
+      "steps": [
+        {
+          "sql": "VACUUM",
+          "status": "unsupported",
+          "feature_contains": "VACUUM"
+        }
+      ]
+    },
+    {
+      "name": "a_constraint_refuses_a_write",
+      "about": "A refusal that is the schema doing its job, and must not read as either a syntax error or a missing feature.",
+      "setup": [
+        "CREATE TABLE u (a INTEGER PRIMARY KEY, b TEXT UNIQUE)",
+        "INSERT INTO u VALUES (1, 'one')"
+      ],
+      "steps": [
+        { "sql": "INSERT INTO u VALUES (2, 'one')", "status": "constraint" },
+        { "sql": "SELECT count(*) FROM u", "rows": [[{ "int": 1 }]] }
+      ]
+    },
+    {
+      "name": "a_transaction_commits_all_of_it",
+      "setup": ["CREATE TABLE c (a INTEGER PRIMARY KEY)"],
+      "steps": [
+        { "sql": "BEGIN" },
+        { "sql": "INSERT INTO c VALUES (1)", "affected": 1 },
+        { "sql": "INSERT INTO c VALUES (2)", "affected": 1 },
+        { "sql": "COMMIT" },
+        { "sql": "SELECT count(*) FROM c", "rows": [[{ "int": 2 }]] }
+      ]
+    },
+    {
+      "name": "a_rollback_undoes_all_of_it",
+      "about": "Including the row written before the one that failed, which is the half a driver that stopped at the first error but did not roll back would leave behind.",
+      "setup": ["CREATE TABLE r (a INTEGER PRIMARY KEY)", "INSERT INTO r VALUES (1)"],
+      "steps": [
+        { "sql": "BEGIN" },
+        { "sql": "INSERT INTO r VALUES (2)", "affected": 1 },
+        { "sql": "INSERT INTO r VALUES (3)", "affected": 1 },
+        { "sql": "ROLLBACK" },
+        { "sql": "SELECT count(*) FROM r", "rows": [[{ "int": 1 }]] }
+      ]
+    },
+    {
+      "name": "a_savepoint_rolls_back_to_itself",
+      "setup": ["CREATE TABLE s (a INTEGER PRIMARY KEY)"],
+      "steps": [
+        { "sql": "BEGIN" },
+        { "sql": "INSERT INTO s VALUES (1)", "affected": 1 },
+        { "sql": "SAVEPOINT half" },
+        { "sql": "INSERT INTO s VALUES (2)", "affected": 1 },
+        { "sql": "ROLLBACK TO half" },
+        { "sql": "COMMIT" },
+        { "sql": "SELECT a FROM s", "rows": [[{ "int": 1 }]] }
+      ]
+    },
+    {
+      "name": "a_delete_that_matched_nothing_says_zero_rather_than_failing",
+      "about": "Zero changed rows is an answer, not an error. A row editor's rule that every statement must change exactly one row is built on being told the difference.",
+      "setup": ["CREATE TABLE d (a INTEGER PRIMARY KEY)", "INSERT INTO d VALUES (1)"],
+      "steps": [
+        { "sql": "DELETE FROM d WHERE a = 99", "affected": 0 },
+        { "sql": "DELETE FROM d WHERE a = 1", "affected": 1 },
+        { "sql": "SELECT count(*) FROM d", "rows": [[{ "int": 0 }]] }
+      ]
+    },
+    {
+      "name": "returning_gives_rows_and_a_count",
+      "about": "The one statement that fills both, which is why `affected` is decided by the count rather than by whether there were columns.",
+      "setup": ["CREATE TABLE ret (a INTEGER PRIMARY KEY, b TEXT)"],
+      "steps": [
+        {
+          "sql": "INSERT INTO ret VALUES (1, 'one') RETURNING a, b",
+          "columns": ["a", "b"],
+          "rows": [[{ "int": 1 }, { "text": "one" }]],
+          "affected": 1
+        }
+      ]
+    },
+    {
+      "name": "the_schema_can_be_read_back",
+      "about": "`sqlite_schema` is a readable table and it holds the CREATE statement as it was typed, which is what lets a consumer show a person what they wrote rather than something composed from a catalogue.",
+      "setup": ["CREATE TABLE shown (a INTEGER PRIMARY KEY, b TEXT)"],
+      "steps": [
+        {
+          "sql": "SELECT type, name FROM sqlite_schema WHERE name = 'shown'",
+          "rows": [[{ "text": "table" }, { "text": "shown" }]]
+        },
+        {
+          "sql": "SELECT sql FROM sqlite_schema WHERE name = 'shown'",
+          "rows": [[{ "text": "CREATE TABLE shown (a INTEGER PRIMARY KEY, b TEXT)" }]]
+        }
+      ]
+    },
+    {
+      "name": "reserved_word_column_names",
+      "about": "`left` and `right` are ordinary column names in SQLite - a diff table, a tree, a stereo channel, a page layout - and its name production accepts the join keywords and `INDEXED` directly rather than through the fallback set. A database using them imported as `corrupt` until task-1847, so this case pins every position a name can appear in: the declaration, a bare reference, a qualified one, an ORDER BY, and an explicit alias. The last step is the other half of the rule: a bare alias written with no AS takes the narrow fallback set, so `SELECT left right FROM pairs` is a syntax error in SQLite and has to stay one here - that is what keeps `FROM t LEFT JOIN u` a join rather than a table aliased `left`.",
+      "setup": [
+        "CREATE TABLE pairs (left TEXT, right TEXT, inner TEXT, outer TEXT, cross TEXT, indexed TEXT)",
+        "INSERT INTO pairs VALUES ('a', 'b', 'i', 'o', 'c', 'x')",
+        "INSERT INTO pairs VALUES ('c', 'd', 'i', 'o', 'c', 'x')"
+      ],
+      "steps": [
+        {
+          "sql": "SELECT left, right FROM pairs ORDER BY left",
+          "columns": ["left", "right"],
+          "rows": [
+            [{ "text": "a" }, { "text": "b" }],
+            [{ "text": "c" }, { "text": "d" }]
+          ],
+          "affected": null,
+          "total": 2
+        },
+        {
+          "sql": "SELECT pairs.inner, pairs.outer, pairs.cross, pairs.indexed FROM pairs WHERE left = 'a'",
+          "rows": [[{ "text": "i" }, { "text": "o" }, { "text": "c" }, { "text": "x" }]]
+        },
+        {
+          "sql": "SELECT left AS right, right AS left FROM pairs WHERE left = 'a'",
+          "columns": ["right", "left"],
+          "rows": [[{ "text": "a" }, { "text": "b" }]]
+        },
+        {
+          "sql": "SELECT sql FROM sqlite_schema WHERE name = 'pairs'",
+          "rows": [[{ "text": "CREATE TABLE pairs (left TEXT, right TEXT, inner TEXT, outer TEXT, cross TEXT, indexed TEXT)" }]]
+        },
+        { "sql": "SELECT left right FROM pairs", "status": "syntax" }
+      ]
+    },
+    {
+      "name": "a_columns_declared_type_is_reported_and_an_expression_has_none",
+      "about": "An expression genuinely has no declared type, and the empty string is the honest answer rather than a guess taken from the first row - which would be a different answer on a different page of the same query.",
+      "setup": ["CREATE TABLE typed (a INTEGER PRIMARY KEY, b TEXT)", "INSERT INTO typed VALUES (1, 'one')"],
+      "steps": [
+        {
+          "sql": "PRAGMA table_info(typed)",
+          "rows": [
+            [{ "int": 0 }, { "text": "a" }, { "text": "INTEGER" }, { "int": 0 }, { "null": true }, { "int": 1 }],
+            [{ "int": 1 }, { "text": "b" }, { "text": "TEXT" }, { "int": 0 }, { "null": true }, { "int": 0 }]
+          ]
+        }
+      ]
+    }
+  ]
+}
