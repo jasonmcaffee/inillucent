@@ -22,8 +22,10 @@
 //! Usage:
 //!   inillucent-prepareprofile [--iterations N] [--sql "SELECT 1"]
 
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use inillucent_compat::newengine::ImportedDatabase;
@@ -31,6 +33,63 @@ use inillucent_exec::physical::Params;
 
 /// How many times each stage runs before its total is divided.
 const DEFAULT_ITERATIONS: u32 = 20_000;
+
+/// How many allocations the process has made.
+///
+/// **Because the nanoseconds alone do not say what to fix.** task-1838 §5
+/// measured a `SELECT 1` compile at 3.03 ms per four thousand on the Windows
+/// CRT heap and 1.23 ms on a pooled allocator, and 1.31 / 1.11 on Linux - so
+/// nearly a microsecond of a Windows compile is `malloc` and nothing else. The
+/// count is what turns that into a list of things to stop allocating.
+static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+
+/// An allocator that counts, and otherwise delegates to the system one.
+struct CountingAllocator;
+
+// SAFETY: every method forwards to the system allocator with the same
+// arguments; the counter is the only addition and it touches no memory the
+// allocator owns.
+unsafe impl GlobalAlloc for CountingAllocator {
+    // SAFETY: the layout is the caller's, forwarded unchanged.
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: forwarded unchanged to the system allocator.
+        unsafe { System.alloc(layout) }
+    }
+
+    // SAFETY: the pointer and layout are the ones this allocator handed out.
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        // SAFETY: forwarded unchanged to the allocator that made the pointer.
+        unsafe { System.dealloc(pointer, layout) }
+    }
+
+    // SAFETY: the pointer and layout are the ones this allocator handed out.
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: forwarded unchanged to the allocator that made the pointer.
+        unsafe { System.realloc(pointer, layout, size) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+/// Returns how many allocations one call of a closure made.
+///
+/// @param iterations - how many calls to average over
+/// @param body - the work to count
+fn allocations(
+    iterations: u32,
+    mut body: impl FnMut() -> Result<(), String>,
+) -> Result<f64, String> {
+    body()?;
+    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    for _ in 0..iterations {
+        body()?;
+    }
+    let after = ALLOCATIONS.load(Ordering::Relaxed);
+    Ok((after.saturating_sub(before)) as f64 / f64::from(iterations.max(1)))
+}
 
 /// Returns the average nanoseconds one call of a closure took.
 ///
@@ -108,8 +167,17 @@ fn main() -> ExitCode {
     };
     println!("## compiling a statement, stage by stage   (nanoseconds)");
     println!(
-        "  {:<34} {:>8} {:>8} {:>8} {:>10} {:>9} {:>9}",
-        "statement", "parse", "+bind", "+plan", "+physical", "+pipeline", "compile"
+        "  {:<34} {:>8} {:>8} {:>8} {:>10} {:>9} {:>9} {:>7} {:>7} {:>7}",
+        "statement",
+        "parse",
+        "+bind",
+        "+plan",
+        "+physical",
+        "+pipeline",
+        "compile",
+        "a/parse",
+        "a/plan",
+        "a/pipe"
     );
     for sql in &statements {
         match profile(&mut database, sql, iterations) {
@@ -179,9 +247,27 @@ fn profile(database: &mut ImportedDatabase, sql: &str, iterations: u32) -> Resul
             .map(|_| ())
             .map_err(|e| format!("{e:?}"))
     })?;
+    let counted = iterations.min(2_000);
+    let parse_allocs = allocations(counted, || {
+        inillucent_sql::parser::parse_next_statement(sql.as_bytes(), 0, &limits)
+            .map(|_| ())
+            .map_err(|error| format!("{error:?}"))
+    })?;
+    let plan_allocs = allocations(counted, || {
+        database.plan(sql).map(|_| ()).map_err(|e| format!("{e:?}"))
+    })?;
+    let built_allocs = allocations(counted, || {
+        let plan = database.plan(sql).map_err(|e| format!("{e:?}"))?;
+        let choice = database.prepare(&plan).map_err(|e| format!("{e:?}"))?;
+        let sink = Box::new(inillucent_exec::ops::Collect::default());
+        database
+            .pipeline(&plan, &choice, &params, sink)
+            .map(|_| ())
+            .map_err(|e| format!("{e:?}"))
+    })?;
     let shown: String = sql.chars().take(34).collect();
     println!(
-        "  {shown:<34} {parse:>8.1} {bind:>8.1} {plan:>8.1} {physical:>10.1} {built:>9.1} {prepared:>9.1}"
+        "  {shown:<34} {parse:>8.1} {bind:>8.1} {plan:>8.1} {physical:>10.1} {built:>9.1} {prepared:>9.1} {parse_allocs:>7.1} {plan_allocs:>7.1} {built_allocs:>7.1}"
     );
     Ok(())
 }

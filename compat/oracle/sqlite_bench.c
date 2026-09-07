@@ -83,6 +83,7 @@ struct workload {
 struct plan {
   long rows;
   char journal[32];
+  char locking[32];
   char synchronous[32];
   long page_size;
   long cache_size;
@@ -184,6 +185,7 @@ static int read_plan(const char *path, struct plan *plan) {
   plan->page_size = 4096;
   plan->cache_size = -2000;
   strcpy(plan->journal, "delete");
+  strcpy(plan->locking, "normal");
   strcpy(plan->synchronous, "full");
   while (fgets(line, sizeof(line), file)) {
     char *tab;
@@ -200,6 +202,8 @@ static int read_plan(const char *path, struct plan *plan) {
       plan->rows = strtol(value, 0, 10);
     } else if (strcmp(key, "journal") == 0) {
       snprintf(plan->journal, sizeof(plan->journal), "%s", value);
+    } else if (strcmp(key, "locking") == 0) {
+      snprintf(plan->locking, sizeof(plan->locking), "%s", value);
     } else if (strcmp(key, "synchronous") == 0) {
       snprintf(plan->synchronous, sizeof(plan->synchronous), "%s", value);
     } else if (strcmp(key, "page_size") == 0) {
@@ -368,6 +372,16 @@ static int run_workload(sqlite3 *db, const struct workload *workload, long rows)
 static int apply_settings(sqlite3 *db, const struct plan *plan) {
   char sql[256];
   snprintf(sql, sizeof(sql), "PRAGMA page_size=%ld;", plan->page_size);
+  if (!run_sql(db, sql)) return 0;
+  /*
+  ** Before journal_mode, because changing the locking mode after a journal
+  ** mode has been set is refused while a lock is held. `normal` is the default
+  ** and is what every gate before task-1838 ran; `exclusive` is what the new
+  ** engine actually does - one process, no lock taken per statement - and the
+  ** gate can now ask for either so the difference is a number rather than an
+  ** argument.
+  */
+  snprintf(sql, sizeof(sql), "PRAGMA locking_mode=%s;", plan->locking);
   if (!run_sql(db, sql)) return 0;
   snprintf(sql, sizeof(sql), "PRAGMA journal_mode=%s;", plan->journal);
   if (!run_sql(db, sql)) return 0;

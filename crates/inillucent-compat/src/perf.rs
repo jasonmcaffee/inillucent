@@ -136,6 +136,16 @@ pub struct Plan {
     pub rows: u32,
     /// The journal mode both engines run in.
     pub journal: String,
+    /// The locking mode SQLite's arm runs in.
+    ///
+    /// **Only SQLite has one.** The new engine takes no operating-system lock
+    /// on its file at all and answers `exclusive` when asked, so this is not a
+    /// setting both arms share - it is the question of whether SQLite is asked
+    /// to behave the way the engine it is being compared against behaves.
+    /// task-1838 §5 measured what it costs: on Windows a rowid point lookup was
+    /// 12.4 microseconds against Linux's 2.0 for the same C, because a read in
+    /// `normal` mode takes and drops a `LockFileEx` per statement.
+    pub locking: String,
     /// The durability level both engines run at.
     pub synchronous: String,
     /// The page size both engines use.
@@ -1121,6 +1131,7 @@ pub fn plan_for(scale: &str) -> Plan {
         scale: scale.to_string(),
         rows,
         journal: "delete".to_string(),
+        locking: "normal".to_string(),
         synchronous: "full".to_string(),
         page_size: 4096,
         cache_size: -2000,
@@ -1140,6 +1151,7 @@ mod tests {
             scale: "small".to_string(),
             rows: 1000,
             journal: "delete".to_string(),
+            locking: "normal".to_string(),
             synchronous: "full".to_string(),
             page_size: 4096,
             cache_size: -2000,

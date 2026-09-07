@@ -134,11 +134,32 @@ at medium scale (100,000 rows) and **no family below 1.00x**.
 
 At medium on Windows the lower bound cleared 3.00x on all four thirty-round runs (3.08, 3.01, 3.08,
 3.00). It sits on the bar rather than above it, and a single run had already been retracted once for
-landing on the wrong side of it, so the spread is reported rather than one number. On Linux the same
-binary is under half of that, and the cause is the denominator: SQLite is three to nine times faster
-on Linux on every per-statement workload while inillucent is 8 to 53% faster, so the ratio falls
-although inillucent itself got quicker. A speed claim about this engine has to name the platform and
-the scale. (task-1834 §5e, §5h)
+landing on the wrong side of it, so the spread is reported rather than one number. A speed claim
+about this engine has to name the platform and the scale. (task-1834 §5e, §5h; task-1838 §4 has since
+moved medium on Windows to 3.36x / 3.22x and Linux to 1.53x / 1.51x.)
+
+**Why Linux is half of Windows, measured rather than argued (task-1838 §5).** Four experiments, two
+of which refuted the guesses the Phase 2 TDD wrote down:
+
+| experiment | result |
+|---|---|
+| `PRAGMA locking_mode=exclusive` on SQLite's Windows arm, so it stops taking a file lock per statement the way this engine never does | **no change** (64.5 ms against 73.2 ms on `point.rowid`, inside the spread). The lock is not the cost. |
+| `MALLOC_ARENA_MAX=1` on Linux | **no change** (1.52x against 1.53x weighted). The glibc arena is not the cost. |
+| the same workloads under a size-classed free list instead of the system allocator, both platforms (`inillucent-allocarm`) | **Windows 46.95 ms to 38.97 ms (17%); Linux 39.91 ms to 38.20 ms (4%)**. On a `SELECT 1` compile: Windows 3.03 ms to 1.23 ms (**59% of it is `malloc`**), Linux 1.31 ms to 1.11 ms (15%). With the allocator taken out of the question the two platforms run the **same speed** (38.97 against 38.20). |
+| the Linux gate with its scratch on ext4 and on a Windows filesystem through 9p | SQLite's `point.rowid` goes 7.9 ms to **1,993 ms**; inillucent's goes 2.02 ms to 2.00 ms. |
+
+Which settles it. **This engine is not slower on Linux - it is faster there on 26 of the 30
+workloads**, and slower only on the three that `fsync` per commit. What changes is the denominator:
+SQLite does per-statement operating-system work and this engine does none, so SQLite's number tracks
+the platform's syscall cost across three orders of magnitude while this engine's does not move at
+all. Windows charges SQLite for that work; Linux barely does; 9p charges it 250x.
+
+So there is no Linux-specific fix to make, and the TDD's two candidates were both wrong: the
+allocator problem is on **Windows**, and it is **ours** rather than SQLite's. Closing the Linux gap
+means the same absolute work the floor needs, and the measurement names the first item precisely -
+a `SELECT 1` compile makes **25 heap allocations** (7 in the parser, 7 more through bind and plan,
+11 more building the pipeline), and on Windows those cost about a microsecond, which is most of
+`prepare.trivial`'s 0.31x.
 
 ### Speed: per family, lower bounds, Windows x64, final Phase 5 build
 
