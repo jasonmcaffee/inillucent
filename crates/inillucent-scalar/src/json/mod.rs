@@ -296,6 +296,30 @@ fn error_position(arguments: &[Argument<'_>]) -> DbResult<Answer> {
     }
 }
 
+/// Answers a single-path `json_extract` from a document and a path that are
+/// already parsed.
+///
+/// **The whole point is what it does not do.** `json_extract('{...}', '$.b.c')`
+/// with two literal arguments used to re-parse the document into a `Node` tree
+/// and re-parse the path into steps on every one of the gate's four thousand
+/// calls, because the entry point takes SQL values and values carry no memory.
+/// A caller that can prove its arguments have not changed - which a compiled
+/// expression can, by remembering the bytes it last saw - keeps both and calls
+/// this instead. task-1838 §4.
+///
+/// @param node - the document, already parsed
+/// @param steps - the path, already parsed
+/// @param binary - true for `jsonb_extract`, false for `json_extract`
+pub fn extract_parsed(node: &Node, steps: &[path::Step], binary: bool) -> DbResult<Answer> {
+    let Some(found) = path::lookup(node, steps) else {
+        return Ok(Answer::null());
+    };
+    if binary {
+        return answer(found, true);
+    }
+    as_sql(found)
+}
+
 /// Turns one element into the SQL value `json_extract` hands back.
 pub fn value_of(node: &Node) -> DbResult<Answer> {
     as_sql(node)

@@ -477,10 +477,12 @@ impl ImportedDatabase {
         layout: SourceLayout,
         rows: &[Vec<OwnedDatum>],
     ) -> DbResult<PageId> {
+        let copied = std::time::Instant::now();
         let borrowed: Vec<Vec<Datum<'_>>> = rows
             .iter()
             .map(|row| row.iter().map(OwnedDatum::borrow).collect())
             .collect();
+        self.borrow_nanos.set(copied.elapsed().as_nanos());
         let txn = self.current_txn();
         let tree = {
             let open = self.batch.get().is_some();
@@ -758,8 +760,11 @@ impl ImportedDatabase {
         let uniqueness = checked.elapsed().as_nanos();
         let packed = std::time::Instant::now();
         let page = self.build_tree_from(root, columns, key_columns, layout, &rows)?;
-        self.index_stages
-            .set((scan, sort, uniqueness, packed.elapsed().as_nanos()));
+        let pack = packed.elapsed().as_nanos();
+        // The tail is timed too, because it is not free and it is not the
+        // build: recording the catalog row, re-deriving every table from the
+        // catalog text, refreshing the planner's view of it, and sealing.
+        let tail = std::time::Instant::now();
         self.record(
             root,
             SchemaEntry {
@@ -780,6 +785,8 @@ impl ImportedDatabase {
         self.rebuild_tables()?;
         self.refresh_catalog();
         self.seal()?;
+        self.index_stages
+            .set((scan, sort, uniqueness, pack, tail.elapsed().as_nanos()));
         Ok(Outcome::empty())
     }
 

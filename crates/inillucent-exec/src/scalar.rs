@@ -166,6 +166,30 @@ pub struct JsonCall {
     arguments: Vec<JsonOperand>,
     /// The last document seen, and its binary form.
     cached: std::sync::Mutex<Option<(Vec<u8>, Vec<u8>)>>,
+    /// The last document and path seen, and what they parsed to.
+    ///
+    /// **A second cache rather than a bigger one, because it answers a
+    /// different question.** `cached` above holds the *JSONB* of a document, so
+    /// that a function which hands its argument on as a value can hand on a
+    /// blob instead of re-parsed text. This one holds the parsed `Node` and the
+    /// parsed path, which is what `json_extract` actually reads - and decoding
+    /// that blob back into a tree was the cost the first cache left behind: the
+    /// gate's `extension.json` ran the same two literals four thousand times
+    /// and paid a full document decode and a path parse on every one.
+    /// task-1838 §4.
+    ///
+    /// One lock rather than two, because the two are read together on every
+    /// call and a second lock is a second uncontended atomic for nothing.
+    extract: std::sync::Mutex<ExtractCache>,
+}
+
+/// What a repeated `json_extract` does not have to parse again.
+#[derive(Default)]
+struct ExtractCache {
+    /// The last document seen, and the tree it parsed to.
+    document: Option<(Vec<u8>, json::Node)>,
+    /// The last path seen, and the steps it parsed to.
+    steps: Option<(Vec<u8>, Vec<json::path::Step>)>,
 }
 
 /// One argument of a JSON call.
@@ -186,6 +210,7 @@ impl JsonCall {
             func,
             arguments,
             cached: std::sync::Mutex::new(None),
+            extract: std::sync::Mutex::new(ExtractCache::default()),
         }
     }
 
@@ -217,11 +242,103 @@ impl JsonCall {
         Some(answer)
     }
 
+    /// Answers `json_extract(document, path)` without allocating an argument
+    /// vector, when the call has that shape and its arguments repeat.
+    ///
+    /// `None` means "not this shape", and the caller falls through to the
+    /// general path - which is every other JSON function, every multi-path
+    /// extract, and any argument that is not text or a blob.
+    ///
+    /// **It evaluates its own two operands** rather than being handed the
+    /// general path's `values` and `marks`, because building those is two heap
+    /// allocations and the whole point of this path is that a repeated call
+    /// costs neither a parse nor an allocation.
+    ///
+    /// The document is keyed by its own bytes, so a column of different
+    /// documents misses every time and costs one extra comparison; a literal or
+    /// a repeated value hits every time and parses once. That is the same
+    /// bargain `cached` already made, applied to the form the answer is
+    /// actually read out of.
+    ///
+    /// @param batch - the batch being evaluated
+    /// @param nth - the position among the batch's live rows
+    fn extract_cached(&self, batch: &Batch<'_>, nth: usize) -> DbResult<Option<json::Answer>> {
+        let binary = match self.func {
+            JsonFunc::Extract => false,
+            JsonFunc::ExtractB => true,
+            _ => return Ok(None),
+        };
+        let (Some(JsonOperand::Plain(left)), Some(JsonOperand::Plain(right))) =
+            (self.arguments.first(), self.arguments.get(1))
+        else {
+            return Ok(None);
+        };
+        if self.arguments.len() != 2 {
+            return Ok(None);
+        }
+        // **Read as borrowed bytes, not as `Value`s.** `to_value` owns what it
+        // is given, so converting first copied the whole document and the whole
+        // path on every call - which on the gate's four thousand identical
+        // calls is four thousand copies of a document the cache already holds.
+        // The copy now happens only on a miss, where it has to.
+        let left = left.value(batch, nth)?;
+        let right = right.value(batch, nth)?;
+        let Datum::Text(path) = right.get() else {
+            return Ok(None);
+        };
+        let (document, blob) = match left.get() {
+            Datum::Text(bytes) => (bytes, false),
+            Datum::Blob(bytes) => (bytes, true),
+            _ => return Ok(None),
+        };
+        let Ok(mut held) = self.extract.lock() else {
+            return Ok(None);
+        };
+        if held.steps.as_ref().map(|(seen, _)| seen.as_slice()) != Some(path) {
+            let Ok(text) = std::str::from_utf8(path) else {
+                return Ok(None);
+            };
+            held.steps = Some((path.to_vec(), json::path::parse(text)?));
+        }
+        if held.document.as_ref().map(|(seen, _)| seen.as_slice()) != Some(document) {
+            let owned = if blob {
+                Value::owned_blob(document)
+            } else {
+                Value::owned_text(document)
+            };
+            let Ok(owned) = owned else {
+                return Ok(None);
+            };
+            let argument = json::Argument {
+                value: &owned,
+                json: false,
+            };
+            let Some(node) = json::document(&argument)? else {
+                return Ok(Some(json::Answer {
+                    value: Value::Null,
+                    json: false,
+                }));
+            };
+            held.document = Some((document.to_vec(), node));
+        }
+        let (Some((_, node)), Some((_, steps))) = (held.document.as_ref(), held.steps.as_ref())
+        else {
+            return Ok(None);
+        };
+        Ok(Some(json::extract_parsed(node, steps, binary)?))
+    }
+
     /// Evaluates the call, keeping the subtype its answer carries.
     ///
     /// @param batch - the batch being evaluated
     /// @param nth - the position among the batch's live rows
     fn answer(&self, batch: &Batch<'_>, nth: usize) -> DbResult<json::Answer> {
+        // The single-path `json_extract` shape, answered from the cache above
+        // without parsing or allocating anything a previous row already did.
+        // Every other shape falls through to the general path below.
+        if let Some(answer) = self.extract_cached(batch, nth)? {
+            return Ok(answer);
+        }
         let mut values: Vec<Value<'static>> = Vec::with_capacity(self.arguments.len());
         let mut marks: Vec<bool> = Vec::with_capacity(self.arguments.len());
         for operand in &self.arguments {

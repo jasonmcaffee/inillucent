@@ -294,7 +294,9 @@ pub struct ImportedDatabase {
     /// test-only crate, and nothing in the engine consults it - the same shape
     /// as the write path's `execute_timed`, and for the same reason: `schema`
     /// is a gate this project has already been wrong about the cause of once.
-    index_stages: std::cell::Cell<(u128, u128, u128, u128)>,
+    index_stages: std::cell::Cell<(u128, u128, u128, u128, u128)>,
+    /// TEMPORARY: how long the owned-to-borrowed copy before a bulk build took.
+    borrow_nanos: std::cell::Cell<u128>,
     /// How many times the catalog has changed.
     ///
     /// A plan compiled at one generation is not run at another: `execute_ddl`
@@ -794,7 +796,8 @@ impl ImportedDatabase {
             collations: Vec::new(),
             registry: modules(),
             virtual_tables: HashMap::new(),
-            index_stages: std::cell::Cell::new((0, 0, 0, 0)),
+            index_stages: std::cell::Cell::new((0, 0, 0, 0, 0)),
+            borrow_nanos: std::cell::Cell::new(0),
             catalog_generation: 0,
         })
     }
@@ -1225,7 +1228,8 @@ impl ImportedDatabase {
             collations: Vec::new(),
             registry: modules(),
             virtual_tables: HashMap::new(),
-            index_stages: std::cell::Cell::new((0, 0, 0, 0)),
+            index_stages: std::cell::Cell::new((0, 0, 0, 0, 0)),
+            borrow_nanos: std::cell::Cell::new(0),
             catalog_generation: 0,
         };
         opened.rebuild_tables()?;
@@ -1590,13 +1594,15 @@ impl ImportedDatabase {
     ///
     /// Microseconds per stage, rendered for a report.
     pub fn build_stages(&self) -> String {
-        let (scan, sort, unique, pack) = self.index_stages.get();
+        let (scan, sort, unique, pack, tail) = self.index_stages.get();
         format!(
-            "scan {:.1} ms, sort {:.1} ms, unique {:.1} ms, pack {:.1} ms",
+            "scan {:.1} ms, sort {:.1} ms, unique {:.1} ms, pack {:.1} ms (of which borrow {:.1} ms), catalog {:.1} ms",
             scan as f64 / 1e6,
             sort as f64 / 1e6,
             unique as f64 / 1e6,
-            pack as f64 / 1e6
+            pack as f64 / 1e6,
+            self.borrow_nanos.get() as f64 / 1e6,
+            tail as f64 / 1e6
         )
     }
 
