@@ -127,6 +127,12 @@ pub use inillucent_base::error::{DbError, PrimaryCode};
 /// would be depending on the layer the driver exists to hide.
 pub use inillucent_exec::physical::Params as BoundParams;
 
+/// What an application registers a function or a collation as.
+///
+/// Re-exported so the facade above can offer it without every caller having to
+/// name the extension crate.
+pub use inillucent_ext::registry as extensions;
+
 /// A value going into a statement or coming out of one.
 ///
 /// Re-exported for the reason [`BoundParams`] is. It is named `Value` here
