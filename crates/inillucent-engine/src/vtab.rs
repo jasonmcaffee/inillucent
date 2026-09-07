@@ -856,11 +856,21 @@ impl ImportedDatabase {
             // row. The arguments after the table are constants of the
             // statement; a call whose arguments varied per row would be a
             // different feature and is not one the modules declare.
-            for (name, _arity) in &needed.functions {
+            //
+            // **They are passed.** An empty list went down here until
+            // task-1860, so `bm25(t, 10.0)` ignored its weights and
+            // `highlight(t, 0, '[', ']')` could not be written at all.
+            for (name, arguments) in &needed.functions {
+                let mut values: Vec<Value<'static>> = Vec::with_capacity(arguments.len());
+                for argument in arguments {
+                    values.push(inillucent_exec::scalar::to_value(
+                        inillucent_exec::physical::literal_value(argument, params)?.borrow(),
+                    ));
+                }
                 row.push(inillucent_exec::scalar::from_value(cursor.auxiliary(
                     &mut context,
                     name,
-                    &[],
+                    &values,
                 )?));
             }
             if !passes_rechecks(&row, &rechecks)? {

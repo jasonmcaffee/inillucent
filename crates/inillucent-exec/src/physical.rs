@@ -867,7 +867,7 @@ pub struct PreparedStage {
     /// declared columns and the rowid, so a query reading `score(t)` finds it
     /// at a column the module filled rather than at an expression the pipeline
     /// has no way to evaluate.
-    pub functions: Vec<(Vec<u8>, usize)>,
+    pub functions: Vec<(Vec<u8>, Vec<inillucent_sql::bind::BoundExpr>)>,
     /// The tree this stage reads.
     pub root: u32,
     /// How it reads it.
@@ -1733,8 +1733,15 @@ impl Space<'_> {
     ///
     /// @param source - the FROM term the call is about
     /// @param name - the function's folded name
-    /// @param arity - how many arguments follow the table
-    fn virtual_function(&self, source: usize, name: &[u8], arity: usize) -> Option<usize> {
+    /// @param arguments - the arguments after the table, which are part of the
+    ///   identity: two calls of one name with different arguments are two
+    ///   answers and so two slots
+    fn virtual_function(
+        &self,
+        source: usize,
+        name: &[u8],
+        arguments: &[inillucent_sql::bind::BoundExpr],
+    ) -> Option<usize> {
         for (index, stage) in self.stages.iter().enumerate() {
             if stage.source != source {
                 continue;
@@ -1742,7 +1749,9 @@ impl Space<'_> {
             let position = stage
                 .functions
                 .iter()
-                .position(|(held, count)| held.as_slice() == name && *count == arity)?;
+                .position(|(held, held_arguments)| {
+                    held.as_slice() == name && held_arguments.as_slice() == arguments
+                })?;
             let layout = self.layouts.get(index)?;
             // The functions sit after the declared columns and the rowid, in
             // the order the reads were met.
@@ -5032,7 +5041,7 @@ fn translate(
             arguments,
         } => Expr::Column(
             space
-                .virtual_function(*source, name, arguments.len())
+                .virtual_function(*source, name, arguments)
                 .ok_or_else(|| {
                     misuse(format!(
                         "the tree read does not carry {}, which the module answers per row",

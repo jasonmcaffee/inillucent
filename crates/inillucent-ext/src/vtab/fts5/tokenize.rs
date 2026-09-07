@@ -88,6 +88,59 @@ impl Tokenizer {
         }
     }
 
+    /// Returns the tokens of one piece of text with where each one came from.
+    ///
+    /// **Byte offsets into the original text**, which is what `highlight()` and
+    /// `snippet()` need and what `tokens` throws away: a token is folded, and
+    /// case-folding, diacritic removal and stemming all change its length, so
+    /// there is no way to find a token's bytes again by searching for it. The
+    /// offsets are recorded while the characters are being read, which is the
+    /// one place they are known.
+    ///
+    /// The Porter tokenizer stems, and a stem is not a substring of the word it
+    /// came from - so its spans are the *unstemmed* tokenizer's spans and its
+    /// tokens are the stems, which is the pairing a highlight wants: find the
+    /// word by its span, decide whether it matched by its stem.
+    ///
+    /// @param text - the column's bytes
+    pub fn spans(&self, text: &[u8]) -> Vec<(Vec<u8>, usize, usize)> {
+        if let Tokenizer::Porter(inner) = self {
+            let stemmer = rust_stemmers::Stemmer::create(rust_stemmers::Algorithm::English);
+            return inner
+                .spans(text)
+                .into_iter()
+                .map(|(token, start, end)| {
+                    let word = String::from_utf8_lossy(&token).into_owned();
+                    (stemmer.stem(&word).into_owned().into_bytes(), start, end)
+                })
+                .collect();
+        }
+        let text = String::from_utf8_lossy(text);
+        let mut spans = Vec::new();
+        let mut current = String::new();
+        let mut start = 0usize;
+        let mut at = 0usize;
+        for character in text.chars() {
+            let width = character.len_utf8();
+            if self.is_token_character(character) {
+                if current.is_empty() {
+                    start = at;
+                }
+                self.fold_into(character, &mut current);
+                at = at.saturating_add(width);
+                continue;
+            }
+            if !current.is_empty() {
+                spans.push((core::mem::take(&mut current).into_bytes(), start, at));
+            }
+            at = at.saturating_add(width);
+        }
+        if !current.is_empty() {
+            spans.push((current.into_bytes(), start, at));
+        }
+        spans
+    }
+
     /// Returns the tokens of one piece of text, in the order they appear.
     pub fn tokens(&self, text: &[u8]) -> Vec<Vec<u8>> {
         if let Tokenizer::Porter(inner) = self {

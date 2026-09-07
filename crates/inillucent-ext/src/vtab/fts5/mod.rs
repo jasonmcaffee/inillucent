@@ -1988,6 +1988,228 @@ impl Fts5Cursor {
     }
 }
 
+impl Fts5Cursor {
+    /// Answers `highlight(t, column, open, close)` on the current row.
+    ///
+    /// The column's text is **re-tokenised here** rather than read out of the
+    /// index, and that is the design rather than a shortcut. The index stores a
+    /// token's *position* - which word it is - and highlighting needs its
+    /// *extent* in bytes, which the index never held: a token is folded before
+    /// it is stored, and folding changes its length. Re-tokenising is the only
+    /// way to get from a position back to a range of the original text, and it
+    /// is what SQLite does too.
+    ///
+    /// @param context - the statement's context
+    /// @param arguments - the column index, the opening mark, the closing mark
+    fn highlight(
+        &mut self,
+        context: &mut Context<'_>,
+        arguments: &[Value<'static>],
+    ) -> DbResult<Value<'static>> {
+        let column = arguments
+            .first()
+            .and_then(Value::as_integer)
+            .unwrap_or(0)
+            .max(0) as usize;
+        let open = text_argument(arguments.get(1));
+        let close = text_argument(arguments.get(2));
+        let Some(text) = self.column_text(context, column)? else {
+            return Ok(Value::Null);
+        };
+        let marked = self.marked_spans(&text);
+        let mut out = Vec::with_capacity(text.len());
+        let mut at = 0usize;
+        for (start, end) in marked {
+            out.extend_from_slice(text.get(at..start).unwrap_or_default());
+            out.extend_from_slice(&open);
+            out.extend_from_slice(text.get(start..end).unwrap_or_default());
+            out.extend_from_slice(&close);
+            at = end;
+        }
+        out.extend_from_slice(text.get(at..).unwrap_or_default());
+        Ok(Value::owned_text(&out).unwrap_or(Value::Null))
+    }
+
+    /// Answers `snippet(t, column, open, close, ellipsis, tokens)`.
+    ///
+    /// The window is the run of `tokens` tokens holding the most matched ones,
+    /// earliest when several tie - which is SQLite's rule and the reason a
+    /// snippet of a long document lands on the interesting part rather than on
+    /// its first sentence. The ellipsis is written only where text was actually
+    /// cut, so a snippet of a short column reads as the whole column.
+    ///
+    /// @param context - the statement's context
+    /// @param arguments - column, open, close, ellipsis, token count
+    fn snippet(
+        &mut self,
+        context: &mut Context<'_>,
+        arguments: &[Value<'static>],
+    ) -> DbResult<Value<'static>> {
+        let column = arguments
+            .first()
+            .and_then(Value::as_integer)
+            .unwrap_or(0)
+            .max(0) as usize;
+        let open = text_argument(arguments.get(1));
+        let close = text_argument(arguments.get(2));
+        let ellipsis = text_argument(arguments.get(3));
+        let wanted = arguments
+            .get(4)
+            .and_then(Value::as_integer)
+            .unwrap_or(15)
+            .clamp(1, 64) as usize;
+        let Some(text) = self.column_text(context, column)? else {
+            return Ok(Value::Null);
+        };
+        let spans = self.tokenizer.spans(&text);
+        if spans.is_empty() {
+            return Ok(Value::owned_text(&text).unwrap_or(Value::Null));
+        }
+        let wanted_terms = self.wanted_terms();
+        let hit: Vec<bool> = spans
+            .iter()
+            .map(|(token, _, _)| matches_a_term(token, &wanted_terms))
+            .collect();
+        // The best window, by how many matched tokens it holds.
+        let mut best = 0usize;
+        let mut best_score = usize::MAX;
+        for start in 0..spans.len() {
+            let end = start.saturating_add(wanted).min(spans.len());
+            let score = hit.get(start..end).map(|run| {
+                run.iter().filter(|held| **held).count()
+            }).unwrap_or(0);
+            if best_score == usize::MAX || score > best_score {
+                best_score = score;
+                best = start;
+            }
+            if end == spans.len() {
+                break;
+            }
+        }
+        let end = best.saturating_add(wanted).min(spans.len());
+        let from = spans.get(best).map(|(_, start, _)| *start).unwrap_or(0);
+        let to = spans
+            .get(end.saturating_sub(1))
+            .map(|(_, _, stop)| *stop)
+            .unwrap_or(text.len());
+        let mut out = Vec::with_capacity(to.saturating_sub(from).saturating_add(16));
+        if best > 0 {
+            out.extend_from_slice(&ellipsis);
+        }
+        let mut at = from;
+        for (index, (_, start, stop)) in spans.iter().enumerate() {
+            if index < best || index >= end {
+                continue;
+            }
+            if !hit.get(index).copied().unwrap_or(false) {
+                continue;
+            }
+            out.extend_from_slice(text.get(at..*start).unwrap_or_default());
+            out.extend_from_slice(&open);
+            out.extend_from_slice(text.get(*start..*stop).unwrap_or_default());
+            out.extend_from_slice(&close);
+            at = *stop;
+        }
+        out.extend_from_slice(text.get(at..to).unwrap_or_default());
+        if end < spans.len() {
+            out.extend_from_slice(&ellipsis);
+        }
+        Ok(Value::owned_text(&out).unwrap_or(Value::Null))
+    }
+
+    /// Returns one column's stored text for the current row.
+    ///
+    /// @param context - the statement's context
+    /// @param column - which declared column
+    fn column_text(
+        &mut self,
+        context: &mut Context<'_>,
+        column: usize,
+    ) -> DbResult<Option<Vec<u8>>> {
+        let Some(row) = self.rows.get(self.at).cloned() else {
+            return Ok(None);
+        };
+        if self.held.as_ref().map(|(rowid, _)| *rowid) != Some(row.rowid) {
+            self.held = self
+                .shadows
+                .read_row(context, b"content", row.rowid)?
+                .map(|values| (row.rowid, values));
+        }
+        let Some((_, content)) = self.held.as_ref() else {
+            return Ok(None);
+        };
+        Ok(match content.get(column.saturating_add(1)) {
+            Some(Value::Text(text)) => Some(text.utf8_bytes().into_owned()),
+            Some(Value::Blob(blob)) => Some(blob.raw().to_vec()),
+            _ => None,
+        })
+    }
+
+    /// Returns the byte ranges the query's phrases occupy in one column.
+    ///
+    /// **A phrase, not a token.** `MATCH '"quick brown"'` marks the two words
+    /// as one range and `MATCH 'quick AND brown'` marks them as two, because
+    /// the first is one phrase of two terms and the second is two phrases of
+    /// one - and the reference draws exactly that distinction. Marking every
+    /// matched token and merging adjacent ones gets the first case right and
+    /// the second wrong.
+    ///
+    /// The ranges come back in order and non-overlapping: two phrases that
+    /// claim the same word - `'quick OR "quick brown"'` - would otherwise
+    /// produce nested marks and text repeated between them.
+    ///
+    /// @param text - the column's bytes
+    fn marked_spans(&self, text: &[u8]) -> Vec<(usize, usize)> {
+        let spans = self.tokenizer.spans(text);
+        let mut marked: Vec<(usize, usize)> = Vec::new();
+        for phrase in &self.phrases {
+            if phrase.terms.is_empty() {
+                continue;
+            }
+            let mut at = 0usize;
+            while at.saturating_add(phrase.terms.len()) <= spans.len() {
+                let fits = phrase.terms.iter().enumerate().all(|(offset, term)| {
+                    spans
+                        .get(at.saturating_add(offset))
+                        .is_some_and(|(token, _, _)| matches_a_term(token, &[term.clone()]))
+                });
+                if !fits {
+                    at = at.saturating_add(1);
+                    continue;
+                }
+                let from = spans.get(at).map(|(_, start, _)| *start).unwrap_or(0);
+                let to = spans
+                    .get(at.saturating_add(phrase.terms.len()).saturating_sub(1))
+                    .map(|(_, _, end)| *end)
+                    .unwrap_or(from);
+                marked.push((from, to));
+                at = at.saturating_add(phrase.terms.len());
+            }
+        }
+        marked.sort_unstable();
+        marked.dedup();
+        // Overlaps go, keeping the first - which is the longest match starting
+        // earliest once the list is sorted by start.
+        let mut kept: Vec<(usize, usize)> = Vec::with_capacity(marked.len());
+        for (from, to) in marked {
+            match kept.last() {
+                Some((_, last)) if from < *last => {}
+                _ => kept.push((from, to)),
+            }
+        }
+        kept
+    }
+
+    /// Returns every term the query asked for, across its phrases.
+    fn wanted_terms(&self) -> Vec<expr::Term> {
+        self.phrases
+            .iter()
+            .flat_map(|phrase| phrase.terms.iter().cloned())
+            .collect()
+    }
+
+}
+
 impl VirtualCursor for Fts5Cursor {
     /// Runs the query and collects every row it matched.
     fn filter(&mut self, context: &mut Context<'_>, plan: &FilterPlan) -> DbResult<()> {
@@ -2162,6 +2384,12 @@ impl VirtualCursor for Fts5Cursor {
         name: &[u8],
         arguments: &[Value<'static>],
     ) -> DbResult<Value<'static>> {
+        if name == b"highlight" {
+            return self.highlight(context, arguments);
+        }
+        if name == b"snippet" {
+            return self.snippet(context, arguments);
+        }
         if name != b"bm25" {
             return Err(crate::vtab::failure(format!(
                 "no such function: {}",
@@ -2191,6 +2419,35 @@ impl VirtualCursor for Fts5Cursor {
             &weights,
         )))
     }
+}
+
+
+/// Returns a function argument as bytes, or nothing for a NULL.
+///
+/// @param value - the argument, when there is one
+fn text_argument(value: Option<&Value<'static>>) -> Vec<u8> {
+    match value {
+        Some(Value::Text(text)) => text.utf8_bytes().into_owned(),
+        Some(Value::Blob(blob)) => blob.raw().to_vec(),
+        _ => Vec::new(),
+    }
+}
+
+/// Reports whether a token is one the query asked for.
+///
+/// A prefix term matches anything starting with it, which is what the trailing
+/// `*` means and is why this is not an equality.
+///
+/// @param token - the folded token from the text
+/// @param wanted - the query's terms
+fn matches_a_term(token: &[u8], wanted: &[expr::Term]) -> bool {
+    wanted.iter().any(|term| {
+        if term.prefix {
+            token.starts_with(&term.token)
+        } else {
+            token == term.token.as_slice()
+        }
+    })
 }
 
 #[cfg(test)]
