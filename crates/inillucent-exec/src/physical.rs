@@ -97,6 +97,24 @@ pub struct SourceLayout {
     pub slots: Vec<Option<usize>>,
     /// Which tree column holds the row's rowid.
     pub rowid: Option<usize>,
+    /// The tree columns that identify the *table* row this one belongs to.
+    ///
+    /// **Not `key_columns`, and the difference is the whole of a `WITHOUT
+    /// ROWID` index.** On a table layout this is the rowid's column, or - when
+    /// the table has no rowid - the primary key's columns. On an index layout
+    /// it is the trailing part of the entry: the rowid an ordinary index
+    /// carries, or the primary key a `WITHOUT ROWID` table's index carries
+    /// instead. That is what a non-covering seek probes the table with.
+    ///
+    /// `key_columns` cannot answer this. On an index layout it names the *whole*
+    /// entry rather than the part that identifies the table row, and it is
+    /// deliberately left empty when the tree is not "already sorted" - a `DESC`
+    /// key column, a non-binary collation - which would make index maintenance
+    /// silently wrong on exactly the tables that need it.
+    ///
+    /// Empty for a source that identifies no table row: a view's trigger row, a
+    /// derived table, a virtual table.
+    pub identity: Vec<usize>,
     /// The static type of each tree column, for the expression compiler.
     pub types: Vec<StaticType>,
     /// How many columns the tree has.
@@ -1421,6 +1439,9 @@ fn plan_stages(
                         tree_key: 0,
                         slots: (0..declared).map(Some).collect(),
                         rowid: carries_rowid.then_some(declared),
+                        // A module's rows are not a table's rows: there is
+                        // nothing to probe a table with.
+                        identity: Vec::new(),
                         types: vec![StaticType::Unknown; width],
                         width,
                         key_columns: Vec::new(),
@@ -2438,6 +2459,9 @@ fn push_materialised(
             tree_key: 0,
             slots: (0..width).map(Some).collect(),
             rowid: None,
+            // Rows read once into a buffer: a derived table, a recursive CTE.
+            // None of them identifies a stored row to probe a table with.
+            identity: Vec::new(),
             types: vec![StaticType::Unknown; width],
             width,
             key_columns: Vec::new(),
@@ -2584,21 +2608,31 @@ fn build_nested<'t>(
         .map(<[StaticType]>::to_vec)
         .unwrap_or_default();
     let (keys, full_key) = if stage.is_lookup {
-        // The rowid the index entry carries, which is the previous stage's
-        // rowid column.
+        // **What the index entry carries to find the table row with**, read out
+        // of the previous stage's row: a rowid for an ordinary table, and a
+        // `WITHOUT ROWID` table's primary key - which is several columns, in the
+        // table's own key order - for one of those. `identity` is the field that
+        // says which, and it exists because `key_columns` on an index layout
+        // names the whole entry rather than this part of it.
         let previous = space
             .stages
             .get(index.saturating_sub(1))
-            .ok_or_else(|| misuse("a rowid lookup with no index stage before it"))?;
+            .ok_or_else(|| misuse("a table lookup with no index stage before it"))?;
         let previous_layout = space
             .layouts
             .get(index.saturating_sub(1))
-            .ok_or_else(|| misuse("a rowid lookup with no layout before it"))?;
-        let rowid = previous_layout
-            .rowid
-            .ok_or_else(|| misuse("the index entry carries no rowid to look the row up by"))?;
+            .ok_or_else(|| misuse("a table lookup with no layout before it"))?;
+        if previous_layout.identity.is_empty() {
+            return Err(misuse(
+                "the index entry carries nothing to look the table row up by",
+            ));
+        }
         (
-            vec![Expr::Column(previous.offset.saturating_add(rowid))],
+            previous_layout
+                .identity
+                .iter()
+                .map(|slot| Expr::Column(previous.offset.saturating_add(*slot)))
+                .collect(),
             true,
         )
     } else {
@@ -2953,14 +2987,21 @@ pub struct SpanBounds {
 /// @param position - the key position
 fn index_affinity(
     table: &inillucent_sql::catalog_view::TableInfo,
-    columns: &[u16],
+    columns: &[Option<u16>],
     position: usize,
 ) -> Option<Affinity> {
     match columns.get(position) {
-        Some(column) => table
+        Some(Some(column)) => table
             .columns
             .get(usize::from(*column))
             .map(|info| info.affinity),
+        // **A key the index computes takes no affinity.** An index on
+        // `lower(a)` stores whatever the expression returned, so converting the
+        // probe would compare a converted value against an unconverted one -
+        // which is a seek that lands somewhere else. SQLite applies none here
+        // either.
+        Some(None) => None,
+        // Past the end of the key columns is the entry's trailing rowid.
         None => Some(Affinity::Integer),
     }
 }

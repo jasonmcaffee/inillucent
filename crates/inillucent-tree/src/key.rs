@@ -152,8 +152,15 @@ pub fn encode_into_with(value: &Datum<'_>, collation: Collation, out: &mut Vec<u
     match (value, collation) {
         (Datum::Text(bytes), Collation::NoCase) => {
             out.push(class::TEXT);
-            let folded: Vec<u8> = bytes.iter().map(|byte| byte.to_ascii_lowercase()).collect();
-            escape_into(&folded, out);
+            // Folded straight into the buffer. Collecting a `Vec` first was one
+            // heap allocation per value, which on the index-build path is one
+            // per row.
+            let start = out.len();
+            out.extend_from_slice(bytes);
+            if let Some(folded) = out.get_mut(start..) {
+                folded.make_ascii_lowercase();
+            }
+            escape_in_place(out, start);
         }
         (Datum::Text(bytes), Collation::RTrim) => {
             out.push(class::TEXT);
@@ -285,17 +292,50 @@ fn order_preserving_real(number: f64) -> [u8; 8] {
     transformed.to_be_bytes()
 }
 
+/// Escapes the bytes already appended from `start`, and terminates them.
+///
+/// The folding collations write their transformed payload into the buffer to
+/// avoid a temporary, and then need the same escaping every other payload gets.
+/// A `0x00` in text is rare enough that the scan below almost always finds
+/// none and the work is the two terminator bytes.
+///
+/// @param out - the buffer, holding the payload from `start` to its end
+/// @param start - where the payload begins
+fn escape_in_place(out: &mut Vec<u8>, start: usize) {
+    let has_zero = out
+        .get(start..)
+        .is_some_and(|payload| payload.contains(&0x00));
+    if has_zero {
+        let payload: Vec<u8> = out.get(start..).unwrap_or(&[]).to_vec();
+        out.truncate(start);
+        escape_into(&payload, out);
+        return;
+    }
+    out.push(0x00);
+    out.push(0x00);
+}
+
 /// Appends bytes with `0x00` escaped and a two-byte terminator.
 ///
 /// @param bytes - the payload
 /// @param out - the buffer to append to
 fn escape_into(bytes: &[u8], out: &mut Vec<u8>) {
-    for byte in bytes {
-        out.push(*byte);
-        if *byte == 0x00 {
-            out.push(0xFF);
-        }
+    // **Copied in runs, not byte by byte.** Only `0x00` needs escaping and
+    // text almost never holds one, so the ordinary payload is a single
+    // `extend_from_slice` - one bounds check and one `memcpy` - where the loop
+    // this replaces did a `push` per byte, each with its own capacity check.
+    // A `CREATE INDEX` over a hundred thousand forty-byte labels encodes four
+    // million bytes through here, and that difference was measurable in the
+    // `schema` family.
+    out.reserve(bytes.len().saturating_add(2));
+    let mut rest = bytes;
+    while let Some(at) = rest.iter().position(|byte| *byte == 0x00) {
+        out.extend_from_slice(rest.get(..at).unwrap_or(&[]));
+        out.push(0x00);
+        out.push(0xFF);
+        rest = rest.get(at.saturating_add(1)..).unwrap_or(&[]);
     }
+    out.extend_from_slice(rest);
     out.push(0x00);
     out.push(0x00);
 }

@@ -2487,7 +2487,7 @@ impl Compiler {
                     &equalities,
                     low,
                     high,
-                    &columns,
+                    &named_columns(columns),
                     &descending,
                     without_rowid,
                     &key_entry_slots,
@@ -4866,4 +4866,19 @@ pub fn source_table(plan: &PhysicalPlan, level: usize) -> Option<&TableInfo> {
 /// Returns whether a pattern operator is case-insensitive by default.
 pub fn pattern_is_case_insensitive(op: PatternOp) -> bool {
     op == PatternOp::Like
+}
+
+/// Returns the table column each index key names, dropping the ones it computes.
+///
+/// **The old engine has no expression-index support and is not going to grow
+/// one.** `AccessPath::IndexSeek::columns` became an `Option` per key when the
+/// new engine learned to seek on `lower(a)`; here a computed key can only ever
+/// appear if the planner offered this compiler a path it cannot build, and the
+/// planner does not, because an expression index is not in a schema this engine
+/// loads. Taking the columns it can name keeps the two engines compiling from
+/// one plan type without pretending this one understands the new form.
+///
+/// @param columns - the plan's per-key columns
+pub(crate) fn named_columns(columns: Vec<Option<u16>>) -> Vec<u16> {
+    columns.into_iter().flatten().collect()
 }

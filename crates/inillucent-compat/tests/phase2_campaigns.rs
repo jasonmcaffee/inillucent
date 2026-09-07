@@ -217,6 +217,8 @@ fn fixture(rows: i64, page_size: usize, frames: usize) -> Fixture {
             tree_key: 1,
             slots: vec![Some(0), Some(1), Some(2)],
             rowid: Some(0),
+            // A rowid table's row is identified by its rowid, tree column 0.
+            identity: vec![0],
             types: vec![StaticType::Int, StaticType::Int, StaticType::Text],
             width: 3,
             key_columns: vec![0],
@@ -225,6 +227,9 @@ fn fixture(rows: i64, page_size: usize, frames: usize) -> Fixture {
             tree_key: 2,
             slots: vec![Some(1), Some(0), None],
             rowid: Some(1),
+            // An index entry over a rowid table ends with that rowid, which is
+            // what a non-covering seek probes the table with.
+            identity: vec![1],
             types: vec![StaticType::Int, StaticType::Int],
             width: 2,
             key_columns: vec![0, 1],

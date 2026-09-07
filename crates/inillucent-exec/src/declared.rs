@@ -31,7 +31,7 @@
 
 use inillucent_base::{DbError, DbResult, ExtendedCode};
 use inillucent_sql::catalog_view::TableInfo;
-use inillucent_sql::dml::{codes, BoundCheck};
+use inillucent_sql::dml::{codes, BoundCheck, BoundIndexExprs};
 use inillucent_tree::datum::OwnedDatum;
 use inillucent_value::affinity::{self, Affinity};
 use inillucent_value::encoding::TextEncoding;
@@ -125,6 +125,112 @@ struct CompiledCheck {
     expr: Box<dyn Eval>,
 }
 
+/// One index's per-row expressions, compiled.
+struct CompiledIndexExprs {
+    /// The index's position in the table's `indexes`.
+    position: usize,
+    /// The partial-index predicate, when it has one.
+    predicate: Option<Box<dyn Eval>>,
+    /// One per key column: the expression it indexes, or `None` for a column.
+    keys: Vec<Option<Box<dyn Eval>>>,
+}
+
+/// What the write path needs to maintain a table's indexes, compiled once.
+///
+/// **Empty for every table with neither a partial index nor an expression
+/// key**, which is every table the gate measures - so `holds` answers `true`
+/// and `key` answers `None` off an empty slice, and the write path pays a
+/// length check per index per row and nothing else.
+///
+/// It is a borrowed view rather than an owned bundle because the compiled
+/// expressions live on the statement's [`WriteDeclarations`] and the row space
+/// lives on the statement, and the write path threads one reference rather than
+/// two.
+#[derive(Clone, Copy)]
+pub struct IndexExprs<'a> {
+    /// The compiled expressions, one entry per index that needs any.
+    compiled: &'a [CompiledIndexExprs],
+    /// The space the expressions were compiled against.
+    space: &'a RowSpace,
+}
+
+impl<'a> IndexExprs<'a> {
+    /// Returns a view over a statement's compiled index expressions.
+    ///
+    /// @param declarations - the statement's compiled declarations
+    /// @param space - the space they were compiled against
+    pub fn new(declarations: &'a WriteDeclarations, space: &'a RowSpace) -> IndexExprs<'a> {
+        IndexExprs {
+            compiled: &declarations.index_exprs,
+            space,
+        }
+    }
+
+    /// Returns a view that knows about no index at all.
+    ///
+    /// For the write paths that have no declarations to hand - a trigger body's
+    /// cascade, a view's rows - where the table cannot have an index needing
+    /// one either.
+    ///
+    /// @param space - a space, only ever used if `compiled` were non-empty
+    pub fn none(space: &'a RowSpace) -> IndexExprs<'a> {
+        IndexExprs {
+            compiled: &[],
+            space,
+        }
+    }
+
+    /// Returns the compiled expressions of one index, when it has any.
+    ///
+    /// @param position - the index's position in the table's `indexes`
+    fn at(&self, position: usize) -> Option<&'a CompiledIndexExprs> {
+        self.compiled.iter().find(|held| held.position == position)
+    }
+
+    /// Reports whether a row belongs in one index.
+    ///
+    /// True for every ordinary index, and for a partial one exactly when its
+    /// predicate is true of the row - which is what "partial" means, and what
+    /// makes an `UPDATE` that moves a row across the predicate a removal from
+    /// the index on the old image and an insertion on the new one.
+    ///
+    /// @param position - the index's position in the table's `indexes`
+    /// @param row - the row image, in tree-column order
+    pub fn holds(&self, position: usize, row: &[OwnedDatum]) -> DbResult<bool> {
+        let Some(held) = self.at(position) else {
+            return Ok(true);
+        };
+        let Some(predicate) = held.predicate.as_ref() else {
+            return Ok(true);
+        };
+        let answer = self.space.evaluate(predicate.as_ref(), &[row])?;
+        Ok(!is_false(&answer))
+    }
+
+    /// Returns one key column's value, when the index computes it.
+    ///
+    /// `None` for a key that is a column of the table, which the caller reads
+    /// out of the row itself.
+    ///
+    /// @param position - the index's position in the table's `indexes`
+    /// @param key - which key column
+    /// @param row - the row image, in tree-column order
+    pub fn key(
+        &self,
+        position: usize,
+        key: usize,
+        row: &[OwnedDatum],
+    ) -> DbResult<Option<OwnedDatum>> {
+        let Some(held) = self.at(position) else {
+            return Ok(None);
+        };
+        let Some(Some(expr)) = held.keys.get(key) else {
+            return Ok(None);
+        };
+        Ok(Some(self.space.evaluate(expr.as_ref(), &[row])?))
+    }
+}
+
 /// Everything a table's declarations require of a row, compiled once.
 pub struct WriteDeclarations {
     /// The record slot and affinity of every column that converts a value.
@@ -136,6 +242,10 @@ pub struct WriteDeclarations {
     typed: Vec<TypedColumn>,
     /// The `CHECK` predicates, in declaration order.
     checks: Vec<CompiledCheck>,
+    /// The per-row expressions the table's indexes need, for the indexes that
+    /// need any. Empty for every table with neither a partial index nor an
+    /// expression key.
+    index_exprs: Vec<CompiledIndexExprs>,
 }
 
 impl WriteDeclarations {
@@ -144,12 +254,14 @@ impl WriteDeclarations {
     /// @param table - the table being written
     /// @param layout - the table tree's layout
     /// @param checks - the statement's bound `CHECK` predicates
+    /// @param index_exprs - the statement's bound index expressions
     /// @param space - the statement's row space
     /// @param params - the bound parameters
     pub fn compile(
         table: &TableInfo,
         layout: &SourceLayout,
         checks: &[BoundCheck],
+        index_exprs: &[BoundIndexExprs],
         space: &RowSpace,
         params: &Params,
     ) -> DbResult<WriteDeclarations> {
@@ -187,10 +299,30 @@ impl WriteDeclarations {
                 expr: space.compile(&check.expr, params)?,
             });
         }
+        let mut indexed = Vec::with_capacity(index_exprs.len());
+        for bound in index_exprs {
+            let predicate = match bound.predicate.as_ref() {
+                Some(expr) => Some(space.compile(expr, params)?),
+                None => None,
+            };
+            let mut keys = Vec::with_capacity(bound.keys.len());
+            for key in &bound.keys {
+                keys.push(match key {
+                    Some(expr) => Some(space.compile(expr, params)?),
+                    None => None,
+                });
+            }
+            indexed.push(CompiledIndexExprs {
+                position: bound.position,
+                predicate,
+                keys,
+            });
+        }
         Ok(WriteDeclarations {
             affinities,
             typed,
             checks: compiled,
+            index_exprs: indexed,
         })
     }
 

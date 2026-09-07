@@ -456,6 +456,12 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
             low,
             high
         );
+        if entry.workload == "schema.index" {
+            let stages = INDEX_STAGES.with(|held| held.borrow().clone());
+            if !stages.is_empty() {
+                println!("  {:<24} {stages}", "  last round");
+            }
+        }
     }
 
     println!();
@@ -1124,6 +1130,20 @@ fn time_read(
     })
 }
 
+thread_local! {
+    /// Where the last `CREATE INDEX` this process ran spent its time.
+    ///
+    /// **The gate measures `schema.index` under conditions `indexprofile` does
+    /// not reproduce**: the write workloads have run first, so the table has
+    /// been inserted into, updated and deleted from before the index is built,
+    /// and the compile is inside the clock. Reading the stage breakdown off a
+    /// pristine import and assuming it holds here is how a family gets
+    /// attributed to the wrong stage - it read 26.3 ms there and 38.4 ms here.
+    /// The engine already times the stages; this carries the last round's out
+    /// so the report can print them beside the ratio.
+    static INDEX_STAGES: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
 /// Times one mutating workload.
 ///
 /// @param database - the imported fixture, opened for writing
@@ -1143,6 +1163,10 @@ fn time_write(
             database
                 .execute_any(&workload.sql, &params)
                 .map_err(|error| why(&error))?;
+        }
+        if workload.family == "schema" {
+            let stages = database.build_stages();
+            INDEX_STAGES.with(|held| *held.borrow_mut() = stages);
         }
         return Ok(Sample {
             workload: workload.name.clone(),

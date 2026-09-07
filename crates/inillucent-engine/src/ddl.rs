@@ -53,8 +53,13 @@ use inillucent_sql::bind::BoundStatement;
 use inillucent_sql::catalog_view::{IndexInfo, StaticCatalog, TableInfo};
 use inillucent_sql::directive::{AlterKind, Directive};
 use inillucent_tree::datum::{Datum, OwnedDatum};
+use inillucent_tree::leaf::MiniColumn;
+use inillucent_tree::paged::KeyEncoding;
 use inillucent_tree::types::ColumnSpec;
 use inillucent_tree::PagedTree;
+use inillucent_value::collation::Collation;
+
+use crate::entries::EntrySet;
 
 use super::{
     in_key_order, index_shape, keyed_table_shape, table_shape, ImportedDatabase, Outcome, Recorded,
@@ -753,7 +758,7 @@ impl ImportedDatabase {
         key_columns: usize,
         layout: SourceLayout,
     ) -> DbResult<PageId> {
-        self.build_tree_from(root, columns, key_columns, layout, &[])
+        self.build_tree_from::<Vec<Datum<'_>>>(root, columns, key_columns, layout, &[])
     }
 
     /// Builds one tree from rows already in key order, and registers it.
@@ -762,21 +767,22 @@ impl ImportedDatabase {
     /// @param columns - the column directory
     /// @param key_columns - how many leading columns form the key
     /// @param layout - how a bound expression finds its vector
+    /// **Generic over the row's container, and it no longer copies.** It used
+    /// to take owned rows and build a `Vec<Vec<Datum>>` of the whole input to
+    /// hand the builder - one allocation per row, 4.2 ms of a 48 ms
+    /// `CREATE INDEX` at a hundred thousand rows, and pure waste for a caller
+    /// whose rows are already borrowed. A caller that holds `OwnedDatum` rows
+    /// now does its own borrow, which is where that cost belongs.
+    ///
     /// @param rows - the rows, sorted by the key columns
-    fn build_tree_from(
+    fn build_tree_from<'d, R: AsRef<[Datum<'d>]>>(
         &mut self,
         root: u32,
         columns: Vec<ColumnSpec>,
         key_columns: usize,
         layout: SourceLayout,
-        rows: &[Vec<OwnedDatum>],
+        rows: &[R],
     ) -> DbResult<PageId> {
-        let copied = std::time::Instant::now();
-        let borrowed: Vec<Vec<Datum<'_>>> = rows
-            .iter()
-            .map(|row| row.iter().map(OwnedDatum::borrow).collect())
-            .collect();
-        self.borrow_nanos.set(copied.elapsed().as_nanos());
         let txn = self.current_txn();
         let at = self.ddl_schema;
         let local = self.local_of(at, root);
@@ -813,7 +819,7 @@ impl ImportedDatabase {
                 local,
                 columns,
                 key_columns,
-                &borrowed,
+                rows,
             )?
         };
         let page = tree.root();
@@ -1213,32 +1219,56 @@ impl ImportedDatabase {
             .get(position)
             .cloned()
             .ok_or_else(|| misuse("the table that was just found is gone"))?;
-        if owner.without_rowid {
-            // An index on a `WITHOUT ROWID` table has that table's primary key
-            // as its trailing entry rather than a rowid, and every tree here
-            // appends exactly one rowid column. Building one would produce a
-            // tree whose entries point at nothing. Refused by name rather than
-            // built wrong - the import refuses the same shape.
-            return Err(misuse("an index on a WITHOUT ROWID table"));
-        }
         let root = self.allocate_root()?;
         let index = index_from_create_sql(&sql, &owner, root)?;
-        if index.columns.iter().any(|key| key.column.is_none()) {
-            return Err(misuse("an index on an expression"));
-        }
         let (columns, layout) = index_shape(&owner, &index, root);
         let key_columns = columns.len();
+        // The entries are scanned into an arena, sorted by a radix pass over
+        // their pre-encoded keys, and packed straight out of it. The encoding
+        // and the collations are the *tree's* own, so the order the sort
+        // produces is the order the tree will be searched in - which is the
+        // invariant `in_key_order` exists to defend, taken here rather than
+        // re-derived.
+        let encoding = KeyEncoding::choose(&columns, key_columns);
+        let collations: Vec<Collation> = columns
+            .iter()
+            .take(key_columns)
+            .map(|spec| spec.collation)
+            .collect();
         let scanned = std::time::Instant::now();
-        let rows = self.index_entries(&owner, &index)?;
+        // **A partial index and an index on an expression are filled by a
+        // query; everything else is filled by a scan.** The scan reads columns
+        // out of the leaves and is what the `schema` family measures; it has no
+        // way to evaluate `lower(a)` or `WHERE b > 5`, and teaching it to would
+        // put an expression evaluator on the path of every ordinary
+        // `CREATE INDEX`. The binder, planner and executor already evaluate
+        // both, so the two forms that need them are built by asking them - the
+        // same shape `create_vector_index` uses to backfill a store.
+        let computed =
+            index.partial_sql.is_some() || index.columns.iter().any(|key| key.expr_sql.is_some());
+        let entries = if computed {
+            self.index_entries_by_query(&owner, &index, key_columns, encoding, &collations)?
+        } else {
+            self.index_entries(&owner, &index, key_columns, encoding, &collations)?
+        };
         let scan = scanned.elapsed().as_nanos();
         let sorted = std::time::Instant::now();
-        let rows = in_key_order(rows, &columns, key_columns);
+        let order = entries.order();
         let sort = sorted.elapsed().as_nanos();
         let checked = std::time::Instant::now();
         if unique {
-            refuse_duplicates(&rows, &owner, &index, key_columns)?;
+            refuse_duplicates(&entries, &order, &owner, &index, key_columns)?;
         }
         let uniqueness = checked.elapsed().as_nanos();
+        // One flat run of values in key order, and the rows are slices of it.
+        let flattened = std::time::Instant::now();
+        let flat = entries.to_datums(&order);
+        let rows: Vec<&[Datum<'_>]> = if key_columns == 0 {
+            Vec::new()
+        } else {
+            flat.chunks_exact(key_columns).collect()
+        };
+        let flatten = flattened.elapsed().as_nanos();
         let packed = std::time::Instant::now();
         let page = self.build_tree_from(root, columns, key_columns, layout, &rows)?;
         let pack = packed.elapsed().as_nanos();
@@ -1259,15 +1289,38 @@ impl ImportedDatabase {
                 tree_id: 0,
             },
         )?;
-        self.covering.entry(owner.root).or_default().push(root);
-        self.sort_covering(owner.root);
+        // **A partial index is not a covering candidate.** The physical pass
+        // stands the smallest covering tree in for a plain table scan, and its
+        // test is whether the tree carries every *column* the query reads - it
+        // has no way to notice that the tree holds fewer *rows* than the table.
+        // Offering one here answered `SELECT rowid FROM t` with the rows inside
+        // the predicate, silently, under a plan that said `SCAN t`.
+        if super::covers_every_row(&index) {
+            self.covering.entry(owner.root).or_default().push(root);
+            self.sort_covering(owner.root);
+        }
         let _ = position;
         let _ = index;
         self.rebuild_tables()?;
         self.refresh_catalog();
+        let catalog = tail.elapsed().as_nanos();
+        // **`seal` is timed apart from the catalog work, because they are
+        // different claims.** `seal` is a log commit and a sync that SQLite
+        // pays too under `synchronous = FULL`, so it is not a gap to close;
+        // `record`, `rebuild_tables` and `refresh_catalog` are this engine's own
+        // and are worth knowing the size of. Reported together they were one
+        // number nobody could act on.
+        let sealed = std::time::Instant::now();
         self.seal()?;
-        self.index_stages
-            .set((scan, sort, uniqueness, pack, tail.elapsed().as_nanos()));
+        self.index_stages.set((
+            scan,
+            sort,
+            uniqueness,
+            flatten,
+            pack,
+            catalog,
+            sealed.elapsed().as_nanos(),
+        ));
         Ok(Outcome::empty())
     }
 
@@ -1319,9 +1372,15 @@ impl ImportedDatabase {
             .find(|held| held.folded == folded)
             .cloned()
             .ok_or_else(|| misuse(format!("no such table: {}", String::from_utf8_lossy(table))))?;
+        // A module-backed index takes a column, not an expression: the store
+        // is declared over a table column's vectors and there is nothing for it
+        // to compute one from.
+        let key_column = key.column.ok_or_else(|| {
+            misuse("an index USING inillucent_hnsw takes a column, not an expression")
+        })?;
         let column = owner
             .columns
-            .get(usize::from(key.column))
+            .get(usize::from(key_column))
             .ok_or_else(|| misuse("the indexed column is not in the table"))?;
         // **The width has to be declared.** A store is created with a fixed
         // number of dimensions and every vector it is given is checked against
@@ -1394,13 +1453,25 @@ impl ImportedDatabase {
     /// scan operators read, so an index built here indexes the column the
     /// planner thinks it does.
     ///
+    /// The entries land in an [`EntrySet`] rather than in a `Vec` per row.
+    /// Three hundred thousand heap allocations - a vector and a text copy per
+    /// row, and then a borrowed vector per row for the packer - were most of
+    /// what put the `schema` family under the floor. The arena copies each
+    /// payload once, encodes each key once, and hands the packer slices.
+    ///
     /// @param owner - the table being indexed
     /// @param index - the index's declaration
+    /// @param width - how many columns an entry has
+    /// @param encoding - the index tree's key encoding
+    /// @param collations - the key columns' collations, in key order
     fn index_entries(
         &self,
         owner: &TableInfo,
         index: &IndexInfo,
-    ) -> DbResult<Vec<Vec<OwnedDatum>>> {
+        width: usize,
+        encoding: KeyEncoding,
+        collations: &[Collation],
+    ) -> DbResult<EntrySet> {
         let layout = self
             .layouts
             .get(&owner.root)
@@ -1423,13 +1494,24 @@ impl ImportedDatabase {
                 .ok_or_else(|| misuse("an index on a column the tree does not carry"))?;
             sources.push(slot);
         }
-        let rowid = layout
-            .rowid
-            .ok_or_else(|| misuse("an index on a table with no rowid"))?;
-        let width = sources.len().saturating_add(1);
-        let mut rows: Vec<Vec<OwnedDatum>> = Vec::with_capacity(tree.row_count() as usize);
+        // What identifies the table row: a rowid, or a `WITHOUT ROWID` table's
+        // primary key. The layout is asked rather than the table, so the build
+        // path and the read path cannot disagree about what an entry carries.
+        let trailing: Vec<usize> = if layout.identity.is_empty() {
+            vec![layout
+                .rowid
+                .ok_or_else(|| misuse("an index on a table that identifies no row"))?]
+        } else {
+            layout.identity.clone()
+        };
+        let mut entries =
+            EntrySet::with_capacity(width, tree.row_count() as usize, encoding, collations);
         let pool = self.pool_of(owner.root)?;
         tree.visit_leaves(pool, &mut |leaf| {
+            // One reusable buffer per *leaf*, not per row: the values borrow
+            // from the leaf, so the buffer cannot outlive it - and a hundred
+            // and sixty allocations for a hundred thousand rows is not a cost.
+            let mut entry: Vec<Datum<'_>> = Vec::with_capacity(width);
             // **A clean leaf is read column by column, not row by row.** `live`
             // is what merges the delta area and skips the tombstones, and it
             // pays for that by building a `Vec` per row holding *every* column
@@ -1443,29 +1525,128 @@ impl ImportedDatabase {
             // written to still goes through `live`, because merging is exactly
             // what it is for.
             if leaf.has_writes() {
-                for row in leaf.live()? {
-                    let mut entry: Vec<OwnedDatum> = Vec::with_capacity(width);
-                    for slot in sources.iter().chain(std::iter::once(&rowid)) {
-                        entry.push(
-                            row.get(*slot)
-                                .map(OwnedDatum::from_datum)
-                                .unwrap_or(OwnedDatum::Null),
-                        );
-                    }
-                    rows.push(entry);
-                }
+                // **A leaf that has been written to still goes through the
+                // merge, but it no longer materialises a row per row.** `live`
+                // hands back every column of every live row in a fresh `Vec`,
+                // and an index reads two of them - which is 14.3 ms of the
+                // gate's 38.9 ms `CREATE INDEX`, because the gate builds its
+                // index after its write workloads and by then almost every leaf
+                // has a delta entry. `visit_live` performs the same merge and
+                // projects only what was asked for.
+                let mut projected: Vec<usize> = Vec::with_capacity(width);
+                projected.extend(sources.iter().copied());
+                projected.extend(trailing.iter().copied());
+                leaf.visit_live(&projected, &mut |values| {
+                    entries.push(values);
+                    Ok(())
+                })?;
                 return Ok(true);
             }
+            // **The mini-columns are derived once per leaf, not once per
+            // value.** `LeafRef::value` re-reads the directory entry and
+            // re-derives the class array and slot bounds on every call, which
+            // is the same waste `key_view` exists to remove inside a search -
+            // and an index build calls it twice for every row in the table.
+            // Seventy rows per leaf is seventy times the same answer.
+            let mut columns: Vec<MiniColumn<'_>> = Vec::with_capacity(width);
+            for slot in sources.iter().chain(trailing.iter()) {
+                columns.push(leaf.column(*slot)?);
+            }
             for row in 0..leaf.row_count() {
-                let mut entry: Vec<OwnedDatum> = Vec::with_capacity(width);
-                for slot in sources.iter().chain(std::iter::once(&rowid)) {
-                    entry.push(OwnedDatum::from_datum(&leaf.value(row, *slot)?));
+                entry.clear();
+                for column in &columns {
+                    entry.push(column.value(row)?);
                 }
-                rows.push(entry);
+                entries.push(&entry);
             }
             Ok(true)
         })?;
-        Ok(rows)
+        Ok(entries)
+    }
+
+    /// Returns the entries a new index holds, by asking the query engine.
+    ///
+    /// **For the two forms whose entries are not columns of the row**: a
+    /// partial index, whose predicate decides which rows have an entry at all,
+    /// and an index on an expression, whose key no column carries. Both are
+    /// ordinary SQL, so this writes the SQL and runs it rather than growing a
+    /// second evaluator inside the DDL path.
+    ///
+    /// The projection is the key columns - each either an expression as it was
+    /// written or a quoted column name - followed by whatever identifies the
+    /// row, which is `rowid` for an ordinary table and the primary key's
+    /// columns for a `WITHOUT ROWID` one. That is exactly the entry shape
+    /// `index_shape` describes.
+    ///
+    /// A predicate or an expression naming a column the table has not got is
+    /// refused here, by the binder, which is what makes
+    /// `CREATE INDEX ix ON t(a) WHERE nosuchcolumn > 5` an error rather than an
+    /// index nothing can maintain.
+    ///
+    /// @param owner - the table being indexed
+    /// @param index - the index's declaration
+    /// @param width - how many columns an entry has
+    /// @param encoding - the index tree's key encoding
+    /// @param collations - the key columns' collations, in key order
+    fn index_entries_by_query(
+        &mut self,
+        owner: &TableInfo,
+        index: &IndexInfo,
+        width: usize,
+        encoding: KeyEncoding,
+        collations: &[Collation],
+    ) -> DbResult<EntrySet> {
+        let mut projected: Vec<String> = Vec::with_capacity(width);
+        for key in &index.columns {
+            match (&key.expr_sql, key.column) {
+                (Some(sql), _) => projected.push(String::from_utf8_lossy(sql).into_owned()),
+                (None, Some(declared)) => {
+                    let column = owner
+                        .column(declared)
+                        .ok_or_else(|| misuse("an index on a column the table has not got"))?;
+                    projected.push(quoted(&column.name));
+                }
+                (None, None) => return Err(misuse("an index key that is neither")),
+            }
+        }
+        let identity = super::identity_columns(owner);
+        if identity.is_empty() {
+            projected.push("rowid".to_string());
+        } else {
+            for declared in &identity {
+                let column = owner
+                    .columns
+                    .get(*declared)
+                    .ok_or_else(|| misuse("a primary key column the table has not got"))?;
+                projected.push(quoted(&column.name));
+            }
+        }
+        let query = match index.partial_sql.as_ref() {
+            Some(predicate) => format!(
+                "SELECT {} FROM {} WHERE ({})",
+                projected.join(", "),
+                quoted(&owner.name),
+                String::from_utf8_lossy(predicate)
+            ),
+            None => format!(
+                "SELECT {} FROM {}",
+                projected.join(", "),
+                quoted(&owner.name)
+            ),
+        };
+        let rows = self
+            .execute_any(&query, &inillucent_exec::physical::Params::new())?
+            .rows;
+        let mut entries = EntrySet::with_capacity(width, rows.len(), encoding, collations);
+        let mut entry: Vec<Datum<'_>> = Vec::with_capacity(width);
+        for row in &rows {
+            entry.clear();
+            for value in row.iter().take(width) {
+                entry.push(value.borrow());
+            }
+            entries.push(&entry);
+        }
+        Ok(entries)
     }
 
     /// Puts a table's covering indexes back in smallest-tree-first order.
@@ -1982,9 +2163,17 @@ impl ImportedDatabase {
             })
             .collect();
         let rows = in_key_order(rows, &columns, key_columns);
+        // The rebuild holds owned rows, so it does its own borrow. It runs once
+        // per `ALTER TABLE` and is not on any measured path, which is exactly
+        // why the cost belongs here rather than inside the builder every caller
+        // shares.
+        let borrowed: Vec<Vec<Datum<'_>>> = rows
+            .iter()
+            .map(|row| row.iter().map(OwnedDatum::borrow).collect())
+            .collect();
         self.release_tree(old_root)?;
         let covering: Vec<u32> = self.covering.get(&old_root).cloned().unwrap_or_default();
-        self.build_tree_from(old_root, columns, key_columns, layout, &rows)?;
+        self.build_tree_from(old_root, columns, key_columns, layout, &borrowed)?;
         if !covering.is_empty() {
             self.covering.insert(old_root, covering);
         }
@@ -2054,18 +2243,15 @@ impl ImportedDatabase {
 /// @param index - the index, for the message
 /// @param key_columns - how wide the entry is, rowid included
 fn refuse_duplicates(
-    rows: &[Vec<OwnedDatum>],
+    entries: &EntrySet,
+    order: &[u32],
     owner: &TableInfo,
     index: &IndexInfo,
     key_columns: usize,
 ) -> DbResult<()> {
     let compared = key_columns.saturating_sub(1);
-    for window in rows.windows(2) {
-        let (Some(left), Some(right)) = (window.first(), window.get(1)) else {
-            continue;
-        };
-        let same = (0..compared).all(|column| left.get(column) == right.get(column));
-        if same {
+    for at in 0..order.len().saturating_sub(1) {
+        if entries.shares_key_prefix(order, at, compared) {
             let columns: Vec<String> = index
                 .columns
                 .iter()
@@ -2085,6 +2271,17 @@ fn refuse_duplicates(
         }
     }
     Ok(())
+}
+
+/// Returns an identifier quoted the way SQL wants it.
+///
+/// Double quotes, with any inside doubled: a column called `odd"name` is legal
+/// and a query built by pasting it in would not parse.
+///
+/// @param name - the identifier
+fn quoted(name: &[u8]) -> String {
+    let written = String::from_utf8_lossy(name).replace('"', "\"\"");
+    format!("\"{written}\"")
 }
 
 /// Returns the new name of an automatic index when its table is renamed.

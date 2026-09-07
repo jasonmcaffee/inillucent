@@ -194,7 +194,15 @@ pub enum AlterKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexKeyColumn {
     /// The table column, when the key is a bare column.
-    pub column: u16,
+    ///
+    /// `None` for a key that is an expression. It was a bare `u16` while
+    /// `CREATE INDEX ix ON t(lower(a))` was refused in the binder; the field is
+    /// an `Option` now so that a reader which needs a column - a module-backed
+    /// index, say - has to say what it does when there is not one, rather than
+    /// reading a position that was invented to fill the slot.
+    pub column: Option<u16>,
+    /// The key expression, as written, when the key is one.
+    pub expr_sql: Option<Vec<u8>>,
     /// The folded collation name.
     pub collation: Vec<u8>,
     /// Whether the key is stored descending.
@@ -1641,11 +1649,14 @@ impl<'a> Binder<'a> {
         table: ast::NameId,
         using: Option<ast::NameId>,
         columns: &[ast::IndexedColumn],
-        filter: Option<ast::ExprId>,
+        _filter: Option<ast::ExprId>,
     ) -> Result<Directive, ParseError> {
-        if filter.is_some() {
-            return Err(unsupported("partial indexes", Span::default()));
-        }
+        // **A `WHERE` is carried in the statement text, not in this
+        // directive.** The engine re-parses the canonical SQL it stores -
+        // `index_from_create_sql` already puts the predicate on
+        // `IndexInfo::partial_sql` - so a field here would be a second copy to
+        // keep in step. A predicate that names a column the table has not got
+        // is refused when the index is built, by the query that fills it.
         // Only one module can back an index, and naming another is refused here
         // rather than accepted and ignored - an index that silently was not the
         // structure it asked for is the shape of wrong answer this ticket keeps
@@ -1698,18 +1709,35 @@ impl<'a> Binder<'a> {
                 }
                 other => (other, column.collation),
             };
-            let Some(ast::Expr::Column {
-                table: None,
-                column: name,
-                ..
-            }) = expr
-            else {
-                return Err(unsupported("indexes on expressions", Span::default()));
+            // A key that is not a bare column is an expression, and is carried
+            // as the source text the engine re-parses. Its collation is BINARY
+            // unless the statement named one: there is no column to inherit
+            // from.
+            let named = match expr {
+                Some(ast::Expr::Column {
+                    table: None,
+                    column: name,
+                    ..
+                }) => Some(*name),
+                _ => None,
             };
-            let folded = self.ast.folded(*name).to_vec();
+            let Some(name) = named else {
+                let collation = match written_collation {
+                    Some(collation) => self.ast.folded(collation).to_vec(),
+                    None => b"binary".to_vec(),
+                };
+                keys.push(IndexKeyColumn {
+                    column: None,
+                    expr_sql: Some(self.ast.expr_span(column.expr).slice(self.source).to_vec()),
+                    collation,
+                    descending: column.order == ast::SortOrder::Descending,
+                });
+                continue;
+            };
+            let folded = self.ast.folded(name).to_vec();
             let Some(position) = target.column_position(&folded) else {
                 return Err(crate::bind::no_such_column(
-                    self.ast.text(*name),
+                    self.ast.text(name),
                     Span::default(),
                 ));
             };
@@ -1721,7 +1749,8 @@ impl<'a> Binder<'a> {
                     .unwrap_or_else(|| b"binary".to_vec()),
             };
             keys.push(IndexKeyColumn {
-                column: position,
+                column: Some(position),
+                expr_sql: None,
                 collation,
                 descending: column.order == ast::SortOrder::Descending,
             });

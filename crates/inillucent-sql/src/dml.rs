@@ -63,6 +63,29 @@ pub struct BoundCheck {
     pub expr: BoundExpr,
 }
 
+/// The expressions one index needs evaluated per row to be maintained.
+///
+/// **An index is usually just columns of the row, and then it needs none of
+/// this.** A partial index holds only the rows its predicate accepts, and an
+/// index on an expression holds a value no column carries - so for those two,
+/// maintaining the index means evaluating something per row rather than
+/// copying a slot. They travel on the bound statement for the same reason the
+/// table's `CHECK` predicates do: the binder is what can turn schema text into
+/// a `BoundExpr`, and the write path is what runs it.
+///
+/// The list holds only the indexes that need it, so a table with neither kind
+/// leaves it empty and the write path's loop runs zero times - which is every
+/// table the gate measures.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoundIndexExprs {
+    /// The index's position in the table's `indexes`.
+    pub position: usize,
+    /// The partial-index predicate, when it has one.
+    pub predicate: Option<BoundExpr>,
+    /// One per key column: the expression it indexes, or `None` for a column.
+    pub keys: Vec<Option<BoundExpr>>,
+}
+
 /// One statement of a trigger body, bound.
 ///
 /// The four the grammar allows and no more. A trigger body is not a general
@@ -132,6 +155,8 @@ pub struct BoundInsert {
     pub on_conflict: Option<ConflictAction>,
     /// The table's `CHECK` constraints.
     pub checks: Vec<BoundCheck>,
+    /// The expressions the table's partial and expression indexes need.
+    pub index_exprs: Vec<BoundIndexExprs>,
     /// The `ON CONFLICT ... DO UPDATE` clause, when there is one.
     pub upsert: Option<BoundUpsert>,
     /// `sqlite_sequence`'s root page, when the target is `AUTOINCREMENT`.
@@ -209,6 +234,8 @@ pub struct BoundUpdate {
     pub on_conflict: Option<ConflictAction>,
     /// The table's `CHECK` constraints.
     pub checks: Vec<BoundCheck>,
+    /// The expressions the table's partial and expression indexes need.
+    pub index_exprs: Vec<BoundIndexExprs>,
     /// The `RETURNING` columns.
     pub returning: Vec<BoundResultColumn>,
     /// The `LIMIT`.
@@ -230,6 +257,12 @@ pub struct BoundUpdate {
 pub struct BoundDelete {
     /// The table being written.
     pub table: TableInfo,
+    /// The expressions the table's partial and expression indexes need.
+    ///
+    /// A delete needs them too: an entry only comes out of a partial index if
+    /// the row was in it, and a key the index computed has to be recomputed to
+    /// be found.
+    pub index_exprs: Vec<BoundIndexExprs>,
     /// The statement-wide number of the FROM term being written.
     ///
     /// It used to be implicitly zero, because a DML statement had exactly one
@@ -376,6 +409,7 @@ impl<'a> Binder<'a> {
         let (columns, rowid) = self.column_sources(&table, &targets)?;
         let named_rowid = targets.iter().position(|target| *target == ROWID_TARGET);
         let checks = self.bind_checks(&table)?;
+        let index_exprs = self.bind_index_exprs(&table)?;
         let upsert = self.bind_upsert(&table, insert)?;
         let returning = self.bind_returning(&insert.returning)?;
         let mut triggers = self.bind_triggers(&table, TriggerEventInfo::Insert, &[])?;
@@ -394,6 +428,7 @@ impl<'a> Binder<'a> {
         };
         Ok(BoundInsert {
             table,
+            index_exprs,
             target_source,
             columns,
             rowid,
@@ -469,6 +504,7 @@ impl<'a> Binder<'a> {
             None => None,
         };
         let checks = self.bind_checks(&table)?;
+        let index_exprs = self.bind_index_exprs(&table)?;
         let returning = self.bind_returning(&update.returning)?;
         let limit = match update.limit {
             Some(expr) => Some(self.bind_expr(expr)?),
@@ -493,6 +529,7 @@ impl<'a> Binder<'a> {
         let view_rows = self.view_rows(&table, filter.clone());
         Ok(BoundUpdate {
             table,
+            index_exprs,
             source,
             from: joined,
             assignments,
@@ -524,6 +561,7 @@ impl<'a> Binder<'a> {
         }
         let (table, source) =
             self.write_target_from_term(delete.target, &TriggerEventInfo::Delete)?;
+        let index_exprs = self.bind_index_exprs(&table)?;
         let filter = match delete.filter {
             Some(expr) => Some(self.bind_expr(expr)?),
             None => None,
@@ -542,6 +580,7 @@ impl<'a> Binder<'a> {
         let view_rows = self.view_rows(&table, filter.clone());
         Ok(BoundDelete {
             table,
+            index_exprs,
             source,
             filter,
             returning,
@@ -871,6 +910,7 @@ impl<'a> Binder<'a> {
                 join: ast::JoinKind::Comma,
                 constraint: None,
                 suppressed: Vec::new(),
+                index_exprs: Vec::new(),
             };
             self.view_target = Some(source.id);
             let scope = source.id;
@@ -986,6 +1026,7 @@ impl<'a> Binder<'a> {
             join: ast::JoinKind::Comma,
             constraint: None,
             suppressed: Vec::new(),
+            index_exprs: Vec::new(),
         });
         self.scopes.push(vec![id]);
         id
@@ -1197,6 +1238,40 @@ impl<'a> Binder<'a> {
             });
         }
         Ok(checks)
+    }
+
+    /// Binds the expressions the table's indexes need per row.
+    ///
+    /// Only the indexes that need any: a partial one, and one with an
+    /// expression key. Everything else is a slot of the row and needs nothing.
+    ///
+    /// @param table - the table being written
+    fn bind_index_exprs(&mut self, table: &TableInfo) -> Result<Vec<BoundIndexExprs>, ParseError> {
+        let mut bound = Vec::new();
+        for (position, index) in table.indexes.iter().enumerate() {
+            let needs = index.partial_sql.is_some()
+                || index.columns.iter().any(|key| key.expr_sql.is_some());
+            if !needs {
+                continue;
+            }
+            let predicate = match index.partial_sql.as_ref() {
+                Some(sql) => Some(self.bind_schema_expr(sql)?),
+                None => None,
+            };
+            let mut keys = Vec::with_capacity(index.columns.len());
+            for key in &index.columns {
+                keys.push(match key.expr_sql.as_ref() {
+                    Some(sql) => Some(self.bind_schema_expr(sql)?),
+                    None => None,
+                });
+            }
+            bound.push(BoundIndexExprs {
+                position,
+                predicate,
+                keys,
+            });
+        }
+        Ok(bound)
     }
 
     /// Parses and binds an expression that was written in the schema.

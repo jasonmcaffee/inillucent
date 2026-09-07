@@ -955,6 +955,24 @@ pub struct BoundSource {
     pub constraint: Option<BoundExpr>,
     /// Columns suppressed from `*` by a NATURAL or USING join.
     pub suppressed: Vec<u16>,
+    /// The expressions this table's partial and expression indexes are built
+    /// from, bound against **this term alone**.
+    ///
+    /// **The planner cannot bind, and the binder is the only thing that can.**
+    /// An index's predicate and its expression keys are schema *text*; deciding
+    /// whether a query's `WHERE` implies the predicate, or whether a `WHERE`
+    /// names the key an index computes, is a comparison between bound
+    /// expressions. So they are bound here and carried, in a list that is empty
+    /// for every table with neither - which is every table the gate measures,
+    /// and the reason this costs a compile nothing.
+    ///
+    /// They are bound against a scope holding only this term, never against the
+    /// statement's whole FROM clause: a predicate reading `b` must mean *this*
+    /// table's `b` even when another term in the query has one too. An index
+    /// whose expressions do not bind is simply left out, which leaves the
+    /// planner unable to choose it - the conservative answer, and the one that
+    /// was in force while these forms were refused outright.
+    pub index_exprs: Vec<crate::dml::BoundIndexExprs>,
 }
 
 /// One aggregate the statement computes.
@@ -2139,11 +2157,102 @@ impl<'a> Binder<'a> {
             join,
             constraint: None,
             suppressed: Vec::new(),
+            index_exprs: Vec::new(),
         });
         if let Some(scope) = self.scopes.last_mut() {
             scope.push(id);
         }
+        self.attach_index_exprs(id);
         Ok(())
+    }
+
+    /// Binds a term's partial-index predicates and expression keys onto it.
+    ///
+    /// **Scoped to the one term, and tolerant of a schema it cannot bind.** The
+    /// expressions are bound in a nested binder holding only this source, so a
+    /// predicate reading `b` means *this* table's `b` and not another term's;
+    /// and an index whose expressions do not bind is left out rather than
+    /// failing the statement, which leaves the planner unable to choose it.
+    /// That is the same answer the planner gave while these forms were refused
+    /// outright, so a schema this cannot read is slower and never wrong.
+    ///
+    /// It returns immediately for a table with neither kind of index, which is
+    /// every table in the performance gate.
+    ///
+    /// @param id - the FROM term's statement-wide number
+    fn attach_index_exprs(&mut self, id: usize) {
+        let Some(source) = self.sources.get(id) else {
+            return;
+        };
+        let table = std::rc::Rc::clone(&source.table);
+        let wanted: Vec<usize> = table
+            .indexes
+            .iter()
+            .enumerate()
+            .filter(|(_, index)| {
+                index.partial_sql.is_some()
+                    || index.columns.iter().any(|key| key.expr_sql.is_some())
+            })
+            .map(|(position, _)| position)
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        let alone = source.clone();
+        let mut bound = Vec::with_capacity(wanted.len());
+        for position in wanted {
+            let Some(index) = table.indexes.get(position) else {
+                continue;
+            };
+            let predicate = match index.partial_sql.as_ref() {
+                Some(sql) => match self.bind_alone(&alone, sql) {
+                    Some(expr) => Some(expr),
+                    None => continue,
+                },
+                None => None,
+            };
+            let mut keys = Vec::with_capacity(index.columns.len());
+            let mut readable = true;
+            for key in &index.columns {
+                match key.expr_sql.as_ref() {
+                    Some(sql) => match self.bind_alone(&alone, sql) {
+                        Some(expr) => keys.push(Some(expr)),
+                        None => {
+                            readable = false;
+                            break;
+                        }
+                    },
+                    None => keys.push(None),
+                }
+            }
+            if !readable {
+                continue;
+            }
+            bound.push(crate::dml::BoundIndexExprs {
+                position,
+                predicate,
+                keys,
+            });
+        }
+        if let Some(source) = self.sources.get_mut(id) {
+            source.index_exprs = bound;
+        }
+    }
+
+    /// Binds one piece of schema text against a single FROM term.
+    ///
+    /// `None` when it does not parse or does not bind, which the caller reads
+    /// as "this index cannot be reasoned about" rather than as an error.
+    ///
+    /// @param alone - the only term the expression may name
+    /// @param sql - the expression as it was written in the schema
+    fn bind_alone(&self, alone: &BoundSource, sql: &[u8]) -> Option<BoundExpr> {
+        let limits = inillucent_base::limits::Limits::default();
+        let (ast, expr) = crate::parser::parse_expression(sql, &limits).ok()?;
+        let mut nested = Binder::new(self.catalog, &ast, self.authorizer);
+        nested.sources = vec![alone.clone()];
+        nested.scopes = vec![vec![alone.id]];
+        nested.bind_expr(expr).ok()
     }
 
     /// Registers a reference to the recursive CTE currently being bound.
@@ -2172,6 +2281,7 @@ impl<'a> Binder<'a> {
             join,
             constraint: None,
             suppressed: Vec::new(),
+            index_exprs: Vec::new(),
         });
         if let Some(scope) = self.scopes.last_mut() {
             scope.push(id);
@@ -2232,6 +2342,7 @@ impl<'a> Binder<'a> {
             join,
             constraint: None,
             suppressed: Vec::new(),
+            index_exprs: Vec::new(),
         });
 
         let seed = self.bind_isolated_arm(first)?;
@@ -2290,6 +2401,7 @@ impl<'a> Binder<'a> {
             join,
             constraint: None,
             suppressed: Vec::new(),
+            index_exprs: Vec::new(),
         };
         if let SourceRows::Recursive(body) = &mut source.rows {
             if body.steps.is_empty() {
@@ -2424,6 +2536,7 @@ impl<'a> Binder<'a> {
             join,
             constraint: None,
             suppressed: Vec::new(),
+            index_exprs: Vec::new(),
         });
         if let Some(scope) = self.scopes.last_mut() {
             scope.push(id);
