@@ -1224,11 +1224,11 @@ impl ImportedDatabase {
         let (columns, layout) = index_shape(&owner, &index, root);
         let key_columns = columns.len();
         // The entries are scanned into an arena, sorted by a radix pass over
-        // their pre-encoded keys, and packed straight out of it. The encoding
-        // and the collations are the *tree's* own, so the order the sort
-        // produces is the order the tree will be searched in - which is the
-        // invariant `in_key_order` exists to defend, taken here rather than
-        // re-derived.
+        // a fixed-width prefix of the tree's own key encoding, and packed
+        // straight out of it. The encoding and the collations are the *tree's*,
+        // so the order the sort produces is the order the tree will be searched
+        // in - which is the invariant `in_key_order` exists to defend, taken
+        // here rather than re-derived.
         let encoding = KeyEncoding::choose(&columns, key_columns);
         let collations: Vec<Collation> = columns
             .iter()
@@ -1274,7 +1274,8 @@ impl ImportedDatabase {
         let pack = packed.elapsed().as_nanos();
         // The tail is timed too, because it is not free and it is not the
         // build: recording the catalog row, re-deriving every table from the
-        // catalog text, refreshing the planner's view of it, and sealing.
+        // catalog text, and refreshing the planner's view of it. `seal` is
+        // timed after it and apart from it - see below.
         let tail = std::time::Instant::now();
         self.record(
             root,

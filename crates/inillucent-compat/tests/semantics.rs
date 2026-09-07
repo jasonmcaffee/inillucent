@@ -17,6 +17,40 @@
 //! input, every byte of standard output and standard error - and the case
 //! declares the outcome rather than the rows.
 //!
+//! ## The five cases a partial index needs, and why three of them look like
+//! nothing
+//!
+//! An `UPDATE` that moves a row across a partial index's predicate exists only
+//! where task-1846's partial indexes and task-1849's `UPDATE` conflict check
+//! meet: neither ticket could test it alone, because before 1846 the index
+//! cannot be created and before 1849 the check is never reached.
+//!
+//! `crossing.into` and `two.indexes` are the ones that were wrong: a row moving
+//! into the predicate onto a key already there must clash, and it did not. The
+//! other three **agreed before either fix, because nothing was checked at
+//! all** - and they have to go on agreeing for the opposite reason, now that
+//! the check is reached and declines to fire. That is what makes them worth
+//! writing down rather than assuming, because a test that passes because
+//! nothing ran is not evidence:
+//!
+//! - `crossing.outof` goes red if the predicate guard is asked of the row's
+//!   **old** image, because a row leaving the index would be probed as though
+//!   it were still in it, and refused a write SQLite allows;
+//! - `crossing.staying` goes red if the conflict check cannot recognise the
+//!   row's **own** entry, because it would report a collision with itself;
+//! - `maintenance.crossing` goes red if the write path skips an index whose
+//!   entry bytes did not change without also asking whether the *predicate*
+//!   changed - which would leave a crossing row with no entry, or with one it
+//!   should have lost. That is an index silently disagreeing with its table
+//!   rather than a refused write, and it reads correctly until the query that
+//!   uses the index.
+//!
+//! `two.indexes` carries a second job: with one plain unique index and one
+//! partial one on the same table, it fails if the predicate is looked up by a
+//! position that does not survive the order `unique_indexes` yields them in.
+//! That would consult **another index's** predicate, silently, and only on a
+//! table with more than one unique index.
+//!
 //! ## The two cases about building an index over a written-to table
 //!
 //! `index.after.writes` and its `WITHOUT ROWID` twin insert, update and delete
@@ -63,8 +97,9 @@ struct Case {
     expect: Expect,
 }
 
-/// The 94 cases: the review's 61, plus the agreeing shapes it did not record,
-/// plus the two task-1846 added over a table that has been written to.
+/// The cases: the review's 61, the agreeing shapes it did not record,
+/// task-1849's seven `UNIQUE`-under-`UPDATE` shapes, and task-1846's - two over
+/// a table that has been written to, and five where the two tickets meet.
 const CASES: &[Case] = &[
     Case {
         name: "select.basic",
@@ -196,6 +231,55 @@ const CASES: &[Case] = &[
         name: "constraint.primarykey",
         kind: "constraint",
         script: "CREATE TABLE t(a INTEGER PRIMARY KEY);\nINSERT INTO t VALUES (1);\nINSERT INTO t VALUES (1);\nSELECT count(*) FROM t;",
+        expect: Agrees,
+    },
+    // task-1849. An `UPDATE` onto another row's key in a secondary `UNIQUE`
+    // index was performed and answered success, leaving the index with two
+    // entries under one key: the first case is the ticket's own script. The
+    // second is the other half of the same defect - the row must not collide
+    // with *itself*, and moving the rowid moves an index entry whose key did
+    // not change, which was already being refused. The rest are the paths a
+    // check that only looked at the table's key never reached.
+    Case {
+        name: "constraint.unique.update",
+        kind: "constraint",
+        script: "CREATE TABLE t(a TEXT, b INTEGER);\nCREATE UNIQUE INDEX u ON t(a);\nINSERT INTO t VALUES ('x',1),('y',2);\nUPDATE t SET a='x' WHERE b=2;\nSELECT a,b FROM t ORDER BY b;\nSELECT count(*) FROM t WHERE a='x';",
+        expect: Agrees,
+    },
+    Case {
+        name: "constraint.unique.update.self",
+        kind: "constraint",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a TEXT);\nCREATE UNIQUE INDEX u ON t(a);\nINSERT INTO t VALUES (1,'x'),(2,'y');\nUPDATE t SET id=5 WHERE id=2;\nSELECT id,a FROM t ORDER BY id;\nSELECT id FROM t WHERE a='y';",
+        expect: Agrees,
+    },
+    Case {
+        name: "constraint.unique.update.replace",
+        kind: "constraint",
+        script: "CREATE TABLE t(a TEXT, b TEXT, c INTEGER);\nCREATE UNIQUE INDEX u1 ON t(a);\nCREATE UNIQUE INDEX u2 ON t(b);\nINSERT INTO t VALUES ('x','p',1),('y','q',2),('z','r',3);\nUPDATE OR REPLACE t SET a='x', b='q' WHERE c=3;\nSELECT a,b,c FROM t ORDER BY c;",
+        expect: Agrees,
+    },
+    Case {
+        name: "constraint.unique.update.ignore",
+        kind: "constraint",
+        script: "CREATE TABLE t(a INTEGER, b INTEGER);\nCREATE UNIQUE INDEX u ON t(a);\nINSERT INTO t VALUES (1,1),(2,2),(3,3);\nUPDATE OR IGNORE t SET a=a+1;\nSELECT a,b FROM t ORDER BY b;",
+        expect: Agrees,
+    },
+    Case {
+        name: "constraint.unique.upsert.arm",
+        kind: "constraint",
+        script: "CREATE TABLE t(a TEXT, b TEXT, c INTEGER);\nCREATE UNIQUE INDEX u1 ON t(a);\nCREATE UNIQUE INDEX u2 ON t(b);\nINSERT INTO t VALUES ('x','p',1),('y','q',2);\nINSERT INTO t VALUES ('y','z',5) ON CONFLICT(a) DO UPDATE SET b='p';\nSELECT a,b,c FROM t ORDER BY c;",
+        expect: Agrees,
+    },
+    Case {
+        name: "constraint.unique.newest.named",
+        kind: "constraint",
+        script: "CREATE TABLE t(a TEXT, b TEXT, c INTEGER);\nCREATE UNIQUE INDEX u1 ON t(a);\nCREATE UNIQUE INDEX u2 ON t(b);\nINSERT INTO t VALUES ('x','p',1),('z','r',3);\nUPDATE t SET a='x', b='p' WHERE c=3;\nINSERT INTO t VALUES ('x','p',9);",
+        expect: Agrees,
+    },
+    Case {
+        name: "constraint.without.rowid.key",
+        kind: "constraint",
+        script: "CREATE TABLE t(a TEXT, b TEXT, c INTEGER, PRIMARY KEY(a,b)) WITHOUT ROWID;\nINSERT INTO t VALUES ('x','1',1),('y','2',2);\nINSERT INTO t VALUES ('x','1',3);\nUPDATE t SET a='x', b='1' WHERE c=2;\nSELECT a,b,c FROM t ORDER BY c;",
         expect: Agrees,
     },
     Case {
@@ -448,6 +532,36 @@ const CASES: &[Case] = &[
         name: "index.after.writes.without.rowid",
         kind: "surface",
         script: "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT) WITHOUT ROWID;\nINSERT INTO t VALUES (1,'a'),(2,'b'),(3,'c'),(4,'d'),(5,'e');\nUPDATE t SET b='B' WHERE a=2;\nDELETE FROM t WHERE a=4;\nINSERT INTO t VALUES (6,'f');\nCREATE INDEX ix ON t(b);\nSELECT b, a FROM t ORDER BY b;\nSELECT a FROM t WHERE b='B';",
+        expect: Agrees,
+    },
+    Case {
+        name: "index.partial.unique.crossing.into",
+        kind: "surface",
+        script: "CREATE TABLE t(a TEXT, b INTEGER);\nCREATE UNIQUE INDEX up ON t(a) WHERE b > 5;\nINSERT INTO t VALUES ('x', 9), ('x', 1);\nUPDATE t SET b = 7 WHERE b = 1;\nSELECT a, b FROM t ORDER BY b;",
+        expect: Agrees,
+    },
+    Case {
+        name: "index.partial.unique.crossing.outof",
+        kind: "surface",
+        script: "CREATE TABLE t(a TEXT, b INTEGER);\nCREATE UNIQUE INDEX up ON t(a) WHERE b > 5;\nINSERT INTO t VALUES ('x', 9), ('y', 1);\nUPDATE t SET b = 2 WHERE b = 9;\nSELECT a, b FROM t ORDER BY a;",
+        expect: Agrees,
+    },
+    Case {
+        name: "index.partial.unique.crossing.staying",
+        kind: "surface",
+        script: "CREATE TABLE t(a TEXT, b INTEGER, c TEXT);\nCREATE UNIQUE INDEX up ON t(a) WHERE b > 5;\nINSERT INTO t VALUES ('x', 9, 'first'), ('y', 7, 'second');\nUPDATE t SET c = 'changed' WHERE a = 'x';\nUPDATE t SET b = 8 WHERE a = 'x';\nSELECT a, b, c FROM t ORDER BY a;",
+        expect: Agrees,
+    },
+    Case {
+        name: "index.partial.maintenance.crossing",
+        kind: "surface",
+        script: "CREATE TABLE t(a INTEGER, b INTEGER);\nCREATE INDEX ixp ON t(a) WHERE b > 5;\nINSERT INTO t VALUES (1,9),(2,1),(3,7);\nUPDATE t SET b = 20 WHERE a = 2;\nSELECT 'in', a, b FROM t WHERE a>0 AND b>5 ORDER BY a;\nUPDATE t SET b = 0 WHERE a = 1;\nSELECT 'out', a, b FROM t WHERE a>0 AND b>5 ORDER BY a;\nUPDATE t SET a = 9 WHERE a = 3;\nSELECT 'moved', a, b FROM t WHERE a>0 AND b>5 ORDER BY a;\nDELETE FROM t WHERE a = 2;\nSELECT 'left', a, b FROM t WHERE a>0 AND b>5 ORDER BY a;",
+        expect: Agrees,
+    },
+    Case {
+        name: "index.partial.unique.two.indexes",
+        kind: "surface",
+        script: "CREATE TABLE t(a TEXT, b TEXT, n INTEGER);\nCREATE UNIQUE INDEX ua ON t(a);\nCREATE UNIQUE INDEX ub ON t(b) WHERE n > 5;\nINSERT INTO t VALUES ('a1','b1',9);\nINSERT INTO t VALUES ('a2','b1',1);\nINSERT INTO t VALUES ('a3','b1',7);\nINSERT INTO t VALUES ('a1','b9',1);\nUPDATE t SET n = 8 WHERE a = 'a2';\nSELECT a, b, n FROM t ORDER BY a;",
         expect: Agrees,
     },
     Case {

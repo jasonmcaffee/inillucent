@@ -1467,8 +1467,20 @@ pub fn unique_message(table: &TableInfo, index: &IndexInfo) -> String {
 /// KEY` - and reports `SQLITE_CONSTRAINT_PRIMARYKEY` for it - and names the
 /// hidden `rowid` under `SQLITE_CONSTRAINT_ROWID` when it does not.
 ///
+/// **A `WITHOUT ROWID` table has no rowid to name.** Its own key *is* its
+/// primary key, held in the one index whose root is the table's, so a collision
+/// reports every column of that key under `SQLITE_CONSTRAINT_PRIMARYKEY` -
+/// `UNIQUE constraint failed: t.a, t.b`. It used to answer `t.rowid`, naming a
+/// column the table does not have, on `INSERT` as well as `UPDATE`
+/// (task-1849).
+///
 /// @param table - the table whose key collided
 pub fn rowid_message(table: &TableInfo) -> (i32, String) {
+    if table.without_rowid {
+        if let Some(index) = table.indexes.iter().find(|index| index.root == table.root) {
+            return (codes::PRIMARY_KEY, unique_message(table, index));
+        }
+    }
     match table.rowid_alias.and_then(|column| table.column(column)) {
         Some(column) => (
             codes::PRIMARY_KEY,

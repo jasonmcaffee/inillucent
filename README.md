@@ -33,7 +33,7 @@ similar to pgvector. Measured against that, today:
 |---|---|---|
 | Faster than SQLite | **Yes on Windows at 100k rows and up, and by a wider margin since task-1845.** Weighted geomean 3.80x-3.91x at medium over four 30-round runs, lower bounds **3.74x, 3.75x, 3.88x, 3.44x** against a 3.00x bar, 30 of 30 workloads digest-equal on every run. It was 3.20x-3.28x (lows 3.11x-3.20x) before the engine's binaries were given a size-classed free list as their global allocator. On Linux the same binary was 1.53x at medium (task-1838 §5, not re-measured since). | task-1845's four-run gate |
 | No family slower than SQLite | **Nine of ten. `schema` is the one left**, at 0.46x-0.58x. `open.prepare` (0.78x -> 1.06x), `extension` (0.68x -> 1.00x-1.03x) and `transaction` (0.90x -> 1.20x) all crossed the floor in task-1845. `CREATE INDEX` at medium is 49.9 ms against SQLite's 30.8, and it is accounted for: scan 13.4, sort 5.9, pack 15.8, and a 6.8 ms `seal()` both engines pay under `synchronous = FULL`. Closing it needs the bulk builder to take pre-encoded keys. | task-1845's four-run gate; `indexprofile` |
-| Same features as SQLite | **No wrong answers left, and three refusals.** 48 of 50 inventoried constructs run. The differential probe is now a checked-in test of 92 cases (`semantics.rs`), **89 of which agree byte for byte**; every one of the nine wrong answers is closed. What still differs is three `CREATE INDEX` forms - partial, on an expression, and on a `WITHOUT ROWID` table - and each is a refusal rather than a wrong answer. | [What it gets wrong](#what-it-gets-wrong-and-what-it-refuses) |
+| Same features as SQLite | **No wrong answer known, and three refusals - but task-1849 found six that the probe was not shaped to see.** 48 of 50 inventoried constructs run. The differential probe is a checked-in test of 99 cases (`semantics.rs`), **96 of which agree byte for byte**; the review's nine are closed and so are task-1849's six. What still differs is three `CREATE INDEX` forms - partial, on an expression, and on a `WITHOUT ROWID` table - and each is a refusal rather than a wrong answer. | [What it gets wrong](#what-it-gets-wrong-and-what-it-refuses) |
 | Same durability and isolation | **Yes, single process, one writer.** A checkpoint retires the segments below it since task-1845, so the same 200,000 rows are 15.9 MB rather than 110.5 MB - 1.83x SQLite's 8.7 MB, where it was 12.7x. WAL with group commit, snapshot isolation, ARIES-style redo recovery, undo for `ROLLBACK`/`SAVEPOINT`, crash campaigns under a deterministic simulator. Multi-process access and SQLite's file format are deliberate non-goals. | [Disk](#disk) |
 | Embedding search like pgvector | **Yes, and graded better than pgvector on 15 of 17 primary comparisons** with zero worse; in production on a 598,560-chunk mailbox at recall 1.000 and 27 ms p95. Reachable from ordinary SQL: a `VECTOR(N)` column, `vector_distance_cos`/`_l2`/`vector_dot`, `CREATE INDEX ... USING inillucent_hnsw`, and `ORDER BY vector_distance_cos(v, ?) LIMIT k` planned onto the index at **0.98x** the cost of querying the store directly. | `inillucent-scorecard.md`, task-1775, this ticket's `vectorprobe.txt` |
 | One engine, one repository that builds | **Half.** The repository builds from a clone again - `drivers/` is committed, and `harness.rs` now asserts every path in `[workspace] members` exists, so the next crate added before it is committed fails on the machine that added it. `inillucent::Database` reaches the new engine; the old engine is still in the tree awaiting task-1837's driver. | [Repository layout](#repository-layout) |
@@ -95,13 +95,35 @@ forbid `unsafe`.
 ### What it gets wrong, and what it refuses
 
 A refusal is visible and an application can work around it. A wrong answer is not. This section is
-ordered by that difference. It is no longer a report: the 92 cases behind it are
+ordered by that difference. It is no longer a report: the 99 cases behind it are
 `crates/inillucent-compat/tests/semantics.rs`, which runs each script through `inillucent-shell` and
-the pinned `sqlite3` and compares every byte of both streams. **89 of the 92 agree.**
+the pinned `sqlite3` and compares every byte of both streams. **96 of the 99 agree.**
 
-**Wrong answers: none.** All nine the second review found were closed by task-1845, and the test above
-is what keeps them closed - each case declares `Agrees` or `Differs`, so a construct that changes its
-mind in either direction fails until its row is moved.
+**Wrong answers: none known** - which is not the same as none, and task-1849 is the reason to say it
+that way. The nine the second review found were closed by task-1845; task-1849 then found six more
+that this section had called clean, and closed those. What separates them from the nine is *where*
+they lived: every one of the nine was reachable by writing one row and reading it back, and every one
+of the six needed a second row to collide with. A probe made of single-row scripts cannot see a
+constraint that is only about the relationship between two rows, and this one was.
+
+| construct | was | now |
+|---|---|---|
+| `UPDATE t SET a='x'` onto another row's value, `UNIQUE(a)` | performed it; the index then held two entries under one key | `UNIQUE constraint failed: t.a` |
+| the same under `OR IGNORE` / `OR REPLACE` | performed it; neither arm was reached | skips the row / deletes the row in the way |
+| `INSERT ... ON CONFLICT DO UPDATE` whose arm takes a second index's key | performed it | refuses, as SQLite's `DO UPDATE` arm resolves ABORT |
+| `UPDATE t SET id=5` with an untouched `UNIQUE(a)` | **refused** a legal statement - the probe found the row's own entry | performs it |
+| a `WITHOUT ROWID` key collision | `UNIQUE constraint failed: t.rowid`, naming a column such a table has no | names the primary key's columns |
+| a row colliding on two unique indexes at once | named the first declared, on `INSERT` as well as `UPDATE` | names the last declared, as SQLite does |
+| `ON CONFLICT DO UPDATE SET a=9` moving an `INTEGER PRIMARY KEY` | wrote the new row and left the old one, so the table held both | the row moves |
+
+Four of the six are one defect and its consequences: `UPDATE` checked uniqueness only when the *table's own*
+key moved, so no secondary `UNIQUE` index constrained it and the check it did run had no way to
+recognise the row it was updating. Both directions of that are in the table above, and the second is
+worth as much as the first: a check added without a notion of "this row" trades a silent accept for a
+false refusal, which is why the fix is not the one-line one it looks like.
+
+**The nine the second review found**, all closed by task-1845. Each case declares `Agrees` or
+`Differs`, so a construct that changes its mind in either direction fails until its row is moved.
 
 | construct | was | now |
 |---|---|---|
