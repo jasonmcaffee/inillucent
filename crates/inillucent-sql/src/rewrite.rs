@@ -201,7 +201,7 @@ pub fn rewrite_insert(statement: &mut BoundInsert, rewrite: Rewrite<'_>) {
     for check in &mut statement.checks {
         rewrite_expr(&mut check.expr, rewrite);
     }
-    if let Some(upsert) = statement.upsert.as_mut() {
+    for upsert in &mut statement.upsert {
         for assignment in &mut upsert.assignments {
             rewrite_expr(&mut assignment.value, rewrite);
         }

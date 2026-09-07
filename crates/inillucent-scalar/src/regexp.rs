@@ -553,7 +553,7 @@ impl Regexp {
     /// @param subject - the bytes to search
     pub fn matches(&self, subject: &[u8]) -> bool {
         let mut at = 0usize;
-        let mut previous = 0u32;
+        let mut previous;
         let mut character = START;
         if !self.init.is_empty() {
             let width = self.init.len();
