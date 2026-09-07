@@ -4413,6 +4413,16 @@ fn translate(
                 }
                 _ => message.clone().unwrap_or_default(),
             },
+            // The one thing the three failing actions differ in. `IGNORE` never
+            // reaches an unwind - the firing point catches it and skips the row
+            // - so its value here is never read.
+            unwind: match action {
+                inillucent_sql::ast::RaiseAction::Rollback => {
+                    inillucent_base::error::Unwind::Transaction
+                }
+                inillucent_sql::ast::RaiseAction::Fail => inillucent_base::error::Unwind::Nothing,
+                _ => inillucent_base::error::Unwind::Statement,
+            },
         },
         // A call to a scalar an application registered. The body is resolved
         // here, once, and carried by the compiled node - see `user_scalar`.

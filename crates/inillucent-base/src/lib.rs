@@ -50,7 +50,7 @@ pub mod probe;
 pub mod rng;
 pub mod varint;
 
-pub use error::{DbError, DbResult, ExtendedCode, PrimaryCode};
+pub use error::{DbError, DbResult, ExtendedCode, PrimaryCode, Unwind};
 
 /// The implementation phase that filled this crate in, as named by the TDD.
 pub const IMPLEMENTATION_PHASE: &str = "phase 1: VFS, binary primitives, and simulator";

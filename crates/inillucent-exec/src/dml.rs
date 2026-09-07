@@ -50,7 +50,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use inillucent_base::error::misuse;
+use inillucent_base::error::{misuse, Unwind};
 use inillucent_base::{DbError, DbResult, ExtendedCode};
 use inillucent_pool::{Database, Pool};
 use inillucent_sql::ast::{ConflictAction, JoinKind as SqlJoinKind, TriggerTime};
@@ -602,6 +602,29 @@ pub fn insert(
     supplied: &[Row],
 ) -> DbResult<Changes> {
     insert_at(statement, target, params, supplied, Depth::default())
+        .map_err(|error| outer_unwind(error, statement.on_conflict))
+}
+
+/// Stamps the outermost statement's `OR` clause onto whatever it failed with.
+///
+/// **Only the outermost**, which is why this is on the `insert`/`update`
+/// wrappers rather than on the `_at` bodies a trigger's own statements call.
+/// SQLite's rule is that "if an `ON CONFLICT` clause is specified as part of
+/// the statement causing the trigger to fire, then conflict handling policy of
+/// the outer statement is used instead" - so the outer clause overrides a
+/// nested statement's and a constraint's, and only an explicit `RAISE` beats
+/// it.
+///
+/// A statement with no `OR` clause stamps nothing, leaving whatever the
+/// constraint said, and leaving an untagged error to read as `ABORT`.
+///
+/// @param error - what the statement failed with
+/// @param on_conflict - the statement's own `OR` clause
+fn outer_unwind(error: DbError, on_conflict: Option<ConflictAction>) -> DbError {
+    match on_conflict {
+        Some(action) => error.with_outer_unwind(unwind_of(Some(action))),
+        None => error,
+    }
 }
 
 /// Applies an `INSERT` that is already some triggers deep.
@@ -1132,12 +1155,15 @@ fn write_one(
         if place_row_absent(table, layout, target, &row, indexes)? {
             return Ok(Some(row));
         }
-        return Err(conflicting_row(table, layout, target, &row, None, indexes)?
-            .map(|clash| clash.error)
+        let clash = conflicting_row(table, layout, target, &row, None, indexes)?;
+        let constraint = clash.as_ref().and_then(|found| found.conflict);
+        return Err(clash
+            .map(|found| found.error)
             .unwrap_or_else(|| {
                 let (code, message) = rowid_message(table);
                 DbError::new(ExtendedCode(code)).with_message(message)
-            }));
+            })
+            .or_unwind(unwind_of(statement.on_conflict.or(constraint))));
     }
     if let Some(clash) = conflicting_row(table, layout, target, &row, None, indexes)? {
         match resolution(statement) {
@@ -1170,8 +1196,14 @@ fn write_one(
                 return Ok(Some(updated));
             }
             // `ABORT`, `FAIL` and `ROLLBACK` all raise here and differ only in
-            // what the *session* undoes, which this layer does not own.
-            Resolution::Raise => return Err(clash.error),
+            // how much of what has been written goes back - which this layer
+            // does not own and so says rather than does. An untagged error
+            // reads as `ABORT`, so the tag is what makes the other two
+            // different from it (task-1850).
+            Resolution::Raise => {
+                let unwind = unwind_of(statement.on_conflict.or(clash.conflict));
+                return Err(clash.error.or_unwind(unwind));
+            }
         }
     }
     place_row(table, layout, target, None, &row, indexes)?;
@@ -1220,6 +1252,45 @@ struct Conflict {
     key: Vec<OwnedDatum>,
     /// The error an aborting statement reports.
     error: DbError,
+    /// The `ON CONFLICT` clause written on the constraint that reported it.
+    ///
+    /// **Read for the *unwind* and not for the resolution.** A constraint may
+    /// say `ON CONFLICT ROLLBACK` or `ON CONFLICT FAIL`, which is `OR ROLLBACK`
+    /// and `OR FAIL` written on the constraint instead of on the statement, and
+    /// those decide how much of the statement goes back - which is what
+    /// task-1850 is about. `ON CONFLICT IGNORE` and `ON CONFLICT REPLACE`
+    /// written here decide which *arm* runs instead, and are still ignored:
+    /// that is a separate defect with its own ticket, and this field is what it
+    /// will read.
+    conflict: Option<ConflictAction>,
+}
+
+/// Returns what a failure resolved this way undoes.
+///
+/// `IGNORE` and `REPLACE` never reach a failure at all, so they read as the
+/// default: an error carrying one of them was raised for some other reason.
+///
+/// @param action - the conflict algorithm in force, if any was written
+fn unwind_of(action: Option<ConflictAction>) -> Unwind {
+    match action {
+        Some(ConflictAction::Fail) => Unwind::Nothing,
+        Some(ConflictAction::Rollback) => Unwind::Transaction,
+        _ => Unwind::Statement,
+    }
+}
+
+/// Returns the `ON CONFLICT` clause the table's own key carries.
+///
+/// SQLite records `id INTEGER PRIMARY KEY ON CONFLICT REPLACE` as the *column's*
+/// clause, because the rowid alias is the column, so this is where a rowid
+/// collision's algorithm is written down.
+///
+/// @param table - the table being written
+fn rowid_conflict(table: &TableInfo) -> Option<ConflictAction> {
+    table
+        .rowid_alias
+        .and_then(|column| table.column(column))
+        .and_then(|column| column.not_null_conflict)
 }
 
 /// Returns the row a new row would collide with, if there is one.
@@ -1269,6 +1340,7 @@ fn conflicting_row(
             return Ok(Some(Conflict {
                 key,
                 error: DbError::new(ExtendedCode(code)).with_message(message),
+                conflict: rowid_conflict(table),
             }));
         }
     }
@@ -1345,6 +1417,7 @@ fn conflicting_row(
             return Ok(Some(Conflict {
                 key,
                 error: DbError::new(ExtendedCode(code)).with_message(unique_message(table, index)),
+                conflict: index.conflict,
             }));
         }
     }
@@ -1414,7 +1487,8 @@ fn upsert_row(
     // resolves ABORT: `INSERT OR IGNORE` and `INSERT OR REPLACE` both report
     // the constraint here rather than skipping or replacing.
     if let Some(clash) = conflicting_row(table, layout, target, &after, Some(&before), indexes)? {
-        return Err(clash.error);
+        let unwind = unwind_of(statement.on_conflict.or(clash.conflict));
+        return Err(clash.error.or_unwind(unwind));
     }
     // **`replace_row` on both paths, because the arm can move the key.**
     // `DO UPDATE SET a = 9` over an `INTEGER PRIMARY KEY` is a row that moves,
@@ -1482,6 +1556,7 @@ pub fn update(
     keys: &[Row],
 ) -> DbResult<Changes> {
     update_at(statement, target, params, keys, Depth::default())
+        .map_err(|error| outer_unwind(error, statement.on_conflict))
 }
 
 /// Applies an `UPDATE` that is already some triggers deep.
@@ -1638,7 +1713,10 @@ pub fn update_at(
                         IndexExprs::new(&declarations, &space),
                     )?;
                 }
-                _ => return Err(clash.error),
+                _ => {
+                    let unwind = unwind_of(statement.on_conflict.or(clash.conflict));
+                    return Err(clash.error.or_unwind(unwind));
+                }
             }
         }
         if skipped {
@@ -2389,13 +2467,16 @@ fn declarations_are_met(
         if matches!(action, Some(ConflictAction::Ignore)) {
             return Ok(false);
         }
-        return Err(
-            DbError::new(ExtendedCode(codes::NOT_NULL)).with_message(format!(
+        return Err(DbError::new(ExtendedCode(codes::NOT_NULL))
+            .with_message(format!(
                 "NOT NULL constraint failed: {}.{}",
                 String::from_utf8_lossy(&table.name),
                 String::from_utf8_lossy(&column.name)
-            )),
-        );
+            ))
+            // `action` is already the statement's clause or, failing that,
+            // the column's own - so `NOT NULL ON CONFLICT ROLLBACK` rolls
+            // back and `INSERT OR FAIL` into the same column does not.
+            .or_unwind(unwind_of(action)));
     }
     Ok(true)
 }

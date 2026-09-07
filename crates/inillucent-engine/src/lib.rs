@@ -88,7 +88,7 @@ pub mod vtab;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use inillucent_base::error::refusal;
+use inillucent_base::error::{refusal, Unwind};
 use inillucent_base::limits::Limits;
 pub use inillucent_base::DbResult;
 use inillucent_catalog::load::table_from_create_sql;
@@ -2392,7 +2392,22 @@ impl ImportedDatabase {
             }
             None => 0,
         };
-        let txn = self.current_txn();
+        self.undo_to_floor(floor, true, self.current_txn())
+    }
+
+    /// Undoes back to a position in the undo buffer, newest first.
+    ///
+    /// The body of [`ImportedDatabase::undo_to`], separated so a *statement*
+    /// can name its own floor. A savepoint is a name this connection was given;
+    /// a statement boundary is a length nobody named, taken by `write` before
+    /// the statement wrote anything, and there is nothing to look up.
+    ///
+    /// @param floor - the buffer length to stop at
+    /// @param reload - whether to rebuild the schema from the catalog tree
+    /// @param txn - the transaction the restores are logged under, which is the
+    ///   statement's own rather than `current_txn`: outside a batch `write` has
+    ///   already taken a number and moved `next_txn` past it
+    fn undo_to_floor(&mut self, floor: usize, reload: bool, txn: u64) -> DbResult<()> {
         while self.undo.borrow().len() > floor {
             let Some(entry) = self.undo.borrow_mut().pop() else {
                 break;
@@ -2453,6 +2468,15 @@ impl ImportedDatabase {
         }
         let held = self.undo.borrow().len();
         self.marks.retain(|(_, at)| *at <= held);
+        // **A DML statement cannot have changed the catalog, so undoing one has
+        // nothing to rebuild from it.** `CREATE`, `DROP` and `ALTER` do not go
+        // through `write`, and reloading here would cost a catalog read on
+        // every failed statement - and could replace a constraint failure with
+        // the "no tree attached" refusal below, which would be a different
+        // error for a statement that never touched a table's existence.
+        if !reload {
+            return Ok(());
+        }
         // The catalog tree may have been restored along with everything else,
         // so the schema the binder sees is rebuilt from it.
         let missing = self.reload_entries()?;
@@ -4147,11 +4171,27 @@ impl ImportedDatabase {
                 (txn, true)
             }
         };
-        // Collected only inside a transaction: outside one there is nothing
-        // that could abandon the write. Every schema's log appends to the one
-        // buffer, because a rollback undoes one *transaction* rather than one
-        // file - and each record carries the schema it came out of.
-        let undo = (!autocommit).then_some(&self.undo);
+        // **Collected whether or not a transaction is open**, because a
+        // statement is abandoned by more than a rollback. SQLite's default
+        // algorithm is `ABORT`, which undoes *the statement* and keeps the
+        // transaction, and an autocommit statement gets it too: this buffer
+        // used to be `None` outside a transaction on the reasoning that
+        // "an autocommit statement cannot be abandoned", and that is what
+        // task-1850 was filed for - a four-row `INSERT` failing on its third
+        // row kept the first two and committed them.
+        //
+        // Outside a transaction it holds at most one statement: `write` clears
+        // it when the statement ends, either way. Every schema's log appends to
+        // the one buffer, because a rollback undoes one *transaction* rather
+        // than one file - and each record carries the schema it came out of.
+        let undo = Some(&self.undo);
+        // **Where this statement's writes begin.** The success path does
+        // nothing with it; the failure path rolls back to it. That asymmetry is
+        // the whole cost of statement atomicity inside a transaction - one
+        // integer read off a `Vec`'s length - which is why there is no
+        // per-statement savepoint here and `txn.large`'s two thousand
+        // statements do not pay for two thousand of them.
+        let mark = self.undo.borrow().len();
         let main_log = WalLog {
             wal: std::rc::Rc::clone(&self.wal),
             txn,
@@ -4198,7 +4238,7 @@ impl ImportedDatabase {
             Logs::Many(held)
         };
         let session = self.session.get();
-        let (changes, wrote) = {
+        let (applied, wrote) = {
             let mut view = WriteView {
                 database: &mut self.database,
                 attached: &mut self.attached,
@@ -4211,13 +4251,21 @@ impl ImportedDatabase {
                 covering: &self.covering,
                 indexed: &self.vector_indexes,
             };
-            let changes = apply(&mut view, params)?;
+            // **Not `?`.** A failed statement has writes of its own to put
+            // back, and the borrow of the trees has to end before anything can.
+            let applied = apply(&mut view, params);
             // **The participant set, read off the logs that were used.** A
             // transaction that wrote one file commits the way it always has; one
             // that wrote two is decided by a super-journal, and this is the only
-            // place that can tell them apart without asking every tree.
+            // place that can tell them apart without asking every tree. Read on
+            // the failure path too, because a statement that failed partway
+            // still wrote, and `OR FAIL` keeps what it wrote.
             let wrote = view.logs.wrote();
-            (changes, wrote)
+            (applied, wrote)
+        };
+        let changes = match applied {
+            Ok(changes) => changes,
+            Err(error) => return Err(self.abandon(error, mark, autocommit, wrote, txn)),
         };
         self.touched |= wrote;
         // **Inside the same transaction, and after the trees rather than
@@ -4225,7 +4273,23 @@ impl ImportedDatabase {
         // write borrowed the connection apart, so this is the first moment both
         // halves exist at once. Doing it before the commit below is what makes
         // the table and the index it carries one change rather than two.
-        self.follow_vector_indexes(&changes)?;
+        //
+        // **It fails the way the statement fails**, not past it: the index it
+        // maintains is part of the write, so a statement that could not
+        // maintain it is a statement that did not happen. Reached with the
+        // trees no longer borrowed, which is what lets it undo.
+        if let Err(error) = self.follow_vector_indexes(&changes) {
+            return Err(self.abandon(error, mark, autocommit, wrote, txn));
+        }
+        if autocommit {
+            // **Nothing else can abandon what an autocommit statement wrote**,
+            // so the before-images stop being useful here rather than growing
+            // for the life of the connection. Held until now so that everything
+            // above can still be undone, and cleared before the commit so that
+            // a commit which fails leaves nothing behind for the next
+            // statement's mark to sit on top of.
+            self.undo.borrow_mut().clear();
+        }
         if let Some(assigned) = changes.last_rowid {
             self.last_rowid.set(assigned);
         }
@@ -4240,6 +4304,71 @@ impl ImportedDatabase {
             names,
             changes,
         })
+    }
+
+    /// Puts back what a failed statement wrote, as its algorithm says.
+    ///
+    /// **The three raising algorithms differ only here.** `ABORT` - which is
+    /// what an error carrying no algorithm at all reads as, and so what a
+    /// `STRICT` type failure, a foreign key and a trigger's `RAISE` get -
+    /// undoes back to the mark `write` took and leaves the transaction open.
+    /// `ROLLBACK` continues up to the transaction, which is the existing
+    /// `rollback` in full: floor zero, the savepoints gone, the batch closed.
+    /// `FAIL` undoes nothing, and is the only one this engine already matched.
+    ///
+    /// The error it returns is the statement's own unless the undo itself
+    /// failed, in which case that failure is the one worth reporting: a
+    /// constraint message describing a database that is now in a state nobody
+    /// intended is worse than saying so.
+    ///
+    /// @param error - what the statement failed with
+    /// @param mark - the undo buffer's length before the statement wrote
+    /// @param autocommit - whether the statement was its own transaction
+    /// @param wrote - the schemas the statement wrote, as a participant set
+    /// @param txn - the transaction the statement wrote under
+    fn abandon(
+        &mut self,
+        error: DbError,
+        mark: usize,
+        autocommit: bool,
+        wrote: u16,
+        txn: u64,
+    ) -> DbError {
+        let unwind = error.unwind();
+        let undone = match unwind {
+            Unwind::Nothing => Ok(()),
+            Unwind::Statement => self.undo_to_floor(mark, false, txn),
+            // **In autocommit the two are the same thing**: the statement is
+            // the transaction, so `ROLLBACK` is `ABORT` with a floor of zero,
+            // and there is no batch to close. Inside one it is the existing
+            // `rollback` in full - the savepoints gone, the batch closed, the
+            // schema refreshed.
+            Unwind::Transaction if autocommit => self.undo_to_floor(0, false, txn),
+            Unwind::Transaction => self.rollback(),
+        };
+        if autocommit {
+            self.undo.borrow_mut().clear();
+            self.marks.clear();
+            if matches!(unwind, Unwind::Nothing) && undone.is_ok() {
+                // **`OR FAIL` outside a transaction commits.** The rows written
+                // before the failure are kept, and keeping them only in the
+                // page cache would make them a fact this process believes and
+                // the file does not. The statement failed; its transaction did
+                // not.
+                self.touched |= wrote;
+                let participants = std::mem::take(&mut self.touched);
+                if let Err(failure) = self.commit_across(txn, participants) {
+                    return failure;
+                }
+            } else {
+                // Undone, so there is nothing to commit and nothing to name as
+                // a participant. The restores are logged like any other write
+                // and no `Commit` follows them, so a recovery replays neither
+                // the statement nor its undo.
+                self.touched = 0;
+            }
+        }
+        undone.err().unwrap_or(error)
     }
 }
 
