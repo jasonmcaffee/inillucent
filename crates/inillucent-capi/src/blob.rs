@@ -45,7 +45,7 @@ pub unsafe extern "C" fn sqlite3_blob_open(
     let column = String::from_utf8_lossy(column).into_owned();
     // The borrow is erased and held open by the count, exactly as a statement's
     // is: a blob handle keeps the connection alive until it is closed.
-    let owner: &'static inillucent::Connection =
+    let owner: &'static inillucent_legacy::Connection =
         std::mem::transmute(&*connection_handle.connection);
     match owner.blob_open(&schema, &table, &column, rowid, writable != 0) {
         Err(error) => connection_handle.fail(&error),

@@ -14,7 +14,7 @@
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 
-use inillucent::Statement;
+use inillucent_legacy::Statement;
 
 use crate::codes::{SQLITE_DONE, SQLITE_MISUSE, SQLITE_OK, SQLITE_ROW};
 use crate::handle::{connection, counted, misuse, sqlite3, sqlite3_stmt, statement};
@@ -71,7 +71,7 @@ pub unsafe extern "C" fn sqlite3_prepare_v3(
     // The borrow is erased here and nowhere else. It is sound because the
     // connection is boxed, never moves, and cannot be freed while
     // `open_statements` is non-zero - which this increments.
-    let owner: &'static inillucent::Connection = std::mem::transmute(&*database.connection);
+    let owner: &'static inillucent_legacy::Connection = std::mem::transmute(&*database.connection);
     match owner.prepare_with_tail(&text) {
         Err(error) => {
             if !tail.is_null() {
@@ -102,7 +102,7 @@ pub unsafe extern "C" fn sqlite3_prepare_v3(
                 held: Vec::new(),
                 values: Vec::new(),
                 sql: sql_text,
-                bound: vec![inillucent::Value::Null; parameters],
+                bound: vec![inillucent_legacy::Value::Null; parameters],
                 destructors: (0..parameters).map(|_| None).collect(),
             });
             *out = Box::into_raw(held);
@@ -314,7 +314,7 @@ pub unsafe extern "C" fn sqlite3_exec(
         return database.last.refuse(SQLITE_MISUSE, "no SQL was given");
     };
     let mut rest = String::from_utf8_lossy(bytes).into_owned();
-    let owner: &'static inillucent::Connection = std::mem::transmute(&*database.connection);
+    let owner: &'static inillucent_legacy::Connection = std::mem::transmute(&*database.connection);
     loop {
         if rest.trim().is_empty() {
             return database.succeed();
@@ -383,7 +383,7 @@ fn step_rows(
     >,
     context: *mut c_void,
     names: &[*mut c_char],
-) -> Result<(), Option<inillucent::DbError>> {
+) -> Result<(), Option<inillucent_legacy::DbError>> {
     loop {
         match prepared.step() {
             Err(error) => return Err(Some(error)),
@@ -396,7 +396,7 @@ fn step_rows(
                     .row()
                     .iter()
                     .map(|value| match value {
-                        inillucent::Value::Null => std::ptr::null_mut(),
+                        inillucent_legacy::Value::Null => std::ptr::null_mut(),
                         other => crate::memory::owned_c_string(&crate::value::as_text(other)),
                     })
                     .collect();

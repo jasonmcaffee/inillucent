@@ -11,4 +11,4 @@ description = "Versioned SQLite C API compatibility surface and ABI probes."
 crate-type = ["lib", "cdylib", "staticlib"]
 
 [dependencies]
-inillucent = { workspace = true }
+inillucent-legacy = { workspace = true }

@@ -11,10 +11,10 @@
 
 use std::path::{Path, PathBuf};
 
-use inillucent::Database;
 use inillucent_catalog::table_from_create_sql;
 use inillucent_compat::oracle::{Driver, Op};
 use inillucent_compat::workspace_root;
+use inillucent_legacy::Database;
 use inillucent_sql::catalog_view::{CatalogView, TableKind};
 
 /// Returns the directory scratch databases are built in.

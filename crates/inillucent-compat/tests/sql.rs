@@ -7,9 +7,9 @@
 
 use std::path::PathBuf;
 
-use inillucent::{Database, Value};
 use inillucent_compat::fixtures::valid_fixtures;
 use inillucent_compat::workspace_root;
+use inillucent_legacy::{Database, Value};
 
 /// Returns the path of a shipped fixture.
 fn fixture(name: &str) -> PathBuf {
@@ -29,7 +29,7 @@ fn open(name: &str) -> Database {
 }
 
 /// Opens a fixture and returns a connection.
-fn connect(name: &str) -> inillucent::Connection {
+fn connect(name: &str) -> inillucent_legacy::Connection {
     let database = open(name);
     database.connect().expect("the connection opens")
 }
@@ -62,7 +62,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// Runs a query and renders every row.
-fn rows(connection: &inillucent::Connection, sql: &str) -> Vec<String> {
+fn rows(connection: &inillucent_legacy::Connection, sql: &str) -> Vec<String> {
     let mut statement = connection.prepare(sql).expect(sql);
     let mut out = Vec::new();
     while statement.step().expect(sql) {

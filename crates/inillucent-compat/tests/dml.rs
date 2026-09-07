@@ -1,12 +1,12 @@
 //! Writing through the public API, and reading it back.
 //!
-//! Invariant: every assertion here goes through `inillucent::Database`, the same
+//! Invariant: every assertion here goes through `inillucent_legacy::Database`, the same
 //! surface an application uses. A test that reached into the pager could pass
 //! while the statement layer above it was broken, and the whole point of these
 //! is that the layers agree.
 
-use inillucent::{Database, Value};
 use inillucent_compat::workspace_root;
+use inillucent_legacy::{Database, Value};
 
 /// Returns a scratch path nothing else is using.
 fn scratch(name: &str) -> std::path::PathBuf {

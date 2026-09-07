@@ -395,14 +395,36 @@ may_depend_on = [
   "inillucent-vm",
 ]
 
-# The facade names `CatalogSnapshot` in one accessor and `JournalStats` and
-# `PagerCounters` in two more, so it depends on the crates that define them.
-# Every edge is downward and adds nothing the facade could not already reach
-# through the session; naming the types is the point, because a caller that
-# wants to know what a commit cost should not have to reach past the facade to
-# find out.
+# **The facade reaches the new engine** (task-1838 §9). `inillucent::Database`
+# is the name an application outside this workspace writes against, and until
+# now it reached `inillucent-session` - the SQLite-file-format engine task-1816
+# replaced. It is a re-export rather than a wrapper: the two surfaces do not
+# differ any more, and a wrapper whose every method forwards is a file to keep
+# in step for nothing. The surface is smaller by exactly the features the new
+# engine does not have - backup, blobs, serialize, the hooks - and a facade that
+# kept their names and answered "unsupported" would stop the compiler saying so.
 [[crate]]
 name = "inillucent"
+kind = "production"
+layer = 9
+may_depend_on = [
+  "inillucent-base",
+  "inillucent-value",
+  "inillucent-tree",
+  "inillucent-sql",
+  "inillucent-engine",
+]
+
+# The old facade, under its own name, unchanged and still over the old engine.
+#
+# It has exactly one consumer left: `inillucent-capi`, the `sqlite3_*` C ABI,
+# whose replacement is task-1837's driver. When that lands, this crate,
+# `inillucent-capi`, `inillucent-session`, `inillucent-vm`,
+# `inillucent-transaction` and `inillucent-storage` go together - deleting them
+# before it would leave the workspace with no C ABI at all, which is why
+# task-1838 §9 stops here and says so rather than doing it anyway.
+[[crate]]
+name = "inillucent-legacy"
 kind = "production"
 layer = 9
 may_depend_on = [
@@ -446,13 +468,37 @@ may_depend_on = [
 name = "inillucent-capi"
 kind = "production"
 layer = 10
-may_depend_on = ["inillucent"]
+may_depend_on = ["inillucent-legacy"]
 
 # task-1834: the shell runs on the new engine. It reaches `inillucent-engine`
 # for the connection, `inillucent-tree` because a row is a vector of
 # `OwnedDatum`, and `inillucent-value` because that is where `Value` and the
 # affinity rules the renderer formats against live. The edge to `inillucent` is
 # gone - the shell used four of the facade's methods and now uses none of them.
+# The driver (task-1837), which is what an application outside this workspace
+# binds to. It sits above `inillucent-engine` and reaches nothing else, and that
+# single edge is the whole reason it exists: Phase 6 deletes four more crates
+# and absorbs a fifth, and a consumer holding this one is unaffected by all of
+# it. The two types a caller has to be able to name - the bound-parameter map
+# and the value - are re-exported by `inillucent-engine` so that the edge stays
+# one rather than three.
+[[crate]]
+name = "inillucent-driver"
+kind = "production"
+layer = 9
+may_depend_on = ["inillucent-engine"]
+
+# The C ABI over the driver, and the reason it is a separate crate rather than a
+# feature: it builds as a `cdylib` and a `staticlib`, it is the only place in
+# the workspace with `unsafe` in it, and it must be able to depend on nothing
+# but the driver so that a marshalling layer cannot quietly start deciding
+# something. Every language that is not Rust reaches the engine through this.
+[[crate]]
+name = "inillucent-driver-capi"
+kind = "production"
+layer = 10
+may_depend_on = ["inillucent-driver"]
+
 [[crate]]
 name = "inillucent-cli"
 kind = "production"
@@ -518,6 +564,10 @@ may_depend_on = [
   # the tool agreeing with itself, and the oracle lives here.
   "inillucent-migrate",
   "inillucent",
+  # And the old facade, because the seven profiling binaries and the seven
+  # suites that measure and test the *old* engine still do, and moving them
+  # onto the new one would be measuring something else.
+  "inillucent-legacy",
   "inillucent-pool",
   "inillucent-tree",
   "inillucent-scalar",

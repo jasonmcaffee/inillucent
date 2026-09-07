@@ -24,7 +24,7 @@
 use std::os::raw::{c_char, c_int, c_void};
 use std::sync::Arc;
 
-use inillucent::{collation, extensions, DbError, Value};
+use inillucent_legacy::{collation, extensions, DbError, Value};
 
 use crate::codes::{SQLITE_MISUSE, SQLITE_OK};
 use crate::handle::{c_str, connection, misuse, sqlite3};

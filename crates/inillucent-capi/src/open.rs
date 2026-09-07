@@ -11,7 +11,7 @@
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int};
 
-use inillucent::{Database, DbError};
+use inillucent_legacy::{Database, DbError};
 
 use crate::codes::{
     message_for, SQLITE_BUSY, SQLITE_MISUSE, SQLITE_OK, SQLITE_OPEN_CREATE, SQLITE_OPEN_MEMORY,
@@ -69,7 +69,7 @@ pub unsafe extern "C" fn sqlite3_open_v2(
     } else {
         name
     };
-    let mut options = inillucent::ConnectionOptions::default();
+    let mut options = inillucent_legacy::ConnectionOptions::default();
     options.writable = flags & SQLITE_OPEN_READONLY == 0;
     // A named VFS is the caller's, and an unknown name is an error rather than
     // a quiet fall back to the default - a caller that asked for its own file
@@ -125,14 +125,14 @@ pub unsafe extern "C" fn sqlite3_open_v2(
 /// the caller gets a null handle and the code.
 fn build(
     path: &str,
-    options: inillucent::ConnectionOptions,
+    options: inillucent_legacy::ConnectionOptions,
 ) -> Result<Box<sqlite3>, (Option<Box<sqlite3>>, c_int)> {
     match open_pair(path, options) {
         Ok((database, connection)) => Ok(assemble(database, connection, ErrorSlot::default())),
         Err(error) => {
             let mut slot = ErrorSlot::default();
             let code = slot.fail(&error);
-            match open_pair(":memory:", inillucent::ConnectionOptions::default()) {
+            match open_pair(":memory:", inillucent_legacy::ConnectionOptions::default()) {
                 Ok((database, connection)) => {
                     Err((Some(assemble(database, connection, slot)), code))
                 }
@@ -145,7 +145,7 @@ fn build(
 /// Puts a handle together around a database, a connection and an error slot.
 fn assemble(
     database: Database,
-    connection: inillucent::Connection,
+    connection: inillucent_legacy::Connection,
     last: ErrorSlot,
 ) -> Box<sqlite3> {
     Box::new(sqlite3 {
@@ -164,8 +164,8 @@ fn assemble(
 /// Builds a handle over a file system the caller supplied.
 fn build_on(
     path: &str,
-    options: inillucent::ConnectionOptions,
-    file_system: std::sync::Arc<dyn inillucent::vfs::Vfs>,
+    options: inillucent_legacy::ConnectionOptions,
+    file_system: std::sync::Arc<dyn inillucent_legacy::vfs::Vfs>,
 ) -> Result<Box<sqlite3>, (Option<Box<sqlite3>>, c_int)> {
     let opened = Database::open_with_vfs(path, options, file_system)
         .and_then(|database| database.connect().map(|held| (database, held)));
@@ -174,7 +174,7 @@ fn build_on(
         Err(error) => {
             let mut slot = ErrorSlot::default();
             let code = slot.fail(&error);
-            match open_pair(":memory:", inillucent::ConnectionOptions::default()) {
+            match open_pair(":memory:", inillucent_legacy::ConnectionOptions::default()) {
                 Ok((database, connection)) => {
                     Err((Some(assemble(database, connection, slot)), code))
                 }
@@ -187,8 +187,8 @@ fn build_on(
 /// Opens the database and its first connection together.
 fn open_pair(
     path: &str,
-    options: inillucent::ConnectionOptions,
-) -> Result<(Database, inillucent::Connection), DbError> {
+    options: inillucent_legacy::ConnectionOptions,
+) -> Result<(Database, inillucent_legacy::Connection), DbError> {
     let database = Database::open_with(path, options)?;
     let connection = database.connect()?;
     Ok((database, connection))
@@ -474,7 +474,7 @@ fn names(database: &sqlite3) -> Vec<Vec<u8>> {
     };
     rows.iter()
         .filter_map(|row| row.get(1))
-        .filter_map(inillucent::Value::as_text)
+        .filter_map(inillucent_legacy::Value::as_text)
         .map(|text| text.raw().to_ascii_lowercase())
         .collect()
 }
@@ -499,14 +499,14 @@ pub unsafe extern "C" fn sqlite3_db_filename(
     for row in rows {
         let is_wanted = row
             .get(1)
-            .and_then(inillucent::Value::as_text)
+            .and_then(inillucent_legacy::Value::as_text)
             .is_some_and(|text| text.raw().eq_ignore_ascii_case(&wanted));
         if !is_wanted {
             continue;
         }
         let file = row
             .get(2)
-            .and_then(inillucent::Value::as_text)
+            .and_then(inillucent_legacy::Value::as_text)
             .map(|text| text.raw().to_vec())
             .unwrap_or_default();
         database.last.message = CString::new(file).unwrap_or_default();

@@ -102,9 +102,9 @@ pub unsafe extern "C" fn sqlite3_update_hook(
                     // it may cross anyway.
                     let carried = carried;
                     let operation = match kind {
-                        inillucent::RowChangeKind::Insert => SQLITE_INSERT,
-                        inillucent::RowChangeKind::Delete => SQLITE_DELETE,
-                        inillucent::RowChangeKind::Update => SQLITE_UPDATE,
+                        inillucent_legacy::RowChangeKind::Insert => SQLITE_INSERT,
+                        inillucent_legacy::RowChangeKind::Delete => SQLITE_DELETE,
+                        inillucent_legacy::RowChangeKind::Update => SQLITE_UPDATE,
                     };
                     let schema = terminated(schema);
                     let table = terminated(table);

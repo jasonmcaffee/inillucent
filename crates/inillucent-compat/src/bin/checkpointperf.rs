@@ -21,8 +21,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
 
-use inillucent::Database;
 use inillucent_compat::{platform_name, workspace_root};
+use inillucent_legacy::Database;
 
 /// How many rows one run commits, one transaction each.
 const COMMITS: usize = 6_000;

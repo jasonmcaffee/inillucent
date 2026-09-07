@@ -3,11 +3,11 @@ name = "inillucent"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Stable public Rust facade: Database, Connection, Statement, Rows, and Transaction."
+description = "Stable public Rust facade: Database, Connection, Statement, Row."
 
 [dependencies]
 inillucent-base = { workspace = true }
+inillucent-engine = { workspace = true }
 inillucent-value = { workspace = true }
-inillucent-catalog = { workspace = true }
-inillucent-session = { workspace = true }
-inillucent-storage = { workspace = true }
+inillucent-tree = { workspace = true }
+inillucent-sql = { workspace = true }

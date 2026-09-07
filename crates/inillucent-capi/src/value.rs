@@ -13,7 +13,7 @@
 
 use std::os::raw::{c_char, c_int, c_void};
 
-use inillucent::{DbError, Value};
+use inillucent_legacy::{DbError, Value};
 
 use crate::codes::{SQLITE_BLOB, SQLITE_FLOAT, SQLITE_INTEGER, SQLITE_NULL, SQLITE_TEXT};
 
@@ -69,12 +69,12 @@ pub(crate) fn type_of(value: &Value<'_>) -> c_int {
 
 /// Returns the integer C reads out of a value, converting as SQLite does.
 pub(crate) fn as_integer(value: &Value<'_>) -> i64 {
-    inillucent::cast::integer_value(value)
+    inillucent_legacy::cast::integer_value(value)
 }
 
 /// Returns the double C reads out of a value.
 pub(crate) fn as_real(value: &Value<'_>) -> f64 {
-    inillucent::cast::real_value(value)
+    inillucent_legacy::cast::real_value(value)
 }
 
 /// Returns the text C reads out of a value.
@@ -93,10 +93,10 @@ pub(crate) fn as_text(value: &Value<'_>) -> Vec<u8> {
 
 /// Renders a number the way the engine writes it into a text column.
 fn text_of(value: &Value<'_>) -> Vec<u8> {
-    let cast = inillucent::cast::cast_value(
+    let cast = inillucent_legacy::cast::cast_value(
         value.clone(),
-        inillucent::Affinity::Text,
-        inillucent::TextEncoding::Utf8,
+        inillucent_legacy::Affinity::Text,
+        inillucent_legacy::TextEncoding::Utf8,
     );
     match cast {
         Ok(Value::Text(text)) => text.raw().to_vec(),
@@ -513,7 +513,7 @@ pub unsafe extern "C" fn sqlite3_result_error(
     let text = crate::handle::counted(message, length)
         .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
         .unwrap_or_else(|| "error".to_string());
-    held.result = Err(DbError::primary(inillucent::PrimaryCode::Error).with_message(text));
+    held.result = Err(DbError::primary(inillucent_legacy::PrimaryCode::Error).with_message(text));
 }
 
 /// Makes a function's answer an error with a numeric code.
@@ -527,7 +527,7 @@ pub unsafe extern "C" fn sqlite3_result_error_code(context: *mut sqlite3_context
         return;
     };
     let message = crate::codes::message_for(code);
-    held.result = Err(DbError::new(inillucent::ExtendedCode(code)).with_message(message));
+    held.result = Err(DbError::new(inillucent_legacy::ExtendedCode(code)).with_message(message));
 }
 
 /// Makes a function's answer an out-of-memory error.

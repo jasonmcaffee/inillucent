@@ -111,9 +111,9 @@ pub unsafe extern "C" fn sqlite3_deserialize(
         return database.last.refuse(SQLITE_ERROR, "no image was given");
     }
     let image = std::slice::from_raw_parts(bytes, size as usize).to_vec();
-    let mut options = inillucent::ConnectionOptions::default();
+    let mut options = inillucent_legacy::ConnectionOptions::default();
     options.writable = flags & crate::codes::SQLITE_DESERIALIZE_READONLY == 0;
-    let outcome = inillucent::Database::deserialize_with(&image, options)
+    let outcome = inillucent_legacy::Database::deserialize_with(&image, options)
         .and_then(|opened| opened.connect().map(|connected| (opened, connected)));
     if flags & crate::codes::SQLITE_DESERIALIZE_FREEONCLOSE != 0 {
         crate::memory::sqlite3_free(bytes.cast());

@@ -12,7 +12,7 @@
 
 use std::os::raw::{c_char, c_int, c_void};
 
-use inillucent::Value;
+use inillucent_legacy::Value;
 
 use crate::codes::{SQLITE_OK, SQLITE_RANGE};
 use crate::handle::{c_str, counted, misuse, sqlite3_stmt, statement, Destructor};
