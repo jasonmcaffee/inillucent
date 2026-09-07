@@ -795,6 +795,23 @@ impl StaticCatalog {
     }
 
     /// Adds a table, returning the catalog, for building fixtures.
+    /// Returns one table by folded name, searching every database.
+    ///
+    /// Attachment order, `main` first, which is the order an unqualified name
+    /// resolves in. A module asking about a name it was given as an argument
+    /// wants the same table the statement that named it would have found.
+    ///
+    /// @param folded - the table's ASCII-folded name
+    pub fn table_named(&self, folded: &[u8]) -> Option<&TableInfo> {
+        self.tables
+            .iter()
+            .map(std::rc::Rc::as_ref)
+            .find(|table| table.folded == folded)
+    }
+
+    /// Returns this catalog with one more table in it.
+    ///
+    /// @param table - the table to add
     pub fn with_table(mut self, table: TableInfo) -> StaticCatalog {
         self.tables.push(std::rc::Rc::new(table));
         self

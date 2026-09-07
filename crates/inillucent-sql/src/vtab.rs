@@ -305,6 +305,20 @@ pub struct ShadowTable {
     pub suffix: Vec<u8>,
     /// The `CREATE` statement, with `%` standing for the table's own name.
     pub create_sql: String,
+    /// The table these shadows belong to, when it is not the module's own.
+    ///
+    /// **How a module reads another table's storage.** `fts5vocab(f, 'row')`
+    /// is a view over the index `f` built, and the whole of what it needs is
+    /// read access to `f`'s shadow tables - which the module contract
+    /// deliberately does not give it, because "a module sees only what it was
+    /// handed" is what makes a hostile module a bounded problem.
+    ///
+    /// So it is handed them, explicitly and by name. A module that names an
+    /// owner is asking for shadows that **already exist**: they are looked up
+    /// rather than created, and a name the catalog does not have is a refusal
+    /// rather than a fresh table. The module still sees only the roots it was
+    /// given, and still cannot resolve a name for itself.
+    pub owner: Option<Vec<u8>>,
 }
 
 /// One row a write asks a module to make.

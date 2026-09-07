@@ -182,26 +182,31 @@ pub fn shadow_tables(columns: usize) -> Vec<ShadowTable> {
         ShadowTable {
             suffix: b"config".to_vec(),
             create_sql: "CREATE TABLE \"%_config\"(k PRIMARY KEY, v) WITHOUT ROWID".to_string(),
+            owner: None,
         },
         ShadowTable {
             suffix: b"content".to_vec(),
             create_sql: content,
+            owner: None,
         },
         ShadowTable {
             suffix: b"delta".to_vec(),
             create_sql:
                 "CREATE TABLE \"%_delta\"(seq INTEGER PRIMARY KEY, commit_seq, id, op, digest)"
                     .to_string(),
+            owner: None,
         },
         ShadowTable {
             suffix: b"gen".to_vec(),
             create_sql:
                 "CREATE TABLE \"%_gen\"(id INTEGER PRIMARY KEY, generation, ordinal, bytes)"
                     .to_string(),
+            owner: None,
         },
         ShadowTable {
             suffix: b"state".to_vec(),
             create_sql: "CREATE TABLE \"%_state\"(k PRIMARY KEY, v) WITHOUT ROWID".to_string(),
+            owner: None,
         },
     ]
 }
