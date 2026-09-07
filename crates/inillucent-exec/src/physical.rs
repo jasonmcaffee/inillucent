@@ -303,6 +303,16 @@ pub trait TreeCatalog {
         None
     }
 
+    /// Reports whether `LIKE` compares ASCII letters exactly on this connection.
+    ///
+    /// `PRAGMA case_sensitive_like`. It is asked here rather than carried on
+    /// the parameters because it is a fact about the connection a statement is
+    /// being compiled *for*, and the pragma empties the statement cache when it
+    /// changes - the same contract `foreign_keys` has.
+    fn like_is_case_sensitive(&self) -> bool {
+        false
+    }
+
     /// Returns the rowids an index a module owns says are nearest a vector.
     ///
     /// **The one thing the executor cannot work out for itself.** The index's
@@ -536,6 +546,12 @@ pub struct Params {
     /// lends: an application binds its values and hands over `&Params`, and the
     /// connection state is not the application's to supply.
     context: std::cell::Cell<crate::scalar::Context>,
+    /// Whether a trigger's own writes fire triggers.
+    ///
+    /// `PRAGMA recursive_triggers`. It rides here rather than being compiled in
+    /// because it is read where a body statement is *run* - see
+    /// `crate::trigger::run_body` - and not where one is translated.
+    recursive_triggers: std::cell::Cell<bool>,
 }
 
 /// Scrambles a seed into the next one.
@@ -558,6 +574,7 @@ impl Params {
             values: Vec::new(),
             reads: std::cell::Cell::new(0),
             context: std::cell::Cell::new(crate::scalar::Context::default()),
+            recursive_triggers: std::cell::Cell::new(false),
             subqueries: Vec::new(),
         }
     }
@@ -570,6 +587,7 @@ impl Params {
             values,
             reads: std::cell::Cell::new(0),
             context: std::cell::Cell::new(crate::scalar::Context::default()),
+            recursive_triggers: std::cell::Cell::new(false),
             subqueries: Vec::new(),
         }
     }
@@ -585,6 +603,7 @@ impl Params {
             values: self.values.clone(),
             reads: std::cell::Cell::new(self.reads.get()),
             context: self.context.clone(),
+            recursive_triggers: self.recursive_triggers.clone(),
             subqueries,
         }
     }
@@ -606,6 +625,7 @@ impl Params {
             values: self.values.clone(),
             reads: std::cell::Cell::new(self.reads.get()),
             context: self.context.clone(),
+            recursive_triggers: self.recursive_triggers.clone(),
             subqueries: Vec::new(),
         }
     }
@@ -649,6 +669,21 @@ impl Params {
     /// @param context - the counters and the statement's random seed
     pub fn set_context(&self, context: crate::scalar::Context) {
         self.context.set(context);
+    }
+
+    /// Tells this set whether a trigger's own writes fire triggers.
+    ///
+    /// @param recursive - what `PRAGMA recursive_triggers` is set to
+    pub fn set_recursive_triggers(&self, recursive: bool) {
+        self.recursive_triggers.set(recursive);
+    }
+
+    /// Returns whether a trigger's own writes fire triggers.
+    ///
+    /// Not counted as a parameter read: nothing is compiled from it, so a chain
+    /// built while it was one way is not stale when it is the other.
+    pub fn recursive_triggers(&self) -> bool {
+        self.recursive_triggers.get()
     }
 
     /// Returns what the connection's counters said.
@@ -963,6 +998,13 @@ pub struct VirtualScanSource<'t> {
     pub params: Params,
     /// Which of the term's columns the query reads.
     pub needed: inillucent_sql::bind::ColumnUse,
+}
+
+/// Reads one catalog's `case_sensitive_like`, as a function `is_some_and` takes.
+///
+/// @param catalog - the catalog the statement is compiled against
+fn inillucent_exec_like_case_sensitive(catalog: &dyn TreeCatalog) -> bool {
+    catalog.like_is_case_sensitive()
 }
 
 /// Returns the pool a source that reads a tree must have been given.
@@ -4877,6 +4919,13 @@ fn translate(
                     Some(escape) => Some(Box::new(translate(escape, space, params, frame)?)),
                     None => None,
                 },
+                // The connection's `case_sensitive_like`, asked of the catalog
+                // here rather than carried on the parameters: it is a property
+                // of the connection the expression is being compiled for, and
+                // the pragma empties the statement cache when it changes.
+                case_sensitive: space
+                    .catalog
+                    .is_some_and(inillucent_exec_like_case_sensitive),
             }
         }
         BoundExpr::Json { func, arguments } => Expr::Json {

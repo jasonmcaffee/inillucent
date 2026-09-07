@@ -111,6 +111,7 @@ impl ImportedDatabase {
             // because the answer is correct, not because the subject is absent.
             b"data_version" => Ok(one_integer(1)),
             b"max_page_count" => self.pragma_max_page_count(argument),
+            b"case_sensitive_like" => self.pragma_case_sensitive_like(argument),
             b"query_only" => self.pragma_query_only(argument),
             b"recursive_triggers" => self.pragma_recursive_triggers(argument),
             // Reported: one value each, and a write that asks for another is
@@ -966,6 +967,31 @@ impl ImportedDatabase {
             self.max_page_count = asked.max(held).min(DEFAULT_MAX_PAGE_COUNT);
         }
         Ok(one_integer(self.max_page_count))
+    }
+
+    /// Sets whether `LIKE` compares ASCII letters exactly.
+    ///
+    /// **Write-only, which is what SQLite makes it**: `PRAGMA
+    /// case_sensitive_like` with no argument returns no rows in either engine.
+    /// The compiled statements go with it, for the reason `foreign_keys`
+    /// documents - the setting is read when a `LIKE` is translated, so a
+    /// statement compiled under the old one would keep the old behaviour, and
+    /// the symptom would be a query quietly returning the wrong rows.
+    ///
+    /// @param argument - the value it was given, when it was given one
+    fn pragma_case_sensitive_like(
+        &mut self,
+        argument: Option<&PragmaArgument>,
+    ) -> DbResult<Outcome> {
+        let Some(argument) = argument else {
+            return Ok(Outcome::empty());
+        };
+        let asked = argument_boolean(argument);
+        if asked != self.case_sensitive_like {
+            self.forget_compiled_statements();
+        }
+        self.case_sensitive_like = asked;
+        Ok(Outcome::empty())
     }
 
     /// Reads or sets whether this connection may write.

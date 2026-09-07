@@ -339,6 +339,13 @@ pub struct ImportedDatabase {
     /// kibibytes; afterwards it is the caller's number, so reading it always
     /// describes the cache the engine is actually keeping.
     pub(crate) cache_size: Option<i64>,
+    /// Whether `LIKE` compares ASCII letters exactly.
+    ///
+    /// `PRAGMA case_sensitive_like`. Read by the binder's translation through
+    /// `TreeCatalog::like_is_case_sensitive`, and the statement cache is
+    /// emptied when it changes so a compiled `LIKE` is never run under the
+    /// other setting.
+    pub(crate) case_sensitive_like: bool,
     /// Whether this connection refuses to write, set by `PRAGMA query_only`.
     ///
     /// Honoured rather than remembered: a caller sets it to make a mistake
@@ -950,6 +957,10 @@ impl TreeCatalog for ImportedDatabase {
         self.nearest_rowids(index, probe, depth)
     }
 
+    fn like_is_case_sensitive(&self) -> bool {
+        self.case_sensitive_like
+    }
+
     fn user_scalar(&self, name: &[u8], argc: usize) -> Option<inillucent_exec::expr::ScalarBody> {
         match self.user_function(name, argc)?.body.clone() {
             inillucent_ext::registry::UserBody::Scalar(body) => {
@@ -1513,6 +1524,7 @@ impl ImportedDatabase {
             settling: std::cell::Cell::new(false),
             scratch_ast: std::cell::RefCell::new(None),
             levers: Levers::default(),
+            case_sensitive_like: false,
             cache_size: None,
             query_only: false,
             recursive_triggers: false,
@@ -1696,6 +1708,7 @@ impl ImportedDatabase {
             settling: std::cell::Cell::new(false),
             scratch_ast: std::cell::RefCell::new(None),
             levers: Levers::default(),
+            case_sensitive_like: false,
             cache_size: None,
             query_only: false,
             recursive_triggers: false,
@@ -2465,6 +2478,9 @@ impl ImportedDatabase {
             total_changes: self.changed_ever.get(),
             last_insert_rowid: self.last_rowid.get(),
             seed: self.next_seed(),
+            // So the `like(a, b)` function spelling follows the same pragma the
+            // `LIKE` operator does.
+            like_case_sensitive: self.case_sensitive_like,
         }
     }
 
@@ -4032,6 +4048,7 @@ impl ImportedDatabase {
         // cached by its text, and a value baked into the plan would answer with
         // whatever was true when it was first compiled (task-1854).
         params.set_context(self.scalar_context());
+        params.set_recursive_triggers(self.recursive_triggers);
         let outcome = self.apply_compiled(cached, params)?;
         // **The cyclic half of a foreign key's action happens here**, after the
         // statement rather than inside it, because a cascade that can reach

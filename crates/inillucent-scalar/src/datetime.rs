@@ -76,15 +76,42 @@ pub fn call(
     let Some(day) = resolve(rest, now, encoding) else {
         return Value::Null;
     };
+    // **`subsec` is a modifier the *renderer* has to know about.** It asks for
+    // the fractional second, so `datetime(x, 'subsec')` formats seconds as
+    // `%f` rather than `%S`. It reached `unixepoch` and nothing else, so
+    // `datetime('2024-03-01 12:00:00', 'subsec')` answered `12:00:00` where
+    // SQLite answers `12:00:00.000` - a modifier accepted and dropped, which is
+    // the one outcome a caller cannot detect.
+    let subsec = asks_for_subsec(rest);
     match func {
         TimeFunc::JulianDay => Value::Real(day),
         TimeFunc::UnixEpoch => unix_epoch(rest, day, encoding),
         TimeFunc::Date => render(day, b"%Y-%m-%d"),
-        TimeFunc::Time => render(day, b"%H:%M:%S"),
-        TimeFunc::DateTime => render(day, b"%Y-%m-%d %H:%M:%S"),
+        TimeFunc::Time => render(day, if subsec { b"%H:%M:%f" } else { b"%H:%M:%S" }),
+        TimeFunc::DateTime => render(
+            day,
+            if subsec {
+                b"%Y-%m-%d %H:%M:%f"
+            } else {
+                b"%Y-%m-%d %H:%M:%S"
+            },
+        ),
         TimeFunc::StrfTime => render(day, &format.unwrap_or_default()),
         TimeFunc::TimeDiff => Value::Null,
     }
+}
+
+/// Reports whether an argument list carries the `subsec` modifier.
+///
+/// @param arguments - the time value and its modifiers
+fn asks_for_subsec(arguments: &[Value<'static>]) -> bool {
+    arguments.iter().skip(1).any(|modifier| {
+        let Value::Text(text) = modifier else {
+            return false;
+        };
+        let folded = trim(&text.utf8_bytes()).to_ascii_lowercase();
+        folded == b"subsec" || folded == b"subsecond"
+    })
 }
 
 /// Returns the Julian day one argument list resolves to.
@@ -110,17 +137,28 @@ fn resolve(arguments: &[Value<'static>], now: f64, encoding: TextEncoding) -> Op
 fn unix_epoch(arguments: &[Value<'static>], day: f64, encoding: TextEncoding) -> Value<'static> {
     let _ = encoding;
     let seconds = (day - UNIX_EPOCH_JD) * SECONDS_PER_DAY;
-    let subsec = arguments.iter().skip(1).any(|modifier| {
-        let Value::Text(text) = modifier else {
-            return false;
-        };
-        let folded = text.utf8_bytes().to_ascii_lowercase();
-        folded == b"subsec" || folded == b"subsecond"
-    });
-    if subsec {
+    if asks_for_subsec(arguments) {
         return Value::Real(seconds);
     }
-    Value::Integer(seconds.floor() as i64)
+    Value::Integer(whole_seconds(seconds))
+}
+
+/// Returns the whole seconds a Julian-day difference stands for.
+///
+/// **Flooring the double directly was one second low.** A Julian day is a
+/// binary fraction, so `2024-03-01 09:05:07` comes back as
+/// `1709283906.9999998` rather than as `1709283907`, and `floor` on that is
+/// 1,709,283,906 - a wrong answer on `strftime('%s', ...)` and on
+/// `unixepoch()` alike, for every timestamp whose representation happens to
+/// fall short. SQLite works in whole milliseconds throughout, so the value is
+/// rounded to a millisecond first and only then reduced to seconds; a
+/// half-second is still floored, which is what makes the truncation SQLite's
+/// rather than a rounding of its own.
+///
+/// @param seconds - the difference from the epoch, in seconds
+fn whole_seconds(seconds: f64) -> i64 {
+    let milliseconds = (seconds * 1000.0).round() as i64;
+    milliseconds.div_euclid(1000)
 }
 
 /// Returns `timediff(a, b)` as SQLite's `+YYYY-MM-DD HH:MM:SS.SSS` string.
@@ -596,9 +634,29 @@ fn render(day: f64, format: &[u8]) -> Value<'static> {
             }
             b'j' => push_padded(&mut out, day_of_year(civil), 3),
             b'J' => {
-                let text = format!("{day}");
+                // SQLite prints this one with sixteen significant digits, which
+                // is not what the shortest round-trip rendering gives:
+                // `2460370.878553241` against `2460370.8785532406`.
+                out.extend_from_slice(sixteen_significant(day).as_bytes());
+            }
+            // The space-padded hours, which were being echoed back as `%k` and
+            // `%l`. task-1856's lesson is written on this row of the ticket:
+            // fixing one member of a specifier family and assuming the rest is
+            // how the next three stay hidden, so the whole table was walked
+            // against the reference rather than the three that were reported.
+            b'k' => {
+                let text = format!("{:2}", civil.hour);
                 out.extend_from_slice(text.as_bytes());
             }
+            b'l' => {
+                let hour = match civil.hour % 12 {
+                    0 => 12,
+                    other => other,
+                };
+                let text = format!("{hour:2}");
+                out.extend_from_slice(text.as_bytes());
+            }
+            b'g' => push_padded(&mut out, iso_week(day).0.rem_euclid(100), 2),
             b'm' => push_padded(&mut out, civil.month, 2),
             b'M' => push_padded(&mut out, civil.minute, 2),
             b'p' => out.extend_from_slice(if civil.hour < 12 { b"AM" } else { b"PM" }),
@@ -608,7 +666,7 @@ fn render(day: f64, format: &[u8]) -> Value<'static> {
                 out.extend_from_slice(text.as_bytes());
             }
             b's' => {
-                let seconds = ((day - UNIX_EPOCH_JD) * SECONDS_PER_DAY).floor() as i64;
+                let seconds = whole_seconds((day - UNIX_EPOCH_JD) * SECONDS_PER_DAY);
                 out.extend_from_slice(seconds.to_string().as_bytes());
             }
             b'S' => push_padded(&mut out, civil.second.floor() as i64, 2),
@@ -637,13 +695,39 @@ fn render(day: f64, format: &[u8]) -> Value<'static> {
                 let text = format!("{:04}", civil.year);
                 out.extend_from_slice(text.as_bytes());
             }
-            other => {
-                out.push(b'%');
-                out.push(other);
-            }
+            // **A specifier SQLite does not have makes the whole call NULL**,
+            // rather than putting the two characters back. `strftime('%y', d)`
+            // is NULL in SQLite and was the literal text `%y` here, which is a
+            // format string silently half-applied.
+            _ => return Value::Null,
         }
     }
     Value::owned_text(&out).unwrap_or(Value::Null)
+}
+
+/// Renders a double the way C's `%.16g` does.
+///
+/// Sixteen significant digits, trailing zeros removed, and the fixed form for
+/// an exponent in the range a Julian day lives in. Only `%J` needs it, and it
+/// needs it exactly: the shortest round-trip rendering Rust gives has
+/// seventeen digits for the same value.
+///
+/// @param value - the number to render
+fn sixteen_significant(value: f64) -> String {
+    if !value.is_finite() || value == 0.0 {
+        return format!("{value}");
+    }
+    let exponent = value.abs().log10().floor() as i32;
+    if !(-5..16).contains(&exponent) {
+        return format!("{value}");
+    }
+    let decimals = (15 - exponent).max(0) as usize;
+    let text = format!("{value:.decimals$}");
+    if !text.contains('.') {
+        return text;
+    }
+    let trimmed = text.trim_end_matches('0');
+    trimmed.trim_end_matches('.').to_string()
 }
 
 /// Appends a zero-padded number.

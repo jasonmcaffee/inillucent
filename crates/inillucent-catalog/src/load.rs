@@ -824,11 +824,30 @@ fn rowid_alias(
         return None;
     }
     for (position, column) in columns.iter().enumerate() {
-        let is_primary = column
-            .constraints
-            .iter()
-            .any(|(_, constraint)| matches!(constraint, ColumnConstraint::PrimaryKey { .. }));
+        // **`INTEGER PRIMARY KEY DESC` is not a rowid alias.** SQLite's own
+        // rule, and not a quirk: a rowid table's key is the rowid and the rowid
+        // ascends, so a key that was asked to descend cannot be it - SQLite
+        // builds a real index instead, and `PRAGMA index_list` shows it. Taking
+        // it as an alias made the descending declaration disappear and left the
+        // table with no index where SQLite has one.
+        let is_primary = column.constraints.iter().any(|(_, constraint)| {
+            matches!(
+                constraint,
+                ColumnConstraint::PrimaryKey {
+                    order: inillucent_sql::ast::SortOrder::Ascending,
+                    ..
+                }
+            )
+        });
         if !is_primary {
+            // A descending primary key over this column is still a primary key;
+            // it simply is not the rowid. Nothing here claims it, and
+            // `automatic_indexes` builds its index.
+            if column.constraints.iter().any(|(_, constraint)| {
+                matches!(constraint, ColumnConstraint::PrimaryKey { .. })
+            }) {
+                return None;
+            }
             continue;
         }
         let declared = column.declared_type.clone().unwrap_or_default();

@@ -16,16 +16,44 @@
 /// `escape` is the one-character escape a `ESCAPE` clause named, if any. An
 /// escaped `%`, `_` or escape character matches itself literally.
 pub fn like(pattern: &[u8], subject: &[u8], escape: Option<u8>) -> bool {
-    matches(pattern, subject, escape, true)
+    matches(pattern, subject, escape, true, true)
+}
+
+/// Matches a `LIKE` pattern, saying whether ASCII case is folded.
+///
+/// **`PRAGMA case_sensitive_like = ON` turns the folding off**, which is the
+/// whole content of that pragma: with it on, `'ABC' LIKE 'a%'` is 0. It was
+/// accepted and dropped here, so the answer stayed 1 - a setting that changes
+/// which rows a query returns, silently not applied.
+///
+/// @param pattern - the pattern
+/// @param subject - the text being matched
+/// @param escape - the `ESCAPE` character, when one was given
+/// @param fold_case - whether ASCII letters match either case
+pub fn like_folding(
+    pattern: &[u8],
+    subject: &[u8],
+    escape: Option<u8>,
+    fold_case: bool,
+) -> bool {
+    matches(pattern, subject, escape, true, fold_case)
 }
 
 /// Matches a `GLOB` pattern against a subject.
 pub fn glob(pattern: &[u8], subject: &[u8]) -> bool {
-    matches(pattern, subject, None, false)
+    // GLOB is case-sensitive whatever `case_sensitive_like` says; the pragma is
+    // about LIKE alone.
+    matches(pattern, subject, None, false, false)
 }
 
 /// The shared matcher, with one backtrack point.
-fn matches(pattern: &[u8], subject: &[u8], escape: Option<u8>, is_like: bool) -> bool {
+fn matches(
+    pattern: &[u8],
+    subject: &[u8],
+    escape: Option<u8>,
+    is_like: bool,
+    fold_case: bool,
+) -> bool {
     let (any, one) = if is_like { (b'%', b'_') } else { (b'*', b'?') };
     let mut p = 0usize;
     let mut s = 0usize;
@@ -70,7 +98,7 @@ fn matches(pattern: &[u8], subject: &[u8], escape: Option<u8>, is_like: bool) ->
                 };
                 let advance = if escaped { 2usize } else { 1usize };
                 if let (Some(literal), Some(actual)) = (literal, subject.get(s).copied()) {
-                    if literal == actual || (is_like && folds_to(literal, actual)) {
+                    if literal == actual || (is_like && fold_case && folds_to(literal, actual)) {
                         p = p.saturating_add(advance);
                         s = s.saturating_add(1);
                         continue;

@@ -3477,6 +3477,23 @@ impl<'a> Binder<'a> {
                 span,
             )),
             Expr::Unary { op, operand } => {
+                // **A negated integer literal is one literal, not an operator
+                // over one.** `-9223372036854775808` is the smallest integer
+                // there is; `9223372036854775808` on its own is one past the
+                // largest, so binding the operand first turned it into a real
+                // and the negation then produced `-9.2233720368547758e+18`.
+                // Every comparison, every affinity and every write of that
+                // value is a different value from the one that was written.
+                // SQLite folds the sign into the literal in its own parser for
+                // exactly this reason.
+                if op == UnaryOp::Negate {
+                    if let Some(Expr::Literal(Literal::Integer(text))) = self.ast.expr(operand) {
+                        let mut negated = Vec::with_capacity(text.len().saturating_add(1));
+                        negated.push(b'-');
+                        negated.extend_from_slice(text);
+                        return Ok(integer_literal(&negated));
+                    }
+                }
                 let operand = Box::new(self.bind_expr(operand)?);
                 match op {
                     UnaryOp::Not => Ok(BoundExpr::Not(operand)),
@@ -3610,13 +3627,22 @@ impl<'a> Binder<'a> {
             }),
             Expr::Is {
                 negated,
+                distinct_from,
                 left,
                 right,
-                ..
             } => {
                 let left = self.bind_expr(left)?;
                 let right = self.bind_expr(right)?;
                 let (affinity, collation) = comparison_rules(&left, &right);
+                // **`DISTINCT FROM` inverts the sense, and it was being
+                // dropped.** `a IS b` is already NULL-safe equality, so
+                // `a IS NOT DISTINCT FROM b` is `a IS b` and
+                // `a IS DISTINCT FROM b` is `a IS NOT b`. Binding the keyword
+                // away left `1 IS DISTINCT FROM NULL` meaning `1 IS NULL` -
+                // 0 where SQLite answers 1, and 0 again for
+                // `1 IS NOT DISTINCT FROM 1`, so both spellings answered the
+                // opposite of the truth.
+                let negated = negated != distinct_from;
                 Ok(BoundExpr::Is {
                     negated,
                     left: Box::new(left),
@@ -4465,18 +4491,26 @@ fn apply_collation(expr: BoundExpr, collation: Collation) -> BoundExpr {
 /// does rather than failing, and a hexadecimal literal wraps into `i64`, which
 /// is also what SQLite does.
 fn integer_literal(text: &[u8]) -> BoundExpr {
-    if text.len() > 2
-        && text.first() == Some(&b'0')
-        && text
+    // The sign is read off first, so `0x` is still recognised under one: the
+    // binder folds a unary minus into the literal (see `Expr::Unary`), and
+    // `-0x10` arrives here as `-0x10` rather than as an operator over `0x10`.
+    let (negative, digits) = match text.first() {
+        Some(b'-') => (true, text.get(1..).unwrap_or(&[])),
+        _ => (false, text),
+    };
+    if digits.len() > 2
+        && digits.first() == Some(&b'0')
+        && digits
             .get(1)
             .is_some_and(|byte| byte.eq_ignore_ascii_case(&b'x'))
     {
         let mut value: u64 = 0;
-        for byte in text.get(2..).unwrap_or(&[]) {
+        for byte in digits.get(2..).unwrap_or(&[]) {
             let digit = (*byte as char).to_digit(16).unwrap_or(0) as u64;
             value = value.wrapping_mul(16).wrapping_add(digit);
         }
-        return BoundExpr::Integer(value as i64);
+        let value = value as i64;
+        return BoundExpr::Integer(if negative { value.wrapping_neg() } else { value });
     }
     let cleaned: Vec<u8> = text.iter().copied().filter(|byte| *byte != b'_').collect();
     let (value, syntax) =

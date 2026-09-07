@@ -780,6 +780,13 @@ pub struct Pattern {
     pub pattern: Box<dyn Eval>,
     /// The `ESCAPE` argument, for `LIKE`.
     pub escape: Option<Box<dyn Eval>>,
+    /// Whether `LIKE` compares ASCII letters exactly.
+    ///
+    /// `PRAGMA case_sensitive_like`, read from the catalog when the expression
+    /// was translated. It is a compile-time property because the pragma empties
+    /// the statement cache when it changes, exactly as `foreign_keys` does -
+    /// so a statement compiled under one setting is never run under the other.
+    pub case_sensitive: bool,
 }
 
 impl Eval for Pattern {
@@ -804,7 +811,9 @@ impl Eval for Pattern {
         let subject = eval::text_bytes(&to_value(operand.get()), ENCODING);
         let pattern_bytes = eval::text_bytes(&to_value(pattern.get()), ENCODING);
         let matched = match self.kind {
-            PatternKind::Like => pattern::like(&pattern_bytes, &subject, escape),
+            PatternKind::Like => {
+                pattern::like_folding(&pattern_bytes, &subject, escape, !self.case_sensitive)
+            }
             PatternKind::Glob => pattern::glob(&pattern_bytes, &subject),
         };
         Ok(Computed::Borrowed(Datum::Int(i64::from(
