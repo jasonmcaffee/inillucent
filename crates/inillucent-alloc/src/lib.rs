@@ -266,7 +266,10 @@ mod tests {
             Some(CLASSES - 1)
         );
         // Too large, too aligned, and too small to hold the link.
-        assert_eq!(class_of(Layout::from_size_align(LARGEST + 1, 8).unwrap()), None);
+        assert_eq!(
+            class_of(Layout::from_size_align(LARGEST + 1, 8).unwrap()),
+            None
+        );
         assert_eq!(class_of(Layout::from_size_align(32, 32).unwrap()), None);
         assert_eq!(class_of(Layout::from_size_align(4, 4).unwrap()), None);
     }

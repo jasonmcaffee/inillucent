@@ -2588,7 +2588,8 @@ impl ImportedDatabase {
         entries
             .iter()
             .find(|held| {
-                held.entry.kind == ObjectKind::Table && held.entry.name.to_ascii_lowercase() == folded
+                held.entry.kind == ObjectKind::Table
+                    && held.entry.name.to_ascii_lowercase() == folded
             })
             .and_then(|held| self.handle_of(at, held.entry.tree_id))
     }
@@ -2637,12 +2638,8 @@ impl ImportedDatabase {
                         .find(|index| index.folded == folded)?
                         .clone()
                 } else {
-                    inillucent_catalog::load::index_from_create_sql(
-                        &held.entry.sql,
-                        &table,
-                        root,
-                    )
-                    .ok()?
+                    inillucent_catalog::load::index_from_create_sql(&held.entry.sql, &table, root)
+                        .ok()?
                 };
                 index.root = root;
                 let (columns, layout) = index_shape(&table, &index, root);
@@ -3963,7 +3960,11 @@ impl ImportedDatabase {
                     .ok_or_else(|| misuse("a view delete with no query"))?;
                 let plan = plan_select_with((**rows).clone(), self.levers);
                 let prepared = physical::prepare_any(&plan, self)?;
-                Ok(Cached::Delete(statement, Box::new(plan), Box::new(prepared)))
+                Ok(Cached::Delete(
+                    statement,
+                    Box::new(plan),
+                    Box::new(prepared),
+                ))
             }
             BoundStatement::Delete(statement) => {
                 let (plan, prepared) = self.keys_plan(

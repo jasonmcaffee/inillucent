@@ -305,17 +305,19 @@ pub static CAPABILITIES: &[Capability] = &[
             sql: "CREATE TEMP TABLE cap_temp (a INTEGER)",
         },
     },
-    // —— what it does not ————————————————————————————————————————
     Capability {
         name: "strict_tables",
-        support: Support::No,
-        note: "STRICT is parsed and not enforced: a table declared STRICT still takes a \
-               value of the wrong type.",
+        support: Support::Yes,
+        note: "STRICT is enforced on write, after the column's affinity has been applied \
+               (task-1845): an integer written to a TEXT column becomes text and is \
+               accepted, and a value still of the wrong class is refused with \
+               SQLITE_CONSTRAINT_DATATYPE.",
         probe: Probe::Refuses {
             setup: &["CREATE TABLE cap_strict (a INTEGER) STRICT"],
             sql: "INSERT INTO cap_strict VALUES ('not a number')",
         },
     },
+    // —— what it does not ————————————————————————————————————————
     Capability {
         name: "add_column_default",
         support: Support::Yes,

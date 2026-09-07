@@ -224,14 +224,11 @@ impl Shell {
 
     /// Runs a statement and collects its column names and rows.
     pub fn collect(&self, sql: &str) -> Result<(Vec<String>, Vec<Vec<Value<'static>>>), Failure> {
-        let mut statement = self
-            .connection()
-            .prepare(sql)
-            .map_err(|error| Failure {
-                message: reason(&error),
-                offset: error.sql_offset(),
-                compiling: true,
-            })?;
+        let mut statement = self.connection().prepare(sql).map_err(|error| Failure {
+            message: reason(&error),
+            offset: error.sql_offset(),
+            compiling: true,
+        })?;
         let mut rows = Vec::new();
         loop {
             match statement.step() {

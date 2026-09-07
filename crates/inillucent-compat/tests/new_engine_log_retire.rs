@@ -128,7 +128,8 @@ fn rows(database: &mut ImportedDatabase) -> i64 {
 #[test]
 fn a_checkpoint_reclaims_the_log() {
     let path = scratch("reclaims");
-    let mut database = ImportedDatabase::create(path.clone(), PAGE, FRAMES).expect("a fresh database");
+    let mut database =
+        ImportedDatabase::create(path.clone(), PAGE, FRAMES).expect("a fresh database");
     fill(&mut database, 13);
     let (before_count, before_bytes) = segments(&path);
     assert!(
@@ -157,7 +158,8 @@ fn a_checkpoint_reclaims_the_log() {
 #[test]
 fn work_after_the_checkpoint_survives_an_abandoned_database() {
     let path = scratch("after-checkpoint");
-    let mut database = ImportedDatabase::create(path.clone(), PAGE, FRAMES).expect("a fresh database");
+    let mut database =
+        ImportedDatabase::create(path.clone(), PAGE, FRAMES).expect("a fresh database");
     fill(&mut database, 10);
     let checkpointed = rows(&mut database);
     database.checkpoint().expect("the checkpoint runs");
@@ -174,7 +176,8 @@ fn work_after_the_checkpoint_survives_an_abandoned_database() {
     // written since the checkpoint is the log.
     drop(database);
 
-    let mut recovered = ImportedDatabase::open(path.clone(), PAGE, FRAMES).expect("the file reopens");
+    let mut recovered =
+        ImportedDatabase::open(path.clone(), PAGE, FRAMES).expect("the file reopens");
     assert_eq!(
         rows(&mut recovered),
         expected,

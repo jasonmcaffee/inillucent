@@ -161,13 +161,7 @@ impl ImportedDatabase {
                 create_sql,
                 select_sql,
                 ..
-            } => self.create_table_as_select(
-                &name,
-                exists,
-                if_not_exists,
-                create_sql,
-                &select_sql,
-            ),
+            } => self.create_table_as_select(&name, exists, if_not_exists, create_sql, &select_sql),
             // **`USING inillucent_hnsw` is sugar for a store plus a promise.**
             // The store is an ordinary `inillucent_search` virtual table over
             // the same HNSW `inillucent-core` builds for the retrieval engine,

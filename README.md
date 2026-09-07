@@ -17,12 +17,12 @@ file can hold ordinary tables and a hybrid index that commits and rolls back wit
 engine links another database: the only SQLite in the tree is a pinned 3.53.4 build run as a
 child-process oracle (`docs/dependency-policy.md`, enforced by a test).
 
-**This document was rewritten on 2026-09-07 (task-1843) from measurements taken on that day at commit
-`d885e91`, not from what earlier tickets reported.** Every gate below was re-run: four 30-round medium
-runs, one each at small and large, the read gate, the search gate, the vector probe, the two memory
-instruments, and a 61-case differential probe against the pinned `sqlite3`. Where a number is quoted
-from a ticket rather than re-measured, the ticket is named and the reason is given. The raw output is
-under `_agent_output/task-1843-inillucent-review-2/`.
+**This document was rewritten on 2026-09-07 (task-1843) from measurements taken that day at commit
+`d885e91`, and updated the same day by task-1845, which implemented the plan it produced.** Every
+performance number here is from task-1845's own four 30-round medium runs; every semantic claim is
+from `crates/inillucent-compat/tests/semantics.rs`, which is the review's differential probe turned
+into a checked-in test rather than a script that was run once. Where a number is quoted from an
+earlier ticket rather than re-measured, the ticket is named and the reason is given.
 
 ## Where it stands against the goal
 
@@ -31,12 +31,12 @@ similar to pgvector. Measured against that, today:
 
 | goal | state | evidence |
 |---|---|---|
-| Faster than SQLite | **Yes on Windows at 100k rows and up.** Weighted geomean 3.20x-3.28x at medium over four 30-round runs, lower bounds **3.11x, 3.20x, 3.20x, 3.14x** against a 3.00x bar, 30 of 30 workloads digest-equal on every run; **4.06x (low 3.85x) at large**; 2.56x (low 2.51x) at small. On Linux the same binary was 1.53x at medium (task-1838 §5, not re-measured here). | this ticket's four-run gate; `fullgate-large.txt`, `fullgate-small.txt` |
-| No family slower than SQLite | **No. Four families are under the 1.00x floor**, on every run: `open.prepare` 0.75x-0.79x, `schema` 0.52x-0.56x, `extension` 0.75x-0.78x, and `transaction` 0.90x/0.93x on two runs of four. The contract's floor is not met, and has not been met by any ticket in this sprint. | `medium-summary.txt` |
-| Same features as SQLite | **Close on the surface, not on the semantics.** 47 of 50 inventoried constructs run. But a 61-case differential probe found **26 differences, of which nine are wrong answers rather than refusals** — `CHECK` unenforced, `STRICT` unenforced, **column affinity not applied on write**, `AUTOINCREMENT` reusing a deleted key, and three built-in functions computing a different value. | [What it gets wrong](#what-it-gets-wrong-and-what-it-refuses) |
-| Same durability and isolation | **Yes, single process, one writer** — with one leak: **a checkpoint never retires a log segment**, so a database's log grows without bound. WAL with group commit, snapshot isolation, ARIES-style redo recovery, undo for `ROLLBACK`/`SAVEPOINT`, crash campaigns under a deterministic simulator. Multi-process access and SQLite's file format are deliberate non-goals. | [Disk](#disk) |
+| Faster than SQLite | **Yes on Windows at 100k rows and up, and by a wider margin since task-1845.** Weighted geomean 3.80x-3.91x at medium over four 30-round runs, lower bounds **3.74x, 3.75x, 3.88x, 3.44x** against a 3.00x bar, 30 of 30 workloads digest-equal on every run. It was 3.20x-3.28x (lows 3.11x-3.20x) before the engine's binaries were given a size-classed free list as their global allocator. On Linux the same binary was 1.53x at medium (task-1838 §5, not re-measured since). | task-1845's four-run gate |
+| No family slower than SQLite | **Nine of ten. `schema` is the one left**, at 0.46x-0.58x. `open.prepare` (0.78x -> 1.06x), `extension` (0.68x -> 1.00x-1.03x) and `transaction` (0.90x -> 1.20x) all crossed the floor in task-1845. `CREATE INDEX` at medium is 49.9 ms against SQLite's 30.8, and it is accounted for: scan 13.4, sort 5.9, pack 15.8, and a 6.8 ms `seal()` both engines pay under `synchronous = FULL`. Closing it needs the bulk builder to take pre-encoded keys. | task-1845's four-run gate; `indexprofile` |
+| Same features as SQLite | **No wrong answers left, and three refusals.** 48 of 50 inventoried constructs run. The differential probe is now a checked-in test of 92 cases (`semantics.rs`), **89 of which agree byte for byte**; every one of the nine wrong answers is closed. What still differs is three `CREATE INDEX` forms - partial, on an expression, and on a `WITHOUT ROWID` table - and each is a refusal rather than a wrong answer. | [What it gets wrong](#what-it-gets-wrong-and-what-it-refuses) |
+| Same durability and isolation | **Yes, single process, one writer.** A checkpoint retires the segments below it since task-1845, so the same 200,000 rows are 15.9 MB rather than 110.5 MB - 1.83x SQLite's 8.7 MB, where it was 12.7x. WAL with group commit, snapshot isolation, ARIES-style redo recovery, undo for `ROLLBACK`/`SAVEPOINT`, crash campaigns under a deterministic simulator. Multi-process access and SQLite's file format are deliberate non-goals. | [Disk](#disk) |
 | Embedding search like pgvector | **Yes, and graded better than pgvector on 15 of 17 primary comparisons** with zero worse; in production on a 598,560-chunk mailbox at recall 1.000 and 27 ms p95. Reachable from ordinary SQL: a `VECTOR(N)` column, `vector_distance_cos`/`_l2`/`vector_dot`, `CREATE INDEX ... USING inillucent_hnsw`, and `ORDER BY vector_distance_cos(v, ?) LIMIT k` planned onto the index at **0.98x** the cost of querying the store directly. | `inillucent-scorecard.md`, task-1775, this ticket's `vectorprobe.txt` |
-| One engine, one repository that builds | **No, and the second half is new.** `inillucent::Database` reaches the new engine, but the old engine is still in the tree awaiting task-1837's driver — and `main` **does not build from a fresh clone**, because the committed `Cargo.toml` names two workspace members in an untracked `drivers/` directory. | [Repository layout](#repository-layout) |
+| One engine, one repository that builds | **Half.** The repository builds from a clone again - `drivers/` is committed, and `harness.rs` now asserts every path in `[workspace] members` exists, so the next crate added before it is committed fails on the machine that added it. `inillucent::Database` reaches the new engine; the old engine is still in the tree awaiting task-1837's driver. | [Repository layout](#repository-layout) |
 
 The improvement plan for every row that is not green is `tasks/rust-db-phase-2-tdd.md`, whose Phase 3
 section was written from this review.
@@ -95,54 +95,72 @@ forbid `unsafe`.
 ### What it gets wrong, and what it refuses
 
 A refusal is visible and an application can work around it. A wrong answer is not. This section is
-ordered by that difference, and every row was reproduced on 2026-09-07 by running the same script
-through `inillucent-shell` and the pinned `sqlite3` (`_agent_output/task-1843-inillucent-review-2/semantics/`).
+ordered by that difference. It is no longer a report: the 92 cases behind it are
+`crates/inillucent-compat/tests/semantics.rs`, which runs each script through `inillucent-shell` and
+the pinned `sqlite3` and compares every byte of both streams. **89 of the 92 agree.**
 
-**Wrong answers — nine of them, in three groups.**
+**Wrong answers: none.** All nine the second review found were closed by task-1845, and the test above
+is what keeps them closed - each case declares `Agrees` or `Differs`, so a construct that changes its
+mind in either direction fails until its row is moved.
 
-| construct | inillucent | SQLite 3.53.4 |
+| construct | was | now |
 |---|---|---|
-| `b INTEGER CHECK (b > 0)`, then `INSERT ... VALUES (1, -5)` | **stores −5** | `CHECK constraint failed: b > 0` |
-| the same constraint under `UPDATE` | **stores −1** | refuses, row unchanged |
-| `CREATE TABLE s(x INTEGER) STRICT`, then `INSERT ... VALUES ('abc')` | **stores the text** | `cannot store TEXT value in INTEGER column s.x` |
-| `a INTEGER`, `INSERT ... VALUES ('42')` | `typeof(a)` is **`text`** | `integer` |
-| `a TEXT`, `INSERT ... VALUES (42)` | `typeof(a)` is **`integer`** | `text` |
-| `a REAL`, `INSERT ... VALUES (1)` | `typeof(a)` is **`integer`**, prints `1` | `real`, prints `1.0` |
-| `INTEGER PRIMARY KEY AUTOINCREMENT`, insert, delete, insert | **reuses key 1** | allocates 2 |
-| `json_valid('{}')` | **0** | 1 |
-| `strftime('%Y-%W', '2024-03-01')` | **`2024-08`** | `2024-09` |
-| `printf('%05.2f', 3.14159)` | **`3.14`** | `03.14` |
+| `b INTEGER CHECK (b > 0)`, then `INSERT ... VALUES (1, -5)` | stored −5 | `CHECK constraint failed: b > 0` |
+| the same constraint under `UPDATE` | stored −1 | refuses, row unchanged |
+| `CREATE TABLE s(x INTEGER) STRICT`, then `INSERT ... VALUES ('abc')` | stored the text | `cannot store TEXT value in INTEGER column s.x` |
+| `a INTEGER`, `INSERT ... VALUES ('42')` | `typeof(a)` was `text` | `integer` |
+| `a TEXT`, `INSERT ... VALUES (42)` | `typeof(a)` was `integer` | `text` |
+| `a REAL`, `INSERT ... VALUES (1)` | `typeof(a)` was `integer`, printed `1` | `real`, prints `1.0` |
+| `INTEGER PRIMARY KEY AUTOINCREMENT`, insert, delete, insert | reused key 1 | allocates 2 |
+| `json_valid('{}')` | 0 | 1 |
+| `strftime('%Y-%W', '2024-03-01')` | `2024-08` | `2024-09` |
+| `printf('%05.2f', 3.14159)` | `3.14` | `03.14` |
 
-Three of these are one defect each in a place the code names precisely, and the first two are the
-same shape as the `NOT NULL` hole task-1838 found and fixed:
+**What they turned out to be**, because three of them were not what they looked like:
 
-- **`CHECK` is collected, bound, and never evaluated.** `collect_checks` fills `TableInfo::checks`
-  and `bind_checks` turns them into `BoundInsert::checks`, but `inillucent-exec` never reads that
-  field: `declarations_are_met` (`crates/inillucent-exec/src/dml.rs`) enforces the `VECTOR(N)` width
-  and `NOT NULL`, and nothing else. The old VM engine compiles checks; the engine that ships does not.
-- **`STRICT` is validated at DDL time and unenforced at write time.** `check_strict` in
-  `inillucent-sql/src/directive.rs` refuses a `STRICT` table whose columns are not from the allowed
-  type set; the extended code `SQLITE_CONSTRAINT_DATATYPE` exists and is only ever raised for a vector
-  of the wrong width.
-- **Column affinity is not applied on the way in.** This is the one to read twice: it is not a missing
-  feature, it is the type system. SQLite converts a value to the column's affinity before storing it;
-  this engine stores what it was given. Every `typeof()`, every comparison between a stored `'42'` and
-  a literal `42`, and every index ordering over a column whose rows are of mixed storage class follows
-  from that one difference.
+- **`CHECK`, `STRICT` and affinity are one change, not three**, and the order between them is
+  load-bearing. SQLite applies affinity first, then `NOT NULL` over every column, then the `STRICT`
+  type check, then `CHECK`, then the unique indexes - probed against 3.53.4 rather than assumed. So
+  `CREATE TABLE s(a INT, b TEXT NOT NULL) STRICT; INSERT INTO s(a) VALUES ('x')` reports the missing
+  `b`, and `INSERT INTO s(b) VALUES (1)` *succeeds*, because affinity has already made it text by the
+  time `STRICT` looks. A `STRICT` implementation written before affinity would have been wrong in both
+  directions. `WriteDeclarations` (`crates/inillucent-exec/src/declared.rs`) holds all three, compiled
+  once per statement.
+- **The rowid alias needed affinity too.** `INSERT INTO t(id) VALUES ('42')` on an
+  `INTEGER PRIMARY KEY` is row 42 in SQLite. The key path's rule is not *no affinity*, it is
+  *affinity, and then a refusal rather than a keep for what does not convert*.
+- **`json_valid` was collateral damage from an optimisation.** The executor swaps a text document for
+  its parsed JSONB before the call, which is invisible for every function whose question is about the
+  *document* and wrong for the one whose question is about the **text**: its flags ask whether the
+  argument was RFC-8259, JSON5 or JSONB. It was wrong in both directions - `json_valid('{}')` was 0
+  against 1, and `json_valid('{}', 4)` was 1 against 0.
+- **`printf`'s zero-padding rule was C's, not SQLite's.** C ignores the `0` flag for `d i o u x X`
+  when a precision is given; SQLite's own printf does not implement that, and renders `%08.3d` of 42
+  as `00000042`. The guard was wrong for the integer conversions it was written for as well as for
+  `%05.2f`.
+- **`strftime('%W')`** counted from the year's first *Sunday* and was off by one besides. SQLite's own
+  arithmetic is transcribed now, and `%U`, `%V` and `%G` are implemented rather than echoed back as
+  literal text - fixing one member of a family and assuming the rest is how the next three stay
+  hidden.
 
-**One hang.** `SELECT ... FROM` a `generate_series` virtual table never returns, and `LIMIT 3` does
-not stop it — one run held about 1.2 cores and a growing working set for ten minutes before it was
-killed. Two causes, both worth naming:
+**The hang is fixed, and it was two halves of one root.** `SELECT value FROM generate_series(1)
+LIMIT 3` used to run past a 25-second timeout - one run held about 1.2 cores and a growing working set
+for ten minutes. It answers in 55 ms.
 
-- `TreeCatalog::virtual_rows` returns `Option<Vec<Vec<OwnedDatum>>>`, so **a virtual-table scan is
-  materialised in full** before any operator above it runs. The doc comment says so and argues it is
-  safe "for the shapes a module answers"; `generate_series` is a shape it is not safe for.
-- With no `stop` constraint the module defaults to 4,294,967,295 rows, and there is no `stop`
-  constraint because **the eponymous table-valued form does not exist on the new engine**:
-  `FROM generate_series(1, 10)`, `FROM json_each(...)` and `FROM pragma_table_info('t')` are all
-  `no such table`, so the only way in is `CREATE VIRTUAL TABLE ... USING generate_series(1, 10)`,
-  which passes its arguments to `connect` and drops them. `json_each` refuses that form outright and is
-  therefore unreachable from SQL altogether.
+- `TreeCatalog::virtual_rows` returned `Option<Vec<Vec<OwnedDatum>>>`, so a virtual-table scan was
+  materialised in full before any operator above it ran, and a `LIMIT` cannot stop a scan that has
+  already finished. It is `virtual_cursor` now: the module's rows go down the chain a batch at a time
+  and the cursor is abandoned on `Flow::Stop`, the way `scan.rs` abandons a b-tree scan.
+- There was no `stop` constraint to bound it because **the eponymous table-valued form did not
+  exist**. It does: `FROM generate_series(1, 10)`, `FROM json_each(...)` and
+  `FROM pragma_table_info('t')` all bind. The binder needed nothing - `bind_table_arguments` already
+  turned the arguments into `Eq` constraints on the module's hidden columns, which is what
+  `best_index` consumes - only the catalog had to carry the modules. `json_each`, which refuses
+  `CREATE VIRTUAL TABLE` outright, was unreachable from SQL by any route and now is not.
+
+The tests for it carry a **deadline**, because the failure mode is a hang and an assertion on rows is
+never reached by a statement that does not return: `new_engine_vtab_stream.rs` runs each case on its
+own thread and fails on the deadline.
 
 **Refusals, by name.** These say what they are:
 
@@ -150,18 +168,17 @@ killed. Two causes, both worth naming:
 |---|---|
 | `VACUUM`, `VACUUM INTO` | refused, and named in the message |
 | plain `EXPLAIN` | refused on purpose: there is no bytecode to list. `EXPLAIN QUERY PLAN` is answered |
-| table-valued pragmas (`pragma_table_info('t')`) and eponymous virtual tables | `no such table` |
-| `CREATE TABLE ... AS SELECT` | `unsupported: CREATE TABLE ... AS SELECT` |
-| `UPDATE ... FROM` | `unsupported: UPDATE ... FROM` |
-| `WITH` on `INSERT`/`UPDATE`/`DELETE` | `unsupported: WITH on INSERT` |
-| partial indexes (`CREATE INDEX ... WHERE`) | `unsupported: partial indexes` |
-| indexes on expressions | `unsupported: indexes on expressions` |
-| row values (`(a, b) = (1, 2)`) | `unsupported: row values` |
-| `CREATE INDEX` on a `WITHOUT ROWID` table | refused |
-| `INSTEAD OF` trigger writing through a view | `no layout imported for v` — the trigger is created, the write fails |
-| undoing a `DROP TABLE` inside a transaction | refused, **and it leaves the connection unable to read the table** |
-| `CREATE TEMP TABLE` **through `inillucent-shell`** | reports success, then `no such table`. The engine's own `Connection` has temp objects since task-1844; the shell's path does not reach them |
+| partial indexes (`CREATE INDEX ... WHERE`) | `unsupported: partial indexes`. The predicate is parsed and stored by the loader; what is missing is maintaining the entries and an implication check before the planner may use it |
+| indexes on expressions | `unsupported: indexes on expressions`. Same shape: `IndexColumnInfo::expr_sql` is there, the write path and the planner are not |
+| `CREATE INDEX` on a `WITHOUT ROWID` table | refused. An index on one has the table's primary key as its trailing entry rather than a rowid, and every tree here appends exactly one rowid column |
 | a second process on the same file, a second writer, SQLite's file format, the C ABI on the new engine | design non-goals of task-1816 |
+
+**Closed by task-1845**, each byte-compared against `sqlite3` including its refusals:
+`CREATE TABLE ... AS SELECT` (the stored text is synthesised from the query's result columns, down to
+`CREATE TABLE w("1")` for `SELECT 1`), `UPDATE ... FROM`, `WITH` on `INSERT`/`UPDATE`/`DELETE`, row
+values in every comparison and their `IN` form, writing through an `INSTEAD OF` trigger, the
+table-valued pragmas and eponymous virtual tables, `CREATE TEMP TABLE` through the shell, and undoing
+a `DROP TABLE` inside a transaction.
 
 ### The retrieval engine
 
@@ -341,24 +358,29 @@ Per-workload CPU is reported by the gate too, but **it is quantised to the Windo
 The same 200,000 rows, built through `INSERT ... SELECT` the way an application builds them, then
 `PRAGMA wal_checkpoint`, closed, reopened and checkpointed again:
 
-| | inillucent | SQLite 3.53.4 |
-|---|---|---|
-| the data file | 27.6 MB | 18.4 MB |
-| its log | **151.5 MB across three segments** | 0 |
-| total on disk | **179.1 MB** | 18.4 MB |
-| open + `SELECT 1`, median of 5 | 18 ms | 7 ms |
+| | inillucent, before | inillucent, now | SQLite 3.53.4 |
+|---|---|---|---|
+| the data file | 15.9 MB | 15.9 MB | 8.7 MB |
+| its log | **94.6 MB across two segments** | **0.0 MB** | 0 |
+| total on disk | **110.5 MB** | **15.9 MB** | 8.7 MB |
 
-**The data file is 1.50x SQLite's, which is the honest number and a large improvement** — the previous
-README measured the same table at 221 MB against 10.7, because every append split its leaf at 32 rows.
-That is fixed.
+**1.83x SQLite, where it was 12.7x.** Both columns are the same script against the same fixture, the
+"before" one run against a release build of the tree as it stood before task-1845.
 
-**The log is a defect, and it is not a tuning question: a checkpoint never retires a segment.**
-`Wal::retire_segments_below` exists, is documented as "called after a checkpoint", is covered by
-`inillucent-wal/tests/recovery.rs` — and is called from exactly one place, `inillucent-txn`'s own
-engine, which is not the engine that ships. `inillucent-engine`'s `checkpoint()` calls
-`note_checkpoint`, which appends a checkpoint record and returns. So a database's log grows for as long
-as the database is written to, survives a checkpoint, a clean close and a reopen, and is never
-reclaimed. On this fixture that is 5.5x the data file after a single build.
+**Calling `retire_segments_below` was necessary and not sufficient**, and the gap is worth recording
+because it reads as done. `Wal::retire_segments_below` existed, was documented as "called after a
+checkpoint", was covered by six cases in `inillucent-wal/tests/recovery.rs`, and was called from
+exactly one place - `inillucent-txn`'s own engine, which is not the engine that ships. Wiring it into
+`Database::checkpoint` reclaimed 67.1 MB and left 27.5 MB behind, for ever, through a close and a
+reopen and a second checkpoint: the function deletes a segment only when *every* record in it is below
+the checkpoint LSN, and the segment being appended to never is, because `note_checkpoint` writes the
+checkpoint record into it. `Wal::roll_segment` moves the boundary to the checkpoint point first, so
+everything behind it becomes redundant and goes.
+
+Nothing is deleted before the data file holds the pages, a segment holding anything recovery still
+needs is left alone, and `new_engine_log_retire.rs` proves both - including that a crash either side
+of a retirement recovers the same database. The reclaim case fails on the tree before this change
+(`the checkpoint reclaimed nothing: 6779664 -> 6779976`).
 
 For comparison, the Phase 3 gate fixtures — which are **imported** rather than built through SQL — are
 16.8 MB as a SQLite file against 23.7 MB as an `.rdb` at medium, and 93.7 MB against 131.2 MB at
@@ -383,8 +405,8 @@ two paths.
 | threads | single-threaded | serialised or multi-thread |
 | rollback | undo buffer of before-images, rows and schema; a `DROP` cannot be undone inside a transaction, and attempting it leaves the connection unable to read the table | rollback journal or WAL |
 | triggers, foreign keys | yes; `BEFORE`/`AFTER`/`INSTEAD OF`, `FOR EACH ROW`, `WHEN`, `RAISE`, recursion capped at 1,000 frames. Foreign keys compile to triggers, so `PRAGMA foreign_keys`, `DEFERRABLE INITIALLY DEFERRED`, `ON DELETE CASCADE`/`SET NULL`/`SET DEFAULT`/`RESTRICT` and `PRAGMA foreign_key_check` all run through the one mechanism | yes |
-| extensions | JSON, FTS5, R-Tree, `inillucent_search`. `json_each` and `generate_series` are registered and unreachable | JSON1, FTS3/4/5, R-Tree, geopoly, session, RBU, … |
-| table-valued functions | none | `pragma_*`, `json_each`, `generate_series`, … |
+| extensions | JSON, FTS5, R-Tree, `inillucent_search` | JSON1, FTS3/4/5, R-Tree, geopoly, session, RBU, … |
+| table-valued functions | `pragma_*`, `json_each`, `json_tree`, `generate_series`, and any eponymous module a caller registers | `pragma_*`, `json_each`, `generate_series`, … |
 | vector search | `VECTOR(N)` columns, `vector_distance_cos`/`_l2`/`vector_dot`, `CREATE INDEX ... USING inillucent_hnsw`, and a planner rule that turns `ORDER BY vector_distance_cos(v, ?) LIMIT k` into a probe of that index followed by an exact rescore. Recall **1.000** against an exhaustive cosine; the SQL path costs **0.98x** the store's own query | none; pgvector is an extension PostgreSQL loads |
 | C API | `inillucent-capi` exports 133 `sqlite3_*` symbols, over the **old** engine, which is now `inillucent-legacy`; a driver and C ABI for the new engine is task-1837 | `sqlite3.h` |
 | shell | `inillucent-shell`, a `sqlite3`-shaped shell | `sqlite3` |
@@ -460,59 +482,59 @@ recognises: only the cosine is wired to the index, because cosine is the measure
 In priority order for the next ticket, each with the evidence already in the tree. The plan for each
 is `tasks/rust-db-phase-2-tdd.md`.
 
-1. **The repository does not build from a clone.** `Cargo.toml` names `drivers/inillucent-driver` and
-   `drivers/inillucent-driver-capi` as workspace members; `drivers/` is untracked and not ignored, so
-   `cargo metadata` on a fresh clone exits 101 before reading a line of Rust. Either commit the
-   directory or take the members out until task-1837 lands.
-2. **Four silent wrong answers in the write path**: `CHECK` unenforced, `STRICT` unenforced, column
-   affinity not applied on write, `AUTOINCREMENT` reusing a deleted key. The first two have failing
-   tests already (`schema_forms.rs`'s `strict_tables_refuse_the_wrong_class` and
-   `strict_is_enforced_on_a_file_sqlite_wrote`); the affinity one has none, and is the largest of the
-   four because it changes what `typeof`, comparison and index ordering mean.
-3. **A `SELECT` over a virtual table cannot be bounded.** `virtual_rows` materialises the whole scan,
-   so `LIMIT` cannot stop it and `generate_series` hangs. The table-valued function form
-   (`FROM generate_series(1, 10)`, `FROM json_each(...)`, `FROM pragma_table_info('t')`) does not exist
-   at all, which is why `json_each` is unreachable from SQL and `generate_series` is unbounded.
-4. **The log is never reclaimed.** `Wal::retire_segments_below` is written, documented and tested, and
-   the shipping engine never calls it. 151.5 MB of segments survive a checkpoint on a 27.6 MB database.
-5. **The floor**: `open.prepare` 0.75x–0.79x, `schema` 0.52x–0.56x, `extension` 0.75x–0.78x,
-   `transaction` 0.90x–1.02x at medium; `write` 0.49x at small; `txn.large` 0.19x. The measurement
-   names the first item precisely — a `SELECT 1` compile makes 25 heap allocations, and on Windows the
-   CRT heap is 59% of it.
-6. **Linux**: 1.53x weighted where Windows is 3.20x–3.28x, and shown by experiment to be the same
-   absolute work the floor needs rather than a Linux-specific fix (task-1838 §5).
-7. **Three constructs still refused, and eight more that a SQLite application writes**: `VACUUM`,
-   plain `EXPLAIN`, table-valued pragmas; plus `CREATE TABLE ... AS SELECT`, `UPDATE ... FROM`, `WITH`
-   on DML, partial and expression indexes, row values, `CREATE INDEX` on a `WITHOUT ROWID` table, and
-   writing through an `INSTEAD OF` trigger.
-8. **`CREATE TEMP TABLE` through the shell** reports success and then `no such table`. The engine has
-   temp objects; the shell's path does not reach them.
-9. **Undoing a `DROP TABLE` inside a transaction** is refused *and* leaves the connection unable to
-   read the table afterwards — a refusal that damages the session is worse than one that does not.
-10. **Deleting the old engine.** Re-rooting is done: `inillucent` is a re-export of
-    `inillucent-engine`, and the old facade is `inillucent-legacy`. What is left is the deletion —
-    `inillucent-legacy`, `inillucent-capi`, `inillucent-session`, `inillucent-vm`,
-    `inillucent-transaction` and `inillucent-storage` minus its reader — and it is blocked on
-    **task-1837**'s driver, which is the C ABI that replaces `inillucent-capi`.
-11. **The retrieval index's footprint**: 3.83 GB resident for a 3.1 GB index of 598,560 chunks. The
-    postings are persisted and the graph build is parallel; nothing has tried to make the resident set
-    smaller.
-12. **Multi-process and multi-thread access**, deliberate non-goals of task-1816 that a SQLite
-    replacement will eventually be asked about.
+1. **`schema` is the one family under the 1.00x floor**, at 0.46x-0.58x. `CREATE INDEX main_label` at
+   medium is 49.9 ms against SQLite's 30.8, and it is accounted for stage by stage: scan 13.4 ms,
+   sort 5.9 ms, pack 15.8 ms (4.4 of it turning owned rows into borrowed ones), and a 6.8 ms `seal()`
+   which is a log sync both engines pay under `synchronous = FULL` - `record`, `rebuild_tables` and
+   `refresh_catalog` together are under 200 µs, so there is no waste hiding in the tail. Reaching
+   1.00x means scan + sort + pack falling from 35 ms to about 21, and the route is the one Phase 3
+   names: build from a sorted run of **pre-encoded keys** with a radix pass rather than comparisons,
+   and log one record per packed leaf. It is a change to `bulk_build_logged` and `pack_with`, whose
+   output is compared page for page against SQLite's index by existing tests, so it wants its own
+   ticket rather than the end of another one.
+2. **Three `CREATE INDEX` forms are still refused**: partial (`CREATE INDEX ... WHERE`), on an
+   expression, and on a `WITHOUT ROWID` table. The first two are half-built already - the loader
+   parses and stores `partial_sql` and `expr_sql` - and what is missing is maintaining the entries on
+   write and, before the planner may *use* either, an implication check for the predicate and
+   expression matching for the key. The third needs an index entry whose trailing part is the table's
+   primary key rather than a rowid, which every tree here currently appends exactly one of.
+3. **Linux**: 1.53x weighted where Windows is now 3.80x-3.91x, and shown by experiment to be the same
+   absolute work rather than a Linux-specific fix (task-1838 §5). The allocator that moved Windows
+   from 3.24x to 3.86x has not been measured there.
+4. **`txn.large` at 0.18x-0.27x and `write.insert.batch` at 0.51x-0.56x.** Both are inside met
+   families now, so neither blocks the floor, and both have a named plan in Phase 3's Part E: route
+   `UPDATE`'s read through the borrowing probe rather than the allocating `PagedTree::point`,
+   overwrite a same-width value in place, one log record per update; and keep delta entries sorted by
+   pre-encoded key and bisect.
+5. **`extension.fts.build` at 0.32x**, which is the module's own cost - task-1835 moved the query
+   path and the build path is what is left. It no longer holds the family under the floor, and one
+   attempt at it (holding the token run on the table and referring to tokens by index instead of
+   moving a `Vec<u8>` per token through the postings and the sort) measured **no change at all**
+   once the allocator was in, so the cost is elsewhere in the module.
+6. **Deleting the old engine.** Re-rooting is done: `inillucent` is a re-export of
+   `inillucent-engine`, and the old facade is `inillucent-legacy`. What is left is the deletion -
+   `inillucent-legacy`, `inillucent-capi`, `inillucent-session`, `inillucent-vm`,
+   `inillucent-transaction` and `inillucent-storage` minus its reader - and it is blocked on
+   **task-1837**'s driver, which is the C ABI that replaces `inillucent-capi`.
+7. **The retrieval index's footprint**: 3.83 GB resident for a 3.1 GB index of 598,560 chunks. The
+   postings are persisted and the graph build is parallel; nothing has tried to make the resident set
+   smaller.
+8. **Multi-process and multi-thread access**, deliberate non-goals of task-1816 that a SQLite
+   replacement will eventually be asked about.
 
-**The 18 failing tests, all accounted for.** `cargo test --workspace --no-fail-fast` runs 2,122 tests
-in 184 binaries: 2,104 pass, 18 fail, in four binaries.
+**The 17 failing tests, all accounted for**, and every one of them was failing before task-1845 too.
 
 | binary | count | what they are |
 |---|---|---|
-| `schema_forms.rs` | 14 | 7 need the pinned `sqlite3` to read a file this engine wrote (or the reverse), which task-1816 withdrew; 6 name a real gap — `STRICT` enforcement, `CREATE INDEX` on `WITHOUT ROWID`, writing through an `INSTEAD OF` trigger, `REINDEX`, `VACUUM`, `VACUUM INTO`; 1 is the chosen `EXPLAIN` refusal |
-| `planner.rs` | 2 | `sqlite_stat1` exchanged with the oracle: file-format interop of the same class as the sixteen tests retired to `_junk/` |
+| `schema_forms.rs` | 14 | **all 14 fail on the same thing**: they need the pinned `sqlite3` to read a file this engine wrote, or the reverse, which task-1816 withdrew as a requirement. Two of them (`strict_tables_refuse_the_wrong_class`, `strict_is_enforced_on_a_file_sqlite_wrote`) now get past every `STRICT` assertion in them and fail only at that step - the enforcement they were written for is in place, and `semantics.rs` and `cli.rs` cover it against the oracle without needing file-format interop |
+| `planner.rs` | 2 | `sqlite_stat1` exchanged with the oracle: file-format interop of the same class |
 | `ordering.rs` | 1 | a known tie-order difference |
 | `harness.rs` | 1 | the retrieval baseline, which drifted before this sprint |
 
-task-1844 recommended retiring the thirteen file-format ones in `schema_forms.rs` to `_junk/` the way
-the other sixteen were retired, keeping the `EXPLAIN QUERY PLAN` half as its own test, and filing the
-six real gaps as tickets. That recommendation is still open.
+task-1844's recommendation - retire the file-format cases in `schema_forms.rs` to `_junk/` the way the
+other sixteen were retired, and keep the rest as tests that drive the engine - is still open, and
+task-1845 strengthens it: all fourteen now fail for one reason, and it is a requirement the project
+has already dropped.
 
 ## Repository layout
 
@@ -541,7 +563,13 @@ above.
 
 ```sh
 cargo build --release
-cargo test --workspace --no-fail-fast        # 184 binaries, 2,122 tests; 18 red, all accounted for
+cargo test --workspace --no-fail-fast        # 181 binaries; 17 red, all accounted for
+
+# The gate binaries and the shell install `inillucent-alloc` as their global
+# allocator. It is part of the build the way fat LTO and one codegen unit are:
+# SQLite ships its own memory subsystem, and measuring a Rust workspace on the
+# platform allocator measures a build configuration rather than an engine.
+# task-1845 measured it at 3.24x -> 3.86x on the medium gate.
 
 pwsh tools/sqlite-reference.ps1              # the pinned SQLite 3.53.4 oracle (Windows)
 bash tools/sqlite-reference.sh               # Linux

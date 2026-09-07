@@ -945,6 +945,7 @@ mod tests {
                 std::rc::Rc::new(table(b"t", 0)),
                 std::rc::Rc::new(table(b"t", 1)),
             ],
+            eponymous: Vec::new(),
             generation: 7,
         };
         let found = catalog.find_table(None, b"t").expect("it resolves");

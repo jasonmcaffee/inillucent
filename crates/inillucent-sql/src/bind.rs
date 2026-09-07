@@ -3876,7 +3876,8 @@ impl<'a> Binder<'a> {
         // of its own. It is desugared here rather than carried into the plan
         // because there is nothing about it the executor would do differently:
         // the parts are ordinary comparisons over ordinary expressions.
-        if let (Some(lefts), Some(rights)) = (self.row_value_parts(left), self.row_value_parts(right))
+        if let (Some(lefts), Some(rights)) =
+            (self.row_value_parts(left), self.row_value_parts(right))
         {
             return self.bind_row_comparison(op, &lefts, &rights, self.ast.expr_span(left));
         }
@@ -4058,10 +4059,9 @@ impl<'a> Binder<'a> {
                 &bound_lefts,
                 &bound_rights,
             )))),
-            BinaryOp::Less
-            | BinaryOp::LessEqual
-            | BinaryOp::Greater
-            | BinaryOp::GreaterEqual => Ok(lexicographic_chain(op, &bound_lefts, &bound_rights, 0)),
+            BinaryOp::Less | BinaryOp::LessEqual | BinaryOp::Greater | BinaryOp::GreaterEqual => {
+                Ok(lexicographic_chain(op, &bound_lefts, &bound_rights, 0))
+            }
             _ => Err(ParseError::new(
                 ParseErrorKind::Refused("row value misused".to_string()),
                 span,
