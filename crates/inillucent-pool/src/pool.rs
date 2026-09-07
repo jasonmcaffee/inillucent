@@ -306,6 +306,11 @@ pub struct Pool {
     state: RefCell<State>,
     /// Where pages come from and go.
     file: Box<dyn VfsFile>,
+    /// The rollback journal, when `PRAGMA journal_mode` selected one.
+    ///
+    /// `None` is the write-ahead log, which is the default and costs a branch
+    /// per page write. See [`crate::journal`].
+    journal: RefCell<Option<crate::journal::Journal>>,
     /// How many pages the file holds.
     page_count: Cell<u64>,
     /// The most pages the pool holds at once, which `PRAGMA cache_size` sets.
@@ -446,6 +451,7 @@ impl Pool {
                 clock: Rng::new(0x5EED_0B0F_C0FF_EE01),
             }),
             file,
+            journal: RefCell::new(None),
             page_count: Cell::new(page_count),
             // The whole pool until `PRAGMA cache_size` says otherwise.
             budget: Cell::new(frames.max(1)),
@@ -1154,6 +1160,12 @@ impl Pool {
         };
         let translated = self.translate_swips(&mut image)?;
         page::checksum_page(&mut image)?;
+        // **The old image goes to the journal before the new one goes to the
+        // file**, and this is the one place either happens - so a page cannot
+        // reach the file by a route that skipped its pre-image, exactly as it
+        // cannot skip the write-ahead rule two lines above. In WAL mode the
+        // journal is not a rollback journal and this costs a branch.
+        self.journal_page(page)?;
         self.file
             .write_all_at(page.0.saturating_mul(self.page_size as u64), &image)
             .map_err(|error| error.into_db_error())?;
@@ -1542,6 +1554,11 @@ impl Pool {
     ///
     /// @param meta - the record to write, with its generation already bumped
     pub fn checkpoint(&self, meta: &Meta) -> DbResult<()> {
+        // **The journal is sealed before the first page moves.** Everything
+        // `save` wrote is in the file's buffers until this; a page image
+        // reaching the database before its pre-image reaches the disk is the
+        // one ordering a rollback journal exists to forbid.
+        self.seal_journal()?;
         self.flush()?;
         self.file
             .sync(SyncMode::Normal)
@@ -1557,7 +1574,62 @@ impl Pool {
             .sync(SyncMode::Normal)
             .map_err(|error| error.into_db_error())?;
         Counters::add(&self.counters.writes, 2);
+        // **And disposed of after the meta record is durable**, which is the
+        // moment the commit exists. A journal removed a line earlier would
+        // leave a crash with a file it could neither trust nor repair.
+        self.finish_journal()?;
         Ok(())
+    }
+
+    /// Saves one page's current contents to the rollback journal.
+    ///
+    /// Reads the page **from the file**, not from the pool: the pre-image the
+    /// journal needs is what is durably there, and the frame holds the new
+    /// version. A page beyond the end of the file has no pre-image, which is
+    /// the right answer - restoring it would mean writing zeros over a page the
+    /// transaction created.
+    ///
+    /// @param page - the page about to be overwritten
+    fn journal_page(&self, page: PageId) -> DbResult<()> {
+        let mut journal = self.journal.borrow_mut();
+        let Some(journal) = journal.as_mut() else {
+            return Ok(());
+        };
+        if page.0 >= self.page_count.get() {
+            return Ok(());
+        }
+        let mut before = vec![0u8; self.page_size];
+        if self
+            .file
+            .read_exact_at(page.0.saturating_mul(self.page_size as u64), &mut before)
+            .is_err()
+        {
+            return Ok(());
+        }
+        journal.save(page, &before)
+    }
+
+    /// Puts a rollback journal in force, or takes it out of force.
+    ///
+    /// @param journal - the journal, or nothing for the write-ahead log
+    pub fn set_journal(&self, journal: Option<crate::journal::Journal>) {
+        *self.journal.borrow_mut() = journal;
+    }
+
+    /// Syncs the journal, which must happen before the first page is written.
+    pub fn seal_journal(&self) -> DbResult<()> {
+        match self.journal.borrow().as_ref() {
+            Some(journal) => journal.seal(),
+            None => Ok(()),
+        }
+    }
+
+    /// Disposes of the journal once the commit is durable.
+    pub fn finish_journal(&self) -> DbResult<()> {
+        match self.journal.borrow_mut().as_mut() {
+            Some(journal) => journal.finish(),
+            None => Ok(()),
+        }
     }
 
     /// Grows the file by one page and returns its id.
