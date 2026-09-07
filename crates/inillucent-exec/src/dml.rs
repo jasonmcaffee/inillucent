@@ -993,6 +993,14 @@ struct InsertPlan {
     rowid: Option<PlannedRowid>,
     /// The `DO UPDATE` assignments, by tree column.
     upsert: Vec<(usize, Box<dyn Eval>)>,
+    /// The `WHERE` on an upsert's `DO UPDATE`, when one was written.
+    ///
+    /// Evaluated over the row already there, which is what it is about:
+    /// `ON CONFLICT(a) DO UPDATE SET n = ? WHERE t.n > 500` updates only the
+    /// rows whose `n` is already over 500, and leaves the rest as they are
+    /// without raising. It used to be compiled nowhere and consulted nowhere,
+    /// so the arm ran for every conflicting row (task-1859 Part E).
+    upsert_filter: Option<Box<dyn Eval>>,
     /// The `RETURNING` expressions.
     returning: Vec<Box<dyn Eval>>,
 }
@@ -1057,6 +1065,7 @@ impl InsertPlan {
             (None, None) => None,
         };
         let mut upsert = Vec::new();
+        let mut upsert_filter = None;
         if let Some(clause) = &statement.upsert {
             if clause.do_update {
                 for assignment in &clause.assignments {
@@ -1069,6 +1078,9 @@ impl InsertPlan {
                         upsert.push((slot, space.compile(&assignment.value, params)?));
                     }
                 }
+                if let Some(filter) = &clause.filter {
+                    upsert_filter = Some(space.compile(filter, params)?);
+                }
             }
         }
         let mut returning = Vec::with_capacity(statement.returning.len());
@@ -1079,6 +1091,7 @@ impl InsertPlan {
             columns,
             rowid,
             upsert,
+            upsert_filter,
             returning,
         })
     }
@@ -1270,10 +1283,12 @@ fn write_one(
                 continue;
             }
             Resolution::Update => {
-                let updated = upsert_row(
+                // `None` is the arm's `WHERE` declining, which leaves the row
+                // as it is and writes nothing - the same outcome as
+                // `DO NOTHING`, and not an error.
+                return upsert_row(
                     statement, table, layout, space, plan, target, &clash, &row, indexes,
-                )?;
-                return Ok(Some(updated));
+                );
             }
             // `ABORT`, `FAIL` and `ROLLBACK` all raise here and differ only in
             // how much of what has been written goes back - which this layer
@@ -1557,7 +1572,7 @@ fn upsert_row(
     clash: &Conflict,
     excluded: &[OwnedDatum],
     indexes: IndexExprs<'_>,
-) -> DbResult<Row> {
+) -> DbResult<Option<Row>> {
     // **The row that is there is read only when something needs it.** An upsert
     // that assigns every column but the key, over a table with no index, and
     // whose assignments read only `excluded`, is a row the statement already
@@ -1579,6 +1594,18 @@ fn upsert_row(
         }
         blank
     };
+    // **The arm's own `WHERE`, tested against the row already there.** SQLite
+    // skips the update when it does not hold - the row stays as it is and
+    // nothing is raised - and this consulted it nowhere, so
+    // `ON CONFLICT(a) DO UPDATE SET n=? WHERE t.n > 500` updated every
+    // conflicting row. A silent wrong write, on the statement an application
+    // uses precisely to make an update conditional.
+    if let Some(filter) = &plan.upsert_filter {
+        let verdict = space.evaluate(filter.as_ref(), &[before.as_slice(), excluded])?;
+        if crate::expr::truth(&verdict.borrow()) != Some(true) {
+            return Ok(None);
+        }
+    }
     let mut after = before.clone();
     for (slot, eval) in &plan.upsert {
         let value = space.evaluate(eval.as_ref(), &[before.as_slice(), excluded])?;
@@ -1604,7 +1631,7 @@ fn upsert_row(
     // enough for `replace_row`: it carries the key the row is moving *from*,
     // which is all a removal needs, and that path has no index to maintain.
     replace_row(table, layout, target, &before, &after, indexes)?;
-    Ok(after)
+    Ok(Some(after))
 }
 
 /// Reports whether an upsert has to read the row it is replacing.
@@ -1641,6 +1668,11 @@ fn needs_before(
     let Some(clause) = &statement.upsert else {
         return true;
     };
+    // The arm's `WHERE` is about the row already there, so writing one without
+    // reading it is not an option when there is a filter to test.
+    if clause.filter.is_some() {
+        return true;
+    }
     clause.assignments.iter().any(|assignment| {
         let mut used = inillucent_sql::bind::ColumnUse::default();
         assignment

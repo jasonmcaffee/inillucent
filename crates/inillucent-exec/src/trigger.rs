@@ -235,7 +235,7 @@ pub fn fire(
             }
         }
         for statement in &trigger.body {
-            match run_body(statement, rows, slots, rowid, target, params, deeper) {
+            match run_body(statement, trigger, rows, slots, rowid, target, params, deeper) {
                 Ok(()) => {}
                 Err(error) if is_ignore(&error) => return Ok(Fired::SkipRow),
                 Err(error) => return Err(named(error, trigger)),
@@ -354,6 +354,7 @@ fn run_select(
 #[allow(clippy::too_many_arguments)]
 fn run_body(
     statement: &BoundTriggerStatement,
+    trigger: &BoundTrigger,
     rows: TriggerRows<'_>,
     slots: &[Option<usize>],
     rowid: Option<usize>,
@@ -361,6 +362,24 @@ fn run_body(
     params: &Params,
     depth: Depth,
 ) -> DbResult<()> {
+    // **`PRAGMA recursive_triggers` lives here, and it is one assignment.** A
+    // trigger body is *inlined* by the binder, and a trigger already being
+    // bound is skipped - which is what makes the inlining terminate, and is
+    // SQLite's behaviour with the pragma off. So a body statement that writes
+    // the trigger's own table carries no triggers at all, and a self-inserting
+    // trigger fired exactly once where SQLite recurses to
+    // `SQLITE_MAX_TRIGGER_DEPTH`.
+    //
+    // With the pragma on, the statement is handed the trigger back. The body is
+    // deep-cloned per fire anyway - the OLD/NEW substitution rewrites it - so
+    // this changes nothing anybody else can see, and the recursion is bounded
+    // by the depth `fire` already takes one level of on every entry. The one
+    // limit is that it re-fires *this* trigger rather than every trigger the
+    // table has, which is what an inlined body can reach.
+    let recursive = params.recursive_triggers();
+    let same_table = |table: &inillucent_sql::catalog_view::TableInfo| {
+        recursive && table.folded == trigger.table
+    };
     match statement {
         BoundTriggerStatement::Select(select) => {
             let mut select = (**select).clone();
@@ -376,6 +395,9 @@ fn run_body(
         }
         BoundTriggerStatement::Insert(insert) => {
             let mut insert = (**insert).clone();
+            if insert.triggers.is_empty() && same_table(&insert.table) {
+                insert.triggers = vec![trigger.clone()];
+            }
             inillucent_sql::rewrite::rewrite_insert(
                 &mut insert,
                 &mut substitution(rows, slots, rowid),
@@ -391,6 +413,9 @@ fn run_body(
         }
         BoundTriggerStatement::Update(update) => {
             let mut update = (**update).clone();
+            if update.triggers.is_empty() && same_table(&update.table) {
+                update.triggers = vec![trigger.clone()];
+            }
             inillucent_sql::rewrite::rewrite_update(
                 &mut update,
                 &mut substitution(rows, slots, rowid),
@@ -401,6 +426,9 @@ fn run_body(
         }
         BoundTriggerStatement::Delete(delete) => {
             let mut delete = (**delete).clone();
+            if delete.triggers.is_empty() && same_table(&delete.table) {
+                delete.triggers = vec![trigger.clone()];
+            }
             inillucent_sql::rewrite::rewrite_delete(
                 &mut delete,
                 &mut substitution(rows, slots, rowid),

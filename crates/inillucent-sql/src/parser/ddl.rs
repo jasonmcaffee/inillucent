@@ -219,10 +219,12 @@ impl Parser<'_> {
                 ColumnConstraint::Unique(self.parse_on_conflict()?)
             }
             Keyword::CHECK => {
-                self.bump()?;
+                let at = self.bump()?.span;
                 self.expect(Punctuator::LeftParen)?;
+                let before = self.selects;
                 let expr = self.parse_expr()?;
                 self.expect(Punctuator::RightParen)?;
+                self.no_subquery_in_check(before, at)?;
                 ColumnConstraint::Check(expr)
             }
             Keyword::DEFAULT => {
@@ -344,10 +346,13 @@ impl Parser<'_> {
                 on_conflict,
             });
         }
-        if self.eat_keyword(Keyword::CHECK)? {
+        if self.at_keyword(Keyword::CHECK)? {
+            let at = self.bump()?.span;
             self.expect(Punctuator::LeftParen)?;
+            let before = self.selects;
             let expr = self.parse_expr()?;
             self.expect(Punctuator::RightParen)?;
+            self.no_subquery_in_check(before, at)?;
             return Ok(TableConstraint::Check {
                 expr,
                 on_conflict: self.parse_on_conflict()?,

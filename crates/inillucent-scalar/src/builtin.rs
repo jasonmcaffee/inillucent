@@ -28,6 +28,12 @@ pub struct Context {
     pub last_insert_rowid: i64,
     /// The seed the random built-ins draw from.
     pub seed: u64,
+    /// Whether `LIKE` compares ASCII letters exactly.
+    ///
+    /// What `PRAGMA case_sensitive_like` sets. It rides with the counters
+    /// because it is the same kind of thing: a fact about the connection that
+    /// an expression has to know and cannot ask for itself.
+    pub like_case_sensitive: bool,
 }
 
 /// Calls a scalar function.
@@ -65,7 +71,7 @@ pub fn call_with(
         ScalarFunc::Coalesce => coalesce(arguments),
         ScalarFunc::Concat => concat(arguments, None, encoding),
         ScalarFunc::ConcatWs => concat_with_separator(arguments, encoding),
-        ScalarFunc::Glob => pattern_call(arguments, false, encoding),
+        ScalarFunc::Glob => pattern_call(arguments, false, encoding, false),
         // `hex`, `quote`, `typeof` and `zeroblob` are the four built-ins that
         // answer a question *about* their argument rather than computing with
         // it, so a NULL argument has an answer instead of poisoning the result.
@@ -77,7 +83,9 @@ pub fn call_with(
         ScalarFunc::Iif => iif(arguments),
         ScalarFunc::Instr => instr(arguments, encoding),
         ScalarFunc::Length => unary(arguments, length),
-        ScalarFunc::Like => pattern_call(arguments, true, encoding),
+        ScalarFunc::Like => {
+            pattern_call(arguments, true, encoding, !context.like_case_sensitive)
+        }
         ScalarFunc::Likelihood => arguments.first().cloned().unwrap_or(Value::Null),
         ScalarFunc::Lower => unary(arguments, |value| change_case(&value, false, encoding)),
         ScalarFunc::LTrim => trim(arguments, true, false, encoding),
@@ -226,12 +234,50 @@ fn sign(value: Value<'static>) -> Value<'static> {
 fn length(value: Value<'static>) -> Value<'static> {
     match &value {
         Value::Blob(blob) => Value::Integer(blob.len() as i64),
-        Value::Text(text) => {
-            Value::Integer(numeric::character_count(text.raw(), text.encoding()) as i64)
-        }
+        Value::Text(text) => Value::Integer(numeric::character_count(
+            before_nul(text.raw(), text.encoding()),
+            text.encoding(),
+        ) as i64),
         _ => {
             let rendered = eval::text_bytes(&value, TextEncoding::Utf8);
-            Value::Integer(numeric::character_count(&rendered, TextEncoding::Utf8) as i64)
+            Value::Integer(numeric::character_count(
+                before_nul(&rendered, TextEncoding::Utf8),
+                TextEncoding::Utf8,
+            ) as i64)
+        }
+    }
+}
+
+/// Returns the bytes of a string up to its first NUL character.
+///
+/// **`length()` counts characters "prior to the first NUL character"**, which
+/// is SQLite's documented definition and not an implementation accident:
+/// `length(char(0))` is 0 and `length(char(65,0,66))` is 1, while `hex()` of
+/// the same values shows all the bytes are there. A count that included them
+/// answered 1 and 3.
+///
+/// A blob has no such rule - every byte of a blob is length - which is why this
+/// is only applied to text.
+///
+/// @param bytes - the string's bytes
+/// @param encoding - how they are encoded
+fn before_nul(bytes: &[u8], encoding: TextEncoding) -> &[u8] {
+    match encoding {
+        TextEncoding::Utf8 => match bytes.iter().position(|byte| *byte == 0) {
+            Some(at) => bytes.get(..at).unwrap_or(bytes),
+            None => bytes,
+        },
+        // A UTF-16 NUL is two zero bytes on an even boundary; a lone zero byte
+        // is the high half of an ordinary ASCII character.
+        _ => {
+            let mut at = 0usize;
+            while at.saturating_add(1) < bytes.len() {
+                if bytes.get(at) == Some(&0) && bytes.get(at.saturating_add(1)) == Some(&0) {
+                    return bytes.get(..at).unwrap_or(bytes);
+                }
+                at = at.saturating_add(2);
+            }
+            bytes
         }
     }
 }
@@ -657,6 +703,14 @@ fn round(arguments: &[Value<'static>]) -> Value<'static> {
     }
     let factor = 10f64.powi(digits as i32);
     let scaled = real * factor;
+    // **Scaling a large value past the end of the range is not a rounding.**
+    // `round(1e308, 2)` multiplied by 100, got infinity, divided it by 100 and
+    // answered `Inf` - a value the source never held and that SQLite never
+    // produces. A number with more magnitude than `digits` can move is already
+    // rounded to that many places, so it is its own answer.
+    if !scaled.is_finite() {
+        return Value::Real(real);
+    }
     // `f64::round` already rounds half away from zero, which is what SQLite
     // does and is not what "round half to even" would do.
     Value::Real(scaled.round() / factor)
@@ -673,6 +727,7 @@ fn pattern_call(
     arguments: &[Value<'static>],
     is_like: bool,
     encoding: TextEncoding,
+    fold_case: bool,
 ) -> Value<'static> {
     let (Some(pattern), Some(subject)) = (arguments.first(), arguments.get(1)) else {
         return Value::Null;
@@ -688,7 +743,7 @@ fn pattern_call(
     let pattern_bytes = eval::text_bytes(pattern, encoding);
     let subject_bytes = eval::text_bytes(subject, encoding);
     let matched = if is_like {
-        crate::pattern::like(&pattern_bytes, &subject_bytes, escape)
+        crate::pattern::like_folding(&pattern_bytes, &subject_bytes, escape, fold_case)
     } else {
         crate::pattern::glob(&pattern_bytes, &subject_bytes)
     };

@@ -138,6 +138,12 @@ pub enum BoundTriggerStatement {
 pub struct BoundTrigger {
     /// The trigger's name, for the diagnostic when its body fails.
     pub name: Vec<u8>,
+    /// The folded name of the table it is attached to.
+    ///
+    /// Read by the executor to decide whether a body statement is writing the
+    /// trigger's *own* table, which is what `PRAGMA recursive_triggers` is
+    /// about: with it on, such a write fires this trigger again.
+    pub table: Vec<u8>,
     /// Whether it fires before or after the row is written.
     pub time: ast::TriggerTime,
     /// The `WHEN` guard, when one was written.
@@ -677,7 +683,7 @@ impl<'a> Binder<'a> {
                 old,
                 new,
             });
-            let result = self.bind_trigger_body(trigger);
+            let result = self.bind_trigger_body(trigger, table);
             self.ast = saved_ast;
             self.scopes = saved_scopes;
             self.row_aliases = saved_aliases;
@@ -771,7 +777,7 @@ impl<'a> Binder<'a> {
             old,
             new,
         });
-        let result = self.bind_trigger_body(trigger);
+        let result = self.bind_trigger_body(trigger, table);
         self.ast = saved_ast;
         self.scopes = saved_scopes;
         self.row_aliases = saved_aliases;
@@ -784,7 +790,11 @@ impl<'a> Binder<'a> {
     }
 
     /// Binds one trigger's guard and body statements.
-    fn bind_trigger_body(&mut self, trigger: &TriggerInfo) -> Result<BoundTrigger, ParseError> {
+    fn bind_trigger_body(
+        &mut self,
+        trigger: &TriggerInfo,
+        table: &TableInfo,
+    ) -> Result<BoundTrigger, ParseError> {
         let when = match trigger.when {
             Some(expr) => Some(self.bind_expr(expr)?),
             None => None,
@@ -801,6 +811,7 @@ impl<'a> Binder<'a> {
         }
         Ok(BoundTrigger {
             name: trigger.name.clone(),
+            table: table.folded.clone(),
             time: trigger.time,
             when,
             body,

@@ -413,6 +413,10 @@ pub enum Expr {
         pattern: Box<Expr>,
         /// The `ESCAPE` argument.
         escape: Option<Box<Expr>>,
+        /// Whether `LIKE` compares ASCII letters exactly.
+        ///
+        /// `PRAGMA case_sensitive_like`, read from the catalog at translation.
+        case_sensitive: bool,
     },
 }
 
@@ -697,6 +701,7 @@ pub fn compile(expr: &Expr, types: &[StaticType]) -> DbResult<Box<dyn Eval>> {
             operand,
             pattern,
             escape,
+            case_sensitive,
         } => Box::new(crate::scalar::Pattern {
             negated: *negated,
             kind: *kind,
@@ -706,6 +711,7 @@ pub fn compile(expr: &Expr, types: &[StaticType]) -> DbResult<Box<dyn Eval>> {
                 Some(escape) => Some(compile(escape, types)?),
                 None => None,
             },
+            case_sensitive: *case_sensitive,
         }),
     })
 }
@@ -918,13 +924,29 @@ fn integer_arith<'p>(op: ArithOp, left: i64, right: i64) -> Datum<'p> {
         Some(number) => Datum::Int(number),
         None => {
             let (a, b) = (left as f64, right as f64);
-            Datum::Real(match op {
+            real_or_null(match op {
                 ArithOp::Add => a + b,
                 ArithOp::Subtract => a - b,
                 ArithOp::Multiply => a * b,
             })
         }
     }
+}
+
+/// Returns a double, or NULL when the arithmetic had no answer.
+///
+/// **SQLite has no NaN.** `1e999 - 1e999` is NULL there and was `NaN` here - a
+/// value that is not equal to itself, that no comparison orders and that no
+/// caller of an arithmetic expression has any way to handle. The same rule
+/// already covered division (`0.0/0.0` is NULL); this is the other operators,
+/// which reach it only through an infinity.
+///
+/// @param value - the computed double
+fn real_or_null<'p>(value: f64) -> Datum<'p> {
+    if value.is_nan() {
+        return Datum::Null;
+    }
+    Datum::Real(value)
 }
 
 /// Applies an arithmetic operator to two values of any class.
@@ -940,7 +962,7 @@ fn generic_arith<'p>(op: ArithOp, left: &Datum<'_>, right: &Datum<'_>) -> DbResu
         return Ok(Computed::Borrowed(integer_arith(op, a, b)));
     }
     let (a, b) = (numeric(left), numeric(right));
-    Ok(Computed::Borrowed(Datum::Real(match op {
+    Ok(Computed::Borrowed(real_or_null(match op {
         ArithOp::Add => a + b,
         ArithOp::Subtract => a - b,
         ArithOp::Multiply => a * b,
@@ -1178,9 +1200,16 @@ impl Eval for Length {
             Datum::Null => Datum::Null,
             // SQLite counts characters in text and bytes in a blob. The
             // database encoding is UTF-8, so a character is a non-continuation
-            // byte.
+            // byte - and the count stops at the first NUL, which is SQLite's
+            // documented definition rather than an accident of C strings:
+            // `length(char(0))` is 0 and `length(char(65,0,66))` is 1, while
+            // `hex()` of the same values shows every byte is still there.
             Datum::Text(bytes) => {
-                Datum::Int(bytes.iter().filter(|byte| (*byte & 0xC0) != 0x80).count() as i64)
+                let counted = match bytes.iter().position(|byte| *byte == 0) {
+                    Some(at) => bytes.get(..at).unwrap_or(bytes),
+                    None => bytes,
+                };
+                Datum::Int(counted.iter().filter(|byte| (*byte & 0xC0) != 0x80).count() as i64)
             }
             Datum::Blob(bytes) => Datum::Int(bytes.len() as i64),
             Datum::Int(number) => Datum::Int(number.to_string().len() as i64),

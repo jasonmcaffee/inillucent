@@ -25,6 +25,9 @@ impl Parser<'_> {
 
     /// Parses a complete SELECT: `WITH`, arms, `ORDER BY`, `LIMIT`.
     pub(super) fn parse_select(&mut self) -> Result<SelectId, ParseError> {
+        // Counted so `CHECK` can tell whether the expression it just read
+        // contained a subquery. See `Parser::no_subquery_in_check`.
+        self.selects = self.selects.saturating_add(1);
         self.enter()?;
         let parsed = self.parse_select_inner();
         self.leave();

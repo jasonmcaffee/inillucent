@@ -752,15 +752,36 @@ impl<'a> Binder<'a> {
                 Span::default(),
             ));
         }
+        // **The declaration a `CREATE TABLE ... AS SELECT` stores is the
+        // *affinity*, not the source column's declared type.** SQLite writes
+        // `a INT` for a source column declared `INTEGER` and `b TEXT` for one
+        // declared `VARCHAR(3)`, because what survives a query is the affinity
+        // and nothing else - the width, the precision and the spelling are
+        // properties of the source table that the copy does not have. Storing
+        // `VARCHAR(3)` here claimed a constraint the new table does not
+        // enforce, and made the two schemas differ for every CTAS.
+        //
+        // The line break is SQLite's own rule too, so the stored text matches
+        // byte for byte: the name lengths are added up first, and a wide
+        // declaration is written one column per line.
+        let mut width = identifier_width(&written);
+        for column in &bound.columns {
+            width = width
+                .saturating_add(identifier_width(&column.name))
+                .saturating_add(5);
+        }
+        let (open, between, close): (&[u8], &[u8], &[u8]) = if width < 50 {
+            (b"", b",", b")")
+        } else {
+            (b"\n  ", b",\n  ", b"\n)")
+        };
         let mut create_sql = Vec::new();
         create_sql.extend_from_slice(b"CREATE TABLE ");
         create_sql.extend_from_slice(&written);
         create_sql.push(b'(');
         let mut seen: Vec<Vec<u8>> = Vec::with_capacity(bound.columns.len());
         for (position, column) in bound.columns.iter().enumerate() {
-            if position > 0 {
-                create_sql.push(b',');
-            }
+            create_sql.extend_from_slice(if position > 0 { between } else { open });
             let folded = column.name.to_ascii_lowercase();
             if seen.contains(&folded) {
                 return Err(refused(
@@ -773,12 +794,9 @@ impl<'a> Binder<'a> {
             }
             seen.push(folded);
             create_sql.extend_from_slice(&quoted_name(&column.name));
-            if !column.declared_type.is_empty() {
-                create_sql.push(b' ');
-                create_sql.extend_from_slice(&column.declared_type);
-            }
+            create_sql.extend_from_slice(affinity_type(&column.declared_type));
         }
-        create_sql.push(b')');
+        create_sql.extend_from_slice(close);
         self.record_write_dependency(index);
         Ok(Directive::CreateTableAsSelect {
             if_not_exists,
@@ -2027,4 +2045,37 @@ fn quoted_name(name: &[u8]) -> Vec<u8> {
     }
     out.push(b'"');
     out
+}
+
+/// Returns the type name a `CREATE TABLE ... AS SELECT` writes for a column.
+///
+/// The affinity's own name, with the leading space, exactly as SQLite writes
+/// it: BLOB affinity - which is what a column with no declared type has -
+/// writes nothing at all, so the copy of an untyped column is untyped.
+///
+/// @param declared - the source column's declared type, as written
+fn affinity_type(declared: &[u8]) -> &'static [u8] {
+    match inillucent_value::affinity::for_column(declared) {
+        inillucent_value::affinity::Affinity::Blob => b"",
+        inillucent_value::affinity::Affinity::Text => b" TEXT",
+        inillucent_value::affinity::Affinity::Integer => b" INT",
+        inillucent_value::affinity::Affinity::Real => b" REAL",
+        inillucent_value::affinity::Affinity::Numeric
+        | inillucent_value::affinity::Affinity::FlexNum => b" NUM",
+    }
+}
+
+/// Returns the width SQLite counts an identifier as when it decides whether to
+/// write a `CREATE TABLE ... AS SELECT`'s columns one per line.
+///
+/// Its own `identLength`: the name plus the two quotes it might need, plus one
+/// for each quote inside it that would have to be doubled. The rule that reads
+/// it is "under fifty, one line", and reproducing both is what makes the stored
+/// declaration byte-identical rather than merely equivalent.
+///
+/// @param name - the identifier
+fn identifier_width(name: &[u8]) -> usize {
+    name.len()
+        .saturating_add(2)
+        .saturating_add(name.iter().filter(|byte| **byte == b'"').count())
 }

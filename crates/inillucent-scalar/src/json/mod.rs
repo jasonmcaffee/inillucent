@@ -315,7 +315,7 @@ pub fn extract_parsed(node: &Node, steps: &[path::Step], binary: bool) -> DbResu
         return Ok(Answer::null());
     };
     if binary {
-        return answer(found, true);
+        return as_jsonb(found);
     }
     as_sql(found)
 }
@@ -323,6 +323,24 @@ pub fn extract_parsed(node: &Node, steps: &[path::Step], binary: bool) -> DbResu
 /// Turns one element into the SQL value `json_extract` hands back.
 pub fn value_of(node: &Node) -> DbResult<Answer> {
     as_sql(node)
+}
+
+/// Turns one element into what `jsonb_extract` hands back.
+///
+/// **A container comes back as JSONB and a primitive comes back as itself.**
+/// SQLite's `jsonb_extract` "works just like `json_extract()` except the
+/// returned value is JSONB rather than JSON text" - and a number was never JSON
+/// text to begin with, so `jsonb_extract(jsonb('{"a":2}'), '$.a')` is the
+/// integer 2 in SQLite and was the raw JSONB byte `0x13 '2'` here: a blob where
+/// an application expected a number, on the function it would reach for to read
+/// one out of a document.
+///
+/// @param node - the element the path found
+fn as_jsonb(node: &Node) -> DbResult<Answer> {
+    match node {
+        Node::Array(_) | Node::Object(_) => answer(node, true),
+        _ => as_sql(node),
+    }
 }
 
 /// Turns one element into the SQL value `json_extract` hands back.
@@ -390,7 +408,7 @@ fn extract(arguments: &[Argument<'_>], binary: bool) -> DbResult<Answer> {
             return Ok(Answer::null());
         };
         if binary {
-            return answer(found, true);
+            return as_jsonb(found);
         }
         return as_sql(found);
     }

@@ -89,6 +89,15 @@ pub struct Parser<'a> {
     limits: &'a Limits,
     depth: i64,
     parameters: ParameterMap,
+    /// How many `SELECT`s this parse has read.
+    ///
+    /// **A counter rather than a walk over what was parsed.** `CHECK` is the
+    /// one place the grammar has to know whether an expression contained a
+    /// subquery, and comparing this before and after the expression answers it
+    /// exactly - where a recursive scan of the arena would be a second
+    /// enumeration of every expression node, to be kept in step with the first
+    /// for ever. See `no_subquery_in_check`.
+    selects: u64,
 }
 
 impl<'a> Parser<'a> {
@@ -123,6 +132,7 @@ impl<'a> Parser<'a> {
             limits,
             depth: 0,
             parameters: ParameterMap::default(),
+            selects: 0,
         }
     }
 
@@ -330,6 +340,27 @@ impl<'a> Parser<'a> {
     /// `ids` - a bare alias, or a declared type name.
     fn at_plain_name(&mut self) -> Result<bool, ParseError> {
         Ok(Parser::token_is_plain_name(self.peek()?))
+    }
+
+    /// Refuses a subquery where SQLite refuses one.
+    ///
+    /// `CHECK (a IN (SELECT ...))` is `subqueries prohibited in CHECK
+    /// constraints` in SQLite and was **accepted** here - a constraint that
+    /// would be evaluated per row against a query, which this engine has no
+    /// intention of doing, so the declaration was being stored and not
+    /// enforced. That is the shape of failure the whole `CHECK` work exists to
+    /// avoid: a declaration the application trusts, doing nothing.
+    ///
+    /// @param before - the `SELECT` count taken before the expression
+    /// @param span - where the constraint was written
+    fn no_subquery_in_check(&mut self, before: u64, span: Span) -> Result<(), ParseError> {
+        if self.selects == before {
+            return Ok(());
+        }
+        Err(ParseError::new(
+            ParseErrorKind::Refused("subqueries prohibited in CHECK constraints".to_string()),
+            span,
+        ))
     }
 
     /// Consumes an identifier, interning it.

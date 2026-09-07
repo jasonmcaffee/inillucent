@@ -108,6 +108,13 @@ pub struct Accumulator {
     compensation: f64,
     /// Whether the sum has left the integers.
     is_real: bool,
+    /// Whether it left them because an integer total would not fit.
+    ///
+    /// Kept apart from `is_real`, which is also set by a real *argument*. Only
+    /// the first of the two is `sum()`'s `integer overflow`.
+    overflowed: bool,
+    /// Whether any value folded in was not an integer.
+    saw_real: bool,
     /// The extreme value seen, for `min` and `max`.
     extreme: Option<OwnedDatum>,
     /// The joined text, for `group_concat`.
@@ -131,6 +138,8 @@ impl Accumulator {
             real_sum: 0.0,
             compensation: 0.0,
             is_real: false,
+            overflowed: false,
+            saw_real: false,
             extreme: None,
             joined: String::new(),
             rows: Vec::new(),
@@ -256,6 +265,7 @@ impl Accumulator {
                         // double from here. Seeding it needs the same split
                         // `seed_real` uses, applied to the wider value.
                         self.is_real = true;
+                        self.overflowed = true;
                         let low = (wide % SPLIT) as f64;
                         self.real_sum = (wide - i128::from(low as i64)) as f64;
                         self.compensation = low;
@@ -323,6 +333,12 @@ impl Accumulator {
                 if !self.is_real {
                     self.seed_real();
                 }
+                // **A real argument makes the whole sum a real**, and a real
+                // sum has no overflow to report - SQLite raises `integer
+                // overflow` only when every value it added was an integer.
+                // `seed_real` above sets the flag because it cannot tell why it
+                // was called; here is where we know.
+                self.saw_real = true;
                 self.add_real(numeric(other));
             }
         }
@@ -335,6 +351,7 @@ impl Accumulator {
     /// bits on the way into the double, which is the same error the split
     /// exists to prevent and is worth exactly as much.
     fn seed_real(&mut self) {
+        self.overflowed = true;
         self.is_real = true;
         let low = self.integer_sum % SPLIT_I64;
         self.real_sum = (self.integer_sum - low) as f64;
@@ -422,6 +439,16 @@ impl Accumulator {
             AggregateKind::Sum => {
                 if self.count == 0 {
                     OwnedDatum::Null
+                } else if self.overflowed && !self.saw_real {
+                    // **`sum()` over integers that will not fit is an error,
+                    // not a bigger number.** It answered
+                    // `1.8446744073709552e+19` where SQLite raises `integer
+                    // overflow` - a total that is *wrong by a rounding* and
+                    // that a caller reading an integer column has no reason to
+                    // suspect. `total()` and `avg()` are documented to be
+                    // doubles and keep answering one, which is why the check is
+                    // on this arm alone.
+                    return Err(inillucent_base::error::refusal("integer overflow"));
                 } else if self.is_real {
                     OwnedDatum::Real(self.compensated())
                 } else {
