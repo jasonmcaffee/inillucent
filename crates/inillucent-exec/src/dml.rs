@@ -1206,7 +1206,7 @@ pub fn update_at(
         // Changing a key moves the row, so the uniqueness of the new key is an
         // ordinary conflict check; leaving it alone is not, or every update
         // would collide with the row it is updating.
-        if key_of(&layout, &after) != key_of(&layout, &before) {
+        if !same_key(&layout, &before, &after) {
             if let Some(clash) = conflicting_row(table, &layout, target, &after)? {
                 match statement.on_conflict {
                     Some(ConflictAction::Ignore) => continue,
@@ -1237,13 +1237,24 @@ pub fn update_at(
         {
             continue;
         }
-        // The row may have moved under a `BEFORE` body that wrote the same
-        // table, so it is read again rather than assumed: applying the stale
-        // image would put back a row another statement had already changed.
-        let Some(current) = read_row(table, target, key)? else {
-            continue;
+        // **Read again only if something could have moved it.** A `BEFORE` body
+        // may write the same table, and applying the stale image would put back
+        // a row another statement had already changed - so when there are
+        // triggers the row is read rather than assumed. When there are none,
+        // nothing has run between the first read and here, and the second read
+        // was a whole row copied out of the tree and thrown away: `txn.large`
+        // is two thousand updates in one transaction and paid for two thousand
+        // of them (task-1838 §4).
+        let reread = if statement.triggers.is_empty() {
+            None
+        } else {
+            match read_row(table, target, key)? {
+                Some(row) => Some(row),
+                None => continue,
+            }
         };
-        replace_row(table, &layout, target, log, &current, &after)?;
+        let current = reread.as_ref().unwrap_or(&before);
+        replace_row(table, &layout, target, log, current, &after)?;
         changes.rows = changes.rows.saturating_add(1);
         if trigger::fire(
             &statement.triggers,
@@ -1496,7 +1507,7 @@ fn replace_row(
     before: &[OwnedDatum],
     after: &[OwnedDatum],
 ) -> DbResult<()> {
-    if key_of(layout, after) != key_of(layout, before) {
+    if !same_key(layout, before, after) {
         // The row moved, so the old one is a delete and the new one an insert.
         // Doing it as an in-place replace would leave the old key behind.
         remove_row(table, layout, target, log, &key_of(layout, before), before)?;
@@ -1586,8 +1597,59 @@ fn place_row(
         .get_mut(table.root)
         .ok_or_else(|| missing_tree(table))?;
     let borrowed: Vec<Datum<'_>> = row.iter().map(OwnedDatum::borrow).collect();
+    // **One column changed, so write that column.** `PagedTree` has had an
+    // in-place update since the leaf was written - logged, undone and recovered
+    // by its own record - and nothing in the write path ever called it: every
+    // `UPDATE` went through `put`, which tombstones the row and appends a whole
+    // new one to the delta area, so a leaf compacted every `DELTA_LIMIT`
+    // updates and the log carried a full row each time. It applies when exactly
+    // one non-key column differs and the tree can write it where it lies; when
+    // it cannot, `put` is still the answer and nothing has been written
+    // (task-1838 §4).
+    if let Some(previous) = before {
+        if let Some(column) = only_change(previous, row) {
+            if column >= layout.key_columns.len() {
+                let key: Vec<Datum<'_>> = layout
+                    .key_columns
+                    .iter()
+                    .filter_map(|held| borrowed.get(*held).copied())
+                    .collect();
+                let Some(value) = borrowed.get(column).copied() else {
+                    return Err(misuse("a changed column is not in the row"));
+                };
+                if tree.update_in_place(database, log, &key, column, &value)? {
+                    return Ok(());
+                }
+            }
+        }
+    }
     tree.put(database, log, &borrowed)?;
     Ok(())
+}
+
+/// Returns the one column that differs between two images, when there is one.
+///
+/// `None` when nothing changed, when more than one column did, or when the two
+/// images are different widths - each of which is a case the in-place update
+/// does not cover.
+///
+/// @param before - the row as it was
+/// @param after - the row as it will be
+fn only_change(before: &[OwnedDatum], after: &[OwnedDatum]) -> Option<usize> {
+    if before.len() != after.len() {
+        return None;
+    }
+    let mut found = None;
+    for (index, (one, two)) in before.iter().zip(after.iter()).enumerate() {
+        if one == two {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(index);
+    }
+    found
 }
 
 /// Removes one row and every index entry that named it.
@@ -1725,6 +1787,25 @@ fn key_of(layout: &SourceLayout, row: &[OwnedDatum]) -> Vec<OwnedDatum> {
         .iter()
         .filter_map(|column| row.get(*column).cloned())
         .collect()
+}
+
+/// Reports whether two images of a row have the same key.
+///
+/// **Without building either key.** `key_of` clones every key value into a new
+/// vector, and asking "did the key change" by building two of them and
+/// comparing was two allocations and a clone per key column on every `UPDATE` -
+/// twice, because `replace_row` asked the same question again. The gate's
+/// `txn.large` is two thousand updates in one transaction and paid for all of
+/// it (task-1838 §4).
+///
+/// @param layout - the table tree's layout
+/// @param before - the row as it was
+/// @param after - the row as it will be
+fn same_key(layout: &SourceLayout, before: &[OwnedDatum], after: &[OwnedDatum]) -> bool {
+    layout
+        .key_columns
+        .iter()
+        .all(|column| before.get(*column) == after.get(*column))
 }
 
 /// Reports whether a table holds a row under one key.

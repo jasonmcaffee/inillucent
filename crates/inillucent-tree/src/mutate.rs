@@ -560,13 +560,20 @@ impl<'p> LeafMut<'p> {
         Ok(())
     }
 
-    /// Overwrites one fixed-width slot of one sorted-region row.
+    /// Overwrites one slot of one sorted-region row.
     ///
     /// The only update that does not go through the delta area, and the only one
-    /// that keeps a leaf on the vectorised fast path. It applies when the column
-    /// is `Int64` or `Float64` **and** the new value is of that class: anything
-    /// else needs the heap, and growing the heap in place is what compaction is
-    /// for. Returns [`Applied::NoRoom`] when it does not apply, which the caller
+    /// that keeps a leaf on the vectorised fast path. It applies to `Int64` and
+    /// `Float64` when the new value is of that class, and to `Text` and `Blob`
+    /// when the new value is **exactly as long as the one it replaces** - the
+    /// heap slot is then written over where it lies. Anything else would move
+    /// the heap, and moving the heap in place is what compaction is for.
+    ///
+    /// The same-length text case is not a curiosity: it is what an `UPDATE` of
+    /// a fixed-shape string column does, which is the gate's `txn.large`, two
+    /// thousand of them in one transaction (task-1838 §4).
+    ///
+    /// Returns [`Applied::NoRoom`] when it does not apply, which the caller
     /// turns into a delete plus a delta insert.
     ///
     /// @param column - which column to write
@@ -586,19 +593,12 @@ impl<'p> LeafMut<'p> {
             let spec = leaf.spec(column)?;
             (leaf.row_count(), spec, leaf.column(column)?.class_at(row)?)
         };
-        let slot = match (spec.physical, value) {
-            (PhysicalType::Int64, Datum::Int(number)) => (*number) as u64,
-            (PhysicalType::Float64, Datum::Real(number)) => number.to_bits(),
-            (PhysicalType::Float64, Datum::Int(number)) => (*number as f64).to_bits(),
-            // Every other combination needs the heap or a class change, and
-            // both are a rewrite of the mini-column rather than a slot write.
-            _ => return Ok(Applied::NoRoom),
-        };
         // A row whose current value is a NULL or an exception has its class bit
         // set to something other than Typed, and changing that is a write into
         // the class array as well - which is fine, except that the directory's
         // `all_typed` bit would then be stale. Refusing is one branch; keeping
-        // the bit correct through every path is several.
+        // the bit correct through every path is several. It also excludes an
+        // `Extent`, whose slot holds a page reference rather than a value.
         if class != crate::types::ValueClass::Typed {
             return Ok(Applied::NoRoom);
         }
@@ -606,7 +606,41 @@ impl<'p> LeafMut<'p> {
         let base = page::read_u32(self.page, entry.saturating_add(4))? as usize;
         let values_at = base.saturating_add(class_bytes(row_count));
         let at = values_at.saturating_add(row.saturating_mul(spec.physical.slot_width()));
+        let slot = match (spec.physical, value) {
+            (PhysicalType::Int64, Datum::Int(number)) => (*number) as u64,
+            (PhysicalType::Float64, Datum::Real(number)) => number.to_bits(),
+            (PhysicalType::Float64, Datum::Int(number)) => (*number as f64).to_bits(),
+            (PhysicalType::Text, Datum::Text(bytes)) | (PhysicalType::Blob, Datum::Blob(bytes)) => {
+                return self.overwrite_heap_slot(at, bytes);
+            }
+            // Every other combination needs the heap to move or the class to
+            // change, and both are a rewrite of the mini-column rather than a
+            // slot write.
+            _ => return Ok(Applied::NoRoom),
+        };
         page::write_u64(self.page, at, slot)?;
+        Ok(Applied::Yes)
+    }
+
+    /// Writes new bytes over a heap value of exactly the same length.
+    ///
+    /// The slot itself does not change - it is still `(offset, length)` and both
+    /// halves are the same - so nothing else on the page moves and no other
+    /// row's slot is affected. A different length would have to move every heap
+    /// value after this one, which is a compaction.
+    ///
+    /// @param slot_at - where the row's eight-byte slot sits in the page
+    /// @param bytes - the new value
+    fn overwrite_heap_slot(&mut self, slot_at: usize, bytes: &[u8]) -> DbResult<Applied> {
+        let offset = page::read_u32(self.page, slot_at)? as usize;
+        let length = page::read_u32(self.page, slot_at.saturating_add(4))? as usize;
+        if length != bytes.len() {
+            return Ok(Applied::NoRoom);
+        }
+        let Some(room) = self.page.get_mut(offset..offset.saturating_add(length)) else {
+            return Err(corrupt("a heap slice runs past the page"));
+        };
+        room.copy_from_slice(bytes);
         Ok(Applied::Yes)
     }
 
