@@ -32,6 +32,99 @@ use super::{
 };
 use crate::shadow::ShadowTables;
 
+/// The shadow rows a transaction has written but not yet flushed.
+///
+/// **The R-Tree's whole cost was its shadow tables.** One insert reads the root,
+/// rewrites every node on the way down so the boxes it passes grow to hold the
+/// new cell, writes the leaf, writes a `%_rowid` row and sometimes a `%_parent`
+/// row - so a five-hundred-cell load did thousands of shadow-table reads and
+/// writes, each one a descent into a b-tree, and `extension.rtree.insert`
+/// measured 0.28x against SQLite (task-1838 §4). None of those intermediate
+/// states is durable state anyone can see: only the last one is. So they are
+/// held here and written once, in `sync`, the same way FTS5 holds a segment.
+///
+/// Every read goes through this too, which is what makes it correct rather than
+/// merely fast: a node this transaction has already rewritten is answered from
+/// here, so a descent sees its own writes. The cursor shares it for the same
+/// reason - a `SELECT` in the transaction that wrote must see what was written.
+#[derive(Default)]
+struct Pending {
+    /// Node blobs by node number. `None` records a node known to be absent.
+    nodes: std::collections::HashMap<i64, Option<Vec<u8>>>,
+    /// Which leaf holds each row. `None` records a row known to be absent.
+    rowids: std::collections::HashMap<i64, Option<i64>>,
+    /// Which node holds each node.
+    parents: std::collections::HashMap<i64, Option<i64>>,
+    /// The node numbers whose entry above still has to be written.
+    dirty_nodes: std::collections::HashSet<i64>,
+    /// The rowids whose entry above still has to be written or deleted.
+    dirty_rowids: std::collections::HashSet<i64>,
+    /// The node numbers whose parent entry still has to be written.
+    dirty_parents: std::collections::HashSet<i64>,
+    /// The largest node number seen, so a split does not reuse one that is
+    /// buffered rather than stored.
+    highest_node: Option<i64>,
+    /// The largest rowid seen, for the same reason.
+    highest_rowid: Option<i64>,
+}
+
+/// The buffer, shared between a table and the cursors it opens.
+type Buffer = std::sync::Arc<std::sync::Mutex<Pending>>;
+
+impl Pending {
+    /// Writes everything buffered and forgets that it was dirty.
+    ///
+    /// The read cache is kept: a transaction that inserts and then reads should
+    /// not go back to the tree for a node it has in hand, and the entries are
+    /// now what the tree holds anyway.
+    ///
+    /// @param context - the statement's context
+    /// @param shadows - the three shadow tables
+    fn flush(&mut self, context: &mut Context<'_>, shadows: &ShadowTables) -> DbResult<()> {
+        let mut nodes: Vec<i64> = self.dirty_nodes.iter().copied().collect();
+        nodes.sort_unstable();
+        for number in nodes {
+            if let Some(Some(bytes)) = self.nodes.get(&number) {
+                shadows.write_row(
+                    context,
+                    b"node",
+                    number,
+                    &[Value::Null, Value::owned_blob(bytes)?],
+                )?;
+            }
+        }
+        self.dirty_nodes.clear();
+        let mut rowids: Vec<i64> = self.dirty_rowids.iter().copied().collect();
+        rowids.sort_unstable();
+        for rowid in rowids {
+            match self.rowids.get(&rowid) {
+                Some(Some(node)) => shadows.write_row(
+                    context,
+                    b"rowid",
+                    rowid,
+                    &[Value::Null, Value::Integer(*node)],
+                )?,
+                _ => shadows.delete_row(context, b"rowid", rowid)?,
+            }
+        }
+        self.dirty_rowids.clear();
+        let mut parents: Vec<i64> = self.dirty_parents.iter().copied().collect();
+        parents.sort_unstable();
+        for node in parents {
+            if let Some(Some(parent)) = self.parents.get(&node) {
+                shadows.write_row(
+                    context,
+                    b"parent",
+                    node,
+                    &[Value::Null, Value::Integer(*parent)],
+                )?;
+            }
+        }
+        self.dirty_parents.clear();
+        Ok(())
+    }
+}
+
 /// How many bytes a node's header takes.
 const HEADER: usize = 4;
 /// The most cells the format allows in one node.
@@ -171,6 +264,7 @@ impl Module for RTreeModule {
             },
             creating,
             rowid_name: names.first().cloned().unwrap_or_else(|| b"id".to_vec()),
+            pending: Buffer::default(),
         }))
     }
 }
@@ -183,6 +277,8 @@ struct RTreeTable {
     declaration: Declaration,
     creating: bool,
     rowid_name: Vec<u8>,
+    /// The shadow rows this transaction has written but not yet flushed.
+    pending: Buffer,
 }
 
 /// The plan number for a scan of every row.
@@ -278,9 +374,37 @@ impl VirtualTable for RTreeTable {
             coordinates: self.coordinates,
             dimensions: self.dimensions,
             shadows: self.shadows.clone(),
+            pending: Buffer::clone(&self.pending),
             rows: Vec::new(),
             at: 0,
         }))
+    }
+
+    /// Writes every buffered shadow row before the engine commits.
+    ///
+    /// Once per transaction rather than once per cell, which is the whole point
+    /// of the buffer. `sync_modules` calls this; nothing else has to know.
+    fn sync(&mut self, context: &mut Context<'_>) -> DbResult<()> {
+        let mut held = match self.pending.lock() {
+            Ok(held) => held,
+            Err(_) => {
+                return Err(inillucent_base::error::misuse(
+                    "the r-tree buffer is poisoned",
+                ))
+            }
+        };
+        held.flush(context, &self.shadows)
+    }
+
+    /// Throws away everything the abandoned transaction buffered.
+    ///
+    /// Including the read cache: rows it holds were read under a transaction
+    /// that no longer happened, and the next reader should go to the tree.
+    fn rollback(&mut self, _context: &mut Context<'_>) -> DbResult<()> {
+        if let Ok(mut held) = self.pending.lock() {
+            *held = Pending::default();
+        }
+        Ok(())
     }
 
     /// Makes the root node the first time the table is created.
@@ -289,10 +413,10 @@ impl VirtualTable for RTreeTable {
             return Ok(());
         }
         self.creating = false;
-        let node_bytes = node_size(context, &self.shadows, self.cell_size());
+        let node_bytes = node_size(context, &self.shadows, &self.pending, self.cell_size());
         let mut root = vec![0u8; node_bytes];
         write_header(&mut root, 0, 0);
-        put_node(context, &self.shadows, ROOT, &root)
+        put_node(context, &self.shadows, &self.pending, ROOT, &root)
     }
 
     /// Applies one insert, update or delete.
@@ -350,7 +474,7 @@ impl VirtualTable for RTreeTable {
         let mut problems = Vec::new();
         let mut stack = vec![ROOT];
         while let Some(number) = stack.pop() {
-            let Some(node) = get_node(context, &self.shadows, number)? else {
+            let Some(node) = get_node(context, &self.shadows, &self.pending, number)? else {
                 problems.push(format!("node {number} is missing"));
                 continue;
             };
@@ -365,14 +489,14 @@ impl VirtualTable for RTreeTable {
                     continue;
                 };
                 if depth == 0 {
-                    match find_rowid(context, &self.shadows, cell.key)? {
+                    match find_rowid(context, &self.shadows, &self.pending, cell.key)? {
                         Some(found) if found == number => {}
                         _ => problems
                             .push(format!("row {} is not recorded in node {number}", cell.key)),
                     }
                     continue;
                 }
-                match find_parent(context, &self.shadows, cell.key)? {
+                match find_parent(context, &self.shadows, &self.pending, cell.key)? {
                     Some(found) if found == number => {}
                     _ => problems.push(format!(
                         "node {} does not record node {number} as its parent",
@@ -512,8 +636,13 @@ fn write_cells(node: &mut [u8], depth: u16, cells: &[Cell]) {
 /// table SQLite created is read with the node size SQLite chose. A table this
 /// module is creating uses a size that fits a page, which is what SQLite's own
 /// choice amounts to.
-fn node_size(context: &mut Context<'_>, shadows: &ShadowTables, cell: usize) -> usize {
-    if let Ok(Some(node)) = get_node(context, shadows, ROOT) {
+fn node_size(
+    context: &mut Context<'_>,
+    shadows: &ShadowTables,
+    pending: &Buffer,
+    cell: usize,
+) -> usize {
+    if let Ok(Some(node)) = get_node(context, shadows, pending, ROOT) {
         if node.len() >= HEADER {
             return node.len();
         }
@@ -554,17 +683,17 @@ impl RTreeTable {
 
     /// Returns a rowid nothing is using.
     fn next_rowid(&self, context: &mut Context<'_>) -> i64 {
-        max_rowid(context, &self.shadows).saturating_add(1)
+        max_rowid(context, &self.shadows, &self.pending).saturating_add(1)
     }
 
     /// Returns the leaf that holds one row, if any does.
     fn find_leaf(&self, context: &mut Context<'_>, rowid: i64) -> DbResult<Option<i64>> {
-        find_rowid(context, &self.shadows, rowid)
+        find_rowid(context, &self.shadows, &self.pending, rowid)
     }
 
     /// Inserts one cell, splitting nodes upwards as they fill.
     fn insert_cell(&mut self, context: &mut Context<'_>, cell: &Cell) -> DbResult<()> {
-        let node_bytes = node_size(context, &self.shadows, self.cell_size());
+        let node_bytes = node_size(context, &self.shadows, &self.pending, self.cell_size());
         let capacity = self.cells_per_node(node_bytes);
         let leaf = self.choose_leaf(context, cell, node_bytes)?;
         self.add_to_node(context, leaf, cell, node_bytes, capacity, true)
@@ -579,7 +708,7 @@ impl RTreeTable {
     ) -> DbResult<i64> {
         let mut number = ROOT;
         loop {
-            let Some(node) = get_node(context, &self.shadows, number)? else {
+            let Some(node) = get_node(context, &self.shadows, &self.pending, number)? else {
                 return Ok(ROOT);
             };
             let (depth, _) = read_header(&node);
@@ -607,7 +736,7 @@ impl RTreeTable {
             }
             let mut node = node;
             write_cells(&mut node, depth, &cells);
-            put_node(context, &self.shadows, number, &node)?;
+            put_node(context, &self.shadows, &self.pending, number, &node)?;
             number = chosen;
             let _ = node_bytes;
         }
@@ -623,37 +752,37 @@ impl RTreeTable {
         capacity: usize,
         leaf: bool,
     ) -> DbResult<()> {
-        let Some(mut node) = get_node(context, &self.shadows, number)? else {
+        let Some(mut node) = get_node(context, &self.shadows, &self.pending, number)? else {
             return Err(failure(format!("rtree node {number} is missing")));
         };
         let (depth, _) = read_header(&node);
         let mut cells = read_cells(&node, self.dimensions);
         cells.push(cell.clone());
         if leaf {
-            put_rowid(context, &self.shadows, cell.key, number)?;
+            put_rowid(context, &self.shadows, &self.pending, cell.key, number)?;
         } else {
-            put_parent(context, &self.shadows, cell.key, number)?;
+            put_parent(context, &self.shadows, &self.pending, cell.key, number)?;
         }
         if cells.len() <= capacity {
             write_cells(&mut node, depth, &cells);
-            return put_node(context, &self.shadows, number, &node);
+            return put_node(context, &self.shadows, &self.pending, number, &node);
         }
         // The node is full. Split it in half along the widest dimension, which
         // is the cheap version of Guttman's quadratic split and is what keeps
         // the boxes from degenerating into one long strip.
         let (left, right) = split(&cells, self.dimensions);
-        let sibling = max_node(context, &self.shadows).saturating_add(1);
+        let sibling = max_node(context, &self.shadows, &self.pending).saturating_add(1);
         let mut left_node = vec![0u8; node_bytes];
         write_cells(&mut left_node, depth, &left);
-        put_node(context, &self.shadows, number, &left_node)?;
+        put_node(context, &self.shadows, &self.pending, number, &left_node)?;
         let mut right_node = vec![0u8; node_bytes];
         write_cells(&mut right_node, depth, &right);
-        put_node(context, &self.shadows, sibling, &right_node)?;
+        put_node(context, &self.shadows, &self.pending, sibling, &right_node)?;
         for moved in &right {
             if depth == 0 {
-                put_rowid(context, &self.shadows, moved.key, sibling)?;
+                put_rowid(context, &self.shadows, &self.pending, moved.key, sibling)?;
             } else {
-                put_parent(context, &self.shadows, moved.key, sibling)?;
+                put_parent(context, &self.shadows, &self.pending, moved.key, sibling)?;
             }
         }
         let left_box = bounding(&left);
@@ -662,15 +791,15 @@ impl RTreeTable {
             // The root splits *downwards*: it keeps its number, because the
             // number is the tree's name, and the two halves become its
             // children. Everything else grows the tree by one level.
-            let first = max_node(context, &self.shadows).saturating_add(1);
+            let first = max_node(context, &self.shadows, &self.pending).saturating_add(1);
             let mut moved = vec![0u8; node_bytes];
             write_cells(&mut moved, depth, &left);
-            put_node(context, &self.shadows, first, &moved)?;
+            put_node(context, &self.shadows, &self.pending, first, &moved)?;
             for cell in &left {
                 if depth == 0 {
-                    put_rowid(context, &self.shadows, cell.key, first)?;
+                    put_rowid(context, &self.shadows, &self.pending, cell.key, first)?;
                 } else {
-                    put_parent(context, &self.shadows, cell.key, first)?;
+                    put_parent(context, &self.shadows, &self.pending, cell.key, first)?;
                 }
             }
             let mut root = vec![0u8; node_bytes];
@@ -688,12 +817,12 @@ impl RTreeTable {
                     },
                 ],
             );
-            put_node(context, &self.shadows, ROOT, &root)?;
-            put_parent(context, &self.shadows, first, ROOT)?;
-            put_parent(context, &self.shadows, sibling, ROOT)?;
+            put_node(context, &self.shadows, &self.pending, ROOT, &root)?;
+            put_parent(context, &self.shadows, &self.pending, first, ROOT)?;
+            put_parent(context, &self.shadows, &self.pending, sibling, ROOT)?;
             return Ok(());
         }
-        let parent = find_parent(context, &self.shadows, number)?.unwrap_or(ROOT);
+        let parent = find_parent(context, &self.shadows, &self.pending, number)?.unwrap_or(ROOT);
         self.refit(context, parent, number, left_box)?;
         self.add_to_node(
             context,
@@ -716,7 +845,7 @@ impl RTreeTable {
         child: i64,
         box_: Vec<f64>,
     ) -> DbResult<()> {
-        let Some(mut node) = get_node(context, &self.shadows, parent)? else {
+        let Some(mut node) = get_node(context, &self.shadows, &self.pending, parent)? else {
             return Ok(());
         };
         let (depth, _) = read_header(&node);
@@ -727,7 +856,7 @@ impl RTreeTable {
             }
         }
         write_cells(&mut node, depth, &cells);
-        put_node(context, &self.shadows, parent, &node)
+        put_node(context, &self.shadows, &self.pending, parent, &node)
     }
 
     /// Removes one row, leaving the tree readable however empty a node becomes.
@@ -736,10 +865,10 @@ impl RTreeTable {
     /// orphans; leaving them costs a little space and no correctness, and the
     /// alternative is a rebalance that has to be crash-safe.
     fn remove(&mut self, context: &mut Context<'_>, rowid: i64) -> DbResult<()> {
-        let Some(leaf) = find_rowid(context, &self.shadows, rowid)? else {
+        let Some(leaf) = find_rowid(context, &self.shadows, &self.pending, rowid)? else {
             return Ok(());
         };
-        let Some(mut node) = get_node(context, &self.shadows, leaf)? else {
+        let Some(mut node) = get_node(context, &self.shadows, &self.pending, leaf)? else {
             return Ok(());
         };
         let (depth, _) = read_header(&node);
@@ -751,8 +880,8 @@ impl RTreeTable {
             *byte = 0;
         }
         write_cells(&mut node, depth, &cells);
-        put_node(context, &self.shadows, leaf, &node)?;
-        delete_rowid(context, &self.shadows, rowid)?;
+        put_node(context, &self.shadows, &self.pending, leaf, &node)?;
+        delete_rowid(context, &self.shadows, &self.pending, rowid)?;
         // The boxes above the leaf are now larger than they need to be, which
         // costs a wider search and never a wrong answer.
         Ok(())
@@ -893,6 +1022,11 @@ struct RTreeCursor {
     coordinates: Coordinates,
     dimensions: usize,
     shadows: ShadowTables,
+    /// The table's write buffer, shared rather than copied.
+    ///
+    /// A `SELECT` in the transaction that wrote has to see what was written,
+    /// and the writes are in the buffer until `sync`.
+    pending: Buffer,
     rows: Vec<Cell>,
     at: usize,
 }
@@ -906,10 +1040,10 @@ impl VirtualCursor for RTreeCursor {
             let Some(rowid) = plan.arguments.first().and_then(Value::as_integer) else {
                 return Ok(());
             };
-            let Some(leaf) = find_rowid(context, &self.shadows, rowid)? else {
+            let Some(leaf) = find_rowid(context, &self.shadows, &self.pending, rowid)? else {
                 return Ok(());
             };
-            let Some(node) = get_node(context, &self.shadows, leaf)? else {
+            let Some(node) = get_node(context, &self.shadows, &self.pending, leaf)? else {
                 return Ok(());
             };
             for cell in read_cells(&node, self.dimensions) {
@@ -957,7 +1091,7 @@ impl VirtualCursor for RTreeCursor {
         }
         let mut stack = vec![ROOT];
         while let Some(number) = stack.pop() {
-            let Some(node) = get_node(context, &self.shadows, number)? else {
+            let Some(node) = get_node(context, &self.shadows, &self.pending, number)? else {
                 continue;
             };
             let (depth, _) = read_header(&node);
@@ -1010,103 +1144,164 @@ impl VirtualCursor for RTreeCursor {
     }
 }
 
-/// Reads one node's blob.
+/// Reads one node's blob, from the buffer when the buffer has it.
 fn get_node(
     context: &mut Context<'_>,
     shadows: &ShadowTables,
+    pending: &Buffer,
     number: i64,
 ) -> DbResult<Option<Vec<u8>>> {
-    let Some(row) = shadows.read_row(context, b"node", number)? else {
-        return Ok(None);
+    if let Ok(held) = pending.lock() {
+        if let Some(node) = held.nodes.get(&number) {
+            return Ok(node.clone());
+        }
+    }
+    let node = match shadows.read_row(context, b"node", number)? {
+        Some(row) => row.get(1).and_then(|value| match value {
+            Value::Blob(blob) => Some(blob.raw().to_vec()),
+            _ => None,
+        }),
+        None => None,
     };
-    Ok(row.get(1).and_then(|value| match value {
-        Value::Blob(blob) => Some(blob.raw().to_vec()),
-        _ => None,
-    }))
+    if let Ok(mut held) = pending.lock() {
+        held.nodes.insert(number, node.clone());
+    }
+    Ok(node)
 }
 
-/// Writes one node's blob.
+/// Buffers one node's blob.
 fn put_node(
-    context: &mut Context<'_>,
-    shadows: &ShadowTables,
+    _context: &mut Context<'_>,
+    _shadows: &ShadowTables,
+    pending: &Buffer,
     number: i64,
     data: &[u8],
 ) -> DbResult<()> {
-    shadows.write_row(
-        context,
-        b"node",
-        number,
-        &[Value::Null, Value::owned_blob(data)?],
-    )
+    let Ok(mut held) = pending.lock() else {
+        return Err(inillucent_base::error::misuse(
+            "the r-tree buffer is poisoned",
+        ));
+    };
+    held.nodes.insert(number, Some(data.to_vec()));
+    held.dirty_nodes.insert(number);
+    held.highest_node = Some(held.highest_node.unwrap_or(ROOT).max(number));
+    Ok(())
 }
 
 /// Returns the leaf that holds one row.
 fn find_rowid(
     context: &mut Context<'_>,
     shadows: &ShadowTables,
+    pending: &Buffer,
     rowid: i64,
 ) -> DbResult<Option<i64>> {
-    let Some(row) = shadows.read_row(context, b"rowid", rowid)? else {
-        return Ok(None);
+    if let Ok(held) = pending.lock() {
+        if let Some(node) = held.rowids.get(&rowid) {
+            return Ok(*node);
+        }
+    }
+    let node = match shadows.read_row(context, b"rowid", rowid)? {
+        Some(row) => row.get(1).and_then(Value::as_integer),
+        None => None,
     };
-    Ok(row.get(1).and_then(Value::as_integer))
+    if let Ok(mut held) = pending.lock() {
+        held.rowids.insert(rowid, node);
+    }
+    Ok(node)
 }
 
-/// Records which leaf holds one row.
+/// Buffers which leaf holds one row.
 fn put_rowid(
-    context: &mut Context<'_>,
-    shadows: &ShadowTables,
+    _context: &mut Context<'_>,
+    _shadows: &ShadowTables,
+    pending: &Buffer,
     rowid: i64,
     node: i64,
 ) -> DbResult<()> {
-    shadows.write_row(
-        context,
-        b"rowid",
-        rowid,
-        &[Value::Null, Value::Integer(node)],
-    )
+    let Ok(mut held) = pending.lock() else {
+        return Err(inillucent_base::error::misuse(
+            "the r-tree buffer is poisoned",
+        ));
+    };
+    held.rowids.insert(rowid, Some(node));
+    held.dirty_rowids.insert(rowid);
+    held.highest_rowid = Some(held.highest_rowid.unwrap_or(0).max(rowid));
+    Ok(())
 }
 
-/// Forgets which leaf held one row.
-fn delete_rowid(context: &mut Context<'_>, shadows: &ShadowTables, rowid: i64) -> DbResult<()> {
-    shadows.delete_row(context, b"rowid", rowid)
+/// Buffers the removal of one row's leaf entry.
+fn delete_rowid(
+    _context: &mut Context<'_>,
+    _shadows: &ShadowTables,
+    pending: &Buffer,
+    rowid: i64,
+) -> DbResult<()> {
+    let Ok(mut held) = pending.lock() else {
+        return Err(inillucent_base::error::misuse(
+            "the r-tree buffer is poisoned",
+        ));
+    };
+    held.rowids.insert(rowid, None);
+    held.dirty_rowids.insert(rowid);
+    Ok(())
 }
 
 /// Returns which node holds one node.
 fn find_parent(
     context: &mut Context<'_>,
     shadows: &ShadowTables,
+    pending: &Buffer,
     node: i64,
 ) -> DbResult<Option<i64>> {
-    let Some(row) = shadows.read_row(context, b"parent", node)? else {
-        return Ok(None);
+    if let Ok(held) = pending.lock() {
+        if let Some(parent) = held.parents.get(&node) {
+            return Ok(*parent);
+        }
+    }
+    let parent = match shadows.read_row(context, b"parent", node)? {
+        Some(row) => row.get(1).and_then(Value::as_integer),
+        None => None,
     };
-    Ok(row.get(1).and_then(Value::as_integer))
+    if let Ok(mut held) = pending.lock() {
+        held.parents.insert(node, parent);
+    }
+    Ok(parent)
 }
 
-/// Records which node holds one node.
+/// Buffers which node holds one node.
 fn put_parent(
-    context: &mut Context<'_>,
-    shadows: &ShadowTables,
+    _context: &mut Context<'_>,
+    _shadows: &ShadowTables,
+    pending: &Buffer,
     node: i64,
     parent: i64,
 ) -> DbResult<()> {
-    shadows.write_row(
-        context,
-        b"parent",
-        node,
-        &[Value::Null, Value::Integer(parent)],
-    )
+    let Ok(mut held) = pending.lock() else {
+        return Err(inillucent_base::error::misuse(
+            "the r-tree buffer is poisoned",
+        ));
+    };
+    held.parents.insert(node, Some(parent));
+    held.dirty_parents.insert(node);
+    Ok(())
 }
 
-/// Returns the largest node number in use.
-fn max_node(context: &mut Context<'_>, shadows: &ShadowTables) -> i64 {
-    shadows.max_rowid(context, b"node").unwrap_or(ROOT)
+/// Returns the largest node number in use, buffered ones included.
+fn max_node(context: &mut Context<'_>, shadows: &ShadowTables, pending: &Buffer) -> i64 {
+    let stored = shadows.max_rowid(context, b"node").unwrap_or(ROOT);
+    match pending.lock() {
+        Ok(held) => stored.max(held.highest_node.unwrap_or(ROOT)),
+        Err(_) => stored,
+    }
 }
 
-/// Returns the largest rowid in use.
-fn max_rowid(context: &mut Context<'_>, shadows: &ShadowTables) -> i64 {
-    shadows.max_rowid(context, b"rowid").unwrap_or(0)
+/// Returns the largest rowid in use, buffered ones included.
+fn max_rowid(context: &mut Context<'_>, shadows: &ShadowTables, pending: &Buffer) -> i64 {
+    let stored = shadows.max_rowid(context, b"rowid").unwrap_or(0);
+    match pending.lock() {
+        Ok(held) => stored.max(held.highest_rowid.unwrap_or(0)),
+        Err(_) => stored,
+    }
 }
 
 /// Returns the error a coordinate out of range reports.
