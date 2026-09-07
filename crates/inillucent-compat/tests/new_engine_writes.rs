@@ -386,6 +386,87 @@ fn a_null_never_collides_in_a_unique_index() {
     );
 }
 
+/// An `UPDATE` is refused by a secondary `UNIQUE` index, and only by a real one.
+///
+/// **This is the silent wrong answer task-1849 was filed for**, and it is worth
+/// stating what "silent" bought: `UPDATE members SET email = 'ana@x' WHERE id =
+/// 2` was performed, answered success, and left `members_email` holding two
+/// entries under one key. Nothing failed. The next reader asking
+/// `WHERE email = 'ana@x'` got two rows from the index and one from the table,
+/// which is why `differences()` runs after every statement here rather than a
+/// `SELECT` at the end: the table alone cannot see it.
+///
+/// The other half is as important and is the reason this is not a one-line fix.
+/// `UPDATE members SET id = 50 WHERE id = 2` is legal - the row moves and every
+/// unique key it holds moves with it - and adding the probe without teaching it
+/// which row is asking refuses it, because the probe finds *this* row's own
+/// entry. That statement was already being refused before the check existed,
+/// for the same reason, whenever the rowid moved.
+///
+/// Each statement is applied to both engines, so the two stay on the same data
+/// and a later case is asked about the state the earlier ones actually left.
+#[test]
+fn an_update_onto_a_taken_unique_key_is_refused_the_way_sqlite_refuses_it() {
+    let Some(mut pair) = pair("update-unique") else {
+        eprintln!("the pinned SQLite oracle is not built; nothing was compared");
+        return;
+    };
+
+    let mut failures = Vec::new();
+    for sql in [
+        // The ticket's own shape: the rowid does not move, `email` does, and
+        // another row already holds the value it moves onto.
+        "UPDATE members SET email = 'ana@x' WHERE id = 2",
+        // The *second* unique index, so the refusal names the index that
+        // collided rather than the first one probed.
+        "UPDATE members SET alias = 'cy' WHERE id = 1",
+        // Both at once, and a `WHERE` that selects the row holding neither.
+        "UPDATE members SET email = 'cy@x', alias = 'cy' WHERE id = 4",
+        // Assigning a row its own value is not a collision with itself.
+        "UPDATE members SET email = 'ana@x', score = 99 WHERE id = 1",
+        // The rowid moves and no indexed value does. Legal, and refused before
+        // this test existed.
+        "UPDATE members SET id = 50 WHERE id = 2",
+        // The rowid moves onto a key another row holds, which is not legal.
+        "UPDATE members SET id = 3 WHERE id = 50",
+        // No unique index holds `team`, so nothing is probed and nothing fails.
+        "UPDATE members SET team = 'gold' WHERE id = 3",
+        // A NULL is distinct from every other NULL, including under an update.
+        "UPDATE members SET alias = NULL WHERE id = 3",
+        // Every row at once, each onto a value only it holds.
+        "UPDATE members SET email = email || '!'",
+        // Every row at once, onto a value another row holds.
+        "UPDATE members SET email = 'ana@x!'",
+        // `OR IGNORE` skips the row; `OR REPLACE` deletes the one in the way.
+        "UPDATE OR IGNORE members SET email = 'ana@x!' WHERE id = 5",
+        "UPDATE OR REPLACE members SET email = 'ana@x!' WHERE id = 5",
+        // The upsert's update arm has the same reach: it collides on
+        // `members_alias` while resolving a conflict on `members_email`.
+        "INSERT INTO members VALUES (60, 'n60@x', 'red', 'n60', 1)",
+        "INSERT INTO members VALUES (61, 'n60@x', 'red', 'zz', 2) \
+         ON CONFLICT(email) DO UPDATE SET alias = 'cy'",
+        // And the same arm assigning a value the conflicting row already holds,
+        // which is the row finding itself again.
+        "INSERT INTO members VALUES (62, 'n60@x', 'red', 'zz', 3) \
+         ON CONFLICT(email) DO UPDATE SET alias = 'n60', score = 7",
+    ] {
+        let (reference, ours) = apply(&mut pair, sql);
+        match (&reference, &ours) {
+            (Some(theirs), Some(mine)) if theirs == mine => {}
+            (None, None) => {}
+            _ => failures.push(format!("{sql}\n  sqlite {reference:?}\n  ours   {ours:?}")),
+        }
+        for difference in differences(&mut pair) {
+            failures.push(format!("after {sql}\n{difference}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "an update resolved a unique key differently from SQLite:\n{}",
+        failures.join("\n\n")
+    );
+}
+
 /// `ON CONFLICT` resolves a collision the way SQLite resolves it.
 #[test]
 fn on_conflict_does_what_sqlite_does() {

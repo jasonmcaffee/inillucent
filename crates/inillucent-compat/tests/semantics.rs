@@ -52,7 +52,8 @@ struct Case {
     expect: Expect,
 }
 
-/// The 92 cases: the review's 61, plus the agreeing shapes it did not record.
+/// The 99 cases: the review's 61, the agreeing shapes it did not record, and
+/// task-1849's seven `UNIQUE`-under-`UPDATE` shapes.
 const CASES: &[Case] = &[
     Case {
         name: "select.basic",
@@ -184,6 +185,55 @@ const CASES: &[Case] = &[
         name: "constraint.primarykey",
         kind: "constraint",
         script: "CREATE TABLE t(a INTEGER PRIMARY KEY);\nINSERT INTO t VALUES (1);\nINSERT INTO t VALUES (1);\nSELECT count(*) FROM t;",
+        expect: Agrees,
+    },
+    // task-1849. An `UPDATE` onto another row's key in a secondary `UNIQUE`
+    // index was performed and answered success, leaving the index with two
+    // entries under one key: the first case is the ticket's own script. The
+    // second is the other half of the same defect - the row must not collide
+    // with *itself*, and moving the rowid moves an index entry whose key did
+    // not change, which was already being refused. The rest are the paths a
+    // check that only looked at the table's key never reached.
+    Case {
+        name: "constraint.unique.update",
+        kind: "constraint",
+        script: "CREATE TABLE t(a TEXT, b INTEGER);\nCREATE UNIQUE INDEX u ON t(a);\nINSERT INTO t VALUES ('x',1),('y',2);\nUPDATE t SET a='x' WHERE b=2;\nSELECT a,b FROM t ORDER BY b;\nSELECT count(*) FROM t WHERE a='x';",
+        expect: Agrees,
+    },
+    Case {
+        name: "constraint.unique.update.self",
+        kind: "constraint",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a TEXT);\nCREATE UNIQUE INDEX u ON t(a);\nINSERT INTO t VALUES (1,'x'),(2,'y');\nUPDATE t SET id=5 WHERE id=2;\nSELECT id,a FROM t ORDER BY id;\nSELECT id FROM t WHERE a='y';",
+        expect: Agrees,
+    },
+    Case {
+        name: "constraint.unique.update.replace",
+        kind: "constraint",
+        script: "CREATE TABLE t(a TEXT, b TEXT, c INTEGER);\nCREATE UNIQUE INDEX u1 ON t(a);\nCREATE UNIQUE INDEX u2 ON t(b);\nINSERT INTO t VALUES ('x','p',1),('y','q',2),('z','r',3);\nUPDATE OR REPLACE t SET a='x', b='q' WHERE c=3;\nSELECT a,b,c FROM t ORDER BY c;",
+        expect: Agrees,
+    },
+    Case {
+        name: "constraint.unique.update.ignore",
+        kind: "constraint",
+        script: "CREATE TABLE t(a INTEGER, b INTEGER);\nCREATE UNIQUE INDEX u ON t(a);\nINSERT INTO t VALUES (1,1),(2,2),(3,3);\nUPDATE OR IGNORE t SET a=a+1;\nSELECT a,b FROM t ORDER BY b;",
+        expect: Agrees,
+    },
+    Case {
+        name: "constraint.unique.upsert.arm",
+        kind: "constraint",
+        script: "CREATE TABLE t(a TEXT, b TEXT, c INTEGER);\nCREATE UNIQUE INDEX u1 ON t(a);\nCREATE UNIQUE INDEX u2 ON t(b);\nINSERT INTO t VALUES ('x','p',1),('y','q',2);\nINSERT INTO t VALUES ('y','z',5) ON CONFLICT(a) DO UPDATE SET b='p';\nSELECT a,b,c FROM t ORDER BY c;",
+        expect: Agrees,
+    },
+    Case {
+        name: "constraint.unique.newest.named",
+        kind: "constraint",
+        script: "CREATE TABLE t(a TEXT, b TEXT, c INTEGER);\nCREATE UNIQUE INDEX u1 ON t(a);\nCREATE UNIQUE INDEX u2 ON t(b);\nINSERT INTO t VALUES ('x','p',1),('z','r',3);\nUPDATE t SET a='x', b='p' WHERE c=3;\nINSERT INTO t VALUES ('x','p',9);",
+        expect: Agrees,
+    },
+    Case {
+        name: "constraint.without.rowid.key",
+        kind: "constraint",
+        script: "CREATE TABLE t(a TEXT, b TEXT, c INTEGER, PRIMARY KEY(a,b)) WITHOUT ROWID;\nINSERT INTO t VALUES ('x','1',1),('y','2',2);\nINSERT INTO t VALUES ('x','1',3);\nUPDATE t SET a='x', b='1' WHERE c=2;\nSELECT a,b,c FROM t ORDER BY c;",
         expect: Agrees,
     },
     Case {

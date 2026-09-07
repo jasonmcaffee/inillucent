@@ -1112,14 +1112,14 @@ fn write_one(
         if place_row_absent(table, layout, target, &row)? {
             return Ok(Some(row));
         }
-        return Err(conflicting_row(table, layout, target, &row)?
+        return Err(conflicting_row(table, layout, target, &row, None)?
             .map(|clash| clash.error)
             .unwrap_or_else(|| {
                 let (code, message) = rowid_message(table);
                 DbError::new(ExtendedCode(code)).with_message(message)
             }));
     }
-    if let Some(clash) = conflicting_row(table, layout, target, &row)? {
+    if let Some(clash) = conflicting_row(table, layout, target, &row, None)? {
         match resolution(statement) {
             Resolution::Skip => return Ok(None),
             Resolution::Replace => {
@@ -1205,26 +1205,73 @@ struct Conflict {
 /// Checks the table's own key first and then every `UNIQUE` index, each through
 /// a point probe - the TDD's "`UNIQUE` enforced through `PointProbe`".
 ///
+/// **An `UPDATE` passes the row it is replacing**, and that changes three
+/// things, because a row must not collide with itself and cannot always be
+/// recognised by the key it is about to have (task-1849):
+///
+/// - the table's own key is probed only when it moved, which is what the
+///   `UPDATE` path used to decide *on its own* and is the whole of the check it
+///   used to do;
+/// - an index whose entry did not change is skipped, which is the same test
+///   `place_row` uses to decide whether to touch it, so an `UPDATE` of a column
+///   no index holds pays two entry builds and no tree work;
+/// - a probe that lands on the row being updated is not a conflict, and the
+///   remaining indexes are still asked. The comparison is against the row's
+///   *before* key: a moved rowid changes an index entry while leaving its
+///   prefix alone, so the entry still in the tree carries the old one.
+///
+/// The last two are what stop the check refusing statements SQLite performs.
+/// `UPDATE t SET id = 5 WHERE id = 2` over a table with an untouched
+/// `UNIQUE(a)` is legal, and finding that row's own `a` was already being
+/// reported as `UNIQUE constraint failed` before this parameter existed.
+///
 /// @param table - the table being written
 /// @param layout - the table tree's layout
 /// @param target - the file and its trees
 /// @param row - the row about to be written
+/// @param replacing - the row's own image before an `UPDATE`, or `None` for an
+///   `INSERT`, which has no row of its own to be confused with
 fn conflicting_row(
     table: &TableInfo,
     layout: &SourceLayout,
     target: &mut dyn WriteTarget,
     row: &[OwnedDatum],
+    replacing: Option<&[OwnedDatum]>,
 ) -> DbResult<Option<Conflict>> {
-    let key = key_of(layout, row);
-    if !key.is_empty() && row_exists(table, target, &key)? {
-        let (code, message) = rowid_message(table);
-        return Ok(Some(Conflict {
-            key,
-            error: DbError::new(ExtendedCode(code)).with_message(message),
-        }));
+    let moved = replacing.is_none_or(|before| !same_key(layout, before, row));
+    if moved {
+        let key = key_of(layout, row);
+        if !key.is_empty() && row_exists(table, target, &key)? {
+            let (code, message) = rowid_message(table);
+            return Ok(Some(Conflict {
+                key,
+                error: DbError::new(ExtendedCode(code)).with_message(message),
+            }));
+        }
     }
     for index in unique_indexes(table) {
         let entry = index_entry(index, layout, row);
+        // **The entry did not move, so neither did the row's claim on it.**
+        //
+        // The same question `place_row` asks before touching an index, asked
+        // here so an `UPDATE` of a column no unique index holds costs two entry
+        // builds and no descent.
+        //
+        // It is the same question, but "the entry did not move" is only the
+        // right *test* for it while every row is in every index. A partial
+        // index constrains only the rows its predicate accepts, so a row that
+        // changed no indexed value but crossed the predicate boundary has an
+        // identical entry and a different claim: it is entering the index, and
+        // entering it can collide. When partial indexes arrive this becomes
+        // "the entries are equal **and** the predicate answers the same for
+        // both images", with the probe below guarded by the predicate asked of
+        // `row` - the image being probed with, never `before`, or a row leaving
+        // the index is refused by a constraint that no longer holds it.
+        // `CREATE INDEX ... WHERE` is refused outright at this commit, so there
+        // is no such index yet and nothing here can be tested against one.
+        if replacing.is_some_and(|before| index_entry(index, layout, before) == entry) {
+            continue;
+        }
         // A NULL is distinct from every other NULL in a UNIQUE index, which is
         // SQL's rule and the reason a nullable unique column may hold any
         // number of NULLs.
@@ -1242,13 +1289,26 @@ fn conflicting_row(
             }
         };
         if let Some(found) = found {
+            let key: Vec<OwnedDatum> = found.last().cloned().into_iter().collect();
+            // The row finding its own entry. It happens when the rowid moved
+            // and the key columns did not, and when a collation makes a changed
+            // value probe onto the value it replaced - `COLLATE NOCASE` and
+            // `SET a = 'X'` over `'x'`. Neither is a conflict, and neither says
+            // anything about the indexes not yet asked.
+            //
+            // The key is built here rather than up front because building one
+            // clones every key value, and the ordinary `UPDATE` never reaches
+            // this line: it is paid once per collision, not once per row.
+            if replacing.is_some_and(|before| key_of(layout, before) == key) {
+                continue;
+            }
             let code = if index.origin == IndexOrigin::PrimaryKey {
                 codes::PRIMARY_KEY
             } else {
                 codes::UNIQUE
             };
             return Ok(Some(Conflict {
-                key: found.last().cloned().into_iter().collect(),
+                key,
                 error: DbError::new(ExtendedCode(code)).with_message(unique_message(table, index)),
             }));
         }
@@ -1309,11 +1369,23 @@ fn upsert_row(
             *cell = value;
         }
     }
-    if needed {
-        replace_row(table, layout, target, &before, &after)?;
-    } else {
-        place_row(table, layout, target, None, &after)?;
+    // **The update arm is an update, and had the same hole `UPDATE` did.** The
+    // row it writes can collide with a *third* row on another `UNIQUE` index -
+    // `ON CONFLICT(a) DO UPDATE SET b = ...` onto a `b` somebody else holds -
+    // and it was written with no check at all (task-1849). It raises whatever
+    // the statement's own `OR` algorithm says, because SQLite's `DO UPDATE` arm
+    // resolves ABORT: `INSERT OR IGNORE` and `INSERT OR REPLACE` both report
+    // the constraint here rather than skipping or replacing.
+    if let Some(clash) = conflicting_row(table, layout, target, &after, Some(&before))? {
+        return Err(clash.error);
     }
+    // **`replace_row` on both paths, because the arm can move the key.**
+    // `DO UPDATE SET a = 9` over an `INTEGER PRIMARY KEY` is a row that moves,
+    // and the unread path wrote the new one with `place_row` and left the old
+    // one behind - the table then held both (task-1849). The stand-in image is
+    // enough for `replace_row`: it carries the key the row is moving *from*,
+    // which is all a removal needs, and that path has no index to maintain.
+    replace_row(table, layout, target, &before, &after)?;
     Ok(after)
 }
 
@@ -1481,22 +1553,39 @@ pub fn update_at(
         // converted value is what the key is built from: `UPDATE t SET id =
         // '7'` moves the row to key 7, not to the text `'7'`.
         declarations.apply_affinity(&mut after);
-        // Changing a key moves the row, so the uniqueness of the new key is an
-        // ordinary conflict check; leaving it alone is not, or every update
-        // would collide with the row it is updating.
-        if !same_key(&layout, &before, &after) {
-            if let Some(clash) = conflicting_row(table, &layout, target, &after)? {
-                match statement.on_conflict {
-                    Some(ConflictAction::Ignore) => continue,
-                    Some(ConflictAction::Replace) => {
-                        let Some(held) = read_row(table, target, &clash.key)? else {
-                            continue;
-                        };
-                        remove_row(table, &layout, target, &clash.key, &held)?;
-                    }
-                    _ => return Err(clash.error),
+        // **Every uniqueness the row moved onto, not just the table's own key.**
+        //
+        // Moving a key moves the row, so the new key has to be free; that much
+        // was always checked. What was not is that an `UPDATE` leaving the
+        // rowid alone can still collide with *another* row on a secondary
+        // `UNIQUE` index - `UPDATE t SET a = 'x'` where some other row already
+        // holds `'x'` - and the engine performed it, leaving two entries under
+        // one key and a table disagreeing with its own constraint (task-1849).
+        // `conflicting_row` knows which row is asking, so it reports neither
+        // this row's own key nor an index whose entry did not move.
+        //
+        // `OR REPLACE` asks again after each deletion, because one image can
+        // collide with a *different* row on each of two unique indexes and
+        // SQLite deletes both. It terminates: every turn removes a row.
+        let mut skipped = false;
+        while let Some(clash) = conflicting_row(table, &layout, target, &after, Some(&before))? {
+            match statement.on_conflict {
+                Some(ConflictAction::Ignore) => {
+                    skipped = true;
+                    break;
                 }
+                Some(ConflictAction::Replace) => {
+                    let Some(held) = read_row(table, target, &clash.key)? else {
+                        skipped = true;
+                        break;
+                    };
+                    remove_row(table, &layout, target, &clash.key, &held)?;
+                }
+                _ => return Err(clash.error),
             }
+        }
+        if skipped {
+            continue;
         }
         if trigger::fire(
             &statement.triggers,
@@ -2037,11 +2126,25 @@ fn index_entry(index: &IndexInfo, layout: &SourceLayout, row: &[OwnedDatum]) -> 
 
 /// Returns the unique indexes of a table that are trees of their own.
 ///
+/// **Newest first, because that is the one SQLite names.** When a row collides
+/// on two unique indexes at once only one of them can be reported, and SQLite
+/// reports the last one declared: it links each new index onto the *head* of
+/// the table's list and walks the list in order, so a schema read back off disk
+/// is in reverse declaration order. `CREATE UNIQUE INDEX u1 ON t(a)` then
+/// `u2 ON t(b)`, and a row taking both, answers `UNIQUE constraint failed: t.b`
+/// - and `t.a` when the two are declared the other way round. Iterating
+/// declaration-first named the wrong constraint on `INSERT` as well as
+/// `UPDATE`, and the message is the part an application matches on (task-1849).
+///
+/// The table's own key is not in here and does not need to be: both engines
+/// check it before any index.
+///
 /// @param table - the table
 fn unique_indexes(table: &TableInfo) -> impl Iterator<Item = &IndexInfo> {
     table
         .indexes
         .iter()
+        .rev()
         .filter(|index| index.unique && index.root != 0 && index.root != table.root)
 }
 
