@@ -93,15 +93,35 @@ fn build(name: &str, sql: &str) -> Option<PathBuf> {
 
 /// Removes a fixture and the files an import built beside it.
 ///
-/// Every path is named in full and removed one at a time; nothing here is
-/// assembled from a glob or a directory listing.
+/// The imported database is not one file: the engine writes its log as numbered
+/// segments beside it, `<name>-wal.0000000001` and so on, and a version of this
+/// that removed only the database left one segment per run in the temporary
+/// directory for ever. So the segments are removed too, matched by the
+/// database's own file name - which carries this process's id and a nanosecond
+/// stamp, so the prefix cannot name a file some other test made.
 ///
 /// @param source - the SQLite file the fixture built
 /// @param imported - the database the import produced, if it produced one
 fn clean_up(source: &Path, imported: Option<&Path>) {
     let _ = std::fs::remove_file(source);
-    if let Some(imported) = imported {
-        let _ = std::fs::remove_file(imported);
+    let Some(imported) = imported else {
+        return;
+    };
+    let _ = std::fs::remove_file(imported);
+    let (Some(directory), Some(name)) = (imported.parent(), imported.file_name()) else {
+        return;
+    };
+    let Some(name) = name.to_str() else {
+        return;
+    };
+    let segments = format!("{name}-wal.");
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&segments) {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 
