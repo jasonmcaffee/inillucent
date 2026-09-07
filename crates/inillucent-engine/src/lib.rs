@@ -88,7 +88,7 @@ pub mod vtab;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use inillucent_base::error::misuse;
+use inillucent_base::error::refusal;
 use inillucent_base::limits::Limits;
 pub use inillucent_base::DbResult;
 use inillucent_catalog::load::table_from_create_sql;
@@ -121,6 +121,18 @@ use inillucent_wal::{Body, Synchronous, Wal, WalOptions, FIRST_LSN};
 /// [`DbError::unsupported`] and [`DbError::code`], both of which it has to be
 /// able to name.
 pub use inillucent_base::error::{DbError, PrimaryCode};
+
+/// What an application-defined function is handed and what it answers with.
+///
+/// Re-exported for the reason [`BoundParams`] is: `inillucent-driver` registers
+/// a function on a caller's behalf and has to be able to name the type the body
+/// speaks, and naming `inillucent-value` to do it would make the driver's one
+/// dependency edge into two.
+pub use inillucent_value::Value as ExprValue;
+
+/// What a function promises about itself, and how a collation orders two values.
+pub use inillucent_ext::registry::{AggregateBody, FunctionFlags, ScalarBody};
+pub use inillucent_value::collation::Comparator;
 
 /// The bound-parameter map a statement is executed with.
 ///
@@ -575,7 +587,7 @@ fn file_of<'a>(
         return Ok(main);
     }
     Ok(&mut schema_of_index(attached, temps, session, at)
-        .ok_or_else(|| misuse("a statement names a database that is not attached"))?
+        .ok_or_else(|| refusal("a statement names a database that is not attached"))?
         .database)
 }
 
@@ -736,7 +748,7 @@ impl ImportedDatabase {
     fn pool_of(&self, root: u32) -> DbResult<&Pool> {
         Ok(self
             .schema_file(self.schema_of(root))
-            .ok_or_else(|| misuse("a tree names a database that is not attached"))?
+            .ok_or_else(|| refusal("a tree names a database that is not attached"))?
             .pool())
     }
 
@@ -805,7 +817,7 @@ impl ImportedDatabase {
         if at == MAIN {
             let root = self.next_root;
             if root >= FIRST_ATTACHED_HANDLE {
-                return Err(misuse(
+                return Err(refusal(
                     "this database holds too many objects for one connection to name them all",
                 ));
             }
@@ -814,14 +826,14 @@ impl ImportedDatabase {
         }
         let handle = self.next_handle;
         if handle == u32::MAX {
-            return Err(misuse(
+            return Err(refusal(
                 "this connection holds too many attached objects to name them all",
             ));
         }
         self.next_handle = handle.saturating_add(1);
         let held = self
             .schema_at_mut(at)
-            .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
+            .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
         let local = held.next_root;
         held.next_root = local.saturating_add(1);
         held.handles.insert(u64::from(local), handle);
@@ -1799,7 +1811,7 @@ impl ImportedDatabase {
         self.recycle(parsed);
         match bound? {
             BoundStatement::Select(select) => Ok(plan_select_with(*select, self.levers)),
-            _ => Err(misuse(format!("{sql} is not a read-only statement"))),
+            _ => Err(refusal(format!("{sql} is not a read-only statement"))),
         }
     }
 
@@ -2105,7 +2117,7 @@ impl ImportedDatabase {
             column_of(b"vector"),
             column_of(b"rank"),
         ) else {
-            return Err(misuse("the index's store is not a search table"));
+            return Err(refusal("the index's store is not a search table"));
         };
         let specs = vec![
             ConstraintSpec {
@@ -2371,7 +2383,7 @@ impl ImportedDatabase {
                     .rposition(|(held, _)| *held == folded)
                     .map(|index| self.marks.get(index).map(|(_, at)| *at).unwrap_or(0))
                 else {
-                    return Err(misuse(format!(
+                    return Err(refusal(format!(
                         "no such savepoint: {}",
                         String::from_utf8_lossy(name)
                     )));
@@ -2393,7 +2405,7 @@ impl ImportedDatabase {
             let at = entry.schema;
             let wal = self
                 .log_of(at)
-                .ok_or_else(|| misuse("a rollback names a database that is not attached"))?;
+                .ok_or_else(|| refusal("a rollback names a database that is not attached"))?;
             let mut log = WalLog {
                 wal,
                 txn,
@@ -2449,7 +2461,7 @@ impl ImportedDatabase {
             // in the schema without putting its tree back in this handle, and a
             // table the binder names and nothing can read is a wrong answer
             // waiting to happen. Refused by name until the re-attach is written.
-            return Err(misuse(format!(
+            return Err(refusal(format!(
                 "rolling back left {} in the schema with no tree attached;                  undoing a DROP inside a transaction is not supported yet",
                 missing.join(", ")
             )));
@@ -2721,7 +2733,7 @@ impl ImportedDatabase {
     pub fn release(&mut self, name: &[u8]) -> DbResult<()> {
         let folded = name.to_ascii_lowercase();
         let Some(position) = self.marks.iter().rposition(|(held, _)| *held == folded) else {
-            return Err(misuse(format!(
+            return Err(refusal(format!(
                 "no such savepoint: {}",
                 String::from_utf8_lossy(name)
             )));
@@ -2925,7 +2937,7 @@ impl ImportedDatabase {
         for (root, tree) in &self.trees {
             let pool = self
                 .schema_file(self.schema_of(*root))
-                .ok_or_else(|| misuse("a tree names a database that is not attached"))?
+                .ok_or_else(|| refusal("a tree names a database that is not attached"))?
                 .pool();
             tree.check(pool)?;
         }
@@ -3227,17 +3239,17 @@ impl ImportedDatabase {
                 physical::run_any_prepared(plan, self, prepared, params)?;
             }
             Cached::Insert(statement, ..) => {
-                self.write(params, |target, params| {
+                self.write(params, Vec::new(), |target, params| {
                     dml::insert(statement, target, params, &rows)
                 })?;
             }
             Cached::Update(statement, ..) => {
-                self.write(params, |target, params| {
+                self.write(params, Vec::new(), |target, params| {
                     dml::update(statement, target, params, &rows)
                 })?;
             }
             Cached::Delete(statement, ..) => {
-                self.write(params, |target, params| {
+                self.write(params, Vec::new(), |target, params| {
                     dml::delete(statement, target, params, &rows)
                 })?;
             }
@@ -3354,7 +3366,7 @@ impl ImportedDatabase {
                 return Ok(());
             }
         }
-        Err(misuse(
+        Err(refusal(
             "a foreign key's action did not settle; the schema may have a cycle that cannot resolve",
         ))
     }
@@ -3695,9 +3707,11 @@ impl ImportedDatabase {
                     None
                 };
                 let params = folded.as_ref().unwrap_or(params);
-                self.write(params, |target, params| {
-                    dml::insert(statement, target, params, &rows)
-                })
+                self.write(
+                    params,
+                    returning_names(&statement.returning),
+                    |target, params| dml::insert(statement, target, params, &rows),
+                )
             }
             Cached::Update(statement, plan, prepared, assignments_hold_subquery) => {
                 let keys = self.keys_of(plan, prepared, params)?;
@@ -3716,9 +3730,11 @@ impl ImportedDatabase {
                     None
                 };
                 let params = folded.as_ref().unwrap_or(params);
-                self.write(params, |target, params| {
-                    dml::update(statement, target, params, &keys)
-                })
+                self.write(
+                    params,
+                    returning_names(&statement.returning),
+                    |target, params| dml::update(statement, target, params, &keys),
+                )
             }
             Cached::VirtualDelete(statement, plan, prepared) => {
                 let keys = physical::run_any_prepared(plan, self, prepared, params)?.0;
@@ -3761,9 +3777,11 @@ impl ImportedDatabase {
                     .collect();
                 let folded = inillucent_exec::subquery::fold_expressions(&returned, self, params)?;
                 let params = folded.as_ref().unwrap_or(params);
-                self.write(params, |target, params| {
-                    dml::delete(statement, target, params, &keys)
-                })
+                self.write(
+                    params,
+                    returning_names(&statement.returning),
+                    |target, params| dml::delete(statement, target, params, &keys),
+                )
             }
         }
     }
@@ -3861,7 +3879,7 @@ impl ImportedDatabase {
         parsed: &inillucent_sql::parser::ParsedStatement,
     ) -> DbResult<Cached> {
         if !query_plan {
-            return Err(misuse(format!(
+            return Err(refusal(format!(
                 "{sql}: plain EXPLAIN lists the opcodes of a bytecode program, and this \
                  engine compiles no bytecode - it builds an operator chain. EXPLAIN \
                  QUERY PLAN describes that chain and is answered"
@@ -3989,7 +4007,7 @@ impl ImportedDatabase {
                 let rows = statement
                     .view_rows
                     .as_ref()
-                    .ok_or_else(|| misuse("a view delete with no query"))?;
+                    .ok_or_else(|| refusal("a view delete with no query"))?;
                 let plan = plan_select_with((**rows).clone(), self.levers);
                 let prepared = physical::prepare_any(&plan, self)?;
                 Ok(Cached::Delete(
@@ -4019,7 +4037,7 @@ impl ImportedDatabase {
             // the execution re-binds against the schema as it is at that
             // moment.
             BoundStatement::Directive(_) => Ok(Cached::Ddl(sql.to_string())),
-            other => Err(misuse(format!(
+            other => Err(refusal(format!(
                 "{sql} binds to {}, which the new engine does not run yet",
                 describe_statement(&other)
             ))),
@@ -4044,7 +4062,7 @@ impl ImportedDatabase {
         let layout = self
             .layouts
             .get(&table.root)
-            .ok_or_else(|| misuse("no layout imported for the table being written"))?;
+            .ok_or_else(|| refusal("no layout imported for the table being written"))?;
         let select = dml::keys_query(table, source, filter, limit, offset, layout)?;
         let plan = plan_select_with(select, self.levers);
         let prepared = physical::prepare_any(&plan, self)?;
@@ -4083,7 +4101,7 @@ impl ImportedDatabase {
         let layout = self
             .layouts
             .get(&statement.table.root)
-            .ok_or_else(|| misuse("no layout imported for the table being written"))?;
+            .ok_or_else(|| refusal("no layout imported for the table being written"))?;
         let assigned: Vec<inillucent_sql::bind::BoundExpr> = statement
             .assignments
             .iter()
@@ -4116,6 +4134,7 @@ impl ImportedDatabase {
     fn write(
         &mut self,
         params: &Params,
+        names: Vec<String>,
         apply: impl FnOnce(&mut dyn WriteTarget, &Params) -> DbResult<Changes>,
     ) -> DbResult<Outcome> {
         // A statement inside an open batch joins it and does not commit; a
@@ -4218,7 +4237,7 @@ impl ImportedDatabase {
         }
         Ok(Outcome {
             rows: changes.returned.clone(),
-            names: Vec::new(),
+            names,
             changes,
         })
     }
@@ -4245,6 +4264,27 @@ struct ViolationQuery {
 /// Returns a shape's column names as strings.
 ///
 /// @param shape - what the built plan produces
+/// Returns the names a `RETURNING` clause's columns report.
+///
+/// **A write that answers rows has to name them.** `INSERT ... RETURNING a, b`
+/// produced its rows and an empty name list, so a caller drawing a grid had two
+/// columns of values and no headings for them - which `inillucent-driver`'s
+/// conformance suite caught, because a result with rows and no columns is a
+/// shape nothing else in the engine produces.
+///
+/// The names are the binder's own `BoundResultColumn::name`, which is where a
+/// `SELECT`'s come from too, so `SELECT a` and `INSERT ... RETURNING a` cannot
+/// disagree about what the column is called.
+///
+/// @param returning - the bound `RETURNING` columns
+fn returning_names(returning: &[inillucent_sql::bind::BoundResultColumn]) -> Vec<String> {
+    returning
+        .iter()
+        .map(|column| String::from_utf8_lossy(&column.name).into_owned())
+        .collect()
+}
+
+/// Returns the names a plan's result columns report.
 fn names_of(shape: &physical::Shape) -> Vec<String> {
     shape
         .names
@@ -4399,7 +4439,7 @@ fn refused(error: inillucent_sql::diagnostic::ParseError) -> inillucent_base::er
     // path, a bound value or page bytes. The detail is left in place so that
     // everything reading it - the shell, the gate, the surface inventory -
     // sees exactly what it saw before.
-    let built = misuse(error.message()).with_message(error.message());
+    let built = refusal(error.message()).with_message(error.message());
     match error.kind {
         inillucent_sql::diagnostic::ParseErrorKind::Unsupported(what) => {
             built.with_unsupported(what)
@@ -4564,12 +4604,12 @@ impl WriteTarget for WriteView<'_> {
         let log = self
             .logs
             .get_mut(at)
-            .ok_or_else(|| misuse("a write names a database that is not attached"))?;
+            .ok_or_else(|| refusal("a write names a database that is not attached"))?;
         let database = if at == MAIN {
             &mut *self.database
         } else {
             &mut schema_of_index(self.attached, self.temps, self.session, at)
-                .ok_or_else(|| misuse("a write names a database that is not attached"))?
+                .ok_or_else(|| refusal("a write names a database that is not attached"))?
                 .database
         };
         Ok((database, self.trees, log))
@@ -4638,7 +4678,7 @@ impl TreeCatalog for WriteView<'_> {
         downstream: &mut dyn inillucent_exec::ops::Sink,
     ) -> DbResult<bool> {
         let _ = (path, params, needed, downstream);
-        Err(misuse(format!(
+        Err(refusal(format!(
             "a trigger body reads {}, which is a virtual table",
             String::from_utf8_lossy(&table.name)
         )))
@@ -5177,13 +5217,13 @@ fn shape_of(
 /// @param entry - the catalog row
 fn identifier_of(entry: &SchemaEntry) -> DbResult<u32> {
     if entry.tree_id == 0 {
-        return Err(misuse(format!(
+        return Err(refusal(format!(
             "the catalog row for {} carries no tree identifier; the database predates              task-1834 and has to be rebuilt",
             String::from_utf8_lossy(&entry.name)
         )));
     }
     u32::try_from(entry.tree_id).map_err(|_| {
-        misuse(format!(
+        refusal(format!(
             "the catalog row for {} carries a tree identifier that does not fit",
             String::from_utf8_lossy(&entry.name)
         ))
@@ -5580,7 +5620,7 @@ fn keyed_table_shape(info: &TableInfo) -> DbResult<(Vec<ColumnSpec>, usize, Sour
     keyed.sort_unstable();
     let key_columns = keyed.len();
     if key_columns == 0 {
-        return Err(misuse(
+        return Err(refusal(
             "a WITHOUT ROWID table with no primary key cannot be keyed",
         ));
     }

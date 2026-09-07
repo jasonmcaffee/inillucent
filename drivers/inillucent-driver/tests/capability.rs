@@ -60,9 +60,51 @@ enum Outcome {
 /// @param sql - the statement under test
 /// @param want_value - whether the probe reads a value rather than an outcome
 fn probe(name: &str, setup: &[&str], sql: &str, want_value: bool) -> Outcome {
+    probe_with(name, setup, sql, want_value, false)
+}
+
+/// Runs one capability's probe, optionally registering a function and a
+/// collation on the connection first.
+///
+/// The registration is a separate flag rather than a separate function because
+/// everything after it is identical, and two copies of "open a scratch
+/// database, run the setup, run the statement, read the first cell" would be
+/// two things that could disagree about what a probe is.
+///
+/// @param name - the capability's name, used for the file
+/// @param setup - the fixture statements
+/// @param sql - the statement under test
+/// @param want_value - whether the probe reads a value rather than an outcome
+/// @param register - whether to register the probe function and collation first
+fn probe_with(
+    name: &str,
+    setup: &[&str],
+    sql: &str,
+    want_value: bool,
+    register: bool,
+) -> Outcome {
     let path = scratch(name);
     let database = Database::open(&path).expect("the scratch database opens");
     let connection = database.connect();
+    if register {
+        // Doubling and a case-insensitive comparison: two things whose right
+        // answer is obvious, so a probe that returned the wrong one could not
+        // be mistaken for a probe that happened to pass.
+        let registered = connection
+            .create_scalar_function("driver_probe", 1, |arguments| match arguments.first() {
+                Some(Value::Integer(number)) => Ok(Value::Integer(number.saturating_mul(2))),
+                _ => Ok(Value::Null),
+            })
+            .and_then(|()| {
+                connection.create_collation("driver_probe_ci", |left, right| {
+                    left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase())
+                })
+            });
+        if let Err(why) = registered {
+            let _ = std::fs::remove_file(&path);
+            return Outcome::Refused(format!("{}: {}", why.status.name(), why.message));
+        }
+    }
     for statement in setup {
         // A setup statement that is refused is a fact about the engine too, and
         // silently carrying on would make the probe measure something else. The
@@ -127,6 +169,23 @@ fn the_capability_table_matches_the_engine() {
                         entry.name
                     )),
                     (_, Outcome::Answered(_)) => unreachable!("Refuses never reads a value"),
+                }
+            }
+            Probe::Registers { sql, expect } => {
+                match (supported, probe_with(entry.name, &[], sql, true, true)) {
+                    (true, Outcome::Answered(got)) if got == expect => {}
+                    (false, Outcome::Answered(got)) if got != expect => {}
+                    (false, Outcome::Refused(_)) => {}
+                    (true, other) => wrong.push(format!(
+                        "`{}` is declared supported and answered `{}` where `{expect}` was                          required - a registration nothing can reach is the failure this                          row exists to catch",
+                        entry.name,
+                        described(&other)
+                    )),
+                    (false, other) => wrong.push(format!(
+                        "`{}` is declared unsupported and answered `{expect}` anyway ({}).                          The engine has grown it; update capability.rs.",
+                        entry.name,
+                        described(&other)
+                    )),
                 }
             }
             Probe::Answers { setup, sql, expect } => {
