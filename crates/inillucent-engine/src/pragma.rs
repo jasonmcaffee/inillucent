@@ -94,7 +94,7 @@ impl ImportedDatabase {
             b"foreign_keys" => self.pragma_flag(argument),
             b"defer_foreign_keys" => self.pragma_defer(argument),
             b"foreign_key_check" => self.pragma_foreign_key_check(argument),
-            b"journal_mode" => self.pragma_fixed_word(argument, b"wal"),
+            b"journal_mode" => self.pragma_journal_mode(argument),
             b"encoding" => self.pragma_fixed_word(argument, b"UTF-8"),
             b"locking_mode" => self.pragma_fixed_word(argument, b"exclusive"),
             b"integrity_check" | b"quick_check" => self.pragma_integrity_check(),
@@ -571,6 +571,24 @@ impl ImportedDatabase {
     /// bigger number meaning something else; the pages written is the same
     /// physical quantity SQLite's frame count is.
     fn pragma_wal_checkpoint(&mut self) -> DbResult<Outcome> {
+        // **Minus one twice when there is no log to check point.** SQLite
+        // answers `0|-1|-1` under a rollback journal because the two counts are
+        // "frames in the log" and "frames moved", and a database with no
+        // write-ahead log has neither - which is a different statement from
+        // "no frames moved". A caller polling the second column to decide
+        // whether a checkpoint is due needs to be able to tell those apart.
+        if self.journal_mode() != inillucent_pool::journal::JournalMode::Wal {
+            self.checkpoint()?;
+            return Ok(Outcome {
+                rows: vec![vec![
+                    OwnedDatum::Int(0),
+                    OwnedDatum::Int(-1),
+                    OwnedDatum::Int(-1),
+                ]],
+                names: vec!["busy".into(), "log".into(), "checkpointed".into()],
+                changes: Default::default(),
+            });
+        }
         let before = self.database.pool().stats().writes;
         self.checkpoint()?;
         let moved = self.database.pool().stats().writes.saturating_sub(before) as i64;
@@ -1021,6 +1039,29 @@ impl ImportedDatabase {
         Ok(one_integer(self.analysis_limit))
     }
 
+    /// Reads or sets `journal_mode`.
+    ///
+    /// **A real switch, not a reported one.** SQLite answers with the mode that
+    /// is now in force, which is not always the one that was asked for - a
+    /// request it cannot honour leaves the old mode and says so by returning
+    /// it. That is why this returns a word rather than nothing, and why a
+    /// refused switch is not an error.
+    ///
+    /// The word is what is *in force*, so a script that sets `DELETE` and reads
+    /// back `wal` knows the switch did not happen.
+    ///
+    /// @param argument - the mode, when one was given
+    fn pragma_journal_mode(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+        let Some(argument) = argument else {
+            return Ok(word_row(self.journal_mode().word()));
+        };
+        let asked = argument_text(argument);
+        if let Some(mode) = inillucent_pool::journal::JournalMode::named(asked.trim()) {
+            self.set_journal_mode(mode)?;
+        }
+        Ok(word_row(self.journal_mode().word()))
+    }
+
     /// Reads or sets `auto_vacuum`.
     ///
     /// **The mode may only change while the database is empty**, which is
@@ -1265,6 +1306,17 @@ impl ImportedDatabase {
 /// Returns the answer a pragma that reports one number gives.
 ///
 /// @param value - the number
+/// Returns a one-row, one-column answer holding a word.
+///
+/// @param word - the value
+fn word_row(word: &str) -> Outcome {
+    Outcome {
+        rows: vec![vec![OwnedDatum::Text(word.as_bytes().to_vec())]],
+        names: vec!["value".into()],
+        changes: Default::default(),
+    }
+}
+
 fn one_integer(value: i64) -> Outcome {
     Outcome {
         rows: vec![vec![OwnedDatum::Int(value)]],

@@ -307,6 +307,13 @@ pub struct ImportedDatabase {
     /// Whether `PRAGMA defer_foreign_keys` has put every immediate check off
     /// until the commit, for the transaction now open.
     defer_foreign_keys: bool,
+    /// How the pre-commit state is protected, which `PRAGMA journal_mode` sets.
+    ///
+    /// The write-ahead log by default, because it is the faster of the two -
+    /// one sync per commit against two. A rollback journal is what an
+    /// application selects when it wants the database to be one file after a
+    /// clean close, which is the difference that made task-1860 build it.
+    journal_mode: inillucent_pool::journal::JournalMode,
     /// Whether `PRAGMA ignore_check_constraints` has turned `CHECK` off.
     ///
     /// Like `foreign_keys` it is read by the *binder*, so changing it throws
@@ -1583,6 +1590,7 @@ impl ImportedDatabase {
             busy_timeout_ms: 0,
             foreign_keys: false,
             defer_foreign_keys: false,
+            journal_mode: inillucent_pool::journal::JournalMode::Wal,
             ignore_check_constraints: false,
             secure_delete: 0,
             auto_vacuum: 0,
@@ -1690,6 +1698,13 @@ impl ImportedDatabase {
         // does.** A database this connection is opened on may have been the
         // participant of a cross-file commit that a crash caught undecided, and
         // there is nothing about being `main` that settles it.
+        // **A hot rollback journal is replayed before anything reads a page.**
+        // It describes a file that is halfway through a transaction, and every
+        // page it names has to go back before the meta record is even read -
+        // the meta page itself may be one of them. A journal whose header is
+        // absent or zeroed describes nothing and is removed, which is what a
+        // finished one looks like. See `inillucent_pool::journal`.
+        inillucent_pool::journal::replay_hot_journal(vfs.as_ref(), &db_path)?;
         let doubtful = multi::doubtful_transactions(&path)?;
         let opened_file = open_file(&vfs, &db_path, frames, &doubtful)?;
         let OpenedFile {
@@ -1773,6 +1788,7 @@ impl ImportedDatabase {
             busy_timeout_ms: 0,
             foreign_keys: false,
             defer_foreign_keys: false,
+            journal_mode: inillucent_pool::journal::JournalMode::Wal,
             ignore_check_constraints: false,
             secure_delete: 0,
             auto_vacuum: 0,
@@ -4170,6 +4186,50 @@ impl ImportedDatabase {
     /// Returns which planner optimizations this connection has on.
     pub fn levers(&self) -> Levers {
         self.levers
+    }
+
+    /// Returns how the pre-commit state is protected.
+    pub(crate) fn journal_mode(&self) -> inillucent_pool::journal::JournalMode {
+        self.journal_mode
+    }
+
+    /// Changes how the pre-commit state is protected.
+    ///
+    /// **The database is checkpointed on the way through**, which is not a
+    /// tidy-up: the two schemes protect different things, and a switch made
+    /// with uncommitted state in either of them would leave a file neither of
+    /// them could recover. SQLite refuses the switch inside a transaction for
+    /// the same reason.
+    ///
+    /// @param mode - the mode to switch to
+    pub(crate) fn set_journal_mode(
+        &mut self,
+        mode: inillucent_pool::journal::JournalMode,
+    ) -> DbResult<()> {
+        if mode == self.journal_mode {
+            return Ok(());
+        }
+        if self.batch.get().is_some() {
+            return Err(refusal(
+                "cannot change PRAGMA journal_mode from within a transaction",
+            ));
+        }
+        self.checkpoint()?;
+        self.journal_mode = mode;
+        // A VFS of its own rather than the schema's, because the journal opens
+        // one file by name and `OsVfs` is stateless - the same reasoning that
+        // lets `create` and `open` each make their own.
+        let journal = mode.is_rollback().then(|| {
+            let vfs: std::sync::Arc<dyn inillucent_vfs::Vfs> = std::sync::Arc::new(OsVfs::new());
+            inillucent_pool::journal::Journal::new(
+                vfs,
+                &DbPath::new(self.path.to_string_lossy().as_ref()),
+                mode,
+                self.page_size,
+            )
+        });
+        self.database.pool().set_journal(journal);
+        Ok(())
     }
 
     /// Turns the automatic index on or off, which `PRAGMA automatic_index` does.

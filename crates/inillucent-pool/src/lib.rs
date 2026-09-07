@@ -60,6 +60,7 @@ pub mod extent;
 pub mod file;
 pub mod freemap;
 pub mod interior;
+pub mod journal;
 pub mod latch;
 pub mod meta;
 pub mod page;
