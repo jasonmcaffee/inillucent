@@ -241,10 +241,12 @@ pub fn try_lock_bytes(
     exclusive: bool,
     operation: VfsOperation,
 ) -> VfsResult<bool> {
+    // `F_WRLCK` and friends are `c_int` on Linux and `c_short` on macOS, so the cast is what makes
+    // one signature serve both rather than only the platform it was written on.
     let kind = if exclusive {
-        libc::F_WRLCK
+        libc::F_WRLCK as libc::c_short
     } else {
-        libc::F_RDLCK
+        libc::F_RDLCK as libc::c_short
     };
     match set_lock(file, start, len, kind) {
         Ok(()) => Ok(true),
@@ -255,7 +257,7 @@ pub fn try_lock_bytes(
 
 /// Releases an `fcntl` byte-range lock.
 pub fn unlock_bytes(file: &File, start: u64, len: u64, operation: VfsOperation) -> VfsResult<()> {
-    set_lock(file, start, len, libc::F_UNLCK).map_err(|error| VfsError::from_io(operation, &error))
+    set_lock(file, start, len, libc::F_UNLCK as libc::c_short).map_err(|error| VfsError::from_io(operation, &error))
 }
 
 /// Reports whether an error means another holder has the range.
@@ -264,11 +266,11 @@ fn is_conflict(error: &io::Error) -> bool {
 }
 
 /// Issues one non-blocking `F_SETLK`.
-fn set_lock(file: &File, start: u64, len: u64, kind: i32) -> io::Result<()> {
+fn set_lock(file: &File, start: u64, len: u64, kind: libc::c_short) -> io::Result<()> {
     // SAFETY: `flock` is a plain C structure whose every field is set below;
     // zeroing it first gives the padding a defined value.
     let mut lock: libc::flock = unsafe { std::mem::zeroed() };
-    lock.l_type = kind as libc::c_short;
+    lock.l_type = kind;
     lock.l_whence = libc::SEEK_SET as libc::c_short;
     lock.l_start = start as libc::off_t;
     lock.l_len = len as libc::off_t;
