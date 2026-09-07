@@ -229,6 +229,28 @@ fn the_workspace_obeys_the_dependency_contract() {
     );
 }
 
+/// Every path in `[workspace] members` must exist and hold a `Cargo.toml`.
+///
+/// `1854f3d` added `drivers/inillucent-driver` and `drivers/inillucent-driver-capi`
+/// to the members list while `drivers/` was untracked and not ignored, so the
+/// directory existed on exactly one machine and `cargo metadata` on a fresh
+/// clone exited 101 before reading a line of Rust. Nothing in the suite noticed,
+/// because every other check runs on a machine where the directory is present.
+/// This test is the one that fails on the machine that added the member rather
+/// than on somebody else's clone.
+#[test]
+fn every_workspace_member_path_exists() {
+    let root = workspace_root();
+    let members = layering::workspace_members(&root).expect("the root manifest declares members");
+    let problems = layering::check_member_paths(&root, &members);
+    assert!(problems.is_empty(), "{problems:#?}");
+    assert!(
+        members.len() >= 16,
+        "the members list should hold the whole workspace, found {}",
+        members.len()
+    );
+}
+
 /// The pinned reference metadata must name a complete build: a version, the
 /// compile options, the run-time settings a comparison uses, and a checksum for
 /// every artifact.

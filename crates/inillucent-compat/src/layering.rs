@@ -173,6 +173,106 @@ pub struct CrateManifest {
     pub development: BTreeSet<String>,
 }
 
+/// Reads the `[workspace] members` list out of the root manifest.
+///
+/// This is the list `cargo` itself resolves before it compiles a line, so a
+/// member naming a directory that is not in the repository is not a slow build
+/// or a missing feature - it is `cargo metadata` exiting 101 on a fresh clone,
+/// which is what `1854f3d` did when it added `drivers/` without committing it.
+/// The list is read by hand rather than through `cargo metadata` for the same
+/// reason `read_workspace` parses manifests: the check has to be able to run
+/// when the workspace does *not* resolve, which is precisely the case it exists
+/// to catch.
+pub fn workspace_members(root: &Path) -> Result<Vec<String>, String> {
+    let path = root.join("Cargo.toml");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
+    let mut members = Vec::new();
+    let mut section = String::new();
+    let mut in_members = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') && !in_members {
+            section = line
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_string();
+            continue;
+        }
+        if section != "workspace" {
+            continue;
+        }
+        if !in_members {
+            let Some(rest) = line.strip_prefix("members") else {
+                continue;
+            };
+            let Some(rest) = rest.trim_start().strip_prefix('=') else {
+                continue;
+            };
+            let rest = rest.trim_start();
+            if !rest.starts_with('[') {
+                return Err("[workspace] members is not an inline array".to_string());
+            }
+            in_members = true;
+            collect_member_entries(&rest[1..], &mut members);
+            if rest.contains(']') {
+                in_members = false;
+            }
+            continue;
+        }
+        collect_member_entries(line, &mut members);
+        if line.contains(']') {
+            in_members = false;
+        }
+    }
+    if members.is_empty() {
+        return Err(format!("{} declares no workspace members", path.display()));
+    }
+    Ok(members)
+}
+
+/// Pulls the quoted paths out of one line of a `members = [...]` array.
+fn collect_member_entries(line: &str, members: &mut Vec<String>) {
+    let line = line.split('#').next().unwrap_or("");
+    let mut rest = line;
+    while let Some(open) = rest.find('"') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('"') else {
+            return;
+        };
+        members.push(after[..close].to_string());
+        rest = &after[close + 1..];
+    }
+}
+
+/// Reports every workspace member whose directory is missing or holds no
+/// `Cargo.toml`.
+///
+/// An empty result is the invariant: the repository builds from a clone.
+pub fn check_member_paths(root: &Path, members: &[String]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for member in members {
+        let directory = root.join(member);
+        if !directory.is_dir() {
+            problems.push(format!(
+                "workspace member `{member}` names a directory that does not exist: {}",
+                directory.display()
+            ));
+            continue;
+        }
+        if !directory.join("Cargo.toml").is_file() {
+            problems.push(format!(
+                "workspace member `{member}` has no Cargo.toml at {}",
+                directory.join("Cargo.toml").display()
+            ));
+        }
+    }
+    problems
+}
+
 /// Reads every workspace member's manifest.
 ///
 /// The manifests are parsed rather than `cargo metadata` being invoked because
@@ -490,5 +590,44 @@ mod tests {
         .expect("the contract parses");
         let violations = find_cycles(&cyclic);
         assert!(!violations.is_empty(), "the cycle was not reported");
+    }
+
+    /// The members list is read out of the real root manifest, including the
+    /// multi-line, comment-interleaved form the workspace actually uses.
+    #[test]
+    fn the_members_list_reads_from_the_root_manifest() {
+        let members = workspace_members(&crate::workspace_root()).expect("the manifest parses");
+        assert!(members.iter().any(|member| member == "crates/inillucent-base"));
+        assert!(members.iter().any(|member| member == "crates/inillucent-compat"));
+        assert!(
+            !members.iter().any(|member| member.contains('#')),
+            "a comment leaked into the members list: {members:?}"
+        );
+    }
+
+    /// A member naming a directory that is not in the repository is what makes
+    /// `cargo metadata` exit 101 on a clone, so it has to be reported.
+    #[test]
+    fn a_member_whose_directory_is_absent_is_reported() {
+        let root = crate::workspace_root();
+        let problems = check_member_paths(
+            &root,
+            &[
+                "crates/inillucent-base".to_string(),
+                "drivers/there-is-no-such-crate".to_string(),
+            ],
+        );
+        assert_eq!(problems.len(), 1, "{problems:#?}");
+        assert!(problems[0].contains("there-is-no-such-crate"));
+    }
+
+    /// A directory that exists but holds no manifest fails the same way cargo
+    /// does, and has to be reported separately from an absent one.
+    #[test]
+    fn a_member_directory_without_a_manifest_is_reported() {
+        let root = crate::workspace_root();
+        let problems = check_member_paths(&root, &["crates".to_string()]);
+        assert_eq!(problems.len(), 1, "{problems:#?}");
+        assert!(problems[0].contains("no Cargo.toml"));
     }
 }

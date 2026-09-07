@@ -1,0 +1,20 @@
+[package]
+name = "inillucent-driver-capi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The C ABI over inillucent-driver: how every language that is not Rust reaches the engine."
+
+[lib]
+name = "inillucent_driver"
+# `cdylib` is what a binding loads at run time - Python's ctypes, Node's koffi,
+# Go's purego, Java's FFM, C#'s DllImport. `staticlib` is for a C or C++ program
+# that would rather link it. `lib` is what this crate's own tests use, because a
+# test that went through the dynamic library would be testing the loader.
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[dependencies]
+# The driver, and nothing else. A marshalling layer that could reach the engine
+# would be a marshalling layer that could start deciding something, and then
+# there would be two answers to every question in `capability.rs`.
+inillucent-driver = { workspace = true }
