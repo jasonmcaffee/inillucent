@@ -2298,7 +2298,7 @@ impl Compiler {
             rowid,
             None,
             insert.on_conflict,
-            insert.upsert.as_ref(),
+            insert.upsert.first(),
             &insert.checks,
             &insert.returning,
             &mut skip,

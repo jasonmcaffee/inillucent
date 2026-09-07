@@ -190,7 +190,7 @@ pub struct BoundInsert {
     /// The expressions the table's partial and expression indexes need.
     pub index_exprs: Vec<BoundIndexExprs>,
     /// The `ON CONFLICT ... DO UPDATE` clause, when there is one.
-    pub upsert: Option<BoundUpsert>,
+    pub upsert: Vec<BoundUpsert>,
     /// `sqlite_sequence`'s root page, when the target is `AUTOINCREMENT`.
     ///
     /// Resolved here rather than in the compiler because it is a fact about the
@@ -215,6 +215,11 @@ pub struct BoundInsert {
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoundUpsert {
     /// The conflict target columns, when written; empty means any constraint.
+    ///
+    /// Sorted, because a conflict target names a *set* of columns and
+    /// `ON CONFLICT(a,b)` and `ON CONFLICT(b,a)` name the same one. Matching
+    /// them against an index's columns is a set comparison, and sorting here
+    /// is what makes it one comparison rather than a search per column.
     pub target: Vec<u16>,
     /// The assignments, or empty for `DO NOTHING`.
     pub assignments: Vec<BoundAssignment>,
@@ -1373,21 +1378,37 @@ impl<'a> Binder<'a> {
         &mut self,
         table: &TableInfo,
         insert: &ast::Insert,
-    ) -> Result<Option<BoundUpsert>, ParseError> {
-        let Some(upsert) = insert.upserts.first() else {
-            return Ok(None);
-        };
-        if insert.upserts.len() > 1 {
-            return Err(unsupported(
-                "more than one ON CONFLICT clause",
-                Span::default(),
-            ));
+    ) -> Result<Vec<BoundUpsert>, ParseError> {
+        if insert.upserts.is_empty() {
+            return Ok(Vec::new());
         }
-        if upsert.target_filter.is_some() {
-            return Err(unsupported(
-                "a partial-index conflict target",
-                Span::default(),
-            ));
+        // **Every clause is bound, in written order.** A statement may carry
+        // several - `ON CONFLICT(k) DO UPDATE ... ON CONFLICT(id) DO UPDATE ...`
+        // - and which one runs is decided at *run time*, by which constraint
+        // the row actually collided with. Binding only the first was the whole
+        // of the old refusal.
+        for upsert in &insert.upserts {
+            if upsert.target_filter.is_some() {
+                return Err(unsupported(
+                    "a partial-index conflict target",
+                    Span::default(),
+                ));
+            }
+        }
+        // A clause with no conflict target matches any constraint, so anything
+        // written after it could never run. SQLite refuses that rather than
+        // accepting a clause it will never reach.
+        if let Some(position) = insert
+            .upserts
+            .iter()
+            .position(|upsert| upsert.target.is_empty())
+        {
+            if position + 1 < insert.upserts.len() {
+                return Err(crate::bind::schema_refused(
+                    "ON CONFLICT clause with no conflict target must be last",
+                    Span::default(),
+                ));
+            }
         }
         // `excluded` is in scope for the assignments and the WHERE, and only
         // there. Setting it around the binding rather than pushing a second
@@ -1396,9 +1417,19 @@ impl<'a> Binder<'a> {
         // ambiguous - every column of the target is also a column of
         // `excluded`.
         self.excluded = Some(table.clone());
-        let bound_upsert = self.bind_upsert_body(table, upsert);
+        let mut bound = Vec::with_capacity(insert.upserts.len());
+        for upsert in &insert.upserts {
+            match self.bind_upsert_body(table, upsert) {
+                Ok(Some(one)) => bound.push(one),
+                Ok(None) => {}
+                Err(error) => {
+                    self.excluded = None;
+                    return Err(error);
+                }
+            }
+        }
         self.excluded = None;
-        bound_upsert
+        Ok(bound)
     }
 
     /// Binds an upsert's target, assignments and filter.
@@ -1420,6 +1451,7 @@ impl<'a> Binder<'a> {
             };
             target.push(position);
         }
+        target.sort_unstable();
         let mut assignments = Vec::new();
         for (names, value) in &upsert.assignments {
             let bound = self.bind_expr(*value)?;

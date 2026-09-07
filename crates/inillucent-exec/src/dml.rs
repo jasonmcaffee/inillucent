@@ -718,7 +718,7 @@ pub fn insert_at(
     // `excluded` only exists inside an `ON CONFLICT ... DO UPDATE`, so a plain
     // insert carries one image rather than two.
     let mut sources = vec![statement.target_source];
-    if statement.upsert.is_some() {
+    if !statement.upsert.is_empty() {
         sources.push(EXCLUDED_SOURCE);
     }
     let space = RowSpace::new(&sources, &layout);
@@ -992,15 +992,7 @@ struct InsertPlan {
     /// Where the rowid comes from.
     rowid: Option<PlannedRowid>,
     /// The `DO UPDATE` assignments, by tree column.
-    upsert: Vec<(usize, Box<dyn Eval>)>,
-    /// The `WHERE` on an upsert's `DO UPDATE`, when one was written.
-    ///
-    /// Evaluated over the row already there, which is what it is about:
-    /// `ON CONFLICT(a) DO UPDATE SET n = ? WHERE t.n > 500` updates only the
-    /// rows whose `n` is already over 500, and leaves the rest as they are
-    /// without raising. It used to be compiled nowhere and consulted nowhere,
-    /// so the arm ran for every conflicting row (task-1859 Part E).
-    upsert_filter: Option<Box<dyn Eval>>,
+    upsert: Vec<CompiledUpsert>,
     /// The `RETURNING` expressions.
     returning: Vec<Box<dyn Eval>>,
 }
@@ -1064,9 +1056,14 @@ impl InsertPlan {
             (None, Some(index)) => Some(PlannedRowid::Supplied(index)),
             (None, None) => None,
         };
-        let mut upsert = Vec::new();
-        let mut upsert_filter = None;
-        if let Some(clause) = &statement.upsert {
+        // **One compiled arm per written clause.** Which of them runs is a
+        // run-time question - it depends on which constraint the row actually
+        // collided with - so all of them are compiled and the choice is made
+        // per conflict.
+        let mut upsert = Vec::with_capacity(statement.upsert.len());
+        for clause in &statement.upsert {
+            let mut assignments = Vec::new();
+            let mut filter = None;
             if clause.do_update {
                 for assignment in &clause.assignments {
                     if let Some(slot) = layout
@@ -1075,13 +1072,17 @@ impl InsertPlan {
                         .copied()
                         .flatten()
                     {
-                        upsert.push((slot, space.compile(&assignment.value, params)?));
+                        assignments.push((slot, space.compile(&assignment.value, params)?));
                     }
                 }
-                if let Some(filter) = &clause.filter {
-                    upsert_filter = Some(space.compile(filter, params)?);
+                if let Some(written) = &clause.filter {
+                    filter = Some(space.compile(written, params)?);
                 }
             }
+            upsert.push(CompiledUpsert {
+                assignments,
+                filter,
+            });
         }
         let mut returning = Vec::with_capacity(statement.returning.len());
         for column in &statement.returning {
@@ -1091,7 +1092,6 @@ impl InsertPlan {
             columns,
             rowid,
             upsert,
-            upsert_filter,
             returning,
         })
     }
@@ -1237,7 +1237,13 @@ fn write_one(
     // since this arm is entered only when the table has no `UNIQUE` index. A
     // key declared `ON CONFLICT IGNORE` or `ON CONFLICT REPLACE` has an arm to
     // run and must take the general path below (task-1853).
-    if resolution_for(statement, rowid_conflict(table)) == Resolution::Raise
+    // **And only when no `ON CONFLICT` clause was written at all.** Which arm a
+    // conflict selects is decided from the constraint that fired, and that is
+    // not known here - so a statement with any clause takes the general path
+    // and lets the collision choose. `resolution_for` used to answer this by
+    // reading the single arm; with several, there is nothing to read yet.
+    if statement.upsert.is_empty()
+        && resolution_for(statement, rowid_conflict(table)) == Resolution::Raise
         && unique_indexes(table).next().is_none()
     {
         if place_row_absent(table, layout, target, &row, indexes)? {
@@ -1258,7 +1264,8 @@ fn write_one(
     // one of them - which is what `UPDATE OR REPLACE` has always done here and
     // the insert path did not. It terminates: every turn removes a row.
     while let Some(clash) = conflicting_row(table, layout, target, &row, None, indexes)? {
-        match resolution_for(statement, clash.conflict) {
+        let arm = matching_arm(statement, &clash.columns);
+        match resolution_for_arm(statement, clash.conflict, arm) {
             Resolution::Skip => return Ok(None),
             Resolution::Replace => {
                 let Some(held) = read_row(table, target, &clash.key)? else {
@@ -1287,7 +1294,7 @@ fn write_one(
                 // as it is and writes nothing - the same outcome as
                 // `DO NOTHING`, and not an error.
                 return upsert_row(
-                    statement, table, layout, space, plan, target, &clash, &row, indexes,
+                    statement, table, layout, space, plan, target, &clash, &row, indexes, arm,
                 );
             }
             // `ABORT`, `FAIL` and `ROLLBACK` all raise here and differ only in
@@ -1339,7 +1346,20 @@ enum Resolution {
 /// @param constraint - the clause the constraint that reported the conflict
 ///   carries, if it carries one
 fn resolution_for(statement: &BoundInsert, constraint: Option<ConflictAction>) -> Resolution {
-    if let Some(clause) = &statement.upsert {
+    resolution_for_arm(statement, constraint, None)
+}
+
+/// Returns what an insert does about a conflict, given the arm that matched it.
+///
+/// @param statement - the bound insert
+/// @param constraint - the clause the constraint carries, if it carries one
+/// @param arm - which `ON CONFLICT` clause matched, when one did
+fn resolution_for_arm(
+    statement: &BoundInsert,
+    constraint: Option<ConflictAction>,
+    arm: Option<usize>,
+) -> Resolution {
+    if let Some(clause) = arm.and_then(|at| statement.upsert.get(at)) {
         return if clause.do_update {
             Resolution::Update
         } else {
@@ -1347,6 +1367,23 @@ fn resolution_for(statement: &BoundInsert, constraint: Option<ConflictAction>) -
         };
     }
     resolution_of(statement.on_conflict.or(constraint))
+}
+
+/// Returns which `ON CONFLICT` clause a conflict selects, if any does.
+///
+/// The clauses are tried in written order and the first whose target names the
+/// constraint that fired wins; a clause with no target matches anything, which
+/// is why one may only be written last. A conflict no clause claims falls
+/// through to the statement's own `OR` algorithm, exactly as if none had been
+/// written - which is what makes `ON CONFLICT(k) DO UPDATE` over a collision on
+/// `id` an error rather than an update.
+///
+/// @param statement - the bound insert
+/// @param columns - the columns of the constraint that reported the conflict
+fn matching_arm(statement: &BoundInsert, columns: &[u16]) -> Option<usize> {
+    statement.upsert.iter().position(|clause| {
+        clause.target.is_empty() || clause.target.as_slice() == columns
+    })
 }
 
 /// Returns the arm an algorithm names.
@@ -1361,6 +1398,21 @@ fn resolution_of(action: Option<ConflictAction>) -> Resolution {
         Some(ConflictAction::Replace) => Resolution::Replace,
         _ => Resolution::Raise,
     }
+}
+
+/// One `ON CONFLICT` clause, compiled.
+///
+/// A statement may carry several, and they are tried in written order against
+/// the constraint that actually reported the conflict - which is why the target
+/// travels with the assignments rather than being resolved once at compile
+/// time. `ON CONFLICT(k) DO UPDATE ... ON CONFLICT(id) DO UPDATE ...` runs the
+/// second arm when the row collided on `id` and the first when it collided on
+/// `k`, and nothing but the collision can decide which.
+struct CompiledUpsert {
+    /// The assignments, by tree-column slot.
+    assignments: Vec<(usize, Box<dyn Eval>)>,
+    /// The `WHERE` on the `DO UPDATE`.
+    filter: Option<Box<dyn Eval>>,
 }
 
 /// A conflict a row would cause, with the error it would report.
@@ -1380,6 +1432,14 @@ struct Conflict {
     /// that is a separate defect with its own ticket, and this field is what it
     /// will read.
     conflict: Option<ConflictAction>,
+    /// The columns of the constraint that reported it, sorted.
+    ///
+    /// **What chooses between several `ON CONFLICT` arms.** An arm names a
+    /// conflict target - a set of columns - and runs only when the constraint
+    /// that fired is that one. Without this the engine could bind more than one
+    /// arm and would still have no way to pick, which is why the old refusal
+    /// was at bind time.
+    columns: Vec<u16>,
 }
 
 /// Returns what a failure resolved this way undoes.
@@ -1463,6 +1523,21 @@ fn conflicting_row(
                 key,
                 error: DbError::new(ExtendedCode(code)).with_message(message),
                 conflict: rowid_conflict(table),
+                // **The table's own key, whichever shape it has.** For a rowid
+                // table that is the `INTEGER PRIMARY KEY` when one was declared
+                // by name and nothing otherwise - an implicit rowid has no
+                // column an `ON CONFLICT` can name. For a `WITHOUT ROWID` table
+                // it is the whole primary key, which is what `ON CONFLICT(k)`
+                // names there.
+                columns: {
+                    let mut held = if table.without_rowid {
+                        table.primary_key()
+                    } else {
+                        table.rowid_alias.into_iter().collect()
+                    };
+                    held.sort_unstable();
+                    held
+                },
             }));
         }
     }
@@ -1536,10 +1611,17 @@ fn conflicting_row(
             } else {
                 codes::UNIQUE
             };
+            let mut columns: Vec<u16> = index
+                .columns
+                .iter()
+                .filter_map(|column| column.column)
+                .collect();
+            columns.sort_unstable();
             return Ok(Some(Conflict {
                 key,
                 error: DbError::new(ExtendedCode(code)).with_message(unique_message(table, index)),
                 conflict: index.conflict,
+                columns,
             }));
         }
     }
@@ -1560,7 +1642,7 @@ fn conflicting_row(
 /// @param target - the file and its trees
 /// @param clash - the conflict, naming the row already there
 /// @param excluded - the row that was being inserted
-#[allow(clippy::too_many_arguments)]
+/// @param arm - which `ON CONFLICT` clause the conflict selected
 #[allow(clippy::too_many_arguments)]
 fn upsert_row(
     statement: &BoundInsert,
@@ -1572,6 +1654,7 @@ fn upsert_row(
     clash: &Conflict,
     excluded: &[OwnedDatum],
     indexes: IndexExprs<'_>,
+    arm: Option<usize>,
 ) -> DbResult<Option<Row>> {
     // **The row that is there is read only when something needs it.** An upsert
     // that assigns every column but the key, over a table with no index, and
@@ -1600,14 +1683,17 @@ fn upsert_row(
     // `ON CONFLICT(a) DO UPDATE SET n=? WHERE t.n > 500` updated every
     // conflicting row. A silent wrong write, on the statement an application
     // uses precisely to make an update conditional.
-    if let Some(filter) = &plan.upsert_filter {
+    let Some(clause) = arm.and_then(|at| plan.upsert.get(at)) else {
+        return Ok(None);
+    };
+    if let Some(filter) = &clause.filter {
         let verdict = space.evaluate(filter.as_ref(), &[before.as_slice(), excluded])?;
         if crate::expr::truth(&verdict.borrow()) != Some(true) {
             return Ok(None);
         }
     }
     let mut after = before.clone();
-    for (slot, eval) in &plan.upsert {
+    for (slot, eval) in &clause.assignments {
         let value = space.evaluate(eval.as_ref(), &[before.as_slice(), excluded])?;
         if let Some(cell) = after.get_mut(*slot) {
             *cell = value;
@@ -1661,24 +1747,30 @@ fn needs_before(
         if Some(column) == layout.rowid {
             continue;
         }
-        if !plan.upsert.iter().any(|(slot, _)| *slot == column) {
+        // **Every arm, not one.** Any of them may be the one that runs, so a
+        // column left unassigned by any of them has to be carried forward.
+        if !plan
+            .upsert
+            .iter()
+            .any(|clause| clause.assignments.iter().any(|(slot, _)| *slot == column))
+        {
             return true;
         }
     }
-    let Some(clause) = &statement.upsert else {
-        return true;
-    };
-    // The arm's `WHERE` is about the row already there, so writing one without
-    // reading it is not an option when there is a filter to test.
-    if clause.filter.is_some() {
+    if statement.upsert.is_empty() {
         return true;
     }
-    clause.assignments.iter().any(|assignment| {
-        let mut used = inillucent_sql::bind::ColumnUse::default();
-        assignment
-            .value
-            .columns_read(statement.target_source, &mut used);
-        used.opaque || !used.columns.is_empty()
+    statement.upsert.iter().any(|clause| {
+        // The arm's `WHERE` is about the row already there, so writing one
+        // without reading it is not an option when there is a filter to test.
+        clause.filter.is_some()
+            || clause.assignments.iter().any(|assignment| {
+                let mut used = inillucent_sql::bind::ColumnUse::default();
+                assignment
+                    .value
+                    .columns_read(statement.target_source, &mut used);
+                used.opaque || !used.columns.is_empty()
+            })
     })
 }
 
