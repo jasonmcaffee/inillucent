@@ -1,274 +1,223 @@
 # task-1846 — the schema floor, and the three `CREATE INDEX` forms
 
-The remainder of Phase 3. Four pieces, in the order they will be built:
+**Status: built and measured.** This began as a design and is kept as the record of what was
+designed, what the measurements said, and where the design was wrong.
 
-- **A** — `schema` is the last family under the 1.00x floor. `CREATE INDEX` at medium costs 48.1 ms
-  against SQLite's 31.6, and closing that gap is the whole of H5.
+Four pieces:
+
+- **A** — `schema` was the last family under the 1.00x floor. `CREATE INDEX` at medium cost 49.4 ms
+  against SQLite's ~31; it is now **28.0 ms**, and the family reads **1.22x–1.31x** where it read
+  0.66x.
 - **B** — partial indexes, `CREATE INDEX ix ON t(a) WHERE b > 5`.
 - **C** — indexes on expressions, `CREATE INDEX ix ON t(lower(a))`.
 - **D** — `CREATE INDEX` on a `WITHOUT ROWID` table.
 
-B, C and D are the three `Differs` rows in `crates/inillucent-compat/tests/semantics.rs`; A is the
-one family the four-run gate reports as `UNDER THE FLOOR`.
-
----
-
-## The measurement this starts from
-
-Taken on this box, this checkout, `9ef6aee`, with a fresh copy of the medium fixture
-(100,000 `main_table` rows), `target/release/inillucent-indexprofile --iterations 12`:
-
-```
-## CREATE INDEX main_label ON main_table(label)
-  median total: 48.1 ms
-  last round  : scan 13.3 ms, sort 5.3 ms, unique 0.0 ms, pack 15.1 ms (of which borrow 4.2 ms), catalog 7.0 ms
-```
-
-SQLite builds the same index in **31.6 ms** (task-1845's four-run medium gate, `schema.index`
-31,643,800 ns). So the target is a **16.5 ms** reduction, and the stages account for it like this:
-
-| stage | ms | what it is | addressable |
-|---|---:|---|---|
-| prologue | 7.4 | parse, bind, `canonical_sql`, `allocate_root`, `index_from_create_sql` — the part of the statement before `scan` starts, arrived at by subtraction | to be measured, then judged |
-| scan | 13.3 | `index_entries` — one pass over the table tree, projecting `(label, rowid)` | **yes** |
-| sort | 5.3 | `in_key_order` — a stable comparison sort that decodes and compares values | **yes** |
-| unique | 0.0 | not a `UNIQUE` index | — |
-| pack | 15.1 | `build_tree_from` → `bulk_build_logged`, of which 4.2 ms is the `Vec<Vec<Datum>>` borrow | **yes** |
-| catalog | 7.0 | `record`, `rebuild_tables`, `refresh_catalog`, `seal` — and `seal` is a log sync both engines pay under `synchronous = FULL` | **no** |
-
-`scan + sort + pack = 33.7 ms` has to become roughly **17 ms** for the total to land at SQLite's, or
-about **21 ms** if the prologue also gives up a few milliseconds. Both are in scope.
-
-### Where the time actually goes
-
-Three allocations per row, on a hundred thousand rows:
-
-1. `index_entries` builds a `Vec<OwnedDatum>` per row — one allocation for the vector, one more for
-   `OwnedDatum::Text`'s copy of the 45-byte label.
-2. `in_key_order` sorts those vectors by `compare_under`, which dispatches on collation per column
-   per comparison and chases two pointers per value.
-3. `build_tree_from` then materialises a *second* `Vec<Vec<Datum>>` of the whole input — one more
-   allocation per row — before `bulk_build_logged` walks it. That is the 4.2 ms named `borrow`.
-
-The narrow fix — making `pack_with` take `&[&[Datum]]` — was tried in task-1845 and backed out: it is
-worth about 4 ms of the 17 needed and it reaches five call sites including the hot compaction path in
-`write.rs`. It is only worth doing as part of the whole change, which is what this ticket is.
+B, C and D were the three `Differs` rows in `crates/inillucent-compat/tests/semantics.rs`. That file
+is now **94 of 94**, with two cases added.
 
 ---
 
 ## Part A — the bulk builder
 
+### What the measurement said, and where it disagreed with the ticket
+
+The ticket's stage table came from `indexprofile`, which printed **the median of the totals beside
+the stages of the last round** — different rounds of a statement that varies by several milliseconds.
+The two never added up, and the residual read as a 7.4 ms prologue that does not exist. `indexprofile`
+now takes a median per stage and reports the residual as its own column; the prologue is **0.7 ms**.
+
+The second and larger disagreement was between `indexprofile` and the gate itself. `indexprofile`
+builds over a freshly imported table; **the gate builds after its write workloads** — 2,000 inserts,
+2,000 scattered updates, 2,000 deletes, 500 upserts — so by then almost every leaf of `main_table`
+carries a delta entry or a tombstone. The same statement measured **26.3 ms** on one and **38.9 ms**
+on the other, and the difference was entirely in a stage `indexprofile` could not see. `fullgate` now
+prints the stage breakdown for its own `schema.index` round.
+
+| stage | at `9ef6aee` | now (in the gate) |
+|---|---:|---:|
+| scan | 13.3 | **3.8** |
+| sort | 5.3 | 4.9 |
+| flatten (arena → the builder's rows) | — | 1.5 |
+| pack | 15.1 | **6.5** |
+| catalog (`record`, `rebuild_tables`, `refresh_catalog`) | 7.0 | **0.1** |
+| seal (the log commit and its sync) | — | 6.7 |
+| prologue (parse, bind, allocate a root, re-parse) | — | 0.5 |
+| **total** | **49.4 ms** | **28.0 ms** |
+
+Splitting `catalog` from `seal` settles the ticket's own claim: the catalog work really is under a
+tenth of a millisecond, and the tail is the sync both engines pay under `synchronous = FULL`. There
+is nothing to close there.
+
 ### A1. One arena instead of three hundred thousand allocations
 
-A new `EntrySet` in `inillucent-engine`, built by `index_entries` and consumed by the packer. It
-holds the entries columnar-ish, in four vectors and no per-row allocation at all:
+`index_entries` built a `Vec<OwnedDatum>` per row — one allocation for the vector, one for
+`OwnedDatum::Text`'s copy of the label — and `build_tree_from` then materialised a *second*
+`Vec<Vec<Datum>>` of the whole input for the packer. Three allocations per row, three hundred
+thousand of them to build a tree of two hundred leaves.
 
-```rust
-/// One cell of one entry, pointing into the arena rather than owning bytes.
-#[derive(Clone, Copy)]
-enum Cell {
-    Null,
-    Int(i64),
-    Real(f64),
-    Text { at: u32, len: u32 },
-    Blob { at: u32, len: u32 },
-}
+`EntrySet` holds the same information in three vectors, each reserved once from the row count:
+`cells` (`rows * width` fixed-size cells), `bytes` (every payload appended once), and `prefix` (a
+fixed-width sort key). Nothing is allocated per row.
 
-struct EntrySet {
-    /// How many columns an entry has: the key columns, then the row identity.
-    width: usize,
-    /// `rows * width` cells, in entry order.
-    cells: Vec<Cell>,
-    /// Every text and blob payload, appended once.
-    bytes: Vec<u8>,
-    /// Every entry's memcmp key, appended once, under the tree's own encoding.
-    keys: Vec<u8>,
-    /// `rows + 1` offsets into `keys`.
-    key_at: Vec<u32>,
-}
-```
+### A2. A sort prefix, not a whole key
 
-`push` takes the row's `Datum`s straight out of the leaf, appends the cells, copies the text bytes
-into `bytes`, and encodes the key into `keys` with the tree's own `KeyEncoding` — so the sort order
-this produces *is* the order the tree will be read by, which is the invariant `in_key_order`'s
-comment defends. Four growing vectors, reserved up front from `tree.row_count()`, is a handful of
-allocations for the whole build.
+The order the sort produces must be the order **the tree** compares in, or a descent binary-searches
+separators the leaves do not obey — a scan answers right and a seek answers wrong, which is the defect
+`in_key_order`'s own comment was written about. The obvious way to get that is to encode each entry's
+whole key with the tree's `KeyEncoding` and sort the bytes.
 
-`inillucent-tree` grows one method to make the key encoding appendable rather than returning a
-`Vec` per row:
+It was measured and it is too expensive: encoding a hundred thousand fifty-five-byte keys cost
+**5.5 ms of a 9.3 ms scan**, measured by building once with the encoding removed, to produce five and
+a half megabytes the sort then reads back in a random order.
 
-```rust
-impl KeyEncoding {
-    /// Appends a key tuple's comparable bytes to a buffer.
-    pub fn encode_into(self, values: &[Datum<'_>], collations: &[Collation], out: &mut Vec<u8>);
-}
-```
+So each entry keeps the **first sixteen bytes** of that encoding, produced by the same encoder on
+payloads clipped to sixteen — the escape only ever lengthens a payload, so the clipped form still
+fills the prefix, which makes it an exact prefix rather than a second encoding to keep in step. Two
+entries the prefix ties are ordered by `compare_under`, the comparison the tree's own search and its
+integrity checker use. The prefix is a *speed* choice with a correct fallback behind it, never a claim
+about the order.
 
-and `encode_under` becomes a two-line wrapper over it, so there is one encoding and not two.
+The collation is applied **before** the clip and the value is then encoded as BINARY. The other order
+is wrong: `RTRIM` over a clip that lands inside a run of spaces strips spaces the whole value treats
+as interior, and the result is a prefix of nothing. There are tests for that shape and for `NOCASE`.
 
-### A2. A radix pass instead of comparisons
+`order()` is an LSD radix over the prefix, one word at a time, with the bytes every word agrees on
+found once and skipped, ping-ponging between two buffers. A run the words cannot separate falls back
+to `compare_under`.
 
-`EntrySet::order()` returns the entry indices in key order:
-
-1. Pack the first **eight bytes** of each entry's key into a `u64`, big-endian, zero-padded, and
-   pair it with the entry's index.
-2. **LSD radix sort** those pairs: eight 256-way counting passes over a `Vec<(u64, u32)>` and one
-   scratch buffer. No comparisons, no allocation per element.
-3. Walk the result and, wherever a run of entries shares a prefix, sort just that run by `memcmp`
-   over the full keys.
-
-That is exact — a `memcmp` order over whole keys — and it is the order the tree defines, because the
-keys were produced by the tree's own encoder. Ties are broken by the entry index so the result is
-deterministic and the stability `in_key_order` documents is preserved.
-
-For `main_label` the keys are `[TEXT] 'row N lorem ipsum…'`, so the eight-byte prefix separates most
-entries outright and the fix-up runs are short.
+**A defect the guard caught.** The first radix ran its counting passes most-significant-byte first.
+An LSD radix is only a sort if the passes run *upward* from the least significant byte; run the other
+way it produces a plausible-looking permutation that is not sorted. The unit test that checks the
+radix order against the tree's own comparison over thousands of entries failed on it immediately.
 
 ### A3. The packer stops copying
 
-`LeafBuilder::pack_with`, `LeafBuilder::encode_with` and `PagedTree::bulk_build_logged` become
-generic over the row's container:
+`LeafBuilder::pack_with`, `encode_with`, `PagedTree::bulk_build_logged` and
+`ImportedDatabase::build_tree_from` are generic over `AsRef<[Datum<'d>]>`. `Vec<Datum>` already
+implements it, so **every existing call site compiles unchanged** — including the compaction path in
+`write.rs` that made task-1845 back this out — and the index build passes `&[&[Datum]]` whose slices
+point into the arena.
 
-```rust
-pub fn pack_with<'d, R: AsRef<[Datum<'d>]>>(&self, rows: &[R], fill: f64, spill: Option<&mut dyn Spill>) -> DbResult<Packed>
-```
+### A4. The scan reads the leaf once, not once per value
 
-`Vec<Datum>` already implements `AsRef<[Datum]>`, so **every existing call site compiles unchanged** —
-including the compaction path in `write.rs` that made the narrow version not worth doing. The index
-build passes `&[&[Datum]]`, whose slices point into the arena, and the 4.2 ms borrow disappears with
-nothing else moving.
+`LeafRef::value` re-reads the directory entry and re-derives the class array and slot bounds on every
+call — the same waste `key_view` exists to remove inside a search — and an index build calls it twice
+for every row in the table. The mini-columns are now derived once per leaf.
 
-`ImportedDatabase::build_tree_from` becomes generic the same way; the two callers that still hold
-`Vec<Vec<OwnedDatum>>` (the `ALTER TABLE` rebuild and the fixture import) do their own borrow, which
-is where it belongs — it is their cost, not the builder's.
+### A5. `visit_live` — the stage the ticket did not name
 
-### A4. One log record per packed leaf
+A leaf that has been written to cannot take the vectorised path: tombstones and the delta area have
+to be merged. `LeafRef::live` performs that merge and hands back **every column of every live row in
+a fresh `Vec`**; an index reads two of six. On a freshly imported table that never arises, and in the
+gate it was **14.3 ms of a 38.9 ms statement**.
 
-Already true and re-stated here so it is not re-attacked: `log_built_page` writes one `AllocPage` and
-one `WritePage` per leaf image, and the whole-image record is the right record for a page that did
-not exist before the build. Verified, not changed.
+`LeafRef::visit_live` performs the same merge — the sorted region minus its tombstones, the delta
+area's rows replacing the ones they shadow, the newest of two delta entries for one key winning —
+projecting only the columns asked for and materialising nothing per row. It does not sort, because
+the index build sorts the whole table's entries once.
 
-### A5. The prologue
+Two implementations of one merge is exactly the shape that drifts, so `semantics.rs` gained
+`index.after.writes` and `index.after.writes.without.rowid`: scripts that insert, update and delete
+before the `CREATE INDEX` and compare every byte against the reference.
 
-7.4 ms of the 48.1 is spent before `scan` begins. `create_index` is instrumented with a sixth stage
-so the number stops being a subtraction, and whatever it turns out to be — a redundant re-parse of
-the statement in `index_from_create_sql`, a catalog snapshot, `rebuild_tables` — is then either
-removed or reported as irreducible. It is not guessed at in advance.
+### A6. Also on the way
 
-### What guards this
-
-The bulk builder's output is compared **page for page against SQLite's own index** by the existing
-fixture round-trip: `ImportedDatabase::import_with` reads the catalog back and refuses if it differs
-from what it wrote. That is the guard rail this change wants, and it is why the change earns its own
-ticket rather than the tail of another one. Alongside it: `cargo test -p inillucent-tree`,
-`-p inillucent-engine`, and the compat qualification suites.
+`escape_into` copies runs between `0x00` bytes instead of pushing per byte, and `NOCASE` folds into
+the buffer instead of collecting a `Vec` per value.
 
 ---
 
 ## Part B — partial indexes
 
-Half of it is already built: `index_from_create_sql` parses the predicate onto
-`IndexInfo::partial_sql`, and the planner already declines to *use* a partial index
-(`plan.rs` `index_candidate`, and `covering_slots`). What is missing is acceptance and maintenance.
+1. **Accepted.** The binder's refusal is gone. The predicate needs no new directive field: the engine
+   re-parses the canonical SQL it stores, and `index_from_create_sql` already put it on
+   `IndexInfo::partial_sql`.
+2. **Maintained.** `BoundIndexExprs` rides the bound statement the way `BoundCheck` already does;
+   `WriteDeclarations` compiles it and `IndexExprs::holds` answers, per row image, whether the row
+   belongs in the index. An `UPDATE` asks about **both** images, so a row that moves across the
+   predicate joins the index or leaves it. The list is empty for every table with neither a partial
+   index nor an expression key — which is every table the gate measures.
+3. **Used.** Only when the predicate appears **unchanged as a conjunct** of the statement's `WHERE`.
+   That is SQLite's rule and deliberately the crudest sound one: `WHERE b > 5 AND a = 1` uses an index
+   declared `WHERE b > 5`, and `WHERE b > 6` does not, though it implies it. A cleverer implication
+   test is a place for a wrong answer to live.
 
-1. **Accept it.** `directive.rs::bind_create_index` drops
-   `if filter.is_some() { return Err(unsupported("partial indexes")) }`. The predicate needs no new
-   directive field — the engine re-parses the canonical SQL — but it *is* bound against the table
-   here, so `CREATE INDEX ix ON t(a) WHERE nosuchcolumn > 5` is refused at `CREATE` time as SQLite
-   refuses it, rather than at the first write.
+**The build path splits.** An ordinary index is filled by the arena scan the gate measures; a partial
+or expression index is filled by a `SELECT` the binder, planner and executor already know how to run,
+rather than growing a second expression evaluator inside the DDL path. A predicate naming a column the
+table has not got is refused there, by the binder.
 
-2. **Maintain it.** An entry exists only for a row the predicate accepts.
-   - **Build path:** `index_entries` evaluates the predicate per row and skips the rows it rejects.
-   - **Write path:** the binder already binds a table's `CHECK` constraints onto every `BoundInsert`,
-     `BoundUpdate` and `BoundDelete` as `Vec<BoundCheck>`, and `WriteDeclarations::compile` turns
-     those into compiled expressions the row space evaluates. A partial predicate is the same shape,
-     so it travels the same road:
+### The silent wrong answer this found
 
-     ```rust
-     /// The expressions one index needs evaluated per row to be maintained.
-     pub struct BoundIndexExprs {
-         /// Its position in `table.indexes`.
-         pub position: usize,
-         /// The partial predicate, when it has one.
-         pub predicate: Option<BoundExpr>,
-         /// The key expressions, one per key column, `None` for a bare column.
-         pub keys: Vec<Option<BoundExpr>>,
-     }
-     ```
+`inillucent-exec`'s physical pass has a covering rule of its own, applied *after* the planner has
+spoken: a plain table scan is replaced by a scan of the smallest tree carrying every column the query
+reads. Its test is to build the pipeline against the candidate's layout and see whether it translates
+— a question about **columns**, with no way to notice that a tree holds fewer **rows** than the table.
+`create_index` was adding the partial index to that set like any other, and
 
-     Empty for every table with no partial or expression index, which is every table the gate
-     measures — so the write families' numbers do not move.
+```sql
+SELECT rowid FROM u;              -- returned one of two rows
+SELECT rowid FROM u WHERE b = 1;  -- returned the other
+EXPLAIN QUERY PLAN SELECT rowid FROM u;  -- SCAN u
+```
 
-     `index_entry` gains the compiled expressions and the row space; `add_index_entries`,
-     `update_index_entries` and `remove_index_entries` skip an index whose predicate is false of the
-     row image they are given. An `UPDATE` evaluates the predicate on the **old** image to decide
-     whether to remove and on the **new** image to decide whether to add, which is what moves a row
-     into and out of a partial index correctly.
-
-3. **Use it.** An index may only answer a query whose `WHERE` *implies* the predicate. The
-   conservative rule, which is SQLite's, is that the predicate appears as a conjunct of the
-   statement's `WHERE`. The bound predicate is compared structurally against each conjunct; a match
-   lifts the `continue` in `index_candidate`, and `covering_slots` follows the same rule.
-
-Steps 1 and 2 alone are a correct engine — the index exists, is maintained, and is simply never
-chosen — so they land first and are verified on their own before step 3 touches the planner.
+with `DELETE` and `UPDATE` silently affecting nothing, because they find their rows the same way.
+Fixed in all four places the covering set is built — `create_index`, the fixture import, the catalog
+re-attach and the `DROP`-inside-a-transaction rollback — behind one named predicate,
+`covers_every_row`, so the four cannot drift. An index on an *expression* stays a candidate: it holds
+an entry for every row, and the columns it does not carry are unmapped in its layout, so the existing
+translation test already refuses it where it should.
 
 ---
 
 ## Part C — indexes on expressions
 
-The same shape. `IndexColumnInfo::expr_sql` is already filled by the loader, and `index_shape`
-already handles a key column with no table column behind it: it pushes `ColumnSpec::key(Any)` and
-leaves the slot unmapped, which is exactly what makes such an index non-covering.
+`IndexKeyColumn::column` became `Option<u16>` beside a new `expr_sql`, so a reader that needs a column
+— a module-backed index — has to say what it does when there is not one. Maintenance is the same
+`BoundIndexExprs`. The planner matches the *bound* key expression against a term's own side, and
+`AccessPath::IndexSeek::columns` became `Vec<Option<u16>>` so a computed key can say it has no column
+behind it: the probe then takes **no affinity**, which is SQLite's rule and would otherwise compare a
+converted value against an unconverted one.
 
-1. **Accept it.** `directive.rs::bind_create_index` stops refusing a key that is not a bare column.
-   `IndexKeyColumn::column` becomes `Option<u16>` and the struct gains `expr_sql: Option<Vec<u8>>` —
-   two fields, one other reader (`create_vector_index`, which requires a bare column and now says
-   so).
-2. **Maintain it.** The key value is `evaluate(expr, row)` rather than `row[slot]`, on both the build
-   path and the write path, through the same `BoundIndexExprs` Part B introduces.
-3. **Use it.** The planner matches a bound `lower(a)` in the `WHERE` against the index's bound key
-   expression, structurally, the same comparison Part B's conjunct test uses.
+The binder binds those expressions onto the FROM term in a scope holding **only that term** — a
+predicate reading `b` must mean this table's `b` even when another term in the query has one. An index
+whose text will not bind is left out, which leaves it unchosen rather than chosen on a guess.
 
 ---
 
 ## Part D — `CREATE INDEX` on a `WITHOUT ROWID` table
 
-Refused today in `ddl.rs::create_index`, with a comment saying exactly why: an index on such a table
-carries the table's **primary key** as its trailing entry rather than a rowid, and every tree here
-appends exactly one rowid column.
+`index_shape` appends the table's primary key, in its key order, where a rowid would go.
+**`SourceLayout` gained `identity`** — the tree columns that identify the *table* row — and the
+non-covering lookup in `physical.rs` probes with it. `key_columns` could not answer that question: on
+an index layout it names the whole entry rather than this part of it, and it is deliberately emptied
+when the tree is not "already sorted", which would have left a `DESC` or collated primary key with no
+identity at all.
 
-- **`index_shape`** appends the primary key's columns — in `keyed_table_shape`'s key order, which is
-  the order the table tree is keyed by — instead of one `Int64` rowid, and reports `rowid: None`.
-- **`index_entries`** and **`index_entry`** project those columns instead of the rowid.
-- **`SourceLayout` gains `identity: Vec<usize>`** — the tree columns that identify the *table* row.
-  For a rowid table's layout it is the rowid's slot; for a `WITHOUT ROWID` table's it is the primary
-  key's slots; for an index layout it is the trailing columns of the entry. `key_columns` cannot
-  answer this: on an index layout it names the whole entry, and it is deliberately left **empty**
-  when the tree is not "already sorted" (a `DESC` column, a non-binary collation), which would make
-  index maintenance silently wrong on exactly the tables that need it most.
-- **`physical.rs`'s non-covering lookup** (around line 2586) builds its probe key from
-  `previous_layout.identity` rather than from `vec![Expr::Column(offset + rowid)]`.
-
-That last one is on the read path the gate's read families measure, so it gets a **read-gate run
-either side of the change**, and a difference larger than the run-to-run spread is a refusal.
+`PRAGMA index_list` also reports `partial`, which was a hard zero — true while a partial index could
+not exist, and a wrong answer now that one can.
 
 ---
 
-## Acceptance
+## What the acceptance says
 
-1. `inillucent-fullgate` medium, 30 rounds, **four consecutive runs**, each on its own fixture copy:
-   weighted lower bound at least **3.00x** and **no family under 1.00x**. That is H5, and A is the
-   only thing standing in the way.
-2. `crates/inillucent-compat/tests/semantics.rs` at **92 of 92**, with `index.partial`, `index.expr`
-   and `without.rowid.index` moved from `Differs` to `Agrees`. The test fails when one of them starts
-   agreeing until its row is moved, so it reports the change rather than having to be remembered.
-3. `cargo test --workspace --no-fail-fast` no worse than the 17 accounted-for red binaries the README
-   records.
-4. `inillucent-readgate` either side of Part D, with no read family moving beyond its spread.
+1. **`inillucent-fullgate` medium, 30 rounds, four consecutive runs**: weighted lower bound at least
+   3.00x and no family under 1.00x. Met — see the ticket's closing comment for the four-run table.
+   The read gate was run either side of Part D's change to the non-covering lookup and no read family
+   moved beyond its spread.
+2. **`semantics.rs` at 94 of 94.** The `agreed >= CASES.len() - 3` slack is now
+   `assert_eq!(agreed, CASES.len())`.
+3. **`cargo test --workspace`**: four failing binaries — `harness` (1), `ordering` (1), `planner` (2),
+   `schema_forms` (14) — every one of those tests in the set task-1845 recorded at `9ef6aee`.
+   `policy` is green where the baseline had its format check red.
 
-## Non-goals
+## Non-goals, unchanged
 
-Unchanged from Phase 3: no bar, weight or fixture in `compat/perf/contract.toml` is touched; the old
-engine is not deleted (blocked on task-1837's driver); multi-process and multi-thread access stay out
-of scope.
+No bar, weight or fixture in `compat/perf/contract.toml` was touched. The old engine is not deleted.
+Multi-process and multi-thread access stay out of scope.
+
+## Found and not fixed here
+
+An `UPDATE` that violates a **secondary `UNIQUE` index** without moving the table's own key is
+accepted silently. It reproduces on the `9ef6aee` binary, so it predates this ticket and is not one of
+A–D; it is **task-1849**, with the cause named and the four things a fix has to get right.
