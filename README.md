@@ -129,14 +129,19 @@ at medium scale (100,000 rows) and **no family below 1.00x**.
 | scale | rows | Windows x64 weighted | lower bound | Linux x64 (WSL2) weighted | lower bound | bar |
 |---|---|---|---|---|---|---|
 | small | 5,000 | 2.30x | 2.29x | 1.16x | 1.15x | 3.00x |
-| **medium** | 100,000 | **3.05x to 3.14x** (four runs) | **3.00x to 3.08x** | 1.45x | 1.42x | 3.00x |
+| **medium** | 100,000 | **3.21x to 3.27x** (four runs) | **3.12x to 3.19x** | 1.53x | 1.51x | 3.00x |
 | large | 600,000 | 3.83x | 3.72x | 1.72x | 1.68x | 3.00x |
 
-At medium on Windows the lower bound cleared 3.00x on all four thirty-round runs (3.08, 3.01, 3.08,
-3.00). It sits on the bar rather than above it, and a single run had already been retracted once for
-landing on the wrong side of it, so the spread is reported rather than one number. A speed claim
-about this engine has to name the platform and the scale. (task-1834 §5e, §5h; task-1838 §4 has since
-moved medium on Windows to 3.36x / 3.22x and Linux to 1.53x / 1.51x.)
+At medium on Windows the lower bound cleared 3.00x on all four thirty-round runs of the task-1838
+qualification - **3.12x, 3.19x, 3.18x, 3.19x** - with all thirty workloads digest-equal on every run.
+It is off the bar rather than on it now; task-1834's four runs were 3.08, 3.01, 3.08, 3.00, and a
+single run had already been retracted once for landing on the wrong side of it, so the spread is
+still reported rather than one number. A speed claim about this engine has to name the platform and
+the scale. (task-1838 §4 and the four-run qualification; task-1834 §5e, §5h for the earlier set.)
+
+**The floor is still not met**, and the qualification says which families: `open.prepare`
+0.78x-0.80x, `schema` 0.53x-0.56x and `extension` 0.75x-0.81x on every run, and `transaction` on two
+of the four (0.96x, 0.99x). The contract asks for no family below 1.00x.
 
 **Why Linux is half of Windows, measured rather than argued (task-1838 §5).** Four experiments, two
 of which refuted the guesses the Phase 2 TDD wrote down:
