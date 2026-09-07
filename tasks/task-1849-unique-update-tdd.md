@@ -1,5 +1,12 @@
 # task-1849 — An `UPDATE` that violates a secondary `UNIQUE` index is accepted, silently
 
+> **Implemented and pushed as `5f77e5f`.** The plan below is what was built, with three additions the
+> work turned up and a section at the end recording what was measured. The additions: a **third
+> defect** in index-check *order* (we named the first-declared unique index where SQLite names the
+> last, on `INSERT` as well as `UPDATE`); a **fourth** in `upsert_row`, whose unread path moved the
+> table key with `place_row` and left the old row behind; and an interaction with task-1846's partial
+> indexes that **neither ticket can test alone** and is handed to the merge.
+
 ## Introduction
 
 `UPDATE` in `inillucent-exec`'s `dml.rs` checks uniqueness only when the *table's own key* moves.
@@ -195,3 +202,76 @@ Functional and differential, against the pinned oracle, in both directions.
    `write.update.indexed`, `txn.large` and `txn.batched` against the run-to-run spread.
 5. **Regression floor** — `cargo test --workspace --no-fail-fast` before the change on the pristine
    tree and after, compared binary by binary rather than by total count.
+
+
+## What was built, and what it measured
+
+Delivered exactly as designed above, plus two defects the work surfaced.
+
+**Third defect — the wrong constraint was named.** When a row collides on two unique indexes at once
+only one can be reported, and SQLite reports the **last declared**: it links each new index onto the
+head of the table's list, so a schema read back off disk walks in reverse declaration order. We
+reported the first, on `INSERT` as well as `UPDATE`, so an application matching on
+`UNIQUE constraint failed: t.b` got `t.a`. `unique_indexes` now yields newest first. It was not in
+the ticket and was not visible from the repro; it surfaced because the new test asks for a collision
+on two indexes at once.
+
+**Fourth defect — the upsert arm moved a key and left the row.** `upsert_row`'s `needs_before = false`
+path wrote the new image with `place_row(None, after)`, which is correct only if the key did not move.
+`INSERT ... ON CONFLICT(a) DO UPDATE SET a = 9` over an `INTEGER PRIMARY KEY` therefore left both rows
+in the table. Both paths now go through `replace_row`; the stand-in image carries the key the row is
+moving *from*, which is all a removal needs, and that path has no index to maintain.
+
+### The partial-index interaction, which is nobody's ticket alone
+
+At `9ef6aee`/`9d17ec0` a partial index cannot be created — `CREATE INDEX ... WHERE` is refused by the
+parser — so the boundary cases cannot be written from this commit at all. task-1846 **adds** the
+partial forms. The interaction therefore exists only after the merge, and neither ticket can test it:
+
+- The skip this ticket added (`index_entry(before) == index_entry(after)` → don't probe) is a sound
+  proxy for "this row's claim on this index did not move" **only while every row is in every index**.
+  A row that changes no indexed value but crosses the predicate boundary has an identical entry and a
+  different claim: it is entering the index, and entering it can collide. 1846 measured exactly that —
+  `CREATE UNIQUE INDEX up ON t(a) WHERE b > 5`, rows `('x',9)` and `('x',1)`, `UPDATE t SET b = 7
+  WHERE b = 1` — and SQLite raises where the engine accepts.
+- Its `place_row` compares **optional** entries (`Some(entry)` when the predicate holds, `None` when
+  it does not), which answers the question directly rather than answering entry-equality and patching
+  the predicate on beside it. Crossing in is `None` vs `Some` and crossing out `Some` vs `None`, so
+  neither is skipped, while staying in and staying out compare equal and keep the optimisation. The
+  same shape is the right one for the skip here.
+- With 1846's in-loop `holds(position, row)` guard skipping an index before any probe, a differing
+  predicate makes this skip a **fast path rather than a correctness boundary** — a better invariant
+  than two places that both have to be right.
+- One mechanical hazard: `unique_indexes` now yields reversed. If a `position` is enumerated over that
+  iterator rather than being a true index into `table.indexes`, `holds` consults a different index's
+  predicate — a plausible wrong answer rather than a crash.
+
+### Measurements
+
+| what | result |
+|---|---|
+| Oracle scripts, both shells, batch 1 | 15 → **39 of 43**; the 4 left are `OR ROLLBACK`, two statement-atomicity cases (task-1850) and the known `WITHOUT ROWID` `CREATE INDEX` refusal |
+| batch 2 (siblings, accept side) | 10 → **30 of 30** |
+| batch 3 (adjacent paths) | **28 of 35**; all 7 left reproduce with no secondary unique index (task-1850) |
+| batch 4 (check order) | 2 → **9 of 9** |
+| `new_engine_writes.rs` | 14/14, including a 15-statement campaign re-probing every index against its table after each statement |
+| `semantics.rs` | 92 → **99 cases, 96 agreeing** |
+| Workspace suite | failing-test set **byte-identical** to the pristine-HEAD baseline: the same 19 names |
+| `inillucent-fullgate`, medium, 30 rounds | `write.update.indexed` 71.30/71.20 Mns vs a 67.72–72.50 baseline; `txn.batched` 264.7/265.5 vs 264.1–271.0; `txn.large` 756.9/776.6 kns vs 765.8–804.4; headline 3.80x/3.84x vs 3.86–3.95x |
+
+A note on reading that gate, because the first pair nearly produced a wrong conclusion: a single
+before/after pair came back at 803.7 k then 877.2 k on `txn.large`, which reads as a 9% regression
+until the SQLite arm is checked and has moved with it. The box was ~7% slower for that stretch. Two
+further after-runs land inside the baseline on every workload.
+
+### Out of scope, filed rather than fixed
+
+Both reproduce with **no secondary unique index at all**, so neither is this ticket's doing:
+
+- **task-1850** — a statement that fails partway keeps the rows it already wrote, and `OR ROLLBACK`
+  does not roll back. `FAIL` and `ABORT` are currently indistinguishable, and `ABORT` is what every
+  unqualified statement gets. The worst shape of it is an `UPDATE OR REPLACE` that deletes the row in
+  the way and then fails a `CHECK`: the failure *destroys* a row and reports an error, so nothing
+  suggests looking.
+- **task-1851** — `PRAGMA integrity_check` answered `ok` over the exact corruption this ticket's
+  defect produced: a `UNIQUE` index holding two entries under one key.
