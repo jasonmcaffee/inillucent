@@ -644,7 +644,8 @@ pub fn insert_at(
     // affinities that convert a value on the way in, the `STRICT` type classes,
     // and the `CHECK` predicates. All three were collected by the catalog and
     // consulted by nobody until task-1845.
-    let declarations = WriteDeclarations::compile(table, &layout, &statement.checks, &space, params)?;
+    let declarations =
+        WriteDeclarations::compile(table, &layout, &statement.checks, &space, params)?;
 
     let rows: Vec<Row> = match &statement.source {
         BoundInsertSource::Values(values) => {
@@ -1438,7 +1439,8 @@ pub fn update_at(
     for column in &statement.returning {
         projected.push(space.compile(&column.expr, params)?);
     }
-    let declarations = WriteDeclarations::compile(table, &layout, &statement.checks, &space, params)?;
+    let declarations =
+        WriteDeclarations::compile(table, &layout, &statement.checks, &space, params)?;
 
     let mut changes = Changes::default();
     let captured = target.captures(table.root);
@@ -1458,8 +1460,7 @@ pub fn update_at(
             // produced, in assignment order.
             let width = layout.key_columns.len();
             for (position, slot) in projected_slots.iter().enumerate() {
-                let (Some(slot), Some(value)) =
-                    (*slot, row.get(width.saturating_add(position)))
+                let (Some(slot), Some(value)) = (*slot, row.get(width.saturating_add(position)))
                 else {
                     continue;
                 };

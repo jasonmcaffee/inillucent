@@ -513,6 +513,7 @@ name = "inillucent-cli"
 kind = "production"
 layer = 10
 may_depend_on = [
+    "inillucent-alloc",
   "inillucent-base",
   "inillucent-value",
   "inillucent-engine",
@@ -546,6 +547,7 @@ name = "inillucent-compat"
 kind = "test-only"
 layer = 12
 may_depend_on = [
+    "inillucent-alloc",
   "inillucent-base",
   "inillucent-value",
   "inillucent-storage",

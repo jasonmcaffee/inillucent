@@ -718,8 +718,12 @@ impl ImportedDatabase {
         //
         // It is built before the scan rather than applied after it, because the
         // scan no longer produces a `Vec` there is an "after" for.
-        let mut rechecks: Vec<(usize, inillucent_sql::vtab::ConstraintOp, OwnedDatum, inillucent_value::collation::Collation)> =
-            Vec::new();
+        let mut rechecks: Vec<(
+            usize,
+            inillucent_sql::vtab::ConstraintOp,
+            OwnedDatum,
+            inillucent_value::collation::Collation,
+        )> = Vec::new();
         for (position, constraint) in offer.iter().enumerate() {
             let promised = query
                 .usage
@@ -834,7 +838,6 @@ fn passes_rechecks(
 }
 
 impl ImportedDatabase {
-
     /// Answers a `pragma_*` table-valued function.
     ///
     /// The argument arrives as an `Eq` constraint on the first hidden column and
@@ -895,8 +898,7 @@ impl ImportedDatabase {
             return Ok(false);
         };
         let width = answer.names.len();
-        let mut rows: Vec<Vec<OwnedDatum>> =
-            Vec::with_capacity(inillucent_exec::batch::BATCH_ROWS);
+        let mut rows: Vec<Vec<OwnedDatum>> = Vec::with_capacity(inillucent_exec::batch::BATCH_ROWS);
         for row in answer.rows {
             let mut held = row;
             held.truncate(width);

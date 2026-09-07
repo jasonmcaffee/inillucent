@@ -687,7 +687,11 @@ fn every_probed_construct_answers_as_the_table_says() {
     let mut agreed = 0usize;
     let mut wrong: Vec<String> = Vec::new();
     for case in CASES {
-        let theirs = run(&reference, &area.join(case.name).join("sqlite"), case.script);
+        let theirs = run(
+            &reference,
+            &area.join(case.name).join("sqlite"),
+            case.script,
+        );
         let mine = run(&ours, &area.join(case.name).join("inillucent"), case.script);
         let same = theirs == mine;
         if same {
@@ -716,8 +720,10 @@ fn every_probed_construct_answers_as_the_table_says() {
 {}",
         agreed,
         CASES.len(),
-        wrong.join("
-")
+        wrong.join(
+            "
+"
+        )
     );
     assert!(
         agreed >= CASES.len() - 3,

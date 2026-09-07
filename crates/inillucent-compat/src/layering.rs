@@ -597,8 +597,12 @@ mod tests {
     #[test]
     fn the_members_list_reads_from_the_root_manifest() {
         let members = workspace_members(&crate::workspace_root()).expect("the manifest parses");
-        assert!(members.iter().any(|member| member == "crates/inillucent-base"));
-        assert!(members.iter().any(|member| member == "crates/inillucent-compat"));
+        assert!(members
+            .iter()
+            .any(|member| member == "crates/inillucent-base"));
+        assert!(members
+            .iter()
+            .any(|member| member == "crates/inillucent-compat"));
         assert!(
             !members.iter().any(|member| member.contains('#')),
             "a comment leaked into the members list: {members:?}"
