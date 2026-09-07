@@ -307,6 +307,24 @@ pub struct ImportedDatabase {
     /// Whether `PRAGMA defer_foreign_keys` has put every immediate check off
     /// until the commit, for the transaction now open.
     defer_foreign_keys: bool,
+    /// How many statements are running, for the file lock.
+    ///
+    /// A statement runs statements - a trigger body, a foreign-key sweep, a
+    /// `CHECK` - so the lock is taken on the way into the outermost one and
+    /// released on the way out of it. A counter rather than a flag because the
+    /// nesting is real and an inner release would drop the file while the outer
+    /// statement was still reading it.
+    running: usize,
+    /// Whether the file lock is held between transactions.
+    ///
+    /// **`normal` is a real setting now, and the reason it can be reported
+    /// honestly.** Until task-1860 this engine took no file lock at all and
+    /// reported `exclusive`, which was the closest true description of "nobody
+    /// else may touch this". Under `normal` the lock is taken for each
+    /// transaction and released after it, so a second process may have the file
+    /// in between - which is what the word means. `exclusive` keeps it, which
+    /// is faster and is what a single-process application wants.
+    locking_exclusive: bool,
     /// How the pre-commit state is protected, which `PRAGMA journal_mode` sets.
     ///
     /// The write-ahead log by default, because it is the faster of the two -
@@ -1591,6 +1609,8 @@ impl ImportedDatabase {
             foreign_keys: false,
             defer_foreign_keys: false,
             journal_mode: inillucent_pool::journal::JournalMode::Wal,
+            running: 0,
+            locking_exclusive: true,
             ignore_check_constraints: false,
             secure_delete: 0,
             auto_vacuum: 0,
@@ -1789,6 +1809,8 @@ impl ImportedDatabase {
             foreign_keys: false,
             defer_foreign_keys: false,
             journal_mode: inillucent_pool::journal::JournalMode::Wal,
+            running: 0,
+            locking_exclusive: true,
             ignore_check_constraints: false,
             secure_delete: 0,
             auto_vacuum: 0,
@@ -2606,6 +2628,15 @@ impl ImportedDatabase {
         if self.batch.get().is_some() {
             return;
         }
+        // **The file is taken here, not at the first write.** A transaction
+        // that raised its lock halfway through could be refused halfway
+        // through, with statements already applied; taking it at `BEGIN` means
+        // a transaction that starts is a transaction that can finish. It is
+        // also why this engine's transactions serialise across processes rather
+        // than overlapping: there is no shared-memory index that would let a
+        // reader follow a writer's log, and pretending otherwise is what would
+        // corrupt a file.
+        let _ = self.database.begin_write_within(true);
         let txn = self.next_txn.get();
         self.next_txn.set(txn.saturating_add(1));
         self.batch.set(Some(txn));
@@ -4188,6 +4219,95 @@ impl ImportedDatabase {
         self.levers
     }
 
+    /// Returns whether a compiled statement changes the database.
+    ///
+    /// A read takes a shared lock and a write an exclusive one, so the answer
+    /// decides which. A directive is counted as a write: `CREATE TABLE` and
+    /// `PRAGMA user_version = 1` both change the file, and the ones that do not
+    /// pay a lock they did not need rather than skip one they did.
+    fn writes_of(cached: &Cached) -> bool {
+        !matches!(cached, Cached::Select(..) | Cached::QueryPlan(_) | Cached::Nothing)
+    }
+
+    /// Returns whether the file lock is kept between transactions.
+    pub(crate) fn locking_exclusive(&self) -> bool {
+        self.locking_exclusive
+    }
+
+    /// Chooses whether the file lock is kept between transactions.
+    ///
+    /// Dropping to `normal` releases the lock immediately, which is the moment
+    /// a second process may open the file; raising to `exclusive` takes it at
+    /// the next statement rather than here, because taking it now would make a
+    /// pragma block on a lock the caller has not asked to wait for.
+    ///
+    /// @param exclusive - whether to keep the lock
+    pub(crate) fn set_locking_exclusive(&mut self, exclusive: bool) -> DbResult<()> {
+        self.locking_exclusive = exclusive;
+        if !exclusive && self.batch.get().is_none() {
+            self.database.end_access()?;
+        }
+        Ok(())
+    }
+
+    /// Takes the lock a statement needs and reloads if the file has moved.
+    ///
+    /// **Called before every statement**, so a connection that has been idle
+    /// while another process wrote sees the new database rather than its own
+    /// cache of the old one. Under `exclusive` the lock is already held and
+    /// this is a comparison of two integers.
+    ///
+    /// @param writing - whether the statement changes the database
+    pub(crate) fn enter(&mut self, writing: bool) -> DbResult<()> {
+        self.running = self.running.saturating_add(1);
+        // **A transaction holds its lock from the first write to the commit.**
+        // Once inside one, the retry loop's release would open a window another
+        // process could write through - see `Database::begin_write_within`.
+        let inside = self.batch.get().is_some() || self.running > 1;
+        let reloaded = if writing {
+            self.database.begin_write_within(!inside)?
+        } else {
+            self.database.begin_read()?
+        };
+        // **The pages are not the whole cache.** `begin_read` throws away the
+        // pool when another process has committed; the *schema* this connection
+        // read at open is just as stale, and a connection that kept it would
+        // write its own catalog tree over the one the other process just built -
+        // which is a lost table rather than a stale read. `reload_catalog` is
+        // the same reread `ATTACH` does.
+        if reloaded && !inside {
+            self.reload_catalog()?;
+        }
+        Ok(())
+    }
+
+    /// Releases the lock when nothing holds the connection to the file.
+    ///
+    /// A transaction is open, so nothing is released: a `BEGIN` that let the
+    /// file go between its statements would be a transaction another process
+    /// could write through the middle of.
+    pub(crate) fn leave(&mut self) -> DbResult<()> {
+        self.running = self.running.saturating_sub(1);
+        if self.running > 0 || self.locking_exclusive || self.batch.get().is_some() {
+            return Ok(());
+        }
+        // **Durable before the file is let go, and this is the whole cost of
+        // `locking_mode = normal`.** A connection that released the lock with
+        // dirty pages would leave the file describing a database without the
+        // statement that just succeeded - and the next process to write would
+        // build on that file and overwrite the statement for good. It is not a
+        // stale read; it is a lost write, and it is what the first version of
+        // this did eight times in ten under two concurrent writers.
+        //
+        // Under `exclusive`, which is the default, the lock is never let go and
+        // none of this runs: the checkpoint happens when the connection closes,
+        // as it always did.
+        if self.database.pool().lock_level() != inillucent_vfs::FileLock::None {
+            self.checkpoint()?;
+        }
+        self.database.end_access()
+    }
+
     /// Returns how the pre-commit state is protected.
     pub(crate) fn journal_mode(&self) -> inillucent_pool::journal::JournalMode {
         self.journal_mode
@@ -4347,7 +4467,16 @@ impl ImportedDatabase {
         // whatever was true when it was first compiled (task-1854).
         params.set_context(self.scalar_context());
         params.set_recursive_triggers(self.recursive_triggers);
-        let outcome = self.apply_compiled(cached, params)?;
+        // **The file lock, taken here and released here.** Both entry points -
+        // `execute_any` and `execute_statement` - come through this function, so
+        // no statement can run without it. Under `exclusive`, which is the
+        // default, both calls compare two integers. Under `normal` this is what
+        // lets a second process have the file between statements, and what makes
+        // this connection notice when one has written to it.
+        self.enter(Self::writes_of(cached))?;
+        let outcome = self.apply_compiled(cached, params);
+        self.leave()?;
+        let outcome = outcome?;
         // **The cyclic half of a foreign key's action happens here**, after the
         // statement rather than inside it, because a cascade that can reach
         // itself cannot be inlined to a depth the data decides: the body would

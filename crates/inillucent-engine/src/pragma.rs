@@ -96,7 +96,7 @@ impl ImportedDatabase {
             b"foreign_key_check" => self.pragma_foreign_key_check(argument),
             b"journal_mode" => self.pragma_journal_mode(argument),
             b"encoding" => self.pragma_fixed_word(argument, b"UTF-8"),
-            b"locking_mode" => self.pragma_fixed_word(argument, b"exclusive"),
+            b"locking_mode" => self.pragma_locking_mode(argument),
             b"integrity_check" | b"quick_check" => self.pragma_integrity_check(),
             b"wal_checkpoint" => self.pragma_wal_checkpoint(),
             b"page_size" => Ok(one_integer(self.page_size as i64)),
@@ -1037,6 +1037,36 @@ impl ImportedDatabase {
             self.analysis_limit = argument_integer(argument).max(0);
         }
         Ok(one_integer(self.analysis_limit))
+    }
+
+    /// Reads or sets `locking_mode`.
+    ///
+    /// `normal` releases the file lock between transactions, so a second
+    /// process may open the database; `exclusive` keeps it. Like `journal_mode`
+    /// it answers with the mode that is in force rather than the one asked for,
+    /// which is what SQLite does and what lets a script tell a refused switch
+    /// from an honoured one.
+    ///
+    /// @param argument - the mode, when one was given
+    fn pragma_locking_mode(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+        let Some(argument) = argument else {
+            return Ok(word_row(self.locking_word()));
+        };
+        match argument_text(argument).trim().to_ascii_lowercase().as_str() {
+            "normal" => self.set_locking_exclusive(false)?,
+            "exclusive" => self.set_locking_exclusive(true)?,
+            _ => {}
+        }
+        Ok(word_row(self.locking_word()))
+    }
+
+    /// Returns the word `locking_mode` reports.
+    fn locking_word(&self) -> &'static str {
+        if self.locking_exclusive() {
+            "exclusive"
+        } else {
+            "normal"
+        }
     }
 
     /// Reads or sets `journal_mode`.
