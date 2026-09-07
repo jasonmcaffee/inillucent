@@ -640,6 +640,12 @@ pub enum ColumnConstraint {
     /// `UNIQUE [conflict]`.
     Unique(Option<ConflictAction>),
     /// `CHECK (expr)`.
+    ///
+    /// **No conflict clause**, which is SQLite's grammar and not an omission:
+    /// `ccons ::= CHECK LP expr RP` has no `onconf`, so
+    /// `b INTEGER CHECK(b < 9) ON CONFLICT IGNORE` is a syntax error there and
+    /// has to be one here. Only a *table*-level `CHECK` takes the clause - see
+    /// [`TableConstraint::Check`].
     Check(ExprId),
     /// `DEFAULT expr`.
     Default(ExprId),
@@ -740,8 +746,26 @@ pub enum TableConstraint {
         /// The conflict clause.
         on_conflict: Option<ConflictAction>,
     },
-    /// `CHECK (expr)`.
-    Check(ExprId),
+    /// `CHECK (expr) [conflict]`.
+    ///
+    /// **Parsed and then ignored, which is what SQLite does with it.**
+    /// `tcons ::= CHECK LP expr RP onconf` accepts the clause and
+    /// `sqlite3AddCheckConstraint` never reads it, so
+    /// `CONSTRAINT small CHECK(b < 9) ON CONFLICT FAIL` behaves exactly as
+    /// `ABORT`: measured against the pinned 3.53.4, an `INSERT` of three rows
+    /// whose second fails keeps none of them.
+    ///
+    /// It is in the tree rather than discarded at the token because the table's
+    /// `CREATE` text is stored and re-parsed on every open, so the grammar has
+    /// to accept everything the text can hold. Not accepting it did not cost
+    /// one statement a clause - it made the `CREATE TABLE` a parse error, and
+    /// every statement after it said `no such table` (task-1853).
+    Check {
+        /// The predicate.
+        expr: ExprId,
+        /// The conflict clause, accepted and not acted on.
+        on_conflict: Option<ConflictAction>,
+    },
     /// `FOREIGN KEY (...) REFERENCES ...`.
     ForeignKey {
         /// The child columns.

@@ -201,10 +201,48 @@ impl Database {
     }
 
     /// Returns a connection to this database.
+    ///
+    /// **Each one is its own session**, and a session is what `temp.`, `ATTACH`
+    /// and the connection pragmas are scoped to. A caller that keeps one
+    /// connection needs nothing more; one that hands out a connection per call
+    /// wants [`Database::connect_as`], or every `CREATE TEMP TABLE` is gone by
+    /// the next statement.
     pub fn connect(&self) -> Connection<'_> {
         Connection {
             database: self,
             engine: self.engine.connect(),
+            depth: Cell::new(0),
+        }
+    }
+
+    /// Returns a connection that continues an earlier one's session.
+    ///
+    /// **For a caller that hands out a connection per call over one logical
+    /// connection**, which is a shape this driver forces rather than a shape
+    /// anyone chose: [`Connection`] borrows the `Database`, so a long-lived
+    /// object cannot hold both - that is a self-referential struct, and Rust
+    /// will not have it. Such a caller holds the `Database` and connects per
+    /// call, and without this every one of those calls is a new session, so:
+    ///
+    /// - a `CREATE TEMP TABLE` typed into a query console is gone by the next
+    ///   statement, and so is everything qualified `temp.`;
+    /// - an `ATTACH` does not outlive the statement that made it;
+    /// - a connection pragma has to be re-applied on every call.
+    ///
+    /// The engine has had this since it grew sessions, and the driver did not
+    /// pass it on (task-1848). Keep the number [`Connection::session`] returns
+    /// and hand it back here, and every later connection is the same session.
+    ///
+    /// A number that no `connect` handed out is a session of its own rather
+    /// than an error, which is the same thing the engine does with it: a
+    /// session is a scope, not a resource, so there is nothing to have failed
+    /// to find.
+    ///
+    /// @param session - the number an earlier connection reported
+    pub fn connect_as(&self, session: u64) -> Connection<'_> {
+        Connection {
+            database: self,
+            engine: self.engine.connect_as(session),
             depth: Cell::new(0),
         }
     }
@@ -275,6 +313,15 @@ impl std::fmt::Debug for Connection<'_> {
 }
 
 impl Connection<'_> {
+    /// Returns the number that identifies this connection's session.
+    ///
+    /// Hand it to [`Database::connect_as`] and the connection that comes back
+    /// continues this one: the same temporary tables, the same attached
+    /// databases, the same connection pragmas.
+    pub fn session(&self) -> u64 {
+        self.engine.session()
+    }
+
     /// Runs one statement and returns everything it produced.
     ///
     /// **`limit` cuts the rows handed back and not the rows produced**, because
@@ -576,7 +623,12 @@ impl Connection<'_> {
             }
         });
         self.engine
-            .create_scalar_function(name, arity, inillucent_engine::FunctionFlags::external(), wrapped)
+            .create_scalar_function(
+                name,
+                arity,
+                inillucent_engine::FunctionFlags::external(),
+                wrapped,
+            )
             .map_err(|error| self.database.classify(&error))
     }
 

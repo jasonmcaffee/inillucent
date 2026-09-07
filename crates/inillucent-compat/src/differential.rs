@@ -195,6 +195,15 @@ pub fn compare_with_counters(
             "{label} `{sql}`: extended code\n  inillucent: {} ({})\n  SQLite:  {} ({})",
             candidate.extended, candidate.message, reference.extended, reference.message
         );
+        // **The rows are not compared and the counters are**, which is why this
+        // returns here rather than skipping the whole tail. A failed statement
+        // produced no rows to compare, but it has counters and they are a
+        // question with a right answer: `UPDATE OR FAIL` keeps the rows it
+        // wrote, so `changes()` moves and `total_changes()` moves with it,
+        // while an `ABORT` puts them back and neither moves. Returning early
+        // graded neither, which is how the pair could read `0 | 0` for every
+        // statement and no differential case notice (task-1854).
+        compare_counters(label, sql, candidate, reference, counters);
         return;
     }
     if query {
@@ -208,6 +217,29 @@ pub fn compare_with_counters(
             "{label} `{sql}`: column names",
         );
     }
+    compare_counters(label, sql, candidate, reference, counters);
+}
+
+/// Compares the three counters and the autocommit flag.
+///
+/// Split out so a statement that **failed** is graded on them too: it has no
+/// rows to compare and every other assertion above is about rows, but the
+/// counters after a failure are a question with a right answer - and one this
+/// engine got wrong in both directions until task-1854.
+///
+/// @param label - what to call this comparison in a failure
+/// @param sql - the statement, for the message
+/// @param candidate - this engine's observation
+/// @param reference - the oracle's
+/// @param counters - whether the cumulative counters are still comparable,
+///   which a module in play makes false
+fn compare_counters(
+    label: &str,
+    sql: &str,
+    candidate: &Observation,
+    reference: &Observation,
+    counters: bool,
+) {
     // A `CREATE VIRTUAL TABLE` leaves the counters holding whatever the module
     // did to its own shadow tables while it was being made, which is a fact
     // about the module rather than about the caller's rows.

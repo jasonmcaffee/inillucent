@@ -55,6 +55,19 @@ pub struct ColumnInfo {
     /// per constraint rather than per table is what makes that override a
     /// choice between two known values instead of a guess.
     pub not_null_conflict: Option<ConflictAction>,
+    /// The `ON CONFLICT` clause written on the column's `PRIMARY KEY`.
+    ///
+    /// **A different constraint from the `NOT NULL`, and a different clause.**
+    /// For a rowid alias this is the only place a rowid collision's algorithm
+    /// is written down - SQLite records `id INTEGER PRIMARY KEY ON CONFLICT
+    /// REPLACE` against the column, because the alias *is* the column and there
+    /// is no index to hang it on. Every other primary key gets an `IndexInfo`
+    /// and carries it there.
+    ///
+    /// Reading `not_null_conflict` for it, which is what the write path did
+    /// until task-1856, answers a question about a constraint the table may not
+    /// even declare.
+    pub primary_key_conflict: Option<ConflictAction>,
     /// The `DEFAULT` expression, as written.
     pub default_sql: Option<Vec<u8>>,
     /// The one-based position in the primary key, when it is in one.
@@ -392,6 +405,15 @@ pub struct CheckInfo {
     pub name: Option<Vec<u8>>,
     /// The predicate, as the source text between its parentheses.
     pub expr_sql: Vec<u8>,
+    /// The `ON CONFLICT` clause a table-level `CHECK` was written with.
+    ///
+    /// **Recorded and not acted on**, because that is what the reference does:
+    /// SQLite's grammar accepts `CHECK (expr) onconf` on a table constraint and
+    /// its builder never reads the clause, so such a constraint aborts like any
+    /// other. It is kept here so the derivation is a full account of the text
+    /// rather than a lossy one, and so the next reader finds the measurement
+    /// instead of the question (task-1853).
+    pub conflict: Option<ConflictAction>,
 }
 
 impl TableInfo {
@@ -911,6 +933,7 @@ mod tests {
                 collation: b"binary".to_vec(),
                 not_null: false,
                 not_null_conflict: None,
+                primary_key_conflict: None,
                 default_sql: None,
                 primary_key_position: None,
                 hidden: false,

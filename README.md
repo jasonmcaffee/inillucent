@@ -32,8 +32,8 @@ similar to pgvector. Measured against that, today:
 | goal | state | evidence |
 |---|---|---|
 | Faster than SQLite | **Yes on Windows at 100k rows and up, and by a wider margin since task-1845.** Weighted geomean 3.80x-3.91x at medium over four 30-round runs, lower bounds **3.74x, 3.75x, 3.88x, 3.44x** against a 3.00x bar, 30 of 30 workloads digest-equal on every run. It was 3.20x-3.28x (lows 3.11x-3.20x) before the engine's binaries were given a size-classed free list as their global allocator. On Linux the same binary was 1.53x at medium (task-1838 §5, not re-measured since). | task-1845's four-run gate |
-| No family slower than SQLite | **Nine of ten. `schema` is the one left**, at 0.46x-0.58x. `open.prepare` (0.78x -> 1.06x), `extension` (0.68x -> 1.00x-1.03x) and `transaction` (0.90x -> 1.20x) all crossed the floor in task-1845. `CREATE INDEX` at medium is 49.9 ms against SQLite's 30.8, and it is accounted for: scan 13.4, sort 5.9, pack 15.8, and a 6.8 ms `seal()` both engines pay under `synchronous = FULL`. Closing it needs the bulk builder to take pre-encoded keys. | task-1845's four-run gate; `indexprofile` |
-| Same features as SQLite | **No wrong answer known, and three refusals - but task-1849 found six that the probe was not shaped to see.** 48 of 50 inventoried constructs run. The differential probe is a checked-in test of 99 cases (`semantics.rs`), **96 of which agree byte for byte**; the review's nine are closed and so are task-1849's six. What still differs is three `CREATE INDEX` forms - partial, on an expression, and on a `WITHOUT ROWID` table - and each is a refusal rather than a wrong answer. | [What it gets wrong](#what-it-gets-wrong-and-what-it-refuses) |
+| No family slower than SQLite | **Ten of ten, on four consecutive runs.** `extension` was the last one straddling the line - its low bound read 0.99, 1.00, 0.99, 1.06 on task-1846's four runs, which is a bound cleared by luck rather than by code. task-1856 moved `extension.fts.build` from 0.29x-0.30x to 0.35x-0.37x and the family's low bound to **1.05, 1.07, 1.07, 1.09**, with the weighted lower bound 3.79x-3.96x against its 3.00x bar. `schema` crossed in task-1846 and reads 1.10-1.23. The families still under their *bars* - a different question from the floor - are `open.prepare`, `schema` and `extension`. | task-1856's four-run gate |
+| Same features as SQLite | **No wrong answer known, no refusal known - and task-1856 closed nine more that the probes were not shaped to see.** 48 of 50 inventoried constructs run. The differential probe is a checked-in test of 110 cases (`semantics.rs`), **all of which agree byte for byte**; the review's nine, task-1849's six and task-1856's nine are all closed. The three `CREATE INDEX` forms task-1845 left refused were closed by task-1846, and a `DESC` index - built and then reasoned about backwards - by task-1856. | [What it gets wrong](#what-it-gets-wrong-and-what-it-refuses) |
 | Same durability and isolation | **Yes, single process, one writer.** A checkpoint retires the segments below it since task-1845, so the same 200,000 rows are 15.9 MB rather than 110.5 MB - 1.83x SQLite's 8.7 MB, where it was 12.7x. WAL with group commit, snapshot isolation, ARIES-style redo recovery, undo for `ROLLBACK`/`SAVEPOINT`, crash campaigns under a deterministic simulator. Multi-process access and SQLite's file format are deliberate non-goals. | [Disk](#disk) |
 | Embedding search like pgvector | **Yes, and graded better than pgvector on 15 of 17 primary comparisons** with zero worse; in production on a 598,560-chunk mailbox at recall 1.000 and 27 ms p95. Reachable from ordinary SQL: a `VECTOR(N)` column, `vector_distance_cos`/`_l2`/`vector_dot`, `CREATE INDEX ... USING inillucent_hnsw`, and `ORDER BY vector_distance_cos(v, ?) LIMIT k` planned onto the index at **0.98x** the cost of querying the store directly. | `inillucent-scorecard.md`, task-1775, this ticket's `vectorprobe.txt` |
 | One engine, one repository that builds | **Half.** The repository builds from a clone again - `drivers/` is committed, and `harness.rs` now asserts every path in `[workspace] members` exists, so the next crate added before it is committed fails on the machine that added it. `inillucent::Database` reaches the new engine; the old engine is still in the tree awaiting task-1837's driver. | [Repository layout](#repository-layout) |
@@ -95,16 +95,37 @@ forbid `unsafe`.
 ### What it gets wrong, and what it refuses
 
 A refusal is visible and an application can work around it. A wrong answer is not. This section is
-ordered by that difference. It is no longer a report: the 99 cases behind it are
+ordered by that difference. It is no longer a report: the 110 cases behind it are
 `crates/inillucent-compat/tests/semantics.rs`, which runs each script through `inillucent-shell` and
-the pinned `sqlite3` and compares every byte of both streams. **96 of the 99 agree.**
+the pinned `sqlite3` and compares every byte of both streams. **All 110 agree.**
 
-**Wrong answers: none known** - which is not the same as none, and task-1849 is the reason to say it
-that way. The nine the second review found were closed by task-1845; task-1849 then found six more
-that this section had called clean, and closed those. What separates them from the nine is *where*
-they lived: every one of the nine was reachable by writing one row and reading it back, and every one
-of the six needed a second row to collide with. A probe made of single-row scripts cannot see a
-constraint that is only about the relationship between two rows, and this one was.
+**Wrong answers: none known** - which is not the same as none, and each of the last three tickets to
+say it is the reason to keep saying it that way. The nine the second review found were closed by
+task-1845; task-1849 then found six more that this section had called clean; task-1856 then found
+nine more that *those* probes were not shaped to see either.
+
+What separates the three sets is *where* they lived, and it is worth writing down because it is how
+the next set will be found. The review's nine were each reachable by writing one row and reading it
+back. task-1849's six each needed a second row to collide with, which a probe made of single-row
+scripts cannot see. task-1856's nine each needed something the probes had no reason to write down at
+all: a **declaration** the scripts never used (`UNIQUE ON CONFLICT IGNORE`, a table-level
+`CHECK ... ON CONFLICT`, `NOT NULL ... DEFAULT` under `OR REPLACE`), a **question about the
+connection** rather than about a row (`changes()`, `total_changes()`, `last_insert_rowid()`,
+`random()`), or a **shape with too few rows to disagree** - `WHERE c >= 10` over a descending index
+answers the right count with three rows and the wrong one with nine.
+
+| construct | was | now |
+|---|---|---|
+| `CREATE INDEX ic ON t(c DESC)`, then `WHERE c >= 10` | one row of nine, silently | nine |
+| `a TEXT UNIQUE ON CONFLICT IGNORE`, a colliding insert | `UNIQUE constraint failed` | skips the row |
+| the same with `ON CONFLICT REPLACE` | `UNIQUE constraint failed` | replaces the row |
+| `id INTEGER PRIMARY KEY ON CONFLICT REPLACE` | read the `NOT NULL`'s clause, so raised | replaces |
+| `CONSTRAINT c CHECK(b < 9) ON CONFLICT FAIL` | a parse error, and every later statement `no such table` | accepted and ignored, as SQLite does |
+| `UPDATE OR REPLACE t SET c = NULL` on `c NOT NULL DEFAULT 'd'` | `NOT NULL constraint failed` | stores `'d'` |
+| `INSERT OR REPLACE` colliding on two unique indexes | deleted the first row in its way and left the second | deletes both |
+| `INSERT ... ON CONFLICT DO NOTHING` violating a `CHECK` | skipped the row and reported success | raises |
+| `changes()`, `total_changes()`, `last_insert_rowid()` | `0`, always, for every statement | what the C API answers |
+| `random()` | one constant, for the life of the process | a different number per call |
 
 | construct | was | now |
 |---|---|---|
@@ -304,7 +325,7 @@ Medians of the four medium runs, in nanoseconds per round.
 | `txn.large` (2,000 `UPDATE`s in one transaction) | 4,018,850 | 809,000 | 0.19x–0.20x | a per-update constant on the allocating read path plus delete-and-insert into the delta area; not compaction |
 | `write.insert.batch` | 36,087,550 | 17,759,300 | 0.48x–0.50x | a per-write constant; the delta area is scanned linearly and every entry's key decoded per lookup |
 | `schema.index` | 55,312,500 | 29,827,700 | 0.54x–0.56x | the bulk build's floor sits above the bar (19.7 ms against a 10.1 ms budget) |
-| `extension.fts.build` | 10,370,000 | 2,769,550 | 0.25x–0.27x | inside the module. **Up from 0.11x** — task-1835's query path and the shadow-write batching moved it |
+| `extension.fts.build` | 7,872,150–8,143,100 | 2,974,250–3,055,500 | 0.35x–0.37x | inside the module, and profiled in task-1856 rather than guessed at — the row is that ticket's four runs, not this table's. **Up from 0.11x**, then 0.25x, then 0.30x |
 | `extension.json` | 1,744,700 | 1,134,500 | 0.62x–0.68x | ~1.1 µs per `json_extract` call against 0.4; the constant argument is re-parsed per call |
 | `extension.rtree.insert` | 2,751,650 | 2,630,900 | 0.89x–0.95x | **was 0.12x**; the shadow-table batching in task-1838 all but closed it |
 | `range.lookaside` | 28,974,400 | 26,784,600 | 0.93x–0.95x | the one read workload still under 1.00x, with `join.range` at 0.96x |
@@ -533,11 +554,16 @@ is `tasks/rust-db-phase-2-tdd.md`.
    `UPDATE`'s read through the borrowing probe rather than the allocating `PagedTree::point`,
    overwrite a same-width value in place, one log record per update; and keep delta entries sorted by
    pre-encoded key and bisect.
-5. **`extension.fts.build` at 0.32x**, which is the module's own cost - task-1835 moved the query
-   path and the build path is what is left. It no longer holds the family under the floor, and one
-   attempt at it (holding the token run on the table and referring to tokens by index instead of
-   moving a `Vec<u8>` per token through the postings and the sort) measured **no change at all**
-   once the allocator was in, so the cost is elsewhere in the module.
+5. **`extension.fts.build` at 0.35x-0.37x**, which is the module's own cost - task-1835 moved the
+   query path and the build path is what task-1856 profiled. The gate now prints the breakdown beside
+   the ratio, the way it does for `schema.index`: 500 documents, `content` 1.3 ms, `tokenize` 0.4,
+   `docsize` 1.0, `group` 0.2, `terms` 0.3, `new terms` 0.4, `dict write` 1.7, `flush` 2.7. What is
+   left is **not** micro-cost. Writing the dictionary in perfect key order still costs ~3.2 us a row
+   against ~2.4 us for a `%_data` row, and this engine's own `write.insert.batch` is 15.7 us a row, so
+   a shadow write is not slow. FTS5 here does four tree writes per document - `%_content`,
+   `%_docsize`, the new term's `%_idx` row and its `%_data` doclist - where SQLite's accumulates the
+   batch in memory and writes a handful of segment blobs at commit. Closing the rest is a segment
+   format change touching every reader of `%_idx` and `%_data`.
 6. **Deleting the old engine.** Re-rooting is done: `inillucent` is a re-export of
    `inillucent-engine`, and the old facade is `inillucent-legacy`. What is left is the deletion -
    `inillucent-legacy`, `inillucent-capi`, `inillucent-session`, `inillucent-vm`,

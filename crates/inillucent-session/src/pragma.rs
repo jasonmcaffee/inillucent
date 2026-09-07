@@ -283,6 +283,7 @@ fn view_columns(
                 collation: b"binary".to_vec(),
                 not_null: false,
                 not_null_conflict: None,
+                primary_key_conflict: None,
                 default_sql: None,
                 primary_key_position: None,
                 hidden: false,

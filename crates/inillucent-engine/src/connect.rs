@@ -397,8 +397,15 @@ impl<'d> Connection<'d> {
     }
 
     /// Returns how many rows the last statement on this database changed.
+    ///
+    /// **Read off the engine, which is where the SQL scalar reads it.** It was
+    /// a cell on the `Database`, set by the two wrappers below from the
+    /// `Outcome` they got back - so a statement that failed partway left it
+    /// holding the previous statement's number, and `sqlite3_changes` and
+    /// `changes()` could answer differently about the same statement
+    /// (task-1854).
     pub fn changes(&self) -> i64 {
-        self.database.changes.get()
+        self.engine().changes()
     }
 
     /// Returns how many rows every statement so far has changed.

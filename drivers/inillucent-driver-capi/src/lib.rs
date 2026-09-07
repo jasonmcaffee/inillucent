@@ -110,6 +110,21 @@ pub struct inillucent_conn {
     /// The database it belongs to, which outlives it by [`inillucent_close`]'s
     /// refusal.
     database: *const inillucent_db,
+    /// The engine session every call on this handle runs in.
+    ///
+    /// **This is what makes the handle a connection rather than a name for the
+    /// database.** Every entry point below borrows the `Database` for the
+    /// length of one call, because `Connection` borrows it and a C handle
+    /// cannot hold a borrow - so before task-1848 each call opened a *new*
+    /// session, and everything a session scopes was gone by the next one: a
+    /// `CREATE TEMP TABLE` did not survive the statement that made it, an
+    /// `ATTACH` did not outlive its own call, and a connection pragma had to be
+    /// re-applied every time.
+    ///
+    /// Keeping the number and reconnecting with it is the engine's own answer
+    /// to this shape, and `Database::connect_as` is where the driver passes it
+    /// on.
+    session: u64,
 }
 
 /// A statement and the values bound to it.
@@ -214,7 +229,9 @@ fn report(out: *mut *mut inillucent_error, failure: &Error, diagnostics: bool) {
             true => failure.detail.as_deref().map(c_string),
             false => None,
         },
-        offset: failure.offset.map_or(-1, |at| i32::try_from(at).unwrap_or(-1)),
+        offset: failure
+            .offset
+            .map_or(-1, |at| i32::try_from(at).unwrap_or(-1)),
     });
     // SAFETY: `out` is a caller-supplied pointer the header requires to be
     // either null - checked above - or writable. Ownership of the box moves to
@@ -232,7 +249,10 @@ fn c_string(text: &str) -> CString {
     match CString::new(text) {
         Ok(built) => built,
         Err(_) => {
-            let cleaned: String = text.chars().map(|c| if c == '\0' { '?' } else { c }).collect();
+            let cleaned: String = text
+                .chars()
+                .map(|c| if c == '\0' { '?' } else { c })
+                .collect();
             CString::new(cleaned).unwrap_or_else(|_| c"?".to_owned())
         }
     }
@@ -558,9 +578,7 @@ pub unsafe extern "C" fn inillucent_backup_to(
 ) -> i32 {
     guarded("inillucent_backup_to", error, || {
         match (held(db as *const inillucent_db), borrowed(path)) {
-            (Some(database), Some(path)) => {
-                finish(database.database.backup_to(path), error, false)
-            }
+            (Some(database), Some(path)) => finish(database.database.backup_to(path), error, false),
             _ => misused("inillucent_backup_to", error),
         }
     })
@@ -610,6 +628,8 @@ pub unsafe extern "C" fn inillucent_connect(
             .set(database.connections.get().saturating_add(1));
         *out = Box::into_raw(Box::new(inillucent_conn {
             database: db as *const inillucent_db,
+            // Opened once, here, and continued by every call on this handle.
+            session: database.database.connect().session(),
         }));
         INILLUCENT_OK
     })
@@ -633,6 +653,23 @@ pub unsafe extern "C" fn inillucent_conn_free(conn: *mut inillucent_conn) {
             .connections
             .set(database.connections.get().saturating_sub(1));
     }
+}
+
+/// Returns the session a connection handle runs its calls in.
+///
+/// Zero for a null or dead handle, which is a session like any other: the
+/// caller is about to be refused for the same reason the handle is not there.
+///
+/// @param conn - the connection handle
+///
+/// # Safety
+///
+/// `conn` must be null or a live handle.
+unsafe fn session_of(conn: *const inillucent_conn) -> u64 {
+    if conn.is_null() {
+        return 0;
+    }
+    (*conn).session
 }
 
 /// Returns the database a connection belongs to.
@@ -672,7 +709,7 @@ pub unsafe extern "C" fn inillucent_execute(
         if out.is_null() {
             return misused("inillucent_execute", error);
         }
-        let connection = database.database.connect();
+        let connection = database.database.connect_as(session_of(conn));
         match connection.query(sql, &[], capped(limit)) {
             Ok(rows) => {
                 *out = Box::into_raw(Box::new(built(rows)));
@@ -706,7 +743,14 @@ pub unsafe extern "C" fn inillucent_execute_batch(
         let (Some(database), Some(sql)) = (database_of(conn), borrowed(sql)) else {
             return misused("inillucent_execute_batch", error);
         };
-        finish(database.database.connect().execute_batch(sql), error, false)
+        finish(
+            database
+                .database
+                .connect_as(session_of(conn))
+                .execute_batch(sql),
+            error,
+            false,
+        )
     })
 }
 
@@ -720,7 +764,10 @@ pub unsafe extern "C" fn inillucent_execute_batch(
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_last_insert_rowid(conn: *mut inillucent_conn) -> i64 {
     match database_of(conn) {
-        Some(database) => database.database.connect().last_insert_rowid(),
+        Some(database) => database
+            .database
+            .connect_as(session_of(conn))
+            .last_insert_rowid(),
         None => 0,
     }
 }
@@ -735,7 +782,10 @@ pub unsafe extern "C" fn inillucent_last_insert_rowid(conn: *mut inillucent_conn
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_total_changes(conn: *mut inillucent_conn) -> i64 {
     match database_of(conn) {
-        Some(database) => database.database.connect().total_changes(),
+        Some(database) => database
+            .database
+            .connect_as(session_of(conn))
+            .total_changes(),
         None => 0,
     }
 }
@@ -750,7 +800,12 @@ pub unsafe extern "C" fn inillucent_total_changes(conn: *mut inillucent_conn) ->
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_in_transaction(conn: *mut inillucent_conn) -> i32 {
     match database_of(conn) {
-        Some(database) => i32::from(database.database.connect().in_transaction()),
+        Some(database) => i32::from(
+            database
+                .database
+                .connect_as(session_of(conn))
+                .in_transaction(),
+        ),
         None => 0,
     }
 }
@@ -765,7 +820,10 @@ pub unsafe extern "C" fn inillucent_in_transaction(conn: *mut inillucent_conn) -
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_schema_cookie(conn: *mut inillucent_conn) -> u64 {
     match database_of(conn) {
-        Some(database) => database.database.connect().schema_cookie(),
+        Some(database) => database
+            .database
+            .connect_as(session_of(conn))
+            .schema_cookie(),
         None => 0,
     }
 }
@@ -790,7 +848,11 @@ pub unsafe extern "C" fn inillucent_cancel(
 ) -> i32 {
     guarded("inillucent_cancel", error, || match database_of(conn) {
         None => misused("inillucent_cancel", error),
-        Some(database) => finish(database.database.connect().cancel(), error, false),
+        Some(database) => finish(
+            database.database.connect_as(session_of(conn)).cancel(),
+            error,
+            false,
+        ),
     })
 }
 
@@ -825,7 +887,7 @@ pub unsafe extern "C" fn inillucent_prepare(
         if out.is_null() {
             return misused("inillucent_prepare", error);
         }
-        let connection = database.database.connect();
+        let connection = database.database.connect_as(session_of(conn));
         if let Err(why) = connection.prepare(sql) {
             let status = why.status as i32;
             report(error, &why, false);
@@ -1029,7 +1091,9 @@ pub unsafe extern "C" fn inillucent_stmt_execute(
         if out.is_null() {
             return misused("inillucent_stmt_execute", error);
         }
-        let connection = database.database.connect();
+        let connection = database
+            .database
+            .connect_as(session_of(statement.connection));
         match connection.query(&statement.sql, &statement.params, capped(limit)) {
             Ok(rows) => {
                 *out = Box::into_raw(Box::new(built(rows)));
@@ -1354,7 +1418,10 @@ pub unsafe extern "C" fn inillucent_txn_begin(
             return misused("inillucent_txn_begin", error);
         }
         let status = finish(
-            database.database.connect().execute_batch("BEGIN"),
+            database
+                .database
+                .connect_as(session_of(conn))
+                .execute_batch("BEGIN"),
             error,
             false,
         );
@@ -1409,7 +1476,9 @@ pub unsafe extern "C" fn inillucent_txn_execute(
             );
             return INILLUCENT_INVALID_STATE;
         }
-        let connection = database.database.connect();
+        let connection = database
+            .database
+            .connect_as(session_of(transaction.connection));
         match connection.query(sql, &[], 0) {
             Ok(rows) => {
                 if !affected.is_null() {
@@ -1460,7 +1529,10 @@ pub unsafe extern "C" fn inillucent_txn_commit(
             return misused("inillucent_txn_commit", error);
         };
         transaction.spent = true;
-        let outcome = database.database.connect().execute_batch("COMMIT");
+        let outcome = database
+            .database
+            .connect_as(session_of(transaction.connection))
+            .execute_batch("COMMIT");
         finish(outcome, error, false)
     })
 }
@@ -1482,7 +1554,10 @@ pub unsafe extern "C" fn inillucent_txn_rollback(txn: *mut inillucent_txn) {
         return;
     }
     if let Some(database) = database_of(transaction.connection) {
-        let _ = database.database.connect().execute_batch("ROLLBACK");
+        let _ = database
+            .database
+            .connect_as(session_of(transaction.connection))
+            .execute_batch("ROLLBACK");
     }
 }
 
@@ -1508,9 +1583,7 @@ pub unsafe extern "C" fn inillucent_error_status(error: *const inillucent_error)
 ///
 /// `error` must be null or a live handle.
 #[no_mangle]
-pub unsafe extern "C" fn inillucent_error_message(
-    error: *const inillucent_error,
-) -> *const c_char {
+pub unsafe extern "C" fn inillucent_error_message(error: *const inillucent_error) -> *const c_char {
     match held(error) {
         Some(held) => held.message.as_ptr(),
         None => std::ptr::null(),
@@ -1525,9 +1598,7 @@ pub unsafe extern "C" fn inillucent_error_message(
 ///
 /// `error` must be null or a live handle.
 #[no_mangle]
-pub unsafe extern "C" fn inillucent_error_feature(
-    error: *const inillucent_error,
-) -> *const c_char {
+pub unsafe extern "C" fn inillucent_error_feature(error: *const inillucent_error) -> *const c_char {
     match held(error).and_then(|held| held.feature.as_ref()) {
         Some(feature) => feature.as_ptr(),
         None => std::ptr::null(),

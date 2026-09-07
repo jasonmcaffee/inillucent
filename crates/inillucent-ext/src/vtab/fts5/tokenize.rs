@@ -75,7 +75,7 @@ impl Tokenizer {
         let mut current = String::new();
         for character in text.chars() {
             if self.is_token_character(character) {
-                current.extend(self.fold(character));
+                self.fold_into(character, &mut current);
                 continue;
             }
             if !current.is_empty() {
@@ -108,18 +108,34 @@ impl Tokenizer {
         }
     }
 
-    /// Folds one character to the form the index stores.
-    fn fold(&self, character: char) -> Vec<char> {
+    /// Folds one character onto the end of the token being built.
+    ///
+    /// **Written into rather than returned**, because a `Vec<char>` per
+    /// character is an allocation per character: the folded form of `a` is one
+    /// character, and describing it cost a heap allocation and a free. The gate
+    /// tokenises fifty-five thousand characters per round of
+    /// `extension.fts.build` and spent a fifth of the workload's module time
+    /// here (task-1856).
+    ///
+    /// A character folds to more than one - the German sharp s lowercases to
+    /// `ss` - so the shape has to stay one-to-many; it is the collection that
+    /// went, not the generality.
+    ///
+    /// @param character - the character to fold
+    /// @param out - the token being built
+    fn fold_into(&self, character: char, out: &mut String) {
         match self {
-            Tokenizer::Ascii => vec![character.to_ascii_lowercase()],
+            Tokenizer::Ascii => out.push(character.to_ascii_lowercase()),
             Tokenizer::Unicode61 {
                 remove_diacritics, ..
             } => {
-                let folded: Vec<char> = character.to_lowercase().collect();
-                if !remove_diacritics {
-                    return folded;
+                for folded in character.to_lowercase() {
+                    out.push(if *remove_diacritics {
+                        strip_diacritic(folded)
+                    } else {
+                        folded
+                    });
                 }
-                folded.into_iter().map(strip_diacritic).collect()
             }
         }
     }

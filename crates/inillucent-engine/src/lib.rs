@@ -252,7 +252,20 @@ pub struct ImportedDatabase {
     /// wearing the same name.
     last_rowid: std::cell::Cell<i64>,
     /// Every row every statement on this database has changed.
+    ///
+    /// A trigger's rows and a foreign key's cascade are in it, which is
+    /// SQLite's rule and is the difference between this and `last_changes`.
+    /// Never decremented: a `ROLLBACK` does not put it back, which was measured
+    /// against the pinned shell rather than assumed.
     changed_ever: std::cell::Cell<i64>,
+    /// How many rows the most recent write changed, for `changes()`.
+    ///
+    /// The statement's own rows only - a trigger body's are not in it. A
+    /// statement that changed nothing sets it to zero; a `SELECT`, a DDL and a
+    /// transaction statement leave it alone.
+    last_changes: std::cell::Cell<i64>,
+    /// The random built-ins' stream, advanced once per statement.
+    seed: std::cell::Cell<u64>,
 
     /// The catalog tree's rows, with what each one needs beside it.
     ///
@@ -1155,24 +1168,22 @@ impl ImportedDatabase {
             identifiers.push(info.root);
             shapes.insert(info.root, shape);
             layouts.insert(info.root, layout);
-            // The indexes the new engine can hold. A descending one is dropped,
-            // and the *catalog* the binder sees is built without it - see
-            // `is_ascending` for why that is one decision rather than three
-            // patches.
+            // **A descending index is imported, and imported ascending.** It
+            // used to be dropped and named in `skipped`, because the planner
+            // read direction off the catalog and every conclusion it drew about
+            // such an index was inverted against a tree that is stored
+            // ascending. task-1856 removed the mismatch at its source rather
+            // than the index: `in_key_order` already re-sorts SQLite's entries
+            // into this tree's own order, so the tree that gets built is
+            // ascending either way, and the catalog now says so - see
+            // `stored_ascending` in `inillucent_catalog::paged`. Dropping it
+            // was the workaround for a catalog that lied.
             let mut info = info.clone();
-            let dropped: Vec<Vec<u8>> = info
-                .indexes
-                .iter()
-                .filter(|index| !is_ascending(index))
-                .map(|index| index.name.clone())
-                .collect();
-            for name in &dropped {
-                skipped.push(format!(
-                    "{} (a descending index)",
-                    String::from_utf8_lossy(name)
-                ));
+            for index in &mut info.indexes {
+                for column in &mut index.columns {
+                    column.descending = false;
+                }
             }
-            info.indexes.retain(is_ascending);
             let info = &info;
             for index in &info.indexes {
                 if index.root == 0 {
@@ -1417,6 +1428,8 @@ impl ImportedDatabase {
             wal,
             next_txn: std::cell::Cell::new(1),
             last_rowid: std::cell::Cell::new(0),
+            last_changes: std::cell::Cell::new(0),
+            seed: std::cell::Cell::new(fresh_seed()),
             changed_ever: std::cell::Cell::new(0),
             statements: std::cell::RefCell::new(HashMap::new()),
             batch: std::cell::Cell::new(None),
@@ -1594,6 +1607,8 @@ impl ImportedDatabase {
             // call something by a name a crashed one already used.
             next_txn: std::cell::Cell::new(highest_txn.saturating_add(1)),
             last_rowid: std::cell::Cell::new(0),
+            last_changes: std::cell::Cell::new(0),
+            seed: std::cell::Cell::new(fresh_seed()),
             changed_ever: std::cell::Cell::new(0),
             statements: std::cell::RefCell::new(HashMap::new()),
             batch: std::cell::Cell::new(None),
@@ -2341,6 +2356,70 @@ impl ImportedDatabase {
         self.changed_ever.get()
     }
 
+    /// Returns how many rows the most recent write changed.
+    ///
+    /// What `sqlite3_changes` and the `changes()` scalar answer. The
+    /// statement's own rows: a trigger body's go into `total_changes` and not
+    /// into this, which is SQLite's rule.
+    pub fn changes(&self) -> i64 {
+        self.last_changes.get()
+    }
+
+    /// Records what a write changed, on both counters.
+    ///
+    /// @param own - the rows the statement wrote itself
+    /// @param all - the rows written under it, triggers included
+    fn record_changes(&self, own: i64, all: i64) {
+        self.last_changes.set(own);
+        self.changed_ever
+            .set(self.changed_ever.get().saturating_add(all));
+    }
+
+    /// Records the rowid an `INSERT` assigned, when it assigned one.
+    ///
+    /// @param rowid - the key, or `None` when the statement wrote no row into a
+    ///   table that has one
+    fn remember_rowid(&self, rowid: Option<i64>) {
+        if let Some(assigned) = rowid {
+            self.last_rowid.set(assigned);
+        }
+    }
+
+    /// Returns what a statement's scalars should be told about the connection.
+    ///
+    /// `changes()`, `total_changes()` and `last_insert_rowid()` are constants
+    /// for the length of one statement - SQLite updates them when a statement
+    /// *finishes* - so they are read once here and compiled in, rather than
+    /// asked per row.
+    pub fn scalar_context(&self) -> inillucent_exec::scalar::Context {
+        inillucent_exec::scalar::Context {
+            changes: self.last_changes.get(),
+            total_changes: self.changed_ever.get(),
+            last_insert_rowid: self.last_rowid.get(),
+            seed: self.next_seed(),
+        }
+    }
+
+    /// Returns a fresh seed for the random built-ins.
+    ///
+    /// **`random()` answered the same number for ever before task-1856**, in
+    /// every statement of every connection, because the new engine called the
+    /// function library with a default context and the default seed is zero.
+    /// One number is a legal answer to one call and a wrong answer to two, and
+    /// an application seeding anything from it - a token, a sample, a shuffle -
+    /// got a constant with no way to notice.
+    ///
+    /// The stream is `xoshiro256**`, started from the clock and the process id
+    /// so two connections opened in the same millisecond do not share it, and
+    /// advanced once per statement. Not cryptographic, which is also true of
+    /// SQLite's `random()`.
+    fn next_seed(&self) -> u64 {
+        let mut rng = inillucent_base::rng::Rng::new(self.seed.get());
+        let next = rng.next_u64();
+        self.seed.set(next);
+        next
+    }
+
     /// Opens a transaction that the statements after it all join.
     ///
     /// The difference between this and autocommit is the whole of what a commit
@@ -2964,6 +3043,218 @@ impl ImportedDatabase {
                 .ok_or_else(|| refusal("a tree names a database that is not attached"))?
                 .pool();
             tree.check(pool)?;
+        }
+        // **And then whether the trees agree with each other.** Every check
+        // above is about one tree in isolation - its key order, its sibling
+        // chain, its separators - and every one of them passes over a database
+        // where an index holds two entries under one `UNIQUE` key, or an entry
+        // naming a row the table does not have. That state was reachable
+        // (task-1849) and `PRAGMA integrity_check` called it healthy, which is
+        // the detector task-1851 is about: the write path is where such a state
+        // is *created*, and there is more than one way in - an import, a crash
+        // recovery, a future write path, a bug like task-1849's.
+        self.check_indexes_agree()
+    }
+
+    /// Writes one entry straight into an index tree, past the write path.
+    ///
+    /// **A repair and diagnosis hook, and the only way to test the integrity
+    /// checker.** Since task-1849 no SQL statement can leave an index holding
+    /// two entries under one `UNIQUE` key, or an entry naming a row the table
+    /// does not have - which is the point of that ticket, and it is also why a
+    /// checker for those states cannot be exercised through SQL. A detector
+    /// that has never been shown the damage it looks for is a detector nobody
+    /// has tested.
+    ///
+    /// It maintains nothing and checks nothing: no uniqueness, no table row, no
+    /// other index. That is deliberate and is the whole of its use. It goes
+    /// through `write`, so the change is logged, committed and recoverable like
+    /// any other - the damage is a real state of a real database rather than an
+    /// artefact of the test harness.
+    ///
+    /// @param index - the index's name, as declared
+    /// @param entry - the entry: the key columns, then whatever identifies the
+    ///   row
+    /// @param adding - true to write it, false to remove it
+    pub fn write_index_entry_unchecked(
+        &mut self,
+        index: &str,
+        entry: &[OwnedDatum],
+        adding: bool,
+    ) -> DbResult<()> {
+        let folded = index.to_ascii_lowercase().into_bytes();
+        let root = self
+            .tables
+            .iter()
+            .flat_map(|table| table.indexes.iter())
+            .find(|held| held.folded == folded)
+            .map(|held| held.root)
+            .ok_or_else(|| refusal(format!("no such index: {index}")))?;
+        let owned: Vec<OwnedDatum> = entry.to_vec();
+        self.write(&Params::new(), Vec::new(), move |target, _| {
+            let (database, trees, log) = target.parts_for(root)?;
+            let tree = trees
+                .get_mut(root)
+                .ok_or_else(|| refusal("the index has no tree"))?;
+            let borrowed: Vec<Datum<'_>> = owned.iter().map(OwnedDatum::borrow).collect();
+            if adding {
+                tree.put(database, log, &borrowed)?;
+            } else {
+                tree.delete(database, log, &borrowed)?;
+            }
+            Ok(Changes::default())
+        })?;
+        Ok(())
+    }
+
+    /// Reports the first disagreement between an index and the table it is on.
+    ///
+    /// **Four kinds of disagreement, in SQLite's own wording**, because an
+    /// application matching on `integrity_check`'s answer is matching on that
+    /// text:
+    ///
+    /// - `non-unique entry in index <name>` - two entries under one key in a
+    ///   `UNIQUE` index. The entries are in key order, so this is a comparison
+    ///   against the previous entry and costs one extra comparison per entry
+    ///   rather than a second pass. A prefix containing a NULL is skipped,
+    ///   because SQL's rule is that every NULL is distinct - the same rule
+    ///   `distinct_prefix` applies on the write path.
+    /// - `row <rowid> missing from index <name>` - a table row whose entry is
+    ///   not there, which is also what an entry whose *key* does not match its
+    ///   row looks like from here: the recomputed key is not found.
+    /// - `wrong # of entries in index <name>` - which is what an entry naming a
+    ///   row the table does not hold shows up as, once every row that is there
+    ///   has been found.
+    ///
+    /// **A partial index and an index on an expression are checked for
+    /// uniqueness only.** Deciding which rows *should* have an entry means
+    /// evaluating the predicate, and deciding what an entry's key should be
+    /// means evaluating the key expression; both need a binder, which the
+    /// checker does not have. Counting them as though every row had an entry
+    /// would report a healthy partial index as damaged, which is worse than
+    /// not looking.
+    fn check_indexes_agree(&self) -> DbResult<()> {
+        for table in &self.tables {
+            let Some(layout) = self.layouts.get(&table.root) else {
+                continue;
+            };
+            let Some(table_tree) = self.trees.get(&table.root) else {
+                continue;
+            };
+            let Some(file) = self.schema_file(self.schema_of(table.root)) else {
+                continue;
+            };
+            for index in &table.indexes {
+                if index.root == 0 || index.root == table.root {
+                    continue;
+                }
+                let Some(index_tree) = self.trees.get(&index.root) else {
+                    continue;
+                };
+                let Some(index_file) = self.schema_file(self.schema_of(index.root)) else {
+                    continue;
+                };
+                // **Two sequential walks and a merge, with no probe between
+                // them.** The obvious algorithm is SQLite's - walk the table
+                // and seek the index for each row - and this engine cannot
+                // afford it: a descent swizzles the pointer it followed, so
+                // probing a hundred thousand distinct leaves pins the pool, and
+                // `an_index_build_bigger_than_the_pool_completes` reported
+                // exactly that on its 64 frames. Both trees are walked left to
+                // right instead, and the table's implied entries are put into
+                // the index's own key order first - by `in_key_order`, which is
+                // the tree's own encoding under the tree's own collations, so
+                // there is no second opinion about ordering to drift from the
+                // first.
+                let computed = index.partial_sql.is_some()
+                    || index.columns.iter().any(|key| key.expr_sql.is_some());
+                let (specs, _) = index_shape(table, index, index.root);
+                let width = index.columns.len();
+                let mut implied: Vec<Vec<OwnedDatum>> = Vec::new();
+                if !computed {
+                    let mut page = table_tree.first_leaf();
+                    while !page.is_none() {
+                        let mut next = inillucent_pool::PageId::NONE;
+                        table_tree.visit_from(file.pool(), page, &mut |leaf| {
+                            next = leaf.right_sibling();
+                            for row in leaf.live()? {
+                                let owned: Vec<OwnedDatum> =
+                                    row.iter().map(OwnedDatum::from_datum).collect();
+                                implied.push(plain_index_entry(index, layout, &owned));
+                            }
+                            Ok(false)
+                        })?;
+                        page = next;
+                    }
+                    implied = in_key_order(implied, &specs, specs.len());
+                }
+                let rows = implied.len() as u64;
+                let mut wanted = implied.into_iter();
+                let mut missing: Option<Vec<OwnedDatum>> = None;
+                let mut entries = 0u64;
+                let mut previous: Option<Vec<OwnedDatum>> = None;
+                index_tree.visit_leaves(index_file.pool(), &mut |leaf| {
+                    for entry in leaf.live()? {
+                        entries = entries.saturating_add(1);
+                        let held: Vec<OwnedDatum> =
+                            entry.iter().map(OwnedDatum::from_datum).collect();
+                        if index.unique {
+                            let key = held.get(..width).unwrap_or_default();
+                            // Every NULL is distinct, so a key holding one is
+                            // not a duplicate of anything - the same rule
+                            // `distinct_prefix` applies on the write path.
+                            if key.iter().any(|value| matches!(value, OwnedDatum::Null)) {
+                                previous = None;
+                            } else {
+                                if previous.as_deref() == Some(key) {
+                                    return Err(corrupt_index(format!(
+                                        "non-unique entry in index {}",
+                                        String::from_utf8_lossy(&index.name)
+                                    )));
+                                }
+                                previous = Some(key.to_vec());
+                            }
+                        }
+                        // **A partial index and an index on an expression are
+                        // checked for uniqueness only.** Deciding which rows
+                        // should have an entry means evaluating the predicate,
+                        // and deciding what a key should be means evaluating
+                        // the key expression; both need a binder the checker
+                        // does not have, and counting them as though every row
+                        // had an entry would report a healthy partial index as
+                        // damaged.
+                        if computed || missing.is_some() {
+                            continue;
+                        }
+                        match wanted.next() {
+                            Some(want) if want == held => {}
+                            Some(want) => missing = Some(want),
+                            // More entries than the table implies. The count
+                            // below is what names that.
+                            None => {}
+                        }
+                    }
+                    Ok(true)
+                })?;
+                if computed {
+                    continue;
+                }
+                // The row is named before the count, because a table row whose
+                // entry was taken away is both - and SQLite names the row.
+                if let Some(want) = missing.or_else(|| wanted.next()) {
+                    return Err(corrupt_index(format!(
+                        "row {} missing from index {}",
+                        entry_identity_text(&want, width),
+                        String::from_utf8_lossy(&index.name)
+                    )));
+                }
+                if entries != rows {
+                    return Err(corrupt_index(format!(
+                        "wrong # of entries in index {}",
+                        String::from_utf8_lossy(&index.name)
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -3664,6 +3955,15 @@ impl ImportedDatabase {
         cached: &std::rc::Rc<Cached>,
         params: &Params,
     ) -> DbResult<Outcome> {
+        // **The connection's counters, handed to the statement before it is
+        // compiled.** `changes()`, `total_changes()`, `last_insert_rowid()` and
+        // the random built-ins' seed are questions about the connection rather
+        // than about a row, and the executor has no connection - so they are
+        // read once here and travel on the parameter set, which is the same
+        // route a folded subquery takes and for the same reason: a plan is
+        // cached by its text, and a value baked into the plan would answer with
+        // whatever was true when it was first compiled (task-1854).
+        params.set_context(self.scalar_context());
         let outcome = self.apply_compiled(cached, params)?;
         // **The cyclic half of a foreign key's action happens here**, after the
         // statement rather than inside it, because a cascade that can reach
@@ -4238,7 +4538,7 @@ impl ImportedDatabase {
             Logs::Many(held)
         };
         let session = self.session.get();
-        let (applied, wrote) = {
+        let (applied, wrote, counted) = {
             let mut view = WriteView {
                 database: &mut self.database,
                 attached: &mut self.attached,
@@ -4250,6 +4550,7 @@ impl ImportedDatabase {
                 layouts: &self.layouts,
                 covering: &self.covering,
                 indexed: &self.vector_indexes,
+                counted: std::cell::Cell::new((0, 0, None)),
             };
             // **Not `?`.** A failed statement has writes of its own to put
             // back, and the borrow of the trees has to end before anything can.
@@ -4261,11 +4562,33 @@ impl ImportedDatabase {
             // the failure path too, because a statement that failed partway
             // still wrote, and `OR FAIL` keeps what it wrote.
             let wrote = view.logs.wrote();
-            (applied, wrote)
+            // Read on the failure path too, and for the same reason `wrote` is:
+            // a statement that failed partway still wrote, and `OR FAIL` keeps
+            // it - so the counters have to see it (task-1854).
+            let counted = view.rows_written();
+            (applied, wrote, counted)
         };
         let changes = match applied {
             Ok(changes) => changes,
-            Err(error) => return Err(self.abandon(error, mark, autocommit, wrote, txn)),
+            Err(error) => {
+                // **The rowid moves even though the row does not.** SQLite
+                // documents `last_insert_rowid()` as the last rowid
+                // *attempted*, and measures out that way: an `INSERT` of two
+                // rows that fails on the second answers the first row's rowid,
+                // with the table holding neither.
+                self.remember_rowid(counted.2);
+                // What the statement kept, which is what the counters count.
+                // `FAIL` keeps the rows it wrote and everything else puts them
+                // back, so the tally is taken only for `FAIL` - which is what
+                // makes `UPDATE OR FAIL` report `1 | 4` and a plain `UPDATE`
+                // that aborts report `0` and no movement at all.
+                if error.unwind() == Unwind::Nothing {
+                    self.record_changes(counted.0, counted.1);
+                } else {
+                    self.last_changes.set(0);
+                }
+                return Err(self.abandon(error, mark, autocommit, wrote, txn));
+            }
         };
         self.touched |= wrote;
         // **Inside the same transaction, and after the trees rather than
@@ -4290,11 +4613,11 @@ impl ImportedDatabase {
             // statement's mark to sit on top of.
             self.undo.borrow_mut().clear();
         }
-        if let Some(assigned) = changes.last_rowid {
-            self.last_rowid.set(assigned);
-        }
-        self.changed_ever
-            .set(self.changed_ever.get().saturating_add(changes.rows as i64));
+        self.remember_rowid(changes.last_rowid);
+        // **Read off the view rather than off `Changes`**, so the success path
+        // and the failure path count the same way and a trigger's rows land in
+        // `total_changes()` where SQLite puts them.
+        self.record_changes(counted.0, counted.1);
         if autocommit {
             let participants = std::mem::take(&mut self.touched);
             self.commit_across(txn, participants)?;
@@ -4703,6 +5026,15 @@ struct WriteView<'a> {
     /// else, and the engine applies both to the module afterwards. See
     /// `Changes::written`.
     indexed: &'a HashMap<u32, Vec<VectorIndex>>,
+    /// What this statement has written, as
+    /// `(rows the statement wrote itself, rows written in all, last rowid)`.
+    ///
+    /// **The tally that survives a failure.** The `Changes` a write builds is
+    /// lost the moment it raises, and `OR FAIL` keeps what it wrote - so
+    /// `changes()`, `total_changes()` and `last_insert_rowid()` are read off
+    /// the view afterwards on either path. It is a fresh view per statement,
+    /// so there is nothing to reset.
+    counted: std::cell::Cell<(i64, i64, Option<i64>)>,
     /// Which index trees cover which table, so a query a trigger body runs
     /// inside the write reaches the same covering indexes a typed one does.
     covering: &'a HashMap<u32, Vec<u32>>,
@@ -4722,6 +5054,24 @@ impl WriteView<'_> {
 }
 
 impl WriteTarget for WriteView<'_> {
+    fn count_row(&self, outer: bool) {
+        let (own, all, rowid) = self.counted.get();
+        self.counted.set((
+            own.saturating_add(i64::from(outer)),
+            all.saturating_add(1),
+            rowid,
+        ));
+    }
+
+    fn count_rowid(&self, rowid: i64) {
+        let (own, all, _) = self.counted.get();
+        self.counted.set((own, all, Some(rowid)));
+    }
+
+    fn rows_written(&self) -> (i64, i64, Option<i64>) {
+        self.counted.get()
+    }
+
     fn parts_for(
         &mut self,
         root: u32,
@@ -4923,40 +5273,6 @@ struct Before {
     key: Vec<OwnedDatum>,
     /// The whole row as it was, or `None` when the key was not there.
     row: Option<Vec<OwnedDatum>>,
-}
-
-/// Reports whether every key column of an index is stored ascending.
-///
-/// **A descending index is dropped by the import, and dropped from the catalog
-/// the binder is given, rather than built and then worked around.** The new
-/// engine's trees have no descending key column: every one is stored ascending.
-/// The planner reasons about direction from the *catalog's* declaration, so for
-/// an index the catalog calls `DESC` every conclusion it draws is inverted
-/// against the tree that actually exists - and it draws three:
-///
-/// - the range bounds, which it emits in the index's order, so `WHERE score >=
-///   20` became `(-inf, 20]` and counted three rows where SQLite counted four;
-/// - whether an ordering is already provided, so `ORDER BY score` came back
-///   **descending** with no sort and no error;
-/// - which direction to walk, so a reverse scan was chosen where a forward one
-///   was needed.
-///
-/// Each of those is a wrong answer rather than a refusal, and all three are one
-/// mismatch. Patching them one at a time would leave the next conclusion the
-/// planner learns to draw waiting to be found the same way, so the mismatch is
-/// removed instead: the index is not built, not registered, and not in the
-/// catalog, so no path over it is ever planned. Queries that would have used it
-/// read the table.
-///
-/// It is **skipped by name**, not silently: `ImportedDatabase::skipped` reports
-/// it, for the same reason a table the import cannot take is reported. Storing
-/// a descending key column properly is a format change - the tree, the key
-/// encoding, the leaf comparisons and every scan - and belongs to whichever
-/// phase decides to pay for it.
-///
-/// @param index - the index to judge
-fn is_ascending(index: &IndexInfo) -> bool {
-    index.columns.iter().all(|column| !column.descending)
 }
 
 /// Puts imported rows into the order the tree they are about to build compares
@@ -5867,6 +6183,95 @@ fn import_index(
     ))
 }
 
+/// Returns a starting point for a connection's `random()` stream.
+///
+/// The wall clock and the process id. Neither is a secret and neither has to
+/// be: SQLite's own `random()` is not a cryptographic generator either, and
+/// what this exists to avoid is two connections - or two runs - answering the
+/// same sequence. A clock that has not moved since the last open still gives a
+/// different stream, because the process id is in it.
+fn fresh_seed() -> u64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|held| held.as_nanos() as u64)
+        .unwrap_or(0);
+    nanos ^ (u64::from(std::process::id()).wrapping_mul(0x9E37_79B9_7F4A_7C15))
+}
+
+/// Builds the entry an index should hold for one table row.
+///
+/// Only for an index whose keys are plain columns, which is what the caller has
+/// already established: a computed key would need the binder to evaluate.
+///
+/// @param index - the index
+/// @param layout - the table tree's layout
+/// @param row - the row, in tree-column order
+fn plain_index_entry(
+    index: &IndexInfo,
+    layout: &SourceLayout,
+    row: &[OwnedDatum],
+) -> Vec<OwnedDatum> {
+    let trailing = layout.identity.len().max(1);
+    let mut entry = Vec::with_capacity(index.columns.len().saturating_add(trailing));
+    for column in &index.columns {
+        entry.push(
+            column
+                .column
+                .and_then(|declared| layout.slots.get(usize::from(declared)).copied().flatten())
+                .and_then(|slot| row.get(slot).cloned())
+                .unwrap_or(OwnedDatum::Null),
+        );
+    }
+    if layout.identity.is_empty() {
+        entry.push(
+            layout
+                .rowid
+                .and_then(|slot| row.get(slot).cloned())
+                .unwrap_or(OwnedDatum::Null),
+        );
+        return entry;
+    }
+    for slot in &layout.identity {
+        entry.push(row.get(*slot).cloned().unwrap_or(OwnedDatum::Null));
+    }
+    entry
+}
+
+/// Names a row the way `integrity_check`'s message does, from its index entry.
+///
+/// An entry is the indexed columns and then whatever identifies the row: the
+/// rowid for an ordinary table, and the primary key's columns for a
+/// `WITHOUT ROWID` one, which has no rowid to be named by.
+///
+/// @param entry - the entry the table implied
+/// @param width - how many leading columns are the index's own key
+fn entry_identity_text(entry: &[OwnedDatum], width: usize) -> String {
+    let identity = entry.get(width..).unwrap_or_default();
+    if identity.is_empty() {
+        return "?".to_string();
+    }
+    identity
+        .iter()
+        .map(|value| match value {
+            OwnedDatum::Int(number) => number.to_string(),
+            OwnedDatum::Text(text) => String::from_utf8_lossy(text).into_owned(),
+            _ => "?".to_string(),
+        })
+        .collect::<Vec<String>>()
+        .join(",")
+}
+
+/// Returns the error `integrity_check` reports a disagreement through.
+///
+/// A corruption rather than a refusal, because that is what it is - and the
+/// pragma prints the detail, so the text SQLite would have printed is the
+/// detail rather than the message.
+///
+/// @param said - what SQLite's own checker would say
+fn corrupt_index(said: String) -> DbError {
+    inillucent_base::error::corrupt(said.clone()).with_detail(said)
+}
+
 /// Returns the column directory and the layout an index tree is built with.
 ///
 /// Shared by the fixture import, which fills the tree from SQLite's own index
@@ -5895,13 +6300,13 @@ fn index_shape(table: &TableInfo, index: &IndexInfo, root: u32) -> (Vec<ColumnSp
         // and a query that reads the underlying column cannot be answered from
         // this tree. Leaving the slot unmapped is what makes that a refusal in
         // the physical pass rather than a wrong answer here.
-        if column.descending {
-            // The executor's streaming rules assume a scan produces ascending
-            // key order. A descending index column would make an adjacent
-            // de-duplication and a skipped sort both wrong, so the tree is
-            // built but not offered as an ordered one.
-            ordered = false;
-        }
+        // **A `DESC` key column says nothing about this tree.** Every key
+        // column here is stored ascending, whatever the declaration says, and
+        // since task-1856 the catalog the planner reads says so too - see
+        // `stored_ascending` in `inillucent_catalog::paged`. The tree is
+        // therefore ordered on its own terms and is offered as such; a
+        // `ORDER BY c DESC` over it is a reverse walk, which the planner
+        // already knows how to ask for.
         let Some(declared) = column.column.map(usize::from) else {
             columns.push(ColumnSpec::key(PhysicalType::Any));
             types.push(StaticType::Unknown);

@@ -744,6 +744,34 @@ const CASES: &[Case] = &[
         script: "CREATE TABLE t(a);\nBEGIN;\nCREATE TABLE u(a);\nROLLBACK;\nSELECT count(*) FROM sqlite_schema WHERE name = 'u';",
         expect: Agrees,
     },
+    // task-1855's four, one per conclusion the planner drew from a `DESC`
+    // key column, plus the write path that maintains one. Nine rows rather
+    // than three, because with three rows an inverted bound selects the same
+    // count by coincidence - which is what kept this hidden.
+    Case {
+        name: "desc.index.range",
+        kind: "desc",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, c INTEGER);\nCREATE INDEX ic ON t(c DESC);\nINSERT INTO t VALUES (1,10),(2,20),(3,30),(4,40),(5,50),(6,60),(7,70),(8,80),(9,90);\nSELECT count(*) FROM t WHERE c >= 10;\nSELECT count(*) FROM t WHERE c > 40;\nSELECT count(*) FROM t WHERE c <= 30;\nSELECT count(*) FROM t WHERE c < 90;\nSELECT group_concat(c) FROM (SELECT c FROM t WHERE c > 40 AND c <= 70 ORDER BY c);",
+        expect: Agrees,
+    },
+    Case {
+        name: "desc.index.order",
+        kind: "desc",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, c INTEGER);\nCREATE INDEX ic ON t(c DESC);\nINSERT INTO t VALUES (1,10),(2,20),(3,30),(4,40),(5,50),(6,60),(7,70),(8,80),(9,90);\nSELECT group_concat(c) FROM (SELECT c FROM t ORDER BY c);\nSELECT group_concat(c) FROM (SELECT c FROM t ORDER BY c DESC);\nSELECT group_concat(c) FROM (SELECT c FROM t WHERE c >= 30 ORDER BY c DESC);",
+        expect: Agrees,
+    },
+    Case {
+        name: "desc.index.write",
+        kind: "desc",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, c INTEGER);\nCREATE UNIQUE INDEX ic ON t(c DESC);\nINSERT INTO t VALUES (1,10),(2,20),(3,30),(4,40),(5,50);\nUPDATE t SET c = 35 WHERE id = 3;\nDELETE FROM t WHERE id = 1;\nINSERT INTO t VALUES (6,10);\nSELECT group_concat(c) FROM (SELECT c FROM t WHERE c >= 20 ORDER BY c);\nINSERT INTO t VALUES (7,35);\nSELECT group_concat(id) FROM (SELECT id FROM t ORDER BY id);",
+        expect: Agrees,
+    },
+    Case {
+        name: "desc.index.compound",
+        kind: "desc",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT);\nCREATE INDEX ic ON t(a DESC, b);\nINSERT INTO t VALUES (1,1,'p'),(2,1,'q'),(3,2,'r'),(4,2,'s'),(5,3,'t'),(6,3,'u');\nSELECT count(*) FROM t WHERE a >= 2;\nSELECT group_concat(b) FROM (SELECT b FROM t WHERE a = 2 ORDER BY b);\nSELECT group_concat(a) FROM (SELECT a FROM t WHERE a > 1 ORDER BY a, b);",
+        expect: Agrees,
+    },
 ];
 
 /// Returns the pinned SQLite shell, if it has been downloaded.

@@ -31,7 +31,7 @@
 
 use inillucent_base::{DbError, DbResult, ExtendedCode};
 use inillucent_sql::catalog_view::TableInfo;
-use inillucent_sql::dml::{codes, BoundCheck, BoundIndexExprs};
+use inillucent_sql::dml::{codes, BoundCheck, BoundDefault, BoundIndexExprs};
 use inillucent_tree::datum::OwnedDatum;
 use inillucent_value::affinity::{self, Affinity};
 use inillucent_value::encoding::TextEncoding;
@@ -246,6 +246,19 @@ pub struct WriteDeclarations {
     /// need any. Empty for every table with neither a partial index nor an
     /// expression key.
     index_exprs: Vec<CompiledIndexExprs>,
+    /// The `DEFAULT` a `REPLACE` stands in for a NULL, by record slot.
+    ///
+    /// Only the `NOT NULL` columns that declare one, so an ordinary table
+    /// leaves this empty and nothing on the write path looks at it.
+    defaults: Vec<CompiledDefault>,
+}
+
+/// One `NOT NULL` column's `DEFAULT`, compiled.
+struct CompiledDefault {
+    /// Which record slot the value lands in.
+    slot: usize,
+    /// The default expression.
+    expr: Box<dyn Eval>,
 }
 
 impl WriteDeclarations {
@@ -254,6 +267,7 @@ impl WriteDeclarations {
     /// @param table - the table being written
     /// @param layout - the table tree's layout
     /// @param checks - the statement's bound `CHECK` predicates
+    /// @param defaults - the bound `DEFAULT`s a `REPLACE` may substitute
     /// @param index_exprs - the statement's bound index expressions
     /// @param space - the statement's row space
     /// @param params - the bound parameters
@@ -261,6 +275,7 @@ impl WriteDeclarations {
         table: &TableInfo,
         layout: &SourceLayout,
         checks: &[BoundCheck],
+        defaults: &[BoundDefault],
         index_exprs: &[BoundIndexExprs],
         space: &RowSpace,
         params: &Params,
@@ -318,12 +333,64 @@ impl WriteDeclarations {
                 keys,
             });
         }
+        let mut standins = Vec::with_capacity(defaults.len());
+        for default in defaults {
+            let Some(slot) = layout
+                .slots
+                .get(usize::from(default.column))
+                .copied()
+                .flatten()
+            else {
+                continue;
+            };
+            standins.push(CompiledDefault {
+                slot,
+                expr: space.compile(&default.expr, params)?,
+            });
+        }
         Ok(WriteDeclarations {
             affinities,
             typed,
             checks: compiled,
             index_exprs: indexed,
+            defaults: standins,
         })
+    }
+
+    /// Puts a `NOT NULL` column's `DEFAULT` in place of a NULL, when it has one.
+    ///
+    /// **REPLACE's rule, and only REPLACE's**: a `NOT NULL` violation resolved
+    /// as `REPLACE` stores the column's default instead of refusing, and falls
+    /// back to `ABORT` when the column declares none. `Ok(true)` means a value
+    /// is now there and the constraint is met; `Ok(false)` means there was no
+    /// default and the caller reports the violation.
+    ///
+    /// The expression is evaluated against the row being written, which is what
+    /// makes `DEFAULT (3+4)` store 7 rather than the text of it.
+    ///
+    /// @param space - the statement's row space
+    /// @param row - the image about to be written, filled in place
+    /// @param slot - the record slot whose value is NULL
+    pub fn stand_in_default(
+        &self,
+        space: &RowSpace,
+        row: &mut [OwnedDatum],
+        slot: usize,
+    ) -> DbResult<bool> {
+        let Some(default) = self.defaults.iter().find(|held| held.slot == slot) else {
+            return Ok(false);
+        };
+        let value = space.evaluate(default.expr.as_ref(), &[row])?;
+        if matches!(value, OwnedDatum::Null) {
+            // `DEFAULT NULL` on a `NOT NULL` column is a default that does not
+            // satisfy the constraint, so it is the same as having none.
+            return Ok(false);
+        }
+        let Some(cell) = row.get_mut(slot) else {
+            return Ok(false);
+        };
+        *cell = value;
+        Ok(true)
     }
 
     /// Reports whether this table declares nothing the write path must apply.

@@ -116,6 +116,22 @@ pub struct Changes {
     pub removed: Vec<Row>,
 }
 
+/// Counts one written row, on the statement's tally and on the target's.
+///
+/// Two tallies rather than one because they answer different questions after a
+/// failure: the [`Changes`] is what a statement that *succeeded* reports, and
+/// the target's is what survives one that did not - see
+/// [`WriteTarget::count_row`].
+///
+/// @param changes - the statement's own tally
+/// @param target - the file being written, which outlives a failure
+/// @param depth - how many triggers deep this write is, zero being the
+///   statement the user ran
+fn count_row(changes: &mut Changes, target: &dyn WriteTarget, depth: Depth) {
+    changes.rows = changes.rows.saturating_add(1);
+    target.count_row(depth.0 == 0);
+}
+
 /// A map from root page to tree, whichever map the caller happens to hold.
 ///
 /// The write path needs a mutable tree and a mutable [`Database`] at the same
@@ -181,6 +197,48 @@ pub trait WriteTarget {
     ///
     /// @param root - the root page id the catalog names the tree by
     fn layout(&self, root: u32) -> Option<&SourceLayout>;
+
+    /// Records that one row was written, for `changes()` and
+    /// `total_changes()`.
+    ///
+    /// **Counted here rather than in the [`Changes`] that comes back, because
+    /// the count has to survive a failure.** A statement that fails partway is
+    /// an `Err` and the `Changes` it had built is gone - and `OR FAIL` keeps
+    /// what it wrote, so SQLite reports `1 | 4` where this engine reported
+    /// `0 | 0` (task-1854). The target outlives the error: it is the thing the
+    /// write was performed against, so the tally is read off it afterwards on
+    /// either path.
+    ///
+    /// The two numbers are different questions and SQLite answers them
+    /// differently. `changes()` counts the rows the statement wrote *itself*;
+    /// `total_changes()` counts every row written under it, a trigger's and a
+    /// foreign key's cascade included - measured, on the pinned 3.53.4: an
+    /// `INSERT` of two rows with an `AFTER INSERT` trigger that inserts one row
+    /// each answers `changes() = 2` and moves `total_changes()` by 4.
+    ///
+    /// @param outer - whether the statement writing it is the one the user ran,
+    ///   rather than a trigger body some levels in
+    fn count_row(&self, outer: bool) {
+        let _ = outer;
+    }
+
+    /// Records the rowid an `INSERT` assigned.
+    ///
+    /// Kept beside the row counts and for the same reason: SQLite's
+    /// `last_insert_rowid()` is the last rowid *attempted*, so a statement that
+    /// wrote a row and then undid it still moves it, and the value has to
+    /// outlive the error the way the counts do.
+    ///
+    /// @param rowid - the key the row was written under
+    fn count_rowid(&self, rowid: i64) {
+        let _ = rowid;
+    }
+
+    /// Returns what this target has been told, as
+    /// `(rows the statement wrote itself, rows written in all, last rowid)`.
+    fn rows_written(&self) -> (i64, i64, Option<i64>) {
+        (0, 0, None)
+    }
 
     /// Returns this target as the catalog a planned query reads.
     ///
@@ -673,6 +731,7 @@ pub fn insert_at(
         table,
         &layout,
         &statement.checks,
+        &statement.not_null_defaults,
         &statement.index_exprs,
         &space,
         params,
@@ -755,12 +814,19 @@ pub fn insert_at(
         // affinity `'42'` in an `INTEGER` column *is* the integer 42.
         let mut image = image;
         declarations.apply_affinity(&mut image);
-        let resolution = resolution(statement);
-        if !declarations_are_met(table, &layout, &image, resolution)? {
+        // **The statement's own `OR` algorithm, not the upsert's arm.** A
+        // `NOT NULL` or a `CHECK` is not a key collision, and an
+        // `ON CONFLICT ... DO NOTHING` says nothing about one: SQLite raises
+        // there, and reading the upsert here skipped the row instead - a
+        // constraint silently not enforced on the ordinary
+        // `INSERT ... ON CONFLICT DO NOTHING` (found while measuring
+        // task-1853).
+        let declared = resolution_of(statement.on_conflict);
+        if !declarations_are_met(table, &layout, &declarations, &space, &mut image, declared)? {
             continue;
         }
         declarations.types_are_met(table, &image)?;
-        if !declarations.checks_are_met(&space, &image, resolution == Resolution::Skip)? {
+        if !declarations.checks_are_met(&space, &image, declared == Resolution::Skip)? {
             continue;
         }
         let Some(stored) = write_one(
@@ -793,9 +859,10 @@ pub fn insert_at(
         {
             continue;
         }
-        changes.rows = changes.rows.saturating_add(1);
+        count_row(&mut changes, target, depth);
         if let Some(OwnedDatum::Int(assigned)) = layout.rowid.and_then(|at| stored.get(at)) {
             changes.last_rowid = Some(*assigned);
+            target.count_rowid(*assigned);
             // A key the statement supplied raises the mark too: `INSERT INTO t
             // VALUES (50, ...)` makes the next allocated key 51.
             high_water = high_water.max(*assigned);
@@ -882,7 +949,7 @@ fn insert_into_view(
         {
             continue;
         }
-        changes.rows = changes.rows.saturating_add(1);
+        count_row(&mut changes, target, depth);
         if !plan.returning.is_empty() {
             let mut out = Vec::with_capacity(plan.returning.len());
             for eval in &plan.returning {
@@ -1151,7 +1218,15 @@ fn write_one(
     // uniqueness is its own key. A table with a secondary `UNIQUE` index needs
     // those probed too, and an `ON CONFLICT` clause needs to know *which* row
     // it collided with, so both take the general path below.
-    if resolution(statement) == Resolution::Raise && unique_indexes(table).next().is_none() {
+    // **The fast path is only for a statement that really will raise.** The
+    // probe has not happened yet, so the only constraint whose clause can be
+    // consulted here is the table's own key - which is the only one there is,
+    // since this arm is entered only when the table has no `UNIQUE` index. A
+    // key declared `ON CONFLICT IGNORE` or `ON CONFLICT REPLACE` has an arm to
+    // run and must take the general path below (task-1853).
+    if resolution_for(statement, rowid_conflict(table)) == Resolution::Raise
+        && unique_indexes(table).next().is_none()
+    {
         if place_row_absent(table, layout, target, &row, indexes)? {
             return Ok(Some(row));
         }
@@ -1165,8 +1240,12 @@ fn write_one(
             })
             .or_unwind(unwind_of(statement.on_conflict.or(constraint))));
     }
-    if let Some(clash) = conflicting_row(table, layout, target, &row, None, indexes)? {
-        match resolution(statement) {
+    // **Asked again after each deletion**, because one row can collide with a
+    // *different* row on each of two unique indexes and `REPLACE` deletes every
+    // one of them - which is what `UPDATE OR REPLACE` has always done here and
+    // the insert path did not. It terminates: every turn removes a row.
+    while let Some(clash) = conflicting_row(table, layout, target, &row, None, indexes)? {
+        match resolution_for(statement, clash.conflict) {
             Resolution::Skip => return Ok(None),
             Resolution::Replace => {
                 let Some(held) = read_row(table, target, &clash.key)? else {
@@ -1188,6 +1267,7 @@ fn write_one(
                     depth,
                     indexes,
                 )?;
+                continue;
             }
             Resolution::Update => {
                 let updated = upsert_row(
@@ -1228,10 +1308,22 @@ enum Resolution {
     Raise,
 }
 
-/// Returns what an insert does about a conflict.
+/// Returns what an insert does about a conflict a named constraint reported.
+///
+/// **A constraint carries its own algorithm, and it is not only about the
+/// unwind.** `a TEXT UNIQUE ON CONFLICT IGNORE` means every statement that
+/// collides on `a` skips the row, with no `OR IGNORE` written anywhere - and
+/// this engine raised instead, refusing four rows SQLite writes (task-1853).
+///
+/// The precedence is SQLite's, innermost clause last: an `ON CONFLICT ... DO
+/// UPDATE` beats everything, because it is attached to the *statement* and to a
+/// named target; then the statement's own `OR` algorithm; then the constraint's
+/// clause; then `ABORT`, which is the default.
 ///
 /// @param statement - the bound insert
-fn resolution(statement: &BoundInsert) -> Resolution {
+/// @param constraint - the clause the constraint that reported the conflict
+///   carries, if it carries one
+fn resolution_for(statement: &BoundInsert, constraint: Option<ConflictAction>) -> Resolution {
     if let Some(clause) = &statement.upsert {
         return if clause.do_update {
             Resolution::Update
@@ -1239,7 +1331,17 @@ fn resolution(statement: &BoundInsert) -> Resolution {
             Resolution::Skip
         };
     }
-    match statement.on_conflict {
+    resolution_of(statement.on_conflict.or(constraint))
+}
+
+/// Returns the arm an algorithm names.
+///
+/// `ABORT`, `FAIL` and `ROLLBACK` all raise and differ only in how much goes
+/// back, which [`unwind_of`] answers.
+///
+/// @param action - the algorithm in force, if one was written
+fn resolution_of(action: Option<ConflictAction>) -> Resolution {
+    match action {
         Some(ConflictAction::Ignore) => Resolution::Skip,
         Some(ConflictAction::Replace) => Resolution::Replace,
         _ => Resolution::Raise,
@@ -1285,12 +1387,17 @@ fn unwind_of(action: Option<ConflictAction>) -> Unwind {
 /// clause, because the rowid alias is the column, so this is where a rowid
 /// collision's algorithm is written down.
 ///
+/// It is the `PRIMARY KEY`'s clause and not the `NOT NULL`'s, which is what
+/// this read until task-1856: a rowid collision was resolved by whatever a
+/// constraint about missing values happened to say, and by nothing at all in
+/// the ordinary case where the column declares no `NOT NULL`.
+///
 /// @param table - the table being written
 fn rowid_conflict(table: &TableInfo) -> Option<ConflictAction> {
     table
         .rowid_alias
         .and_then(|column| table.column(column))
-        .and_then(|column| column.not_null_conflict)
+        .and_then(|column| column.primary_key_conflict)
 }
 
 /// Returns the row a new row would collide with, if there is one.
@@ -1627,6 +1734,7 @@ pub fn update_at(
         table,
         &layout,
         &statement.checks,
+        &statement.not_null_defaults,
         &statement.index_exprs,
         &space,
         params,
@@ -1694,12 +1802,15 @@ pub fn update_at(
             Some(&before),
             IndexExprs::new(&declarations, &space),
         )? {
-            match statement.on_conflict {
-                Some(ConflictAction::Ignore) => {
+            // The constraint's own clause, when the statement wrote none -
+            // `a TEXT UNIQUE ON CONFLICT REPLACE` replaces under a plain
+            // `UPDATE`, which is task-1853's second case on the update path.
+            match resolution_of(statement.on_conflict.or(clash.conflict)) {
+                Resolution::Skip => {
                     skipped = true;
                     break;
                 }
-                Some(ConflictAction::Replace) => {
+                Resolution::Replace => {
                     let Some(held) = read_row(table, target, &clash.key)? else {
                         skipped = true;
                         break;
@@ -1746,12 +1857,15 @@ pub fn update_at(
         // was a whole row copied out of the tree and thrown away: `txn.large`
         // is two thousand updates in one transaction and paid for two thousand
         // of them (task-1838 §4).
-        let resolution = match statement.on_conflict {
-            Some(ConflictAction::Ignore) => Resolution::Skip,
-            Some(ConflictAction::Replace) => Resolution::Replace,
-            _ => Resolution::Raise,
-        };
-        if !declarations_are_met(table, &layout, &after, resolution)? {
+        let resolution = resolution_of(statement.on_conflict);
+        if !declarations_are_met(
+            table,
+            &layout,
+            &declarations,
+            &space,
+            &mut after,
+            resolution,
+        )? {
             continue;
         }
         declarations.types_are_met(table, &after)?;
@@ -1775,7 +1889,7 @@ pub fn update_at(
             &after,
             IndexExprs::new(&declarations, &space),
         )?;
-        changes.rows = changes.rows.saturating_add(1);
+        count_row(&mut changes, target, depth);
         if captured {
             changes.removed.push(before.clone());
             changes.written.push(after.clone());
@@ -1906,8 +2020,16 @@ pub fn delete_at(
     // the table's indexes hold the row it is removing: an entry only comes out
     // of a partial index if the predicate accepted the row, and an index key the
     // table does not carry has to be recomputed to be found.
-    let declarations =
-        WriteDeclarations::compile(table, &layout, &[], &statement.index_exprs, &space, params)?;
+    let declarations = WriteDeclarations::compile(
+        table,
+        &layout,
+        &[],
+        // A `DELETE` writes no value, so no default can stand in for one.
+        &[],
+        &statement.index_exprs,
+        &space,
+        params,
+    )?;
     let mut projected = Vec::with_capacity(statement.returning.len());
     for column in &statement.returning {
         projected.push(space.compile(&column.expr, params)?);
@@ -1942,7 +2064,7 @@ pub fn delete_at(
             depth,
             IndexExprs::new(&declarations, &space),
         )? {
-            changes.rows = changes.rows.saturating_add(1);
+            count_row(&mut changes, target, depth);
             if captured {
                 changes.removed.push(row);
             }
@@ -2412,27 +2534,41 @@ fn key_of(layout: &SourceLayout, row: &[OwnedDatum]) -> Vec<OwnedDatum> {
 /// row image carries the key the statement is about to allocate, and SQLite
 /// fills one in for the same reason.
 ///
+/// **`REPLACE` fills a missing value in rather than refusing it.** SQLite's
+/// rule for a `NOT NULL` violation resolved as `REPLACE` is to store the
+/// column's `DEFAULT`, and to fall back to `ABORT` only when the column
+/// declares none - so `UPDATE OR REPLACE t SET c = NULL` on
+/// `c TEXT NOT NULL DEFAULT 'd'` stores `'d'`, where this engine raised
+/// (task-1853). That is why the row is taken by reference *mutably*: the check
+/// is also the place the substitution happens, since it is the only place that
+/// knows which column was empty.
+///
 /// @param table - the table being written
 /// @param layout - the table tree's layout
-/// @param row - the image about to be written
+/// @param declarations - the table's compiled declarations, which carry the
+///   defaults a `REPLACE` may substitute
+/// @param space - the statement's row space, which evaluates one
+/// @param row - the image about to be written, filled in place
 /// @param resolution - what the statement said to do with a conflict
 fn declarations_are_met(
     table: &TableInfo,
     layout: &SourceLayout,
-    row: &[OwnedDatum],
+    declarations: &WriteDeclarations,
+    space: &RowSpace,
+    row: &mut [OwnedDatum],
     resolution: Resolution,
 ) -> DbResult<bool> {
     for (position, column) in table.columns.iter().enumerate() {
         let Some(slot) = layout.slots.get(position).copied().flatten() else {
             continue;
         };
-        let value = row.get(slot);
+        let value = row.get(slot).cloned();
         // **A `VECTOR(N)` column holds N floats or nothing.** The width is the
         // only thing the declaration promises that the storage does not already
         // enforce, and a vector of the wrong width is not a slow query, it is a
         // distance that silently answers NULL for ever (task-1838 §7).
         if let Some(width) = column.vector_dimensions() {
-            let wrong = match value {
+            let wrong = match &value {
                 Some(OwnedDatum::Blob(bytes)) => bytes.len() != width.saturating_mul(4),
                 Some(OwnedDatum::Null) | None => false,
                 _ => true,
@@ -2466,6 +2602,13 @@ fn declarations_are_met(
         };
         if matches!(action, Some(ConflictAction::Ignore)) {
             return Ok(false);
+        }
+        // The default stands in, and the loop carries on to the next column -
+        // `UPDATE OR REPLACE t SET c = NULL, e = NULL` fills both.
+        if matches!(action, Some(ConflictAction::Replace))
+            && declarations.stand_in_default(space, row, slot)?
+        {
+            continue;
         }
         return Err(DbError::new(ExtendedCode(codes::NOT_NULL))
             .with_message(format!(
@@ -2539,7 +2682,7 @@ fn update_view(
         {
             continue;
         }
-        changes.rows = changes.rows.saturating_add(1);
+        count_row(&mut changes, target, depth);
     }
     Ok(changes)
 }
@@ -2577,7 +2720,7 @@ fn delete_view(
         {
             continue;
         }
-        changes.rows = changes.rows.saturating_add(1);
+        count_row(&mut changes, target, depth);
     }
     Ok(changes)
 }

@@ -100,6 +100,51 @@ fn as_values(row: &[OwnedDatum]) -> DbResult<Vec<Value<'static>>> {
 /// Returns a module's values as a tree row.
 ///
 /// @param values - what the module wrote
+fn borrowed_bytes<'v>(values: &'v [Value<'static>]) -> Vec<std::borrow::Cow<'v, [u8]>> {
+    values
+        .iter()
+        .map(|value| match value {
+            // UTF-8 text and every blob are borrowed; only text stored in
+            // another encoding is converted, and only that one allocates.
+            Value::Text(text) => text.utf8_bytes(),
+            Value::Blob(blob) => std::borrow::Cow::Borrowed(blob.raw()),
+            _ => std::borrow::Cow::Borrowed(&[][..]),
+        })
+        .collect()
+}
+
+/// Borrows a module's row as the tree's own data, copying nothing it need not.
+///
+/// **A shadow write used to copy every text and every blob twice**: once into
+/// an `OwnedDatum` and once again when the tree borrowed it back. On FTS5's
+/// `%_data` the blob is a term's whole doclist, so a flush of five hundred
+/// terms copied every doclist twice for nothing (task-1856). The bytes are
+/// borrowed from the caller's values instead, through `holder`, which has to
+/// outlive the datums for exactly that reason.
+///
+/// @param values - the module's row
+/// @param holder - the byte slices [`borrowed_bytes`] produced for it
+fn as_datums<'v>(
+    values: &'v [Value<'static>],
+    holder: &'v [std::borrow::Cow<'v, [u8]>],
+) -> Vec<Datum<'v>> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(at, value)| match value {
+            Value::Null => Datum::Null,
+            Value::Integer(number) => Datum::Int(*number),
+            Value::Real(number) => Datum::Real(*number),
+            Value::Text(_) => Datum::Text(holder.get(at).map(|held| held.as_ref()).unwrap_or(&[])),
+            Value::Blob(_) => Datum::Blob(holder.get(at).map(|held| held.as_ref()).unwrap_or(&[])),
+        })
+        .collect()
+}
+
+/// Returns a module's row as owned data.
+///
+/// For the callers that keep it past the values it came from. Everything on the
+/// write path uses [`as_datums`] instead, which copies nothing.
 fn as_row(values: &[Value<'static>]) -> Vec<OwnedDatum> {
     values
         .iter()
@@ -329,14 +374,14 @@ impl ShadowStore for WriteStore<'_> {
     }
 
     fn write_row(&mut self, root: u32, rowid: i64, values: &[Value<'static>]) -> DbResult<()> {
-        let mut owned = as_row(values);
+        let holder = borrowed_bytes(values);
+        let mut row = as_datums(values, &holder);
         // A rowid table stores its key once, as the tree's key column, and the
         // module hands the row with its rowid in the first slot - which is what
         // the shadow table declares as `INTEGER PRIMARY KEY`.
-        if let Some(first) = owned.first_mut() {
-            *first = OwnedDatum::Int(rowid);
+        if let Some(first) = row.first_mut() {
+            *first = Datum::Int(rowid);
         }
-        let row: Vec<Datum<'_>> = owned.iter().map(OwnedDatum::borrow).collect();
         let tree = self
             .trees
             .get_mut(&root)
@@ -400,8 +445,8 @@ impl ShadowStore for WriteStore<'_> {
         _key_columns: usize,
         values: &[Value<'static>],
     ) -> DbResult<()> {
-        let owned = as_row(values);
-        let row: Vec<Datum<'_>> = owned.iter().map(OwnedDatum::borrow).collect();
+        let holder = borrowed_bytes(values);
+        let row = as_datums(values, &holder);
         let tree = self
             .trees
             .get_mut(&root)
@@ -416,8 +461,8 @@ impl ShadowStore for WriteStore<'_> {
     }
 
     fn delete_keyed(&mut self, root: u32, key: &[Value<'static>]) -> DbResult<()> {
-        let owned = as_row(key);
-        let probe: Vec<Datum<'_>> = owned.iter().map(OwnedDatum::borrow).collect();
+        let holder = borrowed_bytes(key);
+        let probe = as_datums(key, &holder);
         let Some(tree) = self.trees.get_mut(&root) else {
             return Ok(());
         };

@@ -506,7 +506,21 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
     }
     info.rowid_alias = rowid_alias(&info, &parsed.ast, columns, constraints);
     info.autoincrement = info.rowid_alias.is_some() && declares_autoincrement(columns, constraints);
-    info.indexes = automatic_indexes(&info, &parsed.ast, columns, constraints);
+    let (automatic, rowid_key_conflict) =
+        automatic_indexes(&info, &parsed.ast, columns, constraints);
+    info.indexes = automatic;
+    // A table-level `PRIMARY KEY(id) ON CONFLICT REPLACE` over a rowid alias
+    // has no index of its own, so its clause is recorded on the column - the
+    // same place a column-level one lands (task-1853).
+    if let Some(column) = info
+        .rowid_alias
+        .map(usize::from)
+        .and_then(|at| info.columns.get_mut(at))
+    {
+        if column.primary_key_conflict.is_none() {
+            column.primary_key_conflict = rowid_key_conflict;
+        }
+    }
     if info.without_rowid {
         // A WITHOUT ROWID table *is* its primary-key index: SQLite writes no
         // `sqlite_autoindex` row for it, so nothing would ever fill the root in
@@ -545,6 +559,7 @@ fn column_info(source: &[u8], ast: &Ast, column: &inillucent_sql::ast::ColumnDef
         collation: b"binary".to_vec(),
         not_null: false,
         not_null_conflict: None,
+        primary_key_conflict: None,
         default_sql: None,
         primary_key_position: None,
         hidden: false,
@@ -564,8 +579,9 @@ fn column_info(source: &[u8], ast: &Ast, column: &inillucent_sql::ast::ColumnDef
             ColumnConstraint::Default(expr) => {
                 info.default_sql = Some(source_of(source, ast, *expr));
             }
-            ColumnConstraint::PrimaryKey { .. } => {
+            ColumnConstraint::PrimaryKey { on_conflict, .. } => {
                 info.primary_key_position = Some(1);
+                info.primary_key_conflict = *on_conflict;
             }
             ColumnConstraint::Generated { expr, stored } => {
                 info.generated = true;
@@ -609,15 +625,18 @@ fn collect_checks(
                 checks.push(CheckInfo {
                     name: name.map(|name| ast.text(name).to_vec()),
                     expr_sql: source_of(source, ast, *expr),
+                    // A column-level `CHECK` has no conflict clause to carry.
+                    conflict: None,
                 });
             }
         }
     }
     for (name, constraint) in constraints {
-        if let TableConstraint::Check(expr) = constraint {
+        if let TableConstraint::Check { expr, on_conflict } = constraint {
             checks.push(CheckInfo {
                 name: name.map(|name| ast.text(name).to_vec()),
                 expr_sql: source_of(source, ast, *expr),
+                conflict: *on_conflict,
             });
         }
     }
@@ -853,9 +872,12 @@ fn automatic_indexes(
     ast: &Ast,
     columns: &[inillucent_sql::ast::ColumnDef],
     constraints: &[(Option<inillucent_sql::ast::NameId>, TableConstraint)],
-) -> Vec<IndexInfo> {
+) -> (Vec<IndexInfo>, Option<inillucent_sql::ast::ConflictAction>) {
     let mut indexes = Vec::new();
     let mut ordinal = 0u32;
+    // The clause on a table-level `PRIMARY KEY` over a rowid alias, which makes
+    // no index to carry it.
+    let mut rowid_key_conflict = None;
     for (position, column) in columns.iter().enumerate() {
         for (_, constraint) in &column.constraints {
             let (unique, origin, conflict) = match constraint {
@@ -905,6 +927,13 @@ fn automatic_indexes(
                         .and_then(|name| info.column_position(&name))
                         .is_some_and(|index| info.rowid_alias == Some(index));
                 if single_rowid {
+                    // **No index is made, so the clause is handed back
+                    // instead.** A rowid alias named by a table-level
+                    // `PRIMARY KEY` is the same constraint as one named on the
+                    // column, and SQLite resolves a rowid collision by it
+                    // either way - so the caller puts it on the column, which
+                    // is where the write path looks (task-1853).
+                    rowid_key_conflict = *on_conflict;
                     continue;
                 }
                 (columns, true, IndexOrigin::PrimaryKey, *on_conflict)
@@ -945,7 +974,7 @@ fn automatic_indexes(
             prefix_rows: Vec::new(),
         });
     }
-    indexes
+    (indexes, rowid_key_conflict)
 }
 
 /// Returns the name SQLite gives an automatic index.

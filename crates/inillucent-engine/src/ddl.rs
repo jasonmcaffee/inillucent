@@ -2366,6 +2366,7 @@ fn pragma_column(name: &[u8], hidden: bool) -> inillucent_sql::catalog_view::Col
         collation: Vec::new(),
         not_null: false,
         not_null_conflict: None,
+        primary_key_conflict: None,
         default_sql: None,
         primary_key_position: None,
         hidden,
