@@ -101,6 +101,201 @@ struct Case {
 /// task-1849's seven `UNIQUE`-under-`UPDATE` shapes, and task-1846's - two over
 /// a table that has been written to, and five where the two tickets meet.
 const CASES: &[Case] = &[
+    // task-1859 Part C: the pragma surface. Every one of these answered
+    // nothing at all before - no value and no error, which a caller cannot
+    // tell from an empty result.
+    Case {
+        name: "prag.user.version",
+        kind: "pragma",
+        script: "PRAGMA user_version;\nPRAGMA user_version = 12;\nPRAGMA user_version;",
+        expect: Agrees,
+    },
+    Case {
+        name: "prag.application.id",
+        kind: "pragma",
+        script: "PRAGMA application_id;\nPRAGMA application_id = 99;\nPRAGMA application_id;",
+        expect: Agrees,
+    },
+    Case {
+        name: "prag.schema.version",
+        kind: "pragma",
+        script: "PRAGMA schema_version;\nCREATE TABLE t(a);\nPRAGMA schema_version;\nCREATE INDEX ia ON t(a);\nPRAGMA schema_version;\nPRAGMA data_version;",
+        expect: Agrees,
+    },
+    // The cookie moves once per schema change and not once per catalog
+    // refresh, so a statement that changes nothing leaves it where it was.
+    Case {
+        name: "prag.schema.version.steady",
+        kind: "pragma",
+        script: "CREATE TABLE t(a);\nINSERT INTO t VALUES (1);\nSELECT count(*) FROM t;\nPRAGMA schema_version;",
+        expect: Agrees,
+    },
+    Case {
+        name: "prag.table.info.view",
+        kind: "pragma",
+        script: "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT, c INTEGER GENERATED ALWAYS AS (a*2) VIRTUAL, d TEXT COLLATE NOCASE);
+CREATE INDEX it ON t(b DESC, d COLLATE NOCASE);
+CREATE VIEW v AS SELECT a AS q, b AS r FROM t;
+PRAGMA table_info(v);",
+        expect: Agrees,
+    },
+    Case {
+        name: "prag.table.xinfo.generated",
+        kind: "pragma",
+        script: "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT, c INTEGER GENERATED ALWAYS AS (a*2) VIRTUAL, d TEXT COLLATE NOCASE);
+CREATE INDEX it ON t(b DESC, d COLLATE NOCASE);
+CREATE VIEW v AS SELECT a AS q, b AS r FROM t;
+PRAGMA table_xinfo(t);",
+        expect: Agrees,
+    },
+    // The plain form hides the generated column *and renumbers* what is left,
+    // which is the part that was wrong once the two forms were separated.
+    Case {
+        name: "prag.table.info.renumbered",
+        kind: "pragma",
+        script: "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT, c INTEGER GENERATED ALWAYS AS (a*2) VIRTUAL, d TEXT COLLATE NOCASE);
+CREATE INDEX it ON t(b DESC, d COLLATE NOCASE);
+CREATE VIEW v AS SELECT a AS q, b AS r FROM t;
+PRAGMA table_info(t);",
+        expect: Agrees,
+    },
+    Case {
+        name: "prag.index.xinfo",
+        kind: "pragma",
+        script: "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT, c INTEGER GENERATED ALWAYS AS (a*2) VIRTUAL, d TEXT COLLATE NOCASE);
+CREATE INDEX it ON t(b DESC, d COLLATE NOCASE);
+CREATE VIEW v AS SELECT a AS q, b AS r FROM t;
+PRAGMA index_xinfo(it);\nPRAGMA index_info(it);",
+        expect: Agrees,
+    },
+    Case {
+        name: "prag.table.list.view",
+        kind: "pragma",
+        script: "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT, c INTEGER GENERATED ALWAYS AS (a*2) VIRTUAL, d TEXT COLLATE NOCASE);
+CREATE INDEX it ON t(b DESC, d COLLATE NOCASE);
+CREATE VIEW v AS SELECT a AS q, b AS r FROM t;
+PRAGMA table_list;",
+        expect: Agrees,
+    },
+    Case {
+        name: "prag.max.page.count",
+        kind: "pragma",
+        script: "PRAGMA max_page_count;\nPRAGMA max_page_count=1000;\nPRAGMA max_page_count;",
+        expect: Agrees,
+    },
+    Case {
+        name: "prag.query.only",
+        kind: "pragma",
+        script: "CREATE TABLE t(a);\nPRAGMA query_only;\nPRAGMA query_only=ON;\nPRAGMA query_only;\nINSERT INTO t VALUES (1);",
+        expect: Agrees,
+    },
+    Case {
+        name: "prag.recursive.triggers.value",
+        kind: "pragma",
+        script: "PRAGMA recursive_triggers;\nPRAGMA recursive_triggers=ON;\nPRAGMA recursive_triggers;",
+        expect: Agrees,
+    },
+    Case {
+        name: "prag.introspection",
+        kind: "pragma",
+        script: "SELECT count(*)>0 FROM pragma_pragma_list;\nSELECT count(*)>0 FROM pragma_function_list;\nSELECT count(*)>0 FROM pragma_module_list;\nSELECT count(*)>0 FROM pragma_compile_options;",
+        expect: Agrees,
+    },
+    // Free means a page the file has and nothing is using. It used to mean
+    // every bit the free map had room for, which is six figures on a five-page
+    // database and does not move when rows are deleted.
+    Case {
+        name: "prag.freelist.count",
+        kind: "pragma",
+        script: "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);\nINSERT INTO t VALUES (1,'x'),(2,'y');\nPRAGMA freelist_count;\nDELETE FROM t;\nPRAGMA freelist_count;",
+        expect: Agrees,
+    },
+    // A pragma neither engine has heard of is silent in both, which is the
+    // parity the refusal rule must not break.
+    Case {
+        name: "prag.unknown",
+        kind: "pragma",
+        script: "PRAGMA nonesuch;\nPRAGMA nonesuch = 4;\nSELECT 1;",
+        expect: Agrees,
+    },
+    // task-1859 Part B: `USING` and `NATURAL` coalesce the named column, so the
+    // join has one `k` and an unqualified reference to it is not ambiguous.
+    // All five of these answered `ambiguous column name: k` on the ORDER BY.
+    Case {
+        name: "join.using",
+        kind: "join",
+        script: "CREATE TABLE a(k INTEGER, x TEXT);
+CREATE TABLE b(k INTEGER, y TEXT);
+INSERT INTO a VALUES (1,'p'),(2,'q');
+INSERT INTO b VALUES (1,'m'),(3,'n');
+SELECT * FROM a JOIN b USING (k) ORDER BY k;",
+        expect: Agrees,
+    },
+    Case {
+        name: "join.left.using",
+        kind: "join",
+        script: "CREATE TABLE a(k INTEGER, x TEXT);
+CREATE TABLE b(k INTEGER, y TEXT);
+INSERT INTO a VALUES (1,'p'),(2,'q');
+INSERT INTO b VALUES (1,'m'),(3,'n');
+SELECT k, x, y FROM a LEFT JOIN b USING (k) ORDER BY k;",
+        expect: Agrees,
+    },
+    Case {
+        name: "join.natural",
+        kind: "join",
+        script: "CREATE TABLE a(k INTEGER, x TEXT);
+CREATE TABLE b(k INTEGER, y TEXT);
+INSERT INTO a VALUES (1,'p'),(2,'q');
+INSERT INTO b VALUES (1,'m'),(3,'n');
+SELECT * FROM a NATURAL JOIN b ORDER BY k;",
+        expect: Agrees,
+    },
+    Case {
+        name: "join.natural.left",
+        kind: "join",
+        script: "CREATE TABLE a(k INTEGER, x TEXT);
+CREATE TABLE b(k INTEGER, y TEXT);
+INSERT INTO a VALUES (1,'p'),(2,'q');
+INSERT INTO b VALUES (1,'m'),(3,'n');
+SELECT * FROM a NATURAL LEFT JOIN b ORDER BY k;",
+        expect: Agrees,
+    },
+    Case {
+        name: "join.using.chain",
+        kind: "join",
+        script: "CREATE TABLE a(k INTEGER, x TEXT);
+CREATE TABLE b(k INTEGER, y TEXT);
+INSERT INTO a VALUES (1,'p'),(2,'q');
+INSERT INTO b VALUES (1,'m'),(3,'n');
+CREATE TABLE c(k INTEGER, z TEXT);
+INSERT INTO c VALUES (1,'r'),(2,'s');
+SELECT * FROM a JOIN b USING (k) JOIN c USING (k) ORDER BY k;",
+        expect: Agrees,
+    },
+    // The right-hand copy is suppressed from an *unqualified* reference only; a
+    // qualified one still reaches it, and in a LEFT JOIN it is NULL where the
+    // coalesced column carries the left value.
+    Case {
+        name: "join.using.qualified",
+        kind: "join",
+        script: "CREATE TABLE a(k INTEGER, x TEXT);
+CREATE TABLE b(k INTEGER, y TEXT);
+INSERT INTO a VALUES (1,'p'),(2,'q');
+INSERT INTO b VALUES (1,'m'),(3,'n');
+SELECT k, a.k, b.k FROM a LEFT JOIN b USING (k) ORDER BY k;",
+        expect: Agrees,
+    },
+    // A self join whose inner term carries a rowid bound. The planner used to
+    // choose a rowid range for it and the physical pass then refused the plan.
+    Case {
+        name: "join.self",
+        kind: "join",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER);
+INSERT INTO t VALUES (1,5),(2,5),(3,7),(4,7);
+SELECT x.id, y.id FROM t x JOIN t y ON y.a = x.a AND y.id > x.id ORDER BY x.id;",
+        expect: Agrees,
+    },
     Case {
         name: "select.basic",
         kind: "read",

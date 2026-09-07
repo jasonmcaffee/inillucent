@@ -158,9 +158,20 @@ fn the_distance_functions_answer_the_arithmetic() {
     );
 }
 
-/// Anything that is not a pair of same-width vectors answers NULL.
+/// The two things that still answer NULL, and the four that now refuse.
+///
+/// **The line moved in task-1859.** Every one of these used to answer NULL,
+/// including a probe of the wrong width - so a ranking query given a 1536-wide
+/// vector against a 768-wide column came back as rows in an arbitrary order
+/// with no measure taken and nothing said. pgvector raises `different vector
+/// dimensions`, and now so does this.
+///
+/// What stayed NULL is what NULL actually means here: an argument that *is*
+/// NULL, which is a row with no embedding yet, and a zero vector, which has no
+/// direction so its cosine is undefined. Both have to keep answering NULL for
+/// `WHERE v IS NOT NULL AND vector_distance_cos(v, ?) < 0.2` to be writable.
 #[test]
-fn a_measure_of_something_that_is_not_a_vector_is_null() {
+fn a_measure_of_something_that_is_not_a_vector_refuses_or_is_null() {
     let held = database("null");
     let connection = held.connect();
     let east = literal(&[1.0, 0.0]);
@@ -168,10 +179,15 @@ fn a_measure_of_something_that_is_not_a_vector_is_null() {
 
     for sql in [
         format!("SELECT vector_distance_cos('text', {east})"),
-        format!("SELECT vector_distance_cos({east}, NULL)"),
         format!("SELECT vector_distance_cos({east}, 7)"),
         format!("SELECT vector_distance_cos({east}, {wide})"),
         format!("SELECT vector_distance_cos({east}, x'00')"),
+    ] {
+        assert!(connection.query(&sql).is_err(), "{sql} should have refused");
+    }
+    for sql in [
+        format!("SELECT vector_distance_cos({east}, NULL)"),
+        format!("SELECT vector_distance_cos(NULL, {east})"),
         format!(
             "SELECT vector_distance_cos({}, {east})",
             literal(&[0.0, 0.0])
@@ -623,4 +639,194 @@ fn a_vector_column_round_trips() {
         vec![Some(0.0)],
         "a stored vector is the vector that was stored"
     );
+}
+
+/// A filtered vector search answers what the exhaustive plan answers.
+///
+/// **This is task-1859 Part A, and it was recall 0.1.** 400 vectors, a
+/// predicate keeping one row in twenty and `LIMIT 10`: the exhaustive plan
+/// returned ten rows and the indexed plan returned one, because the index was
+/// probed for ten neighbours and the `WHERE` then threw nine of them away.
+/// Nothing reported it - the query answered, with a tenth of its rows.
+///
+/// The oracle here is this engine's *own* exhaustive plan, which is legitimate
+/// for exactly this question: the two plans are answering the same SQL over the
+/// same rows, and the whole claim under test is that choosing the index does
+/// not change the answer. `vector.rs`'s other tests grade the distance itself
+/// against arithmetic done in this file.
+///
+/// It is graded at every corner the ticket names: filters keeping 100%, 50%,
+/// 5% and 1% of the table, at `LIMIT` 1, 10 and 100. A row-count assertion
+/// would pass on the wrong ten rows, so this compares the rows.
+#[test]
+fn a_filtered_vector_search_keeps_every_row_the_exhaustive_plan_finds() {
+    /// How many rows the corpus holds.
+    const ROWS: usize = 400;
+    let held = database("filtered");
+    let connection = held.connect();
+    connection
+        .execute_batch("CREATE TABLE e (id INTEGER PRIMARY KEY, src TEXT, v VECTOR(32))")
+        .expect("the table is created");
+    for row in 1..=ROWS {
+        // Three overlapping tags, so one column carries a 50%, a 5% and a 1%
+        // predicate and the corpus does not have to be built three times.
+        let mut tags = String::new();
+        if row % 2 == 0 {
+            tags.push('h');
+        }
+        if row % 20 == 0 {
+            tags.push('t');
+        }
+        if row % 100 == 0 {
+            tags.push('c');
+        }
+        if tags.is_empty() {
+            tags.push('x');
+        }
+        connection
+            .execute_batch(&format!(
+                "INSERT INTO e(id, src, v) VALUES ({}, '{tags}', {})",
+                row * 3,
+                literal(&vector_of(row as u64))
+            ))
+            .expect("a row is written");
+    }
+    let probe = literal(&vector_of(7));
+    let filters = [
+        ("every row", "1 = 1"),
+        ("half", "src LIKE '%h%'"),
+        ("a twentieth", "src LIKE '%t%'"),
+        ("a hundredth", "src LIKE '%c%'"),
+    ];
+    let query = |predicate: &str, limit: usize| {
+        format!(
+            "SELECT id FROM e WHERE {predicate} ORDER BY vector_distance_cos(v, {probe}) LIMIT {limit}"
+        )
+    };
+    let mut exhaustive = Vec::new();
+    for (_, predicate) in filters {
+        for limit in [1usize, 10, 100] {
+            exhaustive.push(integers(&connection, &query(predicate, limit)));
+        }
+    }
+    connection
+        .execute_batch("CREATE INDEX ie ON e USING inillucent_hnsw (v)")
+        .expect("the index is built");
+    // The plan really is the indexed one; a test that silently kept scanning
+    // would pass while proving nothing at all.
+    let explained = connection
+        .query(&format!("EXPLAIN QUERY PLAN {}", query("src LIKE '%t%'", 10)))
+        .expect("the plan is explained")
+        .iter()
+        .map(|row| match row.last() {
+            Some(OwnedDatum::Text(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+            other => format!("{other:?}"),
+        })
+        .collect::<Vec<String>>()
+        .join(" | ");
+    assert!(
+        explained.contains("VECTOR INDEX"),
+        "the filtered query should be planned onto the index: {explained}"
+    );
+    let mut at = 0usize;
+    for (name, predicate) in filters {
+        for limit in [1usize, 10, 100] {
+            let indexed = integers(&connection, &query(predicate, limit));
+            let wanted = exhaustive.get(at).cloned().unwrap_or_default();
+            at = at.saturating_add(1);
+            assert_eq!(
+                indexed, wanted,
+                "the indexed plan lost rows: {name}, LIMIT {limit}"
+            );
+        }
+    }
+}
+
+/// A vector measure over a mismatched pair refuses instead of answering NULL.
+///
+/// **The silent case the ticket calls out**: a 1536-wide probe against a
+/// 768-wide column answered NULL for every row, and `ORDER BY` then put them in
+/// whatever order the scan produced. pgvector raises `different vector
+/// dimensions`; so does this. A NULL argument still answers NULL, because a row
+/// with no embedding yet is a real thing to have.
+#[test]
+fn a_mismatched_vector_pair_refuses() {
+    let held = database("mismatch");
+    let connection = held.connect();
+    connection
+        .execute_batch(&format!(
+            "CREATE TABLE e (id INTEGER PRIMARY KEY, v VECTOR(32));
+             INSERT INTO e(id, v) VALUES (1, {});
+             INSERT INTO e(id, v) VALUES (2, NULL)",
+            literal(&vector_of(1))
+        ))
+        .expect("two rows are written");
+    let narrow = literal(&vector_of(1)[..4]);
+    for (sql, why) in [
+        (
+            format!("SELECT vector_distance_cos(v, {narrow}) FROM e WHERE id = 1"),
+            "a narrower probe",
+        ),
+        (
+            "SELECT vector_distance_cos(v, 'text') FROM e WHERE id = 1".to_string(),
+            "a probe that is not a vector at all",
+        ),
+        (
+            format!("SELECT vector_distance_l2(v, {narrow}) FROM e WHERE id = 1"),
+            "the same, through l2",
+        ),
+        (
+            format!("SELECT vector_dot(v, {narrow}) FROM e WHERE id = 1"),
+            "the same, through the dot product",
+        ),
+    ] {
+        assert!(
+            connection.query(&sql).is_err(),
+            "{why} should have been refused: {sql}"
+        );
+    }
+    assert_eq!(
+        reals(
+            &connection,
+            &format!(
+                "SELECT vector_distance_cos(v, {}) FROM e WHERE id = 2",
+                literal(&vector_of(1))
+            )
+        ),
+        vec![None],
+        "a NULL embedding is still NULL rather than a refusal"
+    );
+}
+
+/// Arithmetic and the numeric aggregates over a vector column refuse.
+///
+/// They used to answer `0.0`, which is what numeric affinity makes of a blob
+/// with no leading digits. Refusing is the honest answer for an operator this
+/// engine does not implement; answering zero is the one outcome a caller cannot
+/// detect.
+#[test]
+fn arithmetic_over_a_vector_column_refuses() {
+    let held = database("arithmetic");
+    let connection = held.connect();
+    connection
+        .execute_batch(&format!(
+            "CREATE TABLE e (id INTEGER PRIMARY KEY, v VECTOR(32), n INT);
+             INSERT INTO e(id, v, n) VALUES (1, {}, 5)",
+            literal(&vector_of(1))
+        ))
+        .expect("a row is written");
+    for sql in [
+        "SELECT v + v FROM e",
+        "SELECT v - v FROM e",
+        "SELECT v * 2 FROM e",
+        "SELECT avg(v) FROM e",
+        "SELECT sum(v) FROM e",
+        "SELECT total(v) FROM e",
+    ] {
+        assert!(connection.query(sql).is_err(), "{sql} should have refused");
+    }
+    // The bytes are still readable, and the ordinary column still adds up: the
+    // refusal is about the vector, not about the table.
+    assert_eq!(integers(&connection, "SELECT length(v) FROM e"), vec![128]);
+    assert_eq!(integers(&connection, "SELECT n + n FROM e"), vec![10]);
 }

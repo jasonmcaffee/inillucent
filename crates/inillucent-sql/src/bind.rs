@@ -3895,6 +3895,21 @@ impl<'a> Binder<'a> {
                     }
                 }
                 if let Some(index) = source.table.column_position(&folded) {
+                    // **A `USING` or `NATURAL` join coalesces the named
+                    // column.** The join has one `k`, not two: it comes from
+                    // the left term, and the right term's copy is suppressed -
+                    // from `*`, which this already did, and from an
+                    // *unqualified* reference, which it did not. That is why
+                    // `SELECT * FROM a JOIN b USING (k) ORDER BY k` answered
+                    // `ambiguous column name: k`, and why four of the five join
+                    // spellings failed on one message. A qualified `b.k` still
+                    // reaches the right-hand copy, which is what SQLite does.
+                    if table_folded.is_none()
+                        && u16::try_from(index)
+                            .is_ok_and(|slot| source.suppressed.contains(&slot))
+                    {
+                        continue;
+                    }
                     if found.is_some() {
                         return Err(ambiguous_column(self.ast.text(column), span));
                     }
@@ -4025,12 +4040,45 @@ impl<'a> Binder<'a> {
                 },
                 arguments: vec![bound_left, bound_right],
             }),
-            _ => Ok(BoundExpr::Arithmetic {
-                op,
-                left: Box::new(bound_left),
-                right: Box::new(bound_right),
-            }),
+            _ => {
+                // **A vector has no arithmetic, and answering zero is worse
+                // than refusing.** `v + v` used to be accepted and answer
+                // `0.0`: the blob went through numeric affinity, which reads no
+                // leading digits and calls that nothing. pgvector defines `+`
+                // element-wise; this engine does not implement it, and a
+                // caller who wrote it gets told so rather than getting a
+                // column of zeroes.
+                if self.reads_a_vector(&bound_left) || self.reads_a_vector(&bound_right) {
+                    return Err(unsupported(
+                        "arithmetic over a vector column",
+                        self.ast.expr_span(left),
+                    ));
+                }
+                Ok(BoundExpr::Arithmetic {
+                    op,
+                    left: Box::new(bound_left),
+                    right: Box::new(bound_right),
+                })
+            }
         }
+    }
+
+    /// Reports whether an expression is a reference to a `VECTOR` column.
+    ///
+    /// Only a bare reference, and deliberately: `length(v)` and `hex(v)` are
+    /// questions about the bytes and answer them, and a general "does this
+    /// expression have vector in it anywhere" rule would refuse those too.
+    ///
+    /// @param expr - the bound expression to look at
+    fn reads_a_vector(&self, expr: &BoundExpr) -> bool {
+        let BoundExpr::Column { source, column, .. } = expr else {
+            return false;
+        };
+        self.sources
+            .iter()
+            .find(|held| held.id == *source)
+            .and_then(|held| held.table.columns.get(usize::from(*column)))
+            .is_some_and(crate::catalog_view::ColumnInfo::is_vector)
     }
 
     /// Binds `(a, b) IN (VALUES (...), (...))`.
@@ -4235,6 +4283,19 @@ impl<'a> Binder<'a> {
                 .first()
                 .and_then(BoundExpr::collation)
                 .unwrap_or(Collation::Binary);
+            // The same reason `v + v` refuses: `sum(v)` and `avg(v)` coerced
+            // the blob through numeric affinity and answered `0.0` for a whole
+            // column of embeddings. pgvector's `avg(vector)` is an element-wise
+            // mean; this engine does not compute one, and says so.
+            if matches!(
+                func,
+                function::AggregateFunc::Sum
+                    | function::AggregateFunc::Avg
+                    | function::AggregateFunc::Total
+            ) && bound.iter().any(|argument| self.reads_a_vector(argument))
+            {
+                return Err(unsupported("an aggregate over a vector column", span));
+            }
             let candidate = BoundAggregate {
                 func,
                 external: None,

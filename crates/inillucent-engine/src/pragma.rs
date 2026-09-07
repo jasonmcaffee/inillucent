@@ -25,9 +25,38 @@
 //!   SQLite gives a pragma it has never heard of.
 //!
 //! The distinction that matters is between *silent* and *refused*. A pragma
-//! whose subject does not exist here is silent. A pragma that exists and was
-//! given a value the engine cannot honour is **refused**, because accepting it
-//! would be answering a question wrongly.
+//! that exists and was given a value the engine cannot honour is **refused**,
+//! because accepting it would be answering a question wrongly.
+//!
+//! ## Nothing SQLite lists is silent any more (task-1859)
+//!
+//! **Silence was the wrong third option.** Of the 67 pragmas SQLite's own
+//! `pragma_list` names, 21 answered here and *38 were accepted and answered
+//! nothing at all* - no value and no error, which a caller cannot tell from an
+//! empty result. A pragma that returns nothing is indistinguishable from one
+//! that returned no rows, so an application had no way to find out that its
+//! `PRAGMA user_version` had gone nowhere.
+//!
+//! So the rule is now: **a name on SQLite's list either answers or refuses.**
+//! [`SQLITE_PRAGMAS`] is that list, and anything on it this engine has no
+//! answer for is refused by name. A pragma on *nobody's* list -
+//! `PRAGMA nonesuch` - is still silent, because that is what SQLite does with
+//! one and the parity is the point.
+//!
+//! The dispositions, then, are three:
+//!
+//! - **Honoured** - it does what it says. `user_version`, `application_id` and
+//!   `schema_version` live in the meta page; `max_page_count`, `query_only`
+//!   and `recursive_triggers` are read where they are acted on; `cache_size`
+//!   caps how many pages the pool holds.
+//! - **Reported** - a value this engine has exactly one of. Readable, and a
+//!   write that would change it is refused: `journal_mode` is `wal`,
+//!   `encoding` is `UTF-8`, `auto_vacuum` is `none`, `secure_delete` is off.
+//!   Setting one of these to what it already is succeeds; setting it to
+//!   something else refuses, which is the rule `journal_mode = DELETE` has
+//!   always followed.
+//! - **Refused** - the subject does not exist here. Named in
+//!   `feature-comparison.md` as a deliberate gap rather than dropped.
 
 use inillucent_base::error::refusal;
 use inillucent_base::DbResult;
@@ -71,6 +100,59 @@ impl ImportedDatabase {
             b"page_size" => Ok(one_integer(self.page_size as i64)),
             b"page_count" => Ok(one_integer(self.database.pool().page_count() as i64)),
             b"freelist_count" => Ok(one_integer(self.database.free_pages() as i64)),
+            b"user_version" => self.pragma_user_version(argument),
+            b"application_id" => self.pragma_application_id(argument),
+            b"schema_version" => Ok(one_integer(i64::from(self.database.schema_cookie()))),
+            // **A connection-visible counter, not a file one.** SQLite's
+            // `data_version` changes when *another* connection has committed;
+            // one connection watching its own writes always sees the same
+            // number, and this engine holds the file exclusively, so that
+            // number is 1 and stays 1. It is reported rather than refused
+            // because the answer is correct, not because the subject is absent.
+            b"data_version" => Ok(one_integer(1)),
+            b"max_page_count" => self.pragma_max_page_count(argument),
+            b"query_only" => self.pragma_query_only(argument),
+            b"recursive_triggers" => self.pragma_recursive_triggers(argument),
+            // Reported: one value each, and a write that asks for another is
+            // refused rather than accepted and dropped.
+            b"auto_vacuum" => pragma_fixed_number(argument, "auto_vacuum", 0, &["0", "none"]),
+            b"secure_delete" => {
+                pragma_fixed_number(argument, "secure_delete", 0, &["0", "off", "false", "no"])
+            }
+            // This engine's temporary tables live in memory, so DEFAULT and
+            // MEMORY are both what it already does and FILE is the one value it
+            // cannot be. SQLite reports the setting rather than the state, so a
+            // caller that wrote MEMORY reads 2 back.
+            b"temp_store" => self.pragma_temp_store(argument),
+            // **The pragmas that do nothing here and nothing observable in
+            // SQLite either.** `PRAGMA optimize` decides whether to re-ANALYZE
+            // and answers no rows; `shrink_memory` releases what a page cache
+            // is holding; `incremental_vacuum` moves free pages when
+            // `auto_vacuum` is on, which it never is in either engine's default.
+            // Answering nothing is the *right* answer for these, and it is the
+            // answer SQLite gives, so they are named here rather than falling
+            // through to the refusal - a refusal would be a difference invented
+            // by the rule rather than found by it.
+            b"optimize" | b"shrink_memory" | b"incremental_vacuum" | b"data_store_directory"
+            | b"temp_store_directory" => Ok(Outcome::empty()),
+            // Reported: a number this engine has exactly one of. Read it and
+            // get the truth; set it to that value and nothing happens; set it
+            // to anything else and it refuses rather than pretending.
+            name if reported_value(name).is_some() => {
+                let (value, spellings) = reported_value(name).unwrap_or((0, &[]));
+                pragma_fixed_number(
+                    argument,
+                    &String::from_utf8_lossy(name),
+                    value,
+                    spellings,
+                )
+            }
+            // On SQLite's list and not implemented here: refused by name, so a
+            // caller can tell "no" from "nothing".
+            name if is_sqlite_pragma(name) => Err(refusal(format!(
+                "PRAGMA {} is not implemented by this engine",
+                String::from_utf8_lossy(name)
+            ))),
             // SQLite's own answer to a pragma it does not know: no rows, no
             // error, and the next statement runs.
             _ => Ok(Outcome::empty()),
@@ -99,10 +181,21 @@ impl ImportedDatabase {
     ) -> DbResult<Option<Outcome>> {
         Ok(Some(match name {
             b"foreign_key_list" => self.pragma_foreign_key_list(argument)?,
-            b"table_info" | b"table_xinfo" => self.pragma_table_info(argument)?,
+            b"table_info" => self.pragma_table_info(argument, false)?,
+            b"table_xinfo" => self.pragma_table_info(argument, true)?,
             b"index_list" => self.pragma_index_list(argument)?,
-            b"index_info" | b"index_xinfo" => self.pragma_index_info(argument)?,
+            b"index_info" => self.pragma_index_info(argument, false)?,
+            b"index_xinfo" => self.pragma_index_info(argument, true)?,
             b"table_list" => self.pragma_table_list()?,
+            b"collation_list" => self.pragma_collation_list(),
+            b"pragma_list" => list_of("name", SQLITE_PRAGMAS),
+            b"module_list" => {
+                let mut names = self.registry.module_names();
+                names.sort();
+                list_of("name", &names)
+            }
+            b"function_list" => pragma_function_list(),
+            b"compile_options" => list_of("compile_options", COMPILE_OPTIONS),
             b"database_list" => Outcome {
                 rows: self.database_list(),
                 names: vec!["seq".into(), "name".into(), "file".into()],
@@ -120,11 +213,16 @@ impl ImportedDatabase {
     /// indistinguishable from one that found nothing.
     pub(super) fn pragma_function_names() -> &'static [&'static str] {
         &[
+            "pragma_collation_list",
+            "pragma_compile_options",
             "pragma_database_list",
             "pragma_foreign_key_list",
+            "pragma_function_list",
             "pragma_index_info",
             "pragma_index_list",
             "pragma_index_xinfo",
+            "pragma_module_list",
+            "pragma_pragma_list",
             "pragma_table_info",
             "pragma_table_list",
             "pragma_table_xinfo",
@@ -179,12 +277,39 @@ impl ImportedDatabase {
     /// reported back, and a caller that reads it afterwards is told the truth
     /// about what the engine is using rather than what it asked for.
     fn pragma_cache_size(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
-        let bytes = self.frames.saturating_mul(self.page_size);
-        let kib = (bytes / 1024) as i64;
-        if argument.is_some() {
-            return Ok(Outcome::empty());
-        }
-        Ok(one_integer(-kib))
+        let page_size = self.page_size.max(1);
+        let Some(argument) = argument else {
+            let bytes = self.frames.saturating_mul(page_size);
+            return Ok(one_integer(
+                self.cache_size.unwrap_or(-((bytes / 1024) as i64)),
+            ));
+        };
+        // SQLite's units: a negative number is kibibytes and a positive one is
+        // pages, and it reads back what was written rather than what it derived
+        // from it. So the sign is kept and the page count is worked out here.
+        let asked = argument_integer(argument);
+        let pages = if asked < 0 {
+            (asked.saturating_neg().saturating_mul(1024) / page_size as i64).max(1)
+        } else {
+            asked.max(1)
+        };
+        let pool = self.database.pool();
+        let held = pool.frames() as i64;
+        pool.set_budget(pages.clamp(1, held) as usize);
+        // **The truth, not the request.** The pool's frames are allocated at
+        // open, so a cache larger than the pool is a cache the engine does not
+        // have; asking for one reads back what it does have rather than what
+        // was asked for, in the same units the caller used.
+        self.cache_size = Some(if pages > held {
+            if asked < 0 {
+                -(held.saturating_mul(page_size as i64) / 1024)
+            } else {
+                held
+            }
+        } else {
+            asked
+        });
+        Ok(Outcome::empty())
     }
 
     /// Reads or sets how much of a commit reaches the platter.
@@ -446,16 +571,32 @@ impl ImportedDatabase {
     }
 
     /// Describes one table's columns.
-    fn pragma_table_info(&self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+    ///
+    /// `extended` is `table_xinfo`, which differs in two ways: it shows the
+    /// columns `table_info` hides - a virtual table's arguments and a generated
+    /// column - and it carries a seventh column saying which kind of hidden
+    /// each one is. That seventh column is why an ORM can tell a generated
+    /// column from an ordinary one, and it was missing.
+    ///
+    /// @param argument - the table named in the pragma
+    /// @param extended - whether this is the `xinfo` spelling
+    fn pragma_table_info(
+        &self,
+        argument: Option<&PragmaArgument>,
+        extended: bool,
+    ) -> DbResult<Outcome> {
         // **The names come first and are answered even when nothing matched.**
         // A statement's result columns are a fact about the *pragma*, not about
         // whether the table it was asked about exists - and the table-valued
         // form reads them at catalog time, with no argument at all, to learn
         // what columns `pragma_table_info` declares.
-        let names: Vec<String> = ["cid", "name", "type", "notnull", "dflt_value", "pk"]
+        let mut names: Vec<String> = ["cid", "name", "type", "notnull", "dflt_value", "pk"]
             .iter()
             .map(|held| (*held).to_string())
             .collect();
+        if extended {
+            names.push("hidden".to_string());
+        }
         let Some(table) = self.named_table(argument) else {
             return Ok(Outcome {
                 rows: Vec::new(),
@@ -463,32 +604,119 @@ impl ImportedDatabase {
                 changes: Default::default(),
             });
         };
-        let rows = table
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(position, column)| {
-                vec![
-                    OwnedDatum::Int(position as i64),
-                    OwnedDatum::Text(column.name.clone()),
-                    OwnedDatum::Text(column.declared_type.clone()),
-                    OwnedDatum::Int(i64::from(column.not_null)),
-                    match &column.default_sql {
-                        Some(text) => OwnedDatum::Text(text.clone()),
-                        None => OwnedDatum::Null,
-                    },
-                    // `primary_key_position` is already one-based, which is
-                    // what SQLite's `pk` column holds, and zero for a column
-                    // that is not in the key.
-                    OwnedDatum::Int(column.primary_key_position.map(i64::from).unwrap_or(0)),
-                ]
-            })
-            .collect();
+        // **A view has columns, and they are the columns its `SELECT`
+        // produces.** Nothing in the file records them, so they are bound here
+        // - which is why `PRAGMA table_info(v)` answered nothing at all, and
+        // why every ORM that reads this pragma could not see a view.
+        let bound;
+        let columns: &[inillucent_sql::catalog_view::ColumnInfo] =
+            if table.kind == inillucent_sql::catalog_view::TableKind::View {
+                bound = self.view_columns(table);
+                &bound
+            } else {
+                &table.columns
+            };
+        let mut rows = Vec::new();
+        // **`cid` counts the columns the pragma reports, not the columns the
+        // table declares.** They are the same number until a table has a
+        // generated column, which the plain form hides - and SQLite then
+        // numbers what is left 0, 1, 2 rather than leaving a gap where the
+        // hidden one was. The extended form shows every column, so its `cid`
+        // is the declared position.
+        let mut cid = 0i64;
+        for (position, column) in columns.iter().enumerate() {
+            if !extended && (column.hidden || column.generated) {
+                continue;
+            }
+            let reported = if extended { position as i64 } else { cid };
+            cid = cid.saturating_add(1);
+            // 1 is a virtual table's hidden column; 2 is a VIRTUAL generated
+            // column and 3 a STORED one. The two generated codes are the way
+            // round SQLite has them, which is not the way round the keywords
+            // suggest.
+            let hidden = if column.generated {
+                if column.stored {
+                    3
+                } else {
+                    2
+                }
+            } else {
+                i64::from(column.hidden)
+            };
+            let mut row = vec![
+                OwnedDatum::Int(reported),
+                OwnedDatum::Text(column.name.clone()),
+                OwnedDatum::Text(column.declared_type.clone()),
+                OwnedDatum::Int(i64::from(column.not_null)),
+                match &column.default_sql {
+                    Some(text) => OwnedDatum::Text(text.clone()),
+                    None => OwnedDatum::Null,
+                },
+                // `primary_key_position` is already one-based, which is what
+                // SQLite's `pk` column holds, and zero for a column that is not
+                // in the key.
+                OwnedDatum::Int(column.primary_key_position.map(i64::from).unwrap_or(0)),
+            ];
+            if extended {
+                row.push(OwnedDatum::Int(hidden));
+            }
+            rows.push(row);
+        }
         Ok(Outcome {
             rows,
             names,
             changes: Default::default(),
         })
+    }
+
+    /// Returns the columns a view's `SELECT` produces.
+    ///
+    /// Bound rather than stored, because the file records a view's text and not
+    /// its shape. A view whose body no longer binds - a table it reads was
+    /// dropped - answers no columns rather than failing the pragma, which is
+    /// what SQLite does with the same thing.
+    ///
+    /// @param table - the view
+    fn view_columns(
+        &self,
+        table: &inillucent_sql::catalog_view::TableInfo,
+    ) -> Vec<inillucent_sql::catalog_view::ColumnInfo> {
+        let Some(body) = table.view.as_ref() else {
+            return Vec::new();
+        };
+        let authorizer = inillucent_sql::bind::AllowAll;
+        let mut binder = inillucent_sql::bind::Binder::new(&self.catalog, &body.ast, &authorizer);
+        let Ok(bound) = binder.bind_select(body.select) else {
+            return Vec::new();
+        };
+        let declared = body.columns.clone();
+        bound
+            .columns
+            .iter()
+            .enumerate()
+            .map(|(position, column)| {
+                let name = declared
+                    .get(position)
+                    .cloned()
+                    .unwrap_or_else(|| column.name.clone());
+                inillucent_sql::catalog_view::ColumnInfo {
+                    folded: name.to_ascii_lowercase(),
+                    name,
+                    declared_type: column.declared_type.clone(),
+                    affinity: inillucent_value::affinity::for_column(&column.declared_type),
+                    collation: b"binary".to_vec(),
+                    not_null: false,
+                    not_null_conflict: None,
+                    primary_key_conflict: None,
+                    default_sql: None,
+                    primary_key_position: None,
+                    hidden: false,
+                    generated: false,
+                    stored: true,
+                    generated_sql: None,
+                }
+            })
+            .collect()
     }
 
     /// Lists one table's indexes, newest first, as SQLite does.
@@ -540,11 +768,30 @@ impl ImportedDatabase {
     }
 
     /// Describes one index's key columns.
-    fn pragma_index_info(&self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
-        let names: Vec<String> = ["seqno", "cid", "name"]
+    ///
+    /// `extended` is `index_xinfo`, which answered the same three columns as
+    /// `index_info` and so said nothing the plain form did not. It has six:
+    /// the key's sort direction, the collation it is ordered by, and whether
+    /// the entry is a *key* column or one of the row-identifying columns the
+    /// index carries after them - plus the trailing row for the rowid itself,
+    /// which is what makes an index's real key visible.
+    ///
+    /// @param argument - the index named in the pragma
+    /// @param extended - whether this is the `xinfo` spelling
+    fn pragma_index_info(
+        &self,
+        argument: Option<&PragmaArgument>,
+        extended: bool,
+    ) -> DbResult<Outcome> {
+        let mut names: Vec<String> = ["seqno", "cid", "name"]
             .iter()
             .map(|held| (*held).to_string())
             .collect();
+        if extended {
+            for held in ["desc", "coll", "key"] {
+                names.push(held.to_string());
+            }
+        }
         let empty = Outcome {
             rows: Vec::new(),
             names: names.clone(),
@@ -564,21 +811,38 @@ impl ImportedDatabase {
         let Some((table, index)) = found else {
             return Ok(empty);
         };
-        let rows = index
-            .columns
-            .iter()
-            .enumerate()
-            .map(|(seq, key)| {
-                vec![
-                    OwnedDatum::Int(seq as i64),
-                    OwnedDatum::Int(key.column.map(i64::from).unwrap_or(-2)),
-                    match key.column.and_then(|at| table.column(at)) {
-                        Some(column) => OwnedDatum::Text(column.name.clone()),
-                        None => OwnedDatum::Null,
-                    },
-                ]
-            })
-            .collect();
+        let mut rows: Vec<Vec<OwnedDatum>> = Vec::new();
+        for (seq, key) in index.columns.iter().enumerate() {
+            let mut row = vec![
+                OwnedDatum::Int(seq as i64),
+                OwnedDatum::Int(key.column.map(i64::from).unwrap_or(-2)),
+                match key.column.and_then(|at| table.column(at)) {
+                    Some(column) => OwnedDatum::Text(column.name.clone()),
+                    None => OwnedDatum::Null,
+                },
+            ];
+            if extended {
+                row.push(OwnedDatum::Int(i64::from(key.declared_descending)));
+                row.push(OwnedDatum::Text(collation_name(&key.collation)));
+                row.push(OwnedDatum::Int(1));
+            }
+            rows.push(row);
+        }
+        if extended && table.has_rowid() {
+            // **The row every index has and none of them declares.** An index
+            // over a rowid table carries the rowid after its key columns, which
+            // is how a lookup finds the table row; SQLite reports it as cid -1
+            // with a NULL name and `key` 0, and an application reading this to
+            // work out an index's real width needs it.
+            rows.push(vec![
+                OwnedDatum::Int(rows.len() as i64),
+                OwnedDatum::Int(-1),
+                OwnedDatum::Null,
+                OwnedDatum::Int(0),
+                OwnedDatum::Text(b"BINARY".to_vec()),
+                OwnedDatum::Int(0),
+            ]);
+        }
         Ok(Outcome {
             rows,
             names,
@@ -587,21 +851,53 @@ impl ImportedDatabase {
     }
 
     /// Lists every table in the schema.
+    ///
+    /// **A view is reported as a view, and the schema tables are reported.**
+    /// Every row used to say `table`, so a caller reading this to decide what
+    /// it could write to was told a view was writable; and `sqlite_schema` and
+    /// `sqlite_temp_schema` were missing, which SQLite lists last and a tool
+    /// walking the catalog expects to find.
     fn pragma_table_list(&self) -> DbResult<Outcome> {
-        let rows = self
-            .tables
-            .iter()
-            .map(|table| {
-                vec![
-                    OwnedDatum::Text(b"main".to_vec()),
-                    OwnedDatum::Text(table.name.clone()),
-                    OwnedDatum::Text(b"table".to_vec()),
-                    OwnedDatum::Int(table.columns.len() as i64),
-                    OwnedDatum::Int(0),
-                    OwnedDatum::Int(i64::from(table.without_rowid)),
-                ]
-            })
-            .collect();
+        let mut rows: Vec<Vec<OwnedDatum>> = Vec::new();
+        // Newest first, which is the order SQLite reports and the order
+        // `index_list` already uses for the same reason.
+        for table in self.tables.iter().rev() {
+            if table.folded == b"sqlite_schema" || table.folded == b"sqlite_temp_schema" {
+                continue;
+            }
+            let kind: &[u8] = match table.kind {
+                inillucent_sql::catalog_view::TableKind::View => b"view",
+                inillucent_sql::catalog_view::TableKind::Virtual => b"virtual",
+                _ => b"table",
+            };
+            let ncol = if table.kind == inillucent_sql::catalog_view::TableKind::View {
+                self.view_columns(table).len() as i64
+            } else {
+                table.columns.len() as i64
+            };
+            rows.push(vec![
+                OwnedDatum::Text(b"main".to_vec()),
+                OwnedDatum::Text(table.name.clone()),
+                OwnedDatum::Text(kind.to_vec()),
+                OwnedDatum::Int(ncol),
+                OwnedDatum::Int(0),
+                OwnedDatum::Int(i64::from(table.strict)),
+            ]);
+        }
+        for (schema, name) in [
+            (b"main".as_slice(), b"sqlite_schema".as_slice()),
+            (b"temp".as_slice(), b"sqlite_temp_schema".as_slice()),
+        ] {
+            rows.push(vec![
+                OwnedDatum::Text(schema.to_vec()),
+                OwnedDatum::Text(name.to_vec()),
+                OwnedDatum::Text(b"table".to_vec()),
+                OwnedDatum::Int(5),
+                OwnedDatum::Int(0),
+                OwnedDatum::Int(0),
+            ]);
+        }
+        let rows: Vec<Vec<OwnedDatum>> = rows;
         Ok(Outcome {
             rows,
             names: vec![
@@ -614,6 +910,156 @@ impl ImportedDatabase {
             ],
             changes: Default::default(),
         })
+    }
+
+    /// Reads or writes the four bytes an application owns.
+    ///
+    /// **The single highest-value pragma on the list.** Every migration
+    /// framework there is reads `user_version` to decide which migrations to
+    /// run and writes it when one has run; an engine where it silently answers
+    /// nothing cannot host one of them. It lives in the meta page, beside the
+    /// catalog root, and reaches the file at the next checkpoint like every
+    /// other meta field.
+    ///
+    /// @param argument - the value it was given, when it was given one
+    fn pragma_user_version(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+        let Some(argument) = argument else {
+            return Ok(one_integer(i64::from(self.database.user_version())));
+        };
+        let value = argument_integer(argument) as i32;
+        self.database.set_user_version(value);
+        // **Checkpointed, because the meta page is not in the log.** Every
+        // other write here is replayed from the WAL on the next open; a meta
+        // field only reaches the file at a checkpoint, so one that was set and
+        // not checkpointed would be silently forgotten - which is the exact
+        // failure a migration framework cannot survive. SQLite pays a page
+        // write and a journal for the same four bytes.
+        self.checkpoint()?;
+        Ok(Outcome::empty())
+    }
+
+    /// Reads or writes the four bytes that say what application owns the file.
+    ///
+    /// @param argument - the value it was given, when it was given one
+    fn pragma_application_id(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+        let Some(argument) = argument else {
+            return Ok(one_integer(i64::from(self.database.application_id())));
+        };
+        let value = argument_integer(argument) as i32;
+        self.database.set_application_id(value);
+        self.checkpoint()?;
+        Ok(Outcome::empty())
+    }
+
+    /// Reads or sets the ceiling on how large the file may grow.
+    ///
+    /// SQLite echoes the value back from a set, and reports its own maximum -
+    /// `4294967294` - when nothing has been set. A ceiling below the pages the
+    /// file already holds is not applied, which is SQLite's rule too: the
+    /// answer is then the count rather than the request.
+    ///
+    /// @param argument - the value it was given, when it was given one
+    fn pragma_max_page_count(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+        if let Some(argument) = argument {
+            let asked = argument_integer(argument);
+            let held = self.database.pool().page_count() as i64;
+            self.max_page_count = asked.max(held).min(DEFAULT_MAX_PAGE_COUNT);
+        }
+        Ok(one_integer(self.max_page_count))
+    }
+
+    /// Reads or sets whether this connection may write.
+    ///
+    /// **Honoured rather than remembered.** A caller sets `query_only` to make
+    /// a mistake impossible, so a connection that recorded it and wrote anyway
+    /// would be worse than one that refused the pragma outright.
+    ///
+    /// @param argument - the value it was given, when it was given one
+    fn pragma_query_only(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+        let Some(argument) = argument else {
+            return Ok(one_integer(i64::from(self.query_only)));
+        };
+        self.query_only = argument_boolean(argument);
+        Ok(Outcome::empty())
+    }
+
+    /// Reads or sets whether a trigger's own writes fire triggers.
+    ///
+    /// The compiled statements go with it, for the reason `foreign_keys`
+    /// documents: whether a trigger's body may re-enter is decided when the
+    /// body is compiled, so a statement compiled under the old setting would
+    /// keep the old behaviour.
+    ///
+    /// @param argument - the value it was given, when it was given one
+    fn pragma_recursive_triggers(
+        &mut self,
+        argument: Option<&PragmaArgument>,
+    ) -> DbResult<Outcome> {
+        let Some(argument) = argument else {
+            return Ok(one_integer(i64::from(self.recursive_triggers)));
+        };
+        let asked = argument_boolean(argument);
+        if asked != self.recursive_triggers {
+            self.forget_compiled_statements();
+        }
+        self.recursive_triggers = asked;
+        Ok(Outcome::empty())
+    }
+
+    /// Reads or sets where temporary tables live.
+    ///
+    /// This engine keeps them in memory, so `DEFAULT` and `MEMORY` are both
+    /// what it already does and are accepted; `FILE` is the one value it cannot
+    /// be, and is refused rather than accepted and ignored. SQLite reports the
+    /// *setting* rather than the state, so a caller that wrote `MEMORY` reads
+    /// `2` back and one that wrote nothing reads `0`.
+    ///
+    /// @param argument - the value it was given, when it was given one
+    fn pragma_temp_store(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+        let Some(argument) = argument else {
+            return Ok(one_integer(self.temp_store));
+        };
+        let text = argument_text(argument).trim().to_ascii_lowercase();
+        self.temp_store = match text.as_str() {
+            "0" | "default" => 0,
+            "2" | "memory" => 2,
+            other => {
+                return Err(refusal(format!(
+                    "temp_store {other} is not available here; temporary tables live in memory"
+                )))
+            }
+        };
+        Ok(Outcome::empty())
+    }
+
+    /// Lists the collations this connection can order by.
+    ///
+    /// The three built in, then whatever the application registered, which is
+    /// what SQLite reports and in the same shape.
+    fn pragma_collation_list(&self) -> Outcome {
+        let mut names: Vec<String> = ["BINARY", "NOCASE", "RTRIM"]
+            .iter()
+            .map(|held| (*held).to_string())
+            .collect();
+        for (name, _) in &self.collations {
+            if !names.iter().any(|held| held.eq_ignore_ascii_case(name)) {
+                names.push(name.clone());
+            }
+        }
+        Outcome {
+            rows: names
+                .iter()
+                .enumerate()
+                .map(|(seq, name)| {
+                    vec![
+                        OwnedDatum::Int(seq as i64),
+                        OwnedDatum::Text(name.as_bytes().to_vec()),
+                    ]
+                })
+                .collect(),
+            names: vec!["seq".into(), "name".into()],
+            changes: Default::default(),
+        }
     }
 
     /// Returns the table a pragma's argument names.
@@ -656,4 +1102,288 @@ fn action_name(action: inillucent_sql::ast::ReferentialAction) -> &'static str {
         ReferentialAction::SetDefault => "SET DEFAULT",
         ReferentialAction::Cascade => "CASCADE",
     }
+}
+
+
+/// The ceiling `PRAGMA max_page_count` reports when nothing has been set.
+///
+/// SQLite's own maximum, so a caller reading it before setting it is told the
+/// same number by either engine.
+pub(crate) const DEFAULT_MAX_PAGE_COUNT: i64 = 4_294_967_294;
+
+/// Returns whether a name is one SQLite's own `pragma_list` carries.
+///
+/// The whole point of the list: a name on it that this engine does not answer
+/// is **refused**, so a caller can tell "this engine will not do that" from
+/// "that returned no rows". A name on nobody's list stays silent, which is what
+/// SQLite does with one.
+///
+/// @param name - the pragma's folded name
+fn is_sqlite_pragma(name: &[u8]) -> bool {
+    SQLITE_PRAGMAS
+        .iter()
+        .any(|held| held.as_bytes().eq_ignore_ascii_case(name))
+}
+
+/// Answers a pragma this engine has exactly one value for.
+///
+/// Reading it gives that value; setting it to what it already is succeeds and
+/// setting it to anything else refuses. That is the rule `journal_mode = DELETE`
+/// has always followed, said once for the pragmas that now need it.
+///
+/// @param argument - the value it was given, when it was given one
+/// @param name - the pragma's name, for the refusal
+/// @param value - the number it reports
+/// @param accepted - the spellings that mean that number
+fn pragma_fixed_number(
+    argument: Option<&PragmaArgument>,
+    name: &str,
+    value: i64,
+    accepted: &[&str],
+) -> DbResult<Outcome> {
+    let Some(argument) = argument else {
+        return Ok(one_integer(value));
+    };
+    let text = argument_text(argument).trim().to_ascii_lowercase();
+    if accepted.iter().any(|held| *held == text) {
+        return Ok(Outcome::empty());
+    }
+    Err(refusal(format!(
+        "this engine's {name} is {value} and cannot be set to {text}"
+    )))
+}
+
+/// Returns a one-column answer over a list of names.
+///
+/// @param column - what the column is called
+/// @param values - the names, in the order they are reported
+fn list_of<S: AsRef<str>>(column: &str, values: &[S]) -> Outcome {
+    Outcome {
+        rows: values
+            .iter()
+            .map(|value| vec![OwnedDatum::Text(value.as_ref().as_bytes().to_vec())])
+            .collect(),
+        names: vec![column.to_string()],
+        changes: Default::default(),
+    }
+}
+
+/// Every pragma name SQLite 3.53.4's own `pragma_list` reports.
+///
+/// **The list is the contract.** A name here that this engine does not answer
+/// is refused by name rather than silently accepted, which is what task-1859
+/// Part C is about: 38 of these used to answer nothing at all. It is also what
+/// `pragma_pragma_list` reports, so a tool can ask this engine what it knows
+/// about - and get the same set of names either engine would give, with the
+/// difference showing up as a refusal rather than as an absence.
+pub(crate) const SQLITE_PRAGMAS: &[&str] = &[
+    "analysis_limit",
+    "application_id",
+    "auto_vacuum",
+    "automatic_index",
+    "busy_timeout",
+    "cache_size",
+    "cache_spill",
+    "case_sensitive_like",
+    "cell_size_check",
+    "checkpoint_fullfsync",
+    "collation_list",
+    "compile_options",
+    "count_changes",
+    "data_store_directory",
+    "data_version",
+    "database_list",
+    "default_cache_size",
+    "defer_foreign_keys",
+    "empty_result_callbacks",
+    "encoding",
+    "foreign_key_check",
+    "foreign_key_list",
+    "foreign_keys",
+    "freelist_count",
+    "full_column_names",
+    "fullfsync",
+    "function_list",
+    "hard_heap_limit",
+    "ignore_check_constraints",
+    "incremental_vacuum",
+    "index_info",
+    "index_list",
+    "index_xinfo",
+    "integrity_check",
+    "journal_mode",
+    "journal_size_limit",
+    "legacy_alter_table",
+    "locking_mode",
+    "max_page_count",
+    "mmap_size",
+    "module_list",
+    "optimize",
+    "page_count",
+    "page_size",
+    "pragma_list",
+    "query_only",
+    "quick_check",
+    "read_uncommitted",
+    "recursive_triggers",
+    "reverse_unordered_selects",
+    "schema_version",
+    "secure_delete",
+    "short_column_names",
+    "shrink_memory",
+    "soft_heap_limit",
+    "synchronous",
+    "table_info",
+    "table_list",
+    "table_xinfo",
+    "temp_store",
+    "temp_store_directory",
+    "threads",
+    "trusted_schema",
+    "user_version",
+    "wal_autocheckpoint",
+    "wal_checkpoint",
+    "writable_schema",
+];
+
+/// What `PRAGMA compile_options` reports about this build.
+///
+/// The choices a caller can act on, not a transcription of SQLite's list: an
+/// option naming a subsystem this engine does not have would be a claim about
+/// somebody else's build.
+pub(crate) const COMPILE_OPTIONS: &[&str] = &[
+    "ENGINE=inillucent",
+    "THREADSAFE=0",
+    "DEFAULT_JOURNAL_MODE=wal",
+    "DEFAULT_LOCKING_MODE=exclusive",
+    "DEFAULT_ENCODING=UTF-8",
+    "ENABLE_FTS5",
+    "ENABLE_RTREE",
+    "ENABLE_JSON1",
+    "ENABLE_VECTOR",
+    "ENABLE_HNSW",
+    "OMIT_AUTOVACUUM",
+    "OMIT_SECURE_DELETE",
+    "OMIT_SHARED_CACHE",
+];
+
+/// Lists the functions this engine answers, in SQLite's own columns.
+///
+/// Read straight out of `inillucent_sql::function::every_function`, which is
+/// the same list the obligations report and the old engine's `function_list`
+/// read - so a function that exists is reported by every route or by none.
+/// `enc` is `utf8` because that is the only text encoding here.
+fn pragma_function_list() -> Outcome {
+    let rows = inillucent_sql::function::every_function()
+        .into_iter()
+        .map(|entry| {
+            vec![
+                OwnedDatum::Text(entry.name.as_bytes().to_vec()),
+                OwnedDatum::Int(1),
+                OwnedDatum::Text(entry.kind.as_bytes().to_vec()),
+                OwnedDatum::Text(b"utf8".to_vec()),
+                OwnedDatum::Int(entry.arity),
+                OwnedDatum::Int(entry.flags),
+            ]
+        })
+        .collect();
+    Outcome {
+        rows,
+        names: vec![
+            "name".into(),
+            "builtin".into(),
+            "type".into(),
+            "enc".into(),
+            "narg".into(),
+            "flags".into(),
+        ],
+        changes: Default::default(),
+    }
+}
+
+/// Returns the name `index_xinfo` reports a key's collation by.
+///
+/// The catalog folds a collation name; SQLite reports the spelling it uses in
+/// its own answers, which is upper case for the three built in and the name as
+/// registered for anything else.
+///
+/// @param folded - the folded collation name the key carries
+fn collation_name(folded: &[u8]) -> Vec<u8> {
+    match folded {
+        b"" | b"binary" => b"BINARY".to_vec(),
+        b"nocase" => b"NOCASE".to_vec(),
+        b"rtrim" => b"RTRIM".to_vec(),
+        other => other.to_vec(),
+    }
+}
+
+/// The spellings that mean "off" for a pragma this engine reports as zero.
+const OFF: &[&str] = &["0", "off", "false", "no"];
+
+/// The spellings that mean "on", for a pragma this engine reports as one.
+const ON: &[&str] = &["1", "on", "true", "yes"];
+
+/// Returns the one value this engine has for a pragma, and how to spell it.
+///
+/// **The third disposition, as a table.** Each of these is a setting whose
+/// subject exists here and has exactly one state: this engine runs on one
+/// thread, maps no pages, limits no heap, spills no cache and has no legacy
+/// callback API for `count_changes` to change the shape of. Reading one is
+/// answering a question truthfully; setting it to what it already is costs
+/// nothing; setting it to anything else is refused, because accepting a
+/// setting that will not be honoured is the failure this whole part is about.
+///
+/// Four of them are values SQLite reports differently, and each difference is
+/// this engine telling the truth about itself: `automatic_index` is 0 because
+/// it never builds one where SQLite reports 1; `cache_spill` is 0 because the
+/// pool evicts by clock rather than at a threshold; `wal_autocheckpoint` is 0
+/// because the log is folded in at an explicit checkpoint rather than every
+/// thousand frames; `default_cache_size` follows the pool this file was opened
+/// with. They are named in `feature-comparison.md` for that reason.
+///
+/// @param name - the pragma's folded name
+fn reported_value(name: &[u8]) -> Option<(i64, &'static [&'static str])> {
+    Some(match name {
+        // ANALYZE here walks the whole table; there is no sampling limit to set.
+        b"analysis_limit" => (0, OFF),
+        // No automatic index is ever built, so the planner setting has one state.
+        b"automatic_index" => (0, OFF),
+        // The pool evicts by clock rather than at a spill threshold.
+        b"cache_spill" => (0, OFF),
+        // Not a page format with cells to size-check.
+        b"cell_size_check" => (0, OFF),
+        b"checkpoint_fullfsync" => (0, OFF),
+        b"fullfsync" => (0, OFF),
+        // The legacy callback API these three shape does not exist here.
+        b"count_changes" => (0, OFF),
+        b"empty_result_callbacks" => (0, OFF),
+        b"full_column_names" => (0, OFF),
+        // Which SQLite also reports as 1.
+        b"short_column_names" => (1, ON),
+        // No heap limit of either kind.
+        b"hard_heap_limit" => (0, OFF),
+        b"soft_heap_limit" => (0, OFF),
+        // CHECK constraints are always enforced; there is no way to skip them.
+        b"ignore_check_constraints" => (0, OFF),
+        // The log is rolled at a checkpoint rather than trimmed to a size.
+        b"journal_size_limit" => (-1, &["-1"]),
+        // `ALTER TABLE RENAME` here always rewrites the references, which is
+        // what SQLite's non-legacy behaviour is.
+        b"legacy_alter_table" => (0, OFF),
+        // Pages are read, never mapped.
+        b"mmap_size" => (0, OFF),
+        // One writer, one pool, no shared cache to read uncommitted from.
+        b"read_uncommitted" => (0, OFF),
+        b"reverse_unordered_selects" => (0, OFF),
+        // Single threaded by design; the sorter and the tree builder are too.
+        b"threads" => (0, OFF),
+        // A schema object is never treated as trusted input here, and the
+        // catalog is not writable as a table.
+        b"trusted_schema" => (0, OFF),
+        b"writable_schema" => (0, OFF),
+        // The log is folded in at an explicit checkpoint rather than every N
+        // frames, so there is no frame count to set.
+        b"wal_autocheckpoint" => (0, OFF),
+        _ => return None,
+    })
 }

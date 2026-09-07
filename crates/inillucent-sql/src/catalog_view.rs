@@ -98,6 +98,16 @@ pub struct IndexColumnInfo {
     pub collation: Vec<u8>,
     /// Whether the key is stored descending.
     pub descending: bool,
+    /// Whether the *declaration* said descending, whatever the storage does.
+    ///
+    /// **A different question from `descending`, and the two used to be one.**
+    /// This engine's trees are always built ascending, so the catalog flattens
+    /// `descending` to false for the planner's sake - a planner told about a
+    /// descending tree that does not exist draws three inverted conclusions
+    /// (see `inillucent-catalog`'s `stored_ascending`). But
+    /// `PRAGMA index_xinfo` reports what was *declared*, and an application
+    /// reading it to reconstruct a `CREATE INDEX` needs the `DESC` back.
+    pub declared_descending: bool,
 }
 
 /// An index over a table.
@@ -200,6 +210,20 @@ pub struct TriggerInfo {
 }
 
 impl ColumnInfo {
+    /// Reports whether the column was declared a vector at all.
+    ///
+    /// `VECTOR(768)` and a bare `VECTOR` both answer true, where
+    /// [`ColumnInfo::vector_dimensions`] answers a width only for the first.
+    /// The difference matters to the operators: a bare `VECTOR` cannot be
+    /// indexed, but adding two of them is just as meaningless.
+    pub fn is_vector(&self) -> bool {
+        let declared = self.declared_type.to_ascii_lowercase();
+        let Some(rest) = declared.strip_prefix(b"vector".as_slice()) else {
+            return false;
+        };
+        rest.is_empty() || rest.first().is_some_and(|byte| !byte.is_ascii_alphanumeric())
+    }
+
     /// Returns how many dimensions a `VECTOR(N)` column declares.
     ///
     /// **Read out of the declared type rather than stored beside it**, because

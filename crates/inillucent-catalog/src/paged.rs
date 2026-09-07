@@ -585,11 +585,13 @@ pub fn tables_from_entries(
 /// direction and the key's disagree.
 ///
 /// Nothing observable is lost. The `CREATE INDEX ... DESC` text is stored and
-/// returned by `sqlite_schema` exactly as written, and this engine's
-/// `index_info`/`index_xinfo` do not report a direction column at all. The one
-/// thing the declaration would still be worth is a tree that really is stored
-/// descending, and that is a format change - the key encoding, the leaf
-/// comparisons and every scan - for whichever phase decides to pay for it.
+/// returned by `sqlite_schema` exactly as written, and `declared_descending` -
+/// which this deliberately leaves alone - is what `PRAGMA index_xinfo` reports,
+/// so the declaration survives for the caller that asks about it while the
+/// planner is told about the tree that exists. The one thing the declaration
+/// would still be worth is a tree that really is stored descending, and that is
+/// a format change - the key encoding, the leaf comparisons and every scan -
+/// for whichever phase decides to pay for it.
 ///
 /// @param index - the index whose key columns are being described
 fn stored_ascending(index: &mut IndexInfo) {

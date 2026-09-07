@@ -349,7 +349,19 @@ impl<'a> Parser<'a> {
     /// The token's own span is the only one that describes this occurrence.
     fn parse_name_spanned(&mut self) -> Result<(NameId, Span), ParseError> {
         let token = self.peek()?;
-        if !Parser::token_is_name(token) {
+        // **A string literal where a name is required is a name.** SQLite's own
+        // documented misfeature, and not an academic one: SQLite *writes*
+        // `CREATE TABLE 'f_data'(id INTEGER PRIMARY KEY, block BLOB)` into
+        // `sqlite_schema` for an FTS5 table's shadow storage, so a migration
+        // that could not read it reported "the declaration of f_data did not
+        // parse: database disk image is malformed" about a perfectly good file
+        // (task-1859 Part D).
+        //
+        // Only here, where the grammar *requires* a name - the lookahead
+        // `at_name` is deliberately left alone, so nothing about which
+        // alternative the parser takes changes. Accepting a string in a
+        // required position can only turn a parse error into a parse.
+        if !Parser::token_is_name(token) && token.kind != TokenKind::String {
             return Err(self.unexpected(&["a name"])?);
         }
         self.bump()?;
@@ -358,6 +370,13 @@ impl<'a> Parser<'a> {
 
     /// Interns an identifier token into the arena.
     fn intern_token(&mut self, token: Token) -> NameId {
+        // A string standing in for a name is interned as the name it spells,
+        // with its own quoting undone - and remembered as double-quoted, which
+        // is how it is written back out when the declaration is rendered.
+        if token.kind == TokenKind::String {
+            let text = lexer::string_text(self.source, token).into_owned();
+            return self.ast.intern(text, QuoteForm::Double, token.span);
+        }
         let quote = match token.kind {
             TokenKind::Identifier { quote, .. } => quote,
             _ => QuoteForm::Bare,

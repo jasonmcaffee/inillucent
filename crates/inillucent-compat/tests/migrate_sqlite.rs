@@ -524,3 +524,157 @@ fn a_failed_migration_leaves_evidence_and_no_destination() {
         }
     }
 }
+
+/// The whole of what an application's database carries, migrated and readable.
+///
+/// **This is task-1859 Part D, and four things stopped it.** A source with a
+/// trigger refused the migration outright with "the new engine does not run
+/// triggers" - false since task-1838. A source with an FTS5 table refused it
+/// with "the declaration of `f_data` did not parse: database disk image is
+/// malformed", about a file that is neither malformed nor at fault. A view
+/// migrated, appeared in `sqlite_schema`, and then answered `no such table`.
+/// And `sqlite_sequence` was not carried, so an AUTOINCREMENT table whose high
+/// rows had been deleted reused their keys on the first insert afterwards.
+///
+/// So the source here carries all four, plus the things that already worked -
+/// a `WITHOUT ROWID` table, a generated column, a partial index and a foreign
+/// key - and the assertions are that every query the source answers, the
+/// migrated database answers.
+#[test]
+fn a_database_with_triggers_views_fts5_and_a_sequence_migrates_and_answers() {
+    let Some(shell) = reference() else {
+        eprintln!("the pinned SQLite shell is missing; skipping");
+        return;
+    };
+    let area = scratch("rich");
+    let source = area.join("source.db");
+    let script = "\
+CREATE TABLE a(id INTEGER PRIMARY KEY AUTOINCREMENT, n TEXT);\n\
+INSERT INTO a(n) VALUES('one'),('two'),('three'),('four');\n\
+DELETE FROM a WHERE id > 2;\n\
+CREATE TABLE log(id INTEGER PRIMARY KEY, what TEXT);\n\
+CREATE TRIGGER a_ins AFTER INSERT ON a BEGIN INSERT INTO log(what) VALUES('ins'); END;\n\
+CREATE VIEW v AS SELECT id, n FROM a;\n\
+CREATE TABLE wr(k TEXT PRIMARY KEY, val TEXT) WITHOUT ROWID;\n\
+INSERT INTO wr VALUES('x','1'),('y','2');\n\
+CREATE TABLE g(a INTEGER, b INTEGER GENERATED ALWAYS AS (a*2) STORED);\n\
+INSERT INTO g(a) VALUES(3),(4);\n\
+CREATE INDEX pg ON g(a) WHERE a > 3;\n\
+CREATE TABLE parent(id INTEGER PRIMARY KEY);\n\
+CREATE TABLE child(id INTEGER PRIMARY KEY, p INTEGER REFERENCES parent(id));\n\
+INSERT INTO parent VALUES(1);\n\
+INSERT INTO child VALUES(1,1);\n\
+CREATE VIRTUAL TABLE f USING fts5(body);\n\
+INSERT INTO f(body) VALUES('the quick brown fox'),('jumps over');\n";
+    let built = Command::new(&shell)
+        .arg(&source)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(script.as_bytes())?;
+            }
+            child.wait_with_output()
+        });
+    let Ok(output) = built else {
+        eprintln!("the reference shell could not be run; skipping");
+        return;
+    };
+    assert!(
+        output.status.success(),
+        "the source could not be built: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let destination = area.join("migrated.rdb");
+    let report = sqlite::migrate(&source, &destination).expect("the migration runs");
+    assert!(
+        report.passed(),
+        "the migration did not verify: {:?}",
+        report
+            .checks
+            .iter()
+            .filter(|check| !check.passed)
+            .collect::<Vec<_>>()
+    );
+    assert!(destination.is_file(), "the migration published nothing");
+    // The full-text table is reported as carried rather than left to be
+    // noticed missing.
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|check| check.name == "carried.f" && check.passed),
+        "the fts5 table was not reported as carried"
+    );
+
+    let database =
+        inillucent_engine::connect::Database::open(&destination).expect("the migration opens");
+    let connection = database.connect();
+    let one = |sql: &str| -> Vec<Vec<OwnedDatum>> {
+        connection
+            .query(sql)
+            .unwrap_or_else(|error| panic!("{sql}: {error:?}"))
+    };
+
+    // The view is readable, not merely listed. It used to be both listed and
+    // unreadable, which is worse than being dropped.
+    assert_eq!(
+        quote_rows(&one("SELECT id, n FROM v ORDER BY id")),
+        vec!["1,'one'".to_string(), "2,'two'".to_string()],
+    );
+    // The full-text index searches, and the docids are the source's.
+    assert_eq!(
+        quote_rows(&one("SELECT rowid, body FROM f WHERE f MATCH 'fox'")),
+        vec!["1,'the quick brown fox'".to_string()],
+    );
+    assert_eq!(
+        quote_rows(&one("SELECT rowid, body FROM f WHERE f MATCH 'jumps'")),
+        vec!["2,'jumps over'".to_string()],
+    );
+    // The trigger fires.
+    connection
+        .execute_batch("INSERT INTO a(n) VALUES('five')")
+        .expect("the insert runs");
+    assert_eq!(quote_rows(&one("SELECT count(*) FROM log")), vec!["1"]);
+    // And the key it was given is past the source's high-water mark rather
+    // than back in the gap the DELETE left.
+    assert_eq!(
+        quote_rows(&one("SELECT id FROM a ORDER BY id")),
+        vec!["1".to_string(), "2".to_string(), "5".to_string()],
+        "AUTOINCREMENT reused a deleted key, so sqlite_sequence was not carried"
+    );
+    // The things that already worked, so a fix to one does not cost another.
+    assert_eq!(
+        quote_rows(&one("SELECT k, val FROM wr ORDER BY k")),
+        vec!["'x','1'".to_string(), "'y','2'".to_string()],
+    );
+    assert_eq!(
+        quote_rows(&one("SELECT a, b FROM g ORDER BY a")),
+        vec!["3,6".to_string(), "4,8".to_string()],
+    );
+    let plan = quote_rows(&one("EXPLAIN QUERY PLAN SELECT a FROM g WHERE a > 3")).join(" ");
+    assert!(
+        plan.contains("pg"),
+        "the partial index did not survive: {plan}"
+    );
+    connection
+        .execute_batch("PRAGMA foreign_keys=ON")
+        .expect("keys are enabled");
+    assert!(
+        connection
+            .execute_batch("INSERT INTO child VALUES(9, 99)")
+            .is_err(),
+        "the foreign key did not survive the migration"
+    );
+}
+
+/// Renders rows the way `quote_row` does, for comparison in a test.
+///
+/// @param rows - the rows to render
+fn quote_rows(rows: &[Vec<OwnedDatum>]) -> Vec<String> {
+    rows.iter().map(|row| quote_row(row)).collect()
+}

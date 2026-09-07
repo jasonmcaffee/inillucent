@@ -152,30 +152,45 @@ pub fn inventory(path: &Path) -> DbResult<SqliteInventory> {
             error.message()
         ))
     })?;
-    // **Triggers are named, one by one, rather than skipped.** The new engine
-    // does not run them and refuses to store one, because a stored trigger that
-    // never fires is a database whose invariants are not maintained and whose
-    // owner is not told. A migration that dropped them quietly would move that
-    // silence from the engine into the tool.
-    //
-    // Named per object because that is the difference between an answer
-    // somebody can act on - "these three triggers cannot be carried, here they
-    // are" - and one they can only be annoyed by.
-    let carried_triggers: Vec<String> = schema
+    // The virtual tables the file declares, so their shadow tables can be told
+    // apart from an application's own.
+    let schema_names: Vec<String> = schema
         .iter()
-        .filter(|object| object.kind == "trigger")
-        .map(|object| object.name.clone())
+        .filter(|object| object.kind == "table" && object.sql.trim_start().len() > 6)
+        .filter(|object| {
+            object
+                .sql
+                .trim_start()
+                .get(..14)
+                .is_some_and(|head| head.eq_ignore_ascii_case("CREATE VIRTUAL"))
+        })
+        .map(|object| object.name.to_ascii_lowercase())
         .collect();
-    if !carried_triggers.is_empty() {
-        return Err(corrupt(format!(
-            "{}: the new engine does not run triggers, so these cannot be carried: {}.              Drop them in the source, or migrate without them and recreate the behaviour              they enforced in the application.",
-            path.display(),
-            carried_triggers.join(", ")
-        )));
-    }
+    // **Triggers are carried.** This used to refuse the whole migration and
+    // name them one by one, and the refusal was right while it stood: the new
+    // engine could store a trigger and list it in `sqlite_schema` but could not
+    // fire one, and a database whose invariants are maintained by nothing is a
+    // failure the owner finds out about from their data. task-1838 made
+    // triggers run, and every trigger case in `feature-comparison.md` agrees
+    // with SQLite - so since then the refusal has been the tool declining to do
+    // something the engine can do, which is the *only* reason
+    // `--sqlite-file` could not be pointed at an ordinary application's
+    // database. The import writes their `CREATE` text out of the table they are
+    // attached to; see `ImportedDatabase::import_into`.
     let mut tables = Vec::new();
     for object in schema {
-        if object.kind != "table" || object.root == 0 || object.name.starts_with("sqlite_") {
+        if object.kind != "table" || object.root == 0 {
+            continue;
+        }
+        // **The schema tables and a module's shadow tables are not the
+        // inventory's business.** `sqlite_sequence` is carried by the import as
+        // a *value* - the AUTOINCREMENT high-water mark - rather than as a
+        // table, and an FTS5 table's `f_data`, `f_idx`, `f_docsize` and
+        // `f_config` are the module's private storage, whose declarations use
+        // syntax no ordinary table has. Inventorying them was what answered
+        // "the declaration of f_data did not parse: database disk image is
+        // malformed" - a message that is not true and that nobody could act on.
+        if object.name.starts_with("sqlite_") || is_shadow_table(&schema_names, &object.name) {
             continue;
         }
         // The declaration, parsed by the same loader the import uses, because
@@ -276,6 +291,20 @@ pub fn migrate(source: &Path, destination: &Path) -> DbResult<Report> {
     })?;
     drop(built);
 
+    // **The full-text tables, rebuilt rather than copied.** An FTS5 table's
+    // rows live in `<name>_data`, `<name>_idx`, `<name>_docsize` and
+    // `<name>_config`, which are the module's private storage in SQLite's own
+    // format; this engine's FTS5 keeps a different one, so copying those pages
+    // across would produce a table that exists and cannot be searched. What
+    // *is* portable is the text: `<name>_content` holds it, and re-inserting it
+    // through this engine's own module builds an index this engine can read.
+    //
+    // The alternative was the refusal this replaces, which named the wrong
+    // thing anyway - "the declaration of `f_data` did not parse: database disk
+    // image is malformed", about a file that was neither malformed nor at
+    // fault.
+    let carried = rebuild_full_text(source, &staged)?;
+
     // **Opened from the file, not reopened from the handle.** The checks below
     // read a database whose schema was derived from bytes on a disk, by the
     // engine's own open path, in a pool that has never seen the import. A
@@ -289,7 +318,8 @@ pub fn migrate(source: &Path, destination: &Path) -> DbResult<Report> {
             error.message()
         ))
     })?;
-    let checks = verify_against(&inventory, &opened);
+    let mut checks = verify_against(&inventory, &opened);
+    checks.extend(carried);
     drop(opened);
 
     let report = Report {
@@ -503,4 +533,195 @@ fn staging_path(destination: &Path) -> PathBuf {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     directory.join(format!(".{name}.staging"))
+}
+
+/// Returns whether a table is one a virtual table owns rather than one the
+/// application declared.
+///
+/// A module's storage is named after the table it belongs to with a suffix:
+/// FTS5 keeps `<name>_data`, `<name>_idx`, `<name>_docsize`, `<name>_content`
+/// and `<name>_config`, and R*Tree keeps `<name>_node`, `<name>_rowid` and
+/// `<name>_parent`. Their declarations are the module's own and are not
+/// ordinary SQL, so parsing one and reporting that the file is malformed is
+/// both wrong and unhelpful. They are also not data an inventory should count:
+/// the rows they hold are an index of rows that are counted already.
+///
+/// @param virtual_tables - the folded names of the file's virtual tables
+/// @param name - the table being considered
+fn is_shadow_table(virtual_tables: &[String], name: &str) -> bool {
+    let folded = name.to_ascii_lowercase();
+    virtual_tables.iter().any(|owner| {
+        folded
+            .strip_prefix(owner.as_str())
+            .and_then(|rest| rest.strip_prefix('_'))
+            .is_some_and(|suffix| !suffix.is_empty())
+    })
+}
+
+/// Rebuilds the source's FTS5 tables in the migrated database, and says so.
+///
+/// One check per full-text table, so the report says what was carried and what
+/// was not rather than leaving the caller to notice a missing table. A virtual
+/// table using any *other* module is reported as not carried, with its module
+/// named: this engine has an R*Tree and a search table of its own, but their
+/// storage is not SQLite's and there is no content table to rebuild them from.
+///
+/// @param source - the SQLite file, read only
+/// @param staged - the migrated database, still under its staging name
+fn rebuild_full_text(source: &Path, staged: &Path) -> DbResult<Vec<Check>> {
+    let mut file = SqliteFile::open(source.to_path_buf())?;
+    let schema = file.schema()?;
+    let mut checks = Vec::new();
+    let mut work: Vec<(String, String, Vec<String>, Vec<Vec<OwnedDatum>>)> = Vec::new();
+    for object in &schema {
+        let Some(module) = virtual_module(&object.sql) else {
+            continue;
+        };
+        if !module.eq_ignore_ascii_case("fts5") {
+            checks.push(Check::failed(
+                &format!("carried.{}", object.name),
+                format!(
+                    "{} uses the {module} module, whose storage is SQLite's own; \
+                     this engine has no content table to rebuild it from"
+                ,
+                    object.name
+                ),
+            ));
+            continue;
+        }
+        let columns = fts5_columns(&object.sql);
+        if columns.is_empty() {
+            checks.push(Check::failed(
+                &format!("carried.{}", object.name),
+                format!("{}: no column could be read out of its declaration", object.name),
+            ));
+            continue;
+        }
+        let content = format!("{}_content", object.name);
+        let Some(held) = schema
+            .iter()
+            .find(|held| held.kind == "table" && held.name.eq_ignore_ascii_case(&content))
+        else {
+            // `content=''` and `content='other'` keep no copy of the text, so
+            // there is nothing here to rebuild from. Said rather than skipped.
+            checks.push(Check::failed(
+                &format!("carried.{}", object.name),
+                format!(
+                    "{} keeps no content table, so its text is not in this file to carry",
+                    object.name
+                ),
+            ));
+            continue;
+        };
+        // `<name>_content` is `id` plus one column per indexed column, in order.
+        let rows = file.read_table(held.root, columns.len().saturating_add(1))?;
+        work.push((object.name.clone(), object.sql.clone(), columns, rows));
+    }
+    if work.is_empty() {
+        return Ok(checks);
+    }
+    let database = inillucent_engine::connect::Database::open(staged)?;
+    let connection = database.connect();
+    for (name, sql, columns, rows) in work {
+        connection.execute_batch(&sql)?;
+        // **The docid moves with the row.** An application that stored the
+        // rowid an fts5 table handed it - which is what `<name>_content`'s `id`
+        // is, and what every search adapter joins on - would find it pointing
+        // at a different document if the rebuild renumbered.
+        let names = columns
+            .iter()
+            .map(|column| format!("\"{column}\""))
+            .collect::<Vec<String>>()
+            .join(", ");
+        let mut carried = 0u64;
+        for row in &rows {
+            // `read_table` prepends the cell's rowid, and the record then
+            // carries `id` (NULL, because it is the rowid alias) followed by
+            // `c0`, `c1`, ... - so the first indexed column is at 2.
+            let values = columns
+                .iter()
+                .enumerate()
+                .map(|(at, _)| sql_literal(row.get(at.saturating_add(2))))
+                .collect::<Vec<String>>()
+                .join(", ");
+            let docid = sql_literal(row.first());
+            connection.execute_batch(&format!(
+                "INSERT INTO \"{name}\"(rowid, {names}) VALUES ({docid}, {values})"
+            ))?;
+            carried = carried.saturating_add(1);
+        }
+        checks.push(Check::passed(
+            &format!("carried.{name}"),
+            format!("{carried} rows rebuilt through this engine's own fts5"),
+        ));
+    }
+    database.checkpoint()?;
+    Ok(checks)
+}
+
+/// Returns the module a `CREATE VIRTUAL TABLE` names, when the text is one.
+///
+/// @param sql - the declaration as the schema stored it
+fn virtual_module(sql: &str) -> Option<String> {
+    let text = sql.trim_start();
+    if !text
+        .get(..14)
+        .is_some_and(|head| head.eq_ignore_ascii_case("CREATE VIRTUAL"))
+    {
+        return None;
+    }
+    let at = text.to_ascii_lowercase().find(" using ")?;
+    let rest = text.get(at.saturating_add(7)..)?.trim_start();
+    let end = rest
+        .find(|byte: char| byte == '(' || byte.is_whitespace() || byte == ';')
+        .unwrap_or(rest.len());
+    Some(rest.get(..end)?.to_string())
+}
+
+/// Returns the column names an `fts5(...)` declaration indexes.
+///
+/// The arguments that are *not* options: `tokenize=`, `content=`, `prefix=` and
+/// the rest carry an `=` and name a setting rather than a column.
+///
+/// @param sql - the declaration as the schema stored it
+fn fts5_columns(sql: &str) -> Vec<String> {
+    let Some(open) = sql.find('(') else {
+        return Vec::new();
+    };
+    let Some(close) = sql.rfind(')') else {
+        return Vec::new();
+    };
+    let Some(inside) = sql.get(open.saturating_add(1)..close) else {
+        return Vec::new();
+    };
+    inside
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty() && !part.contains('='))
+        .map(|part| part.trim_matches(|byte| byte == '"' || byte == '\'' || byte == '`').to_string())
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+/// Renders one value as the SQL literal an `INSERT` can carry.
+///
+/// @param value - the value read out of the source's content table
+fn sql_literal(value: Option<&OwnedDatum>) -> String {
+    match value {
+        None | Some(OwnedDatum::Null) => "NULL".to_string(),
+        Some(OwnedDatum::Int(number)) => number.to_string(),
+        Some(OwnedDatum::Real(number)) => format!("{number:?}"),
+        Some(OwnedDatum::Text(bytes)) => {
+            let text = String::from_utf8_lossy(bytes).replace('\'', "''");
+            format!("'{text}'")
+        }
+        Some(OwnedDatum::Blob(bytes)) => {
+            let mut out = String::from("x'");
+            for byte in bytes {
+                out.push_str(&format!("{byte:02x}"));
+            }
+            out.push('\'');
+            out
+        }
+    }
 }
