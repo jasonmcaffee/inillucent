@@ -97,7 +97,7 @@ impl Redo for DryRun {
 }
 
 /// Where recovery starts and what it is recovering.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct RecoveryStart {
     /// The database's identity; a segment that disagrees is refused.
     pub uuid: u128,
@@ -107,6 +107,21 @@ pub struct RecoveryStart {
     pub sequence: u64,
     /// The commit timestamp watermark the checkpoint recorded.
     pub cts_watermark: u64,
+    /// Transactions whose `Commit` record must be read as absent.
+    ///
+    /// **A commit that spans two files is not decided inside either of them.**
+    /// One transaction writing a database and a database attached to it appends
+    /// a `Commit` to both logs, and neither record is the decision: the decision
+    /// is the deletion of a super-journal named beside the files, which is what
+    /// makes the two commit together or not at all. Recovery of one of those
+    /// files is therefore told which transactions were still in doubt when it
+    /// crashed, and reads their `Commit` records as the votes they are.
+    ///
+    /// Empty for every database that has never been attached to, which is the
+    /// same set as "every database whose caller has no super-journal to hand
+    /// this". A `Commit` for a transaction not named here is the decision, as
+    /// it always was.
+    pub doubtful: BTreeSet<u64>,
 }
 
 impl RecoveryStart {
@@ -119,6 +134,7 @@ impl RecoveryStart {
             checkpoint_lsn: FIRST_LSN,
             sequence: 1,
             cts_watermark: 0,
+            doubtful: BTreeSet::new(),
         }
     }
 }
@@ -174,8 +190,8 @@ pub fn recover(
     start: RecoveryStart,
     redo: &mut dyn Redo,
 ) -> DbResult<Recovered> {
-    let chain = read_chain(vfs, base, start)?;
-    let analysis = analyse(&chain, start)?;
+    let chain = read_chain(vfs, base, &start)?;
+    let analysis = analyse(&chain, &start)?;
     let mut outcome = Recovered {
         next_lsn: analysis.valid_end,
         sequence: analysis.last_sequence,
@@ -189,7 +205,7 @@ pub fn recover(
         catalog_changed: false,
         highest_txn: analysis.highest_txn,
     };
-    replay(&chain, start, &analysis, redo, &mut outcome)?;
+    replay(&chain, &start, &analysis, redo, &mut outcome)?;
     Ok(outcome)
 }
 
@@ -287,7 +303,7 @@ impl Chain {
 /// @param vfs - the file system
 /// @param base - the database file's path
 /// @param start - where to start
-fn read_chain(vfs: &dyn Vfs, base: &DbPath, start: RecoveryStart) -> DbResult<Chain> {
+fn read_chain(vfs: &dyn Vfs, base: &DbPath, start: &RecoveryStart) -> DbResult<Chain> {
     let name = base.as_path().to_string_lossy().to_string();
     let directory = base.as_path().parent().map(std::path::Path::to_path_buf);
     let mut segments = Vec::new();
@@ -359,7 +375,7 @@ struct Analysis {
 ///
 /// @param chain - the segments
 /// @param start - where the scan begins
-fn analyse(chain: &Chain, start: RecoveryStart) -> DbResult<Analysis> {
+fn analyse(chain: &Chain, start: &RecoveryStart) -> DbResult<Analysis> {
     let mut committed = BTreeSet::new();
     let mut aborted = BTreeSet::new();
     let mut open: BTreeMap<u64, ()> = BTreeMap::new();
@@ -440,7 +456,15 @@ fn analyse(chain: &Chain, start: RecoveryStart) -> DbResult<Analysis> {
             highest_txn = highest_txn.max(decoded.txn);
             match decoded.body {
                 Body::Commit { cts } => {
-                    committed.insert(decoded.txn);
+                    // **A vote is not a decision.** A transaction the caller
+                    // named as doubtful wrote more than one file and was
+                    // decided by a super-journal outside this log; if that
+                    // super-journal is still there, the decision never
+                    // happened, and this record has to be read as the vote it
+                    // was rather than replayed into half a transaction.
+                    if !start.doubtful.contains(&decoded.txn) {
+                        committed.insert(decoded.txn);
+                    }
                     latest_cts = latest_cts.max(cts);
                 }
                 Body::Abort => {
@@ -515,7 +539,7 @@ fn count_losers(
 /// @param outcome - the report to fill in
 fn replay(
     chain: &Chain,
-    start: RecoveryStart,
+    start: &RecoveryStart,
     analysis: &Analysis,
     redo: &mut dyn Redo,
     outcome: &mut Recovered,

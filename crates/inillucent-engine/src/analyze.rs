@@ -102,8 +102,9 @@ impl ImportedDatabase {
         let Some(tree) = self.trees.get(&root) else {
             return Ok(0);
         };
+        let pool = self.pool_of(root)?;
         let mut count = 0i64;
-        tree.visit_leaves(self.database.pool(), &mut |leaf| {
+        tree.visit_leaves(pool, &mut |leaf| {
             count = count.saturating_add(leaf.live_rows()? as i64);
             Ok(true)
         })?;
@@ -125,10 +126,11 @@ impl ImportedDatabase {
         };
         // `groups[n]` counts how many distinct values the first `n + 1` key
         // columns take, which is what the average is the reciprocal of.
+        let pool = self.pool_of(index.root)?;
         let mut groups = vec![0i64; width];
         let mut previous: Option<Vec<OwnedDatum>> = None;
         let mut entries = 0i64;
-        tree.visit_leaves(self.database.pool(), &mut |leaf| {
+        tree.visit_leaves(pool, &mut |leaf| {
             for row in leaf.live()? {
                 let current: Vec<OwnedDatum> =
                     row.iter().take(width).map(OwnedDatum::from_datum).collect();
@@ -188,12 +190,13 @@ impl ImportedDatabase {
             return Ok(());
         };
         let doomed: Vec<i64> = {
+            let pool = self.pool_of(root)?;
             let tree = self
                 .trees
                 .get(&root)
                 .ok_or_else(|| misuse("sqlite_stat1 has no tree"))?;
             let mut keys = Vec::new();
-            tree.visit_leaves(self.database.pool(), &mut |leaf| {
+            tree.visit_leaves(pool, &mut |leaf| {
                 for row in leaf.live()? {
                     let Some(Datum::Int(rowid)) = row.first().copied() else {
                         continue;
@@ -209,9 +212,15 @@ impl ImportedDatabase {
             keys
         };
         let txn = self.current_txn();
+        let at = self.schema_of(root);
+        let wal = self
+            .log_of(at)
+            .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
         let mut log = WalLog {
-            wal: &self.wal,
+            wal,
             txn,
+            schema: at,
+            wrote: false,
             undo: None,
         };
         let tree = self
@@ -238,12 +247,13 @@ impl ImportedDatabase {
             return Ok(());
         };
         let mut next = {
+            let pool = self.pool_of(root)?;
             let tree = self
                 .trees
                 .get(&root)
                 .ok_or_else(|| misuse("sqlite_stat1 has no tree"))?;
             let mut highest = 0i64;
-            tree.visit_leaves(self.database.pool(), &mut |leaf| {
+            tree.visit_leaves(pool, &mut |leaf| {
                 for row in leaf.live()? {
                     if let Some(Datum::Int(rowid)) = row.first().copied() {
                         highest = highest.max(rowid);
@@ -254,9 +264,15 @@ impl ImportedDatabase {
             highest.saturating_add(1)
         };
         let txn = self.current_txn();
+        let at = self.schema_of(root);
+        let wal = self
+            .log_of(at)
+            .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
         let mut log = WalLog {
-            wal: &self.wal,
+            wal,
             txn,
+            schema: at,
+            wrote: false,
             undo: None,
         };
         let tree = self
@@ -296,8 +312,11 @@ impl ImportedDatabase {
         let Some(tree) = self.trees.get(&root) else {
             return Vec::new();
         };
+        let Ok(pool) = self.pool_of(root) else {
+            return Vec::new();
+        };
         let mut out = Vec::new();
-        let _ = tree.visit_leaves(self.database.pool(), &mut |leaf| {
+        let _ = tree.visit_leaves(pool, &mut |leaf| {
             for row in leaf.live()? {
                 let matches = matches!(row.get(1), Some(Datum::Text(name)) if *name == table);
                 if !matches {

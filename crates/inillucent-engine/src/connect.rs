@@ -117,8 +117,35 @@ impl Database {
     }
 
     /// Returns a connection to this database.
+    ///
+    /// **Each one is its own session, and that is what `temp` is scoped to.** A
+    /// temporary table belongs to the connection that made it and to no other,
+    /// which is SQLite's rule and is graded against it - so a connection is a
+    /// number the engine can tell apart, rather than a borrow that is
+    /// indistinguishable from every other borrow.
     pub fn connect(&self) -> Connection<'_> {
-        Connection { database: self }
+        let session = self.engine.borrow().open_session();
+        Connection {
+            database: self,
+            session,
+        }
+    }
+
+    /// Returns a connection that is a continuation of an earlier one.
+    ///
+    /// **For a caller that hands out connections per call over one logical
+    /// connection**, which `inillucent-compat`'s facade does: it opens a
+    /// short-lived engine connection per statement because the suites return
+    /// connections from helper functions, and every one of those has to be the
+    /// same session or a temporary table would not survive the statement that
+    /// made it.
+    ///
+    /// @param session - the number an earlier `connect` returned
+    pub fn connect_as(&self, session: u64) -> Connection<'_> {
+        Connection {
+            database: self,
+            session,
+        }
     }
 
     /// Returns the file this database is in.
@@ -176,19 +203,46 @@ impl Database {
 /// held a pool over one file would be two page caches over one set of bytes.
 pub struct Connection<'d> {
     database: &'d Database,
+    /// Which connection this is, which is what `temp` is resolved against.
+    session: u64,
+}
+
+impl Connection<'_> {
+    /// Returns this connection's own number.
+    pub fn session(&self) -> u64 {
+        self.session
+    }
 }
 
 impl<'d> Connection<'d> {
+    /// Returns the engine, having told it which connection is asking.
+    ///
+    /// Every entry point goes through one of these two, because `temp` means
+    /// "this connection's temporary database" and there is no other way for the
+    /// engine to know which connection that is.
+    ///
+    /// **Mutable even for the read-only calls**, because telling the engine
+    /// whose statement this is can change the schema it derives: a connection
+    /// that has its own temporary tables sees a different set from the one
+    /// before it, and a binder handed the previous connection's is the leak
+    /// `temp` exists to prevent.
+    fn engine(&self) -> std::cell::RefMut<'_, ImportedDatabase> {
+        self.engine_mut()
+    }
+
+    /// Returns the engine, having told it which connection is asking.
+    fn engine_mut(&self) -> std::cell::RefMut<'_, ImportedDatabase> {
+        let mut held = self.database.engine.borrow_mut();
+        held.use_session(self.session);
+        held
+    }
+
     /// Runs one or more statements for their effect.
     ///
     /// @param sql - the statements, separated by semicolons
     pub fn execute_batch(&self, sql: &str) -> DbResult<()> {
         for statement in split_statements(sql) {
-            let outcome = self
-                .database
-                .engine
-                .borrow_mut()
-                .execute_any(&statement, &Params::new())?;
+            let outcome = self.engine_mut().execute_any(&statement, &Params::new())?;
             self.database.changes.set(outcome.changes.rows as i64);
         }
         Ok(())
@@ -206,7 +260,7 @@ impl<'d> Connection<'d> {
     /// @param sql - the statement
     /// @param params - the values bound to `?1`, `?2`, ...
     pub fn query_with(&self, sql: &str, params: &Params) -> DbResult<Vec<Vec<OwnedDatum>>> {
-        let outcome = self.database.engine.borrow_mut().execute_any(sql, params)?;
+        let outcome = self.engine_mut().execute_any(sql, params)?;
         self.database.changes.set(outcome.changes.rows as i64);
         Ok(outcome.rows)
     }
@@ -220,7 +274,7 @@ impl<'d> Connection<'d> {
     ///
     /// @param sql - the script, positioned at the statement to compile
     pub fn prepare_with_tail(&self, sql: &str) -> DbResult<(Statement<'d>, usize)> {
-        let consumed = self.database.engine.borrow().statement_length(sql)?;
+        let consumed = self.engine().statement_length(sql)?;
         let head = sql.get(..consumed).unwrap_or(sql);
         Ok((self.prepare(head)?, consumed))
     }
@@ -232,7 +286,7 @@ impl<'d> Connection<'d> {
     ///
     /// @param sql - the statement
     pub fn explain(&self, sql: &str) -> DbResult<Vec<String>> {
-        Ok(self.database.engine.borrow().plan(sql)?.describe())
+        Ok(self.engine().plan(sql)?.describe())
     }
 
     /// Registers a scalar an application defined, replacing one of the same
@@ -253,9 +307,7 @@ impl<'d> Connection<'d> {
         flags: inillucent_ext::registry::FunctionFlags,
         body: inillucent_ext::registry::ScalarBody,
     ) -> DbResult<()> {
-        self.database
-            .engine
-            .borrow_mut()
+        self.engine_mut()
             .create_scalar_function(name, arity, flags, body)
     }
 
@@ -272,9 +324,7 @@ impl<'d> Connection<'d> {
         flags: inillucent_ext::registry::FunctionFlags,
         body: inillucent_ext::registry::AggregateBody,
     ) -> DbResult<()> {
-        self.database
-            .engine
-            .borrow_mut()
+        self.engine_mut()
             .create_aggregate_function(name, arity, flags, body)
     }
 
@@ -283,10 +333,7 @@ impl<'d> Connection<'d> {
     /// @param name - the name it was registered under
     /// @param arity - the arity it was registered for
     pub fn remove_function(&self, name: &str, arity: i32) -> bool {
-        self.database
-            .engine
-            .borrow_mut()
-            .remove_function(name, arity)
+        self.engine_mut().remove_function(name, arity)
     }
 
     /// Registers a collating sequence an application defined.
@@ -298,42 +345,36 @@ impl<'d> Connection<'d> {
         name: &str,
         comparator: inillucent_value::collation::Comparator,
     ) -> DbResult<()> {
-        self.database
-            .engine
-            .borrow_mut()
-            .create_collation(name, comparator)
+        self.engine_mut().create_collation(name, comparator)
     }
 
     /// Returns how many statements are compiled and held.
     pub fn cached_plan_count(&self) -> usize {
-        self.database.engine.borrow().cached_plan_count()
+        self.engine().cached_plan_count()
     }
 
     /// Turns off one or more planner optimizations for this connection.
     ///
     /// @param mask - the levers to switch off
     pub fn disable_optimizations(&self, mask: u32) {
-        self.database
-            .engine
-            .borrow_mut()
-            .disable_optimizations(mask);
+        self.engine_mut().disable_optimizations(mask);
     }
 
     /// Rereads the schema from the file.
     pub fn reload_schema(&self) -> DbResult<()> {
-        self.database.engine.borrow_mut().reload_catalog()
+        self.engine_mut().reload_catalog()
     }
 
     /// Returns the schema's generation, which changes when the schema does.
     pub fn schema_cookie(&self) -> u64 {
-        self.database.engine.borrow().schema_generation()
+        self.engine().schema_generation()
     }
 
     /// Compiles a statement to be bound and stepped.
     ///
     /// @param sql - the statement
     pub fn prepare(&self, sql: &str) -> DbResult<Statement<'d>> {
-        let compiled = self.database.engine.borrow().prepare_statement(sql)?;
+        let compiled = self.engine().prepare_statement(sql)?;
         Ok(Statement {
             database: self.database,
             compiled,
@@ -343,6 +384,7 @@ impl<'d> Connection<'d> {
             at: 0,
             run: false,
             changed: 0,
+            session: self.session,
         })
     }
 
@@ -361,19 +403,27 @@ impl<'d> Connection<'d> {
 
     /// Returns how many rows every statement so far has changed.
     pub fn total_changes(&self) -> i64 {
-        self.database.engine.borrow().total_changes()
+        self.engine().total_changes()
     }
 
     /// Returns the rowid the last `INSERT` assigned.
     pub fn last_insert_rowid(&self) -> i64 {
-        self.database.engine.borrow().last_insert_rowid()
+        self.engine().last_insert_rowid()
+    }
+
+    /// Returns how many databases the last commit was decided over.
+    ///
+    /// One for an ordinary statement; two or more for a transaction that wrote
+    /// two files and was therefore committed through a super-journal.
+    pub fn decided_over(&self) -> usize {
+        self.engine().decided_over()
     }
 
     /// Returns whether every statement is its own transaction.
     ///
     /// `false` between a `BEGIN` and its `COMMIT`.
     pub fn autocommit(&self) -> bool {
-        self.database.engine.borrow().autocommit()
+        self.engine().autocommit()
     }
 }
 
@@ -404,6 +454,8 @@ pub struct Statement<'d> {
     run: bool,
     /// How many rows the last execution changed.
     changed: usize,
+    /// The connection it was compiled on.
+    session: u64,
 }
 
 impl Statement<'_> {
@@ -459,11 +511,12 @@ impl Statement<'_> {
     /// Returns whether a row is available to [`Statement::row`].
     pub fn step(&mut self) -> DbResult<bool> {
         if !self.run {
-            let outcome = self
-                .database
-                .engine
-                .borrow_mut()
-                .execute_statement(&self.compiled, &self.params)?;
+            let mut held = self.database.engine.borrow_mut();
+            // The statement runs on the connection that compiled it, because
+            // `temp` means that connection's temporary database and the plan was
+            // bound against it.
+            held.use_session(self.session);
+            let outcome = held.execute_statement(&self.compiled, &self.params)?;
             self.changed = outcome.changes.rows;
             self.database.changes.set(self.changed as i64);
             self.names = outcome.names;

@@ -113,8 +113,21 @@ pub struct SourceLayout {
 
 /// Where the executor finds its trees, its layouts and its pages.
 pub trait TreeCatalog {
-    /// Returns the buffer pool the trees' pages live in.
-    fn pool(&self) -> &Pool;
+    /// Returns the buffer pool one tree's pages live in.
+    ///
+    /// **Per tree, because a connection is a set of databases.** `ATTACH` gives
+    /// a connection a second file with a second pool, and a join across the two
+    /// reads both inside one statement - so the question "which pool" has no
+    /// answer until a tree is named. There is deliberately no defaulted
+    /// `pool()` to fall back on: a call site that could not say which tree it
+    /// was about would be right only while there was one file, which is exactly
+    /// the assumption this method exists to remove.
+    ///
+    /// `None` for a root no schema holds, which the caller turns into a refusal
+    /// rather than reading somebody else's page two.
+    ///
+    /// @param root - the handle the plan named
+    fn pool_for(&self, root: u32) -> Option<&Pool>;
 
     /// Returns the tree a plan's root page id refers to.
     ///
@@ -267,8 +280,8 @@ struct WithQueue<'a> {
 }
 
 impl TreeCatalog for WithQueue<'_> {
-    fn pool(&self) -> &Pool {
-        self.inner.pool()
+    fn pool_for(&self, root: u32) -> Option<&Pool> {
+        self.inner.pool_for(root)
     }
 
     fn tree(&self, root: u32) -> Option<&PagedTree> {
@@ -742,8 +755,14 @@ pub struct Pipeline<'t> {
     /// That is why only this one box carries a lifetime and none of the
     /// operators in [`crate::ops`] had to grow one.
     pub head: Box<dyn Sink + 't>,
-    /// The pool the source's pages live in.
-    pub pool: &'t Pool,
+    /// The pool the source's pages live in, when the source reads a tree.
+    ///
+    /// `None` for a source that is already rows - a materialised subquery, a
+    /// module's answer, a recursive queue, `VALUES`, or a query with no FROM
+    /// term. Those read no page, so there is no file they belong to, and
+    /// handing them some other schema's pool to ignore would be a lie the type
+    /// could not catch.
+    pub pool: Option<&'t Pool>,
 }
 
 impl Pipeline<'_> {
@@ -790,18 +809,31 @@ pub enum Source<'t> {
     Constant(usize),
 }
 
+/// Returns the pool a source that reads a tree must have been given.
+///
+/// @param pool - what the pipeline carried
+fn needs_pool(pool: Option<&Pool>) -> DbResult<&Pool> {
+    pool.ok_or_else(|| misuse("this source reads a tree no attached database holds"))
+}
+
 impl Source<'_> {
     /// Drives the source until the pipeline is done.
     ///
-    /// @param pool - the buffer pool
+    /// @param pool - the pool the source's tree lives in, when it reads one
     /// @param downstream - the head of the operator chain
-    pub fn run(&self, pool: &Pool, downstream: &mut dyn Sink) -> DbResult<()> {
+    pub fn run(&self, pool: Option<&Pool>, downstream: &mut dyn Sink) -> DbResult<()> {
+        // **Asked for by the arms that read pages, and by no others.** `Rows`
+        // and `Constant` are already materialised, so a pool would be a
+        // parameter they ignore; a source that does read a tree with no pool
+        // behind it is a plan naming a schema this connection does not hold,
+        // which is a refusal rather than a page read out of the wrong file.
         match self {
-            Source::Scan(scan) => scan.run(pool, downstream),
-            Source::Span(scan) => scan.run(pool, downstream),
-            Source::Reverse(scan) => scan.run(pool, downstream),
-            Source::Skip(scan) => scan.run(pool, downstream),
+            Source::Scan(scan) => scan.run(needs_pool(pool)?, downstream),
+            Source::Span(scan) => scan.run(needs_pool(pool)?, downstream),
+            Source::Reverse(scan) => scan.run(needs_pool(pool)?, downstream),
+            Source::Skip(scan) => scan.run(needs_pool(pool)?, downstream),
             Source::Point(probe, key) => {
+                let pool = needs_pool(pool)?;
                 // The borrows go on the stack. A seek key is one column in
                 // every rowid table and at most a handful in any index, and
                 // collecting them was one allocation per execution on the
@@ -822,6 +854,7 @@ impl Source<'_> {
                 probe.run(pool, borrowed, downstream)
             }
             Source::Vector(probe, keys) => {
+                let pool = needs_pool(pool)?;
                 // One descent per candidate, and the candidates are already the
                 // few the index chose - so this is `k` probes rather than a
                 // scan, which is the whole point of the path.
@@ -1528,7 +1561,7 @@ pub fn build_prepared<'t>(
         Pipeline {
             source,
             head: chain.head,
-            pool: catalog.pool(),
+            pool: source_pool(catalog, prepared),
         },
         Shape {
             names: chain.names,
@@ -2094,8 +2127,8 @@ pub struct Statement<'t> {
     held: HeldSpace,
     /// The operator chain, built once.
     head: Box<dyn Sink + 't>,
-    /// The pool the source's pages live in.
-    pool: &'t Pool,
+    /// The pool the source's pages live in, when the source reads a tree.
+    pool: Option<&'t Pool>,
     /// The statement's constant `LIMIT`, which the source may use.
     limit: Option<usize>,
     /// What the statement produces.
@@ -2174,17 +2207,31 @@ pub fn build_statement<'t>(
     operators.push(describe_source(&prepared));
     operators.reverse();
     let names = chain.names;
+    let pool = source_pool(catalog, &prepared);
     Ok(Statement {
         plan,
         catalog,
         prepared,
         held,
         head: chain.head,
-        pool: catalog.pool(),
+        pool,
         limit: chain.limit,
         shape: Shape { names, operators },
         rebindable,
     })
+}
+
+/// Returns the pool the source stage's tree lives in, when it reads one.
+///
+/// **The source is a stage, so its pool travels with it like every other
+/// stage's.** A pipeline has exactly one source and therefore exactly one
+/// source pool; every other stage that touches a tree - the inner side of an
+/// index nested loop, a materialised subquery - asks for its own.
+///
+/// @param catalog - where the trees and their pools come from
+/// @param prepared - the structural choices `prepare` made
+fn source_pool<'t>(catalog: &'t dyn TreeCatalog, prepared: &Prepared) -> Option<&'t Pool> {
+    catalog.pool_for(prepared.stages.first()?.root)
 }
 
 /// Returns what drives a pipeline, and the line `EXPLAIN` prints for it.
@@ -2473,7 +2520,12 @@ fn build_nested<'t>(
     Ok(Box::new(IndexNestedLoopJoin::new(
         JoinKind::Inner,
         tree,
-        catalog.pool(),
+        // **This stage's pool, not the pipeline's.** The inner side of an index
+        // nested loop is where a join across two databases reaches the second
+        // file, so the pool travels with the stage that reads it.
+        catalog.pool_for(stage.root).ok_or_else(|| {
+            misuse("the inner side of a join names a database this connection does not hold")
+        })?,
         compiled,
         Projection::all(stage.width),
         full_key,
@@ -2601,7 +2653,10 @@ fn materialise_stage(
                 .ok_or_else(|| misuse(format!("no tree imported for root page {}", stage.root)))?;
             let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
             let mut sink = CollectInto::new(std::rc::Rc::clone(&collected));
-            FullScan::new(tree, Projection::all(stage.width)).run(catalog.pool(), &mut sink)?;
+            let pool = catalog.pool_for(stage.root).ok_or_else(|| {
+                misuse("a materialised stage names a database this connection does not hold")
+            })?;
+            FullScan::new(tree, Projection::all(stage.width)).run(pool, &mut sink)?;
             let rows = collected.borrow().clone();
             Ok(rows)
         }

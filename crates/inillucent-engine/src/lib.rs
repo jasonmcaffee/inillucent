@@ -77,8 +77,10 @@
 //! bound expression can find its vector.
 
 pub mod analyze;
+pub mod attach;
 pub mod connect;
 pub mod ddl;
+pub mod multi;
 pub mod pragma;
 pub mod vtab;
 
@@ -185,7 +187,7 @@ pub struct ImportedDatabase {
     ///
     /// Keyed by the statement text, which is what a caller re-issues. Behind an
     /// `Rc` so an entry can be held across the `&mut self` a write needs.
-    statements: std::cell::RefCell<HashMap<u32, HashMap<String, std::rc::Rc<Cached>>>>,
+    statements: std::cell::RefCell<HashMap<u64, HashMap<String, std::rc::Rc<Cached>>>>,
     /// The transaction every statement joins, when one has been opened.
     ///
     /// `None` is autocommit: each statement is its own transaction and pays for
@@ -198,7 +200,35 @@ pub struct ImportedDatabase {
     ///
     /// Empty outside a transaction, and never filled there: an autocommit
     /// statement cannot be rolled back, so it records nothing.
-    undo: Vec<Before>,
+    ///
+    /// **Behind a cell because a statement now has several logs.** One write can
+    /// touch `main` and a `TEMP` table in the same breath, each through its own
+    /// log, and all of them append here - so they hold it shared and take the
+    /// cell when they have something to record, rather than one of them holding
+    /// it mutably and the others going without.
+    undo: std::cell::RefCell<Vec<Before>>,
+    /// How many schemas the last commit was decided over.
+    ///
+    /// **The instrument for the one claim about this protocol that is otherwise
+    /// invisible**: that a transaction which wrote one file does not pay for a
+    /// super-journal. The files a two-file commit writes are deleted by the
+    /// commit itself, so a directory listing afterwards cannot tell the two
+    /// paths apart - and the first version of `seal` did take the two-file path
+    /// for a one-file insert, silently. On the harness's own side, like
+    /// `index_stages`, and nothing in the engine reads it.
+    decided_over: std::cell::Cell<usize>,
+    /// Which schemas the open transaction has written, one bit per schema.
+    ///
+    /// **The participant set a cross-file commit is decided over.** A
+    /// transaction that wrote one file commits by appending one record, as it
+    /// always has; one that wrote two is decided by a super-journal, and this is
+    /// what says which it is. Cleared at every commit and every rollback.
+    ///
+    /// A mask rather than a set, because it is written on **every** statement
+    /// and a `BTreeSet` allocates a node the first time each one is inserted
+    /// into. Twelve bits is `main`, `temp` and the ten databases
+    /// [`MAX_ATTACHED`] allows, which is every schema a connection can hold.
+    touched: u16,
     /// Named savepoints, and where each one sits in `undo`.
     marks: Vec<(Vec<u8>, usize)>,
     /// The rowid the last `INSERT` assigned, for `last_insert_rowid`.
@@ -319,11 +349,517 @@ pub struct ImportedDatabase {
     /// the TDD's "every plan cache is invalidated" made into two lines that
     /// cannot get out of step.
     catalog_generation: u64,
+
+    /// The databases `ATTACH` has added beside the one this was opened on.
+    ///
+    /// **`main` is not one of these, deliberately.** The file a connection was
+    /// opened on is not optional: it cannot be detached, it cannot be attached
+    /// over, and it is the coordinator a cross-file commit is decided by. Every
+    /// field above - `database`, `wal`, `entries`, `next_root` - is `main`'s,
+    /// unchanged, which is what makes a connection that never attached anything
+    /// the connection it was before `ATTACH` existed.
+    ///
+    /// Empty on almost every connection, and the read and write paths both
+    /// check that before they look anything up.
+    ///
+    /// Numbered from **two**, because `temp` takes one. That is SQLite's own
+    /// layout - `main`, `temp`, then the attachments in order - and taking it
+    /// here is what lets `temp` be per connection without renumbering anything:
+    /// schema one is *the running session's* temporary database, whichever that
+    /// is, and every attachment keeps the number it was bound under.
+    attached: Vec<Attached>,
+    /// One temporary database per connection that has asked for one.
+    ///
+    /// **All at schema number one, told apart by whose they are.** A temporary
+    /// object is one connection's own - `each_connection_has_its_own_temporary_database`
+    /// grades exactly that against SQLite - so two connections' `temp.t` are two
+    /// tables, and a statement reaches whichever belongs to the session running
+    /// it.
+    temps: Vec<Attached>,
+    /// The session the statement now running belongs to.
+    ///
+    /// Set by every entry point from the connection that called it, so that
+    /// `temp` resolves to that connection's temporary database and to no other.
+    session: std::cell::Cell<u64>,
+    /// The number the next connection takes.
+    next_session: std::cell::Cell<u64>,
+    /// The session `tables` and `catalog` were last derived for.
+    ///
+    /// **A connection's schema is its own.** `tables` holds the running
+    /// session's temporary tables beside the shared ones, so when the session
+    /// changes the derivation has to run again - once, on the change, rather
+    /// than per statement. A connection that is the only one costs one
+    /// comparison.
+    tables_session: u64,
+    /// Which schema each tree handle belongs to, for handles that are not
+    /// `main`'s.
+    ///
+    /// Numbered as the binder numbers schemas: 0 is `main`, and *n* is
+    /// `attached[n - 1]`. `main`'s handles are deliberately absent - a handle
+    /// this map does not hold is `main`'s, which is what keeps a one-file
+    /// connection's lookup a miss on an empty map rather than a hit on a full
+    /// one.
+    owner: HashMap<u32, usize>,
+    /// The handle the next tree of an attached database is registered under.
+    next_handle: u32,
+    /// Which schema the DDL statement now running is about.
+    ///
+    /// **Statement-scoped, and set from the statement's own words.** Every DDL
+    /// directive the binder produces carries a `database` - `CREATE TABLE
+    /// aux.t` binds to one, `CREATE TEMP TABLE t` to another - and the
+    /// primitives a schema change is built out of (`allocate_root`, `record`,
+    /// `build_tree`, `seal`, `release_tree`) all have to write into that file
+    /// rather than into `main`.
+    ///
+    /// It is a field rather than a parameter because those primitives are
+    /// reached from forty call sites through a dozen intermediate functions,
+    /// and a parameter threaded through all of them is forty chances to pass
+    /// the wrong one. `execute_ddl` sets it from the directive and puts it back
+    /// afterwards, so nothing outside one statement can observe it as anything
+    /// but zero.
+    ddl_schema: usize,
+}
+
+/// A database file this connection has attached beside the one it was opened
+/// on, or its own temporary database.
+///
+/// One file, one pool, one log, one local tree numbering - the same shape
+/// `ImportedDatabase` has for `main`, held apart so that the two cannot be
+/// confused. What a statement names it by is [`Attached::name`]; what a *plan*
+/// names its trees by is a connection-wide handle, which is not this file's
+/// business and is not written into it.
+struct Attached {
+    /// The name a statement qualifies with.
+    name: Vec<u8>,
+    /// The file, or `None` for `temp` and for `:memory:`.
+    path: Option<PathBuf>,
+    /// The file system this schema's file and log live on.
+    ///
+    /// `OsVfs` for an ordinary attachment; a `MemoryVfs` of its own for `temp`
+    /// and for `:memory:`, which is what makes "nothing about a temporary table
+    /// reaches the file" a property of the type rather than of a convention.
+    ///
+    /// Held rather than used, because for a memory-backed schema it *is* the
+    /// storage: the bytes live in the `MemoryVfs`, so dropping it before the
+    /// pool that reads it would be dropping the database.
+    #[allow(dead_code)]
+    vfs: std::sync::Arc<dyn inillucent_vfs::Vfs>,
+    /// The pool, the meta page and the free map.
+    database: Database,
+    /// The log every change to this file is described in.
+    wal: std::rc::Rc<Wal>,
+    /// This file's catalog rows, with the handle each object's tree is under.
+    entries: Vec<Recorded>,
+    /// The identifier the next tree created *in this file* takes.
+    next_root: u32,
+    /// The handle each of this file's local tree identifiers is registered
+    /// under.
+    handles: HashMap<u64, u32>,
+    /// The handle this file's own `sqlite_schema` tree is read through.
+    catalog_handle: u32,
+    /// The `sqlite_schema` declaration this file's catalog is bound against.
+    schema_info: TableInfo,
+    /// The session this schema belongs to, when it is a temporary database.
+    ///
+    /// `None` for an `ATTACH`ed file, which every connection to this database
+    /// shares. `Some` for a `temp`, which is one connection's own and which no
+    /// other connection may name.
+    session: Option<u64>,
+}
+
+/// The schema a connection is always holding, and the one nothing can detach.
+const MAIN: usize = 0;
+
+/// Every schema a connection can hold fits in the participant mask.
+///
+/// **Checked by the compiler rather than by a comment**, because a schema past
+/// the sixteenth would take `schema_bit` past the end of a `u16` and be dropped
+/// from the participant set silently - which is a cross-file commit that thinks
+/// it is a single-file one.
+const _: () = assert!(FIRST_ATTACHED + MAX_ATTACHED <= 16);
+
+/// Returns the participant mask with one schema in it.
+///
+/// @param at - the schema, as the binder numbers them
+fn schema_bit(at: usize) -> u16 {
+    1u16.checked_shl(u32::try_from(at).unwrap_or(u32::MAX))
+        .unwrap_or(0)
+}
+
+/// Returns the schemas a participant mask holds, lowest first.
+///
+/// @param mask - the participant set
+fn schemas_in(mask: u16) -> impl Iterator<Item = usize> {
+    (0..16usize).filter(move |at| mask & schema_bit(*at) != 0)
+}
+
+/// The connection's own temporary database, which is schema one whether or not
+/// anything has been put in it.
+///
+/// **A fixed number, so that nothing renumbers.** SQLite's schemas are `main`,
+/// `temp`, then the attachments; keeping that layout means an attachment's
+/// number does not depend on whether a temporary database exists, and a plan
+/// bound before one was made is still a plan about the same files.
+const TEMP: usize = 1;
+
+/// The first schema number an `ATTACH`ed database can take.
+const FIRST_ATTACHED: usize = 2;
+
+impl ImportedDatabase {
+    /// Starts this connection's transaction counter above a number a log holds.
+    ///
+    /// **One counter, and now more than one log.** A file this connection
+    /// attaches may hold higher transaction numbers than anything it has
+    /// issued, and a number reused across the two would make a crashed run's
+    /// records replay under a live transaction's commit - the resurrection
+    /// `inillucent-wal` documents `Recovered::highest_txn` for.
+    ///
+    /// @param highest - the highest number the file's log carries
+    fn raise_transactions_past(&self, highest: u64) {
+        let next = highest.saturating_add(1);
+        if self.next_txn.get() < next {
+            self.next_txn.set(next);
+        }
+    }
+
+    /// Returns the transactions one file's `Commit` records do not decide.
+    ///
+    /// @param path - the file about to be recovered
+    fn doubt_for(&self, path: &DbPath) -> DbResult<std::collections::BTreeSet<u64>> {
+        multi::doubtful_transactions(path.as_path())
+    }
+
+    /// Returns the file behind one schema, when it has one.
+    ///
+    /// `None` for a temporary database and for `:memory:`, which is what makes
+    /// them exempt from the super-journal: a file that is gone with the
+    /// connection has no recovery to be in doubt about.
+    ///
+    /// @param at - the schema, as the binder numbers them
+    fn path_of(&self, at: usize) -> Option<PathBuf> {
+        if at == MAIN {
+            return Some(self.path.clone());
+        }
+        self.schema_at(at).and_then(|held| held.path.clone())
+    }
+}
+
+/// Returns one schema's file, given the two places a connection keeps them.
+///
+/// **A free function rather than a method, because of what a method would
+/// borrow.** A write holds the file, the trees and the undo buffer at the same
+/// instant; a `&mut self` method handing back the file would borrow all three,
+/// and the borrow checker would be right to refuse. Taking the two fields
+/// separately is what lets it see that they are disjoint - the same reason
+/// `WriteView` names its borrows one at a time.
+///
+/// @param main - the database the connection was opened on
+/// @param attached - the databases `ATTACH` added beside it
+/// @param at - the schema, as the binder numbers them
+fn file_of<'a>(
+    main: &'a mut Database,
+    attached: &'a mut [Attached],
+    temps: &'a mut [Attached],
+    session: u64,
+    at: usize,
+) -> DbResult<&'a mut Database> {
+    if at == MAIN {
+        return Ok(main);
+    }
+    Ok(&mut schema_of_index(attached, temps, session, at)
+        .ok_or_else(|| misuse("a statement names a database that is not attached"))?
+        .database)
+}
+
+/// Returns the schema one number names, for one session.
+///
+/// `None` for `main`, which is not one of these, and for a number nothing holds.
+///
+/// @param attached - the databases `ATTACH` added
+/// @param temps - the temporary databases, one per connection that has one
+/// @param session - the connection the statement belongs to
+/// @param at - the schema, as the binder numbers them
+fn schema_of_index<'a>(
+    attached: &'a mut [Attached],
+    temps: &'a mut [Attached],
+    session: u64,
+    at: usize,
+) -> Option<&'a mut Attached> {
+    match at {
+        MAIN => None,
+        TEMP => temps.iter_mut().find(|held| held.session == Some(session)),
+        _ => attached.get_mut(at.saturating_sub(FIRST_ATTACHED)),
+    }
+}
+
+impl ImportedDatabase {
+    /// Returns which schema a tree handle belongs to; `MAIN` when it is
+    /// `main`'s.
+    ///
+    /// **A handle this connection has not attached anything under is `main`'s.**
+    /// The map holds only the handles of attached databases, so a connection
+    /// that has attached nothing answers without hashing anything at all - which
+    /// is what keeps this off the read path's bill.
+    ///
+    /// @param root - the handle
+    fn schema_of(&self, root: u32) -> usize {
+        if self.attached.is_empty() && self.temps.is_empty() {
+            return MAIN;
+        }
+        self.owner.get(&root).copied().unwrap_or(MAIN)
+    }
+
+    /// Returns every schema number this connection holds, for the running
+    /// session.
+    ///
+    /// `main` always; `temp` when this session has made one; then the
+    /// attachments in the order they arrived. Another session's temporary
+    /// database is not one of these, which is the whole of what makes it that
+    /// session's own.
+    fn schema_numbers(&self) -> Vec<usize> {
+        let mut numbers = vec![MAIN];
+        if self.schema_at(TEMP).is_some() {
+            numbers.push(TEMP);
+        }
+        for nth in 0..self.attached.len() {
+            numbers.push(FIRST_ATTACHED.saturating_add(nth));
+        }
+        numbers
+    }
+
+    /// Returns the session the statement now running belongs to.
+    pub fn session(&self) -> u64 {
+        self.session.get()
+    }
+
+    /// Makes the statements that follow belong to one connection.
+    ///
+    /// **Every entry point calls this, because `temp` means "this connection's
+    /// temporary database" and there is no other way to know which.** When the
+    /// connection changes, the schema is derived again: `tables` carries the
+    /// running session's temporary tables, and handing the next connection the
+    /// previous one's would be exactly the leak `temp` exists to prevent.
+    ///
+    /// A connection that is the only one pays one comparison per statement.
+    ///
+    /// @param session - the connection's number, from `open_session`
+    pub fn use_session(&mut self, session: u64) {
+        self.session.set(session);
+        if self.tables_session == session {
+            return;
+        }
+        self.tables_session = session;
+        // A statement compiled for another connection may name that
+        // connection's temporary trees, so it cannot be reused here either.
+        let _ = self.rebuild_tables();
+        self.refresh_catalog();
+    }
+
+    /// Returns a number for a connection that has just been opened.
+    pub fn open_session(&self) -> u64 {
+        let session = self.next_session.get();
+        self.next_session.set(session.saturating_add(1));
+        session
+    }
+
+    /// Makes the running session's temporary database, if it has not got one.
+    ///
+    /// **Lazily, because most connections never make a temporary object.** The
+    /// file is a `MemoryVfs` of its own, so nothing about it reaches the
+    /// directory the connection was opened in - which is what
+    /// `a_temporary_table_is_not_in_the_file` is about - and it goes when the
+    /// connection does.
+    fn ensure_temp(&mut self) -> DbResult<()> {
+        if self.schema_at(TEMP).is_some() {
+            return Ok(());
+        }
+        let session = self.session.get();
+        let vfs: std::sync::Arc<dyn inillucent_vfs::Vfs> =
+            std::sync::Arc::new(inillucent_vfs::memory::MemoryVfs::new());
+        let path = DbPath::from(format!("/temp/{session}.db").as_str());
+        self.attach_file(vfs, path, None, b"temp".to_vec(), Some(session))
+    }
+
+    /// Returns the schema one number names, for the session now running.
+    ///
+    /// `None` for `main`, which is held as this type's own fields rather than as
+    /// an element, and for a number nothing holds.
+    ///
+    /// @param at - the schema, as the binder numbers them
+    fn schema_at(&self, at: usize) -> Option<&Attached> {
+        match at {
+            MAIN => None,
+            TEMP => self
+                .temps
+                .iter()
+                .find(|held| held.session == Some(self.session.get())),
+            _ => self.attached.get(at.saturating_sub(FIRST_ATTACHED)),
+        }
+    }
+
+    /// Returns the schema one number names, to write into.
+    ///
+    /// @param at - the schema, as the binder numbers them
+    fn schema_at_mut(&mut self, at: usize) -> Option<&mut Attached> {
+        let session = self.session.get();
+        schema_of_index(&mut self.attached, &mut self.temps, session, at)
+    }
+
+    /// Returns one schema's file.
+    ///
+    /// Named `schema_file` rather than `file` because `ImportedDatabase::file`
+    /// already answers a different question - the path this database is in.
+    ///
+    /// @param at - the schema, as the binder numbers them
+    fn schema_file(&self, at: usize) -> Option<&Database> {
+        if at == MAIN {
+            return Some(&self.database);
+        }
+        self.schema_at(at).map(|held| &held.database)
+    }
+
+    /// Returns the pool one tree's pages live in.
+    ///
+    /// The same answer `TreeCatalog::pool_for` gives, as a refusal rather than
+    /// an `Option`, for the paths inside the engine that name a tree they have
+    /// just found and would have nothing sensible to do with a `None`.
+    ///
+    /// @param root - the tree's handle
+    fn pool_of(&self, root: u32) -> DbResult<&Pool> {
+        Ok(self
+            .schema_file(self.schema_of(root))
+            .ok_or_else(|| misuse("a tree names a database that is not attached"))?
+            .pool())
+    }
+
+    /// Returns one schema's log.
+    ///
+    /// Cloned rather than borrowed, because a write holds the file mutably at
+    /// the same instant and the log is an `Rc` whose clone is a refcount bump.
+    ///
+    /// @param at - the schema, as the binder numbers them
+    fn log_of(&self, at: usize) -> Option<std::rc::Rc<Wal>> {
+        if at == MAIN {
+            return Some(std::rc::Rc::clone(&self.wal));
+        }
+        self.schema_at(at).map(|held| std::rc::Rc::clone(&held.wal))
+    }
+
+    /// Returns one schema's catalog rows.
+    ///
+    /// @param at - the schema, as the binder numbers them
+    fn entries_of(&self, at: usize) -> &[Recorded] {
+        if at == MAIN {
+            return &self.entries;
+        }
+        match self.schema_at(at) {
+            Some(held) => &held.entries,
+            None => &[],
+        }
+    }
+
+    /// Returns one schema's catalog rows, to add to.
+    ///
+    /// @param at - the schema, as the binder numbers them
+    fn entries_of_mut(&mut self, at: usize) -> Option<&mut Vec<Recorded>> {
+        if at == MAIN {
+            return Some(&mut self.entries);
+        }
+        self.schema_at_mut(at).map(|held| &mut held.entries)
+    }
+
+    /// Returns the handle one schema's own `sqlite_schema` tree is read
+    /// through.
+    ///
+    /// @param at - the schema, as the binder numbers them
+    fn catalog_handle_of(&self, at: usize) -> u32 {
+        if at == MAIN {
+            return SCHEMA_VIEW_ROOT;
+        }
+        self.schema_at(at)
+            .map_or(SCHEMA_VIEW_ROOT, |held| held.catalog_handle)
+    }
+
+    /// Allocates the next tree of one schema: its file-local identifier and the
+    /// handle this connection will name it by.
+    ///
+    /// **Two numbers, because they mean two different things.** The identifier
+    /// is written into the file - it is in the catalog row and in every log
+    /// record the tree produces - so it comes from that file's own counter. The
+    /// handle is what a plan reads the tree through, is never written anywhere,
+    /// and has to be unique across every file this connection holds.
+    ///
+    /// For `main` they are the same number, which is what makes a one-file
+    /// connection's numbering the numbering it has always had.
+    ///
+    /// @param at - the schema, as the binder numbers them
+    fn allocate_in(&mut self, at: usize) -> DbResult<(u32, u32)> {
+        if at == MAIN {
+            let root = self.next_root;
+            if root >= FIRST_ATTACHED_HANDLE {
+                return Err(misuse(
+                    "this database holds too many objects for one connection to name them all",
+                ));
+            }
+            self.next_root = root.saturating_add(1);
+            return Ok((root, root));
+        }
+        let handle = self.next_handle;
+        if handle == u32::MAX {
+            return Err(misuse(
+                "this connection holds too many attached objects to name them all",
+            ));
+        }
+        self.next_handle = handle.saturating_add(1);
+        let held = self
+            .schema_at_mut(at)
+            .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
+        let local = held.next_root;
+        held.next_root = local.saturating_add(1);
+        held.handles.insert(u64::from(local), handle);
+        self.owner.insert(handle, at);
+        Ok((local, handle))
+    }
+
+    /// Returns the handle one file's local tree identifier is registered under.
+    ///
+    /// The identity for `main`, whose handles *are* its identifiers.
+    ///
+    /// @param at - the schema, as the binder numbers them
+    /// @param local - the identifier the file knows the tree by
+    fn handle_of(&self, at: usize, local: u64) -> Option<u32> {
+        if at == MAIN {
+            return u32::try_from(local).ok();
+        }
+        self.schema_at(at)
+            .and_then(|held| held.handles.get(&local).copied())
+    }
+
+    /// Returns the file-local identifier a handle's tree is known by in its own
+    /// file.
+    ///
+    /// The number the log records carry, which is the handle itself for `main`.
+    ///
+    /// @param at - the schema the handle belongs to
+    /// @param root - the handle
+    fn local_of(&self, at: usize, root: u32) -> u64 {
+        if at == MAIN {
+            return u64::from(root);
+        }
+        self.schema_at(at)
+            .and_then(|held| {
+                held.handles
+                    .iter()
+                    .find(|(_, handle)| **handle == root)
+                    .map(|(local, _)| *local)
+            })
+            .unwrap_or(u64::from(root))
+    }
 }
 
 impl TreeCatalog for ImportedDatabase {
-    fn pool(&self) -> &Pool {
-        self.database.pool()
+    fn pool_for(&self, root: u32) -> Option<&Pool> {
+        Some(self.schema_file(self.schema_of(root))?.pool())
     }
 
     fn tree(&self, root: u32) -> Option<&PagedTree> {
@@ -860,7 +1396,9 @@ impl ImportedDatabase {
             changed_ever: std::cell::Cell::new(0),
             statements: std::cell::RefCell::new(HashMap::new()),
             batch: std::cell::Cell::new(None),
-            undo: Vec::new(),
+            undo: std::cell::RefCell::new(Vec::new()),
+            touched: 0,
+            decided_over: std::cell::Cell::new(0),
             marks: Vec::new(),
             entries: entries
                 .into_iter()
@@ -888,6 +1426,14 @@ impl ImportedDatabase {
             index_stages: std::cell::Cell::new((0, 0, 0, 0, 0)),
             borrow_nanos: std::cell::Cell::new(0),
             catalog_generation: 0,
+            attached: Vec::new(),
+            temps: Vec::new(),
+            session: std::cell::Cell::new(0),
+            next_session: std::cell::Cell::new(1),
+            tables_session: 0,
+            owner: HashMap::new(),
+            next_handle: FIRST_ATTACHED_HANDLE,
+            ddl_schema: 0,
         })
     }
 
@@ -959,327 +1505,54 @@ impl ImportedDatabase {
     /// @param page_size - the page size the file was built at
     /// @param frames - how many frames the buffer pool holds
     pub fn open(path: PathBuf, page_size: usize, frames: usize) -> DbResult<ImportedDatabase> {
-        let vfs = OsVfs::new();
+        let vfs: std::sync::Arc<dyn inillucent_vfs::Vfs> = std::sync::Arc::new(OsVfs::new());
         let db_path = DbPath::new(path.to_string_lossy().as_ref());
-        let database = Database::open(&vfs, &db_path, frames.max(64))?;
-
-        // **Recovery.** The log is replayed into the file before anything is
-        // read out of it, which is what makes this an open rather than a
-        // reader of whatever the last checkpoint happened to leave behind.
+        // **A file opened as `main` asks the same question an attached one
+        // does.** A database this connection is opened on may have been the
+        // participant of a cross-file commit that a crash caught undecided, and
+        // there is nothing about being `main` that settles it.
+        let doubtful = multi::doubtful_transactions(&path)?;
+        let opened_file = open_file(&vfs, &db_path, frames, &doubtful)?;
+        let OpenedFile {
+            database,
+            wal,
+            catalog_tree,
+            highest_txn,
+        } = opened_file;
+        // **One derivation for every file this connection can name.** The
+        // shapes are read out of the catalog tree by `load_schema`, which is
+        // the same function `ATTACH` uses - so a file opened as `main` and the
+        // same file attached as `aux` are planned against identical
+        // declarations rather than against two derivations that agree today.
         //
-        // It could not be done until task-1834 put a tree's identifier in the
-        // catalog. `TreeRows` is keyed by that identifier, every logical row
-        // record carries it, and until then the writer's numbering and a
-        // reader's were different - so a replay would have put rows into the
-        // wrong tree, which is a wrong answer rather than a refusal.
-        //
-        // From the file's own checkpoint, not from the start of the log:
-        // `RecoveryStart::fresh` scans from `FIRST_LSN` and would replay
-        // everything the last checkpoint already applied.
-        let meta = database.meta();
-        let start = if meta.checkpoint_lsn == 0 {
-            inillucent_wal::RecoveryStart::fresh(database.uuid())
-        } else {
-            inillucent_wal::RecoveryStart {
-                uuid: database.uuid(),
-                checkpoint_lsn: meta.checkpoint_lsn,
-                sequence: meta.wal_sequence,
-                cts_watermark: meta.cts_watermark,
-            }
-        };
-        let mut database = database;
-        // **Recovery, which this open owes and which the identifier made
-        // possible.** `TreeRows` is keyed by tree id, and until task-1834 put
-        // the identifier in the catalog there was no id a reader could derive
-        // that the writer would have agreed with - so a replay would have handed
-        // row records to the wrong tree. It can now be built from the file.
-        //
-        // The shapes come from the catalog as it stood at the last checkpoint,
-        // plus the catalog tree itself, whose own rows are what a `CREATE TABLE`
-        // writes. A record naming a tree that is in none of them - a table
-        // created *after* the checkpoint, whose rows were then written - makes
-        // `TreeRows` refuse, which fails this open with a named error rather
-        // than replaying into a tree that is not the one meant. A refusal is
-        // still the floor; recovery raises how much is above it.
-        let checkpointed = {
-            let before = attach_catalog(database.pool(), database.catalog_root())?;
-            read_catalog(database.pool(), &before)?
-        };
-        let (outcome, allocated, freed) = {
-            let mut applier =
-                inillucent_txn::redo::Applier::new(&mut database, LearningRows::new(&checkpointed));
-            let outcome = inillucent_wal::recover(&vfs, &db_path, start, &mut applier)?;
-            let (allocated, freed) = applier.allocations();
-            (outcome, allocated.to_vec(), freed.to_vec())
-        };
-        // The free map is rebuilt after the scan rather than inside it: the map
-        // and every page write are both behind `&mut Database`, and one record
-        // cannot hold two mutable borrows of the same object.
-        for page in &allocated {
-            database.claim(*page)?;
-        }
-        for page in &freed {
-            database.release(*page, 1)?;
-        }
-        inillucent_wal::truncate_after(&vfs, &db_path, &outcome)?;
-
-        // The catalog is read again, because recovery may have changed it: a
-        // `CREATE TABLE` after the checkpoint is a row in this very tree.
-        let catalog_tree = attach_catalog(database.pool(), database.catalog_root())?;
-        // **Read with the rowid each row is stored under, not without it.**
-        // The two loops below visit the tables and then the indexes, which is
-        // not the order the catalog holds them in - a schema that creates a
-        // table, an index, another table interleaves the two. The rowid used to
-        // be reconstructed from the position in *this* reordered list, so every
-        // object after the first index was numbered as some other object. The
-        // number is what `seal` and every later `DROP` write by, so the next
-        // catalog write landed on the wrong row: rows came back duplicated and
-        // rows came back missing.
-        let stored_rows =
-            inillucent_catalog::paged::read_catalog_rows(database.pool(), &catalog_tree)?;
-        let stored: Vec<SchemaEntry> = stored_rows.iter().map(|(_, entry)| entry.clone()).collect();
-        let rowid_of_name = |entry: &SchemaEntry| -> i64 {
-            stored_rows
-                .iter()
-                .find(|(_, held)| held.name == entry.name && held.kind == entry.kind)
-                .map(|(rowid, _)| *rowid)
-                .unwrap_or_default()
-        };
-
-        let mut catalog = StaticCatalog::default();
-        let mut trees: HashMap<u32, PagedTree> = HashMap::new();
-        let mut layouts: HashMap<u32, SourceLayout> = HashMap::new();
-        let mut covering: HashMap<u32, Vec<u32>> = HashMap::new();
-        let mut entries: Vec<(i64, SchemaEntry)> = Vec::new();
-        let mut identifiers: Vec<u32> = Vec::new();
-        let mut skipped: Vec<String> = Vec::new();
-        // **The identifier comes out of the catalog row, not out of a counter.**
-        // It used to be handed out here in catalog order, on the reasoning that
-        // it was this process's own bookkeeping. It is not: every logical row
-        // record in the log carries it, so a reader that numbered trees
-        // differently from the writer would hand recovery's records to the wrong
-        // tree - a wrong answer rather than a refusal. task-1834 put it in the
-        // catalog; this reads it back.
-        //
-        // `next_root` is set past the largest so a `CREATE TABLE` after this
-        // open cannot collide with one already in the file, which a counter that
-        // restarted at every open could and did.
-        let mut highest_identifier = 0u32;
-        // Every table by folded name, because an index's shape is derived
-        // against its table's declaration and the catalog does not order tables
-        // before their indexes.
-        let mut infos: HashMap<Vec<u8>, (u32, TableInfo)> = HashMap::new();
-
-        for entry in &stored {
-            if entry.kind != ObjectKind::Table {
-                continue;
-            }
-            // A virtual table has **no tree of its own**. Its rows live in the
-            // shadow tables the module declared, which are ordinary tables in
-            // this same catalog and are loaded by this same loop. So its row
-            // carries no tree identifier, and asking for one refused to open
-            // every database holding a search table - which is how this was
-            // found, by moving `inillucent-migrate` onto the engine.
-            //
-            // The kind is learned from a throwaway parse rather than from the
-            // parse below, because that one is given the identifier and every
-            // shape it derives is derived against it. Parsing once with a
-            // placeholder root and patching `info.root` afterwards looked like
-            // the same thing and was not: it left the *derived* shapes pointing
-            // at the placeholder, and every table then scanned the same tree -
-            // `count(*)` answered the same number for every table in the file.
-            if matches!(
-                table_from_create_sql(&entry.sql, 0, 0).map(|info| info.kind),
-                Ok(inillucent_sql::catalog_view::TableKind::Virtual)
-            ) {
-                // `entries` and `identifiers` are zipped into `Recorded` below,
-                // so they are parallel and a row pushed to one has to be pushed
-                // to the other. Pushing only the entry shifted every later
-                // object onto the previous one's tree - which read as a table
-                // whose covering index answered another table's rows, and cost
-                // an afternoon to find. Zero is what `Recorded.root` documents
-                // for an object with no tree.
-                entries.push((rowid_of_name(entry), entry.clone()));
-                identifiers.push(0);
-                continue;
-            }
-            let identifier = identifier_of(entry)?;
-            highest_identifier = highest_identifier.max(identifier);
-            let mut info = match table_from_create_sql(&entry.sql, 0, identifier) {
-                Ok(info) => info,
-                Err(_) => {
-                    skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
-                    continue;
-                }
-            };
-            info.root = identifier;
-            let (columns, key_columns, layout) = if info.without_rowid {
-                match keyed_table_shape(&info) {
-                    Ok((columns, key_columns, layout)) => (columns, key_columns, layout),
-                    Err(_) => {
-                        skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
-                        continue;
-                    }
-                }
-            } else {
-                let (columns, layout) = table_shape(&info);
-                (columns, 1, layout)
-            };
-            let tree = PagedTree::attach(
-                database.pool(),
-                u64::from(identifier),
-                entry.root,
-                columns,
-                key_columns,
-                entry.stats.leaf_count,
-                entry.stats.row_count,
-            )?;
-            trees.insert(identifier, tree);
-            layouts.insert(identifier, layout);
-            infos.insert(info.folded.clone(), (identifier, info.clone()));
-            entries.push((rowid_of_name(entry), entry.clone()));
-            identifiers.push(identifier);
-        }
-
-        for entry in &stored {
-            if entry.kind != ObjectKind::Index {
-                continue;
-            }
-            let folded = entry.table.to_ascii_lowercase();
-            let Some((table_root, table_info)) = infos.get(&folded).cloned() else {
-                skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
-                continue;
-            };
-            let identifier = identifier_of(entry)?;
-            highest_identifier = highest_identifier.max(identifier);
-            let index = match inillucent_catalog::load::index_from_create_sql(
-                &entry.sql,
-                &table_info,
-                identifier,
-            ) {
-                Ok(index) => index,
-                Err(_) => {
-                    skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
-                    continue;
-                }
-            };
-            let (columns, layout) = index_shape(&table_info, &index, identifier);
-            let key_columns = columns.len();
-            let tree = PagedTree::attach(
-                database.pool(),
-                u64::from(identifier),
-                entry.root,
-                columns,
-                key_columns,
-                entry.stats.leaf_count,
-                entry.stats.row_count,
-            )?;
-            trees.insert(identifier, tree);
-            layouts.insert(identifier, layout);
-            covering.entry(table_root).or_default().push(identifier);
-            // The index joins its table's declaration, so the binder offers it
-            // to the planner exactly as the import does.
-            if let Some((_, info)) = infos.get_mut(&folded) {
-                info.indexes.push(index);
-            }
-            entries.push((rowid_of_name(entry), entry.clone()));
-            identifiers.push(identifier);
-        }
-
-        // **The triggers, then the keys, and in that order.** A written
-        // trigger is a catalog row like a table or an index and joins its
-        // table's declaration; a foreign key is a trigger the binder writes,
-        // and `plan_schema` can only write it once every table is in hand,
-        // because a key records only the child's side and the parent's has to
-        // be found by asking every table what it points at.
-        //
-        // Neither was done here until now, which is the whole reason foreign
-        // keys were unenforced: the binder fills a statement's `triggers` from
-        // exactly these two places, and both were empty on this engine.
-        for entry in &stored {
-            if entry.kind != ObjectKind::Trigger {
-                continue;
-            }
-            let folded = entry.table.to_ascii_lowercase();
-            let Some((_, info)) = infos.get_mut(&folded) else {
-                skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
-                continue;
-            };
-            match inillucent_catalog::load::trigger_from_create_sql(&entry.sql) {
-                // Newest first, which is SQLite's own order: it pushes each
-                // trigger onto the front of the table's list as it reads the
-                // schema, so the most recently created one fires first.
-                Ok(trigger) => info.triggers.insert(0, trigger),
-                Err(_) => skipped.push(String::from_utf8_lossy(&entry.name).into_owned()),
-            }
-            entries.push((rowid_of_name(entry), entry.clone()));
-            identifiers.push(0);
-        }
-
-        let mut planned: Vec<TableInfo> = infos.values().map(|(_, info)| info.clone()).collect();
-        inillucent_sql::foreign_key::plan_schema(&mut planned, b"main", &Limits::default());
-        for info in planned {
-            if let Some((_, held)) = infos.get_mut(&info.folded) {
-                held.foreign_key_triggers = info.foreign_key_triggers.clone();
-            }
-        }
-
-        for (_, (_, info)) in infos.iter() {
+        // `main`'s handles are its own local identifiers, unchanged: the
+        // database a connection was opened on keeps the numbering it has always
+        // had, which is what makes a one-file connection the code it was.
+        let loaded = load_schema(
+            &database,
+            catalog_tree,
+            0,
+            b"main",
+            SCHEMA_VIEW_ROOT,
+            &mut |local| local,
+        )?;
+        let LoadedSchema {
+            trees,
+            layouts,
+            covering,
+            entries,
+            tables: loaded_tables,
+            schema_info,
+            handles: _main_handles,
+            skipped,
+            highest_identifier,
+        } = loaded;
+        let mut catalog = StaticCatalog::empty();
+        for info in &loaded_tables {
             catalog = catalog.with_table(info.clone());
         }
-
-        // `sqlite_schema` over the catalog tree, exactly as the import builds
-        // it: one root number no object can have, and the ordinary scan path.
-        let schema_root = SCHEMA_VIEW_ROOT;
-        let schema_info = table_from_create_sql(schema_create_sql(), 0, schema_root)?;
-        layouts.insert(
-            schema_root,
-            SourceLayout {
-                tree_key: schema_root,
-                slots: (1..=5).map(Some).collect(),
-                rowid: Some(0),
-                types: vec![
-                    StaticType::Int,
-                    StaticType::Text,
-                    StaticType::Text,
-                    StaticType::Text,
-                    StaticType::Int,
-                    StaticType::Text,
-                ],
-                width: 6,
-                key_columns: vec![0],
-            },
-        );
-        trees.insert(schema_root, catalog_tree);
         catalog = catalog.with_table(schema_info.clone());
         catalog = catalog.with_table(schema_alias_of(&schema_info));
-
-        // **The log resumes where recovery ended, not at the beginning.**
-        // Opening it at `FIRST_LSN` with sequence 1 starts a second stream over
-        // the same segments: the session writes records the *next* open cannot
-        // find, because the meta page's checkpoint points into the first stream.
-        // A test caught it as a table created after an open vanishing on the
-        // one after that - `no such table: second` from a file that had just
-        // been told to make it.
-        let wal = std::rc::Rc::new(Wal::open(
-            std::sync::Arc::new(OsVfs::new()),
-            &db_path,
-            database.uuid(),
-            outcome.next_lsn.max(FIRST_LSN),
-            outcome.sequence.max(1),
-            WalOptions::default(),
-        )?);
-        database.pool().set_durable_lsn(wal.write_ahead_point());
-        let_the_pool_ask_the_log(database.pool(), &wal);
-
-        for roots in covering.values_mut() {
-            roots.sort_by_key(|root| {
-                trees
-                    .get(root)
-                    .map(PagedTree::byte_size)
-                    .unwrap_or(usize::MAX)
-            });
-        }
 
         let mut opened = ImportedDatabase {
             catalog,
@@ -1293,21 +1566,29 @@ impl ImportedDatabase {
             skipped,
             limits: Limits::default(),
             wal,
-            next_txn: std::cell::Cell::new(1),
+            // Above every number the log still holds, so that this run cannot
+            // call something by a name a crashed one already used.
+            next_txn: std::cell::Cell::new(highest_txn.saturating_add(1)),
             last_rowid: std::cell::Cell::new(0),
             changed_ever: std::cell::Cell::new(0),
             statements: std::cell::RefCell::new(HashMap::new()),
             batch: std::cell::Cell::new(None),
-            undo: Vec::new(),
+            undo: std::cell::RefCell::new(Vec::new()),
+            touched: 0,
+            decided_over: std::cell::Cell::new(0),
             marks: Vec::new(),
-            entries: entries
-                .into_iter()
-                .zip(identifiers)
-                .map(|((rowid, entry), root)| Recorded { rowid, root, entry })
-                .collect(),
+            entries,
             tables: Vec::new(),
             schema_info,
             next_root: highest_identifier.saturating_add(1).max(FIRST_CREATED_ROOT),
+            attached: Vec::new(),
+            temps: Vec::new(),
+            session: std::cell::Cell::new(0),
+            next_session: std::cell::Cell::new(1),
+            tables_session: 0,
+            owner: HashMap::new(),
+            next_handle: FIRST_ATTACHED_HANDLE,
+            ddl_schema: 0,
             busy_timeout_ms: 0,
             foreign_keys: false,
             defer_foreign_keys: false,
@@ -2030,8 +2311,9 @@ impl ImportedDatabase {
         let txn = self.next_txn.get();
         self.next_txn.set(txn.saturating_add(1));
         self.batch.set(Some(txn));
-        self.undo.clear();
+        self.undo.borrow_mut().clear();
         self.marks.clear();
+        self.touched = 0;
     }
 
     /// Undoes everything the open transaction changed, newest first.
@@ -2068,45 +2350,66 @@ impl ImportedDatabase {
             None => 0,
         };
         let txn = self.current_txn();
-        while self.undo.len() > floor {
-            let Some(entry) = self.undo.pop() else { break };
+        while self.undo.borrow().len() > floor {
+            let Some(entry) = self.undo.borrow_mut().pop() else {
+                break;
+            };
+            // **The record says which file it came out of, and that is the
+            // whole of the routing.** Two databases each number their own trees
+            // from one, so the identifier alone is ambiguous the moment a
+            // connection holds a second file - and a rollback that guessed
+            // would put a row back into the wrong database, silently.
+            let at = entry.schema;
+            let wal = self
+                .log_of(at)
+                .ok_or_else(|| misuse("a rollback names a database that is not attached"))?;
             let mut log = WalLog {
-                wal: &self.wal,
+                wal,
                 txn,
+                schema: at,
+                wrote: false,
                 // The restore is not itself undoable: it *is* the undo, and
                 // recording it would grow the buffer being drained.
                 undo: None,
             };
             // **The catalog tree answers to two numbers.** Its `tree_id` is
             // `SCHEMA_TREE_ID`, which is what the log records carry, and it
-            // lives in `trees` under `SCHEMA_VIEW_ROOT`, which is the
-            // identifier the planner reads `sqlite_schema` through. An undo
-            // record carries the first and this map is keyed by the second, so
-            // a catalog row's before-image was looked up under a number nothing
-            // held and silently skipped - which is why a rolled-back
-            // `CREATE TABLE` stayed in the schema.
+            // lives in `trees` under the handle the planner reads
+            // `sqlite_schema` through. An undo record carries the first and
+            // this map is keyed by the second, so a catalog row's before-image
+            // was looked up under a number nothing held and silently skipped -
+            // which is why a rolled-back `CREATE TABLE` stayed in the schema.
             let root = if entry.tree == inillucent_catalog::paged::SCHEMA_TREE_ID {
-                SCHEMA_VIEW_ROOT
+                self.catalog_handle_of(at)
             } else {
-                u32::try_from(entry.tree).unwrap_or(0)
+                self.handle_of(at, entry.tree).unwrap_or(0)
             };
             let Some(tree) = self.trees.get_mut(&root) else {
                 // The tree is gone, which a rollback of a `CREATE TABLE` makes
                 // true. Its rows went with it.
                 continue;
             };
+            let session = self.session.get();
+            let database = file_of(
+                &mut self.database,
+                &mut self.attached,
+                &mut self.temps,
+                session,
+                at,
+            )?;
             match &entry.row {
                 Some(row) => {
                     let values: Vec<Datum<'_>> = row.iter().map(OwnedDatum::borrow).collect();
-                    tree.put(&mut self.database, &mut log, &values)?;
+                    tree.put(database, &mut log, &values)?;
                 }
                 None => {
                     let key: Vec<Datum<'_>> = entry.key.iter().map(OwnedDatum::borrow).collect();
-                    tree.delete(&mut self.database, &mut log, &key)?;
+                    tree.delete(database, &mut log, &key)?;
                 }
             }
         }
-        self.marks.retain(|(_, at)| *at <= self.undo.len());
+        let held = self.undo.borrow().len();
+        self.marks.retain(|(_, at)| *at <= held);
         // The catalog tree may have been restored along with everything else,
         // so the schema the binder sees is rebuilt from it.
         let missing = self.reload_entries()?;
@@ -2136,20 +2439,30 @@ impl ImportedDatabase {
     /// a refusal - see [`ImportedDatabase::undo_to`], which turns that into
     /// one.
     fn reload_entries(&mut self) -> DbResult<Vec<String>> {
-        let catalog_tree = attach_catalog(self.database.pool(), self.database.catalog_root())?;
-        let stored =
-            inillucent_catalog::paged::read_catalog_rows(self.database.pool(), &catalog_tree)?;
         let mut missing = Vec::new();
-        self.entries = stored
-            .into_iter()
-            .map(|(rowid, entry)| {
-                let root = u32::try_from(entry.tree_id).unwrap_or(0);
-                if root != 0 && !self.trees.contains_key(&root) {
-                    missing.push(String::from_utf8_lossy(&entry.name).into_owned());
-                }
-                Recorded { rowid, root, entry }
-            })
-            .collect();
+        // Every schema, because a transaction may have written more than one of
+        // them and a rollback restores every file it touched.
+        for at in self.schema_numbers() {
+            let Some(database) = self.schema_file(at) else {
+                continue;
+            };
+            let catalog_tree = attach_catalog(database.pool(), database.catalog_root())?;
+            let stored =
+                inillucent_catalog::paged::read_catalog_rows(database.pool(), &catalog_tree)?;
+            let reloaded: Vec<Recorded> = stored
+                .into_iter()
+                .map(|(rowid, entry)| {
+                    let root = self.handle_of(at, entry.tree_id).unwrap_or(0);
+                    if entry.tree_id != 0 && !self.trees.contains_key(&root) {
+                        missing.push(String::from_utf8_lossy(&entry.name).into_owned());
+                    }
+                    Recorded { rowid, root, entry }
+                })
+                .collect();
+            if let Some(held) = self.entries_of_mut(at) {
+                *held = reloaded;
+            }
+        }
         self.rebuild_tables()?;
         self.refresh_catalog();
         Ok(missing)
@@ -2160,6 +2473,10 @@ impl ImportedDatabase {
         self.undo_to(None)?;
         self.marks.clear();
         self.batch.set(None);
+        // Nothing to decide: an abandoned transaction has no commit for a
+        // super-journal to be about, and the records it left are never replayed
+        // because no `Commit` follows them.
+        self.touched = 0;
         // The transaction's own setting goes with the transaction, which is
         // SQLite's rule for `PRAGMA defer_foreign_keys`.
         self.defer_foreign_keys = false;
@@ -2171,8 +2488,8 @@ impl ImportedDatabase {
     ///
     /// @param name - the savepoint's name
     pub fn savepoint(&mut self, name: &[u8]) {
-        self.marks
-            .push((name.to_ascii_lowercase(), self.undo.len()));
+        let held = self.undo.borrow().len();
+        self.marks.push((name.to_ascii_lowercase(), held));
     }
 
     /// Undoes back to a savepoint, keeping the transaction open.
@@ -2222,15 +2539,141 @@ impl ImportedDatabase {
         }
         // Nothing to abandon once it is committed, and holding the before-images
         // would hold every row a long transaction touched.
-        self.undo.clear();
+        self.undo.borrow_mut().clear();
         self.marks.clear();
         let Some(txn) = self.batch.take() else {
+            self.touched = 0;
             return Ok(());
         };
-        self.wal.commit(txn, txn)?;
-        self.database
-            .pool()
-            .set_durable_lsn(self.wal.write_ahead_point());
+        let participants = std::mem::take(&mut self.touched);
+        self.commit_across(txn, participants)
+    }
+
+    /// Commits one transaction across every file it wrote.
+    ///
+    /// **One file is the path this engine has always taken; two is a
+    /// super-journal.** A transaction that wrote a single database appends one
+    /// `Commit` record and waits for it, exactly as before - no marker, no extra
+    /// file, no stat. A transaction that wrote two or more files that will be
+    /// recovered writes a super-journal listing them, marks each one as being in
+    /// doubt, appends every vote, and then deletes the super-journal. That
+    /// deletion is the commit: before it, every participant recovers without the
+    /// transaction; after it, every one recovers with it.
+    ///
+    /// A temporary database is not a participant. It has no file, so it has no
+    /// recovery to be in doubt about, and including it would make an ordinary
+    /// `CREATE TEMP TABLE ... INSERT` pay for a protocol that decides nothing.
+    ///
+    /// @param txn - the transaction to commit
+    /// @param participants - the schemas it wrote
+    fn commit_across(&mut self, txn: u64, participants: u16) -> DbResult<()> {
+        let durable: Vec<usize> = schemas_in(participants)
+            .filter(|at| self.path_of(*at).is_some())
+            .collect();
+        self.decided_over.set(durable.len());
+        if durable.len() < 2 {
+            return self.vote(txn, participants);
+        }
+        let files: Vec<PathBuf> = durable.iter().filter_map(|at| self.path_of(*at)).collect();
+        let near = self.path.clone();
+        let mut journal = multi::SuperJournal::create(&near, txn, &files)?;
+        // **Every marker is durable before any vote is.** A `Commit` that
+        // reached the disk while its marker had not would be replayed by a
+        // recovery that never learned to doubt it, which is the one ordering
+        // this protocol cannot get wrong.
+        for at in &durable {
+            let Some(path) = self.path_of(*at) else {
+                continue;
+            };
+            if let Err(error) = journal.mark(&path, txn) {
+                journal.abandon();
+                return Err(error);
+            }
+        }
+        if let Err(error) = self.vote(txn, participants) {
+            // **Not abandoned, and that is the point.** Some participants may
+            // already have their `Commit` on disk; removing the super-journal
+            // would make those count and the rest not, which is precisely the
+            // torn commit this protocol exists to prevent. Leaving it makes
+            // every vote a vote that lost, which is the outcome that is
+            // consistent. Dropping the handle removes nothing: `SuperJournal`
+            // has no destructor precisely so that the safe outcome is the one a
+            // path which returns early gets for free.
+            drop(journal);
+            return Err(error);
+        }
+        journal.commit()
+    }
+
+    /// Appends and awaits one `Commit` record per schema a transaction wrote.
+    ///
+    /// @param txn - the transaction
+    /// @param participants - the schemas it wrote
+    fn vote(&mut self, txn: u64, participants: u16) -> DbResult<()> {
+        // A transaction that wrote nothing still commits `main`, which is what
+        // an empty `BEGIN; COMMIT;` has always done and what keeps the
+        // transaction numbers in step with the log.
+        let mut wrote_any = false;
+        for at in schemas_in(participants) {
+            let Some(wal) = self.log_of(at) else {
+                continue;
+            };
+            wal.commit(txn, txn)?;
+            if let Some(database) = self.schema_file(at) {
+                database.pool().set_durable_lsn(wal.write_ahead_point());
+            }
+            wrote_any = true;
+        }
+        if !wrote_any {
+            self.wal.commit(txn, txn)?;
+            self.database
+                .pool()
+                .set_durable_lsn(self.wal.write_ahead_point());
+        }
+        Ok(())
+    }
+
+    /// Returns how many databases the last commit was decided over.
+    ///
+    /// One, or none, for every transaction that wrote a single file - which is
+    /// every statement the performance gate measures. Two or more is a
+    /// super-journal.
+    pub fn decided_over(&self) -> usize {
+        self.decided_over.get()
+    }
+
+    /// Returns what the write path has done to every tree, added up.
+    ///
+    /// The counters, not the clock. For a write the counters are the story: a
+    /// page compacted is a whole page image in the log, and a tree that
+    /// compacts once per statement is doing work no timing will explain on its
+    /// own.
+    /// Folds every attached database's log into its own file.
+    ///
+    /// A checkpoint is per file, because a log is per file. `checkpoint` does
+    /// `main`; this does the rest, so that a connection closed after one is not
+    /// leaving an attached database's committed rows in a log the next open of
+    /// *that file alone* would still have to replay.
+    fn checkpoint_attached(&mut self) -> DbResult<()> {
+        for nth in 0..self.attached.len() {
+            let Some(held) = self.attached.get_mut(nth) else {
+                continue;
+            };
+            if held.path.is_none() {
+                // A database with no file has nothing to fold a log into.
+                continue;
+            }
+            held.wal.sync()?;
+            let durable = held.wal.write_ahead_point();
+            held.database.pool().set_durable_lsn(durable);
+            let sequence = held.wal.sequence();
+            held.database.set_log_position(durable, 0, sequence);
+            held.database.checkpoint()?;
+            held.wal.note_checkpoint(durable, 0)?;
+            held.database
+                .pool()
+                .set_durable_lsn(held.wal.write_ahead_point());
+        }
         Ok(())
     }
 
@@ -2260,8 +2703,12 @@ impl ImportedDatabase {
     /// drifted structurally still answers a scan correctly for a long time,
     /// which is precisely why the check has to be a check rather than a query.
     pub fn check_trees(&self) -> DbResult<()> {
-        for tree in self.trees.values() {
-            tree.check(self.database.pool())?;
+        for (root, tree) in &self.trees {
+            let pool = self
+                .schema_file(self.schema_of(*root))
+                .ok_or_else(|| misuse("a tree names a database that is not attached"))?
+                .pool();
+            tree.check(pool)?;
         }
         Ok(())
     }
@@ -2298,6 +2745,10 @@ impl ImportedDatabase {
         self.database
             .pool()
             .set_durable_lsn(self.wal.write_ahead_point());
+        // Every attached database too, because a log is per file and a
+        // connection closed after a checkpoint should leave databases rather
+        // than databases and logs nobody will open again.
+        self.checkpoint_attached()?;
         Ok(())
     }
 
@@ -2531,18 +2982,18 @@ impl ImportedDatabase {
                 physical::run_any_prepared(plan, self, prepared, params)?;
             }
             Cached::Insert(statement, ..) => {
-                self.write(params, |target, log, params| {
-                    dml::insert(statement, target, log, params, &rows)
+                self.write(params, |target, params| {
+                    dml::insert(statement, target, params, &rows)
                 })?;
             }
             Cached::Update(statement, ..) => {
-                self.write(params, |target, log, params| {
-                    dml::update(statement, target, log, params, &rows)
+                self.write(params, |target, params| {
+                    dml::update(statement, target, params, &rows)
                 })?;
             }
             Cached::Delete(statement, ..) => {
-                self.write(params, |target, log, params| {
-                    dml::delete(statement, target, log, params, &rows)
+                self.write(params, |target, params| {
+                    dml::delete(statement, target, params, &rows)
                 })?;
             }
         }
@@ -2803,6 +3254,16 @@ impl ImportedDatabase {
         Ok(())
     }
 
+    /// Returns the key a compiled statement is held under.
+    ///
+    /// The lever mask and the session, packed. Two connections' plans are kept
+    /// apart because a temporary table makes the same text mean two different
+    /// tables; two lever settings' plans are kept apart because a plan built
+    /// with the covering-index rule on is that rule's answer.
+    fn plan_key(&self) -> u64 {
+        (self.session.get() << 32) | u64::from(self.levers.disabled())
+    }
+
     /// Returns how many statements are compiled and held.
     ///
     /// The plan cache's size, which is what a test asserting that a
@@ -2989,8 +3450,8 @@ impl ImportedDatabase {
                     None
                 };
                 let params = folded.as_ref().unwrap_or(params);
-                self.write(params, |target, log, params| {
-                    dml::insert(statement, target, log, params, &rows)
+                self.write(params, |target, params| {
+                    dml::insert(statement, target, params, &rows)
                 })
             }
             Cached::Update(statement, plan, prepared, assignments_hold_subquery) => {
@@ -3010,8 +3471,8 @@ impl ImportedDatabase {
                     None
                 };
                 let params = folded.as_ref().unwrap_or(params);
-                self.write(params, |target, log, params| {
-                    dml::update(statement, target, log, params, &keys)
+                self.write(params, |target, params| {
+                    dml::update(statement, target, params, &keys)
                 })
             }
             Cached::VirtualDelete(statement, plan, prepared) => {
@@ -3055,8 +3516,8 @@ impl ImportedDatabase {
                     .collect();
                 let folded = inillucent_exec::subquery::fold_expressions(&returned, self, params)?;
                 let params = folded.as_ref().unwrap_or(params);
-                self.write(params, |target, log, params| {
-                    dml::delete(statement, target, log, params, &keys)
+                self.write(params, |target, params| {
+                    dml::delete(statement, target, params, &keys)
                 })
             }
         }
@@ -3108,18 +3569,22 @@ impl ImportedDatabase {
         // copy of the SQL - about 90 ns on a 1,163 ns compile, and paid again
         // on every execution of an already-cached statement, which is the one
         // path a plan cache exists to make cheap.
+        // **And by the session**, because `SELECT * FROM t` binds to a
+        // different table in a connection that has shadowed `t` with a `TEMP`
+        // one. Packed into one `u64` so the lookup stays a single hash of the
+        // SQL text: a paired key would have to be built before the map could be
+        // asked, which is an allocation on the one path a plan cache exists to
+        // make free.
+        let key = self.plan_key();
         let held = self.statements.borrow();
-        if let Some(found) = held
-            .get(&self.levers.disabled())
-            .and_then(|under| under.get(sql))
-        {
+        if let Some(found) = held.get(&key).and_then(|under| under.get(sql)) {
             return Ok(std::rc::Rc::clone(found));
         }
         drop(held);
         let compiled = std::rc::Rc::new(self.compile(sql)?);
         self.statements
             .borrow_mut()
-            .entry(self.levers.disabled())
+            .entry(key)
             .or_default()
             .insert(sql.to_string(), std::rc::Rc::clone(&compiled));
         Ok(compiled)
@@ -3346,7 +3811,7 @@ impl ImportedDatabase {
     fn write(
         &mut self,
         params: &Params,
-        apply: impl FnOnce(&mut dyn WriteTarget, &mut dyn TreeLog, &Params) -> DbResult<Changes>,
+        apply: impl FnOnce(&mut dyn WriteTarget, &Params) -> DbResult<Changes>,
     ) -> DbResult<Outcome> {
         // A statement inside an open batch joins it and does not commit; a
         // statement outside one is its own transaction and does.
@@ -3358,23 +3823,79 @@ impl ImportedDatabase {
                 (txn, true)
             }
         };
-        let changes = {
-            let mut log = WalLog {
-                wal: &self.wal,
-                txn,
-                // Collected only inside a transaction: outside one there is
-                // nothing that could abandon the write.
-                undo: (!autocommit).then_some(&mut self.undo),
-            };
+        // Collected only inside a transaction: outside one there is nothing
+        // that could abandon the write. Every schema's log appends to the one
+        // buffer, because a rollback undoes one *transaction* rather than one
+        // file - and each record carries the schema it came out of.
+        let undo = (!autocommit).then_some(&self.undo);
+        let main_log = WalLog {
+            wal: std::rc::Rc::clone(&self.wal),
+            txn,
+            schema: MAIN,
+            wrote: false,
+            undo,
+        };
+        let logs = if self.attached.is_empty() && self.temps.is_empty() {
+            Logs::One(main_log)
+        } else {
+            // One per schema *number*, so that `logs[at]` is the log of the file
+            // schema `at` names. The temporary slot is filled with `main`'s log
+            // when this session has no temporary database, and nothing can reach
+            // it: a handle that resolved to `TEMP` could only have come from a
+            // temporary tree, which only exists when the schema does.
+            let mut held: Vec<WalLog<'_>> =
+                Vec::with_capacity(self.attached.len().saturating_add(2));
+            held.push(main_log);
+            held.push(match self.schema_at(TEMP) {
+                Some(temp) => WalLog {
+                    wal: std::rc::Rc::clone(&temp.wal),
+                    txn,
+                    schema: TEMP,
+                    wrote: false,
+                    undo,
+                },
+                None => WalLog {
+                    wal: std::rc::Rc::clone(&self.wal),
+                    txn,
+                    schema: MAIN,
+                    wrote: false,
+                    undo,
+                },
+            });
+            for (nth, attached) in self.attached.iter().enumerate() {
+                held.push(WalLog {
+                    wal: std::rc::Rc::clone(&attached.wal),
+                    txn,
+                    schema: FIRST_ATTACHED.saturating_add(nth),
+                    wrote: false,
+                    undo,
+                });
+            }
+            Logs::Many(held)
+        };
+        let session = self.session.get();
+        let (changes, wrote) = {
             let mut view = WriteView {
                 database: &mut self.database,
+                attached: &mut self.attached,
+                temps: &mut self.temps,
+                session,
+                logs,
+                owner: &self.owner,
                 trees: &mut self.trees,
                 layouts: &self.layouts,
                 covering: &self.covering,
                 indexed: &self.vector_indexes,
             };
-            apply(&mut view, &mut log, params)?
+            let changes = apply(&mut view, params)?;
+            // **The participant set, read off the logs that were used.** A
+            // transaction that wrote one file commits the way it always has; one
+            // that wrote two is decided by a super-journal, and this is the only
+            // place that can tell them apart without asking every tree.
+            let wrote = view.logs.wrote();
+            (changes, wrote)
         };
+        self.touched |= wrote;
         // **Inside the same transaction, and after the trees rather than
         // during them.** The module is registered on the connection and the
         // write borrowed the connection apart, so this is the first moment both
@@ -3387,10 +3908,8 @@ impl ImportedDatabase {
         self.changed_ever
             .set(self.changed_ever.get().saturating_add(changes.rows as i64));
         if autocommit {
-            self.wal.commit(txn, txn)?;
-            self.database
-                .pool()
-                .set_durable_lsn(self.wal.write_ahead_point());
+            let participants = std::mem::take(&mut self.touched);
+            self.commit_across(txn, participants)?;
         }
         Ok(Outcome {
             rows: changes.returned.clone(),
@@ -3625,6 +4144,54 @@ fn describe_directive(directive: &inillucent_sql::directive::Directive) -> &'sta
     }
 }
 
+/// The logs one statement writes through, indexed by schema number.
+///
+/// **Inline for a connection that has one file, which is almost every
+/// connection.** A `Vec` here is a heap allocation on every write, and
+/// `txn.batched` - two thousand statements inside one transaction - is where
+/// that shows: 6.17x to 6.77x on task-1838's four runs, 5.71x to 6.22x with the
+/// allocation, on the same fixture, the same rounds and the same machine. It is
+/// the only measurable cost the multi-schema write path had, and this is it
+/// removed rather than argued away.
+enum Logs<'a> {
+    /// The only file this connection holds.
+    One(WalLog<'a>),
+    /// `main`, then `temp`, then the attachments, indexed by schema number.
+    Many(Vec<WalLog<'a>>),
+}
+
+impl<'a> Logs<'a> {
+    /// Returns the log one schema writes through.
+    ///
+    /// @param at - the schema, as the binder numbers them
+    fn get_mut(&mut self, at: usize) -> Option<&mut WalLog<'a>> {
+        match self {
+            // A connection with one file has one schema, so a handle can only
+            // have resolved to `main`; anything else is a plan naming a database
+            // that is not there, and the caller refuses it.
+            Logs::One(log) => (at == MAIN).then_some(log),
+            Logs::Many(held) => held.get_mut(at),
+        }
+    }
+
+    /// Returns the schemas anything was written through, one bit each.
+    fn wrote(&self) -> u16 {
+        match self {
+            Logs::One(log) => {
+                if log.wrote {
+                    schema_bit(log.schema)
+                } else {
+                    0
+                }
+            }
+            Logs::Many(held) => held
+                .iter()
+                .filter(|log| log.wrote)
+                .fold(0, |mask, log| mask | schema_bit(log.schema)),
+        }
+    }
+}
+
 /// The disjoint halves of an [`ImportedDatabase`] a write borrows.
 ///
 /// A write needs `&mut Database` and `&mut PagedTree` at the same instant while
@@ -3632,7 +4199,27 @@ fn describe_directive(directive: &inillucent_sql::directive::Directive) -> &'sta
 /// one struct is what lets the borrow checker see they are disjoint; a method
 /// taking `&mut self` could not, because it would borrow the log too.
 struct WriteView<'a> {
+    /// The file this connection was opened on.
     database: &'a mut Database,
+    /// The files `ATTACH` added beside it.
+    attached: &'a mut [Attached],
+    /// The temporary databases, one per connection that has one.
+    temps: &'a mut [Attached],
+    /// The connection this statement belongs to, which is what makes `temp`
+    /// mean one of the above rather than another.
+    session: u64,
+    /// One log per schema, `main`'s first, built once for the statement.
+    ///
+    /// **One per file, because a statement can write more than one.** A `TEMP`
+    /// trigger firing on a write to `main` writes rows into two files, and each
+    /// one has to be described in its own log. They are built once per statement
+    /// rather than per write, so a statement pays one `Rc` clone per schema
+    /// rather than one per row - and none at all beyond the first when the
+    /// connection has one file.
+    logs: Logs<'a>,
+    /// Which schema each tree handle belongs to, for handles that are not
+    /// `main`'s.
+    owner: &'a HashMap<u32, usize>,
     trees: &'a mut HashMap<u32, PagedTree>,
     layouts: &'a HashMap<u32, SourceLayout>,
     /// The tables an index a module owns is built over, by root page.
@@ -3646,9 +4233,40 @@ struct WriteView<'a> {
     covering: &'a HashMap<u32, Vec<u32>>,
 }
 
+impl WriteView<'_> {
+    /// Returns which schema a tree handle belongs to; `MAIN` when it is
+    /// `main`'s.
+    ///
+    /// @param root - the handle
+    fn schema_of(&self, root: u32) -> usize {
+        if self.attached.is_empty() && self.temps.is_empty() {
+            return MAIN;
+        }
+        self.owner.get(&root).copied().unwrap_or(MAIN)
+    }
+}
+
 impl WriteTarget for WriteView<'_> {
-    fn parts(&mut self) -> (&mut Database, &mut dyn Trees) {
-        (self.database, self.trees)
+    fn parts_for(
+        &mut self,
+        root: u32,
+    ) -> DbResult<(&mut Database, &mut dyn Trees, &mut dyn TreeLog)> {
+        let at = self.schema_of(root);
+        // Three separate fields of `self`, which is what lets the borrow checker
+        // see that the file, the trees and the log are disjoint - the same
+        // arrangement this view has always had, one file wider.
+        let log = self
+            .logs
+            .get_mut(at)
+            .ok_or_else(|| misuse("a write names a database that is not attached"))?;
+        let database = if at == MAIN {
+            &mut *self.database
+        } else {
+            &mut schema_of_index(self.attached, self.temps, self.session, at)
+                .ok_or_else(|| misuse("a write names a database that is not attached"))?
+                .database
+        };
+        Ok((database, self.trees, log))
     }
 
     fn layout(&self, root: u32) -> Option<&SourceLayout> {
@@ -3678,8 +4296,19 @@ impl WriteTarget for WriteView<'_> {
 /// connection is exactly what a write has split apart. A trigger body over a
 /// virtual table is refused by name rather than answered with nothing.
 impl TreeCatalog for WriteView<'_> {
-    fn pool(&self) -> &Pool {
-        self.database.pool()
+    fn pool_for(&self, root: u32) -> Option<&Pool> {
+        let at = self.schema_of(root);
+        if at == MAIN {
+            return Some(self.database.pool());
+        }
+        let held = match at {
+            TEMP => self
+                .temps
+                .iter()
+                .find(|held| held.session == Some(self.session))?,
+            _ => self.attached.get(at.saturating_sub(FIRST_ATTACHED))?,
+        };
+        Some(held.database.pool())
     }
 
     fn tree(&self, root: u32) -> Option<&PagedTree> {
@@ -3718,8 +4347,27 @@ impl TreeCatalog for WriteView<'_> {
 /// has not reached, the pool asks the log directly through the closure
 /// `let_the_pool_ask_the_log` registers. See `Pool::on_log_behind`.
 struct WalLog<'a> {
-    wal: &'a Wal,
+    /// The log of the file this one writes into.
+    ///
+    /// **Owned rather than borrowed.** A write holds its schema's file mutably
+    /// while it appends, and a borrow of the log out of the same `Attached`
+    /// would be a second borrow of it. An `Rc` clone is a refcount bump, paid
+    /// once per schema per statement.
+    wal: std::rc::Rc<Wal>,
     txn: u64,
+    /// Which schema this log belongs to, as the binder numbers them.
+    ///
+    /// Stamped onto every before-image, so a rollback puts a row back into the
+    /// file it came out of. A tree identifier alone could not say: two files
+    /// number their own trees from one.
+    schema: usize,
+    /// Whether anything has been written through this log.
+    ///
+    /// **The participant set a cross-file commit needs**, collected where it is
+    /// free. A transaction that wrote one file commits the way it always did; a
+    /// transaction that wrote two is decided by a super-journal, and this is how
+    /// the commit knows which it is.
+    wrote: bool,
     /// Where before-images go while a transaction is open, or `None` outside
     /// one.
     ///
@@ -3727,11 +4375,12 @@ struct WalLog<'a> {
     /// pays nothing for the possibility. The buffer is handed in by the caller
     /// rather than owned here because it has to outlive the log: the log lives
     /// for one statement and the transaction for many.
-    undo: Option<&'a mut Vec<Before>>,
+    undo: Option<&'a std::cell::RefCell<Vec<Before>>>,
 }
 
 impl TreeLog for WalLog<'_> {
     fn log(&mut self, body: Body<'_>) -> DbResult<u64> {
+        self.wrote = true;
         self.wal.append(self.txn, body)
     }
 
@@ -3745,7 +4394,7 @@ impl TreeLog for WalLog<'_> {
         key: &[Datum<'_>],
         before: Option<Vec<OwnedDatum>>,
     ) -> DbResult<()> {
-        if let Some(buffer) = self.undo.as_mut() {
+        if let Some(buffer) = self.undo {
             // **The key is copied only when there is no row to put back.** A
             // restore that has a row calls `put`, which reads the key columns
             // out of the row itself; copying them a second time allocated a
@@ -3754,7 +4403,8 @@ impl TreeLog for WalLog<'_> {
                 Some(_) => Vec::new(),
                 None => key.iter().map(OwnedDatum::from_datum).collect(),
             };
-            buffer.push(Before {
+            buffer.borrow_mut().push(Before {
+                schema: self.schema,
                 tree,
                 key,
                 row: before,
@@ -3780,7 +4430,14 @@ impl TreeLog for WalLog<'_> {
 /// a piece of work rather than a wiring job.
 #[derive(Clone, Debug)]
 struct Before {
-    /// The tree the row is in.
+    /// Which schema the tree is in, as the binder numbers them.
+    ///
+    /// **Because a tree identifier is a file's number, not a connection's.**
+    /// Two databases each number their own trees from one, so an undo record
+    /// naming tree 7 says nothing until it also says which file - and a rollback
+    /// that guessed would restore a row into the wrong database.
+    schema: usize,
+    /// The tree the row is in, by the identifier its own file knows it by.
     tree: u64,
     /// The row's key columns, and empty when `row` carries them.
     ///
@@ -3951,6 +4608,25 @@ const SCHEMA_VIEW_ROOT: u32 = u32::MAX;
 /// page size before it reached this. Counting up from here keeps every created
 /// tree's identifier distinct from every imported one without a search.
 const FIRST_CREATED_ROOT: u32 = 0x8000_0000;
+
+/// The first handle a tree of an attached database is registered under.
+///
+/// **A handle is the connection's name for a tree; a tree identifier is the
+/// file's.** They are the same number for `main` and they cannot be for anything
+/// else: two files number their own trees from one, so a connection holding both
+/// would have two trees under one key. So `main` keeps identity and every other
+/// schema's trees are re-numbered into the range above this.
+///
+/// The two ranges cannot meet by growth, because `allocate_root` refuses at this
+/// number: a `main` holding 2^30 created objects is refused by name rather than
+/// silently handed a handle an attached database already answers to.
+const FIRST_ATTACHED_HANDLE: u32 = 0xC000_0000;
+
+/// How many databases a connection may hold beside `main` and `temp`.
+///
+/// SQLite's `SQLITE_MAX_ATTACHED` default, and the number `attach.rs` grades
+/// against.
+const MAX_ATTACHED: usize = 10;
 
 /// Returns the path the imported database is written to.
 ///
@@ -4221,9 +4897,22 @@ fn identifier_of(entry: &SchemaEntry) -> DbResult<u32> {
 ///
 /// @param schema - the schema table's own declaration
 fn schema_alias_of(schema: &TableInfo) -> TableInfo {
+    schema_named(schema, b"sqlite_master")
+}
+
+/// Returns one schema's catalog declaration under another name.
+///
+/// A temporary database's catalog is `sqlite_temp_schema` and
+/// `sqlite_temp_master`; an attached one's is `sqlite_schema` and
+/// `sqlite_master` under its own qualifier. Same tree, same five columns, same
+/// handle - only the name a statement writes differs.
+///
+/// @param schema - the catalog declaration to rename
+/// @param name - the name it will answer to
+fn schema_named(schema: &TableInfo, name: &[u8]) -> TableInfo {
     let mut alias = schema.clone();
-    alias.name = b"sqlite_master".to_vec();
-    alias.folded = b"sqlite_master".to_vec();
+    alias.name = name.to_vec();
+    alias.folded = name.to_ascii_lowercase();
     alias
 }
 
@@ -4819,4 +5508,443 @@ fn physical_for(affinity: inillucent_value::affinity::Affinity) -> (PhysicalType
         Affinity::Blob => (PhysicalType::Blob, StaticType::Unknown),
         Affinity::Numeric | Affinity::FlexNum => (PhysicalType::Any, StaticType::Unknown),
     }
+}
+
+/// Everything one database file's catalog tree describes.
+///
+/// **One derivation, for `main` and for every `ATTACH`ed file.** The shapes a
+/// query is planned against are derived from the `CREATE` text the catalog row
+/// carries; deriving them twice - once for the file a connection was opened on
+/// and once for a file it attached - is how the two come to disagree about a
+/// generated column or a `WITHOUT ROWID` key, which is a wrong answer rather
+/// than a refusal.
+struct LoadedSchema {
+    /// Every tree this file holds, keyed by the connection's handle for it.
+    trees: HashMap<u32, PagedTree>,
+    /// Each tree's layout, keyed the same way.
+    layouts: HashMap<u32, SourceLayout>,
+    /// For each table's handle, its index handles.
+    covering: HashMap<u32, Vec<u32>>,
+    /// The catalog rows, with the handle each object's tree is registered under.
+    entries: Vec<Recorded>,
+    /// The tables the binder resolves names against, `sqlite_schema` excepted.
+    tables: Vec<TableInfo>,
+    /// This file's own `sqlite_schema` declaration.
+    schema_info: TableInfo,
+    /// The handle each of this file's local tree identifiers is registered under.
+    handles: HashMap<u64, u32>,
+    /// The objects whose `CREATE` text this engine could not re-read.
+    skipped: Vec<String>,
+    /// The largest local identifier the file holds, so the next one is past it.
+    highest_identifier: u32,
+}
+
+/// Reads one file's catalog tree and derives everything needed to plan on it.
+///
+/// @param database - the file
+/// @param catalog_tree - its catalog tree, already attached from the meta page
+/// @param index - which schema this is, as the binder numbers them
+/// @param name - the schema's name, which the foreign-key planner qualifies with
+/// @param catalog_handle - the handle this file's `sqlite_schema` is read through
+/// @param allocate - hands out the connection's handle for a local tree identifier
+fn load_schema(
+    database: &Database,
+    catalog_tree: PagedTree,
+    index: usize,
+    name: &[u8],
+    catalog_handle: u32,
+    allocate: &mut dyn FnMut(u32) -> u32,
+) -> DbResult<LoadedSchema> {
+    let mut trees: HashMap<u32, PagedTree> = HashMap::new();
+    let mut layouts: HashMap<u32, SourceLayout> = HashMap::new();
+    let mut covering: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut entries: Vec<(i64, SchemaEntry)> = Vec::new();
+    let mut identifiers: Vec<u32> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut handles: HashMap<u64, u32> = HashMap::new();
+    // **Read with the rowid each row is stored under, not without it.**
+    // The two loops below visit the tables and then the indexes, which is
+    // not the order the catalog holds them in - a schema that creates a
+    // table, an index, another table interleaves the two. The rowid used to
+    // be reconstructed from the position in *this* reordered list, so every
+    // object after the first index was numbered as some other object. The
+    // number is what `seal` and every later `DROP` write by, so the next
+    // catalog write landed on the wrong row: rows came back duplicated and
+    // rows came back missing.
+    let stored_rows = inillucent_catalog::paged::read_catalog_rows(database.pool(), &catalog_tree)?;
+    let stored: Vec<SchemaEntry> = stored_rows.iter().map(|(_, entry)| entry.clone()).collect();
+    let rowid_of_name = |entry: &SchemaEntry| -> i64 {
+        stored_rows
+            .iter()
+            .find(|(_, held)| held.name == entry.name && held.kind == entry.kind)
+            .map(|(rowid, _)| *rowid)
+            .unwrap_or_default()
+    };
+
+    // **The identifier comes out of the catalog row, not out of a counter.**
+    // It used to be handed out here in catalog order, on the reasoning that
+    // it was this process's own bookkeeping. It is not: every logical row
+    // record in the log carries it, so a reader that numbered trees
+    // differently from the writer would hand recovery's records to the wrong
+    // tree - a wrong answer rather than a refusal. task-1834 put it in the
+    // catalog; this reads it back.
+    //
+    // `next_root` is set past the largest so a `CREATE TABLE` after this
+    // open cannot collide with one already in the file, which a counter that
+    // restarted at every open could and did.
+    let mut highest_identifier = 0u32;
+    // Every table by folded name, because an index's shape is derived
+    // against its table's declaration and the catalog does not order tables
+    // before their indexes.
+    let mut infos: HashMap<Vec<u8>, (u32, TableInfo)> = HashMap::new();
+
+    for entry in &stored {
+        if entry.kind != ObjectKind::Table {
+            continue;
+        }
+        // A virtual table has **no tree of its own**. Its rows live in the
+        // shadow tables the module declared, which are ordinary tables in
+        // this same catalog and are loaded by this same loop. So its row
+        // carries no tree identifier, and asking for one refused to open
+        // every database holding a search table - which is how this was
+        // found, by moving `inillucent-migrate` onto the engine.
+        //
+        // The kind is learned from a throwaway parse rather than from the
+        // parse below, because that one is given the identifier and every
+        // shape it derives is derived against it. Parsing once with a
+        // placeholder root and patching `info.root` afterwards looked like
+        // the same thing and was not: it left the *derived* shapes pointing
+        // at the placeholder, and every table then scanned the same tree -
+        // `count(*)` answered the same number for every table in the file.
+        if matches!(
+            table_from_create_sql(&entry.sql, index, 0).map(|info| info.kind),
+            Ok(inillucent_sql::catalog_view::TableKind::Virtual)
+        ) {
+            // `entries` and `identifiers` are zipped into `Recorded` below,
+            // so they are parallel and a row pushed to one has to be pushed
+            // to the other. Pushing only the entry shifted every later
+            // object onto the previous one's tree - which read as a table
+            // whose covering index answered another table's rows, and cost
+            // an afternoon to find. Zero is what `Recorded.root` documents
+            // for an object with no tree.
+            entries.push((rowid_of_name(entry), entry.clone()));
+            identifiers.push(0);
+            continue;
+        }
+        let local = identifier_of(entry)?;
+        highest_identifier = highest_identifier.max(local);
+        let identifier = allocate(local);
+        handles.insert(u64::from(local), identifier);
+        let mut info = match table_from_create_sql(&entry.sql, index, identifier) {
+            Ok(info) => info,
+            Err(_) => {
+                skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
+                continue;
+            }
+        };
+        info.root = identifier;
+        let (columns, key_columns, layout) = if info.without_rowid {
+            match keyed_table_shape(&info) {
+                Ok((columns, key_columns, layout)) => (columns, key_columns, layout),
+                Err(_) => {
+                    skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
+                    continue;
+                }
+            }
+        } else {
+            let (columns, layout) = table_shape(&info);
+            (columns, 1, layout)
+        };
+        let tree = PagedTree::attach(
+            database.pool(),
+            // **The tree keeps the identifier its own file numbered it with.**
+            // Every log record it writes carries this number and the log
+            // outlives the process, so it is the file's business. The map key
+            // beside it is the connection's handle, which is not.
+            u64::from(local),
+            entry.root,
+            columns,
+            key_columns,
+            entry.stats.leaf_count,
+            entry.stats.row_count,
+        )?;
+        trees.insert(identifier, tree);
+        layouts.insert(identifier, layout);
+        infos.insert(info.folded.clone(), (identifier, info.clone()));
+        entries.push((rowid_of_name(entry), entry.clone()));
+        identifiers.push(identifier);
+    }
+
+    for entry in &stored {
+        if entry.kind != ObjectKind::Index {
+            continue;
+        }
+        let folded = entry.table.to_ascii_lowercase();
+        let Some((table_root, table_info)) = infos.get(&folded).cloned() else {
+            skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
+            continue;
+        };
+        let local = identifier_of(entry)?;
+        highest_identifier = highest_identifier.max(local);
+        let identifier = allocate(local);
+        handles.insert(u64::from(local), identifier);
+        let index = match inillucent_catalog::load::index_from_create_sql(
+            &entry.sql,
+            &table_info,
+            identifier,
+        ) {
+            Ok(index) => index,
+            Err(_) => {
+                skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
+                continue;
+            }
+        };
+        let (columns, layout) = index_shape(&table_info, &index, identifier);
+        let key_columns = columns.len();
+        let tree = PagedTree::attach(
+            database.pool(),
+            // **The tree keeps the identifier its own file numbered it with.**
+            // Every log record it writes carries this number and the log
+            // outlives the process, so it is the file's business. The map key
+            // beside it is the connection's handle, which is not.
+            u64::from(local),
+            entry.root,
+            columns,
+            key_columns,
+            entry.stats.leaf_count,
+            entry.stats.row_count,
+        )?;
+        trees.insert(identifier, tree);
+        layouts.insert(identifier, layout);
+        covering.entry(table_root).or_default().push(identifier);
+        // The index joins its table's declaration, so the binder offers it
+        // to the planner exactly as the import does.
+        if let Some((_, info)) = infos.get_mut(&folded) {
+            info.indexes.push(index);
+        }
+        entries.push((rowid_of_name(entry), entry.clone()));
+        identifiers.push(identifier);
+    }
+
+    // **The triggers, then the keys, and in that order.** A written
+    // trigger is a catalog row like a table or an index and joins its
+    // table's declaration; a foreign key is a trigger the binder writes,
+    // and `plan_schema` can only write it once every table is in hand,
+    // because a key records only the child's side and the parent's has to
+    // be found by asking every table what it points at.
+    //
+    // Neither was done here until now, which is the whole reason foreign
+    // keys were unenforced: the binder fills a statement's `triggers` from
+    // exactly these two places, and both were empty on this engine.
+    for entry in &stored {
+        if entry.kind != ObjectKind::Trigger {
+            continue;
+        }
+        let folded = entry.table.to_ascii_lowercase();
+        let Some((_, info)) = infos.get_mut(&folded) else {
+            skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
+            continue;
+        };
+        match inillucent_catalog::load::trigger_from_create_sql(&entry.sql) {
+            // Newest first, which is SQLite's own order: it pushes each
+            // trigger onto the front of the table's list as it reads the
+            // schema, so the most recently created one fires first.
+            Ok(trigger) => info.triggers.insert(0, trigger),
+            Err(_) => skipped.push(String::from_utf8_lossy(&entry.name).into_owned()),
+        }
+        entries.push((rowid_of_name(entry), entry.clone()));
+        identifiers.push(0);
+    }
+
+    let mut planned: Vec<TableInfo> = infos.values().map(|(_, info)| info.clone()).collect();
+    inillucent_sql::foreign_key::plan_schema(&mut planned, name, &Limits::default());
+    for info in planned {
+        if let Some((_, held)) = infos.get_mut(&info.folded) {
+            held.foreign_key_triggers = info.foreign_key_triggers.clone();
+        }
+    }
+
+    // `sqlite_schema` over the catalog tree, exactly as the import builds
+    // it: one root number no object can have, and the ordinary scan path.
+    let schema_root = catalog_handle;
+    let schema_info = table_from_create_sql(schema_create_sql(), index, schema_root)?;
+    layouts.insert(
+        schema_root,
+        SourceLayout {
+            tree_key: schema_root,
+            slots: (1..=5).map(Some).collect(),
+            rowid: Some(0),
+            types: vec![
+                StaticType::Int,
+                StaticType::Text,
+                StaticType::Text,
+                StaticType::Text,
+                StaticType::Int,
+                StaticType::Text,
+            ],
+            width: 6,
+            key_columns: vec![0],
+        },
+    );
+    trees.insert(schema_root, catalog_tree);
+    for roots in covering.values_mut() {
+        roots.sort_by_key(|root| {
+            trees
+                .get(root)
+                .map(PagedTree::byte_size)
+                .unwrap_or(usize::MAX)
+        });
+    }
+    let mut tables: Vec<TableInfo> = infos.into_values().map(|(_, info)| info).collect();
+    tables.sort_by(|one, two| one.folded.cmp(&two.folded));
+    Ok(LoadedSchema {
+        trees,
+        layouts,
+        covering,
+        entries: entries
+            .into_iter()
+            .zip(identifiers)
+            .map(|((rowid, entry), root)| Recorded { rowid, root, entry })
+            .collect(),
+        tables,
+        schema_info,
+        handles,
+        skipped,
+        highest_identifier,
+    })
+}
+
+/// One database file, opened, recovered, and ready to be read.
+struct OpenedFile {
+    /// The pool, the meta page and the free map.
+    database: Database,
+    /// The log, positioned where recovery ended.
+    wal: std::rc::Rc<Wal>,
+    /// The catalog tree, attached from the meta page's root.
+    catalog_tree: PagedTree,
+    /// The highest transaction number any record recovery scanned carried.
+    ///
+    /// **A reopened database must not reuse a number the log still holds**, and
+    /// this is what the engine's counter is started above. Recovery decides
+    /// which records to replay by transaction number, so a number used twice in
+    /// one log makes two different transactions into one - a run that wrote as
+    /// transaction 3 and crashed leaves records the *next* run resurrects the
+    /// moment its own transaction 3 commits, permanently.
+    ///
+    /// `inillucent-wal` has reported this since it was written and nothing read
+    /// it; the cross-file commit is what made it load-bearing, because a marker
+    /// naming transaction 7 in a file whose next run also calls something
+    /// transaction 7 would suppress a commit that had nothing to do with it.
+    highest_txn: u64,
+}
+
+/// Opens one database file, replays its log into it, and opens that log.
+///
+/// **The one recovery path, for the file a connection is opened on and for
+/// every file it attaches.** An `ATTACH`ed database is an ordinary database of
+/// this engine - it may have been written by a process that crashed, and a
+/// second recovery path would be a second set of rules about what a torn tail
+/// means. There is one, and both callers take it.
+///
+/// @param vfs - the file system the file and its log live on
+/// @param db_path - the database file
+/// @param frames - how many frames the buffer pool holds
+/// @param doubtful - transactions whose `Commit` record is not the decision
+fn open_file(
+    vfs: &std::sync::Arc<dyn inillucent_vfs::Vfs>,
+    db_path: &DbPath,
+    frames: usize,
+    doubtful: &std::collections::BTreeSet<u64>,
+) -> DbResult<OpenedFile> {
+    let database = Database::open(vfs.as_ref(), db_path, frames.max(64))?;
+
+    // **Recovery.** The log is replayed into the file before anything is read
+    // out of it, which is what makes this an open rather than a reader of
+    // whatever the last checkpoint happened to leave behind.
+    //
+    // It could not be done until task-1834 put a tree's identifier in the
+    // catalog. `TreeRows` is keyed by that identifier, every logical row record
+    // carries it, and until then the writer's numbering and a reader's were
+    // different - so a replay would have put rows into the wrong tree, which is
+    // a wrong answer rather than a refusal.
+    //
+    // From the file's own checkpoint, not from the start of the log:
+    // `RecoveryStart::fresh` scans from `FIRST_LSN` and would replay everything
+    // the last checkpoint already applied.
+    //
+    // `doubtful` is how a cross-file commit reaches this. A transaction that
+    // wrote two databases votes in each file's log and is *decided* by a
+    // super-journal outside both, so a `Commit` record for one of those
+    // transactions is a vote rather than the decision - see
+    // `super_journal_doubt`.
+    let meta = database.meta();
+    let start = if meta.checkpoint_lsn == 0 {
+        inillucent_wal::RecoveryStart {
+            doubtful: doubtful.clone(),
+            ..inillucent_wal::RecoveryStart::fresh(database.uuid())
+        }
+    } else {
+        inillucent_wal::RecoveryStart {
+            uuid: database.uuid(),
+            checkpoint_lsn: meta.checkpoint_lsn,
+            sequence: meta.wal_sequence,
+            cts_watermark: meta.cts_watermark,
+            doubtful: doubtful.clone(),
+        }
+    };
+    let mut database = database;
+    // The shapes come from the catalog as it stood at the last checkpoint, plus
+    // the catalog tree itself, whose own rows are what a `CREATE TABLE` writes.
+    // A record naming a tree that is in none of them - a table created *after*
+    // the checkpoint, whose rows were then written - makes `TreeRows` refuse,
+    // which fails this open with a named error rather than replaying into a
+    // tree that is not the one meant.
+    let checkpointed = {
+        let before = attach_catalog(database.pool(), database.catalog_root())?;
+        read_catalog(database.pool(), &before)?
+    };
+    let (outcome, allocated, freed) = {
+        let mut applier =
+            inillucent_txn::redo::Applier::new(&mut database, LearningRows::new(&checkpointed));
+        let outcome = inillucent_wal::recover(vfs.as_ref(), db_path, start, &mut applier)?;
+        let (allocated, freed) = applier.allocations();
+        (outcome, allocated.to_vec(), freed.to_vec())
+    };
+    // The free map is rebuilt after the scan rather than inside it: the map and
+    // every page write are both behind `&mut Database`, and one record cannot
+    // hold two mutable borrows of the same object.
+    for page in &allocated {
+        database.claim(*page)?;
+    }
+    for page in &freed {
+        database.release(*page, 1)?;
+    }
+    inillucent_wal::truncate_after(vfs.as_ref(), db_path, &outcome)?;
+
+    // **The log resumes where recovery ended, not at the beginning.** Opening it
+    // at `FIRST_LSN` with sequence 1 starts a second stream over the same
+    // segments: the session writes records the *next* open cannot find, because
+    // the meta page's checkpoint points into the first stream. A test caught it
+    // as a table created after an open vanishing on the one after that -
+    // `no such table: second` from a file that had just been told to make it.
+    let wal = std::rc::Rc::new(Wal::open(
+        std::sync::Arc::clone(vfs),
+        db_path,
+        database.uuid(),
+        outcome.next_lsn.max(FIRST_LSN),
+        outcome.sequence.max(1),
+        WalOptions::default(),
+    )?);
+    database.pool().set_durable_lsn(wal.write_ahead_point());
+    let_the_pool_ask_the_log(database.pool(), &wal);
+
+    // The catalog is read again, because recovery may have changed it: a
+    // `CREATE TABLE` after the checkpoint is a row in this very tree.
+    let catalog_tree = attach_catalog(database.pool(), database.catalog_root())?;
+    Ok(OpenedFile {
+        database,
+        wal,
+        catalog_tree,
+        highest_txn: outcome.highest_txn,
+    })
 }

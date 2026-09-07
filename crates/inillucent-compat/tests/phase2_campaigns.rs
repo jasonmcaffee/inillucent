@@ -84,9 +84,17 @@ impl Fixture {
     }
 }
 
-impl TreeCatalog for Fixture {
+impl Fixture {
+    /// Returns the pool the fixture's two trees live in.
     fn pool(&self) -> &Pool {
         self.database.pool()
+    }
+}
+
+impl TreeCatalog for Fixture {
+    fn pool_for(&self, root: u32) -> Option<&Pool> {
+        let _ = root;
+        Some(self.database.pool())
     }
 
     fn tree(&self, root: u32) -> Option<&PagedTree> {

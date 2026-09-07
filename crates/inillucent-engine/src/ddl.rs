@@ -58,8 +58,36 @@ use inillucent_tree::PagedTree;
 
 use super::{
     in_key_order, index_shape, keyed_table_shape, table_shape, ImportedDatabase, Outcome, Recorded,
-    WalLog, SCHEMA_VIEW_ROOT,
+    WalLog,
 };
+
+/// Returns which schema a directive is about, as the binder numbered them.
+///
+/// Zero - `main` - for every directive that names no database, which includes
+/// the transaction-control statements, `ATTACH` and `DETACH` themselves, and
+/// every `PRAGMA` this engine answers from the connection rather than from a
+/// file.
+///
+/// @param directive - the bound statement
+fn schema_of(directive: &Directive) -> usize {
+    match directive {
+        Directive::CreateTable { database, .. }
+        | Directive::CreateVirtualTable { database, .. }
+        | Directive::CreateView { database, .. }
+        | Directive::CreateIndex { database, .. }
+        | Directive::CreateTrigger { database, .. }
+        | Directive::Drop { database, .. }
+        | Directive::Alter { database, .. }
+        | Directive::Reindex { database, .. }
+        | Directive::Vacuum { database, .. }
+        | Directive::Analyze { database, .. } => *database,
+        // A pragma may name a database and mostly does not; the ones this
+        // engine answers from the connection rather than from a file are about
+        // `main` either way.
+        Directive::Pragma { database, .. } => database.unwrap_or(super::MAIN),
+        _ => super::MAIN,
+    }
+}
 
 impl ImportedDatabase {
     /// Returns how many times the catalog has changed.
@@ -90,6 +118,33 @@ impl ImportedDatabase {
         let BoundStatement::Directive(directive) = self.bind(sql)? else {
             return Err(misuse(format!("{sql} is not a directive")));
         };
+        // **Which file the statement is about, from the statement's own
+        // words.** `CREATE TABLE aux.t` and `CREATE TEMP TABLE t` each bind to a
+        // schema, and the primitives underneath - `allocate_root`, `record`,
+        // `build_tree`, `seal` - have to write into it. Put back afterwards, so
+        // nothing outside one statement ever observes it as anything but `main`.
+        let previous = self.ddl_schema;
+        let at = schema_of(&directive);
+        // **The temporary database is made by the first statement that needs
+        // one.** The binder has already resolved `temp` to schema one, because
+        // the name is always in the catalog; this is where the file behind it
+        // comes into being, so a connection that never writes a temporary object
+        // never makes one.
+        if at == super::TEMP {
+            self.ensure_temp()?;
+        }
+        self.ddl_schema = at;
+        let outcome = self.run_directive(directive, sql);
+        self.ddl_schema = previous;
+        outcome
+    }
+
+    /// Runs one bound directive against the schema `execute_ddl` selected.
+    ///
+    /// @param directive - the bound statement
+    /// @param sql - the statement text, which the DDL cases slice the stored
+    ///   `CREATE` text out of
+    fn run_directive(&mut self, directive: Box<Directive>, sql: &str) -> DbResult<Outcome> {
         let source = sql.as_bytes();
         match *directive {
             Directive::CreateTable {
@@ -244,6 +299,19 @@ impl ImportedDatabase {
                 self.release(&name)?;
                 Ok(Outcome::empty())
             }
+            // **A second database, opened beside the one this connection was
+            // opened on.** Everything above the file - the binder's schema
+            // numbering, the planner's tree handles, the write path's choice of
+            // log - was already written for more than one; what was missing was
+            // a second file to point them at.
+            Directive::Attach { file, schema } => {
+                self.attach(&file, &schema)?;
+                Ok(Outcome::empty())
+            }
+            Directive::Detach { schema } => {
+                self.detach(&schema)?;
+                Ok(Outcome::empty())
+            }
             // **Marked as a capability gap, not as misuse.** A directive this
             // engine has not implemented - `ATTACH`, `DETACH`, `VACUUM` - is a
             // construct it does not do yet, which is a different thing from a
@@ -260,10 +328,11 @@ impl ImportedDatabase {
     }
 
     /// Returns the identifier the next created tree is registered under.
-    fn allocate_root(&mut self) -> u32 {
-        let root = self.next_root;
-        self.next_root = self.next_root.saturating_add(1);
-        root
+    fn allocate_root(&mut self) -> DbResult<u32> {
+        // The handle, which is what everything above the file names the tree by.
+        // Its file-local identifier goes into the catalog row and into every log
+        // record, and `record` reads it back with `local_of`.
+        Ok(self.allocate_in(self.ddl_schema)?.1)
     }
 
     /// Returns the rowid the next catalog row takes.
@@ -272,7 +341,7 @@ impl ImportedDatabase {
     /// with no explicit key does - and SQLite writes its own `sqlite_schema`
     /// rows with exactly that statement.
     fn next_catalog_rowid(&self) -> i64 {
-        self.entries
+        self.entries_of(self.ddl_schema)
             .iter()
             .map(|held| held.rowid)
             .max()
@@ -305,11 +374,47 @@ impl ImportedDatabase {
         // offered (task-1838 §7).
         self.refresh_vector_indexes();
         let mut catalog = StaticCatalog::empty();
+        // **In attachment order, `main` first.** The binder numbers schemas by
+        // their position here and resolves an unqualified name by walking
+        // `temp`, then `main`, then the attachments in the order they arrived -
+        // which is SQLite's order and is what `main_wins_an_unqualified_name`
+        // grades.
+        // **`temp` is listed whether or not this connection has made one.** The
+        // binder refuses `CREATE TEMP TABLE` when the name is not in the
+        // catalog, and the database it would go into is made by the statement
+        // that first needs it - so the name has to be there before the schema
+        // is. It also fixes every attachment's number: `main`, `temp`, then the
+        // attachments, which is SQLite's own layout.
+        catalog.databases.push((b"temp".to_vec(), 0));
+        for held in &self.attached {
+            catalog.databases.push((held.name.clone(), 0));
+        }
         for table in &self.tables {
             catalog = catalog.with_table(table.clone());
         }
         catalog = catalog.with_table(self.schema_info.clone());
         catalog = catalog.with_table(super::schema_alias_of(&self.schema_info));
+        // Each attached database's own `sqlite_schema`, reachable only when it
+        // is qualified: an unqualified `sqlite_schema` is `main`'s, which is
+        // what SQLite answers and what the search order above already gives.
+        for held in &self.attached {
+            catalog = catalog.with_table(held.schema_info.clone());
+            catalog = catalog.with_table(super::schema_alias_of(&held.schema_info));
+        }
+        // A temporary database's catalog answers to `sqlite_temp_schema` and
+        // `sqlite_temp_master`, which is how SQLite names it - and registering
+        // it as `sqlite_schema` as well would put it *first* in the search order
+        // and make an unqualified `sqlite_schema` mean the temporary one.
+        // The temporary database's catalog answers to `sqlite_temp_schema` and
+        // `sqlite_temp_master`, which is how SQLite names it - and registering
+        // it as `sqlite_schema` as well would put it *first* in the search order
+        // and make an unqualified `sqlite_schema` mean the temporary one.
+        if let Some(held) = self.schema_at(super::TEMP) {
+            let temp_schema = super::schema_named(&held.schema_info, b"sqlite_temp_schema");
+            let temp_master = super::schema_named(&held.schema_info, b"sqlite_temp_master");
+            catalog = catalog.with_table(temp_schema);
+            catalog = catalog.with_table(temp_master);
+        }
         self.catalog = catalog;
         self.forget_compiled_statements();
         self.catalog_generation = self.catalog_generation.saturating_add(1);
@@ -339,26 +444,46 @@ impl ImportedDatabase {
         // itself would be a fifth place it could disagree with the tree it
         // describes - and a catalog naming the wrong tree would send recovery's
         // row records somewhere else.
-        entry.tree_id = u64::from(root);
+        let at = self.ddl_schema;
+        entry.tree_id = self.local_of(at, root);
         let txn = self.current_txn();
         let open = self.batch.get().is_some();
+        let wal = self
+            .log_of(at)
+            .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
+        let catalog_handle = self.catalog_handle_of(at);
         {
             let mut log = WalLog {
-                wal: &self.wal,
+                wal,
                 txn,
+                schema: at,
+                wrote: false,
                 // **A catalog row is a row.** A `CREATE TABLE` inside a
                 // transaction has to come back out when the transaction is
                 // abandoned, and the way it comes back out is the same way a
                 // deleted row does: the catalog tree's before-image, restored.
-                undo: open.then_some(&mut self.undo),
+                undo: open.then_some(&self.undo),
             };
             let tree = self
                 .trees
-                .get_mut(&SCHEMA_VIEW_ROOT)
+                .get_mut(&catalog_handle)
                 .ok_or_else(|| misuse("the catalog tree is not attached"))?;
-            insert_entry(&mut self.database, tree, &mut log, rowid, &entry)?;
+            let session = self.session.get();
+            let database = super::file_of(
+                &mut self.database,
+                &mut self.attached,
+                &mut self.temps,
+                session,
+                at,
+            )?;
+            insert_entry(database, tree, &mut log, rowid, &entry)?;
         }
-        self.entries.push(Recorded { rowid, root, entry });
+        self.entries_of_mut(at)
+            .ok_or_else(|| misuse("a statement names a database that is not attached"))?
+            .push(Recorded { rowid, root, entry });
+        // A schema change is a write, and a transaction that made one in two
+        // files commits both or neither like any other.
+        self.touched |= super::schema_bit(at);
         Ok(())
     }
 
@@ -419,23 +544,39 @@ impl ImportedDatabase {
         {
             let txn = self.current_txn();
             let open = self.batch.get().is_some();
+            let at = self.ddl_schema;
+            let wal = self
+                .log_of(at)
+                .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
             let mut log = WalLog {
-                wal: &self.wal,
+                wal,
                 txn,
+                schema: at,
+                wrote: false,
                 // **A catalog row is a row.** A `CREATE TABLE` inside a
                 // transaction has to come back out when the transaction is
                 // abandoned, and the way it comes back out is the same way a
                 // deleted row does: the catalog tree's before-image, restored.
-                undo: open.then_some(&mut self.undo),
+                undo: open.then_some(&self.undo),
             };
+            let catalog_handle = self.catalog_handle_of(at);
             let tree = self
                 .trees
-                .get_mut(&SCHEMA_VIEW_ROOT)
+                .get_mut(&catalog_handle)
                 .ok_or_else(|| misuse("the catalog tree is not attached"))?;
-            delete_entry(&mut self.database, tree, &mut log, rowid)?;
-            insert_entry(&mut self.database, tree, &mut log, rowid, &entry)?;
+            let session = self.session.get();
+            let database = super::file_of(
+                &mut self.database,
+                &mut self.attached,
+                &mut self.temps,
+                session,
+                at,
+            )?;
+            delete_entry(database, tree, &mut log, rowid)?;
+            insert_entry(database, tree, &mut log, rowid, &entry)?;
         }
-        for held in &mut self.entries {
+        let at = self.ddl_schema;
+        for held in self.entries_of_mut(at).into_iter().flatten() {
             if held.rowid == rowid {
                 held.entry = entry.clone();
             }
@@ -450,22 +591,40 @@ impl ImportedDatabase {
         {
             let txn = self.current_txn();
             let open = self.batch.get().is_some();
+            let at = self.ddl_schema;
+            let wal = self
+                .log_of(at)
+                .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
             let mut log = WalLog {
-                wal: &self.wal,
+                wal,
                 txn,
+                schema: at,
+                wrote: false,
                 // **A catalog row is a row.** A `CREATE TABLE` inside a
                 // transaction has to come back out when the transaction is
                 // abandoned, and the way it comes back out is the same way a
                 // deleted row does: the catalog tree's before-image, restored.
-                undo: open.then_some(&mut self.undo),
+                undo: open.then_some(&self.undo),
             };
+            let catalog_handle = self.catalog_handle_of(at);
             let tree = self
                 .trees
-                .get_mut(&SCHEMA_VIEW_ROOT)
+                .get_mut(&catalog_handle)
                 .ok_or_else(|| misuse("the catalog tree is not attached"))?;
-            delete_entry(&mut self.database, tree, &mut log, rowid)?;
+            let session = self.session.get();
+            let database = super::file_of(
+                &mut self.database,
+                &mut self.attached,
+                &mut self.temps,
+                session,
+                at,
+            )?;
+            delete_entry(database, tree, &mut log, rowid)?;
         }
-        self.entries.retain(|held| held.rowid != rowid);
+        let at = self.ddl_schema;
+        if let Some(held) = self.entries_of_mut(at) {
+            held.retain(|row| row.rowid != rowid);
+        }
         Ok(())
     }
 
@@ -507,21 +666,39 @@ impl ImportedDatabase {
             .collect();
         self.borrow_nanos.set(copied.elapsed().as_nanos());
         let txn = self.current_txn();
+        let at = self.ddl_schema;
+        let local = self.local_of(at, root);
+        let wal = self
+            .log_of(at)
+            .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
         let tree = {
             let open = self.batch.get().is_some();
             let mut log = WalLog {
-                wal: &self.wal,
+                wal,
                 txn,
+                schema: at,
+                wrote: false,
                 // **A catalog row is a row.** A `CREATE TABLE` inside a
                 // transaction has to come back out when the transaction is
                 // abandoned, and the way it comes back out is the same way a
                 // deleted row does: the catalog tree's before-image, restored.
-                undo: open.then_some(&mut self.undo),
+                undo: open.then_some(&self.undo),
             };
-            PagedTree::bulk_build_logged(
+            let session = self.session.get();
+            let database = super::file_of(
                 &mut self.database,
+                &mut self.attached,
+                &mut self.temps,
+                session,
+                at,
+            )?;
+            PagedTree::bulk_build_logged(
+                database,
                 Some(&mut log),
-                u64::from(root),
+                // **The file's own number, not the connection's.** Every record
+                // this tree writes carries it, and the log outlives the process
+                // that made the handle.
+                local,
                 columns,
                 key_columns,
                 &borrowed,
@@ -530,6 +707,7 @@ impl ImportedDatabase {
         let page = tree.root();
         self.trees.insert(root, tree);
         self.layouts.insert(root, layout);
+        self.touched |= super::schema_bit(at);
         Ok(page)
     }
 
@@ -537,18 +715,35 @@ impl ImportedDatabase {
     ///
     /// @param root - the identifier it is registered under
     fn release_tree(&mut self, root: u32) -> DbResult<()> {
+        let at = self.schema_of(root);
+        let owner = self
+            .schema_file(at)
+            .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
         let pages = match self.trees.get(&root) {
-            Some(tree) => tree.pages(self.database.pool())?,
+            Some(tree) => tree.pages(owner.pool())?,
             None => Vec::new(),
         };
         let txn = self.current_txn();
+        let wal = self
+            .log_of(at)
+            .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
         for page in &pages {
-            self.wal
-                .append(txn, inillucent_wal::record::Body::FreePage { page: page.0 })?;
+            wal.append(txn, inillucent_wal::record::Body::FreePage { page: page.0 })?;
         }
-        for page in pages {
-            self.database.release(page, 1)?;
+        {
+            let session = self.session.get();
+            let database = super::file_of(
+                &mut self.database,
+                &mut self.attached,
+                &mut self.temps,
+                session,
+                at,
+            )?;
+            for page in pages {
+                database.release(page, 1)?;
+            }
         }
+        self.owner.remove(&root);
         self.trees.remove(&root);
         self.layouts.remove(&root);
         self.covering.remove(&root);
@@ -579,15 +774,24 @@ impl ImportedDatabase {
         }
         let txn = self.next_txn.get();
         self.next_txn.set(txn.saturating_add(1));
-        self.wal.append(
+        let at = self.ddl_schema;
+        let wal = self
+            .log_of(at)
+            .ok_or_else(|| misuse("a statement names a database that is not attached"))?;
+        wal.append(
             txn,
             inillucent_wal::record::Body::CatalogChange { delta: &[] },
         )?;
-        self.wal.commit(txn, txn)?;
-        self.database
-            .pool()
-            .set_durable_lsn(self.wal.write_ahead_point());
-        Ok(())
+        // **Through the same commit as every other statement's.** A schema
+        // change is a write, and it takes the participant set the write left
+        // behind - which is one file for every `CREATE TABLE` there has ever
+        // been, and therefore the single-file path. Committing the log directly
+        // here instead would leave that set uncleared, and the *next* autocommit
+        // statement would find a schema in it that it had not written: a
+        // one-file insert paying for a two-file protocol, and a `Commit` record
+        // in a log for a transaction that never touched it.
+        let participants = std::mem::take(&mut self.touched) | super::schema_bit(at);
+        self.commit_across(txn, participants)
     }
 
     /// Creates a table, its tree, and the trees its constraints imply.
@@ -632,7 +836,7 @@ impl ImportedDatabase {
     /// @param name - the table's name as it will be stored
     /// @param sql - the `CREATE` text to store and to derive the shape from
     pub(super) fn define_table(&mut self, name: &[u8], sql: Vec<u8>) -> DbResult<u32> {
-        let root = self.allocate_root();
+        let root = self.allocate_root()?;
         let mut info = table_from_create_sql(&sql, 0, root)?;
         info.name = name.to_vec();
         info.folded = name.to_ascii_lowercase();
@@ -676,7 +880,7 @@ impl ImportedDatabase {
                     continue;
                 }
             }
-            let index_root = self.allocate_root();
+            let index_root = self.allocate_root()?;
             let mut index = index.clone();
             index.root = index_root;
             let (columns, layout) = index_shape(&info, &index, index_root);
@@ -763,7 +967,7 @@ impl ImportedDatabase {
             // built wrong - the import refuses the same shape.
             return Err(misuse("an index on a WITHOUT ROWID table"));
         }
-        let root = self.allocate_root();
+        let root = self.allocate_root()?;
         let index = index_from_create_sql(&sql, &owner, root)?;
         if index.columns.iter().any(|key| key.column.is_none()) {
             return Err(misuse("an index on an expression"));
@@ -970,7 +1174,8 @@ impl ImportedDatabase {
             .ok_or_else(|| misuse("an index on a table with no rowid"))?;
         let width = sources.len().saturating_add(1);
         let mut rows: Vec<Vec<OwnedDatum>> = Vec::with_capacity(tree.row_count() as usize);
-        tree.visit_leaves(self.database.pool(), &mut |leaf| {
+        let pool = self.pool_of(owner.root)?;
+        tree.visit_leaves(pool, &mut |leaf| {
             // **A clean leaf is read column by column, not row by row.** `live`
             // is what merges the delta area and skips the tombstones, and it
             // pays for that by building a `Vec` per row holding *every* column
@@ -1115,10 +1320,11 @@ impl ImportedDatabase {
         let folded = name.to_ascii_lowercase();
         match kind {
             Ast::Table => {
+                let at = self.ddl_schema;
                 let position = self
                     .tables
                     .iter()
-                    .position(|held| held.folded == folded)
+                    .position(|held| held.database == at && held.folded == folded)
                     .ok_or_else(|| {
                         misuse(format!("no such table: {}", String::from_utf8_lossy(name)))
                     })?;
@@ -1131,7 +1337,7 @@ impl ImportedDatabase {
                 // triggers. Collected before anything is removed, because the
                 // list is what decides what to remove.
                 let doomed: Vec<i64> = self
-                    .entries
+                    .entries_of(at)
                     .iter()
                     .filter(|held| {
                         held.entry.name.to_ascii_lowercase() == folded
@@ -1149,7 +1355,11 @@ impl ImportedDatabase {
                 let _ = position;
             }
             Ast::Index => {
+                let owner = self.ddl_schema;
                 let found = self.tables.iter().enumerate().find_map(|(at, table)| {
+                    if table.database != owner {
+                        return None;
+                    }
                     table
                         .indexes
                         .iter()
@@ -1169,7 +1379,7 @@ impl ImportedDatabase {
                     .map(|index| index.root)
                     .ok_or_else(|| misuse("the index that was just found is gone"))?;
                 let rowids: Vec<i64> = self
-                    .entries
+                    .entries_of(self.ddl_schema)
                     .iter()
                     .filter(|held| {
                         held.entry.kind == ObjectKind::Index
@@ -1191,7 +1401,7 @@ impl ImportedDatabase {
                     ObjectKind::Trigger
                 };
                 let rowids: Vec<i64> = self
-                    .entries
+                    .entries_of(self.ddl_schema)
                     .iter()
                     .filter(|held| {
                         held.entry.kind == wanted && held.entry.name.to_ascii_lowercase() == folded
@@ -1225,14 +1435,19 @@ impl ImportedDatabase {
         action: &AlterKind,
     ) -> DbResult<Outcome> {
         let folded = table.to_ascii_lowercase();
-        if !self.tables.iter().any(|held| held.folded == folded) {
+        let at = self.ddl_schema;
+        if !self
+            .tables
+            .iter()
+            .any(|held| held.database == at && held.folded == folded)
+        {
             return Err(misuse(format!(
                 "no such table: {}",
                 String::from_utf8_lossy(table)
             )));
         }
         let mut updates: Vec<(i64, SchemaEntry)> = Vec::new();
-        for held in &self.entries {
+        for held in self.entries_of(at) {
             let (rowid, entry) = (&held.rowid, &held.entry);
             let owns = entry.table.to_ascii_lowercase() == folded;
             let itself =
@@ -1358,10 +1573,47 @@ impl ImportedDatabase {
     /// view has to be derived again. The identifiers are carried across by name
     /// so the trees a plan will read stay the trees they were.
     pub(super) fn rebuild_tables(&mut self) -> DbResult<()> {
-        let entries: Vec<inillucent_catalog::paged::SchemaEntry> =
-            self.entries.iter().map(|held| held.entry.clone()).collect();
-        let roots: Vec<u32> = self.entries.iter().map(|held| held.root).collect();
-        let mut rebuilt = tables_from_entries(&entries, &roots, 0)?;
+        // **Every schema, each numbered as the binder numbers it.** A table's
+        // `database` is what an unqualified name is resolved through and what a
+        // qualified one is matched against, so a table derived under the wrong
+        // number is a table the wrong statement finds.
+        // **Every schema every session shares, and no session's own.** A
+        // temporary table belongs to one connection, so it is derived per
+        // session by `session_catalog` rather than kept here where another
+        // connection would find it.
+        let mut rebuilt: Vec<TableInfo> = Vec::new();
+        for at in self.schema_numbers() {
+            let held = self.entries_of(at);
+            let entries: Vec<inillucent_catalog::paged::SchemaEntry> =
+                held.iter().map(|row| row.entry.clone()).collect();
+            let roots: Vec<u32> = held.iter().map(|row| row.root).collect();
+            rebuilt.extend(tables_from_entries(&entries, &roots, at)?);
+        }
+        // **A temporary trigger fires on whatever the name finds.** Its row
+        // lives in the temporary database and its table usually does not -
+        // `CREATE TEMP TRIGGER t_log AFTER INSERT ON t` is a trigger on a
+        // permanent table - so `tables_from_entries` leaves it unattached, and
+        // this is where it is put where it belongs. Newest first, which is
+        // SQLite's own order.
+        let orphans: Vec<(Vec<u8>, Vec<u8>)> = self
+            .entries_of(super::TEMP)
+            .iter()
+            .filter(|row| row.entry.kind == ObjectKind::Trigger)
+            .map(|row| (row.entry.table.to_ascii_lowercase(), row.entry.sql.clone()))
+            .filter(|(folded, _)| {
+                !rebuilt
+                    .iter()
+                    .any(|table| table.database == super::TEMP && table.folded == *folded)
+            })
+            .collect();
+        for (folded, sql) in orphans {
+            let Ok(trigger) = inillucent_catalog::load::trigger_from_create_sql(&sql) else {
+                continue;
+            };
+            if let Some(table) = rebuilt.iter_mut().find(|table| table.folded == folded) {
+                table.triggers.insert(0, trigger);
+            }
+        }
         // **A virtual table's columns come from its module, not its text.**
         // `CREATE VIRTUAL TABLE documents USING fts5(title, body)` names a
         // module and its arguments; what the *columns* are is the module's
@@ -1415,7 +1667,7 @@ impl ImportedDatabase {
                 .trees
                 .get(&old_root)
                 .ok_or_else(|| misuse("no tree for the table being rebuilt"))?;
-            tree.rows(self.database.pool())?
+            tree.rows(self.pool_of(old_root)?)?
         };
         let (columns, key_columns, layout) = if info.without_rowid {
             keyed_table_shape(&info)?
@@ -1521,8 +1773,9 @@ impl ImportedDatabase {
             .map(|index| index.root)
             .collect();
         for root in roots {
+            let pool = self.pool_of(root)?;
             if let Some(tree) = self.trees.get(&root) {
-                tree.check(self.database.pool())?;
+                tree.check(pool)?;
             }
         }
         Ok(Outcome::empty())

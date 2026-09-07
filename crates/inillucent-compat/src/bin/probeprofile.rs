@@ -126,7 +126,9 @@ fn index_probe_stages(database: &ImportedDatabase) -> Result<(), String> {
     let Some(tree) = inillucent_exec::physical::TreeCatalog::tree(database, index_root) else {
         return Ok(());
     };
-    let pool = inillucent_exec::physical::TreeCatalog::pool(database);
+    let Some(pool) = inillucent_exec::physical::TreeCatalog::pool_for(database, index_root) else {
+        return Ok(());
+    };
     println!();
     println!(
         "side_owner: root page {:?}, height {}, {} leaves, {} rows, key columns {}",
@@ -356,7 +358,9 @@ fn probe_stages(database: &ImportedDatabase, rows: u32) -> Result<(), String> {
     let Some(tree) = inillucent_exec::physical::TreeCatalog::tree(database, root) else {
         return Err("no tree for main_table".to_string());
     };
-    let pool = inillucent_exec::physical::TreeCatalog::pool(database);
+    let Some(pool) = inillucent_exec::physical::TreeCatalog::pool_for(database, root) else {
+        return Ok(());
+    };
     println!();
     println!(
         "main_table: root page {:?}, height {}, {} leaves, {} rows",

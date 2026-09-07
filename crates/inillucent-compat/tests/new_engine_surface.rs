@@ -200,7 +200,7 @@ const SURFACE: &[(&str, &str, Answers)] = &[
         "SELECT a FROM t WHERE EXISTS (SELECT 1 FROM t AS u WHERE u.id = t.id)",
         Yes,
     ),
-    ("attach", "ATTACH DATABASE ':memory:' AS other", NotYet),
+    ("attach", "ATTACH DATABASE ':memory:' AS other", Yes),
     ("vacuum", "VACUUM", NotYet),
     // Plain EXPLAIN is refused for a reason that is not "yet": see the two
     // classes of refusal above.
