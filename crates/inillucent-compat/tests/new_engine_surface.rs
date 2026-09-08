@@ -206,9 +206,10 @@ const SURFACE: &[(&str, &str, Answers)] = &[
     // task-1859 Part H: `VACUUM` folds the log into the file and `VACUUM INTO`
     // writes a verified copy, which is how a backup is taken.
     ("vacuum", "VACUUM", Yes),
-    // Plain EXPLAIN is refused for a reason that is not "yet": see the two
-    // classes of refusal above.
-    ("explain", "EXPLAIN SELECT a FROM t", NotYet),
+    // task-1860: plain `EXPLAIN` answers. It lists the operator chain the
+    // statement runs, in the eight columns SQLite lists opcodes in - see
+    // `new_engine_explain::plain_explain_lists_the_chain_in_the_references_columns`.
+    ("explain", "EXPLAIN SELECT a FROM t", Yes),
 ];
 
 /// Every construct answers the way the inventory says it does.

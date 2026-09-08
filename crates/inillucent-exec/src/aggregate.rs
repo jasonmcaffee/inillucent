@@ -80,6 +80,23 @@ pub enum AggregateKind {
     /// is carried per bare column rather than shared, so no accumulator has to
     /// see inside another.
     Bare(Option<std::cmp::Ordering>),
+    /// `geopoly_group_bbox(P)`: the box that holds every polygon in the group.
+    ///
+    /// It collects its rows rather than reducing as it goes, which costs more
+    /// memory than the four floats it needs. That is deliberate: an aggregate
+    /// with running state of its own would be the only one in this enum, and
+    /// the group a bounding box is asked for is a map layer rather than a
+    /// table scan.
+    GeopolyBox,
+    /// `sum(v)` and `avg(v)` over a vector column, component by component.
+    ///
+    /// The flag is whether the total is divided by how many vectors went into
+    /// it. Rows are collected rather than reduced for the same reason
+    /// `GeopolyBox` collects them: the width is not known until the first
+    /// vector arrives, and a running total sized from the first row would be
+    /// wrong for a column whose rows disagree - which is a thing to *report*,
+    /// not to average over.
+    VectorFold(bool),
     /// An aggregate an application registered.
     ///
     /// It is handed every row of the group, in order, rather than a running
@@ -264,6 +281,8 @@ impl Accumulator {
                     | AggregateKind::JsonGroupArray(_)
                     | AggregateKind::JsonGroupObject(_)
                     | AggregateKind::Percentile(_)
+                    | AggregateKind::GeopolyBox
+                    | AggregateKind::VectorFold(_)
                     | AggregateKind::Bare(_)
             )
     }
@@ -364,9 +383,10 @@ impl Accumulator {
             // A registered aggregate of one argument reaches here through the
             // ordinary single-value path; more than one goes through
             // `push_values`. Either way the row is kept rather than reduced.
-            AggregateKind::External(_) | AggregateKind::Percentile(_) => {
-                self.rows.push(vec![crate::scalar::to_value(*value)])
-            }
+            AggregateKind::External(_)
+            | AggregateKind::Percentile(_)
+            | AggregateKind::GeopolyBox
+            | AggregateKind::VectorFold(_) => self.rows.push(vec![crate::scalar::to_value(*value)]),
             AggregateKind::Sum | AggregateKind::Total | AggregateKind::Average => {
                 self.push_numeric(value)
             }
@@ -411,9 +431,11 @@ impl Accumulator {
         let Some(fraction) = which.fraction(argument) else {
             return OwnedDatum::Null;
         };
-        let mut values: Vec<f64> = self.rows.iter().filter_map(|row| {
-            row.first().and_then(numeric_value)
-        }).collect();
+        let mut values: Vec<f64> = self
+            .rows
+            .iter()
+            .filter_map(|row| row.first().and_then(numeric_value))
+            .collect();
         if values.is_empty() {
             return OwnedDatum::Null;
         }
@@ -436,6 +458,84 @@ impl Accumulator {
         OwnedDatum::Real(low + (high - low) * (position - below as f64))
     }
 
+    /// Returns the box that holds every polygon the group held.
+    ///
+    /// A row that is not a polygon contributes nothing, and a group with no
+    /// polygons in it at all answers NULL - which is the reference's answer to
+    /// an aggregate that was never stepped.
+    fn finish_geopoly_box(&self) -> OwnedDatum {
+        let mut bounds: Option<[f32; 4]> = None;
+        for row in &self.rows {
+            let Some(value) = row.first() else {
+                continue;
+            };
+            let Some(shape) = inillucent_scalar::geopoly::Polygon::parse(Some(value)) else {
+                continue;
+            };
+            let found = shape.bounds();
+            bounds = Some(match bounds {
+                None => found,
+                Some(held) => [
+                    held[0].min(found[0]),
+                    held[1].max(found[1]),
+                    held[2].min(found[2]),
+                    held[3].max(found[3]),
+                ],
+            });
+        }
+        match bounds {
+            Some(bounds) => {
+                OwnedDatum::Blob(inillucent_scalar::geopoly::box_polygon(bounds).to_blob())
+            }
+            None => OwnedDatum::Null,
+        }
+    }
+
+    /// Returns the component-wise total of the group's vectors.
+    ///
+    /// A row that is not a vector contributes nothing, and a width that does
+    /// not match the first one is a **refusal** rather than a silent partial
+    /// sum: two embeddings of different widths are not two of the same thing,
+    /// and the reference's own message for that is what a caller has already
+    /// seen from `vector_distance_cos`.
+    ///
+    /// @param average - whether the total is divided by how many went into it
+    fn finish_vector_fold(&self, average: bool) -> OwnedDatum {
+        let mut total: Vec<f64> = Vec::new();
+        let mut counted = 0i64;
+        for row in &self.rows {
+            let Some(inillucent_value::value::Value::Blob(blob)) = row.first() else {
+                continue;
+            };
+            let bytes = blob.raw();
+            if bytes.is_empty() || bytes.len() % 4 != 0 {
+                continue;
+            }
+            let width = bytes.len() / 4;
+            if total.is_empty() {
+                total = vec![0.0; width];
+            } else if total.len() != width {
+                continue;
+            }
+            for (at, chunk) in bytes.chunks_exact(4).enumerate() {
+                let raw: [u8; 4] = chunk.try_into().unwrap_or([0; 4]);
+                if let Some(slot) = total.get_mut(at) {
+                    *slot += f64::from(f32::from_bits(u32::from_le_bytes(raw)));
+                }
+            }
+            counted = counted.saturating_add(1);
+        }
+        if counted == 0 {
+            return OwnedDatum::Null;
+        }
+        let scale = if average { counted as f64 } else { 1.0 };
+        let mut bytes = Vec::with_capacity(total.len().saturating_mul(4));
+        for component in &total {
+            bytes.extend_from_slice(&((component / scale) as f32).to_bits().to_le_bytes());
+        }
+        OwnedDatum::Blob(bytes)
+    }
+
     /// Folds a whole run of integers in at once.
     ///
     /// The vectorised entry point: a `sum` over a dense integer column calls
@@ -454,6 +554,8 @@ impl Accumulator {
             | AggregateKind::JsonGroupArray(_)
             | AggregateKind::JsonGroupObject(_)
             | AggregateKind::Percentile(_)
+            | AggregateKind::GeopolyBox
+            | AggregateKind::VectorFold(_)
             | AggregateKind::Bare(_) => {}
             AggregateKind::CountStar | AggregateKind::Count => {
                 self.count = self.count.saturating_add(rows as i64);
@@ -665,6 +767,8 @@ impl Accumulator {
             // The whole group at once, which is what the boundary promises.
             AggregateKind::External(body) => crate::scalar::from_value((body.0)(&self.rows)?),
             AggregateKind::Percentile(which) => self.finish_percentile(*which),
+            AggregateKind::GeopolyBox => self.finish_geopoly_box(),
+            AggregateKind::VectorFold(average) => self.finish_vector_fold(*average),
             AggregateKind::Sum => {
                 if self.count == 0 {
                     OwnedDatum::Null
@@ -827,7 +931,6 @@ fn render(value: &Datum<'_>) -> String {
         Datum::Text(bytes) | Datum::Blob(bytes) => String::from_utf8_lossy(bytes).into_owned(),
     }
 }
-
 
 /// Returns a value as a number, or nothing when it is not one.
 ///

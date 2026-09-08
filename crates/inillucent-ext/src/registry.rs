@@ -194,10 +194,15 @@ impl Registry {
         registry.register_module(Arc::new(SeriesModule));
         registry.register_module(Arc::new(RTreeModule::float()));
         registry.register_module(Arc::new(RTreeModule::integer()));
+        registry.register_module(Arc::new(RTreeModule::geopoly()));
         registry.register_module(Arc::new(Fts5Module));
-        registry.register_module(Arc::new(
-            crate::vtab::fts5::vocab::Fts5VocabModule,
-        ));
+        registry.register_module(Arc::new(crate::vtab::fts5::Fts3Module::three()));
+        registry.register_module(Arc::new(crate::vtab::fts5::Fts3Module::four()));
+        registry.register_module(Arc::new(crate::vtab::fts5::vocab::Fts5VocabModule));
+        // pgvector's other index type, which is k-means centroids and an
+        // inverted list per centroid rather than a graph - see
+        // `crate::vtab::ivfflat`.
+        registry.register_module(Arc::new(crate::vtab::ivfflat::IvfFlatModule));
         registry
     }
 

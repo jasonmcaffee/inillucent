@@ -73,6 +73,7 @@ macro_rules! assert_same {
 pub mod builtin;
 pub mod datetime;
 pub mod eval;
+pub mod geopoly;
 pub mod json;
 pub mod mathfn;
 pub mod pattern;

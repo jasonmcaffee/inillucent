@@ -154,10 +154,7 @@ impl Sink for LateralModule<'_> {
 ///
 /// @param rows - the rows
 /// @param held - a buffer the batch's columns borrow from
-pub fn batch_over<'r>(
-    rows: &'r [Vec<OwnedDatum>],
-    held: &'r mut Vec<Vec<Datum<'r>>>,
-) -> Batch<'r> {
+pub fn batch_over<'r>(rows: &'r [Vec<OwnedDatum>], held: &'r mut Vec<Vec<Datum<'r>>>) -> Batch<'r> {
     let width = rows.first().map(Vec::len).unwrap_or(0);
     held.clear();
     for column in 0..width {

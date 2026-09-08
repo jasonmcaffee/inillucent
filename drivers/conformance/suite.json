@@ -150,13 +150,13 @@
     },
     {
       "name": "an_unimplemented_construct_refuses_by_name",
-      "about": "A construct the engine has not built reports `unsupported` and names itself, which is a different thing from a statement that is wrong. A binding that folds this into its general error type has thrown the design away. The example moves as the engine grows: it was VACUUM until task-1859 built it, and is now a second ON CONFLICT clause on one statement. When that is built, repoint this at whatever still is rather than deleting the case.",
+      "about": "A construct the engine has not built reports `unsupported` and names itself, which is a different thing from a statement that is wrong. A binding that folds this into its general error type has thrown the design away. The example moves as the engine grows: it was VACUUM until task-1859 built it, a second ON CONFLICT clause until task-1860 built that, and is now an encryption key on ATTACH. When that is built, repoint this at whatever still is rather than deleting the case.",
       "setup": ["CREATE TABLE conflicts (a INTEGER PRIMARY KEY, b TEXT UNIQUE)"],
       "steps": [
         {
-          "sql": "INSERT INTO conflicts VALUES (1, 'x') ON CONFLICT(a) DO NOTHING ON CONFLICT DO NOTHING",
+          "sql": "ATTACH DATABASE 'vault.db' AS vault KEY 'secret'",
           "status": "unsupported",
-          "feature_contains": "ON CONFLICT"
+          "feature_contains": "ATTACH"
         }
       ]
     },

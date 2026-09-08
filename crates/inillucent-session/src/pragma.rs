@@ -54,6 +54,7 @@ pub const REGISTER: &[PragmaSpec] = &[
     boolean("cache_spill"),
     boolean("case_sensitive_like"),
     boolean("cell_size_check"),
+    boolean("checkpoint_fullfsync"),
     PragmaSpec {
         name: "collation_list",
         columns: &["seq", "name"],
@@ -65,12 +66,14 @@ pub const REGISTER: &[PragmaSpec] = &[
         takes_argument: false,
     },
     boolean("count_changes"),
+    boolean("data_store_directory"),
     boolean("data_version"),
     PragmaSpec {
         name: "database_list",
         columns: &["seq", "name", "file"],
         takes_argument: false,
     },
+    boolean("default_cache_size"),
     boolean("defensive"),
     boolean("defer_foreign_keys"),
     boolean("empty_result_callbacks"),
@@ -101,6 +104,7 @@ pub const REGISTER: &[PragmaSpec] = &[
     boolean("foreign_keys"),
     boolean("freelist_count"),
     boolean("full_column_names"),
+    boolean("fullfsync"),
     PragmaSpec {
         name: "function_list",
         columns: &["name", "builtin", "type", "enc", "narg", "flags"],
@@ -195,6 +199,7 @@ pub const REGISTER: &[PragmaSpec] = &[
         takes_argument: true,
     },
     boolean("temp_store"),
+    boolean("temp_store_directory"),
     boolean("threads"),
     boolean("trusted_schema"),
     boolean("user_version"),
@@ -590,10 +595,23 @@ pub fn collation_list(state: &mut ConnectionState) -> DbResult<PragmaRows> {
 }
 
 /// Returns the rows that list the modules this connection can reach.
+///
+/// **Without the `pragma_*` shims.** This front-end registers one module per
+/// pragma so that `SELECT * FROM pragma_table_info('t')` works, and listing all
+/// sixty-seven of them made `pragma_module_list` answer sixty-seven names where
+/// the reference answers five. The reference creates its `pragma` module the
+/// first time one is used, so its register names only the one the query itself
+/// provoked - which is why its own answer carries `pragma_module_list` and
+/// nothing else of the kind. Filtering them here makes this front-end agree
+/// with the reference and with the new engine's own `module_list`, which never
+/// listed them. task-1869.
 pub fn module_list(state: &mut ConnectionState) -> DbResult<PragmaRows> {
     let names = state.registry.module_names();
     let mut rows = Vec::new();
     for name in names {
+        if name.starts_with("pragma_") {
+            continue;
+        }
         rows.push(vec![Value::owned_text(name.as_bytes())?]);
     }
     Ok(rows)

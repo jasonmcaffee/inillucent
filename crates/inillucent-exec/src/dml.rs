@@ -1381,9 +1381,10 @@ fn resolution_for_arm(
 /// @param statement - the bound insert
 /// @param columns - the columns of the constraint that reported the conflict
 fn matching_arm(statement: &BoundInsert, columns: &[u16]) -> Option<usize> {
-    statement.upsert.iter().position(|clause| {
-        clause.target.is_empty() || clause.target.as_slice() == columns
-    })
+    statement
+        .upsert
+        .iter()
+        .position(|clause| clause.target.is_empty() || clause.target.as_slice() == columns)
 }
 
 /// Returns the arm an algorithm names.
@@ -2984,7 +2985,9 @@ fn highest_rowid(target: &mut dyn WriteTarget, table: &TableInfo) -> DbResult<i6
 fn largest_key(tree: &PagedTree, pool: &Pool) -> DbResult<i64> {
     let key = tree.encode_key(&[Datum::Int(i64::MAX)]);
     let (guard, _) = tree.descend_guard(pool, &key)?;
-    let leaf = LeafRef::parse(&guard)?.with_collations(tree.collations());
+    let leaf = LeafRef::parse(&guard)?
+        .with_collations(tree.collations())
+        .with_directions(tree.directions());
     let rows = leaf.live()?;
     Ok(rows
         .last()

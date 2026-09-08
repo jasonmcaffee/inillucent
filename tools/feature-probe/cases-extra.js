@@ -82,7 +82,7 @@ module.exports = [
   c('join', 'NATURAL LEFT JOIN', 'join.natural.left', "CREATE TABLE a(k INTEGER, x TEXT);\nCREATE TABLE b(k INTEGER, y TEXT);\nINSERT INTO a VALUES (1,'p'),(2,'q');\nINSERT INTO b VALUES (1,'m');\nSELECT * FROM a NATURAL LEFT JOIN b ORDER BY k;"),
   c('join', 'USING with three tables', 'join.using.three', "CREATE TABLE a(k INTEGER, x TEXT);\nCREATE TABLE b(k INTEGER, y TEXT);\nCREATE TABLE c(k INTEGER, z TEXT);\nINSERT INTO a VALUES (1,'p');\nINSERT INTO b VALUES (1,'q');\nINSERT INTO c VALUES (1,'r');\nSELECT * FROM a JOIN b USING (k) JOIN c USING (k);"),
   c('fn-core', 'printf %q, %Q and %w', 'fn.printf.quote', "SELECT printf('%q',\"it's\"), printf('%Q',\"it's\"), printf('%Q',NULL);"),
-  c('fn-core', 'substr with negative and missing lengths', 'fn.substr.negative', "SELECT substr('abcdef',2), substr('abcdef',-3,2), substr('abcdef',2,-1), substr('abcdef',0,3);"),
+  c('fn-core', 'substr with negative and omitted lengths', 'fn.substr.negative', "SELECT substr('abcdef',2), substr('abcdef',-3,2), substr('abcdef',2,-1), substr('abcdef',0,3);"),
   c('fn-core', 'abs of the smallest integer', 'fn.abs.min', "SELECT abs(-9223372036854775807), abs(-9.0), abs('abc'), abs(NULL);"),
   c('fn-core', 'round to negative and large digits', 'fn.round.digits', "SELECT round(1234.5678,-2), round(1.005,2), round(2.5), round(-2.5), round(1e308,2);"),
   c('fn-core', 'char with zero and out-of-range code points', 'fn.char.edge', "SELECT length(char(0)), char(65,0x1F600), unicode('');"),

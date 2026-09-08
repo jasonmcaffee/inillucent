@@ -106,6 +106,8 @@ pub fn call(func: JsonFunc, arguments: &[Argument<'_>]) -> DbResult<Answer> {
         JsonFunc::Type => type_of(arguments),
         JsonFunc::Valid => valid(arguments),
         JsonFunc::Quote => quote(arguments),
+        JsonFunc::ArrayInsert => array_insert(arguments, false),
+        JsonFunc::ArrayInsertB => array_insert(arguments, true),
     }
 }
 
@@ -479,6 +481,38 @@ fn edit(arguments: &[Argument<'_>], edit: path::Edit, binary: bool) -> DbResult<
         };
         let steps = path_of(target)?;
         path::apply(&mut node, &steps, stored(value, true)?, edit)?;
+    }
+    answer(&node, binary)
+}
+
+/// `json_array_insert(X, P, V, ...)` and its `jsonb_` spelling.
+///
+/// The pairs are applied left to right, so an insert can be made in front of
+/// one the same call just made - which is why `('$[0]',9,'$[0]',8)` answers
+/// `[8,9,...]` and not `[9,8,...]`.
+fn array_insert(arguments: &[Argument<'_>], binary: bool) -> DbResult<Answer> {
+    let Some(first) = arguments.first() else {
+        return Ok(Answer::null());
+    };
+    let rest = arguments.get(1..).unwrap_or_default();
+    if rest.len() % 2 != 0 {
+        return Err(failure(
+            "json_array_insert() needs an odd number of arguments",
+        ));
+    }
+    let Some(mut node) = document(first)? else {
+        return Ok(Answer::null());
+    };
+    for pair in rest.chunks(2) {
+        let (Some(target), Some(value)) = (pair.first(), pair.get(1)) else {
+            continue;
+        };
+        let steps = path_of(target)?;
+        let written = match target.value {
+            Value::Text(text) => String::from_utf8_lossy(&text.utf8_bytes()).into_owned(),
+            _ => String::from("$"),
+        };
+        path::insert_into_array(&mut node, &steps, stored(value, true)?, &written)?;
     }
     answer(&node, binary)
 }

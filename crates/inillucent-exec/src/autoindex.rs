@@ -87,7 +87,8 @@ pub fn equi_keys(condition: &Expr, offset: usize, width: usize) -> Option<EquiKe
         match (left_side, right_side) {
             (Side::Outer, Side::Inner) => {
                 keys.probe.push(converted((**left).clone(), affinity));
-                keys.build.push(converted(rebased(right, offset)?, affinity));
+                keys.build
+                    .push(converted(rebased(right, offset)?, affinity));
             }
             (Side::Inner, Side::Outer) => {
                 keys.probe.push(converted((**right).clone(), affinity));

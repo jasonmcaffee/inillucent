@@ -131,6 +131,16 @@ fn build(connection: &inillucent_compat::facade::Connection) {
 }
 
 /// `ANALYZE` writes a `sqlite_stat1` the pinned binary reads and agrees with.
+///
+/// **Through the interchange, not through `fopen`.** inillucent stores an
+/// `RDB2` file, so handing its path to SQLite tests the file format rather than
+/// the statistics - and the file format is deliberately its own, which is what
+/// `inillucent-migrate` exists for. The claim this test is named after is about
+/// the *content* of `sqlite_stat1`: that the strings inillucent's `ANALYZE`
+/// writes mean to SQLite what they mean here. So the schema and the rows are
+/// rebuilt in a real SQLite file, inillucent's own `sqlite_stat1` rows are
+/// written into it verbatim, and SQLite is asked what it plans - which is the
+/// question, asked of the bytes that answer it.
 #[test]
 fn analyze_writes_statistics_sqlite_reads() {
     let path = scratch("analyze");
@@ -157,17 +167,63 @@ fn analyze_writes_statistics_sqlite_reads() {
             .any(|row| row.contains("small_tag") && row.contains("text:6 1")),
         "{stats:?}"
     );
+    // The same rows as SQL literals, ready to be handed to the other engine.
+    let carried = run(
+        &connection,
+        "SELECT quote(tbl) || ',' || quote(idx) || ',' || quote(stat) FROM sqlite_stat1",
+    )
+    .expect("the statistics quote");
+    assert!(!carried.is_empty(), "ANALYZE wrote no statistics");
     drop(connection);
     drop(database);
 
     let Some(program) = oracle_path() else {
         panic!("the pinned SQLite oracle is not built");
     };
+    let mirror = scratch("analyze-mirror");
     let mut driver = Driver::start("sqlite", &program).expect("the oracle starts");
     driver.send(&Op::Hello).expect("the oracle answers");
     driver
-        .send(&Op::Open(path.display().to_string()))
+        .send(&Op::Open(mirror.display().to_string()))
         .expect("the oracle opens the file");
+    let mut script = vec![
+        "CREATE TABLE large (id INTEGER PRIMARY KEY, tag TEXT, filler TEXT)".to_string(),
+        "CREATE TABLE small (id INTEGER PRIMARY KEY, tag TEXT)".to_string(),
+        "CREATE INDEX large_tag ON large (tag)".to_string(),
+        "CREATE INDEX small_tag ON small (tag)".to_string(),
+        "BEGIN".to_string(),
+    ];
+    for row in 0..600 {
+        script.push(format!(
+            "INSERT INTO large VALUES ({row}, 't{}', 'xxxxxxxxxx')",
+            row % 60
+        ));
+    }
+    for row in 0..6 {
+        script.push(format!("INSERT INTO small VALUES ({row}, 't{row}')"));
+    }
+    script.push("COMMIT".to_string());
+    // `sqlite_stat1` is created by SQLite's own ANALYZE and then overwritten:
+    // the numbers the planner is asked about have to be inillucent's, not the
+    // ones SQLite would have computed for itself.
+    script.push("ANALYZE".to_string());
+    script.push("DELETE FROM sqlite_stat1".to_string());
+    for row in &carried {
+        let values = row
+            .strip_prefix("text:")
+            .expect("quote() returns text")
+            .to_string();
+        script.push(format!("INSERT INTO sqlite_stat1 VALUES({values})"));
+    }
+    // Reloading is what makes the planner read what was just written.
+    script.push("ANALYZE sqlite_schema".to_string());
+    for sql in &script {
+        let observation = driver
+            .send(&Op::Exec(sql.clone()))
+            .expect("the oracle answers");
+        assert!(observation.ok, "{sql}: {}", observation.message);
+    }
+
     let integrity = driver
         .send(&Op::Query("PRAGMA integrity_check".to_string()))
         .expect("the oracle answers");
@@ -363,13 +419,22 @@ fn statistics_sqlite_wrote_are_read_back() {
     }
     drop(driver);
 
-    let database = Database::open(&path).expect("the database opens");
+    // The file SQLite wrote is a SQLite file, so it is *imported* rather than
+    // opened: `Database::open` reads inillucent's own format and would refuse
+    // this one at its meta page. The statistics come across with everything
+    // else, which is the half of the round trip this test is about.
+    let database = Database::import(&path).expect("the database imports");
     let connection = database.connect().expect("the connection opens");
     let query = "SELECT count(*) FROM large, small WHERE large.tag = small.tag";
     let planned = plan(&connection, query);
+    let carried = run(
+        &connection,
+        "SELECT tbl, idx, stat FROM sqlite_stat1 ORDER BY tbl",
+    );
     assert!(
         planned.first().is_some_and(|line| line.contains("small")),
-        "inillucent did not use SQLite's statistics: {planned:?}"
+        "inillucent did not use SQLite's statistics: {planned:?}
+  sqlite_stat1: {carried:?}"
     );
     assert_eq!(run(&connection, query), Ok(vec!["int:60".to_string()]));
 }

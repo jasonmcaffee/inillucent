@@ -72,10 +72,25 @@ mod at {
     /// The application's `PRAGMA application_id`, 4 bytes.
     pub const APPLICATION_ID: usize = 96;
     /// The schema cookie `PRAGMA schema_version` reports, 4 bytes.
-    ///
-    /// The last field named here; the region continues at 104 for whatever
-    /// comes next.
     pub const SCHEMA_COOKIE: usize = 100;
+    /// Whether the database is in write-ahead-log mode, 4 bytes.
+    ///
+    /// **Only WAL is persisted, which is SQLite's rule.** Its header carries a
+    /// read/write version of 2 for a WAL database and 1 for every other mode,
+    /// so a reopen comes back in WAL and comes back at the connection default
+    /// for anything else - `delete`, `truncate` and `persist` differ only in
+    /// what happens to a file that is not there after a clean commit, and
+    /// `memory` and `off` are a caller's decision about durability rather than
+    /// a property of the file.
+    ///
+    /// Zero means "not WAL", which is what a file written before this field
+    /// existed says, and is the right answer for one: those files were written
+    /// by a build whose only mode was the log, and a rollback open of one is
+    /// safe because recovery replays the log first either way.
+    ///
+    /// The last field named here; the region continues at 108 for whatever
+    /// comes next.
+    pub const WAL: usize = 104;
 }
 
 /// The smallest a meta page can be and still hold every field.
@@ -114,6 +129,11 @@ pub struct Meta {
     pub application_id: i32,
     /// What `PRAGMA schema_version` reports: one per schema change.
     pub schema_cookie: i32,
+    /// Whether the database is in write-ahead-log mode.
+    ///
+    /// The one journal mode that outlives the connection that chose it - see
+    /// `at::WAL`.
+    pub wal: bool,
 }
 
 impl Meta {
@@ -135,6 +155,7 @@ impl Meta {
             user_version: 0,
             application_id: 0,
             schema_cookie: 0,
+            wal: false,
         }
     }
 
@@ -165,6 +186,7 @@ impl Meta {
         put(page, at::USER_VERSION, &self.user_version.to_le_bytes())?;
         put(page, at::APPLICATION_ID, &self.application_id.to_le_bytes())?;
         put(page, at::SCHEMA_COOKIE, &self.schema_cookie.to_le_bytes())?;
+        put(page, at::WAL, &u32::from(self.wal).to_le_bytes())?;
         let sum = checksum(page)?;
         put(page, at::CHECKSUM, &sum.to_le_bytes())?;
         Ok(())
@@ -209,6 +231,7 @@ impl Meta {
             user_version: i32v(page, at::USER_VERSION),
             application_id: i32v(page, at::APPLICATION_ID),
             schema_cookie: i32v(page, at::SCHEMA_COOKIE),
+            wal: i32v(page, at::WAL) != 0,
         })
     }
 
@@ -336,6 +359,8 @@ mod tests {
             user_version: 42,
             application_id: -7,
             schema_cookie: 3,
+            // And the journal-mode flag, for the same reason.
+            wal: true,
         };
         let mut page = vec![0u8; 32_768];
         meta.encode(&mut page).unwrap();

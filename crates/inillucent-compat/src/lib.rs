@@ -30,6 +30,7 @@ pub mod facade;
 pub mod fixtures;
 pub mod hash;
 pub mod history;
+pub mod interchange;
 pub mod layering;
 pub mod manifest;
 pub mod model;

@@ -201,7 +201,15 @@ fn memory_round(database: &Path, settings: &Settings) -> Result<(), String> {
     let mut opened =
         ImportedDatabase::open(database.to_path_buf(), settings.page_size, settings.frames)
             .map_err(|error| format!("open failed: {}", why(&error)))?;
-    round_on(&mut opened, &plan)?;
+    let (_, _, cost) = round_on(&mut opened, &plan)?;
+    // **The only place a per-workload peak means anything.** This process runs
+    // the plan once and nothing else, so its high-water mark is the engine's;
+    // the parent's is the harness's. The parent reads these lines back off the
+    // child's standard output and prints them, which is why they carry a tag
+    // rather than being formatted here.
+    for (name, peak, resident, frames) in &cost.marks {
+        println!("mark\t{name}\t{peak}\t{resident}\t{frames}");
+    }
     Ok(())
 }
 
@@ -419,7 +427,7 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     // Once, not per round: it is a residency measurement, and thirty of them
     // would say the same thing thirty times for the price of another gate.
     let child = measure_in_a_child(fixture, &scratch, settings);
-    report_costs(&plan, &our_rounds, &their_rounds, child.as_ref());
+    report_costs(&plan, &our_rounds, &their_rounds, child.as_ref(), settings.page_size);
 
     println!();
     println!("## result");
@@ -617,9 +625,127 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     }
     passed = passed && floored;
 
+    // **The two bars that are not about elapsed time.** They are judged only on
+    // a full-plan run, for the same reason the headline is: the residency and
+    // the processor time of a families-filtered round are a different quantity
+    // wearing the same name, because the workloads that hold the memory may not
+    // have run.
+    passed = report_residency(&contract, child.as_ref(), &their_rounds, full_plan) && passed;
+
+    // **The scratch goes with the run that made it.** Every round copies the
+    // fixture twice and imports one of the copies, so a medium run leaves
+    // roughly a hundred megabytes behind - and this binary left all of it, once
+    // per run, under a pid-named directory nothing ever came back for.
+    // task-1869 found 279 of them holding 60 GB in `%TEMP%`, and the
+    // measurement itself pays for that: `txn.batched` is 200 commits and 200
+    // syncs, and on a temp volume in that state it went from 47 ms to 240 ms on
+    // *both* arms - the reference's own number moving with ours is what says it
+    // is the disk rather than the engine.
+    //
+    // A **disagreement** leaves it, and only that: the two databases are the
+    // evidence for a digest that did not match, and nothing else here is worth
+    // a hundred megabytes. A missed bar is a number, not a file.
+    if measured.iter().all(|entry| entry.agreed) {
+        let _ = std::fs::remove_dir_all(&scratch);
+        let _ = std::fs::remove_file(&plan_path);
+    } else {
+        println!();
+        println!("  a workload disagreed; the two databases are kept in {scratch:?}");
+    }
+
     println!();
     println!("## gate: {}", if passed { "MET" } else { "NOT MET" });
     Ok(passed)
+}
+
+/// Judges the peak resident set and the processor time against the contract.
+///
+/// **The child pair, and nothing else.** The engine's in-process figures are
+/// deltas over a region of a process that also holds the harness, the plan and
+/// thirty rounds of both arms; the reference's are the whole of a fresh child.
+/// Only the pair of whole children - one each, one round, one budget - is a
+/// comparison, so only it is judged.
+///
+/// A reading that could not be taken is reported as absent rather than as met:
+/// `measure_in_a_child` returns `None` on a child that would not run, and a
+/// gate that passed on a missing measurement is the failure this whole file
+/// exists to prevent.
+///
+/// @param contract - the checked-in bars
+/// @param child - what this engine's child cost, when one ran
+/// @param theirs - the reference child's cost, one per round
+/// @param full_plan - whether every family ran
+fn report_residency(
+    contract: &Contract,
+    child: Option<&ChildRound>,
+    theirs: &[ProcessCost],
+    full_plan: bool,
+) -> bool {
+    use inillucent_compat::procstat::{mebibytes, millis};
+    println!();
+    println!("## memory and processor time, against the contract");
+    if contract.memory.is_none() && contract.cpu.is_none() {
+        println!("  the contract sets no memory or cpu bar");
+        return true;
+    }
+    let Some(round) = child else {
+        println!("  NOT MEASURED: this engine's child could not be run, so neither bar is judged");
+        return false;
+    };
+    let mut peaks: Vec<f64> = theirs
+        .iter()
+        .map(|cost| mebibytes(cost.peak_working_set))
+        .collect();
+    let mut cpus: Vec<f64> = theirs
+        .iter()
+        .map(|cost| millis(cost.cpu_nanos()))
+        .collect();
+    let their_peak = middle(&mut peaks);
+    let their_cpu = middle(&mut cpus);
+    if their_peak <= 0.0 || their_cpu <= 0.0 {
+        println!("  NOT MEASURED: the reference child reported no cost, so neither bar is judged");
+        return false;
+    }
+    let our_peak = mebibytes(round.cost.peak_working_set);
+    let our_cpu = millis(round.cost.cpu_nanos());
+    println!(
+        "  {:<28} {:>12} {:>12} {:>9} {:>8}  {}",
+        "quantity", "inillucent", "sqlite", "ratio", "bar", "verdict"
+    );
+    let mut met = true;
+    for (label, ours, reference, bar, unit) in [
+        (
+            "peak resident set",
+            our_peak,
+            their_peak,
+            contract.memory,
+            "MiB",
+        ),
+        ("processor time", our_cpu, their_cpu, contract.cpu, "ms"),
+    ] {
+        let ratio = ours / reference;
+        let verdict = match (bar, full_plan) {
+            (None, _) => "no bar".to_string(),
+            (Some(_), false) => "PARTIAL RUN - not judged".to_string(),
+            (Some(bar), true) => {
+                if ratio <= bar {
+                    "MET".to_string()
+                } else {
+                    met = false;
+                    "MISSED".to_string()
+                }
+            }
+        };
+        println!(
+            "  {label:<28} {:>9.2} {unit} {:>9.2} {unit} {ratio:>8.2}x {:>7}  {verdict}",
+            ours,
+            reference,
+            bar.map(|bar| format!("{bar:.2}x"))
+                .unwrap_or_else(|| "-".to_string()),
+        );
+    }
+    println!("  one child process each, one round of the same plan, one matched memory budget");
+    met
 }
 
 /// Returns the geometric mean of a family's per-workload ratios.
@@ -707,6 +833,17 @@ fn round_on(
     let opened = ProcessCost::now();
     let mut costs: Vec<(String, ProcessCost, usize, LogCost)> =
         Vec::with_capacity(plan.workloads.len());
+    let mut marks: Vec<(String, u64, u64, usize)> = Vec::with_capacity(plan.workloads.len());
+    // **Two marks before the first workload**, because the two halves of the
+    // fixed cost are different problems: what the process costs merely to exist
+    // and open a file, and what filling the pool costs on top of it.
+    let opening = ProcessCost::now();
+    marks.push((
+        "(open)".to_string(),
+        opening.peak_working_set,
+        opening.working_set,
+        database.frames_resident(),
+    ));
     for workload in &plan.workloads {
         // `pre` and `post` are setup, not work: `sqlite_bench.c` runs them
         // either side of the timed region and so does this.
@@ -751,6 +888,15 @@ fn round_on(
                 eprintln!("  {}: post refused: {reason}", workload.name);
             }
         }
+        // After `post`, so a workload that builds a fixture and drops it again
+        // is charged for what it held while it held it.
+        let standing = ProcessCost::now();
+        marks.push((
+            workload.name.clone(),
+            standing.peak_working_set,
+            standing.working_set,
+            database.frames_resident(),
+        ));
     }
     let round = ProcessCost::now().since(&opened);
     let mut state = Vec::with_capacity(AGREEMENT.len());
@@ -760,7 +906,11 @@ fn round_on(
             .map_err(|error| format!("{question}: {}", why(&error)))?;
         state.push(render_row(&answer.rows));
     }
-    Ok((samples, state, RoundCost { round, costs }))
+    Ok((samples, state, RoundCost {
+        round,
+        costs,
+        marks,
+    }))
 }
 
 /// What one round of this engine's arm cost, besides time.
@@ -778,6 +928,23 @@ struct RoundCost {
     /// Per workload: the name, what its timed region cost, how many pool frames
     /// were resident when it finished, and what it put in the log.
     costs: Vec<(String, ProcessCost, usize, LogCost)>,
+    /// Per workload: the name, the process's **absolute** resident set and
+    /// high-water mark once that workload had finished, and how many pool
+    /// frames were resident at the same moment.
+    ///
+    /// The frames are here because the resident set on its own cannot say
+    /// whether a rise was the buffer pool doing its job or the engine holding
+    /// something it did not need to. Pool bytes are frames times the page size,
+    /// and what is left over is everything else the process is holding.
+    ///
+    /// **A delta cannot say where a peak came from.** `PeakWorkingSetSize` only
+    /// rises, so the workload that first reaches a number reports the whole
+    /// rise and every later one reports zero - which reads as "only the first
+    /// workload costs anything" rather than as "the mark has not moved since".
+    /// The absolute pair does say it: the high-water mark's *steps* name the
+    /// workloads that set the peak, and the resident set beside them says
+    /// whether what they took was given back.
+    marks: Vec<(String, u64, u64, usize)>,
 }
 
 /// What one workload asked of the write-ahead log.
@@ -816,7 +983,8 @@ fn report_costs(
     plan: &inillucent_compat::perf::Plan,
     ours: &[RoundCost],
     theirs: &[ProcessCost],
-    child: Option<&ProcessCost>,
+    child: Option<&ChildRound>,
+    page_size: usize,
 ) {
     use inillucent_compat::procstat::{mebibytes, millis};
     if ours.is_empty() {
@@ -913,8 +1081,8 @@ fn report_costs(
     println!("  are the whole of a child that ran the whole plan. They are not one measurement.");
     println!();
     println!("## peak resident set, one child process each, one round of the same plan");
-    match child {
-        Some(cost) => {
+    match child.map(|round| (&round.cost, &round.marks)) {
+        Some((cost, marks)) => {
             println!(
                 "  {:<24} {:>12} {:>12} {:>10} {:>10}",
                 "arm", "", "peak MiB", "user ms", "kernel ms"
@@ -951,6 +1119,7 @@ fn report_costs(
             }
             println!("  both open a finished file the parent built; both run one round of the");
             println!("  plan; neither figure is a delta. This is the comparable pair.");
+            report_marks(marks, page_size);
         }
         None => println!("  not measured: the child could not be run"),
     }
@@ -981,7 +1150,7 @@ fn report_costs(
 /// @param fixture - the SQLite fixture to build the round's database from
 /// @param scratch - where to put the copy
 /// @param settings - the page size, frame count, scale and family filter
-fn measure_in_a_child(fixture: &Path, scratch: &Path, settings: &Settings) -> Option<ProcessCost> {
+fn measure_in_a_child(fixture: &Path, scratch: &Path, settings: &Settings) -> Option<ChildRound> {
     let copy = restore(fixture, scratch, "ours-memory").ok()?;
     let target = scratch.join("ours-memory.rdb");
     let built =
@@ -1010,9 +1179,9 @@ fn measure_in_a_child(fixture: &Path, scratch: &Path, settings: &Settings) -> Op
         .spawn()
         .ok()?;
     let mut err = String::new();
+    let mut out = String::new();
     if let Some(mut pipe) = child.stdout.take() {
-        let mut sink = String::new();
-        let _ = std::io::Read::read_to_string(&mut pipe, &mut sink);
+        let _ = std::io::Read::read_to_string(&mut pipe, &mut out);
     }
     if let Some(mut pipe) = child.stderr.take() {
         let _ = std::io::Read::read_to_string(&mut pipe, &mut err);
@@ -1025,7 +1194,38 @@ fn measure_in_a_child(fixture: &Path, scratch: &Path, settings: &Settings) -> Op
         eprintln!("  memory child: {}", err.trim());
         return None;
     }
-    Some(cost)
+    Some(ChildRound {
+        cost,
+        marks: marks_from(&out),
+    })
+}
+
+/// What the memory child reported: its own cost, and where its peak came from.
+struct ChildRound {
+    /// The operating system's accounting for the whole child.
+    cost: ProcessCost,
+    /// Per workload, in plan order: the name, the high-water mark once it had
+    /// finished, and the resident set at the same moment, both in bytes.
+    marks: Vec<(String, u64, u64, usize)>,
+}
+
+/// Reads the child's `mark` lines back.
+///
+/// @param out - everything the child wrote to its standard output
+fn marks_from(out: &str) -> Vec<(String, u64, u64, usize)> {
+    out.lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            if parts.next()? != "mark" {
+                return None;
+            }
+            let name = parts.next()?.to_string();
+            let peak = parts.next()?.parse().ok()?;
+            let resident = parts.next()?.parse().ok()?;
+            let frames = parts.next()?.parse().ok()?;
+            Some((name, peak, resident, frames))
+        })
+        .collect()
 }
 
 /// Returns the median of a list, sorting it in place.
@@ -1511,4 +1711,52 @@ fn eat_borrowed(digest: &mut Digest, value: &inillucent_tree::datum::Datum<'_>) 
             digest.bytes(bytes);
         }
     }
+}
+
+/// Prints where the memory child's high-water mark actually came from.
+///
+/// **The attribution the ticket kept having to take by hand.** Review 5 found
+/// where the memory was by running the gate once per family and reading one
+/// number off each run - seven runs to answer one question, and a number per
+/// family rather than per workload. The child already walks the whole plan in
+/// one process; reading its mark after every workload gives the same
+/// attribution in a single run, at the granularity the optimisation work
+/// actually needs.
+///
+/// Only the workloads that *moved* the mark are printed. A workload that did
+/// not raise it took less than something before it, which is a fact about the
+/// earlier workload, and printing thirty rows of "no change" would bury the
+/// four that matter.
+///
+/// @param marks - the child's per-workload high-water mark and resident set
+fn report_marks(marks: &[(String, u64, u64, usize)], page_size: usize) {
+    use inillucent_compat::procstat::mebibytes;
+    if marks.is_empty() {
+        return;
+    }
+    println!();
+    println!("## what raised the child's high-water mark, workload by workload");
+    println!(
+        "  {:<24} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "workload", "peak MiB", "rise MiB", "rss MiB", "pool MiB", "other MiB"
+    );
+    let mut previous = 0_u64;
+    for (name, peak, resident, frames) in marks {
+        let rise = peak.saturating_sub(previous);
+        let pool = frames.saturating_mul(page_size) as u64;
+        if rise > 0 {
+            println!(
+                "  {name:<24} {:>10.2} {:>10.2} {:>10.2} {:>10.2} {:>10.2}",
+                mebibytes(*peak),
+                mebibytes(rise),
+                mebibytes(*resident),
+                mebibytes(pool),
+                mebibytes(resident.saturating_sub(pool))
+            );
+        }
+        previous = (*peak).max(previous);
+    }
+    println!("  every other workload left the mark where it already was");
+    println!("  pool = frames resident times the page size; other = everything else the");
+    println!("  process holds, which is the number the optimisation work is about");
 }

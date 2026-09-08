@@ -5,6 +5,15 @@ edition.workspace = true
 license.workspace = true
 description = "SQL virtual table and index-method bridge to the existing BM25, vector, and hybrid ranking core."
 
+[features]
+default = []
+# `embed(TEXT)` as a SQL function, which runs the retrieval engine's ONNX model
+# in the database process. Off by default for the reason `inillucent-core`'s own
+# `onnx` feature is off: a SQL engine that linked a native machine-learning
+# runtime would cost every caller who supplies their own vectors the binary, the
+# load time and the shutdown, and most of them do supply their own.
+embed = ["inillucent-core/onnx"]
+
 [dependencies]
 inillucent-base = { workspace = true }
 inillucent-value = { workspace = true }

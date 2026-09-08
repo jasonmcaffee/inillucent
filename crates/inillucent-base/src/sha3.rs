@@ -328,7 +328,10 @@ mod tests {
     /// the whole reason the sponge is incremental.
     #[test]
     fn feeding_in_pieces_is_the_same_as_feeding_it_whole() {
-        let whole = sha3(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", 256);
+        let whole = sha3(
+            b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+            256,
+        );
         let mut sponge = Sha3::new(256);
         for piece in [
             &b"abcdbcdecdefdefg"[..],

@@ -801,14 +801,26 @@ fn a_mismatched_vector_pair_refuses() {
     );
 }
 
-/// Arithmetic and the numeric aggregates over a vector column refuse.
+/// The aggregates fold a vector, the operators work on one, and a blob is
+/// still SQLite's zero.
 ///
-/// They used to answer `0.0`, which is what numeric affinity makes of a blob
-/// with no leading digits. Refusing is the honest answer for an operator this
-/// engine does not implement; answering zero is the one outcome a caller cannot
-/// detect.
+/// All three used to answer `0.0`, which is what numeric affinity makes of a
+/// blob with no leading digits, and which is the one outcome a caller cannot
+/// detect. They are three different answers now and the difference is the
+/// point:
+///
+/// - **`avg(v)` and `sum(v)` fold component by component**, which is what they
+///   mean in pgvector, and the binder can choose that because the column's
+///   declared type says it holds a vector.
+/// - **`v + v` is element-wise too.** task-1860 gave the operators back, on the
+///   condition that keeps SQLite's answer as well: the vector meaning is chosen
+///   from the *declared type*, which is what PostgreSQL is doing when it
+///   overloads `+` for its own `vector`.
+/// - **`x'00' + x'00'` is still `0`**, an integer, because neither side reads a
+///   column declared `VECTOR(n)`. That is the case the refusal used to protect
+///   and it is protected by the condition instead.
 #[test]
-fn arithmetic_over_a_vector_column_refuses() {
+fn the_aggregates_fold_a_vector_and_the_operators_work_on_one() {
     let held = database("arithmetic");
     let connection = held.connect();
     connection
@@ -818,18 +830,149 @@ fn arithmetic_over_a_vector_column_refuses() {
             literal(&vector_of(1))
         ))
         .expect("a row is written");
+    // Every operator answers a vector of the same width - 32 components, 128
+    // bytes - rather than a number.
     for sql in [
-        "SELECT v + v FROM e",
-        "SELECT v - v FROM e",
-        "SELECT v * 2 FROM e",
-        "SELECT avg(v) FROM e",
-        "SELECT sum(v) FROM e",
-        "SELECT total(v) FROM e",
+        "SELECT length(v + v) FROM e",
+        "SELECT length(v - v) FROM e",
+        "SELECT length(v * 2) FROM e",
+        "SELECT length(2 * v) FROM e",
     ] {
-        assert!(connection.query(sql).is_err(), "{sql} should have refused");
+        assert_eq!(integers(&connection, sql), vec![128], "{sql}");
     }
-    // The bytes are still readable, and the ordinary column still adds up: the
-    // refusal is about the vector, not about the table.
+    // One row in, so the mean is the row and the total is the row: the fold is
+    // element-wise either way.
+    for sql in [
+        "SELECT length(avg(v)) FROM e",
+        "SELECT length(sum(v)) FROM e",
+        "SELECT length(total(v)) FROM e",
+        "SELECT length(vector_add(v, v)) FROM e",
+        "SELECT length(vector_mul(v, 2)) FROM e",
+    ] {
+        assert_eq!(integers(&connection, sql), vec![128], "{sql}");
+    }
+    // The bytes are still readable, the ordinary column still adds up, and two
+    // blobs that are not a vector column are still SQLite's integer zero.
     assert_eq!(integers(&connection, "SELECT length(v) FROM e"), vec![128]);
     assert_eq!(integers(&connection, "SELECT n + n FROM e"), vec![10]);
+    assert_eq!(integers(&connection, "SELECT x'00' + x'00'"), vec![0]);
+    let classed = connection
+        .query("SELECT typeof(x'00' + x'00')")
+        .expect("the class reads back");
+    assert_eq!(
+        classed
+            .first()
+            .and_then(|row| row.first())
+            .map(|value| match value {
+                OwnedDatum::Text(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+                other => format!("{other:?}"),
+            }),
+        Some("integer".to_string())
+    );
+}
+
+/// An `ivfflat` index answers the same rows as an exhaustive scan.
+///
+/// **The claim an IVFFlat makes is narrower than a graph's and easier to
+/// check.** It is approximate in exactly one place - which lists it probes -
+/// and exact inside them, so probing every list has to give the exhaustive
+/// answer, row for row. That is what this asserts, and then it asserts the
+/// interesting half: three lists of twenty over a four-hundred-vector corpus
+/// give the same ten rows, which is the recall the structure exists to buy.
+#[test]
+fn an_ivfflat_index_answers_what_an_exhaustive_scan_answers() {
+    let held = database("ivfflat");
+    let connection = held.connect();
+    connection
+        .execute_batch("CREATE TABLE e (id INTEGER PRIMARY KEY, v VECTOR(4))")
+        .expect("the table is created");
+    // A corpus with real structure rather than a ladder: two trigonometric
+    // sweeps at different rates, so the neighbours of a query are not simply
+    // the rows either side of it.
+    for id in 1..=400i64 {
+        let step = id as f32;
+        let vector = vec![
+            (step * 0.7).cos(),
+            (step * 0.7).sin(),
+            (step * 0.13).cos(),
+            (step * 0.31).sin(),
+        ];
+        connection
+            .execute_batch(&format!(
+                "INSERT INTO e VALUES ({id}, {})",
+                literal(&vector)
+            ))
+            .expect("a row is written");
+    }
+    let probe = {
+        let step = 37.0f32;
+        literal(&[
+            (step * 0.7).cos(),
+            (step * 0.7).sin(),
+            (step * 0.13).cos(),
+            (step * 0.31).sin(),
+        ])
+    };
+    let query = format!("SELECT id FROM e ORDER BY vector_distance_cos(v, {probe}) LIMIT 10");
+    let exhaustive = integers(&connection, &query);
+    assert_eq!(exhaustive.len(), 10);
+    assert_eq!(
+        exhaustive.first(),
+        Some(&37),
+        "the query is its own nearest"
+    );
+
+    connection
+        .execute_batch("CREATE INDEX ie ON e USING ivfflat (v) WITH (lists = 20, probes = 20)")
+        .expect("the index is built");
+    // The plan really is the index rather than a scan that happens to agree.
+    let planned = connection
+        .query(&format!("EXPLAIN QUERY PLAN {query}"))
+        .expect("the plan reads back");
+    let detail = planned
+        .first()
+        .and_then(|row| row.last())
+        .map(|value| match value {
+            OwnedDatum::Text(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+            other => format!("{other:?}"),
+        })
+        .unwrap_or_default();
+    assert!(
+        detail.contains("VECTOR INDEX"),
+        "the ivfflat index was not used: {detail}"
+    );
+    assert_eq!(
+        integers(&connection, &query),
+        exhaustive,
+        "probing every list has to be exhaustive"
+    );
+}
+
+/// An `ivfflat` refuses a setting it has not got, and takes the two it has.
+#[test]
+fn an_ivfflat_takes_its_own_settings_and_refuses_another() {
+    let held = database("ivfflat-settings");
+    let connection = held.connect();
+    connection
+        .execute_batch(&format!(
+            "CREATE TABLE e (id INTEGER PRIMARY KEY, v VECTOR(32));
+             INSERT INTO e VALUES (1, {})",
+            literal(&vector_of(1))
+        ))
+        .expect("a row is written");
+    connection
+        .execute_batch("CREATE INDEX ok ON e USING ivfflat (v) WITH (lists = 4, probes = 2)")
+        .expect("the two settings an ivfflat has are taken");
+    assert!(
+        connection
+            .execute_batch("CREATE INDEX bad ON e USING ivfflat (v) WITH (nosuch = 1)")
+            .is_err(),
+        "a setting the structure has not got is refused rather than ignored"
+    );
+    assert!(
+        connection
+            .execute_batch("CREATE INDEX worse ON e USING nosuchindex (v)")
+            .is_err(),
+        "a structure that does not exist is refused"
+    );
 }

@@ -255,8 +255,8 @@ fn an_interrupted_migration_resumes() {
         for line in inventory.manifest_lines() {
             manifest.record("source.file", line).expect("recorded");
         }
-        let database = inillucent_engine::connect::Database::open(&plan.staging)
-            .expect("the staging opens");
+        let database =
+            inillucent_engine::connect::Database::open(&plan.staging).expect("the staging opens");
         let connection = database.connect();
         inillucent_migrate::copy::create_schema(&connection, DIMS).expect("the schema builds");
         manifest.record("stage", "schema").expect("recorded");

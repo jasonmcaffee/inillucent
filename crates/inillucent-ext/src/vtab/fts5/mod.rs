@@ -67,8 +67,69 @@ const FIRST_TERM_ROW: i64 = 16;
 /// writes, and a reader looking at the schema sees what it expects.
 const SEGMENT: i64 = 0;
 
+/// Which full-text surface a table presents.
+///
+/// **One index, two front ends.** FTS3, FTS4 and FTS5 are three generations of
+/// the same idea and SQLite ships two separate implementations of it; here the
+/// index - the tokenizer, the term dictionary, the doclists, the sizes and the
+/// totals - is one thing, and the dialect decides what a table made with it
+/// *looks* like: which columns it declares, what its auxiliary functions are
+/// called, and in what order they take their arguments.
+///
+/// What that does **not** promise is SQLite's FTS3 file layout. This engine
+/// does not write SQLite's file format at all, so a `%_segdir` written to match
+/// one byte for byte would be a shape nothing reads; the shadow tables are this
+/// index's own, under FTS5's names, and the surface above them is FTS3's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dialect {
+    /// `fts5`: `rank`, `bm25`, `highlight`, and `snippet(t, col, ...)`.
+    Five,
+    /// `fts3` and `fts4`: `docid`, `snippet(t, start, ...)`, `offsets`,
+    /// `matchinfo`.
+    Three,
+}
+
 /// The FTS5 module.
 pub struct Fts5Module;
+
+/// The FTS3 and FTS4 module.
+pub struct Fts3Module {
+    /// The name this registration answers to.
+    name: &'static str,
+}
+
+impl Fts3Module {
+    /// Returns the `fts3` registration.
+    pub fn three() -> Fts3Module {
+        Fts3Module { name: "fts3" }
+    }
+
+    /// Returns the `fts4` registration.
+    pub fn four() -> Fts3Module {
+        Fts3Module { name: "fts4" }
+    }
+}
+
+impl Module for Fts3Module {
+    /// Returns the module's name.
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    /// The same shadow tables the FTS5 index uses.
+    fn shadow_tables(&self, arguments: &ModuleArguments) -> DbResult<Vec<ShadowTable>> {
+        Fts5Module.shadow_tables(arguments)
+    }
+
+    /// Connects, declaring the FTS3 surface over the FTS5 index.
+    fn connect(
+        &self,
+        arguments: &ModuleArguments,
+        creating: bool,
+    ) -> DbResult<Box<dyn VirtualTable>> {
+        connect_with(arguments, creating, Dialect::Three)
+    }
+}
 
 /// One column of an FTS5 table, and what was written about it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,6 +147,13 @@ struct Options {
     columns: Vec<ColumnSpec>,
     /// The tokenizer's name and its arguments.
     tokenizer: Vec<Vec<u8>>,
+    /// The table the rows live in, when they are not this table's own.
+    ///
+    /// `content='c'` makes an **external content** table: the index is built
+    /// over rows that belong to `c`, and `%_content` is not created at all. It
+    /// is what an application uses when the documents already exist and a
+    /// second copy of them would double the file.
+    content: Option<Vec<u8>>,
 }
 
 /// Reads the arguments of a `CREATE VIRTUAL TABLE ... USING fts5(...)`.
@@ -96,24 +164,22 @@ struct Options {
 fn parse_options(arguments: &[Vec<u8>]) -> DbResult<Options> {
     let mut columns = Vec::new();
     let mut tokenizer = vec![b"unicode61".to_vec()];
+    let mut content: Option<Vec<u8>> = None;
     for argument in arguments {
         let text = String::from_utf8_lossy(argument).trim().to_string();
         if let Some((name, value)) = split_option(&text) {
             match name.to_ascii_lowercase().as_str() {
                 "tokenize" => tokenizer = tokenize::parse_specification(&value),
-                // An *external content* table keeps its rows in a table this
-                // module cannot read: a module reaches its own shadow tables
-                // and nothing else, so `rebuild` would find nothing and the
-                // table would answer no rows at all. Refusing by name is the
-                // honest form of that - an empty index that looks like a
-                // working one is the difference a caller cannot see.
+                // **An external content table names its rows' owner**, and
+                // reaching them is the one thing the module contract does not
+                // give a module for free. It is asked for explicitly, by name,
+                // through `ShadowTable::owner` - the same grant `fts5vocab`
+                // uses - so the reach stays a grant rather than a hole.
                 //
                 // `content=''` is a *contentless* table, which is a different
-                // thing and is supported: it stores no rows on purpose.
+                // thing: it stores no rows on purpose.
                 "content" if !unquote_option(&value).is_empty() => {
-                    return Err(failure(
-                        "fts5: an external content table (content=) is not supported",
-                    ))
+                    content = Some(unquote_option(&value).as_bytes().to_vec())
                 }
                 // The options this build understands and the ones it does not
                 // are both accepted, because refusing one would make a schema
@@ -142,7 +208,11 @@ fn parse_options(arguments: &[Vec<u8>]) -> DbResult<Options> {
     if columns.is_empty() {
         return Err(failure("an fts5 table needs at least one column"));
     }
-    Ok(Options { columns, tokenizer })
+    Ok(Options {
+        columns,
+        tokenizer,
+        content,
+    })
 }
 
 /// Strips the quotes an option's value is written inside.
@@ -180,6 +250,8 @@ impl Module for Fts5Module {
     fn shadow_tables(&self, arguments: &ModuleArguments) -> DbResult<Vec<ShadowTable>> {
         let options = parse_options(&arguments.arguments)?;
         let mut content = String::from("CREATE TABLE \"%_content\"(id INTEGER PRIMARY KEY");
+        // The suffix an external table's rows are reached under is empty,
+        // because the name is the owner's own rather than one derived from it.
         for index in 0..options.columns.len() {
             content.push_str(&format!(", c{index}"));
         }
@@ -198,10 +270,20 @@ impl Module for Fts5Module {
                     .to_string(),
                 owner: None,
             },
-            ShadowTable {
-                suffix: b"content".to_vec(),
-                create_sql: content,
-                owner: None,
+            match &options.content {
+                // **Named rather than made.** The rows already exist in
+                // somebody else's table, and creating a second, empty
+                // `%_content` beside them would be an index over nothing.
+                Some(owner) => ShadowTable {
+                    suffix: Vec::new(),
+                    create_sql: String::new(),
+                    owner: Some(owner.clone()),
+                },
+                None => ShadowTable {
+                    suffix: b"content".to_vec(),
+                    create_sql: content,
+                    owner: None,
+                },
             },
             ShadowTable {
                 suffix: b"docsize".to_vec(),
@@ -223,6 +305,21 @@ impl Module for Fts5Module {
         arguments: &ModuleArguments,
         creating: bool,
     ) -> DbResult<Box<dyn VirtualTable>> {
+        connect_with(arguments, creating, Dialect::Five)
+    }
+}
+
+/// Connects one full-text table, in whichever dialect it was made with.
+///
+/// @param arguments - the `CREATE VIRTUAL TABLE` arguments
+/// @param creating - whether the table is being made rather than reopened
+/// @param dialect - which surface to declare
+fn connect_with(
+    arguments: &ModuleArguments,
+    creating: bool,
+    dialect: Dialect,
+) -> DbResult<Box<dyn VirtualTable>> {
+    {
         let options = parse_options(&arguments.arguments)?;
         let mut columns: Vec<DeclaredColumn> = options
             .columns
@@ -234,20 +331,31 @@ impl Module for Fts5Module {
         columns.push(DeclaredColumn::hidden(&String::from_utf8_lossy(
             &arguments.table,
         )));
-        columns.push(DeclaredColumn::hidden("rank"));
+        // **`rank` in FTS5 and `docid` in FTS3.** They occupy the same slot
+        // because they are the same kind of thing - a column that is not part
+        // of the document - and keeping one layout means the cursor has one
+        // rule for which index is which rather than two.
+        columns.push(DeclaredColumn::hidden(match dialect {
+            Dialect::Five => "rank",
+            Dialect::Three => "docid",
+        }));
+        let suffix = content_suffix(&options);
+        let shadows =
+            ShadowTables::of(arguments, &[b"data", b"idx", suffix, b"docsize", b"config"])?;
         Ok(Box::new(Fts5Table {
+            dialect,
             tokenizer: Tokenizer::named(&options.tokenizer),
+            content: suffix.to_vec(),
+            external: options.content.clone(),
             options,
-            shadows: ShadowTables::of(
-                arguments,
-                &[b"data", b"idx", b"content", b"docsize", b"config"],
-            )?,
+            shadows,
             declaration: Declaration {
                 columns,
                 without_rowid: false,
             },
             creating,
             pending: Buffer::default(),
+            offsets: Vec::new(),
         }))
     }
 }
@@ -263,6 +371,8 @@ const PLAN_RANKED: i32 = 4;
 
 /// One connected FTS5 table.
 struct Fts5Table {
+    /// Which surface this table presents.
+    dialect: Dialect,
     options: Options,
     tokenizer: Tokenizer,
     shadows: ShadowTables,
@@ -270,9 +380,120 @@ struct Fts5Table {
     creating: bool,
     /// The doclists this transaction has changed, shared with its cursors.
     pending: Buffer,
+    /// The shadow suffix the rows are reached under.
+    ///
+    /// `content` for a table that owns its rows and the empty name for one
+    /// whose rows belong to somebody else, because a granted shadow is looked
+    /// up under the owner's own name rather than under a derived one.
+    content: Vec<u8>,
+    /// The table the rows belong to, when they are not this table's.
+    external: Option<Vec<u8>>,
+    /// Where each declared column sits in a stored row.
+    ///
+    /// Filled the first time a row is read, because it is read out of the
+    /// *catalog* and a module is only shown one while a statement is running.
+    offsets: Vec<usize>,
+}
+
+/// Returns the shadow suffix a table's rows are reached under.
+///
+/// @param options - what the `CREATE VIRTUAL TABLE` said
+fn content_suffix(options: &Options) -> &'static [u8] {
+    match options.content {
+        Some(_) => b"",
+        None => b"content",
+    }
+}
+
+/// Returns where each declared column sits in a stored content row.
+///
+/// A row read out of a shadow table arrives as one value per stored column,
+/// the rowid first. `%_content` is written by this module as `(id, c0, c1...)`,
+/// so a declared column is one past its own number; an **external** content
+/// table is somebody else's, so the columns are found by *name* - which is
+/// what SQLite does too, and is why an external table has to declare columns
+/// the index can recognise. A name that is not there reads as NULL rather than
+/// as the wrong column.
+///
+/// @param external - the owner's name, when the rows are not this table's
+/// @param columns - the declared columns of the full-text table
+/// @param catalog - the schema the statement was compiled against
+fn content_offsets(
+    external: Option<&[u8]>,
+    columns: &[ColumnSpec],
+    catalog: Option<&inillucent_sql::catalog_view::StaticCatalog>,
+) -> Vec<usize> {
+    let names: Vec<Vec<u8>> = columns.iter().map(|column| column.name.clone()).collect();
+    content_offsets_named(external, &names, catalog)
+}
+
+/// The same, from the column names alone.
+///
+/// The cursor holds names rather than specifications, and resolving from a
+/// third shape would be a third description of the same rule.
+///
+/// @param external - the owner's name, when the rows are not this table's
+/// @param names - the declared column names of the full-text table
+/// @param catalog - the schema the statement was compiled against
+fn content_offsets_named(
+    external: Option<&[u8]>,
+    names: &[Vec<u8>],
+    catalog: Option<&inillucent_sql::catalog_view::StaticCatalog>,
+) -> Vec<usize> {
+    let Some(owner) = external else {
+        return (0..names.len()).map(|at| at.saturating_add(1)).collect();
+    };
+    let found = catalog.and_then(|catalog| catalog.table_named(&owner.to_ascii_lowercase()));
+    names
+        .iter()
+        .map(|name| {
+            let folded = name.to_ascii_lowercase();
+            found
+                .and_then(|table| {
+                    table
+                        .columns
+                        .iter()
+                        .position(|held| held.name.to_ascii_lowercase() == folded)
+                })
+                .unwrap_or(usize::MAX)
+        })
+        .collect()
 }
 
 impl Fts5Table {
+    /// Returns where each declared column sits in a stored row, filling it in.
+    ///
+    /// @param context - the running statement
+    fn offsets(&mut self, context: &Context<'_>) -> Vec<usize> {
+        if self.offsets.is_empty() {
+            self.offsets = content_offsets(
+                self.external.as_deref(),
+                &self.options.columns,
+                context.catalog,
+            );
+        }
+        self.offsets.clone()
+    }
+
+    /// Returns whether the rows belong to another table.
+    fn borrows_rows(&self) -> bool {
+        self.external.is_some()
+    }
+
+    /// Returns whether the index already holds a row.
+    ///
+    /// **`%_docsize` rather than the content**, because the content may belong
+    /// to somebody else: an external content table's rows exist before they are
+    /// indexed, so asking the owner would report a collision for every row that
+    /// has not been indexed yet. The size row is written by the indexing and is
+    /// therefore the record of what this index holds.
+    ///
+    /// @param context - the running statement
+    /// @param rowid - the row to look for
+    fn holds_row(&self, context: &mut Context<'_>, rowid: i64) -> DbResult<bool> {
+        Ok(self.shadows.read_row(context, b"docsize", rowid)?.is_some())
+    }
+
     /// Returns which declared column is the table's own hidden one.
     fn match_column(&self) -> i32 {
         self.options.columns.len() as i32
@@ -310,7 +531,12 @@ impl VirtualTable for Fts5Table {
                 plan = PLAN_MATCH;
                 break;
             }
-            if constraint.op == ConstraintOp::Eq && constraint.column == ROWID_COLUMN {
+            // **`docid` is the rowid**, so a predicate on it is a rowid
+            // lookup rather than a filter over a scan. It shares the `rank`
+            // slot, which is why the dialect has to be checked and not just
+            // the column number.
+            let docid = self.dialect == Dialect::Three && constraint.column == self.rank_column();
+            if constraint.op == ConstraintOp::Eq && (constraint.column == ROWID_COLUMN || docid) {
                 query.use_constraint(index, true);
                 query.index_number = PLAN_ROWID;
                 query.estimated_cost = 1.0;
@@ -324,6 +550,7 @@ impl VirtualTable for Fts5Table {
         if plan == PLAN_MATCH {
             if let Some(order) = query.order_by.first() {
                 if query.order_by.len() == 1
+                    && self.dialect == Dialect::Five
                     && order.column == self.rank_column()
                     && !order.descending
                 {
@@ -341,6 +568,10 @@ impl VirtualTable for Fts5Table {
     /// Opens a cursor.
     fn open(&self) -> DbResult<Box<dyn VirtualCursor>> {
         Ok(Box::new(Fts5Cursor {
+            dialect: self.dialect,
+            content: self.content.clone(),
+            offsets: content_offsets(self.external.as_deref(), &self.options.columns, None),
+            external: self.external.clone(),
             matched: Vec::new(),
             phrases: Vec::new(),
             query: None,
@@ -416,7 +647,7 @@ impl VirtualTable for Fts5Table {
                         // A rowid the caller named may collide, so it is asked
                         // about; and it moves the mark, so the next allocated
                         // one is above it.
-                        if self.shadows.read_row(context, b"content", key)?.is_some() {
+                        if self.holds_row(context, key)? {
                             return Err(constraint(
                                 "UNIQUE constraint failed: the rowid is already in the index",
                             ));
@@ -427,7 +658,10 @@ impl VirtualTable for Fts5Table {
                     // Allocated, so it is one past everything - which is both
                     // the number and the answer to whether it is taken. See
                     // `Pending::content_highest`.
-                    None => next_content_rowid(context, &self.shadows, &self.pending)?,
+                    None => {
+                        let suffix = self.content.clone();
+                        next_content_rowid(context, &self.shadows, &self.pending, &suffix)?
+                    }
                 };
                 self.add(context, key, values)?;
                 Ok(Some(key))
@@ -476,7 +710,8 @@ impl VirtualTable for Fts5Table {
         flush_doclists(context, &self.shadows, &self.pending)?;
         let mut problems = Vec::new();
         let mut rows = Vec::new();
-        self.shadows.scan(context, b"content", |rowid, _| {
+        let suffix = self.content.clone();
+        self.shadows.scan(context, &suffix, |rowid, _| {
             rows.push(rowid);
             Ok(true)
         })?;
@@ -1054,10 +1289,12 @@ const PENDING_BUDGET: usize = 8 * 1024 * 1024;
 /// @param context - the host
 /// @param shadows - the table's shadow tables
 /// @param buffer - the staged rows
+/// @param suffix - the shadow the rows are reached under
 fn next_content_rowid(
     context: &mut Context<'_>,
     shadows: &ShadowTables,
     buffer: &Buffer,
+    suffix: &[u8],
 ) -> DbResult<i64> {
     if let Ok(mut held) = buffer.lock() {
         if let Some(highest) = held.content_highest {
@@ -1066,7 +1303,7 @@ fn next_content_rowid(
             return Ok(next);
         }
     }
-    let next = shadows.max_rowid(context, b"content")?.saturating_add(1);
+    let next = shadows.max_rowid(context, suffix)?.saturating_add(1);
     if let Ok(mut held) = buffer.lock() {
         held.content_highest = Some(next);
     }
@@ -1546,9 +1783,17 @@ impl Fts5Table {
             held.terms.clear();
         }
         let width = self.options.columns.len();
+        let offsets = self.offsets(context);
         let mut rows: Vec<(i64, Vec<Value<'static>>)> = Vec::new();
-        self.shadows.scan(context, b"content", |rowid, values| {
-            rows.push((rowid, values.iter().skip(1).take(width).cloned().collect()));
+        let suffix = self.content.clone();
+        self.shadows.scan(context, &suffix, |rowid, values| {
+            rows.push((
+                rowid,
+                offsets
+                    .iter()
+                    .map(|at| values.get(*at).cloned().unwrap_or(Value::Null))
+                    .collect(),
+            ));
             Ok(true)
         })?;
         let mut doclists = Vec::new();
@@ -1603,12 +1848,17 @@ impl Fts5Table {
     ) -> DbResult<()> {
         let width = self.options.columns.len();
         let started = std::time::Instant::now();
-        let mut content = vec![Value::Null];
-        for index in 0..width {
-            content.push(values.get(index).cloned().unwrap_or(Value::Null));
+        // **Nothing is stored when the rows are somebody else's.** An
+        // external content table's rows are written through the owner, and a
+        // copy written here would be a second, diverging one.
+        if !self.borrows_rows() {
+            let mut content = vec![Value::Null];
+            for index in 0..width {
+                content.push(values.get(index).cloned().unwrap_or(Value::Null));
+            }
+            self.shadows
+                .write_row(context, b"content", rowid, &content)?;
         }
-        self.shadows
-            .write_row(context, b"content", rowid, &content)?;
         let content_ns = started.elapsed().as_nanos();
 
         let started = std::time::Instant::now();
@@ -1816,7 +2066,9 @@ impl Fts5Table {
 
     /// Removes one row from the content and from every doclist it is in.
     fn remove(&mut self, context: &mut Context<'_>, rowid: i64) -> DbResult<()> {
-        let Some(content) = self.shadows.read_row(context, b"content", rowid)? else {
+        let offsets = self.offsets(context);
+        let suffix = self.content.clone();
+        let Some(content) = self.shadows.read_row(context, &suffix, rowid)? else {
             return Ok(());
         };
         let width = self.options.columns.len();
@@ -1825,7 +2077,11 @@ impl Fts5Table {
             if column.unindexed {
                 continue;
             }
-            let Some(text) = content.get(index.saturating_add(1)).and_then(text_of) else {
+            let Some(text) = offsets
+                .get(index)
+                .and_then(|at| content.get(*at))
+                .and_then(text_of)
+            else {
                 continue;
             };
             terms.extend(self.tokenizer.tokens(&text));
@@ -1881,7 +2137,9 @@ impl Fts5Table {
             None => vec![0; width],
         };
         self.shadows.delete_row(context, b"docsize", rowid)?;
-        self.shadows.delete_row(context, b"content", rowid)?;
+        if !self.borrows_rows() {
+            self.shadows.delete_row(context, b"content", rowid)?;
+        }
         let mut totals = buffered_totals(context, &self.shadows, &self.pending, width);
         totals.rows = (totals.rows - 1).max(0);
         totals.tokens.resize(width, 0);
@@ -1931,7 +2189,15 @@ struct MatchedRow {
 
 /// A cursor over the rows one query matched.
 struct Fts5Cursor {
+    /// Which surface this table presents.
+    dialect: Dialect,
     columns: usize,
+    /// The shadow suffix the rows are reached under.
+    content: Vec<u8>,
+    /// Where each declared column sits in a stored row.
+    offsets: Vec<usize>,
+    /// The table the rows belong to, when they are not this table's.
+    external: Option<Vec<u8>>,
     /// The column names, for a `column:term` filter to resolve against.
     names: Vec<Vec<u8>>,
     match_column: i32,
@@ -2081,9 +2347,10 @@ impl Fts5Cursor {
         let mut best_score = usize::MAX;
         for start in 0..spans.len() {
             let end = start.saturating_add(wanted).min(spans.len());
-            let score = hit.get(start..end).map(|run| {
-                run.iter().filter(|held| **held).count()
-            }).unwrap_or(0);
+            let score = hit
+                .get(start..end)
+                .map(|run| run.iter().filter(|held| **held).count())
+                .unwrap_or(0);
             if best_score == usize::MAX || score > best_score {
                 best_score = score;
                 best = start;
@@ -2126,6 +2393,20 @@ impl Fts5Cursor {
     /// Returns one column's stored text for the current row.
     ///
     /// @param context - the statement's context
+    /// Fills in where each declared column sits, the first time a row is read.
+    ///
+    /// `open` is handed no catalog - a cursor is made before a statement runs -
+    /// so an external content table's column positions cannot be resolved until
+    /// here, where a context exists.
+    ///
+    /// @param context - the running statement
+    fn resolve_offsets(&mut self, context: &Context<'_>) {
+        if self.external.is_some() && self.offsets.iter().any(|at| *at == usize::MAX) {
+            self.offsets =
+                content_offsets_named(self.external.as_deref(), &self.names, context.catalog);
+        }
+    }
+
     /// @param column - which declared column
     fn column_text(
         &mut self,
@@ -2136,19 +2417,22 @@ impl Fts5Cursor {
             return Ok(None);
         };
         if self.held.as_ref().map(|(rowid, _)| *rowid) != Some(row.rowid) {
+            self.resolve_offsets(context);
             self.held = self
                 .shadows
-                .read_row(context, b"content", row.rowid)?
+                .read_row(context, &self.content.clone(), row.rowid)?
                 .map(|values| (row.rowid, values));
         }
         let Some((_, content)) = self.held.as_ref() else {
             return Ok(None);
         };
-        Ok(match content.get(column.saturating_add(1)) {
-            Some(Value::Text(text)) => Some(text.utf8_bytes().into_owned()),
-            Some(Value::Blob(blob)) => Some(blob.raw().to_vec()),
-            _ => None,
-        })
+        Ok(
+            match self.offsets.get(column).and_then(|at| content.get(*at)) {
+                Some(Value::Text(text)) => Some(text.utf8_bytes().into_owned()),
+                Some(Value::Blob(blob)) => Some(blob.raw().to_vec()),
+                _ => None,
+            },
+        )
     }
 
     /// Returns the byte ranges the query's phrases occupy in one column.
@@ -2207,13 +2491,120 @@ impl Fts5Cursor {
     }
 
     /// Returns every term the query asked for, across its phrases.
+    /// Returns `offsets(t)`: where every hit in the row is, as four numbers.
+    ///
+    /// **Column, term, byte offset, byte length**, one quadruple per hit,
+    /// separated by single spaces and in column-then-position order. It is
+    /// FTS3's most direct answer - the caller gets the positions and does its
+    /// own marking - and the term number is the *query's*, so a two-word query
+    /// reports 0 for one word and 1 for the other however they interleave in
+    /// the text.
+    ///
+    /// @param context - the running statement
+    fn offsets(&mut self, context: &mut Context<'_>) -> DbResult<Value<'static>> {
+        let wanted = self.wanted_terms();
+        let mut out: Vec<String> = Vec::new();
+        for column in 0..self.columns {
+            let Some(text) = self.column_text(context, column)? else {
+                continue;
+            };
+            for (token, start, stop) in self.tokenizer.spans(&text) {
+                let Some(term) = wanted
+                    .iter()
+                    .position(|term| matches_a_term(&token, std::slice::from_ref(term)))
+                else {
+                    continue;
+                };
+                out.push(format!(
+                    "{column} {term} {start} {}",
+                    stop.saturating_sub(start)
+                ));
+            }
+        }
+        Value::owned_text(out.join(" ").as_bytes())
+    }
+
+    /// Returns `matchinfo(t, format)`: the counts a caller ranks with.
+    ///
+    /// A blob of native-endian 32-bit integers, one group per format letter,
+    /// in the order the letters were written. `pcx` is the default and is what
+    /// FTS3's own documentation builds its example ranking function from:
+    ///
+    /// | letter | what it contributes |
+    /// |---|---|
+    /// | `p` | how many phrases the query has |
+    /// | `c` | how many columns the table has |
+    /// | `x` | three numbers per phrase and column: hits in this row, hits in every row, and rows with at least one |
+    /// | `n` | how many rows the table holds |
+    /// | `a` | the average token count of each column |
+    /// | `l` | this row's token count per column |
+    ///
+    /// @param context - the running statement
+    /// @param arguments - the format string, when one was written
+    fn matchinfo(
+        &mut self,
+        context: &mut Context<'_>,
+        arguments: &[Value<'static>],
+    ) -> DbResult<Value<'static>> {
+        let format = match arguments.first() {
+            Some(Value::Text(text)) => text.utf8_bytes().into_owned(),
+            _ => b"pcx".to_vec(),
+        };
+        let Some(row) = self.rows.get(self.at).cloned() else {
+            return Ok(Value::Null);
+        };
+        self.ensure_hits(context)?;
+        let sizes = bm25::row_sizes(context, &self.shadows, row.rowid, self.columns)?;
+        let mut out: Vec<u8> = Vec::new();
+        let mut push = |number: i64| out.extend_from_slice(&(number as u32).to_ne_bytes());
+        for letter in format {
+            match letter {
+                b'p' => push(self.phrases.len() as i64),
+                b'c' => push(self.columns as i64),
+                b'n' => push(self.totals.rows),
+                b'a' => {
+                    for column in 0..self.columns {
+                        let total = self.totals.tokens.get(column).copied().unwrap_or(0);
+                        let average = if self.totals.rows > 0 {
+                            total / self.totals.rows
+                        } else {
+                            0
+                        };
+                        push(average);
+                    }
+                }
+                b'l' => {
+                    for column in 0..self.columns {
+                        push(sizes.get(column).copied().unwrap_or(0));
+                    }
+                }
+                b'x' => {
+                    for at in 0..self.phrases.len() {
+                        let hits = self.matched.get(at);
+                        for column in 0..self.columns {
+                            let (here, every, rows) = match hits {
+                                Some(hits) => phrase_counts(hits, row.rowid, column),
+                                None => (0, 0, 0),
+                            };
+                            push(here);
+                            push(every);
+                            push(rows);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Value::owned_blob(&out)
+    }
+
+    /// Returns every term the query asked for, in order.
     fn wanted_terms(&self) -> Vec<expr::Term> {
         self.phrases
             .iter()
             .flat_map(|phrase| phrase.terms.iter().cloned())
             .collect()
     }
-
 }
 
 impl VirtualCursor for Fts5Cursor {
@@ -2228,13 +2619,26 @@ impl VirtualCursor for Fts5Cursor {
             let Some(rowid) = plan.arguments.first().and_then(Value::as_integer) else {
                 return Ok(());
             };
-            if self.shadows.read_row(context, b"content", rowid)?.is_some() {
+            if self
+                .shadows
+                .read_row(context, &self.content.clone(), rowid)?
+                .is_some()
+            {
                 self.rows.push(MatchedRow { rowid, score: None });
             }
             return Ok(());
         }
         if plan.index_number & PLAN_MATCH == 0 {
-            self.shadows.scan(context, b"content", |rowid, _| {
+            // **The index's own rows, not the owner's.** An external content
+            // table's owner may hold rows this index has never seen, and a
+            // scan that returned them would answer with documents no query
+            // could match. `%_docsize` has one row per indexed document.
+            let suffix: &[u8] = if self.external.is_some() {
+                b"docsize"
+            } else {
+                b"content"
+            };
+            self.shadows.scan(context, suffix, |rowid, _| {
                 self.rows.push(MatchedRow { rowid, score: None });
                 Ok(true)
             })?;
@@ -2329,6 +2733,11 @@ impl VirtualCursor for Fts5Cursor {
             return Ok(Value::Null);
         };
         if index as i32 == self.rank_column {
+            // In FTS3 this slot is `docid`, which is the rowid under another
+            // name and is the way that dialect writes a row's identity.
+            if self.dialect == Dialect::Three {
+                return Ok(Value::Integer(row.rowid));
+            }
             if let Some(score) = row.score {
                 return Ok(Value::Real(score));
             }
@@ -2358,16 +2767,19 @@ impl VirtualCursor for Fts5Cursor {
             return Ok(Value::Null);
         }
         if self.held.as_ref().map(|(rowid, _)| *rowid) != Some(row.rowid) {
+            self.resolve_offsets(context);
             self.held = self
                 .shadows
-                .read_row(context, b"content", row.rowid)?
+                .read_row(context, &self.content.clone(), row.rowid)?
                 .map(|values| (row.rowid, values));
         }
         let Some((_, content)) = self.held.as_ref() else {
             return Ok(Value::Null);
         };
-        Ok(content
-            .get(index.saturating_add(1))
+        Ok(self
+            .offsets
+            .get(index)
+            .and_then(|at| content.get(*at))
             .cloned()
             .unwrap_or(Value::Null))
     }
@@ -2394,7 +2806,52 @@ impl VirtualCursor for Fts5Cursor {
             return self.highlight(context, arguments);
         }
         if name == b"snippet" {
+            // **The same snippet, and a different argument order.** FTS3 takes
+            // the markers first and the column fourth; FTS5 takes the column
+            // first. Rewriting the call here rather than writing the routine
+            // twice is what keeps the two dialects from drifting apart.
+            if self.dialect == Dialect::Three {
+                let start = arguments.first().cloned().unwrap_or(text_value(b"<b>"));
+                let end = arguments.get(1).cloned().unwrap_or(text_value(b"</b>"));
+                let ellipsis = arguments
+                    .get(2)
+                    .cloned()
+                    .unwrap_or(text_value(b"<b>...</b>"));
+                let column = arguments
+                    .get(3)
+                    .and_then(Value::as_integer)
+                    .unwrap_or(-1)
+                    .max(0);
+                let tokens = arguments.get(4).and_then(Value::as_integer).unwrap_or(15);
+                return self.snippet(
+                    context,
+                    &[
+                        Value::Integer(column),
+                        start,
+                        end,
+                        ellipsis,
+                        Value::Integer(tokens),
+                    ],
+                );
+            }
             return self.snippet(context, arguments);
+        }
+        if name == b"offsets" && self.dialect == Dialect::Three {
+            return self.offsets(context);
+        }
+        if name == b"matchinfo" && self.dialect == Dialect::Three {
+            return self.matchinfo(context, arguments);
+        }
+        // **`optimize(t)`, which is FTS3/4's and always has nothing to do
+        // here.** SQLite merges an FTS3/4 index's b-tree segments into one and
+        // answers `Index already optimal` when there is nothing to merge. This
+        // index keeps one doclist per term - see `stage_doclist` - so there are
+        // never segments to merge and the answer is the second case, always.
+        // Saying so is the truthful answer; refusing the name was not, and it
+        // was the last function of SQLite's register that this engine answered
+        // to by another route and did not name. task-1869.
+        if name == b"optimize" && self.dialect == Dialect::Three {
+            return Value::owned_text(b"Index already optimal");
         }
         if name != b"bm25" {
             return Err(crate::vtab::failure(format!(
@@ -2427,6 +2884,43 @@ impl VirtualCursor for Fts5Cursor {
     }
 }
 
+/// Returns how often one phrase occurs, in this row and in the table.
+///
+/// Three numbers, which is what `matchinfo`'s `x` reports per phrase and
+/// column: the occurrences in this row, the occurrences in every row, and how
+/// many rows hold at least one.
+///
+/// @param hits - where the phrase matched, per row
+/// @param rowid - the row being reported on
+/// @param column - which column
+fn phrase_counts(hits: &expr::Hits, rowid: i64, column: usize) -> (i64, i64, i64) {
+    let mut here = 0i64;
+    let mut every = 0i64;
+    let mut rows = 0i64;
+    for (held, positions) in hits.iter() {
+        let occurrences = positions
+            .iter()
+            .filter(|(at, _)| *at == column)
+            .map(|(_, offsets)| offsets.len() as i64)
+            .sum::<i64>();
+        if occurrences == 0 {
+            continue;
+        }
+        every = every.saturating_add(occurrences);
+        rows = rows.saturating_add(1);
+        if *held == rowid {
+            here = occurrences;
+        }
+    }
+    (here, every, rows)
+}
+
+/// Returns a text value, for a default an argument did not supply.
+///
+/// @param bytes - the text
+fn text_value(bytes: &[u8]) -> Value<'static> {
+    Value::owned_text(bytes).unwrap_or(Value::Null)
+}
 
 /// Returns a function argument as bytes, or nothing for a NULL.
 ///

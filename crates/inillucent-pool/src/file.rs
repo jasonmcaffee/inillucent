@@ -122,6 +122,13 @@ impl Database {
         database.meta.free_map = database.free.first();
         let _ = created;
         database.write_free_map()?;
+        // **The file is let go once it exists.** The exclusive lock above is
+        // held only for as long as there is no meta record for a second
+        // process to read; keeping it would make creating a database and then
+        // opening it a deadlock with itself, which is what the pool's own tests
+        // do. The connection takes whatever lock it needs at its first
+        // statement, exactly as an opened one does.
+        database.pool.unlock(FileLock::None)?;
         Ok(database)
     }
 
@@ -245,6 +252,26 @@ impl Database {
     /// @param value - the value the application wrote
     pub fn set_user_version(&mut self, value: i32) {
         self.meta.user_version = value;
+    }
+
+    /// Reports whether the file says it is in write-ahead-log mode.
+    ///
+    /// The one journal mode that outlives the connection that chose it, so an
+    /// open reads it rather than assuming: a database left in WAL comes back in
+    /// WAL, which is SQLite's rule and what stops one connection writing undo
+    /// images into a file another is appending frames to.
+    pub fn wal_mode(&self) -> bool {
+        self.meta.wal
+    }
+
+    /// Records whether the database is in write-ahead-log mode.
+    ///
+    /// It lands in the meta record and reaches the file at the next
+    /// checkpoint, which is the same durability every other meta field has.
+    ///
+    /// @param wal - whether the log is the mode in force
+    pub fn set_wal_mode(&mut self, wal: bool) {
+        self.meta.wal = wal;
     }
 
     /// Returns the four bytes `PRAGMA application_id` reads.
@@ -375,6 +402,16 @@ impl Database {
     ///
     /// Returns whether the cache was thrown away, which the caller reports.
     pub fn begin_read(&mut self) -> DbResult<bool> {
+        // **Already holding the file means nothing has changed under it.**
+        // Another process can only have written while this one held no lock, so
+        // a connection that has kept one - every statement inside a transaction,
+        // and every statement at all under `locking_mode = exclusive` - has
+        // nothing to take and nothing to reread. Without this the meta record is
+        // read from the file once per statement, which took the medium gate's
+        // `txn.large` from 1.57x to 0.01x before it was measured.
+        if self.pool.lock_level() != FileLock::None {
+            return Ok(false);
+        }
         self.pool.lock(FileLock::Shared)?;
         self.reload_if_moved()
     }
@@ -405,6 +442,11 @@ impl Database {
     ///
     /// @param may_release - whether the shared lock may be dropped to retry
     pub fn begin_write_within(&mut self, may_release: bool) -> DbResult<bool> {
+        // The same short circuit `begin_read` makes, for the same reason: a
+        // writer that already holds the file exclusively has nothing to raise.
+        if self.pool.lock_level() == FileLock::Exclusive {
+            return Ok(false);
+        }
         if !may_release {
             let reloaded = self.begin_read()?;
             self.pool.lock(FileLock::Reserved)?;
@@ -425,6 +467,14 @@ impl Database {
     /// nine times out of ten. It is not a failure; it is the other writer
     /// working.
     fn begin_write_retrying(&mut self) -> DbResult<bool> {
+        // **Never release a lock this connection already holds.** The retry
+        // below starts by letting go, which is right when the raise has failed
+        // and wrong when there was nothing to raise: a writer holding the file
+        // would drop it, reread the meta record and take it again, once per
+        // statement.
+        if self.pool.lock_level() == FileLock::Exclusive {
+            return Ok(false);
+        }
         let mut waited = 0u64;
         let mut pause = 1u64;
         loop {

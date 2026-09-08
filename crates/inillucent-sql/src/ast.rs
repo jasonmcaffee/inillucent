@@ -141,6 +141,18 @@ pub enum BinaryOp {
     Match,
     /// `REGEXP`
     Regexp,
+    /// `<->`
+    L2Distance,
+    /// `<=>`
+    CosineDistance,
+    /// `<#>`
+    NegativeInnerProduct,
+    /// `<+>`
+    L1Distance,
+    /// `<~>`
+    HammingDistance,
+    /// `<%>`
+    JaccardDistance,
 }
 
 /// Which pattern operator was written.
@@ -1036,6 +1048,13 @@ pub enum Statement {
         using: Option<NameId>,
         /// The key columns.
         columns: Vec<IndexedColumn>,
+        /// The storage parameters `WITH ( ... )` named, as written.
+        ///
+        /// `m = 16`, `ef_construction = 64` and the rest: raw `name = value`
+        /// slices, in the order they were written, for the structure named by
+        /// `using` to read. Empty for a plain `CREATE INDEX`, which has no
+        /// structure to read them.
+        settings: Vec<Vec<u8>>,
         /// The partial-index predicate.
         filter: Option<ExprId>,
     },

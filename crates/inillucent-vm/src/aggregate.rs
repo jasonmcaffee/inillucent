@@ -134,7 +134,10 @@ impl Accumulator {
             | AggregateFunc::Median
             | AggregateFunc::Percentile
             | AggregateFunc::PercentileCont
-            | AggregateFunc::PercentileDisc => {
+            | AggregateFunc::PercentileDisc
+            | AggregateFunc::GeopolyGroupBbox
+            | AggregateFunc::VectorSum
+            | AggregateFunc::VectorAvg => {
                 self.count = self.count.saturating_add(1);
                 self.rows.push(arguments.to_vec());
             }
@@ -276,7 +279,6 @@ impl Accumulator {
         &self.rows
     }
 
-
     /// Returns what a percentile aggregate settles on, over the sorted group.
     ///
     /// The same arithmetic the vectorised executor's
@@ -333,6 +335,37 @@ impl Accumulator {
         Value::Real(low + (high - low) * (position - below as f64))
     }
 
+    /// Returns the box that holds every polygon the group held.
+    ///
+    /// A row that is not a polygon contributes nothing, and a group with no
+    /// polygons in it answers NULL - which is what an aggregate that was never
+    /// stepped answers.
+    fn finish_geopoly_box(&self) -> Value<'static> {
+        let mut bounds: Option<[f32; 4]> = None;
+        for row in &self.rows {
+            let Some(shape) = inillucent_scalar::geopoly::Polygon::parse(row.first()) else {
+                continue;
+            };
+            let found = shape.bounds();
+            bounds = Some(match bounds {
+                None => found,
+                Some(held) => [
+                    held[0].min(found[0]),
+                    held[1].max(found[1]),
+                    held[2].min(found[2]),
+                    held[3].max(found[3]),
+                ],
+            });
+        }
+        match bounds {
+            Some(bounds) => {
+                let blob = inillucent_scalar::geopoly::box_polygon(bounds).to_blob();
+                Value::owned_blob(&blob).unwrap_or(Value::Null)
+            }
+            None => Value::Null,
+        }
+    }
+
     /// Produces the aggregate's value, without the mark.
     fn finish_value(&self) -> DbResult<Value<'static>> {
         Ok(match self.func {
@@ -343,6 +376,12 @@ impl Accumulator {
             | AggregateFunc::Percentile
             | AggregateFunc::PercentileCont
             | AggregateFunc::PercentileDisc => self.finish_percentile(),
+            AggregateFunc::GeopolyGroupBbox => self.finish_geopoly_box(),
+            // The legacy engine never plans a vector fold: the binder only
+            // chooses one for a column declared `VECTOR(n)`, which is the new
+            // engine's declaration. Named rather than folded into a catch-all
+            // so that a kind added later is a compilation error here too.
+            AggregateFunc::VectorSum | AggregateFunc::VectorAvg => Value::Null,
             AggregateFunc::Count => Value::Integer(self.count),
             AggregateFunc::Sum => {
                 if !self.saw_value {

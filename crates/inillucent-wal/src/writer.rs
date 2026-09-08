@@ -74,6 +74,33 @@ pub const FIRST_LSN: u64 = 8;
 /// by a power loss - not that the last commits survive one.
 pub const NORMAL_SYNC_BYTES: u64 = 64 << 20;
 
+/// How much unwritten log may sit in memory before it is handed to the file.
+///
+/// **A buffer that is only ever drained by a commit is a buffer the size of the
+/// transaction.** task-1861 measured the consequence: one round of
+/// `write.update.indexed` writes 7,927 KiB of log, and because every byte of it
+/// was held until the commit, that round raised the process's high-water mark
+/// by 7.04 MiB - and the buffer is recycled rather than freed, so the capacity
+/// stayed for the rest of the process. `write.insert.batch` and `write.upsert`
+/// add another 7.74 MiB between them by the same route. That is a quarter of
+/// this engine's whole residency, spent holding bytes whose only destination is
+/// a file.
+///
+/// Handing them over early costs nothing that matters and is already a case the
+/// design has a name for. Under `FULL` and `NORMAL` a page may not reach the
+/// data file above [`Wal::durable_end`], and a plain write does not move it -
+/// only a sync does - so writing early cannot let an uncommitted change out.
+/// Recovery decides what to replay in a first pass over the `Commit` records,
+/// and [`Body::Abort`] exists precisely so that a transaction *whose records
+/// were flushed* can roll back; `Transaction::rollback` already appends one
+/// when `written_end` has passed the transaction's first LSN.
+///
+/// 512 KiB rather than a smaller bound: the drain is one `write_all_at` of
+/// whatever has accumulated, so a bound of one page would be an ordinary write
+/// path made of syscalls. At 512 KiB the 7,927 KiB round pays fifteen extra
+/// writes and no extra syncs, and holds a sixteenth of what it held before.
+pub const SPILL_BYTES: usize = 512 << 10;
+
 /// How much log a checkpoint is triggered by, in bytes.
 pub const CHECKPOINT_BYTES: u64 = 256 << 20;
 
@@ -356,6 +383,17 @@ impl Wal {
         inner.stats.records = inner.stats.records.saturating_add(1);
         inner.stats.bytes = inner.stats.bytes.saturating_add(length);
         inner.since_checkpoint = inner.since_checkpoint.saturating_add(length);
+        // **The bound, taken after the record is in and with the lock let go.**
+        // A transaction bigger than [`SPILL_BYTES`] hands its earlier records to
+        // the file rather than holding them to the commit; the commit still does
+        // the one sync, so nothing about durability moves. See `SPILL_BYTES` for
+        // why writing an uncommitted record early is safe here and not merely
+        // convenient.
+        let over = inner.buffer.len() >= SPILL_BYTES;
+        drop(inner);
+        if over {
+            self.flush()?;
+        }
         Ok(lsn)
     }
 
@@ -690,6 +728,17 @@ impl Wal {
                     // measured on.
                     let mut recycled = payload;
                     recycled.clear();
+                    // **Recycled, but not at any size.** One record may be
+                    // larger than the bound - a `Structural` carries three
+                    // whole pages - so a drain can hand back a buffer far above
+                    // it, and keeping that capacity is exactly the retention
+                    // the bound exists to stop. Anything past the bound is
+                    // given back to the allocator here; anything under it is
+                    // kept, so the ordinary commit path still allocates
+                    // nothing.
+                    if recycled.capacity() > SPILL_BYTES {
+                        recycled.shrink_to(SPILL_BYTES);
+                    }
                     if inner.buffer.is_empty() {
                         recycled.append(&mut inner.buffer);
                         inner.buffer = recycled;

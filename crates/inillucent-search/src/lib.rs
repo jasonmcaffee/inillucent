@@ -61,6 +61,8 @@
 )]
 
 pub mod adapter;
+#[cfg(feature = "embed")]
+pub mod embed;
 pub mod merge;
 pub mod module;
 pub mod options;
@@ -80,6 +82,14 @@ pub const IMPLEMENTATION_PHASE: &str =
 /// @param registry - the connection's registry
 pub fn register(registry: &mut inillucent_ext::registry::Registry) {
     registry.register_module(std::sync::Arc::new(module::SearchModule));
+    // **And `embed`**, when this build has it. It belongs here for the same
+    // reason the module does - this crate is the one that links the retrieval
+    // engine, and the SQL engine below it may not - and it is behind a feature
+    // for the reason the retrieval engine's own `onnx` is: the model is a
+    // native runtime, and a database that linked one whether or not anybody
+    // asked would be paying for it on every open. See `embed`.
+    #[cfg(feature = "embed")]
+    embed::register(registry);
 }
 
 #[cfg(test)]

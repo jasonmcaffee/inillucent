@@ -419,6 +419,9 @@ pub enum Directive {
         using: Option<Vec<u8>>,
         /// The key columns.
         columns: Vec<IndexKeyColumn>,
+        /// The storage parameters `WITH ( ... )` named, checked against the
+        /// module that will read them.
+        settings: Vec<(Vec<u8>, Vec<u8>)>,
         /// Whether the index already exists.
         exists: bool,
     },
@@ -526,6 +529,7 @@ impl<'a> Binder<'a> {
                 table,
                 using,
                 columns,
+                settings,
                 filter,
             } => self.bind_create_index(
                 *unique,
@@ -535,6 +539,7 @@ impl<'a> Binder<'a> {
                 *table,
                 *using,
                 columns,
+                settings,
                 *filter,
             ),
             ast::Statement::Analyze { database, name } => self.bind_analyze(*database, *name),
@@ -1222,7 +1227,10 @@ impl<'a> Binder<'a> {
                     ))
                 }
                 ast::ColumnConstraint::Unique(_) => {
-                    return Err(schema_refused("Cannot add a UNIQUE column", Span::default()))
+                    return Err(schema_refused(
+                        "Cannot add a UNIQUE column",
+                        Span::default(),
+                    ))
                 }
                 ast::ColumnConstraint::NotNull(_) => not_null = true,
                 ast::ColumnConstraint::Default(expr) => {
@@ -1718,6 +1726,7 @@ impl<'a> Binder<'a> {
         table: ast::NameId,
         using: Option<ast::NameId>,
         columns: &[ast::IndexedColumn],
+        settings: &[Vec<u8>],
         _filter: Option<ast::ExprId>,
     ) -> Result<Directive, ParseError> {
         // **A `WHERE` is carried in the statement text, not in this
@@ -1734,15 +1743,23 @@ impl<'a> Binder<'a> {
             None => None,
             Some(named) => {
                 let folded = self.ast.folded(named).to_vec();
-                if folded != b"inillucent_hnsw" {
+                // Two structures, and both are real: `inillucent_hnsw` is the
+                // graph the retrieval engine builds, and `ivfflat` is the
+                // inverted file pgvector's other index type is - k-means
+                // centroids and a list per centroid, probed `probes` deep.
+                // Anything else is refused rather than accepted and ignored:
+                // an index that silently was not the structure it asked for is
+                // the shape of wrong answer this ticket keeps finding.
+                if folded != b"inillucent_hnsw" && folded != b"ivfflat" {
                     return Err(unsupported(
-                        "an index USING a module other than inillucent_hnsw",
+                        "an index USING a module other than inillucent_hnsw or ivfflat",
                         Span::default(),
                     ));
                 }
                 Some(folded)
             }
         };
+        let parsed_settings = index_settings(&using, settings)?;
         let index = self.resolve_database(database)?;
         let database_name = self.catalog.database_name(index).to_vec();
         let table_folded = self.ast.folded(table).to_vec();
@@ -1835,6 +1852,7 @@ impl<'a> Binder<'a> {
             table_root: target.root,
             using,
             columns: keys,
+            settings: parsed_settings,
             exists,
         })
     }
@@ -2129,4 +2147,78 @@ fn identifier_width(name: &[u8]) -> usize {
     name.len()
         .saturating_add(2)
         .saturating_add(name.iter().filter(|byte| **byte == b'"').count())
+}
+
+/// The storage parameters `CREATE INDEX ... WITH ( ... )` accepts.
+///
+/// One entry per name the vector index understands, with the store option it
+/// becomes. **A name that is not here is refused rather than ignored**, which is
+/// the same rule `USING` follows a few lines above and for the same reason: an
+/// index that quietly was not built the way it was asked to be is a wrong answer
+/// nobody can see.
+const INDEX_SETTINGS: [(&str, &str); 9] = [
+    // The graph's own three, spelled as pgvector spells them.
+    ("m", "m"),
+    ("ef_construction", "ef_construction"),
+    ("ef_search", "ef_search"),
+    // The distance the index is built for. pgvector puts this in an operator
+    // class - `USING hnsw (v vector_l2_ops)` - and names it here as well.
+    ("metric", "metric"),
+    ("distance", "metric"),
+    // How many threads the build uses, and how far behind the table the index
+    // may fall before it is rebuilt.
+    ("threads", "threads"),
+    ("compact", "compact"),
+    // The two an `ivfflat` has: how many centroids it clusters into, and how
+    // many of those lists a query reads.
+    ("lists", "lists"),
+    ("probes", "probes"),
+];
+
+/// Checks `WITH ( ... )` against the structure that will read it.
+///
+/// Returns the settings as folded `(name, value)` pairs, in the order written.
+/// A plain `CREATE INDEX` may not carry any: a b-tree has no parameters, and
+/// accepting them would mean accepting a setting nothing reads.
+///
+/// @param using - the module the index named, when it named one
+/// @param settings - the raw `name = value` slices
+fn index_settings(
+    using: &Option<Vec<u8>>,
+    settings: &[Vec<u8>],
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>, ParseError> {
+    if settings.is_empty() {
+        return Ok(Vec::new());
+    }
+    if using.is_none() {
+        return Err(unsupported(
+            "WITH ( ... ) on an index that is not USING a module",
+            Span::default(),
+        ));
+    }
+    let mut held = Vec::with_capacity(settings.len());
+    for setting in settings {
+        let text = String::from_utf8_lossy(setting).to_string();
+        let Some((name, value)) = text.split_once('=') else {
+            return Err(refused(
+                format!("index setting {} is not name = value", text.trim()),
+                Span::default(),
+            ));
+        };
+        let folded = name.trim().to_ascii_lowercase();
+        let Some((_, option)) = INDEX_SETTINGS
+            .iter()
+            .find(|(known, _)| *known == folded.as_str())
+        else {
+            return Err(refused(
+                format!("no such index setting: {folded}"),
+                Span::default(),
+            ));
+        };
+        let value = value
+            .trim()
+            .trim_matches(|held| held == '\'' || held == '"');
+        held.push((option.as_bytes().to_vec(), value.as_bytes().to_vec()));
+    }
+    Ok(held)
 }

@@ -87,6 +87,8 @@ pub enum ScalarFunc {
     LastInsertRowid,
     /// `sqlite_source_id()`
     SourceId,
+    /// `fts5_source_id()`
+    Fts5SourceId,
     /// `sqlite_version()`
     Version,
     /// `vector_distance_cos(a, b)`, the cosine distance between two vectors.
@@ -107,6 +109,86 @@ pub enum ScalarFunc {
     /// product itself, because a function named `dot` that returned its negative
     /// would be a trap; the ordering sugar negates where it needs to.
     VectorDot,
+    /// `l1_distance(a, b)`, the taxicab distance, spelled `a <+> b`.
+    VectorDistanceL1,
+    /// `hamming_distance(a, b)`, how many components differ.
+    ///
+    /// pgvector defines it over its `bit` type and spells it `a <~> b`. Here a
+    /// bit vector is the blob `binary_quantize` produces, and the distance is
+    /// the population count of the two blobs' exclusive-or - which is the same
+    /// number, computed the same way, over the representation this engine has.
+    VectorDistanceHamming,
+    /// `jaccard_distance(a, b)`, one minus the overlap, spelled `a <%> b`.
+    VectorDistanceJaccard,
+    /// `vector_dims(a)`, how many components a vector has.
+    VectorDims,
+    /// `vector_norm(a)`, its Euclidean length.
+    VectorNorm,
+    /// `l2_normalize(a)`, the same direction with length one.
+    VectorNormalize,
+    /// `binary_quantize(a)`, one bit per component: set when it is positive.
+    VectorQuantize,
+    /// `subvector(a, start, count)`, a slice, counted from one.
+    VectorSlice,
+    /// `vector_add(a, b)`, component by component.
+    ///
+    /// **A function rather than `+`, and that is a compatibility choice rather
+    /// than a shortcut.** pgvector can overload `+` because a `vector` is a
+    /// distinct type in PostgreSQL; here a vector is a blob, and SQLite says
+    /// that a blob in arithmetic is zero. Overloading the operator for every
+    /// blob would change the answer to `x'00' + x'00'` from `0` to a blob,
+    /// which is a difference every application that adds two blobs would see.
+    ///
+    /// **task-1860 gave the operators back, on the one condition that keeps
+    /// both answers.** `a + b` binds to this function when a side reads a
+    /// column *declared* `VECTOR(n)` - which is the same thing PostgreSQL is
+    /// using, a declared type - and stays SQLite's arithmetic otherwise. So
+    /// `x'00' + x'00'` is still `0` and `v + v` over a vector column is a
+    /// vector.
+    VectorAdd,
+    /// `vector_sub(a, b)`, component by component.
+    VectorSubtract,
+    /// `vector_mul(a, b)`, component by component.
+    VectorMultiply,
+    /// `vector_concat(a, b)`, one vector after the other.
+    VectorConcat,
+    /// `geopoly_area(P)`, the signed area a polygon encloses.
+    ///
+    /// **The `geopoly` surface is thirteen functions and one aggregate**, and
+    /// they are listed here individually rather than folded into one
+    /// `Geopoly(kind)` variant because arity checking reads this enum: they
+    /// take one, two, three, four, seven and any number of arguments, and a
+    /// single variant could not say so.
+    GeopolyArea,
+    /// `geopoly_blob(P)`, the stored form of a polygon.
+    GeopolyBlob,
+    /// `geopoly_json(P)`, the GeoJSON form.
+    GeopolyJson,
+    /// `geopoly_svg(P, ...)`, an SVG `<polyline>` with the extra arguments
+    /// written into the tag.
+    GeopolySvg,
+    /// `geopoly_within(P1, P2)`, whether the second is inside the first.
+    GeopolyWithin,
+    /// `geopoly_contains_point(P, X, Y)`, where a point sits.
+    GeopolyContainsPoint,
+    /// `geopoly_overlap(P1, P2)`, how two polygons meet.
+    GeopolyOverlap,
+    /// `geopoly_debug(X)`, which answers nothing.
+    ///
+    /// It switches on the reference's own tracing, which only exists in a build
+    /// made with `GEOPOLY_ENABLE_DEBUG`; in every other build it reads its
+    /// argument and returns nothing at all. That is what this does, and it is
+    /// registered because a name the reference resolves and this engine does
+    /// not is a difference an application can see.
+    GeopolyDebug,
+    /// `geopoly_bbox(P)`, the bounding box as a four-sided polygon.
+    GeopolyBbox,
+    /// `geopoly_xform(P, A, B, C, D, E, F)`, an affine transform.
+    GeopolyXform,
+    /// `geopoly_regular(X, Y, R, N)`, a regular polygon.
+    GeopolyRegular,
+    /// `geopoly_ccw(P)`, the same ring wound counter-clockwise.
+    GeopolyCcw,
     /// `unknown(...)`, which answers NULL to anything.
     ///
     /// SQLite registers it, lists it in `function_list`, and returns NULL from
@@ -129,6 +211,46 @@ pub enum ScalarFunc {
     LoadExtension,
     /// `regexp(pattern, subject)`, which is what `X REGEXP Y` calls.
     Regexp,
+    /// `sqlar_compress(X)`, a blob compressed if that makes it smaller.
+    ///
+    /// **The archive format's own rule, and it is why this is not just a
+    /// compressor.** A row of a `.sqlar` table holds either a zlib stream or
+    /// the raw bytes, and which one is decided by whichever is shorter; the
+    /// stored `sz` column is what tells the two apart on the way back. So a
+    /// value that does not compress is stored as it stands, and a value that is
+    /// not a blob at all is returned unchanged, type and all.
+    SqlarCompress,
+    /// `sqlar_uncompress(Z, SZ)`, the inverse.
+    ///
+    /// `SZ` is the size the row claims the content is. When it equals the
+    /// blob's own length the blob *is* the content and is returned unchanged,
+    /// which is how the format says "this one was stored raw".
+    SqlarUncompress,
+    /// `sqlite_offset(X)`, where in the file the row holding X is.
+    ///
+    /// **The page, not the record, and that is the whole of the difference.**
+    /// SQLite reports the byte offset of the *record* a value would be read
+    /// from, because a row there is one contiguous run of bytes. A leaf here is
+    /// PAX: each column is its own run, so one row occupies several places on
+    /// its page and there is no single offset for it. What is reported is the
+    /// offset of the page, which is where the value is genuinely read from.
+    ///
+    /// Folded to its answer by the physical pass, like `rtreecheck`, because it
+    /// is a question about a *tree* rather than about a value.
+    Offset,
+    /// `rtreedepth(X)`, the depth stored at the front of an R-Tree node.
+    RTreeDepth,
+    /// `rtreenode(D, X)`, an R-Tree node rendered as a readable list.
+    RTreeNode,
+    /// `rtreecheck(T)`, an integrity check over one R-Tree table.
+    ///
+    /// **Answered where the table is reachable, which is not here.** A scalar
+    /// is handed values and nothing else; this one is about a *table*, so the
+    /// physical pass folds it to its answer while it still has the catalog,
+    /// and what reaches the evaluator is already the text. Running once per
+    /// preparation rather than once per row is also what it means: the
+    /// argument is a table name, so the answer cannot vary down a column.
+    RTreeCheck,
 }
 
 /// An aggregate built-in.
@@ -158,6 +280,15 @@ pub enum AggregateFunc {
     JsonbGroupObject,
     /// `median(x)`, which is `percentile_cont(x, 0.5)` under a shorter name.
     Median,
+    /// `geopoly_group_bbox(P)`, the box that holds every polygon in the group.
+    GeopolyGroupBbox,
+    /// `sum(v)` and `total(v)` over a vector column, component by component.
+    ///
+    /// Not a name a caller writes: the binder picks it when `sum`'s argument
+    /// reads a vector, because that is where the argument's type is known.
+    VectorSum,
+    /// `avg(v)` over a vector column, component by component.
+    VectorAvg,
     /// `percentile(x, p)`, where `p` runs 0 to 100.
     Percentile,
     /// `percentile_cont(x, f)`, where `f` runs 0 to 1 and the answer is
@@ -507,6 +638,10 @@ pub enum JsonFunc {
     Valid,
     /// `json_quote(X)`
     Quote,
+    /// `json_array_insert(X, P, V, ...)`
+    ArrayInsert,
+    /// `jsonb_array_insert(X, P, V, ...)`
+    ArrayInsertB,
 }
 
 impl JsonFunc {
@@ -531,7 +666,9 @@ impl JsonFunc {
             | JsonFunc::Replace
             | JsonFunc::ReplaceB
             | JsonFunc::Set
-            | JsonFunc::SetB => (3, usize::MAX),
+            | JsonFunc::SetB
+            | JsonFunc::ArrayInsert
+            | JsonFunc::ArrayInsertB => (3, usize::MAX),
         }
     }
 
@@ -549,7 +686,9 @@ impl JsonFunc {
             | JsonFunc::Replace
             | JsonFunc::ReplaceB
             | JsonFunc::Set
-            | JsonFunc::SetB => count % 2 == 1,
+            | JsonFunc::SetB
+            | JsonFunc::ArrayInsert
+            | JsonFunc::ArrayInsertB => count % 2 == 1,
             JsonFunc::Object | JsonFunc::ObjectB => count % 2 == 0,
             _ => true,
         }
@@ -582,7 +721,17 @@ pub fn lookup_json(folded: &[u8]) -> Option<JsonFunc> {
         b"json_array_length" => JsonFunc::ArrayLength,
         b"json_error_position" => JsonFunc::ErrorPosition,
         b"json_extract" => JsonFunc::Extract,
+        // **The operators are function names too.** SQLite registers `->` and
+        // `->>` as ordinary two-argument functions, so `"->"(a, b)` binds and
+        // `pragma_function_list` reports them. The parser lowered the operators
+        // here already; only the spellings were missing, which made this engine
+        // report two fewer functions than it has and refuse a call SQLite
+        // answers. task-1869.
+        b"->" => JsonFunc::Arrow,
+        b"->>" => JsonFunc::ArrowShift,
         b"jsonb_extract" => JsonFunc::ExtractB,
+        b"json_array_insert" => JsonFunc::ArrayInsert,
+        b"jsonb_array_insert" => JsonFunc::ArrayInsertB,
         b"json_insert" => JsonFunc::Insert,
         b"jsonb_insert" => JsonFunc::InsertB,
         b"json_object" => JsonFunc::Object,
@@ -639,6 +788,7 @@ pub fn lookup_scalar(folded: &[u8]) -> Option<ScalarFunc> {
         b"total_changes" => ScalarFunc::TotalChanges,
         b"last_insert_rowid" => ScalarFunc::LastInsertRowid,
         b"sqlite_source_id" => ScalarFunc::SourceId,
+        b"fts5_source_id" => ScalarFunc::Fts5SourceId,
         b"trim" => ScalarFunc::Trim,
         b"typeof" => ScalarFunc::TypeOf,
         b"unhex" => ScalarFunc::Unhex,
@@ -646,9 +796,37 @@ pub fn lookup_scalar(folded: &[u8]) -> Option<ScalarFunc> {
         b"upper" => ScalarFunc::Upper,
         b"zeroblob" => ScalarFunc::ZeroBlob,
         b"sqlite_version" => ScalarFunc::Version,
-        b"vector_distance_cos" => ScalarFunc::VectorDistanceCos,
-        b"vector_distance_l2" => ScalarFunc::VectorDistanceL2,
-        b"vector_dot" => ScalarFunc::VectorDot,
+        b"vector_distance_cos" | b"cosine_distance" => ScalarFunc::VectorDistanceCos,
+        b"vector_distance_l2" | b"l2_distance" => ScalarFunc::VectorDistanceL2,
+        b"vector_dot" | b"inner_product" => ScalarFunc::VectorDot,
+        // **Both spellings of each distance.** `l1_distance` is pgvector's name
+        // and `vector_distance_l1` is this engine's own, and the family reads
+        // as a family only if every member answers to both - `cos` and `l2`
+        // already did, and `l1` answered to one of the two.
+        b"l1_distance" | b"vector_distance_l1" => ScalarFunc::VectorDistanceL1,
+        b"hamming_distance" | b"vector_distance_hamming" => ScalarFunc::VectorDistanceHamming,
+        b"jaccard_distance" | b"vector_distance_jaccard" => ScalarFunc::VectorDistanceJaccard,
+        b"vector_dims" => ScalarFunc::VectorDims,
+        b"vector_norm" => ScalarFunc::VectorNorm,
+        b"l2_normalize" => ScalarFunc::VectorNormalize,
+        b"binary_quantize" => ScalarFunc::VectorQuantize,
+        b"subvector" => ScalarFunc::VectorSlice,
+        b"vector_add" => ScalarFunc::VectorAdd,
+        b"vector_sub" => ScalarFunc::VectorSubtract,
+        b"vector_mul" => ScalarFunc::VectorMultiply,
+        b"vector_concat" => ScalarFunc::VectorConcat,
+        b"geopoly_area" => ScalarFunc::GeopolyArea,
+        b"geopoly_blob" => ScalarFunc::GeopolyBlob,
+        b"geopoly_json" => ScalarFunc::GeopolyJson,
+        b"geopoly_svg" => ScalarFunc::GeopolySvg,
+        b"geopoly_within" => ScalarFunc::GeopolyWithin,
+        b"geopoly_contains_point" => ScalarFunc::GeopolyContainsPoint,
+        b"geopoly_overlap" => ScalarFunc::GeopolyOverlap,
+        b"geopoly_debug" => ScalarFunc::GeopolyDebug,
+        b"geopoly_bbox" => ScalarFunc::GeopolyBbox,
+        b"geopoly_xform" => ScalarFunc::GeopolyXform,
+        b"geopoly_regular" => ScalarFunc::GeopolyRegular,
+        b"geopoly_ccw" => ScalarFunc::GeopolyCcw,
         b"unknown" => ScalarFunc::Unknown,
         b"subtype" => ScalarFunc::Subtype,
         b"unistr" => ScalarFunc::Unistr,
@@ -658,6 +836,12 @@ pub fn lookup_scalar(folded: &[u8]) -> Option<ScalarFunc> {
         b"sqlite_log" => ScalarFunc::Log,
         b"load_extension" => ScalarFunc::LoadExtension,
         b"regexp" => ScalarFunc::Regexp,
+        b"sqlite_offset" => ScalarFunc::Offset,
+        b"sqlar_compress" => ScalarFunc::SqlarCompress,
+        b"sqlar_uncompress" => ScalarFunc::SqlarUncompress,
+        b"rtreedepth" => ScalarFunc::RTreeDepth,
+        b"rtreenode" => ScalarFunc::RTreeNode,
+        b"rtreecheck" => ScalarFunc::RTreeCheck,
         _ => return None,
     };
     Some(func)
@@ -678,6 +862,7 @@ pub fn lookup_aggregate(folded: &[u8]) -> Option<AggregateFunc> {
         b"json_group_array" => AggregateFunc::JsonGroupArray,
         b"jsonb_group_array" => AggregateFunc::JsonbGroupArray,
         b"json_group_object" => AggregateFunc::JsonGroupObject,
+        b"geopoly_group_bbox" => AggregateFunc::GeopolyGroupBbox,
         b"median" => AggregateFunc::Median,
         b"percentile" => AggregateFunc::Percentile,
         b"percentile_cont" => AggregateFunc::PercentileCont,
@@ -702,9 +887,38 @@ pub fn scalar_arity_ok(func: ScalarFunc, count: usize) -> bool {
         | ScalarFunc::Upper
         | ScalarFunc::ZeroBlob => count == 1,
         ScalarFunc::IfNull | ScalarFunc::NullIf | ScalarFunc::Glob => count == 2,
-        ScalarFunc::VectorDistanceCos | ScalarFunc::VectorDistanceL2 | ScalarFunc::VectorDot => {
-            count == 2
-        }
+        ScalarFunc::VectorDistanceCos
+        | ScalarFunc::VectorDistanceL2
+        | ScalarFunc::VectorDot
+        | ScalarFunc::VectorDistanceL1
+        | ScalarFunc::VectorDistanceHamming
+        | ScalarFunc::VectorDistanceJaccard
+        | ScalarFunc::VectorAdd
+        | ScalarFunc::VectorSubtract
+        | ScalarFunc::VectorMultiply
+        | ScalarFunc::VectorConcat => count == 2,
+        ScalarFunc::VectorDims
+        | ScalarFunc::VectorNorm
+        | ScalarFunc::VectorNormalize
+        | ScalarFunc::VectorQuantize => count == 1,
+        ScalarFunc::VectorSlice => count == 3,
+        ScalarFunc::RTreeDepth | ScalarFunc::Offset | ScalarFunc::SqlarCompress => count == 1,
+        ScalarFunc::SqlarUncompress => count == 2,
+        ScalarFunc::RTreeNode => count == 2,
+        // One argument is the table and two is a schema and a table, which is
+        // the same pair `rtreecheck` takes in the reference.
+        ScalarFunc::RTreeCheck => count == 1 || count == 2,
+        ScalarFunc::GeopolyArea
+        | ScalarFunc::GeopolyBlob
+        | ScalarFunc::GeopolyJson
+        | ScalarFunc::GeopolyDebug
+        | ScalarFunc::GeopolyBbox
+        | ScalarFunc::GeopolyCcw => count == 1,
+        ScalarFunc::GeopolyWithin | ScalarFunc::GeopolyOverlap => count == 2,
+        ScalarFunc::GeopolyContainsPoint => count == 3,
+        ScalarFunc::GeopolyRegular => count == 4,
+        ScalarFunc::GeopolyXform => count == 7,
+        ScalarFunc::GeopolySvg => count >= 1,
         ScalarFunc::Replace => count == 3,
         // `iif` is `CASE` written as a call: pairs of a test and a value, with
         // an optional final answer. Two arguments is the shortest legal form
@@ -736,7 +950,8 @@ pub fn scalar_arity_ok(func: ScalarFunc, count: usize) -> bool {
         | ScalarFunc::Changes
         | ScalarFunc::TotalChanges
         | ScalarFunc::LastInsertRowid
-        | ScalarFunc::SourceId => count == 0,
+        | ScalarFunc::SourceId
+        | ScalarFunc::Fts5SourceId => count == 0,
     }
 }
 
@@ -749,7 +964,10 @@ pub fn aggregate_arity_ok(func: AggregateFunc, count: usize, star: bool) -> bool
         AggregateFunc::GroupConcat => !star && (count == 1 || count == 2),
         AggregateFunc::JsonGroupArray | AggregateFunc::JsonbGroupArray => !star && count == 1,
         AggregateFunc::JsonGroupObject | AggregateFunc::JsonbGroupObject => !star && count == 2,
-        AggregateFunc::Median => !star && count == 1,
+        AggregateFunc::Median
+        | AggregateFunc::GeopolyGroupBbox
+        | AggregateFunc::VectorSum
+        | AggregateFunc::VectorAvg => !star && count == 1,
         AggregateFunc::Percentile
         | AggregateFunc::PercentileCont
         | AggregateFunc::PercentileDisc => !star && count == 2,
@@ -850,6 +1068,17 @@ const VOLATILE_FLAGS: i64 = 2048;
 /// the arity is per *overload*: `substr` is here twice, at two and at three
 /// arguments, which is what SQLite reports and what an application checking
 /// whether a call will bind needs to see.
+///
+/// **It must name everything the binder will resolve, and task-1869 found that
+/// it did not.** The register answered 161 names where SQLite answers 218, and
+/// the functionality behind most of the difference was present and
+/// byte-identical - `current_date`, `regexp`, `unistr`, `median`, `bm25`,
+/// `matchinfo` and the rest all answered when called. A caller that
+/// introspects the register to decide what it may use was told less than the
+/// truth, with no error, which is the one *silent* difference this project has
+/// had. The additions below were each verified against the engine before being
+/// listed: a name here that the binder refuses would be the same defect
+/// pointing the other way.
 pub fn every_function() -> Vec<FunctionEntry> {
     let mut out = Vec::new();
     let mut scalar = |name: &'static str, arity: i64| {
@@ -892,6 +1121,13 @@ pub fn every_function() -> Vec<FunctionEntry> {
 }
 
 /// The deterministic scalars, with one row per overload.
+///
+/// **`narg` is SQLite's own encoding, not "how many arguments".** A negative
+/// number means variadic *and carries a minimum*: `coalesce` reads -4 and
+/// `concat` -3 in the reference's register, not -1. task-1869's
+/// register-completeness check compares this column because it is the one an
+/// application reads to decide whether a call will bind, and it found seven
+/// entries here that disagreed with the reference while answering identically.
 const SCALARS: &[(&str, i64)] = &[
     ("abs", 1),
     ("acos", 1),
@@ -904,9 +1140,9 @@ const SCALARS: &[(&str, i64)] = &[
     ("ceil", 1),
     ("ceiling", 1),
     ("char", -1),
-    ("coalesce", -1),
-    ("concat", -1),
-    ("concat_ws", -1),
+    ("coalesce", -4),
+    ("concat", -3),
+    ("concat_ws", -4),
     ("cos", 1),
     ("cosh", 1),
     ("date", -1),
@@ -918,7 +1154,7 @@ const SCALARS: &[(&str, i64)] = &[
     ("glob", 2),
     ("hex", 1),
     ("ifnull", 2),
-    ("iif", 3),
+    ("iif", -4),
     ("instr", 2),
     ("json", 1),
     ("json_array", -1),
@@ -962,8 +1198,8 @@ const SCALARS: &[(&str, i64)] = &[
     ("lower", 1),
     ("ltrim", 1),
     ("ltrim", 2),
-    ("max", -1),
-    ("min", -1),
+    ("max", -3),
+    ("min", -3),
     ("mod", 2),
     ("nullif", 2),
     ("octet_length", 1),
@@ -981,6 +1217,8 @@ const SCALARS: &[(&str, i64)] = &[
     ("sign", 1),
     ("sin", 1),
     ("sinh", 1),
+    ("fts5_source_id", 0),
+    ("optimize", 1),
     ("sqlite_source_id", 0),
     ("sqlite_version", 0),
     ("sqrt", 1),
@@ -1003,18 +1241,81 @@ const SCALARS: &[(&str, i64)] = &[
     ("unixepoch", -1),
     ("unlikely", 1),
     ("upper", 1),
+    ("binary_quantize", 1),
+    ("rtreecheck", -1),
+    ("sqlar_compress", 1),
+    ("sqlar_uncompress", 2),
+    ("sqlite_offset", 1),
+    ("rtreedepth", 1),
+    ("rtreenode", 2),
+    ("geopoly_area", 1),
+    ("geopoly_bbox", 1),
+    ("geopoly_blob", 1),
+    ("geopoly_ccw", 1),
+    ("geopoly_contains_point", 3),
+    ("geopoly_debug", 1),
+    ("geopoly_group_bbox", 1),
+    ("geopoly_json", 1),
+    ("geopoly_overlap", 2),
+    ("geopoly_regular", 4),
+    ("geopoly_svg", -1),
+    ("geopoly_within", 2),
+    ("geopoly_xform", 7),
+    ("cosine_distance", 2),
+    ("hamming_distance", 2),
+    ("inner_product", 2),
+    ("jaccard_distance", 2),
+    ("l1_distance", 2),
+    ("l2_distance", 2),
+    ("l2_normalize", 1),
+    ("subvector", 3),
+    ("vector_add", 2),
+    ("vector_concat", 2),
+    ("vector_dims", 1),
     ("vector_distance_cos", 2),
     ("vector_distance_l2", 2),
     ("vector_dot", 2),
+    ("vector_mul", 2),
+    ("vector_norm", 1),
+    ("vector_sub", 2),
     ("zeroblob", 1),
+    // task-1869: present and answering, and missing from this list until now.
+    // Each was checked against the shell before it was added.
+    ("->", 2),
+    ("->>", 2),
+    ("bm25", -1),
+    ("highlight", -1),
+    ("if", -4),
+    ("json_array_insert", -1),
+    ("jsonb_array_insert", -1),
+    ("match", 2),
+    ("matchinfo", 1),
+    ("matchinfo", 2),
+    ("offsets", 1),
+    ("regexp", 2),
+    ("snippet", -1),
+    ("sqlite_compileoption_get", 1),
+    ("sqlite_compileoption_used", 1),
+    ("subtype", 1),
+    ("unistr", 1),
+    ("unistr_quote", 1),
+    ("unknown", -1),
 ];
 
 /// The scalars whose answer depends on something other than their arguments.
 const VOLATILE: &[(&str, i64)] = &[
     ("changes", 0),
+    // The three date keywords are functions in SQLite's register and answer
+    // like functions here; they read the clock, so they are not deterministic.
+    ("current_date", 0),
+    ("current_time", 0),
+    ("current_timestamp", 0),
     ("last_insert_rowid", 0),
+    ("load_extension", 1),
+    ("load_extension", 2),
     ("random", 0),
     ("randomblob", 1),
+    ("sqlite_log", 2),
     ("total_changes", 0),
 ];
 
@@ -1053,4 +1354,10 @@ const WINDOWS: &[(&str, i64)] = &[
     ("percent_rank", 0),
     ("rank", 0),
     ("row_number", 0),
+    // The percentile family, which SQLite reports as window functions and which
+    // this engine answers as both aggregates and window functions.
+    ("median", 1),
+    ("percentile", 2),
+    ("percentile_cont", 2),
+    ("percentile_disc", 2),
 ];

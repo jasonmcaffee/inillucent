@@ -13,7 +13,7 @@
 //! able to hold spaces.
 
 use crate::render::{literal, Layout};
-use crate::shell::{drive, mode_named, Shell, MODE_NAMES};
+use crate::shell::{drive, mode_named, Shell};
 use inillucent_value::Value;
 
 /// Runs one dot command.
@@ -28,7 +28,7 @@ pub fn run(shell: &mut Shell, line: &str) {
     let arguments: Vec<&str> = words.iter().skip(1).map(String::as_str).collect();
     match name.as_str() {
         "quit" | "exit" => shell.done = true,
-        "help" => help(shell),
+        "help" => help(shell, &arguments),
         "open" => open(shell, &arguments),
         "databases" => databases(shell),
         "tables" => tables(shell, &arguments),
@@ -52,6 +52,10 @@ pub fn run(shell: &mut Shell, line: &str) {
         "echo" => shell.echo = truthy(arguments.first().copied()),
         "bail" => shell.bail = truthy(arguments.first().copied()),
         "timer" => shell.timer = truthy(arguments.first().copied()),
+        "archive" | "ar" => crate::archive::archive(shell, &arguments),
+        "stats" => crate::diagnose::stats(shell, &arguments),
+        "vfslist" => crate::diagnose::vfs_list(shell),
+        "vfsinfo" | "vfsname" => crate::diagnose::vfs_info(shell, name == "vfsname"),
         "changes" => shell.show_changes = truthy(arguments.first().copied()),
         "eqp" => shell.explain_plan = truthy(arguments.first().copied()),
         "read" => read(shell, &arguments),
@@ -65,6 +69,8 @@ pub fn run(shell: &mut Shell, line: &str) {
         "clone" => clone(shell, &arguments),
         "timeout" => timeout(shell, &arguments),
         "log" => log(shell, &arguments),
+        "load" => load_extension(shell, &arguments),
+        "progress" => progress(shell, &arguments),
         "restore" => restore(shell, &arguments),
         "parameter" => parameter(shell, &arguments),
         "recover" => crate::diagnose::recover(shell, &arguments),
@@ -72,6 +78,26 @@ pub fn run(shell: &mut Shell, line: &str) {
         "limit" | "limits" => crate::diagnose::limit(shell, &arguments),
         "selftest" => crate::diagnose::selftest(shell, &arguments),
         "lint" => crate::diagnose::lint(shell, &arguments),
+        "dbconfig" => crate::dbconfig::dbconfig(shell, &arguments),
+        "auth" => crate::commands::auth(shell, &arguments),
+        "connection" => crate::commands::connection(shell, &arguments),
+        "imposter" => crate::commands::imposter(shell, &arguments),
+        "cd" => crate::commands::cd(shell, &arguments),
+        "shell" | "system" => crate::commands::system(shell, &arguments),
+        "crlf" => crate::commands::crlf(shell, &arguments),
+        "prompt" => crate::commands::prompt(shell, &arguments),
+        "explain" => crate::commands::explain(shell, &arguments),
+        "nonce" => crate::commands::nonce(shell, &arguments),
+        "testcase" => crate::commands::testcase(shell, &arguments),
+        "check" => crate::commands::check(shell, &arguments),
+        "scanstats" => crate::commands::scanstats(shell, &arguments),
+        "trace" => crate::commands::trace(shell, &arguments),
+        "dbinfo" => crate::diagnose::dbinfo(shell, &arguments),
+        "dbtotxt" => crate::diagnose::dbtotxt(shell),
+        "intck" => crate::diagnose::intck(shell, &arguments),
+        "filectrl" => crate::diagnose::filectrl(shell, &arguments),
+        "excel" => crate::commands::viewer(shell, false),
+        "www" => crate::commands::viewer(shell, true),
         "version" => version(shell),
         "show" => show(shell),
         "nullvalues" => shell.complain("Error: unknown command; try .help"),
@@ -132,6 +158,71 @@ fn timeout(shell: &mut Shell, arguments: &[&str]) {
 /// @param arguments - the words after the command
 fn log(shell: &mut Shell, arguments: &[&str]) {
     shell.log_to = arguments.first().map(|word| (*word).to_string());
+}
+
+/// `.load FILE ?ENTRY?`: load a runtime extension.
+///
+/// **The command exists and answers; what it cannot do is find a library.**
+/// This engine has no `sqlite3_load_extension` and no C entry point for one to
+/// bind to - a shared library written against SQLite's C API would have nothing
+/// here to call - so every `.load` reports the same failure the reference
+/// reports for a library it cannot open, in the reference's own words.
+///
+/// That is a smaller difference than it looks and a much smaller one than the
+/// command being absent: a script written for the reference now runs to the
+/// same message rather than stopping at "unknown command", and `.help` and the
+/// audit both see a shell with the same surface. task-1869; the inability to
+/// load a library is recorded in `feature-comparison.md` rather than hidden.
+///
+/// @param shell - the shell
+/// @param arguments - the words after the command
+fn load_extension(shell: &mut Shell, arguments: &[&str]) {
+    if arguments.is_empty() {
+        shell.complain("Usage: .load FILE ?ENTRYPOINT?");
+        return;
+    }
+    shell.complain("Error: The specified module could not be found.");
+}
+
+/// `.progress N`: how often the progress handler runs, in opcodes.
+///
+/// The reference's handler prints nothing unless `--limit` is given, and its
+/// visible effect on an ordinary script is therefore none. This accepts the
+/// same words and keeps the same state, so a script that sets it runs
+/// identically; what it does not do is interrupt a statement part-way, because
+/// this engine's VM has no per-opcode callback to hang one on.
+///
+/// @param shell - the shell
+/// @param arguments - the words after the command
+fn progress(shell: &mut Shell, arguments: &[&str]) {
+    let mut interval = 0u64;
+    for word in arguments {
+        match *word {
+            "--once" => shell.progress_once = true,
+            "--quiet" | "-q" => shell.progress_quiet = true,
+            "--reset" => {
+                shell.progress_once = false;
+                shell.progress_quiet = false;
+                shell.progress_limit = 0;
+            }
+            "--limit" => {}
+            other => match other.parse::<u64>() {
+                Ok(number) if shell.progress_pending_limit => {
+                    shell.progress_limit = number;
+                    shell.progress_pending_limit = false;
+                }
+                Ok(number) => interval = number,
+                Err(_) => {
+                    shell.complain(&format!("Error: unknown option: \"{other}\""));
+                    return;
+                }
+            },
+        }
+        if *word == "--limit" {
+            shell.progress_pending_limit = true;
+        }
+    }
+    shell.progress_interval = interval;
 }
 
 /// `.parameter init | list | set NAME VALUE | unset NAME | clear`.
@@ -265,7 +356,7 @@ fn split(line: &str) -> Vec<String> {
 ///
 /// SQLite's shell takes `on`, `yes`, `true` and `1`, and treats a missing
 /// argument as on - which is what makes a bare `.headers` do something.
-fn truthy(argument: Option<&str>) -> bool {
+pub fn truthy(argument: Option<&str>) -> bool {
     match argument {
         None => true,
         Some(text) => matches!(
@@ -276,42 +367,24 @@ fn truthy(argument: Option<&str>) -> bool {
 }
 
 /// Prints the commands this shell knows.
-fn help(shell: &mut Shell) {
-    for line in [
-        ".backup ?DB? FILE      Back up DB (default \"main\") to FILE",
-        ".bail on|off           Stop after hitting an error",
-        ".changes on|off        Show number of rows changed by SQL",
-        ".databases             List names and files of attached databases",
-        ".dump ?TABLE?          Render database content as SQL",
-        ".echo on|off           Turn command echo on or off",
-        ".eqp on|off            Show the query plan before each statement",
-        ".exit                  Exit this program",
-        ".fullschema            Show schema and the content of sqlite_stat tables",
-        ".headers on|off        Turn display of headers on or off",
-        ".help                  Show this message",
-        ".import FILE TABLE     Import data from FILE into TABLE",
-        ".indexes ?TABLE?       Show names of indexes",
-        ".mode MODE             Set output mode",
-        ".nullvalue STRING      Use STRING in place of NULL values",
-        ".once FILE             Output for the next SQL command only to FILE",
-        ".open FILE             Close existing database and reopen FILE",
-        ".output ?FILE?         Send output to FILE or stdout",
-        ".print STRING...       Print literal STRING",
-        ".quit                  Exit this program",
-        ".read FILE             Read input from FILE",
-        ".restore ?DB? FILE     Restore content of DB (default \"main\") from FILE",
-        ".schema ?PATTERN?      Show the CREATE statements matching PATTERN",
-        ".separator STRING      Change the column separator",
-        ".show                  Show the current values for various settings",
-        ".tables ?TABLE?        List names of tables matching a pattern",
-        ".timer on|off          Turn SQL timer on or off",
-        ".version               Show source, library and compiler versions",
-        ".width NUM1 NUM2 ...   Set minimum column widths for columnar output",
-    ] {
-        shell.say(line);
+fn help(shell: &mut Shell, arguments: &[&str]) {
+    let mut lines: Vec<String> = Vec::new();
+    let matched = crate::help::show_help(arguments.first().copied(), &mut |line| {
+        lines.push(line.to_string())
+    });
+    for line in lines {
+        shell.say(&line);
     }
-    let modes = format!("MODE is one of: {MODE_NAMES}");
-    shell.say(&modes);
+    // **Nothing found is said rather than shown as an empty answer**, which is
+    // the reference's behaviour and the reason `.help` is usable as a search:
+    // a pattern that matched nothing has to say so, or it reads as a command
+    // that exists and has no help. It goes to the output rather than to the
+    // error stream, as the reference sends it.
+    if matched == 0 {
+        if let Some(asked) = arguments.first() {
+            shell.say(&format!("Nothing matches '{asked}'"));
+        }
+    }
 }
 
 /// `.open`: closes the current database and opens another.

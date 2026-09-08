@@ -9,10 +9,15 @@ description = "SQLite-like shell used for compatibility testing and manual diagn
 name = "inillucent-shell"
 path = "src/main.rs"
 
+[features]
+default = []
+# Passes the retrieval engine's in-process embedder through, so
+# `embed(TEXT)` answers. Off by default: see `inillucent-search`.
+embed = ["inillucent-engine/embed"]
+
 [dependencies]
 inillucent-alloc = { workspace = true }
 inillucent-base = { workspace = true }
-inillucent-scalar = { workspace = true }
 inillucent-engine = { workspace = true }
 inillucent-value = { workspace = true }
 inillucent-tree = { workspace = true }

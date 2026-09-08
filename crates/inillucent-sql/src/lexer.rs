@@ -156,6 +156,18 @@ pub enum Punctuator {
     Arrow,
     /// `->>`
     DoubleArrow,
+    /// `<->`, pgvector's Euclidean distance.
+    L2Distance,
+    /// `<=>`, pgvector's cosine distance.
+    CosineDistance,
+    /// `<#>`, pgvector's negative inner product.
+    NegativeInnerProduct,
+    /// `<+>`, pgvector's taxicab distance.
+    L1Distance,
+    /// `<~>`, pgvector's Hamming distance.
+    HammingDistance,
+    /// `<%>`, pgvector's Jaccard distance.
+    JaccardDistance,
 }
 
 impl Punctuator {
@@ -185,6 +197,12 @@ impl Punctuator {
             Punctuator::BitNot => "~",
             Punctuator::Concat => "||",
             Punctuator::Arrow => "->",
+            Punctuator::L2Distance => "<->",
+            Punctuator::CosineDistance => "<=>",
+            Punctuator::NegativeInnerProduct => "<#>",
+            Punctuator::L1Distance => "<+>",
+            Punctuator::HammingDistance => "<~>",
+            Punctuator::JaccardDistance => "<%>",
             Punctuator::DoubleArrow => "->>",
         }
     }
@@ -637,6 +655,16 @@ impl<'a> Lexer<'a> {
         let three = self.byte(start + 2);
         let (punctuator, length) = match (one, two, three) {
             (b'-', Some(b'>'), Some(b'>')) => (Punctuator::DoubleArrow, 3),
+            // **Before the two-byte forms, because `<=>` starts with `<=`.**
+            // These are pgvector's distance operators, and the longest-form-
+            // first rule is the only thing that keeps `v <=> q` from lexing as
+            // `v <= (> q)`.
+            (b'<', Some(b'-'), Some(b'>')) => (Punctuator::L2Distance, 3),
+            (b'<', Some(b'='), Some(b'>')) => (Punctuator::CosineDistance, 3),
+            (b'<', Some(b'#'), Some(b'>')) => (Punctuator::NegativeInnerProduct, 3),
+            (b'<', Some(b'+'), Some(b'>')) => (Punctuator::L1Distance, 3),
+            (b'<', Some(b'~'), Some(b'>')) => (Punctuator::HammingDistance, 3),
+            (b'<', Some(b'%'), Some(b'>')) => (Punctuator::JaccardDistance, 3),
             (b'-', Some(b'>'), _) => (Punctuator::Arrow, 2),
             (b'|', Some(b'|'), _) => (Punctuator::Concat, 2),
             (b'<', Some(b'<'), _) => (Punctuator::ShiftLeft, 2),

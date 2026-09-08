@@ -2539,14 +2539,20 @@ impl Machine {
         };
         let limits = self.limits.clone();
         let database = taken.reference.database;
+        // **Flattened, not borrowed.** The module contract's context carries
+        // the binder's view of the schema, which is what `fts5vocab` reads to
+        // name a column; this engine holds the older snapshot shape. Converting
+        // here rather than widening the contract keeps one type in the contract
+        // and puts the cost on the path that is being retired.
         let schema = host.schema();
+        let flattened = schema.as_deref().map(flatten_snapshot);
         let outcome = {
             let mut context = inillucent_ext::vtab::Context {
                 host: host.services(),
                 store: None,
                 database,
                 limits: &limits,
-                catalog: schema.as_deref(),
+                catalog: flattened.as_ref(),
             };
             body(taken.cursor.as_mut(), &mut context)
         };
@@ -2663,4 +2669,31 @@ mod tests {
         assert_same!(normalise_offset(&Value::Null), Value::Integer(0));
         assert_same!(normalise_offset(&Value::Integer(-5)), Value::Integer(0));
     }
+}
+
+/// Returns the binder's view of a catalog snapshot.
+///
+/// Every table of every attached database, in attachment order, which is the
+/// order an unqualified name resolves in - so a module asking about a name it
+/// was given finds the same table the statement that named it would have.
+///
+/// @param snapshot - the schema as this engine holds it
+fn flatten_snapshot(
+    snapshot: &inillucent_catalog::snapshot::CatalogSnapshot,
+) -> inillucent_sql::catalog_view::StaticCatalog {
+    let mut catalog = inillucent_sql::catalog_view::StaticCatalog::empty();
+    // The database list carries the *numbering*, which is what a pragma
+    // function's `schema` argument resolves to - so it has to be filled even
+    // when nothing reads a table.
+    catalog.databases = snapshot
+        .databases
+        .iter()
+        .map(|database| (database.name.clone(), database.schema_cookie))
+        .collect();
+    for database in &snapshot.databases {
+        for table in &database.tables {
+            catalog = catalog.with_table(table.clone());
+        }
+    }
+    catalog
 }

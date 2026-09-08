@@ -59,13 +59,26 @@ const CASES = [
   ['embedding generation in the database', `SELECT embed('hello');`],
 ];
 
+/**
+ * The cases whose *right* answer is a refusal.
+ *
+ * The check below reads any error as a failure, which is the right default -
+ * a feature that errors is a feature that is not there. It is the wrong
+ * reading for a case that exists to prove a refusal happens, and there is
+ * one: comparing vectors of different widths has no answer, so pgvector
+ * raises and so does this. Scoring that as a missing feature made the count
+ * one lower than the measurement.
+ */
+const REFUSALS = new Set(['dimension mismatch is refused']);
+
 const rows = [];
 for (const [name, sql] of CASES) {
   const dir = path.join(AREA, name.replace(/[^a-z0-9]+/gi, '_'));
   fs.mkdirSync(dir, { recursive: true });
   const result = spawnSync(OURS, [path.join(dir, 'p.db')], { cwd: dir, input: sql, encoding: 'utf8', timeout: 30000, windowsHide: true });
   const text = ((result.stdout || '') + (result.stderr || '')).replace(/\r\n/g, '\n').trim();
-  const ok = !/(^|\n)(Parse error|Runtime error|Error)\b/.test(text);
+  const refused = /(^|\n)(Parse error|Runtime error|Error)\b/.test(text);
+  const ok = REFUSALS.has(name) ? refused : !refused;
   rows.push({ name, ok, text });
   console.log(`${ok ? 'YES' : 'NO '}  ${name}\n     ${text.split('\n').join('\n     ').slice(0, 300)}`);
 }

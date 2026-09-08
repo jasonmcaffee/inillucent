@@ -47,10 +47,19 @@ impl ImportedDatabase {
             other => other,
         };
         self.ensure_stat1()?;
+        // **Only the things that have rows to count.** A view has none, a
+        // virtual table's are the module's, and a reserved name is bookkeeping
+        // this engine wrote itself. Measuring them wrote rows the reference
+        // never writes, which showed up as `.dump` emitting
+        // `INSERT INTO sqlite_stat1 VALUES('vv',NULL,'0')` for a *view* - and
+        // then, when that dump was replayed, as statistics claiming the tables
+        // were empty.
         let subjects: Vec<TableInfo> = self
             .tables
             .iter()
-            .filter(|held| held.folded != STAT1.to_ascii_lowercase())
+            .filter(|held| !held.folded.starts_with(b"sqlite_"))
+            .filter(|held| held.kind == inillucent_sql::catalog_view::TableKind::Table)
+            .filter(|held| held.module.is_none())
             .filter(|held| wanted.as_ref().is_none_or(|name| held.folded == *name))
             .cloned()
             .collect();
@@ -335,6 +344,33 @@ impl ImportedDatabase {
             Ok(true)
         });
         out
+    }
+
+    /// Reads `sqlite_stat1` onto the tables the planner costs with.
+    ///
+    /// The counterpart of [`ImportedDatabase::analyze`]: that writes the table,
+    /// this is what makes the planner see it. Called from `refresh_catalog`, so
+    /// every schema change and every `ANALYZE` republishes the measurements.
+    pub(crate) fn republish_statistics(&mut self) {
+        let folded = STAT1.to_ascii_lowercase();
+        let Some(root) = self
+            .tables
+            .iter()
+            .find(|held| held.folded == folded)
+            .map(|held| held.root)
+        else {
+            // No statistics table: clear whatever a previous one left, so a
+            // `DROP TABLE sqlite_stat1` stops changing plans.
+            super::apply_statistics(&mut self.tables, &[]);
+            return;
+        };
+        // Read under an immutable borrow, then patch: the rows come back owned,
+        // which is what lets both happen in one method.
+        let rows = match (self.trees.get(&root), self.pool_of(root)) {
+            (Some(tree), Ok(pool)) => super::statistics_rows(pool, tree),
+            _ => Vec::new(),
+        };
+        super::apply_statistics(&mut self.tables, &rows);
     }
 
     /// Reports whether the schema has a `sqlite_stat1` row.

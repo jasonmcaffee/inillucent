@@ -163,6 +163,17 @@ pub enum Coordinates {
 pub struct RTreeModule {
     coordinates: Coordinates,
     name: &'static str,
+    /// Whether the rows are polygons rather than boxes.
+    ///
+    /// **`geopoly` is this structure with a different front.** Its rows are
+    /// two-dimensional, its coordinates are the reals, and its tree, its node
+    /// format and its three shadow tables are the ones above - what differs is
+    /// that the box is *computed from a shape* rather than written by the
+    /// caller, and that the shape is the first column rather than the
+    /// coordinates being columns at all. SQLite implements it the same way, in
+    /// the same file, for the same reason: a second copy of the node splitting
+    /// is a second place for it to be wrong.
+    shape: bool,
 }
 
 impl RTreeModule {
@@ -171,6 +182,7 @@ impl RTreeModule {
         RTreeModule {
             coordinates: Coordinates::Float,
             name: "rtree",
+            shape: false,
         }
     }
 
@@ -179,6 +191,16 @@ impl RTreeModule {
         RTreeModule {
             coordinates: Coordinates::Integer,
             name: "rtree_i32",
+            shape: false,
+        }
+    }
+
+    /// Returns the polygon module.
+    pub fn geopoly() -> RTreeModule {
+        RTreeModule {
+            coordinates: Coordinates::Float,
+            name: "geopoly",
+            shape: true,
         }
     }
 }
@@ -206,7 +228,41 @@ pub struct RTreeShape {
 /// the whole of the syntax. It does not count towards the odd-number rule,
 /// because it is not half of a dimension - which is why the count is checked
 /// after the split rather than before it.
-fn parse_arguments(arguments: &[Vec<u8>]) -> DbResult<RTreeShape> {
+/// Returns the column names, reading them the way the module in use writes them.
+///
+/// **`geopoly` has no coordinate columns at all**: its arguments are the
+/// auxiliary columns and nothing else, because the two dimensions are computed
+/// from `_shape` rather than written. Sharing the reader rather than writing a
+/// second one keeps one description of what an auxiliary column is.
+///
+/// @param arguments - the arguments inside the parentheses
+/// @param shape - whether this is `geopoly`
+fn parse_arguments_for(arguments: &[Vec<u8>], shape: bool) -> DbResult<RTreeShape> {
+    if shape {
+        return Ok(RTreeShape {
+            coordinates: vec![
+                b"rowid".to_vec(),
+                b"_minx".to_vec(),
+                b"_maxx".to_vec(),
+                b"_miny".to_vec(),
+                b"_maxy".to_vec(),
+            ],
+            auxiliary: arguments
+                .iter()
+                .filter_map(|argument| {
+                    let word = argument
+                        .split(|byte| byte.is_ascii_whitespace())
+                        .find(|part| !part.is_empty())?;
+                    Some(word.to_vec())
+                })
+                .collect(),
+        });
+    }
+    parse_coordinate_arguments(arguments)
+}
+
+/// Returns the column names a `CREATE VIRTUAL TABLE ... USING rtree(...)` gave.
+fn parse_coordinate_arguments(arguments: &[Vec<u8>]) -> DbResult<RTreeShape> {
     let mut coordinates: Vec<Vec<u8>> = Vec::new();
     let mut auxiliary: Vec<Vec<u8>> = Vec::new();
     for argument in arguments {
@@ -240,7 +296,19 @@ impl Module for RTreeModule {
 
     /// The three shadow tables the format needs.
     fn shadow_tables(&self, arguments: &ModuleArguments) -> DbResult<Vec<ShadowTable>> {
-        let shape = parse_arguments(&arguments.arguments)?;
+        let shape = parse_arguments_for(&arguments.arguments, self.shape)?;
+        // The shape is the first auxiliary column, so the `%_rowid` table needs
+        // a slot for it alongside the ones the caller named.
+        let shape = RTreeShape {
+            coordinates: shape.coordinates,
+            auxiliary: if self.shape {
+                let mut named = vec![b"_shape".to_vec()];
+                named.extend(shape.auxiliary);
+                named
+            } else {
+                shape.auxiliary
+            },
+        };
         Ok(vec![
             ShadowTable {
                 suffix: b"node".to_vec(),
@@ -279,31 +347,48 @@ impl Module for RTreeModule {
         arguments: &ModuleArguments,
         creating: bool,
     ) -> DbResult<Box<dyn VirtualTable>> {
-        let shape = parse_arguments(&arguments.arguments)?;
+        let shape = parse_arguments_for(&arguments.arguments, self.shape)?;
         let names = shape.coordinates;
         let dimensions = names.len().saturating_sub(1) / 2;
-        let mut columns = vec![DeclaredColumn::visible(&String::from_utf8_lossy(
-            names.first().map(Vec::as_slice).unwrap_or(b"id"),
-        ))
-        .typed("INTEGER")];
-        for name in names.get(1..).unwrap_or_default() {
+        // **`geopoly` declares `_shape` and the auxiliary columns, and nothing
+        // else.** The bounding box is in the tree and is never a column, which
+        // is why a `geopoly` table has no `minX` to write a predicate against
+        // and every query over one is written with the shape functions.
+        let auxiliary: Vec<Vec<u8>> = if self.shape {
+            let mut named = vec![b"_shape".to_vec()];
+            named.extend(shape.auxiliary.iter().cloned());
+            named
+        } else {
+            shape.auxiliary.clone()
+        };
+        let mut columns = Vec::new();
+        if !self.shape {
             columns.push(
-                DeclaredColumn::visible(&String::from_utf8_lossy(name)).typed(
-                    if self.coordinates == Coordinates::Integer {
-                        "INT"
-                    } else {
-                        "REAL"
-                    },
-                ),
+                DeclaredColumn::visible(&String::from_utf8_lossy(
+                    names.first().map(Vec::as_slice).unwrap_or(b"id"),
+                ))
+                .typed("INTEGER"),
             );
+            for name in names.get(1..).unwrap_or_default() {
+                columns.push(
+                    DeclaredColumn::visible(&String::from_utf8_lossy(name)).typed(
+                        if self.coordinates == Coordinates::Integer {
+                            "INT"
+                        } else {
+                            "REAL"
+                        },
+                    ),
+                );
+            }
         }
         // An auxiliary column is declared with no type, so it keeps whatever
         // was stored in it - which is the point of it.
-        for name in &shape.auxiliary {
+        for name in &auxiliary {
             columns.push(DeclaredColumn::visible(&String::from_utf8_lossy(name)));
         }
         Ok(Box::new(RTreeTable {
-            auxiliary: shape.auxiliary.len(),
+            shape: self.shape,
+            auxiliary: auxiliary.len(),
             coordinates: self.coordinates,
             dimensions,
             shadows: ShadowTables::of(arguments, &[b"node", b"rowid", b"parent"])?,
@@ -320,6 +405,8 @@ impl Module for RTreeModule {
 
 /// One connected R-Tree.
 struct RTreeTable {
+    /// Whether the rows are polygons rather than boxes.
+    shape: bool,
     /// How many `+name` columns follow the coordinates.
     auxiliary: usize,
     coordinates: Coordinates,
@@ -354,7 +441,13 @@ impl RTreeTable {
         if self.auxiliary == 0 {
             return;
         }
-        let first = self.dimensions.saturating_mul(2).saturating_add(1);
+        // A polygon table's first column *is* its first auxiliary column, so
+        // there is nothing in front of it to skip.
+        let first = if self.shape {
+            0
+        } else {
+            self.dimensions.saturating_mul(2).saturating_add(1)
+        };
         let mut extra: Vec<Value<'static>> = values
             .get(first..)
             .unwrap_or_default()
@@ -414,7 +507,10 @@ impl VirtualTable for RTreeTable {
             let Some(constraint) = query.constraints.get(index).copied() else {
                 continue;
             };
-            if !constraint.usable || constraint.column < 1 {
+            // A polygon table has no coordinate columns, so there is nothing
+            // here for a bounding-box descent to be built from and the shape
+            // predicates are left to the engine to apply over a scan.
+            if !constraint.usable || constraint.column < 1 || self.shape {
                 continue;
             }
             let op = match constraint.op {
@@ -449,6 +545,7 @@ impl VirtualTable for RTreeTable {
     /// Opens a cursor over the tree.
     fn open(&self) -> DbResult<Box<dyn VirtualCursor>> {
         Ok(Box::new(RTreeCursor {
+            shape: self.shape,
             coordinates: self.coordinates,
             dimensions: self.dimensions,
             shadows: self.shadows.clone(),
@@ -746,6 +843,28 @@ fn node_size(
 impl RTreeTable {
     /// Builds the cell one row becomes.
     fn cell_of(&self, key: i64, values: &[Value<'static>]) -> DbResult<Cell> {
+        // **A polygon's box is computed, not written.** The whole difference
+        // between the two modules is here: a `geopoly` row carries a shape and
+        // the tree indexes the shape's extent, so a row whose `_shape` is not a
+        // polygon has no place in the tree at all and is refused rather than
+        // stored with a box of zeroes.
+        if self.shape {
+            let Ok(polygon) = inillucent_scalar::geopoly::Polygon::parse_for_index(values.first())
+            else {
+                return Err(constraint("_shape does not contain a valid polygon"));
+            };
+            let [low_x, high_x, low_y, high_y] =
+                polygon.map(|shape| shape.bounds()).unwrap_or([0.0; 4]);
+            return Ok(Cell {
+                key,
+                box_: vec![
+                    f64::from(low_x),
+                    f64::from(high_x),
+                    f64::from(low_y),
+                    f64::from(high_y),
+                ],
+            });
+        }
         let mut box_ = Vec::with_capacity(self.dimensions * 2);
         for dimension in 0..self.dimensions {
             let low = coordinate(values.get(1 + dimension * 2), self.coordinates, Edge::Low);
@@ -1099,6 +1218,8 @@ fn coordinate(value: Option<&Value<'static>>, coordinates: Coordinates, edge: Ed
 
 /// A cursor over the rows one query matched.
 struct RTreeCursor {
+    /// Whether the rows are polygons rather than boxes.
+    shape: bool,
     coordinates: Coordinates,
     dimensions: usize,
     shadows: ShadowTables,
@@ -1212,10 +1333,30 @@ impl VirtualCursor for RTreeCursor {
         let Some(cell) = self.rows.get(self.at) else {
             return Ok(Value::Null);
         };
-        if index == 0 {
-            return Ok(Value::Integer(cell.key));
+        // A polygon table declares only its auxiliary columns, so every index
+        // is one of them and the coordinates are not reachable at all.
+        let coordinates = if self.shape {
+            0
+        } else {
+            if index == 0 {
+                return Ok(Value::Integer(cell.key));
+            }
+            self.dimensions.saturating_mul(2)
+        };
+        if self.shape {
+            if let Ok(pending) = self.pending.lock() {
+                if let Some(extra) = pending.auxiliary.get(&cell.key) {
+                    return Ok(extra.get(index).cloned().unwrap_or(Value::Null));
+                }
+            }
+            let Some(row) = self.shadows.read_row(context, b"rowid", cell.key)? else {
+                return Ok(Value::Null);
+            };
+            return Ok(row
+                .get(index.saturating_add(2))
+                .cloned()
+                .unwrap_or(Value::Null));
         }
-        let coordinates = self.dimensions.saturating_mul(2);
         if index > coordinates {
             let at = index.saturating_sub(coordinates).saturating_add(1);
             if let Ok(pending) = self.pending.lock() {
@@ -1476,17 +1617,42 @@ mod tests {
     /// A table needs an odd number of columns between three and eleven.
     #[test]
     fn the_column_count_is_checked() {
-        assert!(parse_arguments(&[b"id".to_vec(), b"x0".to_vec(), b"x1".to_vec()]).is_ok());
-        assert!(parse_arguments(&[b"id".to_vec(), b"x0".to_vec()]).is_err());
-        assert!(parse_arguments(&[b"id".to_vec()]).is_err());
+        assert!(
+            parse_coordinate_arguments(&[b"id".to_vec(), b"x0".to_vec(), b"x1".to_vec()]).is_ok()
+        );
+        assert!(parse_coordinate_arguments(&[b"id".to_vec(), b"x0".to_vec()]).is_err());
+        assert!(parse_coordinate_arguments(&[b"id".to_vec()]).is_err());
     }
 
     /// A declared type on a column is dropped; only the name is kept.
     #[test]
     fn a_declared_type_is_dropped() {
-        let names =
-            parse_arguments(&[b"id".to_vec(), b"minX REAL".to_vec(), b"maxX REAL".to_vec()])
-                .expect("parses");
-        assert_eq!(names[1], b"minX");
+        let shape = parse_coordinate_arguments(&[
+            b"id".to_vec(),
+            b"minX REAL".to_vec(),
+            b"maxX REAL".to_vec(),
+        ])
+        .expect("parses");
+        assert_eq!(shape.coordinates[1], b"minX");
+        assert!(shape.auxiliary.is_empty());
+    }
+
+    /// A `+name` column is auxiliary and does not count towards the dimensions.
+    ///
+    /// The odd-number rule is about coordinates: `rtree(id, minX, maxX, +label)`
+    /// is four arguments and one dimension, and counting the label would make
+    /// it an even count and refuse a declaration SQLite accepts.
+    #[test]
+    fn a_plus_column_is_auxiliary_and_not_a_coordinate() {
+        let shape = parse_coordinate_arguments(&[
+            b"id".to_vec(),
+            b"minX".to_vec(),
+            b"maxX".to_vec(),
+            b"+label".to_vec(),
+            b"+note TEXT".to_vec(),
+        ])
+        .expect("parses");
+        assert_eq!(shape.coordinates.len(), 3);
+        assert_eq!(shape.auxiliary, vec![b"label".to_vec(), b"note".to_vec()]);
     }
 }

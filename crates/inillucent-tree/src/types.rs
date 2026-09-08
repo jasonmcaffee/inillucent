@@ -144,6 +144,20 @@ pub struct ColumnSpec {
     /// and a page that carried its own could disagree with it. It travels with
     /// the column directory the reader is handed.
     pub collation: Collation,
+    /// Whether the tree is ordered by this key column **descending**.
+    ///
+    /// `CREATE INDEX i ON t(k DESC)` builds a tree whose entries really are in
+    /// descending order of `k`, which is what SQLite builds and what makes the
+    /// two engines read the same rows in the same order - the trailing rowid
+    /// stays ascending, so ties inside a descending column come out ascending
+    /// exactly as SQLite's do. It was flattened to `false` until task-1860, and
+    /// the visible cost of the flattening was that `ORDER BY k` over a `DESC`
+    /// index answered its ties in the opposite order.
+    ///
+    /// Not written to the page, for the same reason the collation is not: the
+    /// catalog says what the order is, and a page that carried its own could
+    /// disagree with it.
+    pub descending: bool,
 }
 
 impl ColumnSpec {
@@ -155,6 +169,7 @@ impl ColumnSpec {
             physical,
             flags: COLUMN_NULLABLE,
             collation: Collation::Binary,
+            descending: false,
         }
     }
 
@@ -169,6 +184,7 @@ impl ColumnSpec {
             physical,
             flags: COLUMN_KEY,
             collation: Collation::Binary,
+            descending: false,
         }
     }
 
@@ -177,6 +193,14 @@ impl ColumnSpec {
     /// @param collation - the order the column's text is stored in
     pub fn with_collation(mut self, collation: Collation) -> ColumnSpec {
         self.collation = collation;
+        self
+    }
+
+    /// Returns the same column ordered descending.
+    ///
+    /// @param descending - whether the tree is ordered by it descending
+    pub fn with_descending(mut self, descending: bool) -> ColumnSpec {
+        self.descending = descending;
         self
     }
 

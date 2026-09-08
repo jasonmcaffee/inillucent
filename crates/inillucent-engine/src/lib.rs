@@ -81,9 +81,10 @@ pub mod attach;
 pub mod connect;
 pub mod ddl;
 mod entries;
+mod inspect;
+mod introspect;
 pub mod multi;
 pub mod pragma;
-mod inspect;
 mod rebuild;
 pub mod vtab;
 
@@ -93,6 +94,15 @@ use std::path::PathBuf;
 use inillucent_base::error::{refusal, Unwind};
 use inillucent_base::limits::Limits;
 pub use inillucent_base::DbResult;
+
+// **Re-exported so a program above this one reaches them through the engine.**
+// `inillucent-cli` is allowed to depend on the engine and not on what the engine
+// is built from - which is the layering rule, and it is the right rule: a shell
+// that named the pool directly would be a shell that had to be rebuilt when the
+// pool moved. What it genuinely needs from below is the module contract, so it
+// can register `fsdir` and `zipfile`; the pattern matcher, so `.lint` and
+// `.sha3sum` fold a `LIKE` the same way the engine does; and the file systems,
+// so `.vfslist` names them.
 use inillucent_catalog::load::table_from_create_sql;
 use inillucent_catalog::paged::{
     attach_catalog, read_catalog, schema_create_sql, schema_layout, write_catalog, ObjectKind,
@@ -101,8 +111,17 @@ use inillucent_catalog::paged::{
 use inillucent_exec::dml::{self, Changes, Trees, WriteTarget};
 use inillucent_exec::physical::{self, ForcePlan, Params, SourceLayout, TreeCatalog};
 use inillucent_exec::StaticType;
+pub use inillucent_ext as ext;
 use inillucent_pool::{Database, Options, PageId, Pool};
 use inillucent_sql::bind::{AllowAll, Binder, BoundStatement};
+/// The authorizer contract, re-exported for a caller above this crate.
+///
+/// **Re-exported rather than depended on directly**, because the layering
+/// contract puts `inillucent-sql` below the engine and the shell above it:
+/// `.auth` needs the trait and its two types and nothing else of the binder,
+/// and reaching around the engine for them is the edge the contract exists to
+/// forbid. The same shape as `ext` and `vfs` above.
+pub use inillucent_sql::bind::{AuthAction, Authorization, Authorizer};
 use inillucent_sql::catalog_view::{IndexInfo, StaticCatalog, TableInfo};
 use inillucent_sql::parser::parse_next_statement;
 use inillucent_sql::plan::{plan_select_with, Levers, PhysicalPlan};
@@ -113,6 +132,7 @@ use inillucent_tree::write::TreeLog;
 use inillucent_tree::PagedTree;
 use inillucent_txn::redo::{RowRedo, TreeRows};
 use inillucent_value::collation::Collation;
+pub use inillucent_vfs as vfs;
 use inillucent_vfs::{DbPath, OsVfs};
 use inillucent_wal::{Body, Synchronous, Wal, WalOptions, FIRST_LSN};
 
@@ -410,6 +430,45 @@ pub struct ImportedDatabase {
     /// refuses a write to a reserved-prefix table whatever it says, and a
     /// module's shadow table is an ordinary table a write reaches without it.
     pub(crate) writable_schema: bool,
+    /// Whether `SQLITE_DBCONFIG_DEFENSIVE` is in force.
+    ///
+    /// Off here and on in the shell, which is where SQLite draws the same line:
+    /// the library defaults it off and its command-line tool turns it on. What
+    /// it forbids is the two statements that can lose a database in one line -
+    /// `PRAGMA journal_mode = OFF`, which stops protecting anything, and
+    /// `PRAGMA writable_schema = ON`, which lets a caller write a schema row
+    /// the engine will later try to parse.
+    pub(crate) defensive: bool,
+    /// The file system this database and everything beside it lives on.
+    ///
+    /// **One instance, held, rather than one made per call.** `OsVfs` is
+    /// stateless, so the seven places that used to write `OsVfs::new()` were
+    /// all the same file system and it did not matter which one they made. A
+    /// `MemoryVfs` is not: each one is its own file system, so a journal that
+    /// made its own would write pre-images into a directory the pool cannot
+    /// see, and a reopen that made its own would find no file at all. Holding
+    /// it is what lets `:memory:` be a database rather than a path the
+    /// operating system refuses.
+    vfs: std::sync::Arc<dyn inillucent_vfs::Vfs>,
+    /// The imposter tables `.imposter` has made, and what each one reads.
+    ///
+    /// **Transient, and deliberately not in the catalog.** An imposter is a
+    /// declaration over an index's own b-tree - `.imposter ix im` makes `im` a
+    /// `WITHOUT ROWID` table whose columns are the index's entries - and it
+    /// exists so a person can read an index directly when they are working out
+    /// what is wrong with one. It is not a schema object: nothing writes it to
+    /// the file, and it goes when the connection does, which is what SQLite's
+    /// own `SQLITE_TESTCTRL_IMPOSTER` does with it.
+    imposters: Vec<(TableInfo, SourceLayout, PagedTree)>,
+    /// The authorizer every statement is bound under, when one is installed.
+    ///
+    /// `sqlite3_set_authorizer`'s subject: a callback the binder consults
+    /// before it binds a read, a select or a function call, so an application
+    /// embedding this engine can refuse a statement rather than run it. None
+    /// means `AllowAll`, which is what a connection nobody has restricted has -
+    /// and is the only case a compiled plan may be reused from the cache under,
+    /// because re-running an authorizer is what makes its answer current.
+    authorizer: Option<std::rc::Rc<dyn inillucent_sql::bind::Authorizer>>,
     /// Whether this connection refuses to write, set by `PRAGMA query_only`.
     ///
     /// Honoured rather than remembered: a caller sets it to make a mistake
@@ -1018,6 +1077,10 @@ impl TreeCatalog for ImportedDatabase {
     /// difference from `virtual_cursor` is entirely in where the arguments came
     /// from: an ordinary scan folds them out of the statement, and a lateral one
     /// reads them out of the outer row it is being driven for.
+    fn module_integrity(&self, name: &[u8]) -> DbResult<Option<Option<String>>> {
+        self.module_integrity(name)
+    }
+
     fn virtual_rows_supplied(
         &self,
         table: &TableInfo,
@@ -1235,11 +1298,11 @@ impl ImportedDatabase {
         // page, which is not the page the row's `rootpage` column names.
         let mut identifiers: Vec<u32> = Vec::new();
 
-        let vfs = OsVfs::new();
+        let vfs: std::sync::Arc<dyn inillucent_vfs::Vfs> = std::sync::Arc::new(OsVfs::new());
         let _ = std::fs::remove_file(&target);
         let db_path = DbPath::new(target.to_string_lossy().as_ref());
         let mut database = Database::create(
-            &vfs,
+            vfs.as_ref(),
             &db_path,
             Options::default()
                 .with_page_size(page_size)
@@ -1274,13 +1337,25 @@ impl ImportedDatabase {
             // under the same name (`inillucent_exec::sequence`), so importing
             // it is importing a table rather than translating a concept.
             //
-            // `sqlite_stat1` and the rest are statistics and indexes this
-            // engine derives for itself, and carrying a stale copy would be
-            // worse than deriving a fresh one.
+            // **`sqlite_stat1` is carried too**, because reading the other
+            // engine's statistics is a stated invariant of this one rather
+            // than a convenience - see `inillucent_catalog::analyze`. Dropping
+            // it on import made that invariant hold in one direction only: a
+            // file SQLite had `ANALYZE`d arrived here with no statistics at
+            // all, and the first join over it was planned by the estimates the
+            // measurements exist to replace. It is the same three-column table
+            // under the same name, so carrying it is carrying a table.
+            //
+            // The rest of the reserved prefix is indexes and shadow state this
+            // engine derives for itself, where a stale copy would be worse
+            // than a fresh derivation.
             if info.name.starts_with(b"sqlite_")
                 && !info
                     .name
                     .eq_ignore_ascii_case(inillucent_exec::sequence::SEQUENCE_TABLE)
+                && !info
+                    .name
+                    .eq_ignore_ascii_case(inillucent_catalog::analyze::STAT1.as_bytes())
             {
                 continue;
             }
@@ -1323,23 +1398,20 @@ impl ImportedDatabase {
             identifiers.push(info.root);
             shapes.insert(info.root, shape);
             layouts.insert(info.root, layout);
-            // **A descending index is imported, and imported ascending.** It
-            // used to be dropped and named in `skipped`, because the planner
-            // read direction off the catalog and every conclusion it drew about
-            // such an index was inverted against a tree that is stored
-            // ascending. task-1856 removed the mismatch at its source rather
-            // than the index: `in_key_order` already re-sorts SQLite's entries
-            // into this tree's own order, so the tree that gets built is
-            // ascending either way, and the catalog now says so - see
-            // `stored_ascending` in `inillucent_catalog::paged`. Dropping it
-            // was the workaround for a catalog that lied.
-            let mut info = info.clone();
-            for index in &mut info.indexes {
-                for column in &mut index.columns {
-                    column.descending = false;
-                }
-            }
-            let info = &info;
+            // **A descending index is imported descending**, which is how
+            // SQLite stores it and what makes the two engines read one in the
+            // same order.
+            //
+            // It used to be dropped and named in `skipped`, then imported
+            // *flattened* to ascending - both were workarounds for trees that
+            // could only be built one way round. task-1860 made the direction
+            // real (see `ColumnSpec::descending`), so the flattening became the
+            // lie: the schema text this file carries says `DESC`, a reopen
+            // parses it and the planner believes it, and a tree built ascending
+            // under a catalog that says descending is sorted by neither. It
+            // showed up as `SELECT k FROM t WHERE k > 1000` returning every row
+            // in the table. `in_key_order` sorts into the tree's own order,
+            // which now includes the direction.
             for index in &info.indexes {
                 if index.root == 0 {
                     continue;
@@ -1469,7 +1541,7 @@ impl ImportedDatabase {
         // a file it did not write.
         database.checkpoint()?;
         drop(database);
-        let database = Database::open(&vfs, &db_path, frames.max(64))?;
+        let database = Database::open(vfs.as_ref(), &db_path, frames.max(64))?;
 
         // The schema comes back out of the file rather than out of the import,
         // and the two are compared. That is what makes the catalog tree load
@@ -1546,7 +1618,7 @@ impl ImportedDatabase {
         // that has just been checkpointed - so it starts empty, at the first
         // stream position, and every record in it is one this process wrote.
         let wal = std::rc::Rc::new(Wal::open(
-            std::sync::Arc::new(OsVfs::new()),
+            std::sync::Arc::clone(&vfs),
             &db_path,
             database.uuid(),
             FIRST_LSN,
@@ -1569,7 +1641,7 @@ impl ImportedDatabase {
             });
         }
 
-        Ok(ImportedDatabase {
+        let mut opened = ImportedDatabase {
             catalog,
             database,
             trees,
@@ -1608,7 +1680,27 @@ impl ImportedDatabase {
             busy_timeout_ms: 0,
             foreign_keys: false,
             defer_foreign_keys: false,
-            journal_mode: inillucent_pool::journal::JournalMode::Wal,
+            // **SQLite's own two defaults, and each one is a measurement.**
+            //
+            // `delete` because it costs nothing: the medium gate reads 3.78x
+            // weighted with `wal` and 3.70x with `delete`, lower bounds 3.45x
+            // and 3.44x - the same number twice, over 30 paired rounds on one
+            // machine. The write-ahead log is still here and
+            // `PRAGMA journal_mode = WAL` still switches to it; what changed is
+            // which one a caller gets without asking, and the answer is now the
+            // one every other SQLite gives.
+            //
+            // `exclusive` because it does not. The same gate with
+            // `locking_mode = normal` as the default reads **3.03x with a lower
+            // bound of 2.95x - under the contract's 3.00x bar** - and takes
+            // `write` from 1.94x to 1.19x, `transaction` from 0.89x to 0.37x
+            // and `schema` from 1.34x to 0.66x, because releasing the file
+            // between statements means re-reading the meta record before each
+            // one. `PRAGMA locking_mode = normal` is a real switch and a second
+            // process can then open the file; making it the default would pay
+            // for that on every statement of every program that never opens a
+            // second connection.
+            journal_mode: inillucent_pool::journal::JournalMode::Delete,
             running: 0,
             locking_exclusive: true,
             ignore_check_constraints: false,
@@ -1622,6 +1714,10 @@ impl ImportedDatabase {
             cache_size: None,
             analysis_limit: 0,
             writable_schema: false,
+            defensive: false,
+            imposters: Vec::new(),
+            authorizer: None,
+            vfs: std::sync::Arc::clone(&vfs),
             query_only: false,
             recursive_triggers: false,
             max_page_count: crate::pragma::DEFAULT_MAX_PAGE_COUNT,
@@ -1641,7 +1737,38 @@ impl ImportedDatabase {
             owner: HashMap::new(),
             next_handle: FIRST_ATTACHED_HANDLE,
             ddl_schema: 0,
-        })
+        };
+        opened.settle_journal()?;
+        Ok(opened)
+    }
+
+    /// Reconciles the journal mode with what the file says, and installs it.
+    ///
+    /// **Two things a constructor cannot do for itself.** The mode a connection
+    /// starts in is not a constant: a database left in WAL comes back in WAL,
+    /// because the alternative is one connection writing pre-images beside a
+    /// log another is appending frames to. And a rollback mode needs its
+    /// `Journal` attached to the pool - without it the mode is a word the
+    /// pragma reports and nothing writes a pre-image, which is a durability
+    /// hole rather than a cosmetic one.
+    fn settle_journal(&mut self) -> DbResult<()> {
+        let mode = if self.database.wal_mode() {
+            inillucent_pool::journal::JournalMode::Wal
+        } else {
+            self.journal_mode
+        };
+        self.journal_mode = mode;
+        let held: std::sync::Arc<dyn inillucent_vfs::Vfs> = std::sync::Arc::clone(&self.vfs);
+        let journal = mode.is_rollback().then(|| {
+            inillucent_pool::journal::Journal::new(
+                held,
+                &DbPath::new(self.path.to_string_lossy().as_ref()),
+                mode,
+                self.page_size,
+            )
+        });
+        self.database.pool().set_journal(journal);
+        Ok(())
     }
 
     /// Creates a fresh, empty database.
@@ -1666,11 +1793,30 @@ impl ImportedDatabase {
     /// @param page_size - the page size to build at
     /// @param frames - how many frames the buffer pool holds
     pub fn create(path: PathBuf, page_size: usize, frames: usize) -> DbResult<ImportedDatabase> {
-        let vfs = OsVfs::new();
-        let _ = std::fs::remove_file(&path);
+        ImportedDatabase::create_on(std::sync::Arc::new(OsVfs::new()), path, page_size, frames)
+    }
+
+    /// Creates a fresh, empty database on a file system of the caller's.
+    ///
+    /// The general form of [`ImportedDatabase::create`], and what `:memory:`
+    /// goes through: a `MemoryVfs` given here is the file system the database,
+    /// its log and its journal all live on, and it disappears with the last
+    /// handle to it.
+    ///
+    /// @param vfs - the file system to build on
+    /// @param path - where to create the database
+    /// @param page_size - the page size to build at
+    /// @param frames - how many frames the buffer pool holds
+    pub fn create_on(
+        vfs: std::sync::Arc<dyn inillucent_vfs::Vfs>,
+        path: PathBuf,
+        page_size: usize,
+        frames: usize,
+    ) -> DbResult<ImportedDatabase> {
         let db_path = DbPath::new(path.to_string_lossy().as_ref());
+        let _ = vfs.delete(&db_path, false);
         let mut database = Database::create(
-            &vfs,
+            vfs.as_ref(),
             &db_path,
             Options::default()
                 .with_page_size(page_size)
@@ -1683,7 +1829,7 @@ impl ImportedDatabase {
         let _ = write_catalog(&mut database, &[])?;
         database.checkpoint()?;
         drop(database);
-        ImportedDatabase::open(path, page_size, frames)
+        ImportedDatabase::open_on(vfs, path, page_size, frames)
     }
 
     /// Opens a database this engine wrote, reading its schema from the file.
@@ -1712,7 +1858,25 @@ impl ImportedDatabase {
     /// @param page_size - the page size the file was built at
     /// @param frames - how many frames the buffer pool holds
     pub fn open(path: PathBuf, page_size: usize, frames: usize) -> DbResult<ImportedDatabase> {
-        let vfs: std::sync::Arc<dyn inillucent_vfs::Vfs> = std::sync::Arc::new(OsVfs::new());
+        ImportedDatabase::open_on(std::sync::Arc::new(OsVfs::new()), path, page_size, frames)
+    }
+
+    /// Opens a database on a file system of the caller's.
+    ///
+    /// The general form of [`ImportedDatabase::open`]; see
+    /// [`ImportedDatabase::create_on`] for why the file system is held rather
+    /// than made where it is used.
+    ///
+    /// @param vfs - the file system the database lives on
+    /// @param path - the database file to open
+    /// @param page_size - the page size the file was built at
+    /// @param frames - how many frames the buffer pool holds
+    pub fn open_on(
+        vfs: std::sync::Arc<dyn inillucent_vfs::Vfs>,
+        path: PathBuf,
+        page_size: usize,
+        frames: usize,
+    ) -> DbResult<ImportedDatabase> {
         let db_path = DbPath::new(path.to_string_lossy().as_ref());
         // **A file opened as `main` asks the same question an attached one
         // does.** A database this connection is opened on may have been the
@@ -1808,7 +1972,7 @@ impl ImportedDatabase {
             busy_timeout_ms: 0,
             foreign_keys: false,
             defer_foreign_keys: false,
-            journal_mode: inillucent_pool::journal::JournalMode::Wal,
+            journal_mode: inillucent_pool::journal::JournalMode::Delete,
             running: 0,
             locking_exclusive: true,
             ignore_check_constraints: false,
@@ -1822,6 +1986,10 @@ impl ImportedDatabase {
             cache_size: None,
             analysis_limit: 0,
             writable_schema: false,
+            defensive: false,
+            imposters: Vec::new(),
+            authorizer: None,
+            vfs: std::sync::Arc::clone(&vfs),
             query_only: false,
             recursive_triggers: false,
             max_page_count: crate::pragma::DEFAULT_MAX_PAGE_COUNT,
@@ -1834,6 +2002,7 @@ impl ImportedDatabase {
             index_stages: std::cell::Cell::new((0, 0, 0, 0, 0, 0, 0)),
             catalog_generation: 0,
         };
+        opened.settle_journal()?;
         opened.rebuild_tables()?;
         opened.refresh_catalog();
         // The modules are connected after the tables are loaded, because a
@@ -2170,6 +2339,81 @@ impl ImportedDatabase {
         Ok(self.plan(sql)?.describe())
     }
 
+    /// Returns the step listing a plain `EXPLAIN` of a statement would print.
+    ///
+    /// Compiled through the same cache the statement itself uses, because the
+    /// listing is *of* the compiled statement: a listing built from a fresh
+    /// plan could describe a plan the next execution would not get.
+    ///
+    /// @param sql - the statement to list
+    pub(crate) fn program_listing(
+        &self,
+        sql: &str,
+    ) -> DbResult<Vec<(String, i64, i64, String, String)>> {
+        match &*self.compiled(&format!("EXPLAIN {sql}"))? {
+            Cached::Program(listing) => Ok(listing.clone()),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// Returns the objects a statement names, and which one it writes.
+    ///
+    /// The plan's sources rather than the parse's, so a name that resolved to a
+    /// view is reported as the view and the tables behind it are reported too.
+    ///
+    /// @param sql - the statement to describe
+    pub(crate) fn statement_tables(
+        &self,
+        sql: &str,
+    ) -> DbResult<(Vec<(&'static str, Vec<u8>)>, Option<Vec<u8>>)> {
+        let parsed = self.parse_once(sql)?;
+        let fallback = AllowAll;
+        let authorizer: &dyn inillucent_sql::bind::Authorizer = match &self.authorizer {
+            Some(held) => held.as_ref(),
+            None => &fallback,
+        };
+        let externals = self.external_functions();
+        let mut binder = Binder::new(&self.catalog, &parsed.ast, authorizer)
+            .with_source(sql.as_bytes())
+            .with_functions(&externals)
+            .with_collations(&self.collations)
+            .with_foreign_keys(self.foreign_keys, self.defer_foreign_keys);
+        let bound = binder.bind_statement(&parsed.statement).map_err(refused)?;
+        let mut names: Vec<(&'static str, Vec<u8>)> = Vec::new();
+        let mut written = None;
+        match &bound {
+            BoundStatement::Select(select) => collect_sources(select, &mut names),
+            BoundStatement::Insert(statement) => written = Some(statement.table.name.clone()),
+            BoundStatement::Update(statement) => written = Some(statement.table.name.clone()),
+            BoundStatement::Delete(statement) => written = Some(statement.table.name.clone()),
+            _ => {}
+        }
+        if let Some(target) = &written {
+            names.insert(0, ("table", target.clone()));
+        }
+        names.dedup();
+        Ok((names, written))
+    }
+
+    /// Returns how many columns a cached statement answers with, and whether
+    /// it only reads.
+    ///
+    /// @param sql - the statement text
+    pub(crate) fn statement_shape(&self, sql: &str) -> (i64, bool) {
+        let columns = match self.compiled(sql) {
+            Ok(cached) => match &*cached {
+                Cached::Select(plan, _) => plan.select.columns.len() as i64,
+                _ => 0,
+            },
+            Err(_) => 0,
+        };
+        let reads = self
+            .statement_tables(sql)
+            .map(|(_, written)| written.is_none())
+            .unwrap_or(true);
+        (columns, reads)
+    }
+
     /// Returns the physical operators a statement runs **through the cache**.
     ///
     /// The difference from [`ImportedDatabase::describe`] is the whole point of
@@ -2185,6 +2429,7 @@ impl ImportedDatabase {
             Cached::Select(_, prepared) => Ok(prepared.describe()),
             Cached::Ddl(_) => Ok(vec!["a directive".to_string()]),
             Cached::QueryPlan(_) => Ok(vec!["a query plan".to_string()]),
+            Cached::Program(_) => Ok(vec!["a program listing".to_string()]),
             Cached::Insert(..) => Ok(vec!["an insert".to_string()]),
             Cached::VirtualInsert(_) => Ok(vec!["an insert into a module".to_string()]),
             Cached::VirtualUpdate(..) => Ok(vec!["an update of a module".to_string()]),
@@ -3269,6 +3514,24 @@ impl ImportedDatabase {
     /// The campaign tests run this after every statement. A tree that has
     /// drifted structurally still answers a scan correctly for a long time,
     /// which is precisely why the check has to be a check rather than a query.
+    /// Adds one virtual-table module to this connection.
+    ///
+    /// The catalog is refreshed on the way out, because an eponymous module's
+    /// name is a table name and the binder resolves those from the catalog.
+    ///
+    /// @param module - the module to add
+    pub(crate) fn register_module(
+        &mut self,
+        module: std::sync::Arc<dyn inillucent_ext::vtab::Module>,
+    ) -> DbResult<()> {
+        self.registry.register_module(module);
+        // The eponymous list is cached because building it connects every
+        // module; a new module invalidates it, and nothing else does.
+        self.eponymous.clear();
+        self.refresh_catalog();
+        Ok(())
+    }
+
     /// Returns the catalog rows of `main`, for the rebuild to replay.
     ///
     /// @returns one entry per object, in catalog order
@@ -3673,12 +3936,20 @@ impl ImportedDatabase {
         self.checkpoint()?;
         let path = self.path.clone();
         let frames = self.frames;
-        let vfs = OsVfs::new();
+        let vfs = std::sync::Arc::clone(&self.vfs);
         let db_path = DbPath::new(path.to_string_lossy().as_ref());
+        // **The old handle lets the file go before the new one asks for it.**
+        // Since the engine takes real file locks, a handle that is still holding
+        // one is a writer as far as the open path is concerned, and the open
+        // would wait out its whole busy budget and then report the file busy -
+        // against a lock this same call is about to drop. The checkpoint above
+        // has already made the file current, so there is nothing left for the
+        // lock to protect.
+        self.database.end_access()?;
         // The old handle's file is closed before the new one opens it, because
         // two `Database`s over one path is two page caches over one file.
         let database = {
-            let replacement = Database::open(&vfs, &db_path, frames.max(64))?;
+            let replacement = Database::open(vfs.as_ref(), &db_path, frames.max(64))?;
             std::mem::replace(&mut self.database, replacement)
         };
         drop(database);
@@ -3740,7 +4011,7 @@ impl ImportedDatabase {
         self.trees = trees;
         self.entries = entries;
         self.wal = std::rc::Rc::new(Wal::open(
-            std::sync::Arc::new(OsVfs::new()),
+            std::sync::Arc::clone(&self.vfs),
             &db_path,
             self.database.uuid(),
             FIRST_LSN,
@@ -3782,9 +4053,13 @@ impl ImportedDatabase {
         sql: &str,
         parsed: &inillucent_sql::parser::ParsedStatement,
     ) -> DbResult<BoundStatement> {
-        let authorizer = AllowAll;
+        let fallback = AllowAll;
+        let authorizer: &dyn inillucent_sql::bind::Authorizer = match &self.authorizer {
+            Some(held) => held.as_ref(),
+            None => &fallback,
+        };
         let externals = self.external_functions();
-        let mut binder = Binder::new(&self.catalog, &parsed.ast, &authorizer)
+        let mut binder = Binder::new(&self.catalog, &parsed.ast, authorizer)
             .with_source(sql.as_bytes())
             .with_functions(&externals)
             .with_collations(&self.collations)
@@ -3858,6 +4133,7 @@ impl ImportedDatabase {
             Cached::Nothing
             | Cached::Ddl(_)
             | Cached::QueryPlan(_)
+            | Cached::Program(_)
             | Cached::VirtualUpdate(..)
             | Cached::VirtualDelete(..)
             | Cached::VirtualInsert(_)
@@ -3880,7 +4156,7 @@ impl ImportedDatabase {
             // Rendered when it was compiled, so there is nothing to apply and
             // nothing to time. It is here to be exhaustive rather than to be
             // measured: a plan description is not a workload.
-            Cached::QueryPlan(_) => {}
+            Cached::QueryPlan(_) | Cached::Program(_) => {}
             // A module's own write, which this harness does not time: what it
             // costs is the module's business and not the engine's.
             Cached::VirtualDelete(..) | Cached::VirtualUpdate(..) => {}
@@ -4197,6 +4473,40 @@ impl ImportedDatabase {
         self.statements.borrow().values().map(HashMap::len).sum()
     }
 
+    /// Puts the connection into or out of defensive mode.
+    ///
+    /// @param on - whether the flag is in force
+    pub fn set_defensive(&mut self, on: bool) {
+        self.defensive = on;
+    }
+
+    /// Installs the authorizer every later statement is bound under.
+    ///
+    /// **The plan cache is emptied with it**, for the same reason it is emptied
+    /// when a lever changes: a plan compiled under one authorizer is that
+    /// authorizer's answer, and reusing it would skip the callback the caller
+    /// installed the authorizer to receive.
+    ///
+    /// @param authorizer - the callback, or nothing to allow everything again
+    pub fn set_authorizer(
+        &mut self,
+        authorizer: Option<std::rc::Rc<dyn inillucent_sql::bind::Authorizer>>,
+    ) {
+        self.authorizer = authorizer;
+        self.statements.borrow_mut().clear();
+    }
+
+    /// Reports whether a compiled plan may be reused.
+    ///
+    /// Only when nothing can refuse a statement: an authorizer that could
+    /// answer differently this time has to be asked this time.
+    fn cacheable(&self) -> bool {
+        match &self.authorizer {
+            Some(held) => held.allows_everything(),
+            None => true,
+        }
+    }
+
     /// Turns off one or more planner optimizations for this connection.
     ///
     /// **Every compiled statement goes with it.** A plan built under a lever is
@@ -4226,7 +4536,10 @@ impl ImportedDatabase {
     /// `PRAGMA user_version = 1` both change the file, and the ones that do not
     /// pay a lock they did not need rather than skip one they did.
     fn writes_of(cached: &Cached) -> bool {
-        !matches!(cached, Cached::Select(..) | Cached::QueryPlan(_) | Cached::Nothing)
+        !matches!(
+            cached,
+            Cached::Select(..) | Cached::QueryPlan(_) | Cached::Program(_) | Cached::Nothing
+        )
     }
 
     /// Returns whether the file lock is kept between transactions.
@@ -4336,13 +4649,28 @@ impl ImportedDatabase {
         }
         self.checkpoint()?;
         self.journal_mode = mode;
+        // **WAL is the one mode the file remembers.** SQLite writes a
+        // read/write version of 2 into its header for a WAL database and 1 for
+        // everything else, so a reopen comes back in WAL and comes back at the
+        // connection's default for any of the rollback modes. Recording it here
+        // is what makes `PRAGMA journal_mode = wal` outlive the connection that
+        // asked - without it, a reopen of a WAL database answered `delete` and
+        // would have started writing pre-images beside a log.
+        self.database
+            .set_wal_mode(mode == inillucent_pool::journal::JournalMode::Wal);
+        // And checkpointed again, because the meta record reaches the file at a
+        // checkpoint and the one above ran before the flag was set. Without
+        // this second one the flag is written only if something else forces a
+        // checkpoint later, so `PRAGMA journal_mode = wal` followed by a clean
+        // close reopened as `delete`.
+        self.checkpoint()?;
         // A VFS of its own rather than the schema's, because the journal opens
         // one file by name and `OsVfs` is stateless - the same reasoning that
         // lets `create` and `open` each make their own.
+        let held: std::sync::Arc<dyn inillucent_vfs::Vfs> = std::sync::Arc::clone(&self.vfs);
         let journal = mode.is_rollback().then(|| {
-            let vfs: std::sync::Arc<dyn inillucent_vfs::Vfs> = std::sync::Arc::new(OsVfs::new());
             inillucent_pool::journal::Journal::new(
-                vfs,
+                held,
                 &DbPath::new(self.path.to_string_lossy().as_ref()),
                 mode,
                 self.page_size,
@@ -4527,6 +4855,7 @@ impl ImportedDatabase {
             Cached::Nothing => Ok(Outcome::empty()),
             Cached::Ddl(sql) => self.execute_ddl(sql),
             Cached::QueryPlan(lines) => Ok(query_plan_rows(lines)),
+            Cached::Program(rows) => Ok(program_rows(rows)),
             Cached::VirtualInsert(statement) => self.insert_into_module(statement, params),
             Cached::Select(plan, prepared) => {
                 let (rows, shape) = physical::run_any_prepared(plan, self, prepared, params)?;
@@ -4680,6 +5009,14 @@ impl ImportedDatabase {
     ///
     /// @param sql - the statement text
     fn compiled(&self, sql: &str) -> DbResult<std::rc::Rc<Cached>> {
+        // **An authorizer that can refuse is asked every time.** A cached plan
+        // is a plan whose authorizer already said yes once, and reusing it
+        // would skip the callback on every later execution - so a connection
+        // with a real authorizer compiles per statement, which is what SQLite
+        // does for the same reason.
+        if !self.cacheable() {
+            return Ok(std::rc::Rc::new(self.compile(sql)?));
+        }
         if !self.levers.has(Levers::PLAN_CACHE) {
             // The lever is off, so nothing is held and every execution
             // compiles. It exists so a measurement can price the compile.
@@ -4743,16 +5080,13 @@ impl ImportedDatabase {
         inner: &inillucent_sql::ast::Statement,
         parsed: &inillucent_sql::parser::ParsedStatement,
     ) -> DbResult<Cached> {
-        if !query_plan {
-            return Err(refusal(format!(
-                "{sql}: plain EXPLAIN lists the opcodes of a bytecode program, and this \
-                 engine compiles no bytecode - it builds an operator chain. EXPLAIN \
-                 QUERY PLAN describes that chain and is answered"
-            )));
-        }
-        let authorizer = AllowAll;
+        let fallback = AllowAll;
+        let authorizer: &dyn inillucent_sql::bind::Authorizer = match &self.authorizer {
+            Some(held) => held.as_ref(),
+            None => &fallback,
+        };
         let externals = self.external_functions();
-        let mut binder = Binder::new(&self.catalog, &parsed.ast, &authorizer)
+        let mut binder = Binder::new(&self.catalog, &parsed.ast, authorizer)
             .with_source(sql.as_bytes())
             .with_functions(&externals)
             .with_collations(&self.collations)
@@ -4787,7 +5121,10 @@ impl ImportedDatabase {
                 .describe(),
             other => vec![describe_statement(&other).to_string()],
         };
-        Ok(Cached::QueryPlan(lines))
+        if query_plan {
+            return Ok(Cached::QueryPlan(lines));
+        }
+        Ok(Cached::Program(program_of(&lines)))
     }
 
     /// Compiles one statement as far as its parameters allow.
@@ -5324,6 +5661,125 @@ fn names_of(shape: &physical::Shape) -> Vec<String> {
 /// between releases, so the text was never the comparable part.
 ///
 /// @param lines - the plan's operators, source first
+/// Returns the listing a plain `EXPLAIN` answers with.
+///
+/// **The eight columns SQLite answers with, holding this engine's steps.**
+/// `EXPLAIN` in SQLite lists the opcodes of a bytecode program; this engine
+/// compiles no bytecode, so what is listed is the operator chain the statement
+/// actually runs - one row per stage, framed by the `Init` and `Halt` that
+/// begin and end every execution here as they do there.
+///
+/// The columns are used for what they mean rather than left at zero: `p1` is
+/// the step's position in the chain, `p2` is where control goes next, `p4`
+/// carries the operator's argument, and `comment` is the same sentence
+/// `EXPLAIN QUERY PLAN` prints. A reader comparing two engines' listings is
+/// comparing two different machines and will see that; a reader asking what
+/// *this* statement does gets an answer rather than a refusal.
+///
+/// @param lines - the plan, as `EXPLAIN QUERY PLAN` describes it
+fn program_of(lines: &[String]) -> Vec<(String, i64, i64, String, String)> {
+    let mut program = Vec::with_capacity(lines.len().saturating_add(2));
+    let last = lines.len().saturating_add(1) as i64;
+    program.push((
+        "Init".to_string(),
+        0,
+        1,
+        String::new(),
+        "Start at 1".to_string(),
+    ));
+    for (at, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start_matches(['`', '-', '|', ' ']);
+        let (word, rest) = match trimmed.split_once(' ') {
+            Some((word, rest)) => (word, rest),
+            None => (trimmed, ""),
+        };
+        program.push((
+            opcode_name(word),
+            at as i64,
+            at.saturating_add(2) as i64,
+            rest.to_string(),
+            trimmed.to_string(),
+        ));
+    }
+    program.push(("Halt".to_string(), 0, 0, String::new(), String::new()));
+    let _ = last;
+    program
+}
+
+/// Returns a plan word as an opcode name.
+///
+/// `SCAN` and `SEARCH` are the two the planner writes most, and the rest are
+/// title-cased so that a listing reads as a program rather than as a shouted
+/// sentence.
+///
+/// @param word - the first word of the plan line
+fn opcode_name(word: &str) -> String {
+    let mut name = String::with_capacity(word.len());
+    for (at, letter) in word.chars().enumerate() {
+        if at == 0 {
+            name.extend(letter.to_uppercase());
+        } else {
+            name.extend(letter.to_lowercase());
+        }
+    }
+    name
+}
+
+/// Returns the rows a plain `EXPLAIN` answers with.
+///
+/// @param program - the steps, as `program_of` built them
+fn program_rows(program: &[(String, i64, i64, String, String)]) -> Outcome {
+    Outcome {
+        rows: program
+            .iter()
+            .enumerate()
+            .map(|(address, (opcode, one, two, argument, comment))| {
+                vec![
+                    OwnedDatum::Int(address as i64),
+                    OwnedDatum::Text(opcode.as_bytes().to_vec()),
+                    OwnedDatum::Int(*one),
+                    OwnedDatum::Int(*two),
+                    OwnedDatum::Int(0),
+                    OwnedDatum::Text(argument.as_bytes().to_vec()),
+                    OwnedDatum::Int(0),
+                    OwnedDatum::Text(comment.as_bytes().to_vec()),
+                ]
+            })
+            .collect(),
+        names: vec![
+            "addr".to_string(),
+            "opcode".to_string(),
+            "p1".to_string(),
+            "p2".to_string(),
+            "p3".to_string(),
+            "p4".to_string(),
+            "p5".to_string(),
+            "comment".to_string(),
+        ],
+        changes: Changes::default(),
+    }
+}
+
+/// Adds every object a bound query reads to a list.
+///
+/// Recursive through subqueries, because a table a subquery reads is a table
+/// the statement uses - which is the question `tables_used` answers.
+///
+/// @param select - the bound query
+/// @param into - the list being built
+fn collect_sources(
+    select: &inillucent_sql::bind::BoundSelect,
+    into: &mut Vec<(&'static str, Vec<u8>)>,
+) {
+    for source in &select.sources {
+        let kind = match source.table.kind {
+            inillucent_sql::catalog_view::TableKind::View => "view",
+            _ => "table",
+        };
+        into.push((kind, source.table.name.clone()));
+    }
+}
+
 fn query_plan_rows(lines: &[String]) -> Outcome {
     Outcome {
         rows: lines
@@ -5379,6 +5835,11 @@ enum Cached {
     /// is cached and invalidated exactly like the query it describes - which is
     /// the point of holding it here rather than rendering it per execution.
     QueryPlan(Vec<String>),
+    /// A plain `EXPLAIN`, rendered when the statement was compiled.
+    ///
+    /// One entry per step: the opcode's name, its first two operands, its
+    /// argument, and the comment. See `program_of` for what those mean here.
+    Program(Vec<(String, i64, i64, String, String)>),
     /// An insert into a virtual table, which the module applies.
     VirtualInsert(Box<inillucent_sql::dml::BoundInsert>),
     /// A delete from a virtual table, with the query that finds its rowids.
@@ -5875,6 +6336,15 @@ fn in_key_order(
         .take(key_columns)
         .map(|spec| spec.collation)
         .collect();
+    // And the directions, because "key order" is the *tree's* order and a
+    // descending key column is part of what that order is. Sorting ascending
+    // and then building a tree whose comparisons are descending produces a tree
+    // that is sorted by nothing either half agrees with.
+    let directions: Vec<bool> = columns
+        .iter()
+        .take(key_columns)
+        .map(|spec| spec.descending)
+        .collect();
     // **Sorted by comparing the values, not by encoding a key per row.**
     //
     // The version this replaces built a `Vec<u8>` key for every row, sorted the
@@ -5898,6 +6368,11 @@ fn in_key_order(
                 &two.borrow(),
                 collations.get(column).copied().unwrap_or(Collation::Binary),
             );
+            let order = if directions.get(column).copied().unwrap_or(false) {
+                order.reverse()
+            } else {
+                order
+            };
             if order != std::cmp::Ordering::Equal {
                 return order;
             }
@@ -6206,9 +6681,26 @@ fn shape_of(
             })?;
             let mut table = table_from_create_sql(&owner.sql, 0, owner.tree_id as u32).ok()?;
             table.root = owner.tree_id as u32;
-            let index =
+            // **An automatic index is declared by the *table's* text.** The
+            // catalog stores an empty `sql` for one - which is what SQLite
+            // writes for `sqlite_autoindex_t_1` - so parsing that empty text as
+            // a `CREATE INDEX` answers nothing, the applier is told no shape,
+            // and every log record naming the index is refused. That is a
+            // database with a `TEXT PRIMARY KEY` that cannot be reopened after
+            // a write, and it is what this branch exists to prevent; the same
+            // rule is applied by `ImportedDatabase::shape_of` when the schema
+            // is loaded.
+            let index = if entry.sql.is_empty() {
+                let folded = entry.name.to_ascii_lowercase();
+                table
+                    .indexes
+                    .iter()
+                    .find(|index| index.folded == folded)?
+                    .clone()
+            } else {
                 inillucent_catalog::load::index_from_create_sql(&entry.sql, &table, identifier)
-                    .ok()?;
+                    .ok()?
+            };
             let (columns, _) = index_shape(&table, &index, identifier);
             let key_columns = columns.len();
             Some((columns, key_columns))
@@ -6911,15 +7403,15 @@ fn index_shape(table: &TableInfo, index: &IndexInfo, root: u32) -> (Vec<ColumnSp
         // and a query that reads the underlying column cannot be answered from
         // this tree. Leaving the slot unmapped is what makes that a refusal in
         // the physical pass rather than a wrong answer here.
-        // **A `DESC` key column says nothing about this tree.** Every key
-        // column here is stored ascending, whatever the declaration says, and
-        // since task-1856 the catalog the planner reads says so too - see
-        // `stored_ascending` in `inillucent_catalog::paged`. The tree is
-        // therefore ordered on its own terms and is offered as such; a
-        // `ORDER BY c DESC` over it is a reverse walk, which the planner
-        // already knows how to ask for.
+        // **A `DESC` key column is stored descending**, which is what SQLite
+        // stores and what makes the two engines read a `DESC` index in the same
+        // order - the trailing rowid stays ascending, so ties inside a
+        // descending column come out ascending in both. It was flattened to
+        // ascending until task-1860, and the visible cost was that `ORDER BY k`
+        // over a `DESC` index answered its ties in the opposite order to
+        // SQLite's, on every one of the seven statements `ordering.rs` names.
         let Some(declared) = column.column.map(usize::from) else {
-            columns.push(ColumnSpec::key(PhysicalType::Any));
+            columns.push(ColumnSpec::key(PhysicalType::Any).with_descending(column.descending));
             types.push(StaticType::Unknown);
             continue;
         };
@@ -6948,7 +7440,27 @@ fn index_shape(table: &TableInfo, index: &IndexInfo, root: u32) -> (Vec<ColumnSp
             // distinction. Disqualifying it costs a sort and never an answer.
             ordered = false;
         }
-        columns.push(ColumnSpec::key(physical).with_collation(collation));
+        if column.descending {
+            // And a descending key column for the same reason, now that one
+            // means what it says. `SourceLayout::key_columns` is read by rules
+            // that ask only *which* columns the walk is ordered by - never in
+            // which direction - so a descending tree reported through it says
+            // "ascending by a, then b" about a walk that is descending by a.
+            // `SELECT a, b FROM t ORDER BY a, b` over `t(a DESC, b)` then
+            // skipped its sorter and came back in the index's own order, which
+            // is the reverse of the answer.
+            //
+            // The planner's own `ordering_provided` is direction-aware and
+            // still elides the sort where a walk really does answer the
+            // ordering, so what this gives up is the executor's second,
+            // direction-blind derivation of the same claim.
+            ordered = false;
+        }
+        columns.push(
+            ColumnSpec::key(physical)
+                .with_collation(collation)
+                .with_descending(column.descending),
+        );
         types.push(static_type);
         if let Some(slot) = slots.get_mut(declared) {
             *slot = Some(position);
@@ -7285,15 +7797,44 @@ fn load_schema(
         highest_identifier = highest_identifier.max(local);
         let identifier = allocate(local);
         handles.insert(u64::from(local), identifier);
-        let index = match inillucent_catalog::load::index_from_create_sql(
-            &entry.sql,
-            &table_info,
-            identifier,
-        ) {
-            Ok(index) => index,
-            Err(_) => {
-                skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
-                continue;
+        // **An automatic index is declared by the *table's* text**, and the
+        // catalog stores an empty statement for it - which is what SQLite
+        // writes for `sqlite_autoindex_t_1`. Parsing that empty text as a
+        // `CREATE INDEX` fails, and the arm below used to skip the index: no
+        // tree was attached, no row joined `entries`, and the declaration the
+        // planner reads kept the root of zero it was parsed with. The visible
+        // result was that **any query using a non-`INTEGER PRIMARY KEY` failed
+        // after a reopen** - `EXPLAIN QUERY PLAN` named the index and the
+        // statement answered `no layout imported for root page 0`. It is the
+        // same rule `tables_from_entries` and `shape_of` already apply.
+        let index = if entry.sql.is_empty() {
+            let wanted = entry.name.to_ascii_lowercase();
+            match table_info
+                .indexes
+                .iter()
+                .find(|index| index.folded == wanted)
+            {
+                Some(index) => {
+                    let mut index = index.clone();
+                    index.root = identifier;
+                    index
+                }
+                None => {
+                    skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
+                    continue;
+                }
+            }
+        } else {
+            match inillucent_catalog::load::index_from_create_sql(
+                &entry.sql,
+                &table_info,
+                identifier,
+            ) {
+                Ok(index) => index,
+                Err(_) => {
+                    skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
+                    continue;
+                }
             }
         };
         let (columns, layout) = index_shape(&table_info, &index, identifier);
@@ -7317,9 +7858,18 @@ fn load_schema(
             covering.entry(table_root).or_default().push(identifier);
         }
         // The index joins its table's declaration, so the binder offers it
-        // to the planner exactly as the import does.
+        // to the planner exactly as the import does. An automatic one is
+        // already there - the table's own text declared it - so its root is
+        // filled in rather than a second copy pushed.
         if let Some((_, info)) = infos.get_mut(&folded) {
-            info.indexes.push(index);
+            match info
+                .indexes
+                .iter_mut()
+                .find(|held| held.folded == index.folded)
+            {
+                Some(held) => held.root = identifier,
+                None => info.indexes.push(index),
+            }
         }
         entries.push((rowid_of_name(entry), entry.clone()));
         identifiers.push(identifier);
@@ -7418,6 +7968,7 @@ fn load_schema(
     }
     let mut tables: Vec<TableInfo> = infos.into_values().map(|(_, info)| info).collect();
     tables.sort_by(|one, two| one.folded.cmp(&two.folded));
+    attach_statistics(database.pool(), &trees, &mut tables);
     Ok(LoadedSchema {
         trees,
         layouts,
@@ -7433,6 +7984,89 @@ fn load_schema(
         skipped,
         highest_identifier,
     })
+}
+
+/// Reads `sqlite_stat1` onto the tables it describes.
+///
+/// **The half of `ANALYZE` that was missing.** This engine wrote the table and
+/// never read it: `IndexInfo::prefix_rows` and `TableInfo::analysed_rows` are
+/// what the planner costs a join with, and nothing on this path had ever set
+/// them - so a file the reference had `ANALYZE`d arrived here with its
+/// measurements sitting in a table nobody opened, and the join was planned by
+/// the guesses the measurements exist to replace. `inillucent-catalog`'s own
+/// loader does this for a SQLite file; this is the same rule over a PAX tree.
+///
+/// A missing, empty or unreadable statistics table is not an error - statistics
+/// are a hint, and a planner that refused to run without them would turn
+/// `ANALYZE` into a dependency.
+///
+/// @param pool - the buffer pool the trees live in
+/// @param trees - every tree this schema holds, by handle
+/// @param tables - the binder's tables, patched in place
+fn attach_statistics(pool: &Pool, trees: &HashMap<u32, PagedTree>, tables: &mut [TableInfo]) {
+    let folded = inillucent_catalog::analyze::STAT1
+        .as_bytes()
+        .to_ascii_lowercase();
+    let Some(root) = tables
+        .iter()
+        .find(|held| held.folded == folded)
+        .map(|held| held.root)
+    else {
+        return;
+    };
+    let Some(tree) = trees.get(&root) else {
+        return;
+    };
+    let rows = statistics_rows(pool, tree);
+    apply_statistics(tables, &rows);
+}
+
+/// Reads the three-column rows out of a `sqlite_stat1` tree.
+///
+/// Separate from attaching them so a caller holding `&mut self` can read under
+/// an immutable borrow, drop it, and then patch its tables.
+///
+/// @param pool - the buffer pool the tree lives in
+/// @param tree - the statistics tree
+fn statistics_rows(pool: &Pool, tree: &PagedTree) -> Vec<(Vec<u8>, Option<Vec<u8>>, Vec<u8>)> {
+    let mut rows: Vec<(Vec<u8>, Option<Vec<u8>>, Vec<u8>)> = Vec::new();
+    let _ = tree.visit_leaves(pool, &mut |leaf| {
+        for row in leaf.live()? {
+            // The row is the rowid and then the three columns SQLite's own
+            // `sqlite_stat1` carries: the table, the index, the measurement.
+            let Some(Datum::Text(table)) = row.get(1) else {
+                continue;
+            };
+            let index = match row.get(2) {
+                Some(Datum::Text(name)) => Some(name.to_vec()),
+                _ => None,
+            };
+            let Some(Datum::Text(stat)) = row.get(3) else {
+                continue;
+            };
+            rows.push((table.to_vec(), index, stat.to_vec()));
+        }
+        Ok(true)
+    });
+    rows
+}
+
+/// Clears every table's measurements and applies the ones just read.
+///
+/// @param tables - the binder's tables, patched in place
+/// @param rows - the `sqlite_stat1` rows
+fn apply_statistics(tables: &mut [TableInfo], rows: &[(Vec<u8>, Option<Vec<u8>>, Vec<u8>)]) {
+    // A stale reading is worse than none, so what is there now replaces
+    // whatever a previous load left behind rather than adding to it.
+    for table in tables.iter_mut() {
+        table.analysed_rows = None;
+        for index in &mut table.indexes {
+            index.prefix_rows = Vec::new();
+        }
+    }
+    for (table, index, stat) in rows {
+        inillucent_catalog::load::apply_statistic(tables, table, index.as_deref(), stat);
+    }
 }
 
 /// One database file, opened, recovered, and ready to be read.

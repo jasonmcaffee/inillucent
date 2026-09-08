@@ -37,6 +37,28 @@ use crate::{ImportedDatabase, DEFAULT_FRAMES};
 /// measurement was taken on.
 pub const PAGE_SIZE: usize = 32_768;
 
+/// What the page cache has been asked to do.
+///
+/// The counters `.stats` reports. They are the engine's own rather than
+/// SQLite's allocator's, because they are the cost this engine actually has.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CacheStats {
+    /// Fetches answered from a resident frame.
+    pub hits: u64,
+    /// Fetches that had to read the file.
+    pub misses: u64,
+    /// Fetches answered by a frame in the cooling list, which cost no I/O.
+    pub rewarms: u64,
+    /// Frames moved into the cooling list.
+    pub cooled: u64,
+    /// Frames evicted.
+    pub evicted: u64,
+    /// Pages read from the file.
+    pub reads: u64,
+    /// Pages written to the file.
+    pub writes: u64,
+}
+
 /// An open database file.
 pub struct Database {
     /// The engine, behind a cell because a statement takes `&mut` and a caller
@@ -53,6 +75,15 @@ pub struct Database {
     changes: std::cell::Cell<i64>,
 }
 
+/// Reports whether a path names an in-memory database rather than a file.
+///
+/// `:memory:` and the empty path, which are SQLite's two spellings for it.
+///
+/// @param path - the path a caller opened with
+fn is_memory(path: &Path) -> bool {
+    path.as_os_str().is_empty() || path.as_os_str() == ":memory:"
+}
+
 impl Database {
     /// Opens a database, creating it when the path holds nothing.
     ///
@@ -67,6 +98,25 @@ impl Database {
     /// @param frames - how many frames the buffer pool holds
     pub fn open_with(path: impl AsRef<Path>, frames: usize) -> DbResult<Database> {
         let path = path.as_ref().to_path_buf();
+        // **`:memory:` is a database, not a filename.** The operating system
+        // refuses it as a path - on Windows with `the filename, directory name,
+        // or volume label syntax is incorrect` - so a shell started with no
+        // file could not open anything at all. It is the name SQLite gives a
+        // database that lives in memory, and this engine has a file system that
+        // is memory: `inillucent_vfs::MemoryVfs`, one instance per database, so
+        // two `:memory:` databases are two databases and both disappear with
+        // the last handle to them. An empty path means the same thing, which is
+        // also SQLite's rule.
+        if is_memory(&path) {
+            let vfs: std::sync::Arc<dyn inillucent_vfs::Vfs> =
+                std::sync::Arc::new(inillucent_vfs::MemoryVfs::new());
+            let engine = ImportedDatabase::create_on(vfs, path.clone(), PAGE_SIZE, frames)?;
+            return Ok(Database {
+                engine: RefCell::new(engine),
+                path,
+                changes: std::cell::Cell::new(0),
+            });
+        }
         let engine = if path.is_file() {
             ImportedDatabase::open(path.clone(), PAGE_SIZE, frames)?
         } else {
@@ -159,6 +209,49 @@ impl Database {
     /// log - but a checkpoint is what makes the next open cheap.
     pub fn checkpoint(&self) -> DbResult<()> {
         self.engine.borrow_mut().checkpoint()
+    }
+
+    /// Adds one virtual-table module to this connection.
+    ///
+    /// **The route a program takes to widen what SQL can reach.** `fsdir` is
+    /// the reason it exists: a table-valued function over the file system does
+    /// not belong in a library that any statement runs through, so the shell
+    /// registers it and a program that does not want it never does. It is the
+    /// same split the reference makes - `fsdir` is in `shell.c`, not in
+    /// `sqlite3.c`.
+    ///
+    /// The schema is refreshed afterwards, because an eponymous module's name
+    /// is a table name and the binder resolves those from the catalog.
+    ///
+    /// @param module - the module to add
+    pub fn register_module(
+        &self,
+        module: std::sync::Arc<dyn inillucent_ext::vtab::Module>,
+    ) -> DbResult<()> {
+        self.engine.borrow_mut().register_module(module)
+    }
+
+    /// Returns what the page cache has been asked to do.
+    ///
+    /// For `.stats`, which reports the work a statement caused rather than the
+    /// answer it gave. The shape is the engine's own rather than the pool's, so
+    /// a caller reading it does not have to name the crate the pool lives in.
+    pub fn cache_stats(&self) -> CacheStats {
+        let held = self.engine.borrow().pool_stats();
+        CacheStats {
+            hits: held.hits,
+            misses: held.misses,
+            rewarms: held.rewarms,
+            cooled: held.cooled,
+            evicted: held.evicted,
+            reads: held.reads,
+            writes: held.writes,
+        }
+    }
+
+    /// Returns how many bytes the page cache is holding.
+    pub fn pool_bytes(&self) -> usize {
+        self.engine.borrow().pool_bytes()
     }
 
     /// Checks every tree's structure.
@@ -358,6 +451,41 @@ impl<'d> Connection<'d> {
     /// @param mask - the levers to switch off
     pub fn disable_optimizations(&self, mask: u32) {
         self.engine_mut().disable_optimizations(mask);
+    }
+
+    /// Puts the connection into or out of defensive mode.
+    ///
+    /// `SQLITE_DBCONFIG_DEFENSIVE`, which the reference's shell turns on by
+    /// default: it refuses `PRAGMA journal_mode = OFF` and
+    /// `PRAGMA writable_schema = ON`, both of which let a caller lose or
+    /// corrupt a database with one statement.
+    ///
+    /// @param on - whether the flag is in force
+    pub fn set_defensive(&self, on: bool) {
+        self.engine_mut().set_defensive(on);
+    }
+
+    /// Installs the authorizer every later statement is bound under.
+    ///
+    /// `sqlite3_set_authorizer`: the callback is consulted before a read, a
+    /// select or a function call is bound, and a `Deny` refuses the statement.
+    /// Pass `None` to allow everything again.
+    ///
+    /// @param authorizer - the callback, or nothing
+    pub fn set_authorizer(&self, authorizer: Option<std::rc::Rc<dyn crate::Authorizer>>) {
+        self.engine_mut().set_authorizer(authorizer);
+    }
+
+    /// Declares a table over one index's own b-tree, or removes every such
+    /// declaration.
+    ///
+    /// `.imposter`'s subject. Returns the `CREATE` it made, so a caller can
+    /// print it the way the reference's shell does.
+    ///
+    /// @param index - the index to read, or nothing to remove them all
+    /// @param name - the table name to declare it under
+    pub fn imposter(&self, index: Option<&[u8]>, name: &[u8]) -> DbResult<Option<String>> {
+        self.engine_mut().imposter(index, name)
     }
 
     /// Rereads the schema from the file.

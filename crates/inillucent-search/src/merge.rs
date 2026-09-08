@@ -223,6 +223,21 @@ pub fn configuration(options: &Options) -> IndexConfig {
             .map(|count| count.get())
             .unwrap_or(1)
     });
+    // **The three graph parameters an index may have named.** `WITH (m = 32,
+    // ef_construction = 128)` on a `CREATE INDEX ... USING inillucent_hnsw`
+    // reaches here, which is the only place they mean anything: a graph is
+    // built once and then searched, and both halves read these. An index that
+    // named none of them leaves the build's own defaults, which is what every
+    // store had before the parameters existed.
+    if let Some(m) = options.m {
+        config.hnsw.m = m;
+    }
+    if let Some(ef) = options.ef_construction {
+        config.hnsw.ef_construction = ef;
+    }
+    if let Some(ef) = options.ef_search {
+        config.hnsw.ef_search = ef;
+    }
     let _ = Metric::Cosine;
     config
 }

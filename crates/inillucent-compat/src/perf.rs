@@ -479,6 +479,15 @@ pub struct Contract {
     pub headline: f64,
     /// The lower bound below which a required family fails.
     pub floor: f64,
+    /// The most of SQLite's peak resident set this engine may hold, as a ratio.
+    ///
+    /// **Under one, because the goal is to hold less.** Absent from a contract
+    /// written before task-1869, in which case there is no memory bar and the
+    /// gate reports the ratio without judging it - a missing bar must read as
+    /// "nobody set one", never as "met".
+    pub memory: Option<f64>,
+    /// The most of SQLite's processor time this engine may spend, as a ratio.
+    pub cpu: Option<f64>,
 }
 
 impl Contract {
@@ -527,10 +536,26 @@ impl Contract {
         if (total - 1.0).abs() > 1.0e-6 {
             return Err(format!("the family weights sum to {total}, not 1"));
         }
+        // **A bar that is present but unreadable is an error, not an absence.**
+        // Returning `None` for `bar = "nought point nine"` would silently drop
+        // the judgement the file was edited to add.
+        let ratio = |section: &str| -> Result<Option<f64>, String> {
+            let table = document.table(section);
+            match table.get("bar").and_then(crate::toml_lite::Value::as_str) {
+                None if table.is_empty() => Ok(None),
+                None => Err(format!("the contract's [{section}] needs a `bar`")),
+                Some(text) => text
+                    .parse::<f64>()
+                    .map(Some)
+                    .map_err(|_| format!("the contract's [{section}] bar `{text}` is not a number")),
+            }
+        };
         Ok(Contract {
             families,
             headline,
             floor,
+            memory: ratio("memory")?,
+            cpu: ratio("cpu")?,
         })
     }
 

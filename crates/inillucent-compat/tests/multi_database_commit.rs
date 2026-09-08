@@ -87,7 +87,8 @@ fn write_across(main: &Path, aux: &Path) {
              BEGIN;
              INSERT INTO t VALUES (1);
              INSERT INTO aux.t VALUES (2);
-             COMMIT;",
+             COMMIT;
+             PRAGMA locking_mode = NORMAL;",
             aux.display().to_string().replace('\\', "/")
         ))
         .expect("the transaction commits");
@@ -95,6 +96,15 @@ fn write_across(main: &Path, aux: &Path) {
     // handle folds the pools' dirty pages into the two files, and a page already
     // in the file is a page recovery has no say over - so a test that closed
     // tidily would be asserting about a decision something else had taken.
+    //
+    // The `locking_mode = NORMAL` above is the other half of the same
+    // simulation, and it is there because the engine now takes real file locks.
+    // A crashing process has its locks released by the operating system, which
+    // is what that pragma does here - it lets the file go without checkpointing,
+    // so the pages stay dirty and unwritten. Forgetting the handle instead would
+    // hold the default `exclusive` lock for the rest of the process, and the
+    // reopen below would be told the file was busy rather than being allowed to
+    // recover it.
     std::mem::forget(connection);
     std::mem::forget(database);
 }
