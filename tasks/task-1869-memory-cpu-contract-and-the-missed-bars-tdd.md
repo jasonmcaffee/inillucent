@@ -351,6 +351,36 @@ Functional and differential, over the real engine — no mocks anywhere.
 6. **No test-suite run as part of the task flow**; these are run deliberately and their output kept
    under `_agent_output/task-1869/`.
 
+## What it turned out to be
+
+**Written after the work, because the design above was wrong about one thing and the measurement is
+the reason to keep the document rather than replace it.**
+
+The plan named four consumers and expected the memory to be in them. Three of the four were real and
+were closed - the redo buffer, the index build's leaf images and its two materialised copies, and a
+version log nothing was collecting - and a fifth the plan did not name turned up: the allocator's
+free list was capped in *blocks* over classes whose sizes differ 256x, which is 4 MiB in the largest
+class. Together they took the peak from **75.25 MiB to 53.28** against SQLite's 37.19.
+
+**What the plan got wrong is where the rest is.** It assumed the remaining gap was more transient.
+It is not: at a 20 MiB matched budget this engine's transient is **14.85 MiB against SQLite's 15.9**,
+so the two are already the same size and ours is the smaller. The whole residual difference is two
+fixed quantities - a `.rdb` that is **1.41x** the `.db`, because a PAX leaf spends a fixed 8-byte slot
+per column where SQLite spends a 1-3 byte varint, and a process floor of **8.45 MiB against 4.20**.
+The cache costs what the file costs, and no buffer change reaches it.
+
+Three items of the plan were therefore not implemented, each with a measured price rather than an
+opinion:
+
+- **spilling the index build's sorted run** adds about 8 ms to a 27 ms statement, which puts `schema`
+  under its 1.00x floor - buying memory with a floor;
+- **streaming large values** does not move the plan's high-water mark at all in plan order, which
+  also corrects review 5's reading of its own family table;
+- **FTS5's segment format** is 2,000 tree writes per 500 documents against SQLite's ~1,000 plus one
+  blob, and is a change to the query path, `fts5vocab` and the integrity check.
+
+They live in **task-1870** with the leaf-density measurement they are all downstream of.
+
 ## Done means
 
 - `inillucent-fullgate` medium, four consecutive 30-round runs, with the weighted lower bound at or
