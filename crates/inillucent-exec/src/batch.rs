@@ -38,8 +38,16 @@ pub enum Vector<'p> {
     /// scan proves once per leaf. That is the fast path: the consumer reads the
     /// bytes with no per-row branch at all.
     Int64 {
-        /// `rows * 8` bytes.
+        /// `rows * width` bytes.
         bytes: &'p [u8],
+        /// How many bytes one slot occupies: 1, 2, 4 or 8.
+        ///
+        /// A leaf spends the narrowest width that holds its own values, so a
+        /// column of small integers is a contiguous run of bytes rather than of
+        /// eight-byte words. The run is still contiguous and still unmixed with
+        /// anything else, which is the property the vectorised paths need; what
+        /// changes is the stride, and every dense loop takes it as a parameter.
+        width: usize,
         /// Two bits per row, or `None` when every row is typed.
         class: Option<&'p [u8]>,
     },
@@ -91,8 +99,12 @@ impl<'p> Vector<'p> {
     /// @param row - the row's position within the batch
     pub fn at(&self, row: usize) -> DbResult<Datum<'p>> {
         match self {
-            Vector::Int64 { bytes, class } => match class_at(*class, row)? {
-                ValueClass::Typed => Ok(Datum::Int(read_i64(bytes, row))),
+            Vector::Int64 {
+                bytes,
+                width,
+                class,
+            } => match class_at(*class, row)? {
+                ValueClass::Typed => Ok(Datum::Int(read_slot(bytes, *width, row))),
                 ValueClass::Null => Ok(Datum::Null),
                 // An exception in a typed vector is impossible: the scan puts a
                 // leaf with exceptions on the `Column` path instead. So is an
@@ -101,7 +113,7 @@ impl<'p> Vector<'p> {
                 ValueClass::Exception | ValueClass::Extent => Ok(Datum::Null),
             },
             Vector::Float64 { bytes, class } => match class_at(*class, row)? {
-                ValueClass::Typed => Ok(Datum::Real(f64::from_bits(read_i64(bytes, row) as u64))),
+                ValueClass::Typed => Ok(Datum::Real(f64::from_bits(read_slot(bytes, 8, row) as u64))),
                 _ => Ok(Datum::Null),
             },
             Vector::Variable { slots, page, text } => {
@@ -139,9 +151,16 @@ impl<'p> Vector<'p> {
     ///
     /// The fast path's entry point: a consumer that gets `Some` may walk the
     /// bytes with `chunks_exact(8)` and pay nothing per row.
-    pub fn dense_int_bytes(&self) -> Option<&'p [u8]> {
+    pub fn dense_ints(&self) -> Option<DenseInts<'p>> {
         match self {
-            Vector::Int64 { bytes, class: None } => Some(bytes),
+            Vector::Int64 {
+                bytes,
+                width,
+                class: None,
+            } => Some(DenseInts {
+                bytes,
+                width: *width,
+            }),
             _ => None,
         }
     }
@@ -167,6 +186,7 @@ impl<'p> Vector<'p> {
         match column.physical {
             PhysicalType::Int64 if column.all_typed() => Vector::Int64 {
                 bytes: column.inline_bytes(),
+                width: column.width,
                 class: None,
             },
             PhysicalType::Float64 if column.all_typed() => Vector::Float64 {
@@ -183,15 +203,115 @@ impl<'p> Vector<'p> {
     }
 }
 
-/// Reads one 8-byte slot as an integer.
+/// Reads one slot as an integer, sign-extending a narrow one.
 ///
 /// @param bytes - the value array
+/// @param width - how many bytes one slot occupies
 /// @param row - the row's position
-fn read_i64(bytes: &[u8], row: usize) -> i64 {
-    let at = row.saturating_mul(8);
-    match bytes.get(at..at.saturating_add(8)) {
-        Some(slice) => i64::from_le_bytes(slice.try_into().unwrap_or([0; 8])),
+fn read_slot(bytes: &[u8], width: usize, row: usize) -> i64 {
+    let at = row.saturating_mul(width);
+    match bytes.get(at..at.saturating_add(width)) {
+        Some(slice) => inillucent_tree::types::read_int_slot(slice),
         None => 0,
+    }
+}
+
+/// A contiguous run of typed integers, at whatever width the leaf spent.
+///
+/// **The fast path's currency.** Every operator that used to take
+/// `&[u8]` and walk it with `chunks_exact(8)` takes one of these instead and
+/// walks it with [`DenseInts::for_each`], which dispatches on the width once and
+/// then runs a fixed-stride loop - so the loop the optimiser sees is as tight as
+/// the eight-byte one was, over a quarter or an eighth of the bytes.
+#[derive(Clone, Copy, Debug)]
+pub struct DenseInts<'p> {
+    /// `rows * width` bytes of values and nothing else.
+    bytes: &'p [u8],
+    /// How many bytes one value occupies: 1, 2, 4 or 8.
+    width: usize,
+}
+
+impl<'p> DenseInts<'p> {
+    /// Returns a run over raw bytes at a stated width.
+    ///
+    /// @param bytes - the value array
+    /// @param width - how many bytes one value occupies
+    pub fn new(bytes: &'p [u8], width: usize) -> DenseInts<'p> {
+        DenseInts {
+            bytes,
+            width: width.max(1),
+        }
+    }
+
+    /// How many values the run holds.
+    pub fn len(&self) -> usize {
+        self.bytes.len() / self.width
+    }
+
+    /// Reports whether the run holds no values.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Returns one value, or zero when the row is past the end.
+    ///
+    /// @param row - the value's position in the run
+    #[inline]
+    pub fn get(&self, row: usize) -> i64 {
+        read_slot(self.bytes, self.width, row)
+    }
+
+    /// Returns the sub-run `from..to`, clamped to what the run holds.
+    ///
+    /// @param from - the first value to keep
+    /// @param to - one past the last
+    pub fn range(&self, from: usize, to: usize) -> DenseInts<'p> {
+        let start = from.saturating_mul(self.width).min(self.bytes.len());
+        let end = to
+            .saturating_mul(self.width)
+            .min(self.bytes.len())
+            .max(start);
+        DenseInts {
+            bytes: self.bytes.get(start..end).unwrap_or(&[]),
+            width: self.width,
+        }
+    }
+
+    /// Calls `visit` with every value, in order.
+    ///
+    /// The width is matched **once**, so each arm compiles to a loop over a
+    /// fixed stride - which is what the eight-byte `chunks_exact(8)` loops were
+    /// and is what keeps them vectorisable.
+    ///
+    /// @param visit - what to do with each value
+    #[inline]
+    pub fn for_each(&self, mut visit: impl FnMut(i64)) {
+        match self.width {
+            1 => {
+                for byte in self.bytes {
+                    visit(i64::from(*byte as i8));
+                }
+            }
+            2 => {
+                for chunk in self.bytes.chunks_exact(2) {
+                    visit(i64::from(i16::from_le_bytes(
+                        chunk.try_into().unwrap_or([0; 2]),
+                    )));
+                }
+            }
+            4 => {
+                for chunk in self.bytes.chunks_exact(4) {
+                    visit(i64::from(i32::from_le_bytes(
+                        chunk.try_into().unwrap_or([0; 4]),
+                    )));
+                }
+            }
+            _ => {
+                for chunk in self.bytes.chunks_exact(8) {
+                    visit(i64::from_le_bytes(chunk.try_into().unwrap_or([0; 8])));
+                }
+            }
+        }
     }
 }
 
@@ -349,12 +469,16 @@ mod tests {
         let page = leaf_page(rows);
         let leaf = LeafRef::parse(&page).unwrap();
         let vector = Vector::from_column(leaf.column(1).unwrap());
-        let bytes = vector.dense_int_bytes().expect("should be dense");
-        for (row, chunk) in bytes.chunks_exact(8).enumerate() {
-            let dense = i64::from_le_bytes(chunk.try_into().unwrap());
-            assert_eq!(dense, row as i64 * 7);
-            assert_eq!(vector.at(row).unwrap().as_int().unwrap(), dense);
-        }
+        let slots = vector.dense_ints().expect("should be dense");
+        assert_eq!(slots.len(), 100);
+        let mut row = 0usize;
+        slots.for_each(|value| {
+            assert_eq!(value, row as i64 * 7);
+            assert_eq!(vector.at(row).unwrap().as_int().unwrap(), value);
+            assert_eq!(slots.get(row), value);
+            row += 1;
+        });
+        assert_eq!(row, 100);
     }
 
     /// One NULL takes the column off the dense path, and the general accessor
@@ -377,7 +501,7 @@ mod tests {
         let page = leaf_page(rows);
         let leaf = LeafRef::parse(&page).unwrap();
         let vector = Vector::from_column(leaf.column(1).unwrap());
-        assert!(vector.dense_int_bytes().is_none());
+        assert!(vector.dense_ints().is_none());
         for row in 0..50usize {
             let value = vector.at(row).unwrap();
             if row == 17 {

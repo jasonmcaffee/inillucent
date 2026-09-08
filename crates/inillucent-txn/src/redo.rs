@@ -31,7 +31,7 @@ use inillucent_base::DbResult;
 use inillucent_pool::page::{self, header};
 use inillucent_pool::{Database, PageId};
 use inillucent_tree::datum::Datum;
-use inillucent_tree::leaf::{LeafBuilder, LeafRef, Packed};
+use inillucent_tree::leaf::{LeafBuilder, LeafRef};
 use inillucent_tree::mutate::{Applied, LeafMut};
 use inillucent_tree::types::ColumnSpec;
 use inillucent_tree::write::Located;
@@ -339,27 +339,22 @@ impl RowRedo for TreeRows {
             let rows = leaf.live()?;
             let builder =
                 LeafBuilder::new(page_size, tree, shape.columns.clone(), shape.key_columns)?;
-            let packed = builder.pack(&rows, inillucent_tree::write::COMPACT_FILL)?;
-            let Packed::Filled {
-                page: mut image,
-                rows: taken,
-            } = packed
-            else {
-                return Err(corrupt(format!(
-                    "replaying a compaction of leaf {} produced no page",
-                    page.0
-                )));
-            };
-            if taken != rows.len() {
+            // **The same fill ladder the write path walked**, and for the same
+            // reason it is a shared function: a compaction is logged without its
+            // page when it is deterministic, and "deterministic" means this
+            // replay lands on the same bytes. A leaf packed above `COMPACT_FILL`
+            // by a bulk build compacts at `TIGHT_FILL` rather than splitting, and
+            // a replay that only knew the first fill declared the file corrupt.
+            let Some(mut image) = inillucent_tree::write::compact_image(&builder, &rows)? else {
                 // The write path only logs a compaction when every live row
                 // fits; a replay that cannot fit them is looking at a different
                 // page than the one the record was written against.
                 return Err(corrupt(format!(
-                    "replaying a compaction of leaf {} fitted {taken} of {} rows",
+                    "replaying a compaction of leaf {} could not fit its {} rows",
                     page.0,
                     rows.len()
                 )));
-            }
+            };
             inillucent_pool::page::set_right(&mut image, leaf.right_sibling())?;
             page::write_u64(
                 &mut image,

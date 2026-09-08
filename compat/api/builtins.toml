@@ -5,7 +5,23 @@
 # `inillucent-compat::obligations::the_registers_match_the_engine` fails if
 # this file and the engine disagree.
 
-count = 183
+count = 213
+
+[[function]]
+name = "->"
+kind = "s"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "->>"
+kind = "s"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
 
 [[function]]
 name = "abs"
@@ -88,6 +104,14 @@ deterministic = true
 innocuous = true
 
 [[function]]
+name = "bm25"
+kind = "s"
+arity = -1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
 name = "ceil"
 kind = "s"
 arity = 1
@@ -122,7 +146,7 @@ innocuous = true
 [[function]]
 name = "coalesce"
 kind = "s"
-arity = -1
+arity = -4
 flags = 526336
 deterministic = true
 innocuous = true
@@ -130,7 +154,7 @@ innocuous = true
 [[function]]
 name = "concat"
 kind = "s"
-arity = -1
+arity = -3
 flags = 526336
 deterministic = true
 innocuous = true
@@ -138,7 +162,7 @@ innocuous = true
 [[function]]
 name = "concat_ws"
 kind = "s"
-arity = -1
+arity = -4
 flags = 526336
 deterministic = true
 innocuous = true
@@ -189,6 +213,30 @@ kind = "w"
 arity = 0
 flags = 526336
 deterministic = true
+innocuous = true
+
+[[function]]
+name = "current_date"
+kind = "s"
+arity = 0
+flags = 2048
+deterministic = false
+innocuous = true
+
+[[function]]
+name = "current_time"
+kind = "s"
+arity = 0
+flags = 2048
+deterministic = false
+innocuous = true
+
+[[function]]
+name = "current_timestamp"
+kind = "s"
+arity = 0
+flags = 2048
+deterministic = false
 innocuous = true
 
 [[function]]
@@ -251,6 +299,14 @@ innocuous = true
 name = "format"
 kind = "s"
 arity = -1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "fts5_source_id"
+kind = "s"
+arity = 0
 flags = 526336
 deterministic = true
 innocuous = true
@@ -400,6 +456,22 @@ deterministic = true
 innocuous = true
 
 [[function]]
+name = "highlight"
+kind = "s"
+arity = -1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "if"
+kind = "s"
+arity = -4
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
 name = "ifnull"
 kind = "s"
 arity = 2
@@ -410,7 +482,7 @@ innocuous = true
 [[function]]
 name = "iif"
 kind = "s"
-arity = 3
+arity = -4
 flags = 526336
 deterministic = true
 innocuous = true
@@ -449,6 +521,14 @@ innocuous = true
 
 [[function]]
 name = "json_array"
+kind = "s"
+arity = -1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "json_array_insert"
 kind = "s"
 arity = -1
 flags = 526336
@@ -617,6 +697,14 @@ innocuous = true
 
 [[function]]
 name = "jsonb_array"
+kind = "s"
+arity = -1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "jsonb_array_insert"
 kind = "s"
 arity = -1
 flags = 526336
@@ -840,6 +928,22 @@ deterministic = true
 innocuous = true
 
 [[function]]
+name = "load_extension"
+kind = "s"
+arity = 1
+flags = 2048
+deterministic = false
+innocuous = true
+
+[[function]]
+name = "load_extension"
+kind = "s"
+arity = 2
+flags = 2048
+deterministic = false
+innocuous = true
+
+[[function]]
 name = "log"
 kind = "s"
 arity = 1
@@ -896,9 +1000,33 @@ deterministic = true
 innocuous = true
 
 [[function]]
+name = "match"
+kind = "s"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "matchinfo"
+kind = "s"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "matchinfo"
+kind = "s"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
 name = "max"
 kind = "s"
-arity = -1
+arity = -3
 flags = 526336
 deterministic = true
 innocuous = true
@@ -912,9 +1040,17 @@ deterministic = true
 innocuous = true
 
 [[function]]
+name = "median"
+kind = "w"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
 name = "min"
 kind = "s"
-arity = -1
+arity = -3
 flags = 526336
 deterministic = true
 innocuous = true
@@ -968,9 +1104,49 @@ deterministic = true
 innocuous = true
 
 [[function]]
+name = "offsets"
+kind = "s"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "optimize"
+kind = "s"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
 name = "percent_rank"
 kind = "w"
 arity = 0
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "percentile"
+kind = "w"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "percentile_cont"
+kind = "w"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "percentile_disc"
+kind = "w"
+arity = 2
 flags = 526336
 deterministic = true
 innocuous = true
@@ -1048,6 +1224,14 @@ deterministic = true
 innocuous = true
 
 [[function]]
+name = "regexp"
+kind = "s"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
 name = "replace"
 kind = "s"
 arity = 3
@@ -1082,15 +1266,7 @@ innocuous = true
 [[function]]
 name = "rtreecheck"
 kind = "s"
-arity = 1
-flags = 526336
-deterministic = true
-innocuous = true
-
-[[function]]
-name = "rtreecheck"
-kind = "s"
-arity = 2
+arity = -1
 flags = 526336
 deterministic = true
 innocuous = true
@@ -1152,6 +1328,14 @@ deterministic = true
 innocuous = true
 
 [[function]]
+name = "snippet"
+kind = "s"
+arity = -1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
 name = "sqlar_compress"
 kind = "s"
 arity = 1
@@ -1165,6 +1349,30 @@ kind = "s"
 arity = 2
 flags = 526336
 deterministic = true
+innocuous = true
+
+[[function]]
+name = "sqlite_compileoption_get"
+kind = "s"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "sqlite_compileoption_used"
+kind = "s"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "sqlite_log"
+kind = "s"
+arity = 2
+flags = 2048
+deterministic = false
 innocuous = true
 
 [[function]]
@@ -1243,6 +1451,14 @@ innocuous = true
 name = "substring"
 kind = "s"
 arity = 3
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "subtype"
+kind = "s"
+arity = 1
 flags = 526336
 deterministic = true
 innocuous = true
@@ -1368,7 +1584,31 @@ deterministic = true
 innocuous = true
 
 [[function]]
+name = "unistr"
+kind = "s"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "unistr_quote"
+kind = "s"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
 name = "unixepoch"
+kind = "s"
+arity = -1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "unknown"
 kind = "s"
 arity = -1
 flags = 526336

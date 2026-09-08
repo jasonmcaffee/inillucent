@@ -542,9 +542,9 @@ impl Accumulator {
     /// this once per batch with the mini-column's bytes and never touches a
     /// `Datum`. It is the reason the aggregate operator has a fast path at all.
     ///
-    /// @param bytes - a contiguous run of little-endian `i64` values
-    pub fn push_dense_ints(&mut self, bytes: &[u8]) {
-        let rows = bytes.len() / 8;
+    /// @param slots - a contiguous run of typed integers, at the leaf's width
+    pub fn push_dense_ints(&mut self, slots: crate::batch::DenseInts<'_>) {
+        let rows = slots.len();
         match self.kind {
             // Unreachable: `takes_dense` is false for a registered aggregate
             // and `takes_whole_row` is true for a JSON group, so no operator
@@ -563,8 +563,12 @@ impl Accumulator {
             AggregateKind::Sum | AggregateKind::Total | AggregateKind::Average => {
                 self.count = self.count.saturating_add(rows as i64);
                 if self.is_real {
-                    for chunk in bytes.chunks_exact(8) {
-                        self.add_int(i64::from_le_bytes(chunk.try_into().unwrap_or([0; 8])));
+                    // Borrowed out of `self` because `add_int` takes it
+                    // mutably and the closure would otherwise hold it twice.
+                    let mut values: Vec<i64> = Vec::with_capacity(rows);
+                    slots.for_each(|value| values.push(value));
+                    for value in values {
+                        self.add_int(value);
                     }
                     return;
                 }
@@ -574,9 +578,7 @@ impl Accumulator {
                 // value the per-row path produces, which the agreement test
                 // asserts.
                 let mut wide: i128 = i128::from(self.integer_sum);
-                for chunk in bytes.chunks_exact(8) {
-                    wide += i128::from(i64::from_le_bytes(chunk.try_into().unwrap_or([0; 8])));
-                }
+                slots.for_each(|value| wide += i128::from(value));
                 match i64::try_from(wide) {
                     Ok(exact) => self.integer_sum = exact,
                     Err(_) => {
@@ -593,12 +595,11 @@ impl Accumulator {
             }
             AggregateKind::Minimum => {
                 let mut best = i64::MAX;
-                for chunk in bytes.chunks_exact(8) {
-                    let value = i64::from_le_bytes(chunk.try_into().unwrap_or([0; 8]));
+                slots.for_each(|value| {
                     if value < best {
                         best = value;
                     }
-                }
+                });
                 if rows > 0 {
                     self.count = self.count.saturating_add(rows as i64);
                     self.push_extreme(&Datum::Int(best), std::cmp::Ordering::Less);
@@ -606,20 +607,20 @@ impl Accumulator {
             }
             AggregateKind::Maximum => {
                 let mut best = i64::MIN;
-                for chunk in bytes.chunks_exact(8) {
-                    let value = i64::from_le_bytes(chunk.try_into().unwrap_or([0; 8]));
+                slots.for_each(|value| {
                     if value > best {
                         best = value;
                     }
-                }
+                });
                 if rows > 0 {
                     self.count = self.count.saturating_add(rows as i64);
                     self.push_extreme(&Datum::Int(best), std::cmp::Ordering::Greater);
                 }
             }
             AggregateKind::GroupConcat(_) => {
-                for chunk in bytes.chunks_exact(8) {
-                    let value = i64::from_le_bytes(chunk.try_into().unwrap_or([0; 8]));
+                let mut values: Vec<i64> = Vec::with_capacity(rows);
+                slots.for_each(|value| values.push(value));
+                for value in values {
                     self.push(&Datum::Int(value));
                 }
             }
@@ -1125,7 +1126,7 @@ mod tests {
                     per_row.push(&Datum::Int(*value));
                 }
                 let mut dense = Accumulator::new(kind.clone());
-                dense.push_dense_ints(&bytes);
+                dense.push_dense_ints(crate::batch::DenseInts::new(&bytes, 8));
                 // **A refusal is an answer the two paths have to agree on
                 // too.** `sum` over `[i64::MAX, 1, 1]` raises `integer
                 // overflow` now, and the point of this sweep is that the
@@ -1159,7 +1160,7 @@ mod tests {
         for batch in 0..5i64 {
             let run: Vec<i64> = (0..100).map(|n| batch * 100 + n).collect();
             let bytes: Vec<u8> = run.iter().flat_map(|value| value.to_le_bytes()).collect();
-            dense.push_dense_ints(&bytes);
+            dense.push_dense_ints(crate::batch::DenseInts::new(&bytes, 8));
             for value in &run {
                 per_row.push(&Datum::Int(*value));
             }

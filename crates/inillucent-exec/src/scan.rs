@@ -261,8 +261,13 @@ impl<'t> TableScan<'t> {
 /// @param len - how many rows the batch holds
 fn slice_vector(vector: Vector<'_>, start: usize, len: usize) -> Vector<'_> {
     match vector {
-        Vector::Int64 { bytes, class } => Vector::Int64 {
-            bytes: slice_inline(bytes, start, len),
+        Vector::Int64 {
+            bytes,
+            width,
+            class,
+        } => Vector::Int64 {
+            bytes: slice_at(bytes, width, start, len),
+            width,
             // A class array is two bits per row, so it can only be sliced at a
             // four-row boundary. Rather than carry an offset, a batch that does
             // not start on one keeps the whole array and is therefore only
@@ -271,7 +276,7 @@ fn slice_vector(vector: Vector<'_>, start: usize, len: usize) -> Vector<'_> {
             class,
         },
         Vector::Float64 { bytes, class } => Vector::Float64 {
-            bytes: slice_inline(bytes, start, len),
+            bytes: slice_at(bytes, 8, start, len),
             class,
         },
         // The general path is not sliced: a batch over it addresses rows by
@@ -280,14 +285,20 @@ fn slice_vector(vector: Vector<'_>, start: usize, len: usize) -> Vector<'_> {
     }
 }
 
-/// Slices a run of 8-byte values.
+/// Narrows a value array to one batch's rows, at a stated slot width.
 ///
-/// @param bytes - the whole value array
-/// @param start - the first row
-/// @param len - how many rows
-fn slice_inline(bytes: &[u8], start: usize, len: usize) -> &[u8] {
-    let from = start.saturating_mul(8);
-    let to = from.saturating_add(len.saturating_mul(8)).min(bytes.len());
+/// An integer mini-column's slots are one, two, four or eight bytes wide
+/// depending on the values in the leaf, so the stride is the column's rather
+/// than the type's.
+///
+/// @param bytes - the value array
+/// @param width - how many bytes one slot occupies
+/// @param start - the first row of the batch
+/// @param len - how many rows the batch holds
+fn slice_at(bytes: &[u8], width: usize, start: usize, len: usize) -> &[u8] {
+    let width = width.max(1);
+    let from = start.saturating_mul(width);
+    let to = from.saturating_add(len.saturating_mul(width)).min(bytes.len());
     bytes.get(from..to).unwrap_or(&[])
 }
 

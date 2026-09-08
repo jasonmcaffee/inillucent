@@ -38,7 +38,7 @@ use inillucent_tree::types::compare_under;
 use inillucent_value::collation::Collation;
 
 use crate::aggregate::{Accumulator, AggregateKind};
-use crate::batch::{Batch, Vector};
+use crate::batch::{Batch, DenseInts, Vector};
 use crate::expr::Eval;
 
 /// Whether the pipeline should keep going.
@@ -606,14 +606,13 @@ impl Sink for SimpleAggregate {
                         argument
                             .column()
                             .and_then(|column| batch.columns.get(column))
-                            .and_then(|vector| vector.dense_int_bytes())
+                            .and_then(|vector| vector.dense_ints())
                     } else {
                         None
                     };
                     match dense {
-                        Some(bytes) => {
-                            let wanted = live.saturating_mul(8).min(bytes.len());
-                            accumulator.push_dense_ints(bytes.get(..wanted).unwrap_or(&[]));
+                        Some(slots) => {
+                            accumulator.push_dense_ints(slots.range(0, live));
                         }
                         None => {
                             for nth in 0..live {
@@ -860,15 +859,14 @@ impl StreamAggregate {
                         argument
                             .column()
                             .and_then(|column| batch.columns.get(column))
-                            .and_then(|vector| vector.dense_int_bytes())
+                            .and_then(|vector| vector.dense_ints())
                     } else {
                         None
                     };
                     match dense {
-                        Some(bytes) => {
-                            let from = start.saturating_mul(8);
-                            let to = from.saturating_add(len.saturating_mul(8)).min(bytes.len());
-                            accumulator.push_dense_ints(bytes.get(from..to).unwrap_or(&[]));
+                        Some(slots) => {
+                            accumulator
+                                .push_dense_ints(slots.range(start, start.saturating_add(len)));
                         }
                         None => {
                             for nth in start..start.saturating_add(len) {
@@ -896,17 +894,17 @@ impl Sink for StreamAggregate {
                 .first()
                 .and_then(|expression| expression.column())
                 .and_then(|column| batch.columns.get(column))
-                .and_then(|vector| vector.dense_int_bytes())
+                .and_then(|vector| vector.dense_ints())
         } else {
             None
         };
-        if let Some(bytes) = dense {
-            let rows = batch.live().min(bytes.len() / 8);
+        if let Some(slots) = dense {
+            let rows = batch.live().min(slots.len());
             let mut start = 0usize;
             while start < rows {
-                let value = read_int(bytes, start);
+                let value = slots.get(start);
                 let mut end = start.saturating_add(1);
-                while end < rows && read_int(bytes, end) == value {
+                while end < rows && slots.get(end) == value {
                     end = end.saturating_add(1);
                 }
                 let same = matches!(
@@ -984,18 +982,6 @@ impl Sink for StreamAggregate {
             }
         }
         self.downstream.reset()
-    }
-}
-
-/// Reads one 8-byte slot of a dense integer vector.
-///
-/// @param bytes - the value array
-/// @param row - the row's position
-fn read_int(bytes: &[u8], row: usize) -> i64 {
-    let at = row.saturating_mul(8);
-    match bytes.get(at..at.saturating_add(8)) {
-        Some(slice) => i64::from_le_bytes(slice.try_into().unwrap_or([0; 8])),
-        None => 0,
     }
 }
 
@@ -1239,8 +1225,9 @@ impl TopN {
 /// and the seek path disagreeing about affinity cost a wrong answer that every
 /// test of either path passed.
 enum KeyColumn<'p> {
-    /// A fully typed integer column: eight bytes per row, no class array.
-    Ints(&'p [u8]),
+    /// A fully typed integer column: one, two, four or eight bytes per row,
+    /// no class array.
+    Ints(DenseInts<'p>),
     /// A fully typed variable-width column: an offset and a length per row.
     Bytes {
         /// `rows * 8` bytes of slots.
@@ -1261,7 +1248,16 @@ impl<'p> KeyColumn<'p> {
     /// @param column - which column the sort term names
     fn of(batch: &Batch<'p>, column: usize) -> KeyColumn<'p> {
         match batch.columns.get(column) {
-            Some(Vector::Int64 { bytes, class: None }) => KeyColumn::Ints(bytes),
+            Some(
+                vector @ Vector::Int64 {
+                    bytes: _,
+                    width: _,
+                    class: None,
+                },
+            ) => match vector.dense_ints() {
+                Some(slots) => KeyColumn::Ints(slots),
+                None => KeyColumn::General(*vector),
+            },
             Some(Vector::Variable { slots, page, text }) => KeyColumn::Bytes {
                 slots,
                 page,
@@ -1277,15 +1273,11 @@ impl<'p> KeyColumn<'p> {
     /// @param row - the row's position within the batch, after any selection
     fn at(&self, row: usize) -> DbResult<Datum<'p>> {
         match self {
-            KeyColumn::Ints(bytes) => {
-                let at = row.saturating_mul(8);
-                Ok(match bytes.get(at..at.saturating_add(8)) {
-                    Some(slice) => {
-                        Datum::Int(i64::from_le_bytes(slice.try_into().unwrap_or([0; 8])))
-                    }
-                    None => Datum::Null,
-                })
-            }
+            KeyColumn::Ints(slots) => Ok(if row < slots.len() {
+                Datum::Int(slots.get(row))
+            } else {
+                Datum::Null
+            }),
             KeyColumn::Bytes { slots, page, text } => {
                 let at = row.saturating_mul(8);
                 let Some(slot) = slots.get(at..at.saturating_add(8)) else {
@@ -1704,6 +1696,7 @@ mod tests {
             let dense = Batch::new(
                 count,
                 vec![Vector::Int64 {
+                    width: 8,
                     bytes: &bytes,
                     class: None,
                 }],
@@ -1712,6 +1705,7 @@ mod tests {
                 rows: count,
                 selection: Some(&all),
                 columns: vec![Vector::Int64 {
+                    width: 8,
                     bytes: &bytes,
                     class: None,
                 }]
@@ -1790,6 +1784,7 @@ mod tests {
             rows: 100,
             selection: Some(&selection),
             columns: vec![Vector::Int64 {
+                width: 8,
                 bytes: &bytes,
                 class: None,
             }]
@@ -1955,10 +1950,12 @@ mod tests {
             let make = |dense: bool| {
                 let columns = vec![
                     Vector::Int64 {
+                        width: 8,
                         bytes: &key_bytes,
                         class: None,
                     },
                     Vector::Int64 {
+                        width: 8,
                         bytes: &payload_bytes,
                         class: None,
                     },

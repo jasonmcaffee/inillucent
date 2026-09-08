@@ -760,7 +760,10 @@ impl ImportedDatabase {
                 b"sqlite_stmt" => self.stmt_rows()?,
                 _ => self.completion_rows(&argument)?,
             };
-            inillucent_exec::ops::emit_rows(&rows, downstream)?;
+            // The argument came out of an `Eq` on the first hidden column and
+            // is the only constraint this answer applied; everything else the
+            // planner took out of the residual has to be tested here.
+            self.emit_filtered(rows, offer, params, &hidden_columns(table), downstream)?;
             return Ok(true);
         }
         // The same arrangement for the two tables that describe the file; see
@@ -776,7 +779,10 @@ impl ImportedDatabase {
             for row in &mut rows {
                 row.push(OwnedDatum::Text(b"main".to_vec()));
             }
-            inillucent_exec::ops::emit_rows(&rows, downstream)?;
+            // Nothing here consumed a constraint - the schema qualifier is
+            // always `main` and the rows are the whole file - so every offered
+            // predicate is the engine's to test.
+            self.emit_filtered(rows, offer, params, &[], downstream)?;
             return Ok(true);
         }
         // **An eponymous module has nothing in `virtual_tables`**, because
@@ -965,7 +971,7 @@ impl ImportedDatabase {
                     &values,
                 )?));
             }
-            if !passes_rechecks(&row, &rechecks)? {
+            if !passes_rechecks(&row, &rechecks, self.case_sensitive_like)? {
                 cursor.next(&mut context)?;
                 continue;
             }
@@ -989,24 +995,47 @@ impl ImportedDatabase {
     }
 }
 
+/// One constraint the engine has to test for itself: which column, which
+/// operator, against what, under which collation.
+type Recheck = (
+    usize,
+    inillucent_sql::vtab::ConstraintOp,
+    OwnedDatum,
+    inillucent_value::collation::Collation,
+);
+
+/// Returns the positions of a table's hidden columns.
+///
+/// A table-valued function's arguments arrive as `Eq` constraints on these, so
+/// they are the constraints an eponymous answer has already applied by the time
+/// it has any rows.
+///
+/// @param table - the function's catalog entry
+fn hidden_columns(table: &inillucent_sql::catalog_view::TableInfo) -> Vec<i32> {
+    table
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| column.hidden)
+        .filter_map(|(at, _)| i32::try_from(at).ok())
+        .collect()
+}
+
 /// Reports whether a produced row satisfies the constraints the module left.
 ///
 /// @param row - the row the cursor produced
 /// @param rechecks - the column, operator, value and collation of each
+/// @param case_sensitive - `PRAGMA case_sensitive_like`, for a `LIKE` recheck
 fn passes_rechecks(
     row: &[OwnedDatum],
-    rechecks: &[(
-        usize,
-        inillucent_sql::vtab::ConstraintOp,
-        OwnedDatum,
-        inillucent_value::collation::Collation,
-    )],
+    rechecks: &[Recheck],
+    case_sensitive: bool,
 ) -> DbResult<bool> {
     for (column, op, wanted, collation) in rechecks {
         let Some(held) = row.get(*column) else {
             return Ok(false);
         };
-        if !satisfies(held, *op, wanted, *collation)? {
+        if !satisfies(held, *op, wanted, *collation, case_sensitive)? {
             return Ok(false);
         }
     }
@@ -1109,7 +1138,7 @@ impl ImportedDatabase {
             return Ok(false);
         };
         let width = answer.names.len();
-        let mut rows: Vec<Vec<OwnedDatum>> = Vec::with_capacity(inillucent_exec::batch::BATCH_ROWS);
+        let mut rows: Vec<Vec<OwnedDatum>> = Vec::with_capacity(answer.rows.len());
         for row in answer.rows {
             let mut held = row;
             held.truncate(width);
@@ -1119,19 +1148,89 @@ impl ImportedDatabase {
             held.push(argument.clone());
             held.push(schema.clone());
             rows.push(held);
-            if rows.len() >= inillucent_exec::batch::BATCH_ROWS {
-                if inillucent_exec::ops::emit_rows(&rows, downstream)?
+        }
+        // The two hidden columns *are* the arguments and were applied above;
+        // every other offered predicate was taken out of the residual on the
+        // promise that something would test it, and this is the something.
+        let applied: Vec<i32> = hidden
+            .iter()
+            .filter_map(|at| i32::try_from(*at).ok())
+            .collect();
+        self.emit_filtered(rows, offer, params, &applied, downstream)?;
+        Ok(true)
+    }
+
+    /// Emits rows this connection produced itself, testing the predicates the
+    /// planner took out of the residual and nothing else applied.
+    ///
+    /// **The eponymous answers are not module cursors, and that is why they
+    /// need this.** `virtual_path` consumes every offered predicate on the
+    /// optimistic assumption that the scan puts back what it does not apply;
+    /// the module path keeps that promise in `passes_rechecks`, and the
+    /// branches that answer out of the connection - `dbstat`, `sqlite_dbpage`,
+    /// `pragma_*`, `bytecode`, `tables_used`, `sqlite_stmt`, `completion` -
+    /// returned before reaching it. `SELECT name FROM dbstat WHERE
+    /// name='main_key'` answered with every page in the file, and
+    /// `SELECT name FROM pragma_table_info('t') WHERE name='b'` with every
+    /// column.
+    ///
+    /// @param rows - the rows the connection produced, hidden columns included
+    /// @param offer - every constraint the planner pushed down
+    /// @param params - the values bound to `?1`, `?2`, ...
+    /// @param applied - the columns this answer already filtered on
+    /// @param downstream - where the batches go
+    fn emit_filtered(
+        &self,
+        rows: Vec<Vec<OwnedDatum>>,
+        offer: &[inillucent_sql::plan::VirtualConstraint],
+        params: &inillucent_exec::physical::Params,
+        applied: &[i32],
+        downstream: &mut dyn inillucent_exec::ops::Sink,
+    ) -> DbResult<()> {
+        let width = rows.first().map(Vec::len).unwrap_or(0);
+        let mut rechecks: Vec<Recheck> = Vec::new();
+        for constraint in offer {
+            let column = constraint.spec.column;
+            if applied.contains(&column) {
+                continue;
+            }
+            // A negative column is the rowid, which these rows do not carry -
+            // and answering with every row would be the bug this exists to
+            // close, so it is refused instead.
+            let Some(at) = usize::try_from(column).ok().filter(|at| *at < width) else {
+                if rows.is_empty() {
+                    continue;
+                }
+                return Err(refusal(
+                    "the engine cannot test that constraint against this table",
+                ));
+            };
+            rechecks.push((
+                at,
+                constraint.spec.op,
+                inillucent_exec::physical::literal_value(&constraint.value, params)?,
+                inillucent_value::collation::Collation::Binary,
+            ));
+        }
+        let mut batch: Vec<Vec<OwnedDatum>> = Vec::with_capacity(inillucent_exec::batch::BATCH_ROWS);
+        for row in rows {
+            if !passes_rechecks(&row, &rechecks, self.case_sensitive_like)? {
+                continue;
+            }
+            batch.push(row);
+            if batch.len() >= inillucent_exec::batch::BATCH_ROWS {
+                if inillucent_exec::ops::emit_rows(&batch, downstream)?
                     == inillucent_exec::ops::Flow::Stop
                 {
-                    return Ok(true);
+                    return Ok(());
                 }
-                rows.clear();
+                batch.clear();
             }
         }
-        if !rows.is_empty() {
-            inillucent_exec::ops::emit_rows(&rows, downstream)?;
+        if !batch.is_empty() {
+            inillucent_exec::ops::emit_rows(&batch, downstream)?;
         }
-        Ok(true)
+        Ok(())
     }
 
     /// Connects an eponymous module for the length of one scan.
@@ -1514,21 +1613,26 @@ impl ImportedDatabase {
 
 /// Reports whether one value satisfies one of a module's constraints.
 ///
-/// The comparisons are the dialect's, under the column's own collation. An
-/// operator the engine cannot evaluate - `MATCH`, `GLOB`, `LIKE`, a module's own
-/// function - is refused rather than answered: the module either promised to
-/// apply it or it cannot be applied at all, and answering as though it had been
-/// would return rows the query excluded.
+/// The comparisons are the dialect's, under the column's own collation.
+/// `LIKE`, `GLOB` and `REGEXP` are evaluated here with the same implementations
+/// the pipeline's own residual uses, because the engine *can* evaluate them and
+/// refusing them turned `SELECT value FROM json_each('[\"aa\"]') WHERE value
+/// LIKE 'a%'` - a statement SQLite answers - into an error. `MATCH` is the one
+/// that stays refused: it is the module's own operator and has no meaning
+/// outside it, so answering as though it had been applied would return rows the
+/// query excluded.
 ///
 /// @param held - the value the module produced
 /// @param op - the operator the constraint carries
 /// @param wanted - the value on the other side
 /// @param collation - the column's collation
+/// @param case_sensitive - `PRAGMA case_sensitive_like`
 fn satisfies(
     held: &OwnedDatum,
     op: inillucent_sql::vtab::ConstraintOp,
     wanted: &OwnedDatum,
     collation: inillucent_value::Collation,
+    case_sensitive: bool,
 ) -> DbResult<bool> {
     use inillucent_sql::vtab::ConstraintOp;
     use std::cmp::Ordering;
@@ -1537,6 +1641,23 @@ fn satisfies(
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         // A comparison against NULL is unknown, which excludes the row.
         return Ok(false);
+    }
+    // A pattern reads both sides as text, which is what the pipeline's own
+    // `Pattern` expression does; the ordering below would compare a number to a
+    // pattern string and answer nonsense.
+    let pattern = match op {
+        ConstraintOp::Like => Some(inillucent_exec::scalar::PatternOperator::Like),
+        ConstraintOp::Glob => Some(inillucent_exec::scalar::PatternOperator::Glob),
+        ConstraintOp::Regexp => Some(inillucent_exec::scalar::PatternOperator::Regexp),
+        _ => None,
+    };
+    if let Some(pattern) = pattern {
+        return Ok(inillucent_exec::scalar::matches_pattern(
+            pattern,
+            &left,
+            &right,
+            case_sensitive,
+        ));
     }
     let order = inillucent_value::compare::compare_values(&left, &right, collation);
     Ok(match op {

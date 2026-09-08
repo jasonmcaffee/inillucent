@@ -77,6 +77,27 @@ impl PhysicalType {
         }
     }
 
+    /// Reports whether a column of this type may use a slot narrower than
+    /// [`PhysicalType::slot_width`].
+    ///
+    /// Only `Int64`. A `Float64` slot is a bit pattern and truncating one loses
+    /// the value; `Text`, `Blob` and `Any` slots are addresses into the page,
+    /// and narrowing those is a change to the heap's addressing rather than to
+    /// a value's encoding.
+    pub fn narrows(self) -> bool {
+        matches!(self, PhysicalType::Int64)
+    }
+
+    /// Reports whether a width is one this type's slots may be written at.
+    ///
+    /// @param width - the width a page's column directory claims
+    pub fn admits_width(self, width: usize) -> bool {
+        if !self.narrows() {
+            return width == self.slot_width();
+        }
+        matches!(width, 1 | 2 | 4 | 8)
+    }
+
     /// Reports whether values of this type live in the value array itself.
     pub fn is_inline(self) -> bool {
         matches!(self, PhysicalType::Int64 | PhysicalType::Float64)
@@ -91,6 +112,65 @@ impl PhysicalType {
             PhysicalType::Blob,
             PhysicalType::Any,
         ]
+    }
+}
+
+/// Returns the narrowest signed slot, in bytes, that holds one integer.
+///
+/// The width is the *storage* of a two's-complement value, so a slot is read
+/// back by sign-extending it and the value that comes out is the value that
+/// went in. One byte covers -128..=127, two covers -32,768..=32,767, four
+/// covers a 32-bit range, and eight is what every slot used to be.
+///
+/// @param value - the integer being stored
+pub fn int_slot_width(value: i64) -> usize {
+    if i64::from(value as i8) == value {
+        1
+    } else if i64::from(value as i16) == value {
+        2
+    } else if i64::from(value as i32) == value {
+        4
+    } else {
+        8
+    }
+}
+
+/// Reads one integer out of a narrow slot, sign-extending it.
+///
+/// @param slot - exactly `width` bytes of the value array
+pub fn read_int_slot(slot: &[u8]) -> i64 {
+    match slot.len() {
+        1 => i64::from(slot.first().copied().unwrap_or(0) as i8),
+        2 => {
+            let mut raw = [0u8; 2];
+            raw.copy_from_slice(slot);
+            i64::from(i16::from_le_bytes(raw))
+        }
+        4 => {
+            let mut raw = [0u8; 4];
+            raw.copy_from_slice(slot);
+            i64::from(i32::from_le_bytes(raw))
+        }
+        _ => {
+            let mut raw = [0u8; 8];
+            raw.copy_from_slice(slot.get(..8).unwrap_or(&[0; 8]));
+            i64::from_le_bytes(raw)
+        }
+    }
+}
+
+/// Writes one integer into a narrow slot, truncating it.
+///
+/// The caller has already chosen a width that holds the value, so the
+/// truncation is lossless; [`read_int_slot`] is its inverse.
+///
+/// @param slot - exactly `width` bytes of the value array
+/// @param value - the integer to store
+pub fn write_int_slot(slot: &mut [u8], value: i64) {
+    let raw = value.to_le_bytes();
+    let width = slot.len().min(8);
+    if let (Some(target), Some(source)) = (slot.get_mut(..width), raw.get(..width)) {
+        target.copy_from_slice(source);
     }
 }
 
