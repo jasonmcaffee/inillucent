@@ -54,6 +54,8 @@ pub struct Opened {
 /// that was started with one file.
 pub const CONNECTIONS: usize = 5;
 
+/// One shell session: the databases it can reach, and every setting a dot
+/// command can change.
 pub struct Shell {
     /// The databases `.connection` switches between; slot 0 is the one the
     /// shell was started on.
@@ -141,6 +143,48 @@ pub struct Shell {
     pub progress_quiet: bool,
     /// Whether the next number belongs to a `--limit` that has just been read.
     pub progress_pending_limit: bool,
+    /// Whether a statement that changes something is refused.
+    ///
+    /// `-readonly` on the command line, and `--readonly` on `inillucent` and
+    /// `inillucent-mcp`. **The binder decides what writes, not a scan of the
+    /// text**: `EXPLAIN QUERY PLAN` over the statement fails with "not a
+    /// read-only statement" for anything that does, which cannot be talked past
+    /// with whitespace, a comment or an unusual capitalisation. It is the same
+    /// mechanism `inillucent-driver` uses and it is deliberately the same one -
+    /// two classifiers would eventually disagree, and the one that let a write
+    /// through would be the one nobody was watching.
+    ///
+    /// The *file* is still open for writing. The capability table says
+    /// `readonly_open` is `partial` and says exactly this, which is why the row
+    /// is worth reading before an application decides what it means by "open
+    /// this read only".
+    pub readonly: bool,
+    /// Whether the commands that reach outside the database are refused.
+    ///
+    /// `-safe` on the command line. The set is the reference's: running a
+    /// program (`.shell`, `.system`), loading a shared library (`.load`),
+    /// changing the working directory (`.cd`), handing a file to whatever the
+    /// system opens it with (`.excel`, `.www`), and writing output through a
+    /// pipe (`.output |cmd`, `.once |cmd`). Every one of them is a way for a
+    /// script that was only supposed to query a database to run code.
+    ///
+    /// `.nonce` lifts it for one command, which is the reference's own escape
+    /// hatch and is why the token is a secret the script's author chose.
+    pub safe: bool,
+    /// Where output goes when a caller is collecting it rather than printing.
+    ///
+    /// **Not the same as `captured`, and deliberately outside it.** `captured`
+    /// belongs to `.testcase`/`.check`, which compare one command's output
+    /// against an expected digest; this belongs to a caller running the shell
+    /// as a subroutine - task-1836's `run` command and the MCP server behind it
+    /// - and has to still be collecting while a `.testcase` inside the script it
+    /// was given is doing its own thing. So `say` checks the testcase first and
+    /// this second, and a script that uses both nests the way it reads.
+    ///
+    /// `complain` writes here too, because a caller collecting output wants the
+    /// error in the same stream a person would have seen it in. It still sets
+    /// `failed`.
+    pub sink: Option<String>,
     /// The values `.parameter set` bound, by the name they were given.
     ///
     /// **The shell's own table, not the engine's.** SQLite keeps them in a
@@ -169,6 +213,18 @@ pub struct Failure {
     pub offset: Option<u32>,
     /// Whether it failed to compile rather than while running.
     pub compiling: bool,
+    /// The engine's own error, kept so a caller can classify it.
+    ///
+    /// **The message is not the classification.** task-1836's command layer
+    /// has to tell a caller whether a statement was refused because the engine
+    /// has not built the construct - the driver's `unsupported` - or because it
+    /// was mistyped, and `drivers/README.md` argues at length for why folding
+    /// those two together throws the design away. Only the `DbError` knows:
+    /// `unsupported()` is a field on it, and the primary code separates a
+    /// constraint from a busy file from corruption. Rendering it to a sentence
+    /// here and matching on the sentence there would be a second, worse
+    /// classifier beside the driver's.
+    pub error: Option<inillucent_base::DbError>,
 }
 
 impl Shell {
@@ -245,6 +301,9 @@ impl Shell {
             progress_quiet: false,
             progress_pending_limit: false,
             parameters: std::collections::BTreeMap::new(),
+            readonly: false,
+            safe: false,
+            sink: None,
             line: 1,
         })
     }
@@ -413,6 +472,11 @@ impl Shell {
             self.captured.push('\n');
             return;
         }
+        if let Some(sink) = self.sink.as_mut() {
+            sink.push_str(line);
+            sink.push('\n');
+            return;
+        }
         let ending = if self.crlf { "\r\n" } else { "\n" };
         match self.output.as_mut() {
             Some(file) => {
@@ -426,9 +490,35 @@ impl Shell {
     }
 
     /// Prints an error, which always goes to standard error.
+    ///
+    /// Unless a caller is collecting output, in which case it goes there: a
+    /// command run through the MCP server has no standard error anybody will
+    /// ever read, and an error that vanished would be worse than one printed
+    /// among the rows.
     pub fn complain(&mut self, message: &str) {
-        eprintln!("{message}");
+        match self.sink.as_mut() {
+            Some(sink) => {
+                sink.push_str(message);
+                sink.push('\n');
+            }
+            None => eprintln!("{message}"),
+        }
         self.failed = true;
+    }
+
+    /// Refuses a command that safe mode does not allow, and says which it was.
+    ///
+    /// Returns whether the caller may go on. A matching `.nonce` has already
+    /// cleared safe mode for this command by the time this is asked, because
+    /// that is what `.nonce` does.
+    ///
+    /// @param command - the dot command being attempted, leading dot included
+    pub fn unsafe_refused(&mut self, command: &str) -> bool {
+        if !self.safe {
+            return false;
+        }
+        self.complain(&format!("Error: {command} is prohibited in safe mode"));
+        true
     }
 
     /// Sends output to a file, or back to standard output when `path` is none.
@@ -459,6 +549,10 @@ impl Shell {
 
     /// Runs one complete statement and prints whatever it produced.
     pub fn run(&mut self, sql: &str) {
+        if self.readonly && self.writes(sql) {
+            self.complain("Error: attempt to write a readonly database");
+            return;
+        }
         if self.echo {
             let text = sql.to_string();
             self.say(&text);
@@ -554,12 +648,53 @@ impl Shell {
 
     /// Runs a statement and collects its column names and rows.
     pub fn collect(&self, sql: &str) -> Result<(Vec<String>, Vec<Vec<Value<'static>>>), Failure> {
+        self.collect_bound(sql, &[])
+    }
+
+    /// Runs a statement with values bound by position, and collects its rows.
+    ///
+    /// **By position, because a caller that is a program has no names.** The
+    /// shell's own `.parameter` table binds `:name` and `@name` markers, which
+    /// is what a person typing a script wants; a command arriving over MCP or
+    /// off a command line carries an ordered array and means `?1`, `?2`, ... .
+    /// Going through the named table for those was the first thing task-1836
+    /// tried and it bound nothing at all: the engine reports a numbered marker
+    /// under a name that is not the text `?1`, so every lookup missed and every
+    /// value silently arrived as NULL. Binding by the index the parser assigned
+    /// cannot miss.
+    ///
+    /// Both mechanisms apply: positional values are bound first and the named
+    /// table after, so a script that sets `:limit` once and passes `?1` per
+    /// call gets both.
+    ///
+    /// @param sql - the statement
+    /// @param bound - the values for `?1`, `?2`, ... in order
+    pub fn collect_bound(
+        &self,
+        sql: &str,
+        bound: &[OwnedDatum],
+    ) -> Result<(Vec<String>, Vec<Vec<Value<'static>>>), Failure> {
         let connection = self.connection();
         let mut statement = connection.prepare(sql).map_err(|error| Failure {
             message: reason(&error),
             offset: error.sql_offset(),
             compiling: true,
+            error: Some(error),
         })?;
+        for (nth, value) in bound.iter().enumerate() {
+            // The parser numbers markers from one, and a caller that passed
+            // more values than the statement has markers is told so rather than
+            // having the extras dropped: a query that silently ignored an
+            // argument is a query answering a different question.
+            statement
+                .bind(nth as u32 + 1, value.clone())
+                .map_err(|error| Failure {
+                    message: reason(&error),
+                    offset: None,
+                    compiling: true,
+                    error: Some(error),
+                })?;
+        }
         // **What `.parameter set` bound, applied by name.** A statement that
         // names none of them binds nothing; a name the statement does not use
         // is not an error, which is what makes a set of parameters reusable
@@ -582,6 +717,7 @@ impl Shell {
                         message: reason(&error),
                         offset: None,
                         compiling: false,
+                        error: Some(error),
                     })
                 }
                 Ok(false) => break,
@@ -612,6 +748,22 @@ impl Shell {
         self.connection()
             .execute_batch(sql)
             .map_err(|error| reason(&error))
+    }
+
+    /// Returns whether a statement changes something, as the binder sees it.
+    ///
+    /// A statement that fails to plan for any other reason - a missing table, a
+    /// construct the engine has not built - answers `false`, so it reaches the
+    /// ordinary path and is reported as the failure it actually is. Telling a
+    /// caller to reopen the file over a typo would be worse than not having the
+    /// flag.
+    ///
+    /// @param sql - the statement
+    pub fn writes(&self, sql: &str) -> bool {
+        match self.connection().explain(sql) {
+            Ok(_) => false,
+            Err(error) => error.message().contains("not a read-only statement"),
+        }
     }
 
     /// Returns one column of one row, as text.

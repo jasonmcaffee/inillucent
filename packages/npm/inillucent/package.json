@@ -1,0 +1,36 @@
+{
+  "name": "inillucent",
+  "version": "0.1.0",
+  "description": "Embedded SQL database with full-text and vector search, an MCP server, and a sqlite3-shaped shell. No native build step: the binaries ship as platform packages.",
+  "keywords": ["database", "sql", "sqlite", "vector", "embedding", "search", "mcp", "cli", "rag"],
+  "homepage": "https://github.com/jasonmcaffee/inillucent#readme",
+  "bugs": "https://github.com/jasonmcaffee/inillucent/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jasonmcaffee/inillucent.git",
+    "directory": "packages/npm/inillucent"
+  },
+  "license": "MIT",
+  "author": "Jason McAffee",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "inillucent": "bin/inillucent.mjs",
+    "inillucent-shell": "bin/inillucent-shell.mjs",
+    "inillucent-mcp": "bin/inillucent-mcp.mjs",
+    "inillucent-migrate": "bin/inillucent-migrate.mjs"
+  },
+  "main": "index.mjs",
+  "exports": {
+    ".": "./index.mjs"
+  },
+  "files": ["bin", "index.mjs", "resolve.mjs", "README.md"],
+  "optionalDependencies": {
+    "@inillucent/cli-win32-x64": "0.1.0",
+    "@inillucent/cli-darwin-arm64": "0.1.0",
+    "@inillucent/cli-darwin-x64": "0.1.0",
+    "@inillucent/cli-linux-x64": "0.1.0"
+  }
+}

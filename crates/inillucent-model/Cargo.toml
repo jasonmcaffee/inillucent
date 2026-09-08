@@ -3,6 +3,7 @@ name = "inillucent-model"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "An executable model of the engine's transactional semantics, and the traces that drive it"
 
 # The model depends on nothing but the error type. That is the whole point: a

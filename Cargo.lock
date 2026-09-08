@@ -624,6 +624,7 @@ version = "0.1.0"
 dependencies = [
  "inillucent-alloc",
  "inillucent-base",
+ "inillucent-driver",
  "inillucent-engine",
  "inillucent-tree",
  "inillucent-value",
@@ -637,6 +638,8 @@ dependencies = [
  "inillucent-alloc",
  "inillucent-base",
  "inillucent-catalog",
+ "inillucent-cli",
+ "inillucent-driver",
  "inillucent-engine",
  "inillucent-exec",
  "inillucent-ext",

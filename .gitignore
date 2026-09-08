@@ -1,6 +1,12 @@
 # Build output.
 /target/
 
+# The release archives packaging/release.* stages. They are built from a tag,
+# uploaded to the GitHub release, and downloaded by every installer; nothing
+# here is source and none of it is reproducible from the repository alone
+# without the toolchain that built it.
+/dist/
+
 # The corpus and its vectors. Both are large and both are rebuilt from public
 # sources by scripts/fetch-public-corpus.sh, so neither belongs in the repository.
 # Keeping the text out also means the share alike licences of the Wikipedia
@@ -56,3 +62,29 @@ corpus.jsonl
 # writes its bytecode cache beside it.
 __pycache__/
 *.pyc
+
+# The npm packages packages/npm/build.mjs assembles from dist/. The manifests
+# and the shims are source; the staged tree is a copy of them with the built
+# binaries beside it, and it is rebuilt from dist/ every release.
+/packages/npm/staged/
+*.tgz
+
+# The Python wheel packages/python/build.py assembles, and everything it stages
+# into the package to do it. The manifests, the shims and the __init__ are
+# source; the binaries, the C ABI library, the header, the licence copy and
+# `driver.py` are all copied in from elsewhere in the repository at build time,
+# and a second tracked copy of any of them is a copy that would go stale.
+/packages/python/build/
+/packages/python/dist/
+/packages/python/LICENSE
+**/*.egg-info/
+/packages/python/src/inillucent/_bin/
+/packages/python/src/inillucent/_lib/
+/packages/python/src/inillucent/_include/
+/packages/python/src/inillucent/driver.py
+
+# Composer's own output, and the binaries packages/php/bin/inillucent-install
+# downloads into the package at run time.
+/vendor/
+/composer.lock
+/packages/php/runtime/

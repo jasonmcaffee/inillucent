@@ -3,6 +3,7 @@ name = "inillucent-session"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Connection-local state, statement lifecycle, hooks, PRAGMA state, and interrupt handling."
 
 [dependencies]

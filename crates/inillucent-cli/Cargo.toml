@@ -3,11 +3,31 @@ name = "inillucent-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "SQLite-like shell used for compatibility testing and manual diagnosis."
+description = "inillucent's command surface: the sqlite3-shaped shell, the verb-shaped CLI, and the MCP server."
+repository = "https://github.com/jasonmcaffee/inillucent"
+readme = "../../README.md"
+keywords = ["database", "sql", "sqlite", "mcp", "cli"]
+categories = ["database", "command-line-utilities"]
 
+[lib]
+name = "inillucent_cli"
+path = "src/lib.rs"
+
+# The sqlite3-shaped shell, whose name and behaviour are fixed by the scripts
+# that drive `sqlite3`.
 [[bin]]
 name = "inillucent-shell"
 path = "src/main.rs"
+
+# The verb-shaped command line (task-1836).
+[[bin]]
+name = "inillucent"
+path = "src/bin/inillucent.rs"
+
+# The same commands, served to an agent over MCP.
+[[bin]]
+name = "inillucent-mcp"
+path = "src/bin/inillucent-mcp.rs"
 
 [features]
 default = []
@@ -18,6 +38,7 @@ embed = ["inillucent-engine/embed"]
 [dependencies]
 inillucent-alloc = { workspace = true }
 inillucent-base = { workspace = true }
+inillucent-driver = { workspace = true }
 inillucent-engine = { workspace = true }
 inillucent-value = { workspace = true }
 inillucent-tree = { workspace = true }

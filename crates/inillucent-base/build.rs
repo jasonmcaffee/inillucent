@@ -267,12 +267,64 @@ fn emit_limit_table(out: &mut String, rows: &[Table]) {
     out.push_str("];\n");
 }
 
-/// Reads a manifest next to the workspace root and registers it for rerun.
-fn read_manifest(manifest_dir: &Path, relative: &str) -> String {
-    let path = manifest_dir.join(relative);
-    println!("cargo:rerun-if-changed={}", path.display());
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+/// Reads one of the two manifests, from the workspace or from the vendored copy.
+///
+/// **Two locations, and the second one exists because of `cargo publish`.** The
+/// manifests live in `compat/`, which is above this crate's directory, and a
+/// published `.crate` tarball holds nothing above the crate directory - so a
+/// build script that could only read `../../compat/errors.toml` made this crate
+/// unpublishable, and everything above it in the graph with it. task-1836 found
+/// that the first time it ran `cargo publish --dry-run`.
+///
+/// So the manifests are also vendored into `manifests/`, which travels in the
+/// tarball, and the workspace copy wins whenever it is there.
+///
+/// **And the two are compared, every build, whenever both exist.** A vendored
+/// copy that nothing checks is a copy that goes stale, and this one generates
+/// the engine's error table - a stale one would silently give a released build
+/// a different set of result codes from the one the compatibility harness
+/// tests. So a difference is a build failure that names the file, which is the
+/// same shape as every other invariant in this repository: checked, not
+/// documented.
+///
+/// @param manifest_dir - this crate's directory, as cargo sets it
+/// @param relative - the workspace path, relative to this crate
+/// @param vendored - the file name under `manifests/`
+fn read_manifest(manifest_dir: &Path, relative: &str, vendored: &str) -> String {
+    let workspace = manifest_dir.join(relative);
+    let carried = manifest_dir.join("manifests").join(vendored);
+    println!("cargo:rerun-if-changed={}", workspace.display());
+    println!("cargo:rerun-if-changed={}", carried.display());
+
+    let from_workspace = std::fs::read_to_string(&workspace).ok();
+    let from_package = std::fs::read_to_string(&carried).ok();
+
+    match (from_workspace, from_package) {
+        (Some(workspace_text), Some(package_text)) => {
+            // Compared as lines rather than as bytes, because git's autocrlf
+            // rewrites the line endings of one copy and not the other on this
+            // platform, and a difference in line endings is not a difference in
+            // the table. Everything else is.
+            let same = workspace_text.lines().eq(package_text.lines());
+            assert!(
+                same,
+                "{} and {} have drifted apart.\n  \
+                 The workspace copy is the source of truth: copy it over the vendored one.\n  \
+                 The vendored copy exists so this crate can be published; a stale one would \
+                 give a released build a different error table from the one the harness tests.",
+                workspace.display(),
+                carried.display()
+            );
+            workspace_text
+        }
+        (Some(workspace_text), None) => workspace_text,
+        (None, Some(package_text)) => package_text,
+        (None, None) => panic!(
+            "cannot read {} or {}",
+            workspace.display(),
+            carried.display()
+        ),
+    }
 }
 
 /// Reads the manifests, generates the error and limit tables, and tells cargo
@@ -281,7 +333,7 @@ fn main() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets this"));
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("cargo sets this"));
     generate_limits(&manifest_dir, &out_dir);
-    let text = read_manifest(&manifest_dir, "../../compat/errors.toml");
+    let text = read_manifest(&manifest_dir, "../../compat/errors.toml", "errors.toml");
     let (top, arrays) = parse_manifest(&text);
     let primary = arrays
         .get("primary")
@@ -313,7 +365,7 @@ fn main() {
 
 /// Generates the limit table into `OUT_DIR`.
 fn generate_limits(manifest_dir: &Path, out_dir: &Path) {
-    let text = read_manifest(manifest_dir, "../../compat/limits.toml");
+    let text = read_manifest(manifest_dir, "../../compat/limits.toml", "limits.toml");
     let (_, arrays) = parse_manifest(&text);
     let rows = arrays
         .get("limit")

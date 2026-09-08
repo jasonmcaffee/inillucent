@@ -1,0 +1,20 @@
+inillucent
+
+An embedded SQL database that speaks SQLite's dialect on its own storage, with
+full-text and vector search built in - the job of PostgreSQL + pgvector + an
+embedding server, in one process and one file.
+
+This installs four programs into /usr/local/bin:
+
+  inillucent          the command line: query, exec, describe, import, export,
+                      backup, search, and twenty more verbs
+  inillucent-shell    a sqlite3-shaped interactive shell, with all 63 of its
+                      dot commands
+  inillucent-mcp      the same commands served to an AI agent over MCP
+  inillucent-migrate  builds an inillucent database from a SQLite file
+
+and the C ABI (/usr/local/lib/libinillucent_driver_capi.dylib) with its header,
+which is how a binding in any language reaches the engine.
+
+Nothing runs in the background. There is no service and no daemon: a database
+is a file, and a program opens it.

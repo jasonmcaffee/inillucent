@@ -508,6 +508,16 @@ kind = "production"
 layer = 10
 may_depend_on = ["inillucent-driver"]
 
+# The command surface: the sqlite3-shaped shell, the verb-shaped `inillucent`
+# binary and the MCP server, which are three front ends over one command table
+# (task-1836). The edge to `inillucent-driver` is deliberate and narrow: the
+# driver owns the classification of a failure - `unsupported` against `syntax`,
+# the distinction `drivers/README.md` argues is the whole shape of the design -
+# and it owns the checked capability table. A CLI that classified failures for
+# itself would be a second classifier that drifts the first time the engine
+# grows a construct, and a CLI that carried its own feature list would carry a
+# list nobody runs. Neither reaches the engine through the driver: statements go
+# through the shell, as they always have.
 [[crate]]
 name = "inillucent-cli"
 kind = "production"
@@ -516,6 +526,7 @@ may_depend_on = [
     "inillucent-alloc",
   "inillucent-base",
   "inillucent-value",
+  "inillucent-driver",
   "inillucent-engine",
   "inillucent-tree",
 ]
@@ -574,6 +585,14 @@ may_depend_on = [
   # reading the same source file. The oracle is what makes it a test rather than
   # the tool agreeing with itself, and the oracle lives here.
   "inillucent-migrate",
+  # task-1836: `command_parity.rs` reads the command table and the MCP server's
+  # own `tools/list` out of the crate that holds both, and asserts they name the
+  # same set. Reading them any other way - a fixture, a copy of the list - would
+  # be testing the copy.
+  "inillucent-cli",
+  # The capability table the CLI reports, so the parity test can assert the
+  # `capabilities` command answers the same rows `tests/capability.rs` probes.
+  "inillucent-driver",
   "inillucent",
   # And the old facade, because the seven profiling binaries and the seven
   # suites that measure and test the *old* engine still do, and moving them

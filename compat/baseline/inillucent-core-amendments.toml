@@ -8,9 +8,9 @@
 
 [[amendment]]
 path = "crates/inillucent-bench/Cargo.toml"
-ticket = "task-1818"
-reason = "task-1818 generalises the grading harness from one embedding model to a head-to-head between several, which is what the task-1815 TDD's success criteria are graded by. A model is now a manifest (id, width, Matryoshka widths, four prefixes, pooling, token bound, backend, output, tokenizer and weights digests) instead of a set of constants; a cache carries a header naming the corpus digest, the model, the manifest digest and the truncation it performed; grade-embedding compares two or more caches and refuses before it starts unless they agree on corpus, chunk count and query seeds; and the embedder gained CLS and last-token pooling, graph-driven inputs, and a llama.cpp backend for the one model with no ONNX export. ModelManifest::nomic_v1_5() reproduces every constant it replaced: the fresh baseline cache agrees with the August run at cosine 1.000000 minimum over 5000 chunks, and grade's card is unchanged on every measurement row."
-sha256 = "84f96c8fed91d80a6335ba31bca14d395b1ddae010f9c28a086564b220fd5f54"
+ticket = "task-1836"
+reason = "task-1836 makes the workspace publishable to crates.io, which required every crate to carry publishable metadata and required the two crates that must never be published to say so. inillucent-bench is one of them: it links PostgreSQL and pgvector so the scorecard can measure against them, and publishing a database client to crates.io as a dependency of a database would be wrong. The change is four lines of package metadata - license, repository, description and publish = false - and touches no code, no dependency and no behaviour. cargo publish --workspace --dry-run refused to run at all until it was there."
+sha256 = "a846c43d65a09d2c43c7d304595a6fdaf9e6361ef313e53746524bf9051d94a3"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/arm.rs"

@@ -3,6 +3,7 @@ name = "inillucent-exec"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Push-based vectorised executor over batches that borrow from pinned pages"
 
 [dependencies]

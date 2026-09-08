@@ -1,0 +1,45 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+ * `vendor/bin/inillucent`: find the binary and become it.
+ *
+ * Composer cannot install a Rust program, so this shim looks for one - see
+ * Inillucent\Locator for the three places and the order - and hands the process
+ * over with the arguments it was given. The exit code is passed back up, and it
+ * carries meaning: 3 is "the engine has not built that", which is something a
+ * script can branch on.
+ */
+
+foreach (
+    [
+        __DIR__ . '/../../../vendor/autoload.php',   // installed as a dependency
+        __DIR__ . '/../../../../autoload.php',       // installed under another vendor directory
+        __DIR__ . '/../../../vendor/autoload.php',   // the repository itself
+    ] as $autoload
+) {
+    if (is_file($autoload)) {
+        require_once $autoload;
+        break;
+    }
+}
+
+if (!class_exists(\Inillucent\Locator::class)) {
+    fwrite(STDERR, "inillucent: composer's autoloader was not found beside this script.\n");
+    fwrite(STDERR, "  Run `composer install` in the project that requires this package.\n");
+    exit(1);
+}
+
+try {
+    $binary = \Inillucent\Locator::find('inillucent');
+} catch (\Inillucent\Error $why) {
+    fwrite(STDERR, $why->getMessage() . PHP_EOL);
+    exit(1);
+}
+
+$outcome = \Inillucent\Process::run(array_merge([$binary], array_slice($argv, 1)));
+fwrite(STDOUT, $outcome['stdout']);
+fwrite(STDERR, $outcome['stderr']);
+exit($outcome['code']);
