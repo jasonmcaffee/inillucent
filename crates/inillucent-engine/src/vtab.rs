@@ -598,7 +598,17 @@ impl ImportedDatabase {
                 txn,
                 schema: at,
                 wrote: false,
-                undo: None,
+                // **The before-images a rollback needs.** Every ordinary write
+                // passes `Some(&self.undo)`; this path passed `None`, so a
+                // virtual table's writes went into the pool with nothing
+                // recorded that could put them back. `ROLLBACK` then undid
+                // every ordinary table and left the module's shadow trees as
+                // the abandoned transaction had made them - so the connection
+                // read two rows where the file held one, and a reopen was the
+                // only thing that corrected it. The file itself was never
+                // wrong: no commit record was written, so recovery ignored
+                // the pages. Only the live connection was.
+                undo: Some(&self.undo),
             };
             let mut store = WriteStore {
                 database: super::file_of(
@@ -1374,7 +1384,17 @@ impl ImportedDatabase {
                 txn,
                 schema: at,
                 wrote: false,
-                undo: None,
+                // **The before-images a rollback needs.** Every ordinary write
+                // passes `Some(&self.undo)`; this path passed `None`, so a
+                // virtual table's writes went into the pool with nothing
+                // recorded that could put them back. `ROLLBACK` then undid
+                // every ordinary table and left the module's shadow trees as
+                // the abandoned transaction had made them - so the connection
+                // read two rows where the file held one, and a reopen was the
+                // only thing that corrected it. The file itself was never
+                // wrong: no commit record was written, so recovery ignored
+                // the pages. Only the live connection was.
+                undo: Some(&self.undo),
             };
             let mut store = WriteStore {
                 database: super::file_of(
@@ -1703,7 +1723,11 @@ impl ImportedDatabase {
                     txn,
                     schema: at,
                     wrote: false,
-                    undo: None,
+                    // A flush is part of the transaction that asked for it -
+                    // at a commit the buffer is cleared immediately after, and
+                    // at a savepoint these writes are exactly what a later
+                    // `ROLLBACK TO` an earlier point has to be able to undo.
+                    undo: Some(&self.undo),
                 };
                 let mut store = WriteStore {
                     database: super::file_of(
@@ -1733,6 +1757,103 @@ impl ImportedDatabase {
             outcome?;
         }
         Ok(())
+    }
+
+    /// Tells every connected module that the transaction was abandoned.
+    ///
+    /// **The half of the contract the new engine never held up.** The module
+    /// trait has had `rollback` since the old engine, and
+    /// `inillucent-session/src/vtab.rs` dispatches `Moment::Rollback` to it -
+    /// but this engine only ever called `begin`, `sync` and `commit`. A module
+    /// that buffers therefore never heard that its buffer was void.
+    ///
+    /// The file was always right: shadow tables are ordinary trees, so the undo
+    /// log put them back. What was wrong was the *connection*, which went on
+    /// reading the module's staging area - so one query answered differently
+    /// before and after a reopen with nothing written in between, in whichever
+    /// direction the abandoned transaction had written. Measured against the
+    /// pinned SQLite 3.53.4 before the fix: an abandoned insert left an `fts5`
+    /// table reading 2 where the file held 1, and an abandoned delete left it
+    /// reading 0 where the file held 2.
+    ///
+    /// A module that fails to abandon its buffer is not allowed to stop the
+    /// rollback - the transaction is going away either way, and a rollback that
+    /// could itself fail would leave the connection in a state with no name. The
+    /// first failure is remembered and returned once every module has been told.
+    ///
+    /// @param to_savepoint - the savepoint level, or nothing for the whole
+    ///     transaction
+    pub(super) fn rollback_modules(&mut self, to_savepoint: Option<i32>) -> DbResult<()> {
+        let names: Vec<Vec<u8>> = self.virtual_tables.keys().cloned().collect();
+        let mut first_failure: Option<inillucent_base::DbError> = None;
+        for name in names {
+            let Some(mut connected) = self.virtual_tables.remove(&name) else {
+                continue;
+            };
+            let outcome = self.tell_one_module(&mut connected, to_savepoint);
+            self.virtual_tables.insert(name, connected);
+            if let Err(why) = outcome {
+                if first_failure.is_none() {
+                    first_failure = Some(why);
+                }
+            }
+        }
+        match first_failure {
+            Some(why) => Err(why),
+            None => Ok(()),
+        }
+    }
+
+    /// Tells one module the transaction was abandoned.
+    ///
+    /// Split out so `rollback_modules` can hold the table out of the map across
+    /// the call - a module may read its own shadow trees while it discards, and
+    /// the map is borrowed for the walk.
+    ///
+    /// @param connected - the module and the arguments it was connected with
+    /// @param to_savepoint - the savepoint level, or nothing for the whole
+    ///     transaction
+    fn tell_one_module(
+        &mut self,
+        connected: &mut Connected,
+        to_savepoint: Option<i32>,
+    ) -> DbResult<()> {
+        let txn = self.current_txn();
+        let at = self.ddl_schema;
+        let session = self.session.get();
+        let Some(wal) = self.log_of(at) else {
+            return Ok(());
+        };
+        let mut log = WalLog {
+            wal,
+            txn,
+            schema: at,
+            wrote: false,
+            undo: None,
+        };
+        let mut store = WriteStore {
+            database: super::file_of(
+                &mut self.database,
+                &mut self.attached,
+                &mut self.temps,
+                session,
+                at,
+            )?,
+            trees: &mut self.trees,
+            log: &mut log,
+        };
+        let mut nowhere = Nowhere;
+        let mut context = Context {
+            host: &mut nowhere,
+            store: Some(&mut store),
+            database: 0,
+            limits: &self.limits,
+            catalog: Some(&self.catalog),
+        };
+        match to_savepoint {
+            Some(level) => connected.table.rollback_to(&mut context, level),
+            None => connected.table.rollback(&mut context),
+        }
     }
 }
 

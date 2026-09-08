@@ -49,6 +49,7 @@ pub mod perf;
 pub mod procstat;
 pub mod report;
 pub mod results;
+pub mod selection;
 pub mod slt;
 pub mod syntax;
 pub mod toml_lite;

@@ -694,6 +694,39 @@ impl VirtualTable for Fts5Table {
     /// buffer a buffer: nothing durable is deferred past the transaction that
     /// wrote it, and a reader inside the transaction sees it because the
     /// cursors share the same handle.
+    /// Throws away everything the abandoned transaction staged.
+    ///
+    /// **FTS5 buffers.** A document's doclists, its `%_idx` dictionary rows and
+    /// the running totals are held in `pending` and written out at `sync`,
+    /// which is what makes a bulk load one flush rather than one flush per
+    /// document. The engine undoes the shadow *trees* when a transaction is
+    /// abandoned, so the file comes back correct - but the buffer is this
+    /// module's own memory and nothing was undoing it, so the connection went
+    /// on answering out of a staging area belonging to a transaction that never
+    /// happened. It read two rows where the file had one, and nought where the
+    /// file had two, until the database was reopened.
+    ///
+    /// The totals go with the doclists. They are a count of what is in the
+    /// index, and a count that survived the rows it counted would be wrong in
+    /// the other direction.
+    fn rollback(&mut self, _context: &mut Context<'_>) -> DbResult<()> {
+        if let Ok(mut held) = self.pending.lock() {
+            *held = Pending::default();
+        }
+        Ok(())
+    }
+
+    /// Rolls back to a savepoint.
+    ///
+    /// The same discard, and it is correct for the same reason it is correct
+    /// for a whole transaction: the engine flushes every module when a
+    /// savepoint is *taken*, so everything staged before the point is already
+    /// in the trees and under the undo log, and what is left in the buffer
+    /// belongs entirely to the part being abandoned.
+    fn rollback_to(&mut self, context: &mut Context<'_>, _number: i32) -> DbResult<()> {
+        self.rollback(context)
+    }
+
     fn sync(&mut self, context: &mut Context<'_>) -> DbResult<()> {
         // The rowid mark is the transaction's, not the connection's: a rowid a
         // later transaction's delete frees is reused, exactly as SQLite reuses

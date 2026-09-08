@@ -559,6 +559,11 @@ impl ForcePlan {
 #[derive(Clone, Debug, Default)]
 pub struct Params {
     values: Vec<OwnedDatum>,
+    /// How many parameters the statement has, once it has been compiled.
+    ///
+    /// `None` until the binder says, because a caller may bind before the
+    /// statement exists. See [`Params::try_set`].
+    declared: Option<u32>,
     /// How many times a parameter has been read out of this set.
     ///
     /// The counter is what makes [`Statement`] safe. A statement may only be
@@ -630,6 +635,7 @@ impl Params {
     pub fn new() -> Params {
         Params {
             values: Vec::new(),
+            declared: None,
             reads: std::cell::Cell::new(0),
             context: std::cell::Cell::new(crate::scalar::Context::default()),
             recursive_triggers: std::cell::Cell::new(false),
@@ -643,6 +649,7 @@ impl Params {
     pub fn from_values(values: Vec<OwnedDatum>) -> Params {
         Params {
             values,
+            declared: None,
             reads: std::cell::Cell::new(0),
             context: std::cell::Cell::new(crate::scalar::Context::default()),
             recursive_triggers: std::cell::Cell::new(false),
@@ -659,6 +666,7 @@ impl Params {
     pub fn with_subqueries(&self, subqueries: Vec<Option<crate::subquery::Subvalue>>) -> Params {
         Params {
             values: self.values.clone(),
+            declared: self.declared,
             reads: std::cell::Cell::new(self.reads.get()),
             context: self.context.clone(),
             recursive_triggers: self.recursive_triggers.clone(),
@@ -681,6 +689,7 @@ impl Params {
     pub fn without_subqueries(&self) -> Params {
         Params {
             values: self.values.clone(),
+            declared: self.declared,
             reads: std::cell::Cell::new(self.reads.get()),
             context: self.context.clone(),
             recursive_triggers: self.recursive_triggers.clone(),
@@ -800,6 +809,22 @@ impl Params {
     ///
     /// @param index - the one-based parameter number
     /// @param value - the value to bind
+    /// Binds one parameter with no range check, for the engine's own use.
+    ///
+    /// **Deliberately unchecked, and not what a caller's `bind` goes through.**
+    /// The binder allocates parameter slots of its own above the ones the SQL
+    /// wrote - `correlate::Correlation::answer` feeds an outer row's columns
+    /// into a correlated block through exactly this method, at numbers past the
+    /// statement's declared count. Routing this through the checked form made
+    /// those writes vanish and every correlated `EXISTS` answered against an
+    /// unbound slot, which is a wrong answer rather than an error.
+    ///
+    /// [`Params::try_set`] is the caller-facing one, and the split is the
+    /// point: the engine may write any slot it invented, and an application may
+    /// only write the ones its statement declared.
+    ///
+    /// @param index - the one-based parameter number
+    /// @param value - the value
     pub fn set(&mut self, index: u32, value: OwnedDatum) {
         let at = index.saturating_sub(1) as usize;
         if self.values.len() <= at {
@@ -808,6 +833,59 @@ impl Params {
         if let Some(slot) = self.values.get_mut(at) {
             *slot = value;
         }
+    }
+
+    /// Binds one parameter, reporting an index the statement does not have.
+    ///
+    /// **`index` is one-based, and zero is out of range rather than the first
+    /// slot.** This used to be `index.saturating_sub(1)` into a vector that was
+    /// resized to fit whatever it was given, which made every index legal: a
+    /// bind of 9 on a one-parameter statement grew the set to nine slots and
+    /// answered `Ok`, and a bind of **0 silently wrote over `?1`** - so a caller
+    /// who believed index 0 was a no-op had replaced its first parameter and
+    /// had nothing in the result to say so. SQLite answers `SQLITE_RANGE` to
+    /// both, and now so does this.
+    ///
+    /// The set still grows, because it has to: a caller binds `?1` before the
+    /// statement it belongs to has been compiled, so at bind time the number of
+    /// parameters may not be known. What it will not do is grow past the count
+    /// once one has been declared with [`Params::expect`].
+    ///
+    /// @param index - the one-based parameter number
+    /// @param value - the value
+    pub fn try_set(&mut self, index: u32, value: OwnedDatum) -> Result<(), ()> {
+        if index == 0 {
+            return Err(());
+        }
+        if let Some(declared) = self.declared {
+            if index > declared {
+                return Err(());
+            }
+        }
+        let at = (index - 1) as usize;
+        if self.values.len() <= at {
+            self.values.resize(at.saturating_add(1), OwnedDatum::Null);
+        }
+        if let Some(slot) = self.values.get_mut(at) {
+            *slot = value;
+        }
+        Ok(())
+    }
+
+    /// Tells this set how many parameters the statement it belongs to has.
+    ///
+    /// Called once the statement is compiled and the binder knows the answer.
+    /// Until then the set has no upper bound to check against and only index
+    /// zero is refused.
+    ///
+    /// @param count - the highest parameter number the statement uses
+    pub fn expect(&mut self, count: u32) {
+        self.declared = Some(count);
+    }
+
+    /// Returns how many parameters the statement was said to have.
+    pub fn declared(&self) -> Option<u32> {
+        self.declared
     }
 
     /// Unbinds every parameter.

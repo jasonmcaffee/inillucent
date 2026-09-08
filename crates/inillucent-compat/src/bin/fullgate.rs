@@ -427,7 +427,13 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     // Once, not per round: it is a residency measurement, and thirty of them
     // would say the same thing thirty times for the price of another gate.
     let child = measure_in_a_child(fixture, &scratch, settings);
-    report_costs(&plan, &our_rounds, &their_rounds, child.as_ref(), settings.page_size);
+    report_costs(
+        &plan,
+        &our_rounds,
+        &their_rounds,
+        child.as_ref(),
+        settings.page_size,
+    );
 
     println!();
     println!("## result");
@@ -696,10 +702,7 @@ fn report_residency(
         .iter()
         .map(|cost| mebibytes(cost.peak_working_set))
         .collect();
-    let mut cpus: Vec<f64> = theirs
-        .iter()
-        .map(|cost| millis(cost.cpu_nanos()))
-        .collect();
+    let mut cpus: Vec<f64> = theirs.iter().map(|cost| millis(cost.cpu_nanos())).collect();
     let their_peak = middle(&mut peaks);
     let their_cpu = middle(&mut cpus);
     if their_peak <= 0.0 || their_cpu <= 0.0 {
@@ -906,11 +909,15 @@ fn round_on(
             .map_err(|error| format!("{question}: {}", why(&error)))?;
         state.push(render_row(&answer.rows));
     }
-    Ok((samples, state, RoundCost {
-        round,
-        costs,
-        marks,
-    }))
+    Ok((
+        samples,
+        state,
+        RoundCost {
+            round,
+            costs,
+            marks,
+        },
+    ))
 }
 
 /// What one round of this engine's arm cost, besides time.

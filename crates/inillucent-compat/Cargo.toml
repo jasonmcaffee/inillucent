@@ -23,6 +23,12 @@ inillucent-legacy = { workspace = true }
 # The rearchitected engine (task-1816), measured beside the old one.
 inillucent-pool = { workspace = true }
 inillucent-tree = { workspace = true }
+# The engine's own JSON reader, which `inillucent-testrun` parses cargo's
+# `--message-format=json` with. A test runner that pulled in a JSON crate to
+# read one field would be adding a dependency this workspace already has an
+# implementation of, and a stricter one: it is the reader SQLite's `json()` is
+# graded against.
+inillucent-scalar = { workspace = true }
 inillucent-sqlite-reader = { workspace = true }
 inillucent-exec = { workspace = true }
 inillucent-wal = { workspace = true }
@@ -36,6 +42,29 @@ libc = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true }
+
+# The test runner, behind a feature ON PURPOSE.
+#
+# Cargo builds a package's binaries whenever that package has integration tests,
+# so that a test can execute one - and `inillucent-compat` has 75 of them. The
+# runner's own first act is `cargo test --no-run`, which therefore tried to
+# replace the executable of the process that had just asked for it. Windows does
+# not allow that, and the run died with "Access is denied" on its own binary.
+#
+# `required-features` is cargo's own way to say "do not build this unless
+# somebody asks", and it makes the conflict impossible rather than unlikely: the
+# build the runner starts does not enable `testrun`, so it never touches the
+# runner. Building it is one command, in `tests/inillucent-testing-tdd.md`:
+#
+#   cargo build -p inillucent-compat --bin inillucent-testrun --features testrun
+[[bin]]
+name = "inillucent-testrun"
+path = "src/bin/testrun.rs"
+required-features = ["testrun"]
+
+[[bin]]
+name = "inillucent-perfhistory"
+path = "src/bin/perfhistory.rs"
 
 [[bin]]
 name = "inillucent-sqlperf"
@@ -194,6 +223,10 @@ name = "inillucent-checkpointperf"
 path = "src/bin/checkpointperf.rs"
 
 [features]
+# Builds `inillucent-testrun`. See the comment on its `[[bin]]` section: the
+# feature exists to keep the runner out of the build the runner itself starts.
+testrun = []
+
 # Passed through to the virtual machine so `inillucent-hotprofile` can attribute
 # time and allocations to individual opcodes.
 opcode-probe = [

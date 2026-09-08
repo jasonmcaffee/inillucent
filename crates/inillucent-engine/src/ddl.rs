@@ -363,7 +363,7 @@ impl ImportedDatabase {
                 if self.batch.get().is_none() {
                     self.begin_batch();
                 }
-                self.savepoint(&name);
+                self.savepoint(&name)?;
                 Ok(Outcome::empty())
             }
             Directive::Release(name) => {

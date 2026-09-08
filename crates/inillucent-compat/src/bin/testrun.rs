@@ -1,0 +1,1033 @@
+//! The test runner: one build, then every selected binary at once.
+//!
+//! Invariant: **this runner never decides that a test passed.** It builds what
+//! `cargo` builds, runs the same executables `cargo` would run, and reports
+//! their exit status. Where it differs from `cargo test` is only in *which*
+//! binaries it runs and *how many at a time* - never in what counts as a pass.
+//! A runner that could turn a failure into a pass would be worse than no runner.
+//!
+//! ## Why this exists
+//!
+//! `cargo test` runs test binaries **one at a time**. That is the right default
+//! for a crate, and the wrong one for a workspace with 90 integration suites on
+//! a 24-core machine: the suites are processes that mostly wait on the file
+//! system, and running them one after another leaves the machine idle for most
+//! of a run. Measured on this repository, that is the difference between a full
+//! suite you run before a commit and one you do not.
+//!
+//! It also skips something `cargo test` does not. Of this workspace's 45 bin
+//! targets, 43 are benchmark and profiling instruments with no `#[test]` in
+//! them, and `cargo test --workspace` starts every one of them to be told it
+//! has nothing to run. The runner starts only the two that do hold tests -
+//! `inillucent-bench` and `inillucent-shell`, which between them hold 179,
+//! because their crates have no library to put them in.
+//!
+//! That is a claim about every file rather than a habit, so it is checked:
+//! `crates/inillucent-compat/tests/selection.rs` attributes every source file
+//! carrying a `#[test]` to the target that compiles it and fails if one lands
+//! on a target the map does not name. A test cannot hide in a binary here.
+//!
+//! ## The three ways to narrow a run
+//!
+//! - `--changed` asks what the working tree has altered and runs what that can
+//!   break, through `inillucent_compat::selection`. This is the pragmatic mode:
+//!   a change to one crate does not run the other twenty-eight.
+//! - `--tier` runs a named band - `smoke`, `unit`, `engine`, `differential`,
+//!   `durability`, `e2e`, `perf`, `tooling`.
+//! - `--target` runs one suite by name, for when you already know which.
+//!
+//! With none of them, it runs everything.
+//!
+//! ## The failure this runner is most careful about
+//!
+//! Several suites need something the workspace cannot build: the pinned SQLite
+//! oracle, a C compiler, the ONNX runtime. Each of them returns early and
+//! reports success when its prerequisite is absent, which is correct behaviour
+//! for `cargo test` on a fresh clone and a trap for anybody reading a green
+//! run as evidence. So the runner counts them, names them, and `--strict`
+//! turns the count into a non-zero exit. A run that evidenced nothing must not
+//! look like a pass.
+//!
+//! ## Building it
+//!
+//! ```text
+//! cargo build -p inillucent-compat --bin inillucent-testrun --features testrun
+//! target/debug/inillucent-testrun --tier smoke
+//! ```
+//!
+//! The feature is not optional decoration and `cargo run` will not work in its
+//! place. Cargo builds a package's binaries whenever that package has
+//! integration tests, so an ordinary `cargo test --no-run` would try to replace
+//! *this* executable while it was running it - which Windows refuses, and the
+//! run dies on its own binary. `required-features` keeps the runner out of the
+//! build the runner starts, which makes that impossible rather than unlikely.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, ExitCode, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+use inillucent_compat::layering;
+use inillucent_compat::selection::{self, Kind, Map, Row, Target};
+use inillucent_compat::workspace_root;
+use inillucent_scalar::json::node::Node;
+use inillucent_scalar::json::{parse, render};
+
+/// How long a target is assumed to take when the ledger has never seen it.
+///
+/// Longest-first scheduling needs a number for every target, and a new suite
+/// has none. Assuming it is slow is the safe direction: a slow target started
+/// late is what leaves one core working after the other twenty-three have run
+/// out of work, and that tail is the whole cost of getting the order wrong.
+const UNKNOWN_MILLISECONDS: u64 = 30_000;
+
+/// What the command line asked for.
+struct Options {
+    /// Tiers to run; empty means every tier.
+    tiers: Vec<String>,
+    /// Targets to run by label; empty means no explicit choice.
+    targets: Vec<String>,
+    /// Select from the working tree's changes against this revision.
+    changed: Option<String>,
+    /// How many test binaries to run at once.
+    jobs: usize,
+    /// How many threads each test binary uses internally.
+    test_threads: usize,
+    /// Print the selection and stop.
+    list: bool,
+    /// Print the tiers and stop.
+    list_tiers: bool,
+    /// Treat a missing prerequisite as a failure.
+    strict: bool,
+    /// Write the measured times back to the ledger.
+    record: bool,
+    /// Skip the build step, because the caller has just built.
+    no_build: bool,
+    /// Pass a filter through to each test binary.
+    filter: Option<String>,
+}
+
+impl Options {
+    /// Copies the options, so the exclusive pass can differ in `jobs` alone.
+    ///
+    /// @param other - the options to copy
+    fn from(other: &Options) -> Options {
+        Options {
+            tiers: other.tiers.clone(),
+            targets: other.targets.clone(),
+            changed: other.changed.clone(),
+            jobs: other.jobs,
+            test_threads: other.test_threads,
+            list: other.list,
+            list_tiers: other.list_tiers,
+            strict: other.strict,
+            record: other.record,
+            no_build: other.no_build,
+            filter: other.filter.clone(),
+        }
+    }
+}
+
+impl Default for Options {
+    fn default() -> Options {
+        Options {
+            tiers: Vec::new(),
+            targets: Vec::new(),
+            changed: None,
+            jobs: std::thread::available_parallelism()
+                .map(std::num::NonZeroUsize::get)
+                .unwrap_or(4),
+            // Two, not one, and not the default. Each binary already runs its
+            // own tests on several threads; multiplying that by the number of
+            // binaries in flight oversubscribes the machine badly enough to be
+            // slower than running them one at a time. Two keeps a little
+            // intra-binary parallelism without the run becoming a thundering
+            // herd - see the TDD's scheduling section.
+            test_threads: 2,
+            list: false,
+            list_tiers: false,
+            strict: false,
+            record: false,
+            no_build: false,
+            filter: None,
+        }
+    }
+}
+
+/// Reads the command line, reporting anything it does not understand.
+///
+/// @param arguments - the arguments after the program name
+fn parse_options(arguments: &[String]) -> Result<Options, String> {
+    let mut options = Options::default();
+    let mut index = 0usize;
+    while let Some(argument) = arguments.get(index) {
+        index += 1;
+        let mut take = |name: &str| -> Result<String, String> {
+            let value = arguments.get(index).cloned();
+            index += 1;
+            value.ok_or_else(|| format!("`{name}` needs a value"))
+        };
+        match argument.as_str() {
+            "--tier" => options.tiers.push(take("--tier")?),
+            "--target" => options.targets.push(take("--target")?),
+            "--jobs" => {
+                let value = take("--jobs")?;
+                options.jobs = value
+                    .parse()
+                    .map_err(|_| format!("`--jobs` wants a number, not `{value}`"))?;
+            }
+            "--test-threads" => {
+                let value = take("--test-threads")?;
+                options.test_threads = value
+                    .parse()
+                    .map_err(|_| format!("`--test-threads` wants a number, not `{value}`"))?;
+            }
+            "--filter" => options.filter = Some(take("--filter")?),
+            "--changed" => {
+                // The revision is optional: `--changed` alone means the working
+                // tree against HEAD, which is what somebody about to commit
+                // wants.
+                match arguments.get(index) {
+                    Some(next) if !next.starts_with("--") => {
+                        options.changed = Some(next.clone());
+                        index += 1;
+                    }
+                    _ => options.changed = Some("HEAD".to_string()),
+                }
+            }
+            "--all" => {
+                options.tiers.clear();
+                options.targets.clear();
+                options.changed = None;
+            }
+            "--list" => options.list = true,
+            "--list-tiers" => options.list_tiers = true,
+            "--strict" => options.strict = true,
+            "--record" => options.record = true,
+            "--no-build" => options.no_build = true,
+            "--help" | "-h" => return Err(usage()),
+            other => return Err(format!("unknown option `{other}`\n\n{}", usage())),
+        }
+        if options.jobs == 0 {
+            return Err("`--jobs` must be at least 1".to_string());
+        }
+    }
+    Ok(options)
+}
+
+/// The help text.
+fn usage() -> String {
+    "inillucent-testrun - run the workspace's tests in parallel\n\
+     \n\
+     Narrowing (with none of these, everything runs):\n  \
+       --changed [<rev>]   run what the changes since <rev> (default HEAD) can break\n  \
+       --tier <name>       run one tier; repeatable\n  \
+       --target <label>    run one target as `package::name`; repeatable\n  \
+       --filter <text>     pass a name filter to each test binary\n\
+     \n\
+     Execution:\n  \
+       --jobs <n>          test binaries at once (default: the machine's cores)\n  \
+       --test-threads <n>  threads inside each binary (default: 2)\n  \
+       --no-build          do not build first\n\
+     \n\
+     Reporting:\n  \
+       --list              print the selection and stop\n  \
+       --list-tiers        print the tiers and stop\n  \
+       --strict            fail when a selected suite's prerequisite is missing\n  \
+       --record            write the measured times to tests/timings.toml\n"
+        .to_string()
+}
+
+/// One built test binary.
+struct Built {
+    /// Which target it is.
+    target: Target,
+    /// Where the executable is.
+    executable: PathBuf,
+    /// The directory `cargo` would run it from.
+    directory: PathBuf,
+}
+
+/// What one finished run produced.
+struct Outcome {
+    /// Which target ran.
+    target: Target,
+    /// Whether it exited zero.
+    passed: bool,
+    /// How long it took.
+    elapsed: Duration,
+    /// How many tests ran, as the harness counted them.
+    ran: usize,
+    /// Everything it printed, kept for the report when it failed.
+    output: String,
+    /// How it exited, for the report.
+    ///
+    /// A harness that prints `test result: ok` and then exits non-zero is not a
+    /// contradiction to be discarded: it is a process that died after its tests
+    /// passed - in a destructor, in a background thread, or at the hands of the
+    /// operating system. Without the status in the report, that failure has no
+    /// visible cause at all.
+    status: String,
+}
+
+/// Runs the whole thing.
+fn main() -> ExitCode {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let options = match parse_options(&arguments) {
+        Ok(options) => options,
+        Err(reason) => {
+            eprintln!("{reason}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match run(&options) {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(reason) => {
+            eprintln!("inillucent-testrun: {reason}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Selects, builds, runs and reports. Returns whether everything passed.
+///
+/// @param options - what the command line asked for
+fn run(options: &Options) -> Result<bool, String> {
+    let root = workspace_root();
+    let map = Map::load(&root.join("tests/selection.toml"))?;
+
+    if options.list_tiers {
+        for tier in &map.tiers {
+            println!(
+                "{:<12} {}{}",
+                tier.name,
+                tier.purpose,
+                if tier.exclusive { "  [runs alone]" } else { "" }
+            );
+        }
+        return Ok(true);
+    }
+
+    let selected = choose(&root, &map, options)?;
+    if selected.is_empty() {
+        println!("nothing selected");
+        return Ok(true);
+    }
+
+    if options.list {
+        for row in &selected {
+            println!(
+                "{:<10} {:<44} covers {}",
+                row.tier,
+                row.target.label(),
+                row.covers.iter().cloned().collect::<Vec<_>>().join(", ")
+            );
+        }
+        println!("\n{} target(s)", selected.len());
+        return Ok(true);
+    }
+
+    if !options.no_build {
+        build(&root)?;
+    }
+    let built = locate(&root, &selected)?;
+    let ledger = read_ledger(&root.join("tests/timings.toml"));
+    let ordered = schedule(built, &ledger);
+
+    // Split off the targets whose tier asked for the machine to itself. They
+    // go last, one at a time: see `selection::Tier::exclusive` for why a timing
+    // guard cannot share a machine, and why widening its threshold instead
+    // would only have made it stop guarding.
+    let exclusive_tiers: BTreeSet<&str> = map
+        .tiers
+        .iter()
+        .filter(|tier| tier.exclusive)
+        .map(|tier| tier.name.as_str())
+        .collect();
+    let mut shared = Vec::new();
+    let mut alone = Vec::new();
+    for built in ordered {
+        let solo = map
+            .row(&built.target)
+            .is_some_and(|row| exclusive_tiers.contains(row.tier.as_str()));
+        if solo {
+            alone.push(built);
+        } else {
+            shared.push(built);
+        }
+    }
+
+    println!(
+        "running {} target(s), {} at a time, {} thread(s) each{}",
+        shared.len() + alone.len(),
+        options.jobs,
+        options.test_threads,
+        if alone.is_empty() {
+            String::new()
+        } else {
+            format!("; {} of them alone at the end", alone.len())
+        }
+    );
+    let started = Instant::now();
+    let mut outcomes = execute(shared, options);
+    if !alone.is_empty() {
+        let solo = Options {
+            jobs: 1,
+            ..Options::from(options)
+        };
+        outcomes.extend(execute(alone, &solo));
+    }
+    let wall = started.elapsed();
+
+    report(&outcomes, wall, &map, options.strict);
+    if options.record {
+        write_ledger(&root.join("tests/timings.toml"), &ledger, &outcomes)?;
+        println!("recorded {} timing(s)", outcomes.len());
+    }
+
+    let failed = outcomes.iter().any(|outcome| !outcome.passed);
+    let hollow = options.strict && !missing_prerequisites(&outcomes, &map).is_empty();
+    Ok(!failed && !hollow)
+}
+
+/// Works out which rows to run.
+///
+/// @param root - the workspace root
+/// @param map - the selection map
+/// @param options - what the command line asked for
+fn choose<'map>(root: &Path, map: &'map Map, options: &Options) -> Result<Vec<&'map Row>, String> {
+    let mut rows: Vec<&Row> = if let Some(revision) = &options.changed {
+        let members = layering::workspace_members(root)?;
+        let manifests = layering::read_members(root, &members)?;
+        let changed = changed_paths(root, revision)?;
+        if changed.is_empty() {
+            println!("nothing has changed against {revision}");
+            return Ok(Vec::new());
+        }
+        let graph = selection::dependents(&manifests);
+        let choice = selection::seeds_of(map, &members, &manifests, &changed);
+        if choice.selects_everything {
+            let why = if choice.unmatched.is_empty() {
+                "a changed path is declared to select everything".to_string()
+            } else {
+                format!(
+                    "no rule covers {}, so everything is selected",
+                    choice.unmatched.join(", ")
+                )
+            };
+            println!("{} changed path(s): {why}", changed.len());
+        } else {
+            println!(
+                "{} changed path(s) in {}; {} package(s) affected",
+                changed.len(),
+                choice.seeds.iter().cloned().collect::<Vec<_>>().join(", "),
+                selection::affected(&graph, &choice.seeds).len()
+            );
+        }
+        selection::select(map, &choice, &graph)
+    } else {
+        map.rows.iter().collect()
+    };
+
+    if !options.targets.is_empty() {
+        let wanted: BTreeSet<&str> = options.targets.iter().map(String::as_str).collect();
+        rows.retain(|row| wanted.contains(row.target.label().as_str()));
+        for want in &wanted {
+            if !map.rows.iter().any(|row| row.target.label() == *want) {
+                return Err(format!("no target called `{want}`"));
+            }
+        }
+    }
+    if !options.tiers.is_empty() {
+        let wanted: BTreeSet<&str> = options.tiers.iter().map(String::as_str).collect();
+        for want in &wanted {
+            if !map.tiers.iter().any(|tier| tier.name == *want) {
+                return Err(format!("no tier called `{want}`; try --list-tiers"));
+            }
+        }
+        rows.retain(|row| wanted.contains(row.tier.as_str()));
+    }
+    Ok(rows)
+}
+
+/// Asks git which paths differ from a revision, including untracked files.
+///
+/// An untracked file is a new suite or a new crate, and a selector that could
+/// not see one would run nothing for exactly the change most likely to need a
+/// run.
+///
+/// @param root - the workspace root
+/// @param revision - what to compare against
+fn changed_paths(root: &Path, revision: &str) -> Result<Vec<String>, String> {
+    let mut paths = BTreeSet::new();
+    let tracked = Command::new("git")
+        .current_dir(root)
+        .args(["diff", "--name-only", revision])
+        .output()
+        .map_err(|error| format!("cannot run git: {error}"))?;
+    if !tracked.status.success() {
+        return Err(format!(
+            "git diff against `{revision}` failed: {}",
+            String::from_utf8_lossy(&tracked.stderr).trim()
+        ));
+    }
+    for line in String::from_utf8_lossy(&tracked.stdout).lines() {
+        if !line.trim().is_empty() {
+            paths.insert(line.trim().to_string());
+        }
+    }
+    let untracked = Command::new("git")
+        .current_dir(root)
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .output()
+        .map_err(|error| format!("cannot run git: {error}"))?;
+    for line in String::from_utf8_lossy(&untracked.stdout).lines() {
+        if !line.trim().is_empty() {
+            paths.insert(line.trim().to_string());
+        }
+    }
+    Ok(paths.into_iter().collect())
+}
+
+/// Builds every test binary, and the two programs the shell suites run.
+///
+/// The second half matters for parallelism. `cli.rs`, `capi.rs` and
+/// `semantics.rs` each shell out to `cargo build` from inside the test, because
+/// they drive a *program* rather than a library. Run at once, they would each
+/// wait on cargo's lock on the target directory. Building those programs here,
+/// before anything starts, makes each of those in-test builds a no-op.
+///
+/// @param root - the workspace root
+fn build(root: &Path) -> Result<(), String> {
+    println!("building test targets");
+    let status = Command::new(cargo())
+        .current_dir(root)
+        // `--lib --tests` and not a bare `--no-run`. A bare one also builds the
+        // plain binaries, and one of those is *this program*: cargo cannot
+        // replace an executable that is currently running, so the runner's own
+        // build step failed with "Access is denied" trying to overwrite itself.
+        // `--tests` still builds the test harness compiled from each binary's
+        // sources, which is what `inillucent-bench` and `inillucent-shell` keep
+        // their tests in; it just does not build the binaries themselves. The
+        // two programs the shell suites actually execute are built below, by
+        // name.
+        .args(["test", "--workspace", "--no-run", "--lib", "--tests"])
+        .status()
+        .map_err(|error| format!("cannot run cargo: {error}"))?;
+    if !status.success() {
+        return Err("the build failed".to_string());
+    }
+    let status = Command::new(cargo())
+        .current_dir(root)
+        .args(["build", "-p", "inillucent-cli", "-p", "inillucent-capi"])
+        .status()
+        .map_err(|error| format!("cannot run cargo: {error}"))?;
+    if !status.success() {
+        return Err("building the shell and the C ABI failed".to_string());
+    }
+    Ok(())
+}
+
+/// Returns the cargo to invoke.
+fn cargo() -> String {
+    std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string())
+}
+
+/// Asks cargo where the executables it just built are.
+///
+/// The answer comes from `--message-format=json`, read with the engine's own
+/// JSON parser. Guessing at `target/debug/deps/<name>-<hash>` would be guessing
+/// at a hash and at which of several stale copies is the current one.
+///
+/// @param root - the workspace root
+/// @param rows - the rows that were selected
+fn locate(root: &Path, rows: &[&Row]) -> Result<Vec<Built>, String> {
+    let output = Command::new(cargo())
+        .current_dir(root)
+        .args([
+            "test",
+            "--workspace",
+            "--no-run",
+            "--lib",
+            "--tests",
+            "--message-format=json",
+        ])
+        .stderr(Stdio::inherit())
+        .output()
+        .map_err(|error| format!("cannot run cargo: {error}"))?;
+    if !output.status.success() {
+        return Err("cargo could not list the built targets".to_string());
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut found: BTreeMap<Target, (PathBuf, PathBuf)> = BTreeMap::new();
+    for line in text.lines() {
+        let Some(artifact) = read_artifact(line) else {
+            continue;
+        };
+        found.insert(artifact.0, (artifact.1, artifact.2));
+    }
+    let mut built = Vec::new();
+    let mut missing = Vec::new();
+    for row in rows {
+        match found.get(&row.target) {
+            Some((executable, directory)) => built.push(Built {
+                target: row.target.clone(),
+                executable: executable.clone(),
+                directory: directory.clone(),
+            }),
+            None => missing.push(row.target.label()),
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "cargo built no executable for: {}",
+            missing.join(", ")
+        ));
+    }
+    Ok(built)
+}
+
+/// Reads one `compiler-artifact` line, returning the target, its executable and
+/// the directory cargo would run it from.
+///
+/// Two filters matter here and both are load-bearing.
+///
+/// `profile.test` must be true. Cargo emits **two** artifacts for every binary
+/// under `--no-run`: the program itself, and the test harness compiled from the
+/// same sources. They have the same kind and the same name, and only the
+/// profile tells them apart - so a reader that took the first would run
+/// `inillucent-shell` as a program, get a shell waiting on standard input, and
+/// hang the run.
+///
+/// `executable` must be present. A library's `rlib` is an artifact with no
+/// executable, and its test harness is a second artifact that has one.
+///
+/// @param line - one line of cargo's JSON stream
+fn read_artifact(line: &str) -> Option<(Target, PathBuf, PathBuf)> {
+    let parsed = parse::parse(line).ok()?;
+    let node = parsed.node;
+    if text_of(field(&node, "reason")?)? != "compiler-artifact" {
+        return None;
+    }
+    if !matches!(field(field(&node, "profile")?, "test")?, Node::True) {
+        return None;
+    }
+    let executable = text_of(field(&node, "executable")?)?;
+    let manifest = text_of(field(&node, "manifest_path")?)?;
+    let target = field(&node, "target")?;
+    let name = text_of(field(target, "name")?)?;
+    let kind = match field(target, "kind")? {
+        Node::Array(items) => text_of(items.first()?)?,
+        other => text_of(other)?,
+    };
+    let manifest = PathBuf::from(manifest);
+    let directory = manifest.parent()?.to_path_buf();
+    let package = read_package_name(&manifest)?;
+    let kind = match kind.as_str() {
+        "lib" => Kind::Lib,
+        "test" => Kind::Test,
+        "bin" => Kind::Bin,
+        // `proc-macro`, `custom-build` and the rest are not things this
+        // workspace has, and running one would not mean anything if it did.
+        _ => return None,
+    };
+    let name = match kind {
+        Kind::Lib => "lib".to_string(),
+        Kind::Test | Kind::Bin => name,
+    };
+    Some((
+        Target {
+            package,
+            kind,
+            name,
+        },
+        PathBuf::from(executable),
+        directory,
+    ))
+}
+
+/// Reads the `name` out of a manifest's `[package]` section.
+///
+/// @param path - the manifest cargo named
+fn read_package_name(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut in_package = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        let (key, body) = line.split_once('=')?;
+        if key.trim() == "name" {
+            return Some(body.trim().trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
+/// Returns one member of a JSON object.
+///
+/// @param node - the object
+/// @param name - the member's label
+fn field<'tree>(node: &'tree Node, name: &str) -> Option<&'tree Node> {
+    match node {
+        Node::Object(members) => members
+            .iter()
+            .find(|(label, _)| render::unescape(label) == name)
+            .map(|(_, value)| value),
+        _ => None,
+    }
+}
+
+/// Returns a JSON string's content, with its escapes resolved.
+///
+/// The escapes are the point: every path in cargo's stream is a Windows path,
+/// so every one of them arrives with doubled backslashes.
+///
+/// @param node - the string node
+fn text_of(node: &Node) -> Option<String> {
+    match node {
+        Node::Text(_) | Node::TextJ(_) | Node::Text5(_) | Node::TextRaw(_) => {
+            Some(render::unescape(node))
+        }
+        _ => None,
+    }
+}
+
+/// Reads the recorded times, ignoring a ledger that is absent or unreadable.
+///
+/// A missing ledger must not stop a run: it only costs a worse order, and the
+/// first `--record` writes one.
+///
+/// @param path - the ledger
+fn read_ledger(path: &Path) -> BTreeMap<String, u64> {
+    let mut times = BTreeMap::new();
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return times;
+    };
+    let Ok(document) = inillucent_compat::toml_lite::parse(&text) else {
+        return times;
+    };
+    for row in document.array("timing") {
+        let Some(target) = row
+            .get("target")
+            .and_then(inillucent_compat::toml_lite::Value::as_str)
+        else {
+            continue;
+        };
+        let Some(milliseconds) = row
+            .get("milliseconds")
+            .and_then(inillucent_compat::toml_lite::Value::as_integer)
+        else {
+            continue;
+        };
+        if milliseconds >= 0 {
+            times.insert(target.to_string(), milliseconds as u64);
+        }
+    }
+    times
+}
+
+/// Writes the ledger back, keeping times for targets this run did not touch.
+///
+/// @param path - the ledger
+/// @param previous - what it held before
+/// @param outcomes - what this run measured
+fn write_ledger(
+    path: &Path,
+    previous: &BTreeMap<String, u64>,
+    outcomes: &[Outcome],
+) -> Result<(), String> {
+    let mut times = previous.clone();
+    for outcome in outcomes {
+        // A failure's duration is not a measurement of the suite: it is a
+        // measurement of how long it took to hit the first assertion, which is
+        // usually much shorter and would poison the schedule.
+        if outcome.passed {
+            let milliseconds = u64::try_from(outcome.elapsed.as_millis()).unwrap_or(u64::MAX);
+            times.insert(outcome.target.label(), milliseconds);
+        }
+    }
+    let mut text = String::from(
+        "# Measured wall-clock per test target, in milliseconds.\n\
+         #\n\
+         # Written by `inillucent-testrun --record`, and read back to schedule the\n\
+         # longest targets first. It is committed because the schedule has to be\n\
+         # good on the first run on a fresh clone, not on the second.\n\
+         #\n\
+         # These are times under the parallel runner on a 24-core machine, so they\n\
+         # are longer than the same suite's time to itself. That is the right\n\
+         # number for ordering: it is what the suite costs the run it is part of.\n\n",
+    );
+    for (target, milliseconds) in &times {
+        text.push_str("[[timing]]\n");
+        text.push_str(&format!("target = \"{target}\"\n"));
+        text.push_str(&format!("milliseconds = {milliseconds}\n\n"));
+    }
+    std::fs::write(path, text).map_err(|error| format!("cannot write {}: {error}", path.display()))
+}
+
+/// Puts the longest targets first.
+///
+/// Longest-processing-time-first is the classic answer to this shape of
+/// problem, and the reason is the tail: whatever starts last decides when the
+/// run ends, so the worst thing to start last is the slowest suite. On this
+/// workspace the difference is not marginal - a handful of campaigns take
+/// minutes while most suites take under a second.
+///
+/// @param built - the located executables
+/// @param ledger - the recorded times
+fn schedule(mut built: Vec<Built>, ledger: &BTreeMap<String, u64>) -> Vec<Built> {
+    built.sort_by(|left, right| {
+        let left_time = ledger
+            .get(&left.target.label())
+            .copied()
+            .unwrap_or(UNKNOWN_MILLISECONDS);
+        let right_time = ledger
+            .get(&right.target.label())
+            .copied()
+            .unwrap_or(UNKNOWN_MILLISECONDS);
+        right_time
+            .cmp(&left_time)
+            .then_with(|| left.target.cmp(&right.target))
+    });
+    built
+}
+
+/// Runs the binaries, at most `jobs` at a time, reporting each as it finishes.
+///
+/// @param ordered - the targets, longest first
+/// @param options - what the command line asked for
+fn execute(ordered: Vec<Built>, options: &Options) -> Vec<Outcome> {
+    let total = ordered.len();
+    let (sender, receiver) = mpsc::channel::<Outcome>();
+    let mut pending = ordered.into_iter();
+    let mut running = 0usize;
+    let mut outcomes = Vec::with_capacity(total);
+    let mut finished = 0usize;
+
+    let start_one = |pending: &mut std::vec::IntoIter<Built>| -> bool {
+        let Some(built) = pending.next() else {
+            return false;
+        };
+        let sender = sender.clone();
+        let threads = options.test_threads.to_string();
+        let filter = options.filter.clone();
+        let _ = std::thread::Builder::new()
+            .name(built.target.label())
+            .spawn(move || {
+                let outcome = run_one(&built, &threads, filter.as_deref());
+                let _ = sender.send(outcome);
+            });
+        true
+    };
+
+    while running < options.jobs && start_one(&mut pending) {
+        running += 1;
+    }
+    while running > 0 {
+        let Ok(outcome) = receiver.recv() else {
+            break;
+        };
+        running -= 1;
+        finished += 1;
+        println!(
+            "  [{finished:>3}/{total}] {:<7} {:<44} {:>7.2}s  {} test(s)",
+            if outcome.passed { "ok" } else { "FAILED" },
+            outcome.target.label(),
+            outcome.elapsed.as_secs_f64(),
+            outcome.ran
+        );
+        let _ = std::io::stdout().flush();
+        outcomes.push(outcome);
+        if start_one(&mut pending) {
+            running += 1;
+        }
+    }
+    outcomes
+}
+
+/// Runs one test binary and reads its result.
+///
+/// @param built - the executable and where to run it
+/// @param threads - what to pass as `--test-threads`
+/// @param filter - a name filter, when one was asked for
+fn run_one(built: &Built, threads: &str, filter: Option<&str>) -> Outcome {
+    let mut command = Command::new(&built.executable);
+    command
+        .current_dir(&built.directory)
+        // `cli.rs` and its two siblings read `CARGO` to find the cargo that is
+        // driving them. Started from here rather than from cargo, they would
+        // fall back to whatever `cargo` is on PATH, which on a machine with
+        // several toolchains is not necessarily this one.
+        .env("CARGO", cargo())
+        .args(["--test-threads", threads]);
+    if let Some(filter) = filter {
+        command.arg(filter);
+    }
+    let started = Instant::now();
+    let output = command.output();
+    let elapsed = started.elapsed();
+    match output {
+        Ok(output) => {
+            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&output.stderr));
+            Outcome {
+                target: built.target.clone(),
+                passed: output.status.success(),
+                elapsed,
+                ran: count_tests(&text),
+                output: text,
+                status: match output.status.code() {
+                    Some(code) => format!("exit status {code}"),
+                    None => "killed by a signal".to_string(),
+                },
+            }
+        }
+        Err(error) => Outcome {
+            target: built.target.clone(),
+            passed: false,
+            elapsed,
+            ran: 0,
+            output: format!("cannot start {}: {error}", built.executable.display()),
+            status: "never started".to_string(),
+        },
+    }
+}
+
+/// Reads how many tests a harness said it ran.
+///
+/// @param text - the harness's output
+fn count_tests(text: &str) -> usize {
+    for line in text.lines() {
+        let Some(rest) = line.strip_prefix("test result:") else {
+            continue;
+        };
+        let Some((passed, _)) = rest.trim().split_once(" passed;") else {
+            continue;
+        };
+        let count = passed
+            .rsplit(' ')
+            .next()
+            .and_then(|number| number.parse::<usize>().ok());
+        if let Some(count) = count {
+            return count;
+        }
+    }
+    0
+}
+
+/// Returns the selected suites whose prerequisites were not there.
+///
+/// The harness says so itself: every one of these suites prints a line naming
+/// what is missing rather than failing, so the runner reads the transcript
+/// instead of trying to detect the prerequisite for itself. Detecting it
+/// separately would be a second opinion that could disagree with the suite's.
+///
+/// @param outcomes - what ran
+/// @param map - the selection map, for what each target requires
+fn missing_prerequisites<'run>(
+    outcomes: &'run [Outcome],
+    map: &Map,
+) -> Vec<(&'run Outcome, Vec<String>)> {
+    let mut hollow = Vec::new();
+    for outcome in outcomes {
+        let Some(row) = map.row(&outcome.target) else {
+            continue;
+        };
+        if row.requires.is_empty() {
+            continue;
+        }
+        // A suite that ran no tests at all, or that said out loud that its
+        // reference is absent, evidenced nothing.
+        let silent = outcome.ran == 0;
+        let announced = outcome.output.contains("has not been built")
+            || outcome.output.contains("is not available")
+            || outcome.output.contains("no reference");
+        if silent || announced {
+            hollow.push((outcome, row.requires.clone()));
+        }
+    }
+    hollow
+}
+
+/// Prints the summary, and every failure in full.
+///
+/// @param outcomes - what ran
+/// @param wall - how long the whole run took
+/// @param map - the selection map
+/// @param strict - whether a missing prerequisite is a failure
+fn report(outcomes: &[Outcome], wall: Duration, map: &Map, strict: bool) {
+    let failures: Vec<&Outcome> = outcomes.iter().filter(|outcome| !outcome.passed).collect();
+    for failure in &failures {
+        println!("\n=== {} ({}) ===", failure.target.label(), failure.status);
+        println!("{}", failure.output.trim_end());
+    }
+
+    let tests: usize = outcomes.iter().map(|outcome| outcome.ran).sum();
+    let serial: Duration = outcomes.iter().map(|outcome| outcome.elapsed).sum();
+    println!("\n--- summary ---");
+    println!(
+        "{} target(s), {} test(s), {} failed",
+        outcomes.len(),
+        tests,
+        failures.len()
+    );
+    println!(
+        "wall {:.1}s; the same work run one at a time is {:.1}s of processor time ({:.1}x)",
+        wall.as_secs_f64(),
+        serial.as_secs_f64(),
+        if wall.as_secs_f64() > 0.0 {
+            serial.as_secs_f64() / wall.as_secs_f64()
+        } else {
+            0.0
+        }
+    );
+
+    let mut slowest: Vec<&Outcome> = outcomes.iter().collect();
+    slowest.sort_by(|left, right| right.elapsed.cmp(&left.elapsed));
+    println!("slowest:");
+    for outcome in slowest.iter().take(8) {
+        println!(
+            "  {:>7.2}s  {}",
+            outcome.elapsed.as_secs_f64(),
+            outcome.target.label()
+        );
+    }
+
+    let hollow = missing_prerequisites(outcomes, map);
+    if !hollow.is_empty() {
+        println!(
+            "\n{} suite(s) ran without a prerequisite and evidenced nothing{}:",
+            hollow.len(),
+            if strict {
+                ""
+            } else {
+                " (--strict makes this a failure)"
+            }
+        );
+        for (outcome, requires) in &hollow {
+            println!(
+                "  {:<44} needs {}",
+                outcome.target.label(),
+                requires.join(", ")
+            );
+        }
+    }
+
+    if failures.is_empty() {
+        println!("\nok");
+    } else {
+        println!("\nFAILED:");
+        for failure in &failures {
+            println!("  {}", failure.target.label());
+        }
+    }
+}
