@@ -1086,7 +1086,7 @@ MCP process that used to open its own copy of the index (3,831.6 MB) now asks th
 and recall@100 against an exact scan from 0.899 to **1.000**.
 
 The retrieval index's resident set is the one cost on this side of the project that nothing has tried
-to reduce; it is item 24 of [What is still missing](#what-is-still-missing).
+to reduce; it is item 22 of [What is still missing](#what-is-still-missing).
 
 ### The SQL surface
 
@@ -1362,11 +1362,11 @@ evidence are in [Is the feature list itself complete?](#is-the-feature-list-itse
 
 | # | gap | measured | what "closed" looks like |
 |---|---|---|---|
-| 19 | **`pragma_function_list` and `pragma_module_list` under-report, silently** | 161 rows against SQLite's 218, and 14 against 19, while `dbstat`, `sqlite_dbpage`, `sqlite_stmt`, `bytecode`, `tables_used`, `completion`, `generate_series`, `matchinfo` and `offsets` all answer byte-identically | register lazily-created modules and per-module functions in the list, so a caller introspecting the register is told the truth. **This is the project's one silent difference** and it should be the first thing fixed |
-| 20 | **Six FTS functions are absent**: `fts5(...)`, `fts5_source_id()`, `fts5_locale()`, `fts5_get_locale()`, `fts5_insttoken()`, `fts3_tokenizer()` | each called in both shells; `no such function` here, an answer there | the ones an application reaches for are `fts5(...)` - FTS5's own rank and config hook - and `fts3_tokenizer` |
-| 21 | **Two modules are absent**: `fts4aux` and `fts3tokenize` | `no such module` here, working tables there. The FTS5 analogue `fts5vocab` **is** here | `fts4aux` is the vocabulary table over an FTS3/4 index; `fts3tokenize` is the table-valued tokenizer |
-| 22 | **Four dot commands are absent**: `.expert`, `.load`, `.progress`, `.session` | `.help` from each shell: 61 against 65 | `.load` is the one with a real dependency behind it - there is no extension loading here |
-| 23 | **Eighteen names give the wrong reason out of context** - the eleven window functions and the FTS5 auxiliary functions say `no such function` where SQLite says `misuse of window function` or `unable to use function X in the requested context` | each called bare in both shells; **each verified byte-identical when called properly** | the message, not the feature. It is a small change and it removes eighteen false "missing function" reports from anybody auditing the way this section did |
+| 17 | **`pragma_function_list` and `pragma_module_list` under-report, silently** | 161 rows against SQLite's 218, and 14 against 19, while `dbstat`, `sqlite_dbpage`, `sqlite_stmt`, `bytecode`, `tables_used`, `completion`, `generate_series`, `matchinfo` and `offsets` all answer byte-identically | register lazily-created modules and per-module functions in the list, so a caller introspecting the register is told the truth. **This is the project's one silent difference** and it should be the first thing fixed |
+| 18 | **Six FTS functions are absent**: `fts5(...)`, `fts5_source_id()`, `fts5_locale()`, `fts5_get_locale()`, `fts5_insttoken()`, `fts3_tokenizer()` | each called in both shells; `no such function` here, an answer there | the ones an application reaches for are `fts5(...)` - FTS5's own rank and config hook - and `fts3_tokenizer` |
+| 19 | **Two modules are absent**: `fts4aux` and `fts3tokenize` | `no such module` here, working tables there. The FTS5 analogue `fts5vocab` **is** here | `fts4aux` is the vocabulary table over an FTS3/4 index; `fts3tokenize` is the table-valued tokenizer |
+| 20 | **Four dot commands are absent**: `.expert`, `.load`, `.progress`, `.session` | `.help` from each shell: 61 against 65 | `.load` is the one with a real dependency behind it - there is no extension loading here |
+| 21 | **Eighteen names give the wrong reason out of context** - the eleven window functions and the FTS5 auxiliary functions say `no such function` where SQLite says `misuse of window function` or `unable to use function X in the requested context` | each called bare in both shells; **each verified byte-identical when called properly** | the message, not the feature. It is a small change and it removes eighteen false "missing function" reports from anybody auditing the way this section did |
 
 **Forty-one further names are not a gap**: `base64`, `base85`, `decimal*`, `ieee754*`, `sha1*`,
 `sha3*`, `regexpi`, `zipfile`, `readfile`, `writefile`, `edit`, `lsmode`, `realpath`, `usleep`,
@@ -1382,8 +1382,8 @@ full for this review. What is open is cost rather than quality.
 
 | # | gap | measured | what "closed" looks like |
 |---|---|---|---|
-| 24 | **The retrieval index's resident set.** 3.83 GB for a 3.1 GB index of 598,560 chunks in production; 1,216 MiB for the 185,078-chunk corpus here | task-1775, and this review's `inillucent-childcost` run | nothing has tried to make it smaller; a measured attempt, with a number |
-| 25 | **`embed()` is behind a feature flag and off by default**, so the "one library, no second process" claim needs a build to be true | `--features embed` | a decision recorded either way, rather than a default nobody chose |
+| 22 | **The retrieval index's resident set.** 3.83 GB for a 3.1 GB index of 598,560 chunks in production; 1,216 MiB for the 185,078-chunk corpus here | task-1775, and this review's `inillucent-childcost` run | nothing has tried to make it smaller; a measured attempt, with a number |
+| 23 | **`embed()` is behind a feature flag and off by default**, so the "one library, no second process" claim needs a build to be true | `--features embed` | a decision recorded either way, rather than a default nobody chose |
 
 
 ---
