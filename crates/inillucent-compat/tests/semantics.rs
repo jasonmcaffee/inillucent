@@ -116,6 +116,36 @@ const CASES: &[Case] = &[
         script: "CREATE TABLE t(a INTEGER PRIMARY KEY, n INTEGER);\nINSERT INTO t VALUES(1,100),(2,600);\nINSERT INTO t VALUES(1,7) ON CONFLICT(a) DO UPDATE SET n=999 WHERE t.n > 500;\nINSERT INTO t VALUES(2,7) ON CONFLICT(a) DO UPDATE SET n=999 WHERE t.n > 500;\nSELECT * FROM t ORDER BY a;\nSELECT changes();",
         expect: Agrees,
     },
+    // task-1870's QA pass: the two shapes the 416-case probe caught reporting a
+    // refusal in the wrong words.
+    //
+    // The pinned reference is not compiled with
+    // `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`, so it has no grammar for the clause
+    // and answers `near "ORDER": syntax error`. This engine parses the form -
+    // it is a published production and the syntax register requires it - and
+    // refuses it at bind time in the reference's words. task-1869 moved
+    // `bind::refused` from `Unexpected` to `Refused`, which was right for the
+    // forty-seven sentence-shaped refusals it was aimed at and wrong for this
+    // one: the message became a bare `ORDER`. Both engines still refused, so
+    // nothing that only checks for failure could see it.
+    Case {
+        name: "dml.delete.limit",
+        kind: "write",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT);
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t');
+DELETE FROM t ORDER BY a DESC LIMIT 2;
+SELECT count(*) FROM t;",
+        expect: Agrees,
+    },
+    Case {
+        name: "dml.update.limit",
+        kind: "write",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT);
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t');
+UPDATE t SET b='z' ORDER BY a DESC LIMIT 1;
+SELECT group_concat(b) FROM (SELECT b FROM t ORDER BY id);",
+        expect: Agrees,
+    },
     Case {
         name: "trigger.recursive",
         kind: "trigger",
