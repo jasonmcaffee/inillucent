@@ -13,13 +13,24 @@ declare(strict_types=1);
  * script can branch on.
  */
 
-foreach (
-    [
-        __DIR__ . '/../../../vendor/autoload.php',   // installed as a dependency
-        __DIR__ . '/../../../../autoload.php',       // installed under another vendor directory
-        __DIR__ . '/../../../vendor/autoload.php',   // the repository itself
-    ] as $autoload
-) {
+// Composer's bin proxy sets this global, and it is the only way of finding the
+// autoloader that does not depend on counting directories. The path list below
+// is the fallback for the two cases it does not cover: a project that runs this
+// file directly, and this repository's own checkout.
+//
+// The counting matters and was wrong: installed, this file sits at
+// `vendor/jasonmcaffee/inillucent/packages/php/bin/`, so the project's
+// autoloader is **five** levels up, not three. With three, `vendor/bin/inillucent`
+// answered "composer's autoloader was not found" on a correct install - which is
+// the shim failing at the one job it has.
+$autoloaders = [];
+if (isset($GLOBALS['_composer_autoload_path'])) {
+    $autoloaders[] = $GLOBALS['_composer_autoload_path'];
+}
+$autoloaders[] = __DIR__ . '/../../../../../autoload.php';   // installed as a dependency
+$autoloaders[] = __DIR__ . '/../../../vendor/autoload.php';  // this repository's own checkout
+
+foreach ($autoloaders as $autoload) {
     if (is_file($autoload)) {
         require_once $autoload;
         break;
