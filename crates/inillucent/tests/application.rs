@@ -614,6 +614,60 @@ fn rolling_back_to_an_outer_savepoint_discards_the_inner_one() {
     );
 }
 
+/// A `ROLLBACK TO` that names no open savepoint fails and changes nothing.
+///
+/// **A failed statement may not have a side effect**, and this one nearly did.
+/// The engine tells every module which savepoint is being returned to; when the
+/// name matched nothing, the first version of that code defaulted the level to
+/// zero, told the modules to discard, and only then let the statement fail. So
+/// a typo in a savepoint name threw away a buffered virtual table's pending
+/// writes and reported an error, leaving the transaction quietly short of rows
+/// it had accepted.
+///
+/// Found by a review of this ticket's own fix, which is why the case is here:
+/// nothing else in the suite asks what a *failed* rollback does to a module.
+#[test]
+fn a_rollback_to_an_unknown_savepoint_changes_nothing() {
+    let directory = scratch("unknown-savepoint");
+    let database = Database::open(directory.join("unknown.rdb")).expect("the database opens");
+    let connection = database.connect();
+    connection
+        .execute_batch(
+            "CREATE VIRTUAL TABLE pages USING fts5 (title, body);\
+             INSERT INTO pages (title, body) VALUES ('base', 'trees');",
+        )
+        .expect("the index is created");
+    connection
+        .execute_batch("BEGIN")
+        .expect("the transaction opens");
+    connection
+        .execute("INSERT INTO pages (title, body) VALUES ('pending', 'trees')")
+        .expect("a row that has not been committed");
+    assert_eq!(ask(&connection, "SELECT count(*) FROM pages"), "2");
+
+    connection
+        .execute_batch("ROLLBACK TO no_such_point")
+        .expect_err("a savepoint that was never opened is an error");
+
+    assert_eq!(
+        ask(&connection, "SELECT count(*) FROM pages"),
+        "2",
+        "the failed rollback discarded the transaction's pending rows"
+    );
+    assert_eq!(
+        ask(
+            &connection,
+            "SELECT count(*) FROM pages WHERE pages MATCH 'trees'"
+        ),
+        "2",
+        "the failed rollback discarded the full-text index's buffer"
+    );
+    connection
+        .execute_batch("COMMIT")
+        .expect("the transaction still commits");
+    assert_eq!(ask(&connection, "SELECT count(*) FROM pages"), "2");
+}
+
 /// The ordinary half of the same story: a normal table in a transaction that a
 /// virtual table also wrote to still rolls back correctly.
 ///
