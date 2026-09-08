@@ -3250,13 +3250,20 @@ impl ImportedDatabase {
     }
 
     /// Abandons the open transaction.
+    ///
+    /// **Every step runs, and the first failure is reported afterwards.** A
+    /// rollback is not a step that can be declined: the caller has said the
+    /// transaction is over, and returning early from the middle of it would
+    /// leave the rows undone and the connection still believing a transaction
+    /// and its savepoints were open - a state with no name, which the next
+    /// statement would inherit. So the module notification, the undo and the
+    /// bookkeeping all happen, and only then is an error returned.
     pub fn rollback(&mut self) -> DbResult<()> {
         // **The modules are told, or the connection goes on answering out of a
         // transaction that did not happen.** See `rollback_modules`: the file
         // was always put back correctly, and the module's own buffer was not.
         let told = self.rollback_modules(None);
-        self.undo_to(None)?;
-        told?;
+        let undone = self.undo_to(None);
         self.marks.clear();
         self.batch.set(None);
         // Nothing to decide: an abandoned transaction has no commit for a
@@ -3267,6 +3274,8 @@ impl ImportedDatabase {
         // SQLite's rule for `PRAGMA defer_foreign_keys`.
         self.defer_foreign_keys = false;
         self.refresh_catalog();
+        undone?;
+        told?;
         Ok(())
     }
 
@@ -3296,11 +3305,27 @@ impl ImportedDatabase {
     ///
     /// @param name - the savepoint's name
     pub fn rollback_to(&mut self, name: &[u8]) -> DbResult<()> {
-        let level = i32::try_from(self.marks.len()).unwrap_or(i32::MAX);
+        // **The level of the savepoint being returned to, not how deep the
+        // nesting currently is.** `SAVEPOINT a; SAVEPOINT b; ROLLBACK TO a`
+        // has two marks and a target level of zero, and a module told "two"
+        // would keep the state belonging to `b` - the savepoint that was just
+        // abandoned. A module numbers its own marks by what it was given, so
+        // the number has to mean the same thing to both sides.
+        //
+        // A name the transaction does not hold is left to `undo_to` to refuse,
+        // so that the error is the one it has always been.
+        let folded = name.to_ascii_lowercase();
+        let level = self
+            .marks
+            .iter()
+            .rposition(|(held, _)| *held == folded)
+            .and_then(|position| i32::try_from(position).ok())
+            .unwrap_or(0);
         let told = self.rollback_modules(Some(level));
-        self.undo_to(Some(name))?;
-        told?;
+        let undone = self.undo_to(Some(name));
         self.refresh_catalog();
+        undone?;
+        told?;
         Ok(())
     }
 

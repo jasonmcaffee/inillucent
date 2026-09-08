@@ -530,6 +530,90 @@ fn a_virtual_table_rolls_back_with_its_transaction() {
     );
 }
 
+/// Rolling back to an *outer* savepoint discards the inner one's rows too.
+///
+/// **What this test does and does not prove.** It pins the observable answer:
+/// two levels of savepoint, a rollback to the outer one, and the inner one's
+/// rows gone - through a virtual table, across a reopen.
+///
+/// It does **not** discriminate the savepoint-level defect a review of this
+/// ticket found, and saying so is the point. The engine used to tell each
+/// module the current nesting depth rather than the level of the savepoint
+/// being returned to, so `SAVEPOINT a; SAVEPOINT b; ROLLBACK TO a` said "two"
+/// where the answer was "zero". The fix is real and it is in `rollback_to`, but
+/// this test passes with it reverted - checked, not assumed - because FTS5's
+/// `rollback_to` discards its whole buffer and ignores the number. The defect
+/// bites a module that keeps marks of its own, and there is no such module in
+/// the tree to write a failing test against yet.
+///
+/// So this is a regression test for the behaviour and a note about the rest.
+/// The alternative - a comment claiming the test proves the fix - is the thing
+/// section 1.1 of the standard is against.
+#[test]
+fn rolling_back_to_an_outer_savepoint_discards_the_inner_one() {
+    let directory = scratch("nested-savepoint");
+    let path = directory.join("nested.rdb");
+    {
+        let database = Database::open(&path).expect("the database opens");
+        let connection = database.connect();
+        connection
+            .execute_batch(
+                "CREATE VIRTUAL TABLE pages USING fts5 (title, body);\
+                 INSERT INTO pages (title, body) VALUES ('base', 'trees');",
+            )
+            .expect("the index is created");
+        connection
+            .execute_batch("BEGIN")
+            .expect("the transaction opens");
+        connection
+            .execute("INSERT INTO pages (title, body) VALUES ('before', 'trees')")
+            .expect("a row before any savepoint");
+        connection
+            .execute_batch("SAVEPOINT a")
+            .expect("the outer point");
+        connection
+            .execute("INSERT INTO pages (title, body) VALUES ('inside-a', 'trees')")
+            .expect("a row inside a");
+        connection
+            .execute_batch("SAVEPOINT b")
+            .expect("the inner point");
+        connection
+            .execute("INSERT INTO pages (title, body) VALUES ('inside-b', 'trees')")
+            .expect("a row inside b");
+        assert_eq!(
+            ask(&connection, "SELECT count(*) FROM pages"),
+            "4",
+            "the writes are not visible inside their own transaction"
+        );
+        connection
+            .execute_batch("ROLLBACK TO a")
+            .expect("the outer point is returned to");
+        assert_eq!(
+            ask(&connection, "SELECT count(*) FROM pages"),
+            "2",
+            "returning to the outer savepoint kept a row from the inner one"
+        );
+        connection
+            .execute_batch("COMMIT")
+            .expect("the transaction commits");
+    }
+    let database = reopen_and_check(&path);
+    let connection = database.connect();
+    assert_eq!(
+        ask(&connection, "SELECT title FROM pages ORDER BY rowid"),
+        "base\nbefore",
+        "the file disagrees with the connection that wrote it"
+    );
+    assert_eq!(
+        ask(
+            &connection,
+            "SELECT count(*) FROM pages WHERE pages MATCH 'trees'"
+        ),
+        "2",
+        "the full-text index disagrees with its own content table"
+    );
+}
+
 /// The ordinary half of the same story: a normal table in a transaction that a
 /// virtual table also wrote to still rolls back correctly.
 ///
