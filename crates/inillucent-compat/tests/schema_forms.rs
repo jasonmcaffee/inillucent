@@ -115,14 +115,30 @@ fn sqlite_reads(path: &PathBuf, queries: &[(&str, &[&str])]) {
 /// A stored trigger is only really proved by having the *reference* fire it, and
 /// that needs the reference to write. The writes go through `exec` one statement
 /// at a time because the oracle prepares one statement per request.
-fn sqlite_writes_then_reads(path: &PathBuf, writes: &[&str], queries: &[(&str, &[&str])]) {
+///
+/// Returns the inillucent database the reference's writes were carried back
+/// into, which is what a caller that wants to read them here reopens.
+fn sqlite_writes_then_reads(
+    path: &PathBuf,
+    writes: &[&str],
+    queries: &[(&str, &[&str])],
+) -> PathBuf {
     let Some(program) = oracle_path() else {
         panic!("the pinned SQLite oracle is not built");
     };
+    // **Carried across, not opened in place.** inillucent's file is an `RDB2`
+    // file and SQLite's is a SQLite file; handing the path straight over tests
+    // which header each engine writes, which is settled and deliberate. What
+    // these tests ask is whether the *schema* inillucent stores is one SQLite
+    // reads and agrees with, so the database goes over as `.dump` - the
+    // interchange the shell ships - and every assertion below is then made of a
+    // real SQLite file the reference built from inillucent's own SQL.
+    let mirror = inillucent_compat::interchange::as_sqlite_file(path)
+        .unwrap_or_else(|reason| panic!("carrying {path:?} across: {reason}"));
     let mut driver = Driver::start("sqlite", &program).expect("the oracle starts");
     driver.send(&Op::Hello).expect("the oracle answers");
     driver
-        .send(&Op::Open(path.display().to_string()))
+        .send(&Op::Open(mirror.display().to_string()))
         .expect("the oracle opens the file");
     let integrity = driver
         .send(&Op::Query("PRAGMA integrity_check".to_string()))
@@ -156,6 +172,17 @@ fn sqlite_writes_then_reads(path: &PathBuf, writes: &[&str], queries: &[(&str, &
             .collect();
         assert_eq!(rows, expected.to_vec(), "{sql}");
     }
+    if writes.is_empty() {
+        return path.clone();
+    }
+    // The reference wrote into its own copy, so the writes come back the same
+    // way they went out. A caller that only read gets its own path back and
+    // nothing is rebuilt.
+    drop(driver);
+    let carried = path.with_extension("carried-back.db");
+    inillucent_compat::interchange::from_sqlite_file(&mirror, &carried)
+        .unwrap_or_else(|reason| panic!("carrying {mirror:?} back: {reason}"));
+    carried
 }
 
 /// A view inillucent creates is one SQLite reads, and it selects the same rows.
@@ -355,7 +382,8 @@ fn strict_is_enforced_on_a_file_sqlite_wrote() {
     }
     drop(driver);
 
-    let database = Database::open(&path).expect("the database opens");
+    // A file the reference wrote is a SQLite file: it is imported, not opened.
+    let database = Database::import(&path).expect("the database imports");
     let connection = database.connect().expect("the connection opens");
     assert!(run(&connection, "INSERT INTO s VALUES ('abc', 'y')").is_err());
     run_all(&connection, &["INSERT INTO s VALUES (2, 'y')"]);
@@ -971,7 +999,7 @@ fn without_rowid_round_trips_through_sqlite() {
         ],
     );
     // The reference writes it, and inillucent reads what it wrote.
-    sqlite_writes_then_reads(
+    let carried = sqlite_writes_then_reads(
         &path,
         &[
             "INSERT INTO w VALUES ('r', 4, 'cr')",
@@ -987,7 +1015,7 @@ fn without_rowid_round_trips_through_sqlite() {
             ],
         )],
     );
-    let database = Database::open(&path).expect("the database re-opens");
+    let database = Database::open(&carried).expect("the database re-opens");
     let connection = database.connect().expect("the connection re-opens");
     assert_eq!(
         run(&connection, "SELECT a, b, c FROM w ORDER BY b, a"),

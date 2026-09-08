@@ -39,9 +39,13 @@
 #[global_allocator]
 static ALLOCATOR: inillucent_alloc::Pooled = inillucent_alloc::Pooled;
 
+mod archive;
+mod commands;
+mod dbconfig;
 mod diagnose;
 mod dot;
 mod dump;
+mod help;
 mod import;
 mod render;
 mod shell;
@@ -152,6 +156,9 @@ fn main() {
         let statements = invocation.statements.clone();
         drive(&mut shell, statements.into_iter());
     }
+    // `.testcase`/`.check` report their tally once, at the end, and only when
+    // some ran - which is what makes the line invisible to an ordinary script.
+    commands::report_tests(&mut shell);
     if shell.failed {
         std::process::exit(1);
     }

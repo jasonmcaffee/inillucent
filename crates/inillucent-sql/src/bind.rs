@@ -4076,7 +4076,10 @@ impl<'a> Binder<'a> {
         if self.sources.is_empty() && table_folded.is_none() {
             return Err(no_such_column_quoted(
                 self.ast.text(column),
-                self.ast.name(column).map(|name| name.quote).unwrap_or(QuoteForm::Bare),
+                self.ast
+                    .name(column)
+                    .map(|name| name.quote)
+                    .unwrap_or(QuoteForm::Bare),
                 span,
             ));
         }
@@ -4095,7 +4098,10 @@ impl<'a> Binder<'a> {
             }
             _ if table_folded.is_none() => Err(no_such_column_quoted(
                 self.ast.text(column),
-                self.ast.name(column).map(|name| name.quote).unwrap_or(QuoteForm::Bare),
+                self.ast
+                    .name(column)
+                    .map(|name| name.quote)
+                    .unwrap_or(QuoteForm::Bare),
                 span,
             )),
             // A qualified reference names both halves, which is what the
@@ -4167,6 +4173,36 @@ impl<'a> Binder<'a> {
                 arguments: vec![bound_right, bound_left],
                 collation: Collation::Binary,
             }),
+            // **pgvector's distance operators are sugar for the functions**,
+            // which is exactly what they are in pgvector too: an operator class
+            // over a function, so that an index can be asked for the same
+            // ordering the expression writes. `<#>` is the odd one, and it is
+            // odd in pgvector as well - it answers the *negative* inner product,
+            // so that a smaller number is a better match and one index
+            // direction serves every operator.
+            BinaryOp::L2Distance
+            | BinaryOp::CosineDistance
+            | BinaryOp::L1Distance
+            | BinaryOp::HammingDistance
+            | BinaryOp::JaccardDistance => Ok(BoundExpr::Function {
+                func: match op {
+                    BinaryOp::L2Distance => ScalarFunc::VectorDistanceL2,
+                    BinaryOp::CosineDistance => ScalarFunc::VectorDistanceCos,
+                    BinaryOp::L1Distance => ScalarFunc::VectorDistanceL1,
+                    BinaryOp::HammingDistance => ScalarFunc::VectorDistanceHamming,
+                    _ => ScalarFunc::VectorDistanceJaccard,
+                },
+                arguments: vec![bound_left, bound_right],
+                collation: Collation::Binary,
+            }),
+            BinaryOp::NegativeInnerProduct => Ok(BoundExpr::Unary {
+                op: UnaryOp::Negate,
+                operand: Box::new(BoundExpr::Function {
+                    func: ScalarFunc::VectorDot,
+                    arguments: vec![bound_left, bound_right],
+                    collation: Collation::Binary,
+                }),
+            }),
             BinaryOp::Match => Err(no_such_function(b"match", self.ast.expr_span(right))),
             BinaryOp::Extract | BinaryOp::ExtractText => Ok(BoundExpr::Json {
                 func: if op == BinaryOp::Extract {
@@ -4184,6 +4220,27 @@ impl<'a> Binder<'a> {
                 // element-wise; this engine does not implement it, and a
                 // caller who wrote it gets told so rather than getting a
                 // column of zeroes.
+                // **Element-wise, which is what pgvector defines.** `+`, `-`
+                // and `*` over two vectors work component by component, and
+                // `*` with a number on one side scales. Anything else over a
+                // vector - a division, a modulo, a shift - has no pgvector
+                // meaning, and answering `0.0` for it is worse than refusing:
+                // the blob would go through numeric affinity, which reads no
+                // leading digits and calls that nothing.
+                if let Some(func) = match op {
+                    BinaryOp::Add => Some(ScalarFunc::VectorAdd),
+                    BinaryOp::Subtract => Some(ScalarFunc::VectorSubtract),
+                    BinaryOp::Multiply => Some(ScalarFunc::VectorMultiply),
+                    _ => None,
+                } {
+                    if self.reads_a_vector(&bound_left) || self.reads_a_vector(&bound_right) {
+                        return Ok(BoundExpr::Function {
+                            func,
+                            arguments: vec![bound_left, bound_right],
+                            collation: Collation::Binary,
+                        });
+                    }
+                }
                 if self.reads_a_vector(&bound_left) || self.reads_a_vector(&bound_right) {
                     return Err(unsupported(
                         "arithmetic over a vector column",
@@ -4510,15 +4567,25 @@ impl<'a> Binder<'a> {
             // the blob through numeric affinity and answered `0.0` for a whole
             // column of embeddings. pgvector's `avg(vector)` is an element-wise
             // mean; this engine does not compute one, and says so.
-            if matches!(
-                func,
-                function::AggregateFunc::Sum
-                    | function::AggregateFunc::Avg
-                    | function::AggregateFunc::Total
-            ) && bound.iter().any(|argument| self.reads_a_vector(argument))
-            {
-                return Err(unsupported("an aggregate over a vector column", span));
-            }
+            // **A vector column folds component by component.** `sum(v)` and
+            // `avg(v)` over embeddings used to coerce the blob through numeric
+            // affinity and answer `0.0` for a whole column; pgvector defines
+            // them as element-wise, and this is that - chosen here, where the
+            // argument's type is known, rather than at run time where a blob is
+            // just a blob.
+            let func = match func {
+                function::AggregateFunc::Sum | function::AggregateFunc::Total
+                    if bound.iter().any(|argument| self.reads_a_vector(argument)) =>
+                {
+                    function::AggregateFunc::VectorSum
+                }
+                function::AggregateFunc::Avg
+                    if bound.iter().any(|argument| self.reads_a_vector(argument)) =>
+                {
+                    function::AggregateFunc::VectorAvg
+                }
+                other => other,
+            };
             let candidate = BoundAggregate {
                 func,
                 external: None,
@@ -4604,6 +4671,41 @@ impl<'a> Binder<'a> {
             return Ok(BoundExpr::Json {
                 func,
                 arguments: bound,
+            });
+        }
+        // **`subtype` is answered where the producing function is known.**
+        // A subtype is not a property of a value here - `Value` has no slot
+        // for one - it is a property of the *call* that made it, which is
+        // exactly what the reference records at run time and what the binder
+        // can see. The one call whose answer depends on the data is
+        // `json_extract`, which carries the JSON subtype only when what it
+        // extracted was itself an array or an object; that one is left to run.
+        if folded == b"subtype" && list.len() == 1 {
+            let Some(argument) = list.first().copied() else {
+                return Err(wrong_arguments(&folded, span));
+            };
+            let bound = self.bind_expr(argument)?;
+            // A JSON group aggregate carries the subtype too, and its function
+            // is in the binder's list rather than in the expression - so the
+            // slot is resolved here, where the list is.
+            if let BoundExpr::Aggregate { slot } = &bound {
+                let carries = matches!(
+                    self.aggregates.get(*slot).map(|held| held.func),
+                    Some(
+                        function::AggregateFunc::JsonGroupArray
+                            | function::AggregateFunc::JsonGroupObject
+                    )
+                );
+                return Ok(BoundExpr::Integer(if carries { 74 } else { 0 }));
+            }
+            return Ok(match json_subtype(&bound) {
+                Subtyped::Always => BoundExpr::Integer(74),
+                Subtyped::Never => BoundExpr::Integer(0),
+                Subtyped::WhenShaped => BoundExpr::Function {
+                    func: function::ScalarFunc::Subtype,
+                    arguments: vec![bound],
+                    collation: Collation::Binary,
+                },
             });
         }
         let Some(func) = function::lookup_scalar(&folded) else {
@@ -4729,17 +4831,21 @@ fn integer_literal(text: &[u8]) -> BoundExpr {
 ///
 /// `Unsupported` carries a `&'static str` because most refusals are one of a
 /// closed set of phrases and interning them keeps the error type cheap. A
-/// refusal that has to name a column or count something cannot be one of
-/// those, so it is reported as an unexpected-input failure carrying the whole
-/// sentence, which is the shape SQLite's own messages take.
+/// refusal that has to name a column or count something cannot be one of those,
+/// so it carries the whole sentence.
+///
+/// **`Refused`, not `Unexpected`, since task-1869.** It used to be reported as
+/// an unexpected-input failure carrying the sentence, on the reasoning that
+/// this is the shape SQLite's own messages take - and it is not.
+/// `ParseErrorKind::Unexpected` renders as `near "X": syntax error`, so
+/// `CREATE TABLE t(a)` on a table that exists answered
+/// `near "table t already exists": syntax error` where the reference answers
+/// `table t already exists`. Forty-seven refusals in `directive.rs` alone took
+/// that shape, and the register audit's own probe is what printed it side by
+/// side. `Refused` is the variant whose whole purpose is a sentence the schema
+/// wants said in the reference's words, and it renders as one.
 pub(crate) fn refused(detail: impl Into<String>, span: Span) -> ParseError {
-    ParseError::new(
-        ParseErrorKind::Unexpected {
-            found: detail.into(),
-            expected: Vec::new(),
-        },
-        span,
-    )
+    ParseError::new(ParseErrorKind::Refused(detail.into()), span)
 }
 
 /// Returns a refusal that carries its own wording.
@@ -4811,8 +4917,83 @@ fn ambiguous_column(name: &[u8], span: Span) -> ParseError {
     )
 }
 
-/// Returns a "no such function" failure.
+/// The names that exist but only inside a window frame.
+///
+/// A call to one of these outside `OVER (...)` is a misuse, not an absence, and
+/// SQLite says so. Reporting it as "no such function" made an audit that
+/// enumerated by calling names count eleven functions as missing that are
+/// present and byte-identical over a real frame. task-1869.
+const WINDOW_ONLY: &[&[u8]] = &[
+    b"cume_dist",
+    b"dense_rank",
+    b"first_value",
+    b"lag",
+    b"last_value",
+    b"lead",
+    b"nth_value",
+    b"ntile",
+    b"percent_rank",
+    b"rank",
+    b"row_number",
+];
+
+/// The names that exist but only where a virtual table can answer them.
+///
+/// FTS5's and FTS3/4's auxiliary functions take the table as their first
+/// argument and are answered by the module's cursor; called anywhere else there
+/// is no cursor to ask. SQLite refuses those with "unable to use function X in
+/// the requested context", and so does this - the twelve of them were the rest
+/// of the twenty-three names the audit read as missing. task-1869.
+const CONTEXT_ONLY: &[&[u8]] = &[
+    b"bm25",
+    b"fts5",
+    b"fts5_get_locale",
+    b"fts5_insttoken",
+    b"fts5_locale",
+    b"highlight",
+    b"match",
+    b"matchinfo",
+    b"offsets",
+    b"optimize",
+    b"snippet",
+];
+
+/// Returns the failure a name that did not resolve deserves.
+///
+/// **Three different facts, three different sentences.** A name nobody has is
+/// "no such function". A window function outside a frame is a misuse. An
+/// auxiliary function outside the virtual table that answers it is a context
+/// error. The engine used to say the first about all three, which is the only
+/// one of the three that is a claim about *existence* - so an audit that probed
+/// by calling read twenty-three present functions as absent.
+///
+/// @param name - the folded name that did not resolve
+/// @param span - where it was written
 fn no_such_function(name: &[u8], span: Span) -> ParseError {
+    if WINDOW_ONLY.contains(&name) {
+        return ParseError::new(
+            ParseErrorKind::Refused(format!(
+                "misuse of window function {}()",
+                String::from_utf8_lossy(name)
+            )),
+            span,
+        );
+    }
+    if CONTEXT_ONLY.contains(&name) {
+        // SQLite spells `MATCH` in upper case here and the rest as written,
+        // because `MATCH` reaches this path as the operator's keyword.
+        let spelled = if name == b"match" {
+            "MATCH".to_string()
+        } else {
+            String::from_utf8_lossy(name).into_owned()
+        };
+        return ParseError::new(
+            ParseErrorKind::Refused(format!(
+                "unable to use function {spelled} in the requested context"
+            )),
+            span,
+        );
+    }
     ParseError::new(
         ParseErrorKind::Refused(format!(
             "no such function: {}",
@@ -5073,5 +5254,53 @@ fn compare_bound_rows(
             ParseErrorKind::Refused("row value misused".to_string()),
             span,
         )),
+    }
+}
+
+/// Whether a bound expression carries the JSON subtype.
+///
+/// SQLite marks a value with the subtype `74` - the letter `J` - when it was
+/// produced by a function that returns JSON *text*. The binary spellings do
+/// not carry it (a `jsonb_` result is a blob, and a blob read back out of a
+/// column has no subtype either), and the functions that answer a number or a
+/// type name are not JSON at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Subtyped {
+    /// The call always marks its answer.
+    Always,
+    /// The call never does.
+    Never,
+    /// It depends on what came out: `json_extract` marks an array or an
+    /// object and does not mark the scalar it may equally have found.
+    WhenShaped,
+}
+
+/// Returns whether an expression's value carries the JSON subtype.
+///
+/// @param bound - the argument to `subtype`
+fn json_subtype(bound: &BoundExpr) -> Subtyped {
+    let BoundExpr::Json { func, .. } = bound else {
+        return Subtyped::Never;
+    };
+    use function::JsonFunc;
+    match func {
+        JsonFunc::Extract | JsonFunc::Arrow => Subtyped::WhenShaped,
+        JsonFunc::Jsonb
+        | JsonFunc::ArrayB
+        | JsonFunc::ExtractB
+        | JsonFunc::InsertB
+        | JsonFunc::ObjectB
+        | JsonFunc::PatchB
+        | JsonFunc::RemoveB
+        | JsonFunc::ReplaceB
+        | JsonFunc::SetB
+        | JsonFunc::ArrayInsertB
+        | JsonFunc::ArrowShift
+        | JsonFunc::ArrayLength
+        | JsonFunc::ErrorPosition
+        | JsonFunc::Type
+        | JsonFunc::Valid
+        | JsonFunc::Pretty => Subtyped::Never,
+        _ => Subtyped::Always,
     }
 }

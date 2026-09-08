@@ -38,9 +38,9 @@ sha256 = "42145d6fae6611621d43ff0a53e99389fbd8bf5bfaf0da8e9b21577db00f3cd9"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/gradeembed.rs"
-ticket = "task-1818"
-reason = "task-1818 generalises the grading harness from one embedding model to a head-to-head between several, which is what the task-1815 TDD's success criteria are graded by. A model is now a manifest (id, width, Matryoshka widths, four prefixes, pooling, token bound, backend, output, tokenizer and weights digests) instead of a set of constants; a cache carries a header naming the corpus digest, the model, the manifest digest and the truncation it performed; grade-embedding compares two or more caches and refuses before it starts unless they agree on corpus, chunk count and query seeds; and the embedder gained CLS and last-token pooling, graph-driven inputs, and a llama.cpp backend for the one model with no ONNX export. ModelManifest::nomic_v1_5() reproduces every constant it replaced: the fresh baseline cache agrees with the August run at cosine 1.000000 minimum over 5000 chunks, and grade's card is unchanged on every measurement row."
-sha256 = "063cdedab7af9581870958513a9c5d42a096c806185ee2267d404b1956355efe"
+ticket = "task-1860"
+reason = "task-1834 unformatted the crates the policy does not govern and left this file matching neither the recorded baseline nor task-1818's amendment, so every run since has reported it as moved. The content is the one that has been committed and building since 6b4a96a; this re-records it under that content rather than changing the file, which is what the amendment mechanism is for."
+sha256 = "44dcdff3eaf6585ce4612bf665973f237234016f869dfda12a3201c115f09c46"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/http.rs"
@@ -56,9 +56,9 @@ sha256 = "c606a322fe69ffecb0e7ebc0f58771217a3fda556f24940ea9a580c575e2db31"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/main.rs"
-ticket = "task-1818"
-reason = "task-1818 generalises the grading harness from one embedding model to a head-to-head between several, which is what the task-1815 TDD's success criteria are graded by. A model is now a manifest (id, width, Matryoshka widths, four prefixes, pooling, token bound, backend, output, tokenizer and weights digests) instead of a set of constants; a cache carries a header naming the corpus digest, the model, the manifest digest and the truncation it performed; grade-embedding compares two or more caches and refuses before it starts unless they agree on corpus, chunk count and query seeds; and the embedder gained CLS and last-token pooling, graph-driven inputs, and a llama.cpp backend for the one model with no ONNX export. ModelManifest::nomic_v1_5() reproduces every constant it replaced: the fresh baseline cache agrees with the August run at cosine 1.000000 minimum over 5000 chunks, and grade's card is unchanged on every measurement row."
-sha256 = "23a9d0970c70eb0d40ca949f9bd27b3b1b3bcadcd8b27777e9b24669e448ce4c"
+ticket = "task-1860"
+reason = "The same leftover as gradeembed.rs: task-1834 unformatted the crates the policy does not govern and left this file matching neither the recorded baseline nor task-1818's amendment. The content is the one committed since 6b4a96a; this re-records it rather than changing the file."
+sha256 = "3e1dbb671d3820aab21b53eeb4f62c451ca87ed736ed52e2a6abdd0525507831"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/models.rs"

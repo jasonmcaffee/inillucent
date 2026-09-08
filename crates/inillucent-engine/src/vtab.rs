@@ -669,6 +669,45 @@ impl ImportedDatabase {
             })
     }
 
+    /// Returns what a module says about its own storage.
+    ///
+    /// `None` when the name is not a connected virtual table, which is what
+    /// `rtreecheck` turns into a refusal rather than into a cheerful `ok`.
+    ///
+    /// **A second connection to the same table, not the one already open.** A
+    /// check takes the table by `&mut` because it may flush what a transaction
+    /// staged, and this is reached through the read-only catalog the physical
+    /// pass holds. Connecting again is cheap - it reads the arguments and the
+    /// shadow roots, both of which are already in hand - and it is also more
+    /// honest: what is checked is what a *fresh* open would find, which is the
+    /// question a caller running an integrity check is asking.
+    ///
+    /// @param name - the table's name, as written
+    pub(super) fn module_integrity(&self, name: &[u8]) -> DbResult<Option<Option<String>>> {
+        let folded = name.to_ascii_lowercase();
+        let Some(connected) = self.virtual_tables.get(&folded) else {
+            return Ok(None);
+        };
+        let arguments = connected.arguments.clone();
+        let Some(found) = self.registry.module(&arguments.module) else {
+            return Ok(None);
+        };
+        let mut table = found.connect(&arguments, false)?;
+        let mut nowhere = Nowhere;
+        let mut store = ReadStore {
+            pool: self.database.pool(),
+            trees: &self.trees,
+        };
+        let mut context = Context {
+            host: &mut nowhere,
+            store: Some(&mut store),
+            database: 0,
+            limits: &self.limits,
+            catalog: Some(&self.catalog),
+        };
+        table.integrity(&mut context).map(Some)
+    }
+
     pub(super) fn rows_of_module(
         &self,
         table: &inillucent_sql::catalog_view::TableInfo,
@@ -705,6 +744,24 @@ impl ImportedDatabase {
         // ask one. One implementation, two spellings.
         if table.folded.starts_with(b"pragma_") {
             return self.pragma_function_rows(table, offer, params, downstream);
+        }
+        // The same arrangement for the four that describe statements; see
+        // `crate::introspect`. Each takes its argument as an `Eq` constraint on
+        // its hidden column, which is what makes `bytecode('SELECT 1')` a
+        // table-valued function rather than a special form.
+        if matches!(
+            table.folded.as_slice(),
+            b"bytecode" | b"tables_used" | b"sqlite_stmt" | b"completion"
+        ) {
+            let argument = self.eponymous_argument(offer, params, table)?;
+            let rows = match table.folded.as_slice() {
+                b"bytecode" => self.bytecode_rows(&argument)?,
+                b"tables_used" => self.tables_used_rows(&argument)?,
+                b"sqlite_stmt" => self.stmt_rows()?,
+                _ => self.completion_rows(&argument)?,
+            };
+            inillucent_exec::ops::emit_rows(&rows, downstream)?;
+            return Ok(true);
         }
         // The same arrangement for the two tables that describe the file; see
         // `crate::inspect`.
@@ -970,6 +1027,41 @@ impl ImportedDatabase {
     /// @param table - the function's catalog entry
     /// @param offer - the constraints the planner pushed down
     /// @param params - the values bound to `?1`, `?2`, ...
+    /// Returns the value an eponymous table's first hidden column was given.
+    ///
+    /// A table-valued function's arguments arrive as `Eq` constraints on the
+    /// hidden columns rather than as text at connect time, which is what makes
+    /// `bytecode(?)` bindable and `bytecode(t.sql)` joinable.
+    ///
+    /// @param offer - the constraints the planner is offering
+    /// @param params - the statement's bound parameters
+    /// @param table - the table being scanned
+    fn eponymous_argument(
+        &self,
+        offer: &[inillucent_sql::plan::VirtualConstraint],
+        params: &inillucent_exec::physical::Params,
+        table: &inillucent_sql::catalog_view::TableInfo,
+    ) -> DbResult<Vec<u8>> {
+        let Some(first) = table
+            .columns
+            .iter()
+            .position(|column| column.hidden)
+            .and_then(|at| i32::try_from(at).ok())
+        else {
+            return Ok(Vec::new());
+        };
+        for constraint in offer {
+            if constraint.spec.op != inillucent_sql::vtab::ConstraintOp::Eq
+                || constraint.spec.column != first
+            {
+                continue;
+            }
+            let value = inillucent_exec::physical::literal_value(&constraint.value, params)?;
+            return Ok(pragma_argument_text(&value));
+        }
+        Ok(Vec::new())
+    }
+
     /// @param downstream - where the batches go
     fn pragma_function_rows(
         &self,
@@ -1222,6 +1314,14 @@ impl ImportedDatabase {
 /// @param table - the virtual table's own name
 /// @param suffix - the shadow table's suffix
 fn shadow_table_name(table: &[u8], suffix: &[u8]) -> Vec<u8> {
+    // **An empty suffix is the table itself.** A module that asks for a shadow
+    // with no suffix is asking for the named table rather than for one derived
+    // from it, which is what an external-content FTS5 index needs: its rows are
+    // in `c`, not in `c_content`, and there is no other way to say so through a
+    // contract whose whole vocabulary is suffixes.
+    if suffix.is_empty() {
+        return table.to_vec();
+    }
     let mut name = table.to_vec();
     name.push(b'_');
     name.extend_from_slice(suffix);

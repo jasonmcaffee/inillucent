@@ -69,6 +69,14 @@ pub struct Document {
     pub top: Table,
     /// The `[[array]]` tables, in file order, by array name.
     pub arrays: BTreeMap<String, Vec<Table>>,
+    /// The plain `[table]` sections, by name.
+    ///
+    /// **One section, not a list.** A second `[memory]` header merges into the
+    /// first rather than making a second table, which is what TOML itself says
+    /// happens and is the only behaviour a reader of this subset could sensibly
+    /// expect. The subset refused plain tables outright until task-1869 needed
+    /// `[memory]` and `[cpu]` in the performance contract.
+    pub tables: BTreeMap<String, Table>,
 }
 
 impl Document {
@@ -78,6 +86,13 @@ impl Document {
             .get(name)
             .map(|rows| rows.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Returns one plain `[table]` section, or an empty one.
+    ///
+    /// @param name - the section's name, without its brackets
+    pub fn table(&self, name: &str) -> Table {
+        self.tables.get(name).cloned().unwrap_or_default()
     }
 
     /// Returns a required top-level string, or an error naming what is missing.
@@ -94,6 +109,7 @@ impl Document {
 pub fn parse(text: &str) -> Result<Document, String> {
     let mut document = Document::default();
     let mut current: Option<String> = None;
+    let mut section: Option<String> = None;
     let lines: Vec<&str> = text.lines().collect();
     let mut index = 0usize;
     while index < lines.len() {
@@ -115,12 +131,18 @@ pub fn parse(text: &str) -> Result<Document, String> {
                 .or_default()
                 .push(Table::new());
             current = Some(name);
+            section = None;
+            continue;
+        }
+        if let Some(name) = line.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+            let name = name.trim().to_string();
+            document.tables.entry(name.clone()).or_default();
+            current = None;
+            section = Some(name);
             continue;
         }
         if line.starts_with('[') {
-            return Err(format!(
-                "line {number}: plain tables are not part of the subset"
-            ));
+            return Err(format!("line {number}: expected a `[table]` header"));
         }
         let Some((key, body)) = line.split_once('=') else {
             return Err(format!("line {number}: expected `key = value`"));
@@ -143,9 +165,17 @@ pub fn parse(text: &str) -> Result<Document, String> {
             parse_value(body.trim()).map_err(|reason| format!("line {number}: {reason}"))?;
         let key = key.trim().to_string();
         match current.as_ref() {
-            None => {
-                document.top.insert(key, value);
-            }
+            None => match section.as_ref() {
+                None => {
+                    document.top.insert(key, value);
+                }
+                Some(name) => {
+                    let Some(row) = document.tables.get_mut(name) else {
+                        return Err(format!("line {number}: table `{name}` vanished"));
+                    };
+                    row.insert(key, value);
+                }
+            },
             Some(name) => {
                 let Some(rows) = document.arrays.get_mut(name) else {
                     return Err(format!("line {number}: array `{name}` vanished"));

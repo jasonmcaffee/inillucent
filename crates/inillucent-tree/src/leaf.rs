@@ -206,6 +206,12 @@ pub struct LeafRef<'p> {
     /// comparison that used the page's answer instead would silently disagree
     /// with the order the tree is stored in.
     collations: &'p [inillucent_value::collation::Collation],
+    /// The direction of each key column, in key order.
+    ///
+    /// Empty means every column ascending, which is every tree but an index
+    /// declared `DESC`. It travels with the column directory for the same
+    /// reason the collations do: the page does not carry it and must not.
+    directions: &'p [bool],
     page: &'p [u8],
     row_count: usize,
     delta_count: usize,
@@ -275,6 +281,7 @@ impl<'p> LeafRef<'p> {
 
         let leaf = LeafRef {
             collations: &[],
+            directions: &[],
             page: pageent,
             row_count,
             delta_count,
@@ -417,6 +424,38 @@ impl<'p> LeafRef<'p> {
     ) -> LeafRef<'p> {
         self.collations = collations;
         self
+    }
+
+    /// Returns the same leaf, reading its key columns in these directions.
+    ///
+    /// @param directions - one per key column; short means ascending
+    pub fn with_directions(mut self, directions: &'p [bool]) -> LeafRef<'p> {
+        self.directions = directions;
+        self
+    }
+
+    /// Returns whether one key column is stored descending.
+    ///
+    /// @param index - the key column's position
+    pub fn descending_at(&self, index: usize) -> bool {
+        self.directions.get(index).copied().unwrap_or(false)
+    }
+
+    /// Returns a comparison with the column's direction applied.
+    ///
+    /// **One place, so a comparison cannot be written that forgets.** Every
+    /// order this leaf produces - the binary search, the bound tests, the row
+    /// comparison - goes through here, so a descending column is descending for
+    /// all of them or for none.
+    ///
+    /// @param order - the ascending comparison
+    /// @param index - which key column it was made on
+    fn directed(&self, order: std::cmp::Ordering, index: usize) -> std::cmp::Ordering {
+        if self.descending_at(index) {
+            order.reverse()
+        } else {
+            order
+        }
     }
 
     /// Attaches the out-of-line values a caller has read.
@@ -627,6 +666,8 @@ impl<'p> LeafRef<'p> {
             // own could disagree with it. A caller that needs the collation
             // has the column directory it built the tree from.
             collation: inillucent_value::collation::Collation::Binary,
+            // Nor a direction, for the same reason.
+            descending: false,
         })
     }
 
@@ -967,7 +1008,10 @@ impl<'p> LeafRef<'p> {
                 // which is correct and only slower.
                 None => self.value(row, index)?,
             };
-            let order = crate::types::compare_under(&held, wanted, self.collation_of(index));
+            let order = self.directed(
+                crate::types::compare_under(&held, wanted, self.collation_of(index)),
+                index,
+            );
             if order != std::cmp::Ordering::Equal {
                 return Ok(order);
             }
@@ -1362,6 +1406,13 @@ impl<'p> LeafRef<'p> {
         if self.collation_of(0) != inillucent_value::collation::Collation::Binary {
             return Ok(None);
         }
+        // **And off entirely for a descending column.** Interpolation assumes
+        // the values rise across the leaf; in a descending tree they fall, and
+        // a guess made on the wrong slope is a guess that lands past the row it
+        // was looking for.
+        if self.descending_at(0) {
+            return Ok(None);
+        }
         Ok(Some(IntegerGuide {
             values: column.inline_bytes(),
             target: *target,
@@ -1602,7 +1653,10 @@ impl<'p> LeafRef<'p> {
             let (Some(a), Some(b)) = (left.get(index), right.get(index)) else {
                 return std::cmp::Ordering::Equal;
             };
-            let order = crate::types::compare_under(a, b, self.collation_of(index));
+            let order = self.directed(
+                crate::types::compare_under(a, b, self.collation_of(index)),
+                index,
+            );
             if order != std::cmp::Ordering::Equal {
                 return order;
             }
@@ -1624,7 +1678,10 @@ impl<'p> LeafRef<'p> {
             let Some(held) = row.get(index) else {
                 return std::cmp::Ordering::Less;
             };
-            let order = crate::types::compare_under(held, wanted, self.collation_of(index));
+            let order = self.directed(
+                crate::types::compare_under(held, wanted, self.collation_of(index)),
+                index,
+            );
             if order != std::cmp::Ordering::Equal {
                 return order;
             }
@@ -1669,11 +1726,48 @@ pub fn compare_rows(
     right: &[Datum<'_>],
     key_columns: usize,
 ) -> std::cmp::Ordering {
+    compare_rows_under(left, right, key_columns, &[], &[])
+}
+
+/// Compares two rows' keys the way the tree they came from is ordered.
+///
+/// **The same comparison the tree's own searches make, which is the point.** A
+/// caller that checks a tree's ordering with `BINARY` while the tree is ordered
+/// by `NOCASE` is not checking the tree - it is checking a different tree. The
+/// integrity check did exactly that, and `REINDEX` over
+/// `CREATE INDEX ix ON t(team COLLATE NOCASE)` holding `'Blue'` and `'BLUE'`
+/// reported `a key does not increase across the leaf chain` about a tree whose
+/// every read was correct.
+///
+/// Short slices default the rest: no collation is `BINARY` and no direction is
+/// ascending, which is what every rowid tree is.
+///
+/// @param left - one row
+/// @param right - the other
+/// @param key_columns - how many leading columns form the key
+/// @param collations - the collation of each key column
+/// @param directions - whether each key column is stored descending
+pub fn compare_rows_under(
+    left: &[Datum<'_>],
+    right: &[Datum<'_>],
+    key_columns: usize,
+    collations: &[inillucent_value::collation::Collation],
+    directions: &[bool],
+) -> std::cmp::Ordering {
     for index in 0..key_columns {
         let (Some(a), Some(b)) = (left.get(index), right.get(index)) else {
             return std::cmp::Ordering::Equal;
         };
-        let order = a.compare(b);
+        let collation = collations
+            .get(index)
+            .copied()
+            .unwrap_or(inillucent_value::collation::Collation::Binary);
+        let order = crate::types::compare_under(a, b, collation);
+        let order = if directions.get(index).copied().unwrap_or(false) {
+            order.reverse()
+        } else {
+            order
+        };
         if order != std::cmp::Ordering::Equal {
             return order;
         }
@@ -2060,6 +2154,55 @@ pub fn encode_extent_tagged(out: &mut Vec<u8>, reference: ExtentRef) {
     out.extend_from_slice(&reference.encode());
 }
 
+/// The rows a leaf builder packs, read one value at a time.
+///
+/// **A value accessor, not a row iterator, and not a slice.** The builder is
+/// column-major - it writes every value of one mini-column, then the next - so
+/// a source that handed back whole rows would have to rebuild each row once per
+/// column. And a slice is what this exists to avoid: `CREATE INDEX` holds its
+/// entries in an arena, and before task-1869 it materialised a flat
+/// `Vec<Datum>` in key order plus a `Vec<&[Datum]>` of slices into it purely so
+/// that a `&[R]` could be passed - 6.4 MiB of copies at a hundred thousand rows,
+/// of a statement whose whole resident cost was 28.9 MiB.
+///
+/// A source is indexed in **its own** order, which for an index build is key
+/// order and not scan order. Out-of-range indices answer `Datum::Null` rather
+/// than panicking, exactly as the slice form did.
+pub trait Rows<'d> {
+    /// How many rows there are.
+    fn len(&self) -> usize;
+
+    /// Reports whether there are none, which clippy asks for beside `len`.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Returns one value.
+    ///
+    /// @param row - which row, in this source's own order
+    /// @param column - which column of it
+    fn value(&self, row: usize, column: usize) -> Datum<'d>;
+}
+
+/// A slice of already-materialised rows, as a [`Rows`].
+///
+/// The trivial implementation, so every caller that already holds owned rows -
+/// the compaction path, the fixture import, the tests - is unchanged.
+pub struct RowSlice<'r, R>(pub &'r [R]);
+
+impl<'d, R: AsRef<[Datum<'d>]>> Rows<'d> for RowSlice<'_, R> {
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    fn value(&self, row: usize, column: usize) -> Datum<'d> {
+        self.0
+            .get(row)
+            .and_then(|values| values.as_ref().get(column).copied())
+            .unwrap_or(Datum::Null)
+    }
+}
+
 /// Where a value too large for a leaf is written.
 ///
 /// The builder decides *that* a value goes out of line - it is the only thing
@@ -2148,6 +2291,80 @@ impl LeafBuilder {
         self.pack_with(rows, fill, None)
     }
 
+    /// Returns how many rows from `at` would fit in one page, without encoding.
+    ///
+    /// **The sizing half of [`LeafBuilder::pack_rows`], on its own.** A bulk
+    /// build has to allocate its leaves as one contiguous run, so it has to know
+    /// how many leaves there will be before it writes the first one - and until
+    /// task-1869 the only way to find out was to pack every leaf into a
+    /// `Vec<Vec<u8>>` and count them, which is a whole copy of the tree held in
+    /// memory for the sake of one integer. A `CREATE INDEX` over a hundred
+    /// thousand rows spent 6.2 MiB that way.
+    ///
+    /// The count is exact rather than an estimate: it is the same forward pass
+    /// [`LeafBuilder::pack_rows`] runs, over the same values, with the same
+    /// spill threshold. It does not spill - it only *prices* a spill, which is
+    /// what makes running it twice safe.
+    ///
+    /// @param rows - the rows, sorted by key
+    /// @param at - the first row to place
+    /// @param fill - the fraction of the page to fill, 0.0..=1.0
+    /// @param spilling - whether the real pass will have a spiller
+    pub fn fit<'d>(&self, rows: &dyn Rows<'d>, at: usize, fill: f64, spilling: bool) -> usize {
+        let budget = ((self.page_size as f64) * fill.clamp(0.05, 1.0)) as usize;
+        let mut heap = 0usize;
+        let mut placed = 0usize;
+        let total = rows.len();
+        let mut row = at;
+        while row < total {
+            let mut row_heap = 0usize;
+            for (index, column) in self.columns.iter().enumerate() {
+                let value = rows.value(row, index);
+                row_heap = row_heap.saturating_add(heap_cost_at(
+                    column.physical,
+                    &value,
+                    self.threshold(index, spilling),
+                ));
+            }
+            let next = placed.saturating_add(1);
+            let size = self
+                .fixed_size(next)
+                .saturating_add(heap.saturating_add(row_heap));
+            if size > budget {
+                break;
+            }
+            heap = heap.saturating_add(row_heap);
+            placed = next;
+            row = row.saturating_add(1);
+        }
+        placed
+    }
+
+    /// Packs as many rows from `at` as fit, sending oversized values out of line.
+    ///
+    /// The row-source form of [`LeafBuilder::pack_with`]: identical arithmetic,
+    /// reading its values through [`Rows`] instead of out of a slice, so a
+    /// caller whose rows are in an arena never has to build the slice.
+    ///
+    /// @param rows - the rows, sorted by key
+    /// @param at - the first row to place
+    /// @param fill - the fraction of the page to fill, 0.0..=1.0
+    /// @param spill - where an oversized value goes, when there is somewhere
+    pub fn pack_rows<'d>(
+        &self,
+        rows: &dyn Rows<'d>,
+        at: usize,
+        fill: f64,
+        spill: Option<&mut dyn Spill>,
+    ) -> DbResult<Packed> {
+        let placed = self.fit(rows, at, fill, spill.is_some());
+        if placed == 0 {
+            return Ok(Packed::RowTooLarge);
+        }
+        let page = self.encode_rows(rows, at, placed, spill)?;
+        Ok(Packed::Filled { page, rows: placed })
+    }
+
     /// Packs as many of `rows` as fit, sending oversized values out of line.
     ///
     /// With `None` for the spiller nothing goes out of line and this is
@@ -2171,9 +2388,10 @@ impl LeafBuilder {
         fill: f64,
         spill: Option<&mut dyn Spill>,
     ) -> DbResult<Packed> {
-        let budget = ((self.page_size as f64) * fill.clamp(0.05, 1.0)) as usize;
         // **One forward pass over the rows it places, not a binary search over
-        // the rows it does not.**
+        // the rows it does not.** The pass itself is [`LeafBuilder::fit`] now;
+        // the reasoning it was written with is kept here because this is the
+        // signature everything but the bulk builder still calls.
         //
         // The size of a prefix is a closed form in the count plus a prefix sum
         // over the rows' heap costs, so a running total answers "does the next
@@ -2187,34 +2405,7 @@ impl LeafBuilder {
         // It cost 96 ms of a 155 ms `CREATE INDEX` and it was not the first
         // guess. The first guess was the write-ahead log, which a measurement
         // with the log switched off showed costs nothing at all.
-        let mut heap = 0usize;
-        let mut placed = 0usize;
-        for row in rows {
-            let row = row.as_ref();
-            let mut row_heap = 0usize;
-            for (index, column) in self.columns.iter().enumerate() {
-                let value = row.get(index).copied().unwrap_or(Datum::Null);
-                row_heap = row_heap.saturating_add(heap_cost_at(
-                    column.physical,
-                    &value,
-                    self.threshold(index, spill.is_some()),
-                ));
-            }
-            let next = placed.saturating_add(1);
-            let size = self
-                .fixed_size(next)
-                .saturating_add(heap.saturating_add(row_heap));
-            if size > budget {
-                break;
-            }
-            heap = heap.saturating_add(row_heap);
-            placed = next;
-        }
-        if placed == 0 {
-            return Ok(Packed::RowTooLarge);
-        }
-        let page = self.encode_with(rows.get(..placed).unwrap_or(&[]), spill)?;
-        Ok(Packed::Filled { page, rows: placed })
+        self.pack_rows(&RowSlice(rows), 0, fill, spill)
     }
 
     /// Returns the longest value one column keeps in the leaf.
@@ -2282,9 +2473,29 @@ impl LeafBuilder {
     pub fn encode_with<'d, R: AsRef<[Datum<'d>]>>(
         &self,
         rows: &[R],
+        spill: Option<&mut dyn Spill>,
+    ) -> DbResult<Vec<u8>> {
+        self.encode_rows(&RowSlice(rows), 0, rows.len(), spill)
+    }
+
+    /// Encodes `count` rows from `at` into one leaf page.
+    ///
+    /// The row-source form of [`LeafBuilder::encode_with`]. It reads
+    /// column-major - every value of one column, then the next - which is why
+    /// [`Rows`] is a value accessor rather than a row iterator: a row-at-a-time
+    /// source would have to rebuild each row once per column.
+    ///
+    /// @param rows - the rows, sorted by key
+    /// @param at - the first row to encode
+    /// @param count - how many to encode
+    /// @param spill - where an oversized value goes, when there is somewhere
+    pub fn encode_rows<'d>(
+        &self,
+        rows: &dyn Rows<'d>,
+        at: usize,
+        count: usize,
         mut spill: Option<&mut dyn Spill>,
     ) -> DbResult<Vec<u8>> {
-        let count = rows.len();
         if count > u16::MAX as usize {
             return Err(misuse("a leaf cannot hold more than 65535 rows"));
         }
@@ -2292,19 +2503,23 @@ impl LeafBuilder {
         page::write_common(&mut page, PageKind::Leaf, 0, self.tree)?;
 
         // Lay the mini-columns out first so the directory can name them.
+        //
+        // `layout` rather than `at`: `at` is this function's first-row argument,
+        // and a layout cursor called the same thing shadowed it silently - which
+        // would have read every value out of the wrong row.
         let mut offsets = Vec::with_capacity(self.columns.len());
-        let mut at = align8(
+        let mut layout = align8(
             leaf_header::DIRECTORY
                 .saturating_add(self.columns.len().saturating_mul(DIRECTORY_ENTRY)),
         );
         for column in &self.columns {
-            offsets.push(at);
-            at = at
+            offsets.push(layout);
+            layout = layout
                 .saturating_add(class_bytes(count))
                 .saturating_add(count.saturating_mul(column.physical.slot_width()));
-            at = align8(at);
+            layout = align8(layout);
         }
-        if at > self.page_size {
+        if layout > self.page_size {
             return Err(misuse("the mini-columns do not fit in one page"));
         }
 
@@ -2322,8 +2537,8 @@ impl LeafBuilder {
             let base = offsets.get(index).copied().unwrap_or(0);
             let values_at = base.saturating_add(class_bytes(count));
             let threshold = self.threshold(index, spill.is_some());
-            for (row, values) in rows.iter().enumerate() {
-                let value = values.as_ref().get(index).copied().unwrap_or(Datum::Null);
+            for row in 0..count {
+                let value = rows.value(at.saturating_add(row), index);
                 let class = classify_at(column.physical, &value, threshold);
                 if class == ValueClass::Exception {
                     has_exceptions = true;
@@ -2401,7 +2616,7 @@ impl LeafBuilder {
             }
         }
 
-        if heap_end < at {
+        if heap_end < layout {
             return Err(misuse("the heap collided with the mini-columns"));
         }
 
@@ -2419,11 +2634,11 @@ impl LeafBuilder {
         page::write_u32(&mut page, leaf_header::HEAP_START, heap_end as u32)?;
         page::write_u32(&mut page, leaf_header::DELTA_START, delta_start as u32)?;
         page::write_u64(&mut page, leaf_header::MAX_CTS, 0)?;
-        let low_fence = rows
-            .first()
-            .and_then(|row| row.as_ref().first().copied())
-            .and_then(|value| value.as_int())
-            .unwrap_or(0);
+        let low_fence = if count == 0 {
+            0
+        } else {
+            rows.value(at, 0).as_int().unwrap_or(0)
+        };
         page::write_u64(&mut page, leaf_header::LOW_FENCE, low_fence as u64)?;
         for (index, column) in self.columns.iter().enumerate() {
             let entry =
@@ -3694,6 +3909,7 @@ mod tests {
                 physical: PhysicalType::Int64,
                 flags: 0,
                 collation: inillucent_value::collation::Collation::Binary,
+                descending: false,
             },
         ];
         let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();

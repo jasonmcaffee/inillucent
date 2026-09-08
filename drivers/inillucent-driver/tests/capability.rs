@@ -240,26 +240,23 @@ fn an_unimplemented_construct_refuses_by_name_and_a_typo_does_not() {
 
     // **The example moves as the engine grows, and that is the point.** It was
     // a `LEFT JOIN` until task-1838 implemented that, `ATTACH` until task-1844,
-    // and `VACUUM` until task-1859; the assertion is about the
-    // *classification*, so it is repointed at a construct that is still
-    // unimplemented rather than weakened. A second `ON CONFLICT` clause on one
-    // statement is one: the conflict a write hits does not carry which
-    // constraint reported it, so there is nothing to match a second clause's
-    // target against.
+    // `VACUUM` until task-1859, and a second `ON CONFLICT` clause until
+    // task-1860; the assertion is about the *classification*, so it is
+    // repointed at a construct that is still unimplemented rather than
+    // weakened. `ATTACH ... KEY` is one: it names an encryption extension this
+    // engine does not have, and SQLite's own answer in a build without one is
+    // to parse the key and quietly ignore it - which is the answer a caller who
+    // asked for an encrypted file must not be given.
     let refused = connection
-        .query(
-            "INSERT INTO people VALUES (1) ON CONFLICT(a) DO NOTHING ON CONFLICT DO NOTHING",
-            &[],
-            10,
-        )
-        .expect_err("a second ON CONFLICT clause is refused");
+        .query("ATTACH DATABASE 'vault.db' AS vault KEY 'secret'", &[], 10)
+        .expect_err("an encryption key on ATTACH is refused");
     assert_eq!(
         refused.status,
         Status::Unsupported,
-        "a second ON CONFLICT clause is a capability gap, not a syntax error: {refused}"
+        "an encryption key is a capability gap, not a syntax error: {refused}"
     );
     let named = refused.feature.expect("the refusal names the construct");
-    assert!(named.contains("ON CONFLICT"), "it named `{named}`");
+    assert!(named.contains("ATTACH"), "it named `{named}`");
 
     let typo = connection
         .query("SELECT a FROM peple", &[], 10)

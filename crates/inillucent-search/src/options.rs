@@ -121,6 +121,24 @@ pub struct Options {
     pub dims: usize,
     /// The distance the vector branch minimises.
     pub metric: Metric,
+    /// How many neighbours a graph node keeps per layer, when the index said.
+    ///
+    /// pgvector's `m`, and the same number: the graph uses `2 * m` on layer
+    /// zero, as the original algorithm does. `None` leaves the build's own
+    /// default, which is what an index that named no parameters gets.
+    pub m: Option<usize>,
+    /// How wide the build search is, when the index said.
+    ///
+    /// pgvector's `ef_construction`. Bigger is a slower build and a better
+    /// graph, which is the whole trade the parameter exists to let a caller
+    /// make.
+    pub ef_construction: Option<usize>,
+    /// How wide a query search is by default, when the index said.
+    ///
+    /// pgvector's `hnsw.ef_search`, which is a session setting there and an
+    /// index setting here as well - `PRAGMA hnsw_ef_search` is the session
+    /// form and overrides this one for the statement it precedes.
+    pub ef_search: Option<usize>,
     /// Whether results are exact or approximate.
     pub mode: Mode,
     /// How many delta rows may accumulate before a commit folds them in, or
@@ -180,6 +198,22 @@ impl Options {
             ("columns".to_string(), names.join(",")),
             ("dims".to_string(), self.dims.to_string()),
             ("metric".to_string(), self.metric.name().to_string()),
+            (
+                "m".to_string(),
+                self.m.map(|held| held.to_string()).unwrap_or_default(),
+            ),
+            (
+                "ef_construction".to_string(),
+                self.ef_construction
+                    .map(|held| held.to_string())
+                    .unwrap_or_default(),
+            ),
+            (
+                "ef_search".to_string(),
+                self.ef_search
+                    .map(|held| held.to_string())
+                    .unwrap_or_default(),
+            ),
             ("mode".to_string(), self.mode.name().to_string()),
             ("tokenize".to_string(), TOKENIZER.to_string()),
             (
@@ -222,6 +256,9 @@ pub fn parse(arguments: &[Vec<u8>]) -> DbResult<Options> {
     let mut threads: Option<usize> = None;
     let mut source_column: Option<Vec<u8>> = None;
     let mut metric = Metric::Cosine;
+    let mut m: Option<usize> = None;
+    let mut ef_construction: Option<usize> = None;
+    let mut ef_search: Option<usize> = None;
     let mut mode = Mode::Exact;
     let mut compact: Option<u64> = None;
     for argument in arguments {
@@ -257,6 +294,12 @@ pub fn parse(arguments: &[Vec<u8>]) -> DbResult<Options> {
             }
             "source_column" => source_column = Some(value.clone().into_bytes()),
             "metric" | "distance" => metric = Metric::parse(&value)?,
+            // The three graph parameters, spelled as pgvector spells them. A
+            // zero is refused rather than taken: a graph with no neighbours is
+            // a list, and a search that looks at nothing finds nothing.
+            "m" => m = Some(positive(&value, "m")?),
+            "ef_construction" => ef_construction = Some(positive(&value, "ef_construction")?),
+            "ef_search" => ef_search = Some(positive(&value, "ef_search")?),
             "mode" => mode = Mode::parse(&value)?,
             "tokenize" | "tokenizer" => {
                 if !value.eq_ignore_ascii_case(TOKENIZER) {
@@ -288,12 +331,33 @@ pub fn parse(arguments: &[Vec<u8>]) -> DbResult<Options> {
         columns,
         dims,
         metric,
+        m,
+        ef_construction,
+        ef_search,
         mode,
         compact,
         source,
         source_column,
         threads,
     })
+}
+
+/// Reads one positive graph parameter, or says which one was not a number.
+///
+/// @param value - the text the option was given
+/// @param name - the option's name, for the message
+fn positive(value: &str, name: &str) -> DbResult<usize> {
+    let held = value.parse::<usize>().map_err(|_| {
+        failure(format!(
+            "inillucent_search: {name} must be a number, not {value}"
+        ))
+    })?;
+    if held == 0 {
+        return Err(failure(format!(
+            "inillucent_search: {name} must be greater than zero"
+        )));
+    }
+    Ok(held)
 }
 
 /// Reads the options back out of the rows `%_config` holds.
@@ -342,10 +406,16 @@ pub fn from_config(rows: &[(String, String)], fallback: &Options) -> DbResult<Op
         }
     }
     let compact = find("compact").and_then(|value| value.parse::<u64>().ok());
+    // An empty stored value is "the build's own default", which is what a store
+    // created before these three existed says - see the `%_config` rows above.
+    let graph = |key: &str| find(key).and_then(|value| value.parse::<usize>().ok());
     Ok(Options {
         columns,
         dims,
         metric,
+        m: graph("m").or(fallback.m),
+        ef_construction: graph("ef_construction").or(fallback.ef_construction),
+        ef_search: graph("ef_search").or(fallback.ef_search),
         mode,
         compact: compact.or(fallback.compact),
         // An empty stored value is "no source", not a table called nothing:

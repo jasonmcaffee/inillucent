@@ -18,10 +18,13 @@
 //! the module says `omit` - and `omit` is the module promising, not the engine
 //! assuming.
 
+pub mod fsdir;
 pub mod fts5;
+pub mod ivfflat;
 pub mod json_each;
 pub mod rtree;
 pub mod series;
+pub mod zipfile;
 
 use inillucent_base::limits::Limits;
 use inillucent_base::{DbError, DbResult};

@@ -29,6 +29,37 @@ schema_version = 1
 headline = "3.00"
 floor = "1.00"
 
+# task-1869 added the two bars below, and added them **before** the work that
+# had to meet them. Until it did, this file held ten elapsed-time families and
+# nothing else, so an engine that doubled its resident set or its processor time
+# would still have passed the gate outright - which is exactly what happened:
+# task-1861 measured 102% more memory than SQLite on a contract that had no
+# opinion about memory at all.
+#
+# Both are **ratios of SQLite's, on the same plan and the same budget**, rather
+# than absolute byte and millisecond counts, so they survive a bigger fixture, a
+# different box and a different pool size. They are read off the child-process
+# pair `inillucent-fullgate` already spawns - one whole process each, opening a
+# finished file and running one round - because that is the only pair of numbers
+# about these two engines that is a comparison rather than two measurements.
+
+[memory]
+# **Under one, because the goal is to hold less.** A bar at 1.00 would be met by
+# a tie, and the ticket that set it says "the goal is to use less RAM than
+# SQLite". 0.95 asks for a real margin and is still not a number chosen to
+# flatter a measurement: when it was written the engine stood at 2.02.
+bar = "0.95"
+description = "peak resident set, one child process each, one round of the same plan, matched budget"
+
+[cpu]
+# **What today already reaches, so a regression fails.** task-1861 measured one
+# round of the whole plan at 422 ms of processor time against SQLite's 1,246 -
+# 34%. The bar is 0.40 rather than 0.34 so that ordinary run-to-run movement on
+# a shared box is not a failure, and so that the memory work is not allowed to
+# buy residency with processor time.
+bar = "0.40"
+description = "user + kernel processor time, the same child pair"
+
 [[family]]
 id = "open.prepare"
 weight = "0.08"

@@ -248,8 +248,13 @@ fn a_pragma_with_one_setting_reports_it_and_refuses_any_other() {
     let Some(mut engine) = engine("fixed") else {
         return no_oracle();
     };
+    // `delete` is the default because the reference's is, and because the
+    // medium gate says it is free: 3.78x weighted with `wal` and 3.70x with
+    // `delete`, lower bounds 3.45x and 3.44x over 30 paired rounds.
+    // `locking_mode` is the other way round - `normal` is a real switch, and
+    // defaulting to it reads 3.03x with a 2.95x lower bound, under the bar.
     for (sql, expected) in [
-        ("PRAGMA journal_mode", "wal"),
+        ("PRAGMA journal_mode", "delete"),
         ("PRAGMA encoding", "UTF-8"),
         ("PRAGMA locking_mode", "exclusive"),
     ] {
@@ -262,27 +267,40 @@ fn a_pragma_with_one_setting_reports_it_and_refuses_any_other() {
             "{sql}"
         );
     }
-    // Setting it to what it already is is accepted.
-    assert_eq!(
-        ask(&mut engine, "PRAGMA journal_mode = WAL")
-            .first()
-            .and_then(|row| row.first())
-            .map(String::as_str),
-        Some("wal")
-    );
-    // **And anything else is refused rather than accepted quietly.** A caller
-    // that asked for a rollback journal and was told `delete` would go on
-    // believing it had one.
-    for sql in [
-        "PRAGMA journal_mode = DELETE",
-        "PRAGMA journal_mode = MEMORY",
-        "PRAGMA encoding = 'UTF-16'",
+    // **Two of those three stopped being fixed in task-1860**, and the settings
+    // they report are now the settings they hold rather than the only ones the
+    // engine has. A rollback journal exists behind `journal_mode`, so asking for
+    // one is answered with the mode that is now in force; the same is true of
+    // `locking_mode`, which is what lets a second process onto the file. What
+    // makes them still worth asserting here is the *round trip*: the pragma
+    // answers with the mode it ended up in, so a caller that asked for `delete`
+    // and was given `wal` would know.
+    for (sql, expected) in [
+        ("PRAGMA journal_mode = WAL", "wal"),
+        ("PRAGMA journal_mode = DELETE", "delete"),
+        ("PRAGMA journal_mode = MEMORY", "memory"),
+        ("PRAGMA journal_mode = WAL", "wal"),
+        ("PRAGMA locking_mode = NORMAL", "normal"),
+        ("PRAGMA locking_mode = EXCLUSIVE", "exclusive"),
     ] {
-        assert!(
-            engine.execute_any(sql, &Params::new()).is_err(),
-            "{sql} should have been refused"
+        assert_eq!(
+            ask(&mut engine, sql)
+                .first()
+                .and_then(|row| row.first())
+                .map(String::as_str),
+            Some(expected),
+            "{sql}"
         );
     }
+    // **Encoding is the one that stayed fixed, and it is still refused rather
+    // than accepted quietly.** Every text value in this format is UTF-8, so a
+    // caller told it had UTF-16 would go on believing it.
+    assert!(
+        engine
+            .execute_any("PRAGMA encoding = 'UTF-16'", &Params::new())
+            .is_err(),
+        "PRAGMA encoding = 'UTF-16' should have been refused"
+    );
 }
 
 #[test]
@@ -320,14 +338,28 @@ fn an_unknown_pragma_is_silent_on_the_new_engine() {
             "{sql}"
         );
     }
-    // And the ones that refuse a value this engine cannot be, rather than
+    // And the one that refuses a value this engine cannot be, rather than
     // accepting it and dropping it.
-    for sql in ["PRAGMA auto_vacuum = FULL", "PRAGMA temp_store = FILE"] {
-        assert!(
-            engine.execute_any(sql, &Params::new()).is_err(),
-            "{sql} should have refused"
-        );
-    }
+    assert!(
+        engine
+            .execute_any("PRAGMA temp_store = FILE", &Params::new())
+            .is_err(),
+        "PRAGMA temp_store = FILE should have refused"
+    );
+    // **`auto_vacuum` is settable now, and is silently ignored on a database
+    // that already has tables** - which is not this engine being lax, it is
+    // SQLite's own rule: the mode is a property of the file header and can only
+    // be chosen before the first table is created, or changed by a `VACUUM`.
+    // Asking for it here is accepted and does nothing, and the pragma keeps
+    // reporting what the file actually is.
+    assert!(ask(&mut engine, "PRAGMA auto_vacuum = FULL").is_empty());
+    assert_eq!(
+        ask(&mut engine, "PRAGMA auto_vacuum")
+            .first()
+            .and_then(|row| row.first())
+            .map(String::as_str),
+        Some("0")
+    );
     // `incremental_vacuum` does nothing here and nothing observable in SQLite
     // either, so it stays a silent no-op rather than becoming a refusal
     // invented by the rule.

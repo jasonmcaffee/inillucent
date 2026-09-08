@@ -256,6 +256,23 @@ pub trait TreeCatalog {
         self.virtual_rows(table, path, params, needed)
     }
 
+    /// Returns what a module says about its own storage, or nothing.
+    ///
+    /// **The route `rtreecheck` takes.** A module's `integrity` is reachable
+    /// from the connection and from nowhere else, and the question is about a
+    /// named table rather than about a row - so it is asked once while the
+    /// statement is being prepared, where the catalog is in hand, and the
+    /// answer is folded into the expression as a constant.
+    ///
+    /// `None` means there is no such table or its module does not check
+    /// itself; `Some(None)` means it checked and found nothing wrong.
+    ///
+    /// @param name - the table's name, as written
+    fn module_integrity(&self, name: &[u8]) -> DbResult<Option<Option<String>>> {
+        let _ = name;
+        Ok(None)
+    }
+
     /// Returns every row of a virtual scan, materialised.
     ///
     /// For the one caller that genuinely needs the whole answer at once: a
@@ -1746,12 +1763,9 @@ impl Space<'_> {
             if stage.source != source {
                 continue;
             }
-            let position = stage
-                .functions
-                .iter()
-                .position(|(held, held_arguments)| {
-                    held.as_slice() == name && held_arguments.as_slice() == arguments
-                })?;
+            let position = stage.functions.iter().position(|(held, held_arguments)| {
+                held.as_slice() == name && held_arguments.as_slice() == arguments
+            })?;
             let layout = self.layouts.get(index)?;
             // The functions sit after the declared columns and the rowid, in
             // the order the reads were met.
@@ -2991,7 +3005,9 @@ fn build_nested<'t>(
     // whether there is a key to build the table on - `build_materialised_join`
     // is where it is built.
     if keys.is_empty()
-        && plan.levers.has(inillucent_sql::plan::Levers::AUTOMATIC_INDEX)
+        && plan
+            .levers
+            .has(inillucent_sql::plan::Levers::AUTOMATIC_INDEX)
         && has_equi_key(plan, space, params, stage, index)?
     {
         return build_materialised_join(plan, catalog, space, params, stage, index, downstream);
@@ -3196,7 +3212,10 @@ fn build_materialised_join<'t>(
     // it is also what a condition this cannot key on gets - which is most of
     // them, deliberately: a residual predicate the hash key did not capture
     // would have to be re-tested per pair, and there is nowhere here to do it.
-    if plan.levers.has(inillucent_sql::plan::Levers::AUTOMATIC_INDEX) {
+    if plan
+        .levers
+        .has(inillucent_sql::plan::Levers::AUTOMATIC_INDEX)
+    {
         // **`ON` for an outer join, the residual for an inner one.** A non-outer
         // join's constraint is split into the planner's term list before paths
         // are chosen, so what is left of `b.p = a.x` arrives as this stage's
@@ -3215,8 +3234,7 @@ fn build_materialised_join<'t>(
             .or_else(|| plan.residuals.get(index).and_then(Option::as_ref));
         if let Some(expr) = keyed {
             let translated = translate_scan(expr, space, params)?;
-            if let Some(keys) =
-                crate::autoindex::equi_keys(&translated, stage.offset, stage.width)
+            if let Some(keys) = crate::autoindex::equi_keys(&translated, stage.offset, stage.width)
             {
                 let outer_types: Vec<StaticType> = space
                     .types
@@ -3602,6 +3620,7 @@ fn span_bounds(
             low,
             high,
             columns,
+            descending,
             ..
         } => {
             let mut prefix = Vec::with_capacity(equalities.len());
@@ -3639,27 +3658,48 @@ fn span_bounds(
                     high_inclusive: true,
                 });
             }
+            // **Which end of the walk the NULLs sit at.** An ascending index
+            // holds them first and a descending one holds them last, and the
+            // range has to exclude them from whichever end it does not
+            // otherwise bound.
+            let range_descending = descending.get(equalities.len()).copied().unwrap_or(false);
+            let had_low = low_value.is_some();
             let mut low_inclusive = low_inclusive;
+            let mut high_inclusive = high_inclusive;
             match low_value {
                 Some(value) => low_key.push(value),
                 // **A range with no lower bound still excludes NULL.**
                 // `WHERE k < -1000` is unknown for a NULL `k`, so SQLite
-                // returns no row for one; an index holds its NULLs first, so a
-                // walk that starts at the beginning returns exactly those. An
-                // exclusive lower bound of NULL starts past that run, which is
-                // the same rule said in the key's own terms.
+                // returns no row for one; an *ascending* index holds its NULLs
+                // first, so a walk that starts at the beginning returns exactly
+                // those. An exclusive lower bound of NULL starts past that run,
+                // which is the same rule said in the key's own terms.
                 //
                 // `WHERE k > 5` never had the problem: its own lower bound
                 // already starts above the NULLs, which is why this was only
                 // ever wrong in the one direction.
-                None if high_value.is_some() => {
+                //
+                // On a descending index the NULLs are at the *other* end, so
+                // this bound would exclude the entire tree rather than the
+                // NULLs - and it did: `WHERE c >= 10` over `t(c DESC)` returned
+                // nothing at all, because an exclusive NULL low bound in
+                // descending order starts past the last row.
+                None if high_value.is_some() && !range_descending => {
                     low_key.push(OwnedDatum::Null);
                     low_inclusive = false;
                 }
                 None => {}
             }
-            if let Some(value) = high_value {
-                high_key.push(value);
+            match high_value {
+                Some(value) => high_key.push(value),
+                // The descending mirror of the rule above: the walk runs from
+                // the largest key down, so the NULLs are the tail it has to
+                // stop before.
+                None if had_low && range_descending => {
+                    high_key.push(OwnedDatum::Null);
+                    high_inclusive = false;
+                }
+                None => {}
             }
             Ok(SpanBounds {
                 low: if low_key.is_empty() {
@@ -4889,6 +4929,131 @@ enum Frame<'a> {
 /// @param expr - the bound expression
 /// @param space - the joined column space
 /// @param params - the bound parameters
+/// Returns the expression `sqlite_offset(X)` compiles to.
+///
+/// The argument has to be a column of a table the statement reads, which is
+/// SQLite's own rule - anything else answers NULL there and answers NULL here.
+/// What is compiled is a lookup of the row's key in a table of leaf boundaries:
+/// one entry per leaf, holding the lowest key on it and the offset of its page
+/// in the file. The boundaries are read once, while the statement is being
+/// prepared, and the cost is one page read per leaf rather than one per row.
+///
+/// @param arguments - the call's single argument
+/// @param space - the joined column space
+/// @param params - the statement's bound parameters
+/// @param frame - which of the two row shapes the expression is over
+fn row_offset(
+    arguments: &[BoundExpr],
+    space: &Space<'_>,
+    params: &Params,
+    frame: Frame<'_>,
+) -> DbResult<Expr> {
+    let Some(BoundExpr::Column { source, .. }) = arguments.first() else {
+        return Ok(Expr::Literal(OwnedDatum::Null));
+    };
+    let source = *source;
+    let Some(catalog) = space.catalog else {
+        return Ok(Expr::Literal(OwnedDatum::Null));
+    };
+    let Some(stage) = space.stages.iter().find(|stage| stage.term == source) else {
+        return Ok(Expr::Literal(OwnedDatum::Null));
+    };
+    let Some(layout) = space.layouts.get(source) else {
+        return Ok(Expr::Literal(OwnedDatum::Null));
+    };
+    let Some(rowid_column) = layout.rowid else {
+        return Ok(Expr::Literal(OwnedDatum::Null));
+    };
+    let (Some(tree), Some(pool)) = (catalog.tree(stage.root), catalog.pool_for(stage.root)) else {
+        return Ok(Expr::Literal(OwnedDatum::Null));
+    };
+    let boundaries = leaf_boundaries(tree, pool, rowid_column)?;
+    let rowid = translate(&BoundExpr::Rowid { source }, space, params, frame)?;
+    Ok(Expr::RowOffset {
+        boundaries: std::sync::Arc::new(boundaries),
+        rowid: Box::new(rowid),
+    })
+}
+
+/// Returns the lowest key on each leaf and where that leaf sits in the file.
+///
+/// Sorted by key, so a lookup is a binary search. A leaf covers a contiguous
+/// run of keys, so the boundary is the whole of what a lookup needs.
+///
+/// @param tree - the table's tree
+/// @param pool - the pool its pages live in
+/// @param rowid_column - which tree column holds the row's key
+fn leaf_boundaries(
+    tree: &PagedTree,
+    pool: &Pool,
+    rowid_column: usize,
+) -> DbResult<Vec<(i64, i64)>> {
+    let page_size = tree.page_size() as i64;
+    let mut boundaries: Vec<(i64, i64)> = Vec::new();
+    let mut page = tree.first_leaf();
+    let mut seen = 0u64;
+    while !page.is_none() {
+        let guard = pool.fetch(page)?;
+        let leaf = inillucent_tree::leaf::LeafRef::parse(&guard)?;
+        let mut lowest: Option<i64> = None;
+        for row in 0..leaf.row_count() {
+            if let Ok(inillucent_tree::datum::Datum::Int(key)) =
+                leaf.value_at(inillucent_tree::leaf::Hit::Sorted(row), rowid_column)
+            {
+                lowest = Some(lowest.map_or(key, |held: i64| held.min(key)));
+            }
+        }
+        for row in 0..leaf.delta_count() {
+            if let Ok(inillucent_tree::datum::Datum::Int(key)) =
+                leaf.value_at(inillucent_tree::leaf::Hit::Delta(row), rowid_column)
+            {
+                lowest = Some(lowest.map_or(key, |held: i64| held.min(key)));
+            }
+        }
+        boundaries.push((
+            lowest.unwrap_or(i64::MIN),
+            (page.0 as i64).saturating_mul(page_size),
+        ));
+        let next = leaf.right_sibling();
+        drop(guard);
+        page = next;
+        seen = seen.saturating_add(1);
+        // The same guard every walk in the tree crate carries: a sibling chain
+        // that pointed at itself would otherwise not come back.
+        if seen > tree.leaf_count().saturating_add(2) {
+            break;
+        }
+    }
+    boundaries.sort_by_key(|(key, _)| *key);
+    Ok(boundaries)
+}
+
+/// Returns what `rtreecheck` answers for the table it names.
+///
+/// `ok` when the module found nothing wrong, the module's own report when it
+/// did, and a refusal when the name is not a table this can be asked about -
+/// which is the reference's behaviour too: `rtreecheck` on a table that is not
+/// an R-Tree is an error rather than a cheerful `ok`.
+///
+/// @param arguments - the schema and table, or just the table
+/// @param space - the joined column space, which carries the catalog
+fn rtree_check(arguments: &[BoundExpr], space: &Space<'_>) -> DbResult<OwnedDatum> {
+    let Some(BoundExpr::Text(name)) = arguments.last() else {
+        return unsupported("rtreecheck with a table name that is not a literal");
+    };
+    let Some(catalog) = space.catalog else {
+        return unsupported("rtreecheck from here");
+    };
+    match catalog.module_integrity(name)? {
+        Some(None) => Ok(OwnedDatum::Text(b"ok".to_vec())),
+        Some(Some(report)) => Ok(OwnedDatum::Text(report.into_bytes())),
+        None => Err(inillucent_base::error::misuse(format!(
+            "no such rtree table: {}",
+            String::from_utf8_lossy(name)
+        ))),
+    }
+}
+
 pub(crate) fn translate_scan(
     expr: &BoundExpr,
     space: &Space<'_>,
@@ -5245,6 +5410,17 @@ fn translate(
                 .iter()
                 .map(|expr| translate(expr, space, params, frame))
                 .collect::<DbResult<Vec<Expr>>>()?;
+            // **Folded here, where the trees are.** `sqlite_offset` asks where
+            // in the file a row lives, which is a question about a tree rather
+            // than about a value; the map from rowid to page is built once for
+            // the statement, out of the leaf boundaries.
+            if *func == ScalarFunc::Offset {
+                return row_offset(arguments, space, params, frame);
+            }
+            // **Folded here, where the catalog is.** See `ScalarFunc::RTreeCheck`.
+            if *func == ScalarFunc::RTreeCheck {
+                return Ok(Expr::Literal(rtree_check(arguments, space)?));
+            }
             if *func == ScalarFunc::Length && translated.len() == 1 {
                 match translated.into_iter().next() {
                     Some(only) => Expr::Length(Box::new(only)),
@@ -5531,6 +5707,9 @@ fn aggregate_specs(
             AggregateFunc::JsonGroupObject => AggregateKind::JsonGroupObject(false),
             AggregateFunc::JsonbGroupObject => AggregateKind::JsonGroupObject(true),
             AggregateFunc::Median => AggregateKind::Percentile(Percentile::Median),
+            AggregateFunc::GeopolyGroupBbox => AggregateKind::GeopolyBox,
+            AggregateFunc::VectorSum => AggregateKind::VectorFold(false),
+            AggregateFunc::VectorAvg => AggregateKind::VectorFold(true),
             AggregateFunc::Percentile => AggregateKind::Percentile(Percentile::Hundredths),
             AggregateFunc::PercentileCont => AggregateKind::Percentile(Percentile::Continuous),
             AggregateFunc::PercentileDisc => AggregateKind::Percentile(Percentile::Discrete),

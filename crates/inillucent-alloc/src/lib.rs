@@ -71,13 +71,85 @@ const GRAIN: usize = 16;
 /// of a row, a key or a name actually lands on.
 const CLASSES: usize = LARGEST / GRAIN + 1;
 
-/// How many blocks one class keeps before handing the rest back.
+/// How many **bytes** one class keeps before handing the rest back.
 ///
 /// The cap is what makes this a recycler rather than a leak: a workload that
-/// allocates a million blocks of one class and frees them all keeps a thousand
-/// and returns the rest, so the process's footprint is bounded by the classes
-/// rather than by the workload.
-const PER_CLASS: usize = 1_024;
+/// allocates a million blocks of one class and frees them all keeps a bounded
+/// amount and returns the rest, so the process's footprint is bounded by the
+/// classes rather than by the workload.
+///
+/// **Bytes rather than blocks, since task-1869.** The cap was a thousand and
+/// twenty-four *blocks* per class - a fixed count over classes whose sizes
+/// differ by two hundred and fifty-six times, so the same number meant sixteen
+/// kilobytes in the smallest class and four megabytes in the largest. The
+/// gate's write family paid for it: one round left 5.2 MiB of heap standing
+/// that nothing live was using, and the process's high-water mark is exactly
+/// what this ticket's memory bar reads.
+///
+/// Sixteen kilobytes per class keeps the small classes as deep as they were -
+/// the sixteen-byte class still holds its thousand and twenty-four blocks,
+/// which is where the free list's measured speed comes from - and bounds the
+/// largest at four. The whole cache is at most `CLASSES * 16 KiB`, about
+/// 4 MiB, rather than an unbounded function of which classes a workload
+/// happened to touch.
+const PER_CLASS_BYTES: usize = 64 << 10;
+
+/// The block cap that was here before, kept as a ceiling.
+///
+/// **The byte cap only ever takes retention away.** Applying it alone would
+/// have made the smallest class keep four thousand blocks where it used to keep
+/// a thousand - more, not less - and the small classes are exactly where the
+/// free list's measured speed comes from. Keeping the old count as a ceiling
+/// means every class holds *at most* what it held before, and the large ones
+/// hold far less.
+const PER_CLASS_BLOCKS: usize = 1_024;
+
+/// How many blocks of each class the free list keeps, worked out once.
+///
+/// **A table rather than the arithmetic, because `dealloc` is the hot path.**
+/// The cap is a division and a pair of clamps, and computing it per free put a
+/// divide on every deallocation the program makes. It is a constant of the
+/// class, so it is a constant of the build.
+const CAPS: [usize; CLASSES] = caps();
+
+/// Builds [`CAPS`] at compile time.
+///
+/// The lower of the two caps, and at least one so no class is barred from
+/// recycling by arithmetic. At 64 KiB and a 1,024-block ceiling: the 16-byte
+/// class keeps its full thousand and twenty-four, unchanged, and the
+/// 4,096-byte class keeps sixteen where it used to keep a thousand - which is
+/// four megabytes of one class's free list that a write workload was leaving
+/// standing.
+#[allow(clippy::indexing_slicing)]
+const fn caps() -> [usize; CLASSES] {
+    let mut caps = [1usize; CLASSES];
+    let mut class = 0usize;
+    while class < CLASSES {
+        let size = if class * GRAIN > GRAIN {
+            class * GRAIN
+        } else {
+            GRAIN
+        };
+        let mut cap = PER_CLASS_BYTES / size;
+        if cap > PER_CLASS_BLOCKS {
+            cap = PER_CLASS_BLOCKS;
+        }
+        if cap < 1 {
+            cap = 1;
+        }
+        caps[class] = cap;
+        class += 1;
+    }
+    caps
+}
+
+/// Returns how many blocks of one class the free list keeps.
+///
+/// @param class - the size class
+#[inline]
+fn per_class(class: usize) -> usize {
+    CAPS.get(class).copied().unwrap_or(1)
+}
 
 thread_local! {
     /// The head of each class's intrusive free list, or null.
@@ -193,7 +265,7 @@ unsafe impl GlobalAlloc for Pooled {
                 let Some(count) = held.get(class) else {
                     return false;
                 };
-                if count.get() >= PER_CLASS {
+                if count.get() >= per_class(class) {
                     return false;
                 }
                 HEADS

@@ -436,7 +436,9 @@ impl PagedTree {
             // at all. A `make_room` restarts the attempt, which re-locates.
             let (located, mut previous) = {
                 let guard = database.pool().fetch(page)?;
-                let leaf = LeafRef::parse(&guard)?.with_collations(self.collations());
+                let leaf = LeafRef::parse(&guard)?
+                    .with_collations(self.collations())
+                    .with_directions(self.directions());
                 let located = leaf.locate(&key, self.key_columns())?;
                 // One row's out-of-line values, and only when the caller wants
                 // the row it is replacing. Locating reads key columns, which are
@@ -807,7 +809,9 @@ impl PagedTree {
         // needs the page mutably and this only needs to read it.
         let fit = 'fit: {
             let guard = database.pool().fetch(page)?;
-            let leaf = LeafRef::parse(&guard)?.with_collations(self.collations());
+            let leaf = LeafRef::parse(&guard)?
+                .with_collations(self.collations())
+                .with_directions(self.directions());
             let held = self.read_extents(database.pool(), &leaf)?;
             let leaf = leaf.with_extents(&held);
             let rows = leaf.live()?;
@@ -1557,7 +1561,9 @@ impl PagedTree {
     /// @param key - the key, one value per key column
     pub fn locate(&self, pool: &Pool, page: PageId, key: &[Datum<'_>]) -> DbResult<Located> {
         let guard = pool.fetch(page)?;
-        let leaf = LeafRef::parse(&guard)?.with_collations(self.collations());
+        let leaf = LeafRef::parse(&guard)?
+            .with_collations(self.collations())
+            .with_directions(self.directions());
         leaf.locate(key, self.key_columns())
     }
 
@@ -1573,7 +1579,9 @@ impl PagedTree {
         key: &[Datum<'_>],
     ) -> DbResult<Option<Vec<OwnedDatum>>> {
         let guard = pool.fetch(page)?;
-        let leaf = LeafRef::parse(&guard)?.with_collations(self.collations());
+        let leaf = LeafRef::parse(&guard)?
+            .with_collations(self.collations())
+            .with_directions(self.directions());
         match self.locate_in(&leaf, key)? {
             Located::Sorted(row) => {
                 // The row's own out-of-line values, not the leaf's: a delete
@@ -1631,7 +1639,9 @@ impl PagedTree {
         page: PageId,
     ) -> DbResult<(Vec<Vec<OwnedDatum>>, Vec<Vec<Option<ExtentRef>>>)> {
         let guard = pool.fetch(page)?;
-        let leaf = LeafRef::parse(&guard)?.with_collations(self.collations());
+        let leaf = LeafRef::parse(&guard)?
+            .with_collations(self.collations())
+            .with_directions(self.directions());
         if !leaf.has_extents() {
             let rows: Vec<Vec<OwnedDatum>> = leaf
                 .live()?

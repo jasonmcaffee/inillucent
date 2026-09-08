@@ -510,6 +510,24 @@ impl Parser<'_> {
             None
         };
         let columns = self.parse_indexed_column_list()?;
+        // `WITH ( name = value, ... )` after the columns, which is where
+        // PostgreSQL and pgvector put an index's storage parameters - and it
+        // follows `USING` for the reason `USING` is here at all: somebody who
+        // has written `WITH (m = 16, ef_construction = 64)` against pgvector
+        // writes it here, in that order.
+        //
+        // Collected as raw source slices rather than parsed as SQL, exactly as
+        // a module's arguments are: a storage parameter is a setting a
+        // structure reads, not an expression the engine evaluates, and the
+        // structure is the thing that knows which names it has.
+        let settings = if self.eat_keyword(Keyword::WITH)? {
+            self.expect(Punctuator::LeftParen)?;
+            let held = self.parse_module_arguments()?;
+            self.expect(Punctuator::RightParen)?;
+            held
+        } else {
+            Vec::new()
+        };
         let filter = if self.eat_keyword(Keyword::WHERE)? {
             Some(self.parse_expr()?)
         } else {
@@ -523,6 +541,7 @@ impl Parser<'_> {
             table,
             using,
             columns,
+            settings,
             filter,
         })
     }

@@ -195,6 +195,18 @@ impl Eq for AggregateBody {}
 pub enum Expr {
     /// One column of the input batch.
     Column(usize),
+    /// `sqlite_offset(X)`: where in the file the row holding X lives.
+    ///
+    /// The boundaries are one entry per leaf - the lowest key on it and the
+    /// offset of its page - built while the statement was prepared. A lookup is
+    /// a binary search, so the cost per row is a handful of comparisons rather
+    /// than a descent.
+    RowOffset {
+        /// The leaf boundaries, sorted by key.
+        boundaries: std::sync::Arc<Vec<(i64, i64)>>,
+        /// The row's key.
+        rowid: Box<Expr>,
+    },
     /// A constant.
     Literal(OwnedDatum),
     /// A call to a scalar an application registered.
@@ -505,6 +517,10 @@ pub enum StaticType {
 pub fn compile(expr: &Expr, types: &[StaticType]) -> DbResult<Box<dyn Eval>> {
     Ok(match expr {
         Expr::Column(index) => Box::new(ColumnRef { index: *index }),
+        Expr::RowOffset { boundaries, rowid } => Box::new(RowOffsetOf {
+            boundaries: std::sync::Arc::clone(boundaries),
+            rowid: compile(rowid, types)?,
+        }),
         Expr::Literal(value) => Box::new(Literal {
             value: value.clone(),
         }),
@@ -756,6 +772,9 @@ pub fn static_type(expr: &Expr, types: &[StaticType]) -> StaticType {
         // one somebody else's code returns.
         Expr::Raise { .. } | Expr::External { .. } => StaticType::Unknown,
         Expr::Literal(OwnedDatum::Int(_)) => StaticType::Int,
+        // A file offset is an integer or it is NULL, which is the same thing a
+        // rowid column proves and is what makes it comparable without a cast.
+        Expr::RowOffset { .. } => StaticType::Unknown,
         Expr::Literal(OwnedDatum::Real(_)) => StaticType::Real,
         Expr::Literal(OwnedDatum::Text(_)) => StaticType::Text,
         Expr::Literal(_) => StaticType::Unknown,
@@ -816,6 +835,39 @@ impl Eval for ColumnRef {
 
     fn column(&self) -> Option<usize> {
         Some(self.index)
+    }
+}
+
+/// `sqlite_offset(X)`: where in the file the row holding X lives.
+struct RowOffsetOf {
+    /// One entry per leaf: the lowest key on it and the offset of its page.
+    boundaries: std::sync::Arc<Vec<(i64, i64)>>,
+    /// The row's key.
+    rowid: Box<dyn Eval>,
+}
+
+impl Eval for RowOffsetOf {
+    /// Returns the offset of the page the row is on, or NULL when there is
+    /// none - a row with no integer key is a row this cannot be asked about,
+    /// which is what SQLite answers NULL for too.
+    fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
+        let Some(rowid) = self.rowid.value(batch, nth)?.get().as_int() else {
+            return Ok(Computed::Owned(OwnedDatum::Null));
+        };
+        // The last boundary at or below the key: a leaf covers a contiguous run
+        // of keys, so that is the leaf the row is on.
+        let at = match self
+            .boundaries
+            .binary_search_by_key(&rowid, |(key, _)| *key)
+        {
+            Ok(found) => found,
+            Err(0) => return Ok(Computed::Owned(OwnedDatum::Null)),
+            Err(after) => after.saturating_sub(1),
+        };
+        match self.boundaries.get(at) {
+            Some((_, offset)) => Ok(Computed::Owned(OwnedDatum::Int(*offset))),
+            None => Ok(Computed::Owned(OwnedDatum::Null)),
+        }
     }
 }
 
@@ -980,6 +1032,16 @@ fn generic_arith<'p>(op: ArithOp, left: &Datum<'_>, right: &Datum<'_>) -> DbResu
     if left.is_null() || right.is_null() {
         return Ok(Computed::Borrowed(Datum::Null));
     }
+    // **A text or blob operand converts to an integer where SQLite makes one.**
+    // `x'00' + x'00'` is `0` there and was `0.0` here, and `'abc' + 1` was
+    // `1.0` against `1`: the conversion went straight to a double, so every
+    // sum with a non-numeric operand in it came out a real. SQLite's rule is
+    // the one `CAST(x AS NUMERIC)` follows - integral text becomes an integer,
+    // text with a point or an exponent becomes a real, and text that is not a
+    // number at all becomes the integer zero - and the class it produces is
+    // the class of the answer.
+    let held = (numeric_datum(left), numeric_datum(right));
+    let (left, right) = (&held.0, &held.1);
     if let (Some(a), Some(b)) = (left.as_int(), right.as_int()) {
         return Ok(Computed::Borrowed(integer_arith(op, a, b)));
     }
@@ -989,6 +1051,64 @@ fn generic_arith<'p>(op: ArithOp, left: &Datum<'_>, right: &Datum<'_>) -> DbResu
         ArithOp::Subtract => a - b,
         ArithOp::Multiply => a * b,
     })))
+}
+
+/// Returns a value as the number SQLite's arithmetic reads it as.
+///
+/// An integer or a real stays what it is; a text or blob becomes an integer
+/// when its numeric prefix is integral and fits, a real when it is not, and the
+/// integer zero when there is no numeric prefix at all - which is what makes
+/// `x'00' + x'00'` an integer.
+///
+/// @param value - the operand
+fn numeric_datum<'p>(value: &Datum<'_>) -> Datum<'p> {
+    let (Datum::Text(bytes) | Datum::Blob(bytes)) = value else {
+        return match value {
+            Datum::Int(number) => Datum::Int(*number),
+            Datum::Real(number) => Datum::Real(*number),
+            _ => Datum::Null,
+        };
+    };
+    if let Some(number) = prefix_integer(bytes) {
+        return Datum::Int(number);
+    }
+    Datum::Real(prefix_number(bytes))
+}
+
+/// Returns the numeric prefix as an integer, when it is one.
+///
+/// `None` when the prefix carries a point or an exponent, or when the digits do
+/// not fit an `i64` - both of which are the cases SQLite reads as a real.
+///
+/// @param bytes - the string to read
+fn prefix_integer(bytes: &[u8]) -> Option<i64> {
+    let text = std::str::from_utf8(bytes).ok()?.trim_start();
+    let raw = text.as_bytes();
+    let mut end = 0usize;
+    let mut seen_digit = false;
+    for (index, byte) in raw.iter().enumerate() {
+        let accept = match byte {
+            b'0'..=b'9' => {
+                seen_digit = true;
+                true
+            }
+            b'+' | b'-' => index == 0,
+            // A point or an exponent means the value is a real, so there is no
+            // integer prefix to read - not a shorter one.
+            b'.' | b'e' | b'E' if seen_digit => return None,
+            _ => false,
+        };
+        if !accept {
+            break;
+        }
+        end = index.saturating_add(1);
+    }
+    if !seen_digit {
+        // No number at all, which SQLite reads as the integer zero.
+        return Some(0);
+    }
+    text.get(..end)
+        .and_then(|prefix| prefix.parse::<i64>().ok())
 }
 
 /// Arithmetic over anything.

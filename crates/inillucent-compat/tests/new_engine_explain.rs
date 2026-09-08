@@ -182,22 +182,36 @@ fn a_query_plan_is_re_rendered_after_the_schema_changes() {
     );
 }
 
-/// Plain `EXPLAIN` is refused, and the refusal says why rather than "not yet".
+/// Plain `EXPLAIN` lists the steps the statement runs, in SQLite's columns.
+///
+/// **It used to be refused, and the refusal was true**: SQLite's `EXPLAIN`
+/// lists the opcodes of a bytecode program and this engine compiles none. What
+/// it answers now is the operator chain the statement actually runs, in the
+/// eight columns SQLite answers with, framed by the `Init` and `Halt` that
+/// begin and end an execution here as they do there. A reader comparing two
+/// engines' listings is comparing two machines and will see that; a reader
+/// asking what *this* statement does gets an answer.
 #[test]
-fn plain_explain_is_refused_because_there_is_no_bytecode() {
+fn plain_explain_lists_the_chain_in_the_references_columns() {
     let database = fixture("plain");
     let connection = database.connect();
 
-    let error = connection
+    let rows = connection
         .query("EXPLAIN SELECT a FROM t")
-        .expect_err("plain EXPLAIN is refused");
-    let text = format!("{error:?}");
-    assert!(
-        text.contains("compiles no bytecode"),
-        "the refusal did not say why it cannot be answered: {text}"
-    );
-    assert!(
-        text.contains("EXPLAIN QUERY PLAN"),
-        "the refusal did not name the form that is answered: {text}"
-    );
+        .expect("plain EXPLAIN is answered");
+    assert_eq!(rows.len(), 3, "an Init, one step and a Halt: {rows:?}");
+    let opcode = |at: usize| match rows.get(at).and_then(|row| row.get(1)) {
+        Some(OwnedDatum::Text(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+        other => panic!("row {at} has no opcode: {other:?}"),
+    };
+    assert_eq!(opcode(0), "Init");
+    assert_eq!(opcode(1), "Scan");
+    assert_eq!(opcode(2), "Halt");
+    // The comment is the same sentence `EXPLAIN QUERY PLAN` prints, which is
+    // what makes the two forms readable against each other.
+    let comment = match rows.get(1).and_then(|row| row.get(7)) {
+        Some(OwnedDatum::Text(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+        other => panic!("the step has no comment: {other:?}"),
+    };
+    assert!(comment.starts_with("SCAN t"), "the comment was {comment:?}");
 }

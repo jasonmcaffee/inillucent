@@ -42,6 +42,16 @@ pub const NOT: Power = Power(3);
 pub const COMPARISON: Power = Power(4);
 /// `&`, `|`, `<<`, `>>`.
 pub const BITWISE: Power = Power(5);
+/// `<->`, `<=>`, `<#>`, `<+>`, `<~>`, `<%>`.
+///
+/// **The same level as the bitwise operators, which is where PostgreSQL puts
+/// them.** pgvector's distances are ordinary user-defined operators there, and
+/// PostgreSQL gives "any other operator" a slot that binds tighter than a
+/// comparison and looser than `+`. That is the slot that makes
+/// `WHERE v <=> q < 0.5` and `ORDER BY v <=> q` parse the way anybody writing
+/// them means, and it is the only property of the level that matters: nothing
+/// mixes a distance with a shift.
+pub const DISTANCE: Power = Power(5);
 /// `+` and `-`.
 pub const ADDITIVE: Power = Power(6);
 /// `*`, `/`, `%`.
@@ -65,6 +75,12 @@ pub fn infix_power(punctuator: Punctuator) -> Option<Power> {
         Punctuator::BitAnd | Punctuator::BitOr | Punctuator::ShiftLeft | Punctuator::ShiftRight => {
             BITWISE
         }
+        Punctuator::L2Distance
+        | Punctuator::CosineDistance
+        | Punctuator::NegativeInnerProduct
+        | Punctuator::L1Distance
+        | Punctuator::HammingDistance
+        | Punctuator::JaccardDistance => DISTANCE,
         Punctuator::Plus | Punctuator::Minus => ADDITIVE,
         Punctuator::Star | Punctuator::Slash | Punctuator::Percent => MULTIPLICATIVE,
         Punctuator::Concat | Punctuator::Arrow | Punctuator::DoubleArrow => CONCAT,

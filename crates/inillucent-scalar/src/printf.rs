@@ -254,6 +254,29 @@ fn based(spec: &Spec, value: i64, base: u32, upper: bool) -> Vec<u8> {
     text.into_bytes()
 }
 
+/// Returns what `%g` would render for a number.
+///
+/// The one conversion another module needs on its own: `geopoly` writes its
+/// coordinates with it, and re-deriving C's shorter-of-the-two rule beside it
+/// would be a second implementation that could drift from this one.
+///
+/// @param value - the number
+pub fn general(value: f64) -> String {
+    let spec = Spec {
+        left: false,
+        plus: false,
+        space: false,
+        zero: false,
+        alternate: false,
+        width: 0,
+        width_from_argument: false,
+        precision: None,
+        precision_from_argument: false,
+        conversion: b'g',
+    };
+    String::from_utf8_lossy(&real(&spec, Some(&Value::Real(value)))).into_owned()
+}
+
 /// Renders a floating-point conversion.
 fn real(spec: &Spec, argument: Option<&Value<'static>>) -> Vec<u8> {
     let value = argument.map_or(0.0, cast::real_value);
@@ -397,6 +420,11 @@ fn normalise_exponent(text: &str) -> String {
 }
 
 /// Returns an argument rendered as text.
+pub fn rendered_text(argument: Option<&Value<'static>>, encoding: TextEncoding) -> Vec<u8> {
+    text_of(argument, encoding)
+}
+
+/// Renders one value the way `%s` would.
 fn text_of(argument: Option<&Value<'static>>, encoding: TextEncoding) -> Vec<u8> {
     let _ = encoding;
     match argument {

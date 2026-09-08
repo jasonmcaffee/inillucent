@@ -323,7 +323,19 @@ impl RowRedo for TreeRows {
                 .take(shape.key_columns)
                 .map(|spec| spec.collation)
                 .collect();
-            let leaf = LeafRef::parse(&guard)?.with_collations(&collations);
+            // And the directions with them, for the same reason: a descending
+            // key column's rows are packed the other way round, and a replay
+            // that read them as ascending would compact them into an order the
+            // tree's own searches do not agree with.
+            let directions: Vec<bool> = shape
+                .columns
+                .iter()
+                .take(shape.key_columns)
+                .map(|spec| spec.descending)
+                .collect();
+            let leaf = LeafRef::parse(&guard)?
+                .with_collations(&collations)
+                .with_directions(&directions);
             let rows = leaf.live()?;
             let builder =
                 LeafBuilder::new(page_size, tree, shape.columns.clone(), shape.key_columns)?;

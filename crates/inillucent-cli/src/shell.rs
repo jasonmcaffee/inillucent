@@ -21,7 +21,8 @@ use inillucent_value::Value;
 use crate::render::{render, Layout, Mode};
 
 /// Everything the shell remembers between lines.
-pub struct Shell {
+/// One open database and the session statements on it belong to.
+pub struct Opened {
     /// The database.
     ///
     /// A connection is a borrow of it rather than a thing of its own, so one is
@@ -43,6 +44,22 @@ pub struct Shell {
     session: u64,
     /// Where the database came from, for `.databases` and the prompt.
     path: String,
+}
+
+/// How many databases `.connection` can hold open at once.
+///
+/// Five, which is the reference's own array size. A slot that has never been
+/// switched to is closed, and switching to one opens an in-memory database
+/// there - which is what makes `.connection 1` a working command on a shell
+/// that was started with one file.
+pub const CONNECTIONS: usize = 5;
+
+pub struct Shell {
+    /// The databases `.connection` switches between; slot 0 is the one the
+    /// shell was started on.
+    connections: Vec<Option<Opened>>,
+    /// Which slot statements run on.
+    active: usize,
     /// How results are laid out.
     pub layout: Layout,
     /// Where output goes, when it is not standard output.
@@ -55,10 +72,47 @@ pub struct Shell {
     pub echo: bool,
     /// Whether to print how long each statement took.
     pub timer: bool,
+    /// Whether the page cache's counters are printed after each statement.
+    pub stats: bool,
     /// Whether to print the change count after each statement.
     pub show_changes: bool,
     /// Whether an `EXPLAIN QUERY PLAN` is printed before each statement.
     pub explain_plan: bool,
+    /// Whether output lines end with a carriage return, which `.crlf` sets.
+    pub crlf: bool,
+    /// The prompt an interactive session prints for a new statement.
+    pub prompt_main: String,
+    /// The prompt it prints for a statement that is not finished.
+    pub prompt_continue: String,
+    /// When an `EXPLAIN` listing is laid out as a table.
+    pub explain_mode: crate::commands::ExplainMode,
+    /// The token `.nonce` set, which suspends safe mode for one command.
+    pub nonce: Option<String>,
+    /// The name of the `.testcase` that is capturing output, if one is.
+    pub testcase: Option<String>,
+    /// What has been printed since that `.testcase`.
+    pub captured: String,
+    /// How many `.check`s have run.
+    pub tests_run: usize,
+    /// How many of them failed.
+    pub tests_failed: usize,
+    /// Where a `.excel` or `.www` file is being written, if one is.
+    pub viewer: Option<std::path::PathBuf>,
+    /// Whether the authorizer's decisions are printed, which `.auth` sets.
+    pub auth: bool,
+    /// The decisions it has recorded since the last statement.
+    pub authorized: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    /// Where `.trace` sends each statement, when it sends it anywhere.
+    pub trace: Option<String>,
+    /// What `.scanstats` was set to.
+    pub scanstats: String,
+    /// Whether `SQLITE_DBCONFIG_DEFENSIVE` is in force.
+    ///
+    /// **On, because the reference's shell turns it on.** It is the flag that
+    /// makes `PRAGMA journal_mode = OFF` and `PRAGMA writable_schema = ON`
+    /// refuse rather than take effect, and a shell that left it off answered
+    /// those two differently from the reference on a fresh database.
+    pub defensive: bool,
     /// Whether the shell should stop.
     pub done: bool,
     /// Whether anything has failed, which decides the exit code.
@@ -71,6 +125,22 @@ pub struct Shell {
     /// destination is a place nothing arrives. `.show` reports it, which is the
     /// only thing that reads it.
     pub log_to: Option<String>,
+    /// How often `.progress` was asked to run a handler, in opcodes.
+    ///
+    /// Recorded and reported by `.show`, and never acted on: the reference's
+    /// handler prints nothing unless `--limit` is given, and this engine's VM
+    /// has no per-opcode callback to hang one on. Keeping the state means a
+    /// script written for the reference sets it and runs on rather than
+    /// stopping at "unknown command". task-1869.
+    pub progress_interval: u64,
+    /// The `--limit` `.progress` was given.
+    pub progress_limit: u64,
+    /// Whether `.progress --once` was asked for.
+    pub progress_once: bool,
+    /// Whether `.progress --quiet` was asked for.
+    pub progress_quiet: bool,
+    /// Whether the next number belongs to a `--limit` that has just been read.
+    pub progress_pending_limit: bool,
     /// The values `.parameter set` bound, by the name they were given.
     ///
     /// **The shell's own table, not the engine's.** SQLite keeps them in a
@@ -79,6 +149,16 @@ pub struct Shell {
     /// Ordered by key, which is the order `.parameter list` prints and the
     /// order the reference prints.
     pub parameters: std::collections::BTreeMap<String, Value<'static>>,
+}
+
+/// Returns an error as a sentence, with its detail when it carries one.
+///
+/// @param error - the failure
+fn described(error: inillucent_base::DbError) -> String {
+    match error.detail() {
+        Some(detail) => format!("{}: {detail}", error.message()),
+        None => error.message().to_string(),
+    }
 }
 
 /// Why a statement did not produce rows.
@@ -92,25 +172,78 @@ pub struct Failure {
 }
 
 impl Shell {
-    /// Opens a shell on a database file, or on an in-memory one.
-    pub fn open(path: &str) -> Result<Shell, String> {
-        let database = Database::open(path).map_err(|error| error.message().to_string())?;
+    /// Opens one database, with the modules and the flags a shell gives it.
+    ///
+    /// @param path - the file, or an in-memory name
+    pub fn open_one(path: &str) -> Result<Opened, String> {
+        // **The detail, not only the code.** An open that fails with "bad
+        // parameter or other API misuse" and nothing else is an error nobody
+        // can act on; the detail says which part of the file could not be read.
+        let database = Database::open(path).map_err(described)?;
+        // **The shell adds `fsdir`, and the library does not.** A table-valued
+        // function over the file system belongs to a program that asked for
+        // one; the reference draws the same line, with `fsdir` in `shell.c`.
+        for module in [
+            std::sync::Arc::new(inillucent_engine::ext::vtab::fsdir::FsDirModule)
+                as std::sync::Arc<dyn inillucent_engine::ext::vtab::Module>,
+            std::sync::Arc::new(inillucent_engine::ext::vtab::zipfile::ZipFileModule),
+        ] {
+            database
+                .register_module(module)
+                .map_err(|error| error.message().to_string())?;
+        }
         let session = database.connect().session();
-        Ok(Shell {
+        // **The reference's shell turns this on and this one has to as well.**
+        // It is a connection flag rather than a shell one, so setting the field
+        // below is not enough: the engine has to be told, or
+        // `PRAGMA journal_mode = OFF` is honoured here and refused there.
+        database.connect_as(session).set_defensive(true);
+        Ok(Opened {
             database,
             session,
             path: path.to_string(),
+        })
+    }
+
+    /// Opens a shell on a database file, or on an in-memory one.
+    pub fn open(path: &str) -> Result<Shell, String> {
+        let mut connections: Vec<Option<Opened>> = (0..CONNECTIONS).map(|_| None).collect();
+        connections[0] = Some(Shell::open_one(path)?);
+        Ok(Shell {
+            connections,
+            active: 0,
             layout: Layout::default(),
             output: None,
             output_is_once: false,
             bail: false,
             echo: false,
             timer: false,
+            stats: false,
             show_changes: false,
             explain_plan: false,
+            crlf: false,
+            prompt_main: "sqlite> ".to_string(),
+            prompt_continue: "   ...> ".to_string(),
+            explain_mode: crate::commands::ExplainMode::Auto,
+            nonce: None,
+            testcase: None,
+            captured: String::new(),
+            tests_run: 0,
+            tests_failed: 0,
+            viewer: None,
+            auth: false,
+            authorized: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            trace: None,
+            scanstats: "off".to_string(),
+            defensive: true,
             done: false,
             failed: false,
             log_to: None,
+            progress_interval: 0,
+            progress_limit: 0,
+            progress_once: false,
+            progress_quiet: false,
+            progress_pending_limit: false,
             parameters: std::collections::BTreeMap::new(),
             line: 1,
         })
@@ -121,38 +254,174 @@ impl Shell {
     /// Always the same session, so a temporary object made by one statement is
     /// there for the next one.
     pub fn connection(&self) -> Connection<'_> {
-        self.database.connect_as(self.session)
+        let held = self.open_slot();
+        held.database.connect_as(held.session)
+    }
+
+    /// Returns whether a boolean pragma reads on.
+    ///
+    /// @param name - the pragma's name
+    pub fn boolean_pragma(&self, name: &str) -> bool {
+        self.column(&format!("PRAGMA {name};"))
+            .first()
+            .is_some_and(|value| value == "1")
+    }
+
+    /// Sets a boolean pragma, reporting whether the engine took it.
+    ///
+    /// @param name - the pragma's name
+    /// @param value - what to set it to
+    pub fn set_boolean_pragma(&mut self, name: &str, value: bool) -> bool {
+        let word = if value { "on" } else { "off" };
+        self.collect(&format!("PRAGMA {name} = {word};")).is_ok()
+            && self.boolean_pragma(name) == value
+    }
+
+    /// Installs or removes the authorizer that `.auth on` prints through.
+    ///
+    /// @param on - whether the decisions are watched
+    pub fn set_authorizer(&mut self, on: bool) {
+        let installed: Option<std::rc::Rc<dyn inillucent_engine::Authorizer>> = on.then(|| {
+            std::rc::Rc::new(crate::commands::Watching {
+                seen: std::rc::Rc::clone(&self.authorized),
+            }) as std::rc::Rc<dyn inillucent_engine::Authorizer>
+        });
+        self.connection().set_authorizer(installed);
+    }
+
+    /// Prints and clears whatever the authorizer recorded.
+    fn report_authorized(&mut self) {
+        let lines: Vec<String> = self.authorized.borrow_mut().drain(..).collect();
+        for line in lines {
+            self.say(&line);
+        }
+    }
+
+    /// Puts the connection into or out of defensive mode.
+    ///
+    /// @param on - whether the flag is in force
+    pub fn set_defensive(&mut self, on: bool) -> bool {
+        self.connection().set_defensive(on);
+        true
+    }
+
+    /// Returns what the page cache has been asked to do.
+    pub fn cache_stats(&self) -> inillucent_engine::connect::CacheStats {
+        self.open_slot().database.cache_stats()
+    }
+
+    /// Returns how many bytes the page cache is holding.
+    pub fn pool_bytes(&self) -> usize {
+        self.open_slot().database.pool_bytes()
     }
 
     /// Copies the open database into a file and checks the copy.
     ///
     /// @param path - where the copy goes
     pub fn backup_to(&self, path: &str) -> Result<(), String> {
-        self.database
+        self.open_slot()
+            .database
             .backup_to(path)
             .map_err(|error| error.message().to_string())
     }
 
     /// Returns where the database was opened from.
     pub fn path(&self) -> &str {
-        &self.path
+        &self.open_slot().path
+    }
+
+    /// Returns the database statements currently run on.
+    ///
+    /// The active slot is never closed: `.connection close` on it moves the
+    /// shell back to slot zero, and slot zero is opened before the shell is.
+    fn open_slot(&self) -> &Opened {
+        self.connections
+            .get(self.active)
+            .and_then(|held| held.as_ref())
+            .or_else(|| self.connections.first().and_then(|held| held.as_ref()))
+            .expect("the shell always holds one open database")
+    }
+
+    /// Returns which slot statements run on.
+    pub fn active(&self) -> usize {
+        self.active
+    }
+
+    /// Returns each slot and what it holds, for `.connection`.
+    pub fn slots(&self) -> Vec<Option<String>> {
+        self.connections
+            .iter()
+            .map(|held| held.as_ref().map(|open| open.path.clone()))
+            .collect()
+    }
+
+    /// Switches to one slot, opening an in-memory database if it is closed.
+    ///
+    /// Out of range is ignored, which is what the reference does with it.
+    ///
+    /// @param slot - which connection to run statements on
+    pub fn use_slot(&mut self, slot: usize) -> Result<(), String> {
+        if slot >= CONNECTIONS {
+            return Ok(());
+        }
+        if self.connections.get(slot).is_some_and(Option::is_none) {
+            let opened = Shell::open_one(":memory:")?;
+            if let Some(place) = self.connections.get_mut(slot) {
+                *place = Some(opened);
+            }
+        }
+        self.active = slot;
+        Ok(())
+    }
+
+    /// Closes one slot, moving back to slot zero if it was the active one.
+    ///
+    /// Slot zero is never closed: it is the database the shell was started on,
+    /// and a shell with nothing open has nothing to run a statement against.
+    ///
+    /// @param slot - which connection to close
+    pub fn close_slot(&mut self, slot: usize) {
+        if slot == 0 || slot >= CONNECTIONS {
+            return;
+        }
+        if let Some(place) = self.connections.get_mut(slot) {
+            *place = None;
+        }
+        if self.active == slot {
+            self.active = 0;
+        }
     }
 
     /// Closes the current database and opens another.
     pub fn reopen(&mut self, path: &str) -> Result<(), String> {
-        let replacement = Shell::open(path)?;
-        self.database = replacement.database;
-        self.path = replacement.path;
+        let replacement = Shell::open_one(path)?;
+        let active = self.active;
+        if let Some(place) = self.connections.get_mut(active) {
+            *place = Some(replacement);
+        }
         Ok(())
     }
 
     /// Prints one line to wherever output is currently going.
     pub fn say(&mut self, line: &str) {
+        // **A `.testcase` captures instead of printing.** `.check` compares the
+        // output of the commands between the two, and a passing case prints
+        // nothing at all - which is what makes a test script's output the list
+        // of the cases that failed.
+        if self.testcase.is_some() {
+            self.captured.push_str(line);
+            self.captured.push('\n');
+            return;
+        }
+        let ending = if self.crlf { "\r\n" } else { "\n" };
         match self.output.as_mut() {
             Some(file) => {
-                let _ = writeln!(file, "{line}");
+                let _ = write!(file, "{line}{ending}");
             }
-            None => println!("{line}"),
+            None => {
+                let mut out = std::io::stdout();
+                let _ = write!(out, "{line}{ending}");
+            }
         }
     }
 
@@ -181,6 +450,11 @@ impl Shell {
             self.output = None;
             self.output_is_once = false;
         }
+        // `.excel` and `.www` hand the file to whatever the system opens that
+        // kind with, and only once it is closed and complete.
+        if let Some(path) = self.viewer.take() {
+            crate::commands::open_viewer(&path);
+        }
     }
 
     /// Runs one complete statement and prints whatever it produced.
@@ -194,6 +468,11 @@ impl Shell {
             self.print_plan(sql);
         }
         let outcome = self.collect(sql);
+        // `.auth on` prints what the binder asked about, before the rows the
+        // statement produced - which is the order the reference prints them in.
+        if self.auth {
+            self.report_authorized();
+        }
         match outcome {
             Err(failure) => {
                 self.report(sql, &failure);
@@ -210,6 +489,23 @@ impl Shell {
                     self.finish_once();
                     return;
                 }
+                // **And the bytecode form is a table with fixed columns.** The
+                // reference's shell switches to its own `MODE_Explain` for an
+                // `EXPLAIN` whatever `.mode` says, because eight columns of
+                // opcode printed as `0|Init|0|1|0||0|Start at 1` is unreadable.
+                // The widths are the reference's own.
+                let as_table = match self.explain_mode {
+                    crate::commands::ExplainMode::Auto => is_bytecode_explain(sql),
+                    crate::commands::ExplainMode::On => true,
+                    crate::commands::ExplainMode::Off => false,
+                };
+                if as_table && columns.len() == EXPLAIN_WIDTHS.len() {
+                    for line in explain_table(&columns, &rows) {
+                        self.say(&line);
+                    }
+                    self.finish_once();
+                    return;
+                }
                 let layout = self.layout.clone();
                 for line in render(&layout, &columns, &rows) {
                     self.say(&line);
@@ -221,6 +517,11 @@ impl Shell {
                     let total = self.connection().total_changes();
                     self.say(&format!("changes: {changes}   total_changes: {total}"));
                 }
+            }
+        }
+        if self.stats {
+            for line in crate::diagnose::statistics(self) {
+                self.say(&line);
             }
         }
         if self.timer {
@@ -634,6 +935,95 @@ fn is_query_plan(sql: &str) -> bool {
         && words
             .next()
             .is_some_and(|word| word.eq_ignore_ascii_case("plan"))
+}
+
+/// The column widths the reference prints an `EXPLAIN` listing in.
+///
+/// `addr`, `opcode`, `p1`, `p2`, `p3`, `p4`, `p5`, `comment` - the same numbers
+/// its shell carries, so a listing lines up under the same headings.
+const EXPLAIN_WIDTHS: [usize; 8] = [4, 13, 4, 4, 4, 13, 2, 13];
+
+/// Reports whether a statement is an `EXPLAIN` in its bytecode form.
+///
+/// The word `EXPLAIN` not followed by `QUERY`, which is the only other thing it
+/// can be followed by.
+///
+/// @param sql - the statement as typed
+fn is_bytecode_explain(sql: &str) -> bool {
+    let mut words = sql.split_whitespace();
+    words
+        .next()
+        .is_some_and(|word| word.eq_ignore_ascii_case("explain"))
+        && !words
+            .next()
+            .is_some_and(|word| word.eq_ignore_ascii_case("query"))
+}
+
+/// Renders an `EXPLAIN` listing as the reference's fixed-width table.
+///
+/// A header, a rule of dashes, then one line per instruction, each column
+/// left-aligned in its own width and separated by two spaces. A value wider
+/// than its column is not truncated - the reference does not truncate either,
+/// and a clipped opcode name would be worse than a ragged line.
+///
+/// @param columns - the column names, which are the reference's headings
+/// @param rows - the instructions
+fn explain_table(columns: &[String], rows: &[Vec<Value<'static>>]) -> Vec<String> {
+    /// What separates two columns.
+    const GAP: &str = "  ";
+
+    let mut lines = Vec::with_capacity(rows.len().saturating_add(2));
+    lines.push(
+        columns
+            .iter()
+            .enumerate()
+            .map(|(at, name)| pad(name, EXPLAIN_WIDTHS.get(at).copied().unwrap_or(0)))
+            .collect::<Vec<String>>()
+            .join(GAP),
+    );
+    lines.push(
+        EXPLAIN_WIDTHS
+            .iter()
+            .map(|width| "-".repeat(*width))
+            .collect::<Vec<String>>()
+            .join(GAP),
+    );
+    let last = EXPLAIN_WIDTHS.len().saturating_sub(1);
+    for row in rows {
+        let cells: Vec<String> = (0..EXPLAIN_WIDTHS.len())
+            .map(|at| {
+                let text = match row.get(at) {
+                    Some(Value::Text(text)) => String::from_utf8_lossy(text.raw()).into_owned(),
+                    Some(Value::Null) | None => String::new(),
+                    Some(other) => crate::render::literal(other),
+                };
+                // **The last column of a row is written as it is.** The heading
+                // is padded and the instruction's comment is not, which is what
+                // leaves a `Halt` line ending in the separator rather than in
+                // thirteen spaces. It is a small thing and it is two bytes of
+                // difference per line against the reference.
+                if at == last {
+                    text
+                } else {
+                    pad(&text, EXPLAIN_WIDTHS.get(at).copied().unwrap_or(0))
+                }
+            })
+            .collect();
+        lines.push(cells.join(GAP));
+    }
+    lines
+}
+
+/// Left-aligns one cell in its column.
+///
+/// @param text - the cell
+/// @param width - the column's width
+fn pad(text: &str, width: usize) -> String {
+    let mut out = text.to_string();
+    while out.chars().count() < width {
+        out.push(' ');
+    }
+    out
 }
 
 /// Renders `EXPLAIN QUERY PLAN`'s four columns as the tree the reference draws.

@@ -164,7 +164,13 @@ fn text_of(record: &inillucent_value::record::RecordRef<'_>, column: usize) -> O
 }
 
 /// Attaches one `sqlite_stat1` row to the object it is about.
-fn apply_statistic(tables: &mut [TableInfo], table: &[u8], index: Option<&[u8]>, stat: &[u8]) {
+///
+/// Public because the new engine holds its schema in its own catalog tree and
+/// reads `sqlite_stat1` out of a PAX tree rather than a SQLite b-tree - a
+/// different way of *finding* the three strings, over the same rule for what
+/// they mean. Two copies of that rule would be two answers to
+/// `ANALYZE`-changed-the-plan.
+pub fn apply_statistic(tables: &mut [TableInfo], table: &[u8], index: Option<&[u8]>, stat: &[u8]) {
     let folded = table.to_ascii_lowercase();
     let Some(info) = tables
         .iter_mut()

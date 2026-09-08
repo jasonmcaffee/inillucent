@@ -120,6 +120,12 @@ impl UndoSink for RecordingUndo {
     }
 }
 
+/// How many before-images the version log holds before the first sweep.
+///
+/// Small enough that an ordinary write workload never accumulates megabytes,
+/// large enough that a hundred single-row commits do not each pay for a walk.
+const COLLECT_FLOOR: usize = 1024;
+
 /// A database file, its log, and the transaction machinery over both.
 pub struct Engine {
     database: RefCell<Database>,
@@ -157,6 +163,22 @@ pub struct Engine {
     /// This is what a checkpoint may not advance recovery past, because
     /// no-steal means that transaction's pages are not in the file.
     oldest_open_lsn: Cell<u64>,
+    /// How many before-images the version log may hold before a commit collects.
+    ///
+    /// **Because nothing was collecting them at all.** `collect_versions` was
+    /// written in Phase 3, tested, and then called by nothing but its own tests
+    /// - so every before-image every write had ever published stayed for the
+    /// life of the connection. task-1869 measured the cost on the gate's write
+    /// family: 7.5 MiB of a round, held by rows no snapshot could reach.
+    ///
+    /// It is a threshold rather than a collect-per-commit because collecting
+    /// walks the whole log: doing it after every commit would be quadratic in
+    /// the images a batch publishes. The threshold doubles past whatever
+    /// survived the last sweep, so a long reader that legitimately holds a
+    /// thousand images is swept when the log reaches two thousand and not
+    /// repeatedly at a thousand - which is the same amortisation a growing
+    /// vector uses, for the same reason.
+    collect_at: Cell<usize>,
     stats: Cell<EngineStats>,
     path: DbPath,
     vfs: Arc<dyn Vfs>,
@@ -301,6 +323,7 @@ impl Engine {
             // build cannot collide with this run either.
             next_txn: Cell::new(recovered.highest_txn.saturating_add(1).max(1)),
             oldest_open_lsn: Cell::new(u64::MAX),
+            collect_at: Cell::new(COLLECT_FLOOR),
             stats: Cell::new(EngineStats::default()),
             path: path.clone(),
             vfs,
@@ -529,6 +552,24 @@ impl Engine {
         stats.checkpoints = stats.checkpoints.saturating_add(1);
         self.stats.set(stats);
         Ok(recovery_from)
+    }
+
+    /// Collects the version log when it has grown past its threshold.
+    ///
+    /// Called on every commit. It does nothing until the log passes the
+    /// threshold, and the threshold is then set to twice what survived - so the
+    /// work is amortised against the images that are actually accumulating,
+    /// and a reader holding a large but stable set is not re-swept on every
+    /// commit for nothing.
+    fn collect_if_grown(&self) {
+        let held = self.versions.borrow().len();
+        if held < self.collect_at.get() {
+            return;
+        }
+        self.collect_versions();
+        let remaining = self.versions.borrow().len();
+        self.collect_at
+            .set(remaining.saturating_mul(2).max(COLLECT_FLOOR));
     }
 
     /// Discards every before-image no active snapshot can reach.
@@ -771,6 +812,11 @@ impl Transaction<'_> {
         let durable = self.engine.wal.write_ahead_point();
         self.engine.with_pool(|pool| pool.set_durable_lsn(durable));
         self.finish(true);
+        // **After `finish`, so this transaction's own snapshot is already
+        // closed.** Collecting while it was still registered would keep every
+        // image the transaction had just published, which is the one shape of
+        // sweep that costs the walk and frees nothing.
+        self.engine.collect_if_grown();
         Ok(cts)
     }
 

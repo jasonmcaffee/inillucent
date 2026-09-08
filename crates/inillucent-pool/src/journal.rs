@@ -418,7 +418,9 @@ mod tests {
         let path = DbPath::new("/hot.db");
         let page_size = 64usize;
         // A database of three pages, each filled with its own page number.
-        let file = vfs.open(&path, OpenOptions::main_db()).expect("the file opens");
+        let file = vfs
+            .open(&path, OpenOptions::main_db())
+            .expect("the file opens");
         for page in 0..3u64 {
             let image = vec![page as u8 + 1; page_size];
             file.write_all_at(page * page_size as u64, &image)
@@ -438,7 +440,9 @@ mod tests {
             journal.save(page, &before).expect("the pre-image is saved");
         }
         journal.seal().expect("the journal syncs");
-        let file = vfs.open(&path, OpenOptions::main_db()).expect("the file opens");
+        let file = vfs
+            .open(&path, OpenOptions::main_db())
+            .expect("the file opens");
         for page in 0..3u64 {
             file.write_all_at(page * page_size as u64, &vec![0xff; page_size])
                 .expect("the page is overwritten");
@@ -451,7 +455,9 @@ mod tests {
             replay_hot_journal(vfs.as_ref(), &path).expect("the replay runs"),
             "a journal holding two pages is hot"
         );
-        let file = vfs.open(&path, OpenOptions::main_db()).expect("the file opens");
+        let file = vfs
+            .open(&path, OpenOptions::main_db())
+            .expect("the file opens");
         let mut image = vec![0u8; page_size];
         for (page, expected) in [(0u64, 1u8), (2, 3)] {
             file.read_exact_at(page * page_size as u64, &mut image)
@@ -476,15 +482,14 @@ mod tests {
         use inillucent_vfs::{MemoryVfs, OpenOptions};
         let vfs: std::sync::Arc<dyn Vfs> = std::sync::Arc::new(MemoryVfs::new());
         let path = DbPath::new("/done.db");
-        let file = vfs.open(&path, OpenOptions::main_db()).expect("the file opens");
-        file.write_all_at(0, &[7u8; 64]).expect("the page is written");
+        let file = vfs
+            .open(&path, OpenOptions::main_db())
+            .expect("the file opens");
+        file.write_all_at(0, &[7u8; 64])
+            .expect("the page is written");
         drop(file);
-        let mut journal = Journal::new(
-            std::sync::Arc::clone(&vfs),
-            &path,
-            JournalMode::Persist,
-            64,
-        );
+        let mut journal =
+            Journal::new(std::sync::Arc::clone(&vfs), &path, JournalMode::Persist, 64);
         journal.save(PageId(0), &[1u8; 64]).expect("saved");
         journal.seal().expect("sealed");
         journal.finish().expect("finished");
@@ -493,7 +498,9 @@ mod tests {
             !replay_hot_journal(vfs.as_ref(), &path).expect("the replay runs"),
             "a zeroed header means the commit completed"
         );
-        let file = vfs.open(&path, OpenOptions::main_db()).expect("the file opens");
+        let file = vfs
+            .open(&path, OpenOptions::main_db())
+            .expect("the file opens");
         let mut image = [0u8; 64];
         file.read_exact_at(0, &mut image).expect("the page reads");
         assert!(image.iter().all(|byte| *byte == 7), "the commit stood");

@@ -55,7 +55,7 @@ use inillucent_value::collation::Collation;
 
 use crate::datum::{Datum, OwnedDatum};
 use crate::key;
-use crate::leaf::{Extents, Hit, LeafBuilder, LeafRef, Packed, Spill};
+use crate::leaf::{Extents, Hit, LeafBuilder, LeafRef, Spill};
 use crate::tree::BULK_FILL;
 use crate::types::{ColumnSpec, PhysicalType};
 
@@ -112,8 +112,22 @@ impl KeyEncoding {
     /// @param values - the key tuple
     /// @param collations - one per column; short means BINARY for the rest
     pub fn encode_under(self, values: &[Datum<'_>], collations: &[Collation]) -> Vec<u8> {
+        self.encode_ordered(values, collations, &[])
+    }
+
+    /// Encodes a key tuple whose columns have collations and directions.
+    ///
+    /// @param values - the key tuple
+    /// @param collations - one per column; short means BINARY for the rest
+    /// @param descending - one per column; short means ascending for the rest
+    pub fn encode_ordered(
+        self,
+        values: &[Datum<'_>],
+        collations: &[Collation],
+        descending: &[bool],
+    ) -> Vec<u8> {
         let mut out = Vec::new();
-        self.encode_into(values, collations, &mut out);
+        self.encode_into(values, collations, descending, &mut out);
         out
     }
 
@@ -131,7 +145,13 @@ impl KeyEncoding {
     /// @param values - the key tuple
     /// @param collations - one per column; short means BINARY for the rest
     /// @param out - the buffer to append to
-    pub fn encode_into(self, values: &[Datum<'_>], collations: &[Collation], out: &mut Vec<u8>) {
+    pub fn encode_into(
+        self,
+        values: &[Datum<'_>],
+        collations: &[Collation],
+        descending: &[bool],
+        out: &mut Vec<u8>,
+    ) {
         match (self, values.first()) {
             (KeyEncoding::Rowid, Some(Datum::Int(number))) if values.len() == 1 => {
                 out.extend_from_slice(&key::order_preserving_int(*number));
@@ -157,7 +177,22 @@ impl KeyEncoding {
             (KeyEncoding::General, _) => {
                 for (index, value) in values.iter().enumerate() {
                     let collation = collations.get(index).copied().unwrap_or(Collation::Binary);
+                    let start = out.len();
                     key::encode_into_with(value, collation, out);
+                    // **A descending column is its own bytes, inverted.** The
+                    // encoding is order preserving, so complementing every byte
+                    // of one column's span reverses that column's order and
+                    // leaves every other column's alone - which is what a
+                    // `DESC` key column means, and is why the comparison below
+                    // and the sort the bulk build does over these bytes both
+                    // come out right with no further change.
+                    if descending.get(index).copied().unwrap_or(false) {
+                        if let Some(span) = out.get_mut(start..) {
+                            for byte in span {
+                                *byte = !*byte;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -352,6 +387,22 @@ fn collations_of(columns: &[ColumnSpec], key_columns: usize) -> Vec<Collation> {
         .collect()
 }
 
+/// Returns the direction of each key column, in key order.
+///
+/// The same derivation as the collations and for the same reason: a tree is
+/// *stored* in its key columns' directions, so every comparison it makes has to
+/// use them, and the column directory is what says a column has one.
+///
+/// @param columns - the column directory
+/// @param key_columns - how many leading columns form the key
+fn directions_of(columns: &[ColumnSpec], key_columns: usize) -> Vec<bool> {
+    columns
+        .iter()
+        .take(key_columns)
+        .map(|column| column.descending)
+        .collect()
+}
+
 /// An encoded key, on the stack when it fits.
 ///
 /// A rowid key is eight bytes and a descent needs one per probe, so returning a
@@ -432,6 +483,13 @@ pub struct PagedTree {
     /// bound - has to use them. They come from the column directory rather
     /// than from the page, because the catalog is what says a column has one.
     collations: Vec<Collation>,
+    /// The direction of each key column.
+    ///
+    /// Ascending for every column of nearly every tree; a `CREATE INDEX ...
+    /// (k DESC)` is what puts a `true` here, and the tree is then genuinely
+    /// stored in that order rather than stored ascending and reversed on the
+    /// way out. See `ColumnSpec::descending`.
+    directions: Vec<bool>,
     /// The leftmost leaf, so a full scan needs no descent.
     first_leaf: PageId,
     /// How many leaves the tree holds.
@@ -549,23 +607,65 @@ impl PagedTree {
     /// @param rows - the rows, already sorted by the key columns
     pub fn bulk_build_logged<'d, R: AsRef<[Datum<'d>]>>(
         database: &mut Database,
-        mut log: Option<&mut dyn crate::write::TreeLog>,
+        log: Option<&mut dyn crate::write::TreeLog>,
         tree_id: u64,
         columns: Vec<ColumnSpec>,
         key_columns: usize,
         rows: &[R],
     ) -> DbResult<PagedTree> {
+        PagedTree::bulk_build_rows(
+            database,
+            log,
+            tree_id,
+            columns,
+            key_columns,
+            &crate::leaf::RowSlice(rows),
+        )
+    }
+
+    /// Builds a tree bottom-up from a row source, holding one leaf at a time.
+    ///
+    /// **Two passes over the sizing arithmetic, and one leaf image in memory.**
+    /// The builder allocates its leaves as one contiguous run, so it has to know
+    /// the leaf count before it writes the first one. Until task-1869 it found
+    /// that out by packing every leaf into a `Vec<Vec<u8>>` and taking its
+    /// length, which is a whole second copy of the tree held live for the sake
+    /// of one integer: 6.2 MiB of a `CREATE INDEX` whose entire resident cost
+    /// was 28.9 MiB.
+    ///
+    /// [`LeafBuilder::fit`] answers the same question without encoding
+    /// anything, so the count is taken first, the run is allocated, and each
+    /// leaf is then packed into a buffer that is logged and dropped before the
+    /// next one is made. The two passes see the same values and price the same
+    /// spill threshold, so they agree by construction rather than by luck - and
+    /// the counting pass writes nothing, which is what makes running it twice
+    /// safe.
+    ///
+    /// One thing does move: an oversized value's extent pages are now allocated
+    /// **after** the leaf run rather than interleaved with it, because the run
+    /// is claimed before any packing happens. The leaves are therefore *more*
+    /// contiguous than they were, which is the property the run exists for.
+    ///
+    /// @param database - the file the pages are allocated and installed in
+    /// @param log - where the records go, when the build is inside a transaction
+    /// @param tree_id - the identifier stamped into every page
+    /// @param columns - the column directory, key columns first
+    /// @param key_columns - how many leading columns form the key
+    /// @param rows - the rows, already sorted by the key columns
+    pub fn bulk_build_rows<'d>(
+        database: &mut Database,
+        mut log: Option<&mut dyn crate::write::TreeLog>,
+        tree_id: u64,
+        columns: Vec<ColumnSpec>,
+        key_columns: usize,
+        rows: &dyn crate::leaf::Rows<'d>,
+    ) -> DbResult<PagedTree> {
         let page_size = database.page_size();
         let encoding = KeyEncoding::choose(&columns, key_columns);
         let collations = collations_of(&columns, key_columns);
+        let directions = directions_of(&columns, key_columns);
         let builder = LeafBuilder::new(page_size, tree_id, columns.clone(), key_columns)?;
 
-        // Pass one: the leaves, and each one's first key as a separator.
-        let mut leaves: Vec<PageId> = Vec::new();
-        let mut separators: Vec<Vec<u8>> = Vec::new();
-        let mut images: Vec<Vec<u8>> = Vec::new();
-        let mut at = 0usize;
-        let mut row_count = 0u64;
         // **The bulk builder always spills, logged or not.** The import builds
         // unlogged - it writes into a file nothing has read and checkpoints it -
         // and it has to produce the same tree the DDL path produces from the
@@ -574,9 +674,57 @@ impl PagedTree {
         // spilled only when it had a log would make the two disagree about where
         // a four-kilobyte value lives.
         let mut nowhere = crate::write::NoLog::default();
-        while at < rows.len() {
-            let remaining = rows.get(at..).unwrap_or(&[]);
-            let packed = {
+
+        // Pass one: how many rows each leaf takes, and each leaf's first key as
+        // a separator. Nothing is encoded, allocated or written.
+        let mut boundaries: Vec<usize> = Vec::new();
+        let mut separators: Vec<Vec<u8>> = Vec::new();
+        let mut head: Vec<Datum<'d>> = Vec::with_capacity(key_columns);
+        let mut at = 0usize;
+        let mut row_count = 0u64;
+        let total = rows.len();
+        while at < total {
+            let placed = builder.fit(rows, at, BULK_FILL, true);
+            if placed == 0 {
+                // Every oversized text and blob would have gone out of line, so
+                // what is left is keys, fixed-width slots and sixteen bytes per
+                // reference. A row that still does not fit is one whose *key* is
+                // most of a page.
+                return Err(misuse(
+                    "a row's keys and fixed-width columns alone are larger than a page",
+                ));
+            }
+            head.clear();
+            for column in 0..key_columns {
+                head.push(rows.value(at, column));
+            }
+            let mut separator = Vec::new();
+            encoding.encode_into(&head, &collations, &directions, &mut separator);
+            separators.push(separator);
+            boundaries.push(placed);
+            at = at.saturating_add(placed);
+            row_count = row_count.saturating_add(placed as u64);
+        }
+        // An empty tree is still a tree: one empty leaf, so every reader has a
+        // page to land on and nothing has to special-case a root that does not
+        // exist.
+        let empty = boundaries.is_empty();
+        if empty {
+            boundaries.push(0);
+            separators.push(Vec::new());
+        }
+
+        // Pass two: the leaves themselves. They are allocated as one run so the
+        // sibling chain is also the file's page order, which is what makes a
+        // full scan sequential - and one image is live at a time.
+        let leaf_pages = boundaries.len();
+        let first_leaf = database.allocate(leaf_pages as u64)?;
+        let mut leaves: Vec<PageId> = Vec::with_capacity(leaf_pages);
+        let mut placed_at = 0usize;
+        for (index, placed) in boundaries.iter().copied().enumerate() {
+            let mut image = if empty {
+                builder.encode_empty()?
+            } else {
                 let mut spiller = Extender {
                     database,
                     log: match log.as_deref_mut() {
@@ -586,55 +734,17 @@ impl PagedTree {
                     tree_id,
                     written: Vec::new(),
                 };
-                builder.pack_with(remaining, BULK_FILL, Some(&mut spiller))?
+                builder.encode_rows(rows, placed_at, placed, Some(&mut spiller))?
             };
-            match packed {
-                Packed::Filled { page, rows: packed } => {
-                    let first = remaining
-                        .first()
-                        .ok_or_else(|| corrupt("a packed leaf held no rows"))?;
-                    let head = first.as_ref().get(..key_columns).unwrap_or(first.as_ref());
-                    let mut separator = Vec::new();
-                    encoding.encode_into(head, &collations, &mut separator);
-                    separators.push(separator);
-                    images.push(page);
-                    at = at.saturating_add(packed);
-                    row_count = row_count.saturating_add(packed as u64);
-                }
-                Packed::RowTooLarge => {
-                    // Every oversized text and blob has already gone out of
-                    // line, so what is left is keys, fixed-width slots and
-                    // sixteen bytes per reference. A row that still does not fit
-                    // is one whose *key* is most of a page.
-                    return Err(misuse(
-                        "a row's keys and fixed-width columns alone are larger than a page",
-                    ));
-                }
-            }
-        }
-        if images.is_empty() {
-            // An empty tree is still a tree: one empty leaf, so every reader
-            // has a page to land on and nothing has to special-case a root that
-            // does not exist.
-            images.push(builder.encode_empty()?);
-            #[allow(clippy::let_underscore_untyped)]
-            let _ = &mut nowhere;
-            separators.push(Vec::new());
-        }
-
-        // The leaves are allocated as one run so the sibling chain is also the
-        // file's page order, which is what makes a full scan sequential.
-        let leaf_pages = images.len();
-        let first_leaf = database.allocate(leaf_pages as u64)?;
-        for (index, image) in images.iter_mut().enumerate() {
+            placed_at = placed_at.saturating_add(placed);
             let id = PageId(first_leaf.0.saturating_add(index as u64));
             let right = if index.saturating_add(1) < leaf_pages {
                 PageId(id.0.saturating_add(1))
             } else {
                 PageId::NONE
             };
-            page::set_right(image, right)?;
-            log_built_page(&mut log, database, id, image)?;
+            page::set_right(&mut image, right)?;
+            log_built_page(&mut log, database, id, &mut image)?;
             leaves.push(id);
         }
 
@@ -691,6 +801,7 @@ impl PagedTree {
             }
         }
         let collations = collations_of(&columns, key_columns);
+        let directions = directions_of(&columns, key_columns);
         Ok(PagedTree {
             tree_id,
             root,
@@ -700,6 +811,7 @@ impl PagedTree {
             page_size,
             encoding,
             collations,
+            directions,
             first_leaf: *leaves.first().unwrap_or(&PageId::NONE),
             leaf_count: leaves.len() as u64,
             row_count,
@@ -758,6 +870,7 @@ impl PagedTree {
         let first_leaf = PagedTree::leftmost_leaf(pool, root)?;
         let encoding = KeyEncoding::choose(&columns, key_columns);
         let collations = collations_of(&columns, key_columns);
+        let directions = directions_of(&columns, key_columns);
         Ok(PagedTree {
             tree_id,
             root,
@@ -767,6 +880,7 @@ impl PagedTree {
             page_size: pool.page_size(),
             encoding,
             collations,
+            directions,
             first_leaf,
             leaf_count,
             row_count,
@@ -863,12 +977,24 @@ impl PagedTree {
     ///
     /// @param values - the key tuple, in key-column order
     pub fn encode_key(&self, values: &[Datum<'_>]) -> Vec<u8> {
-        self.encoding.encode_under(values, &self.collations)
+        self.encoding
+            .encode_ordered(values, &self.collations, &self.directions)
     }
 
     /// Returns the collation of each key column.
     pub fn collations(&self) -> &[Collation] {
         &self.collations
+    }
+
+    /// Returns whether each key column is stored descending.
+    ///
+    /// A leaf parsed without these compares ascending, which for a descending
+    /// tree is not a different order but a *scrambled* one: the packed rows are
+    /// sorted the other way, so a bound search bisects a sequence its invariant
+    /// does not hold for and lands anywhere. `WHERE c >= 10` over
+    /// `CREATE INDEX ic ON t(c DESC)` returned no rows at all.
+    pub fn directions(&self) -> &[bool] {
+        &self.directions
     }
 
     /// Encodes a key tuple without allocating when it fits inline.
@@ -895,7 +1021,11 @@ impl PagedTree {
             }
             return KeyBytes::from_slice(&scratch);
         }
-        KeyBytes::from_slice(&self.encoding.encode_under(values, &self.collations))
+        KeyBytes::from_slice(&self.encoding.encode_ordered(
+            values,
+            &self.collations,
+            &self.directions,
+        ))
     }
 
     /// Descends to the leaf whose range holds a key, returning the pinned leaf.
@@ -1184,7 +1314,9 @@ impl PagedTree {
         let mut seen = 0u64;
         while !page.is_none() {
             let guard = pool.fetch(page)?;
-            let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
+            let leaf = LeafRef::parse(&guard)?
+                .with_collations(&self.collations)
+                .with_directions(&self.directions);
             // **The out-of-line values are read here, once per leaf, for every
             // walk in the crate.** A consumer that had to know about extents
             // would be five consumers that each had to; attaching them where the
@@ -1260,7 +1392,9 @@ impl PagedTree {
         loop {
             {
                 let guard = pool.fetch(descent.leaf)?;
-                let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
+                let leaf = LeafRef::parse(&guard)?
+                    .with_collations(&self.collations)
+                    .with_directions(&self.directions);
                 let held = self.read_extents(pool, &leaf)?;
                 let leaf = leaf.with_extents(&held);
                 if !visit(&leaf)? {
@@ -1526,7 +1660,9 @@ impl PagedTree {
         let encoded = self.encode_key_small(key);
         let (guard, page) = self.descend_guard(pool, encoded.as_slice())?;
         let mut next = {
-            let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
+            let leaf = LeafRef::parse(&guard)?
+                .with_collations(&self.collations)
+                .with_directions(&self.directions);
             let held = self.read_extents(pool, &leaf)?;
             let leaf = leaf.with_extents(&held);
             match Self::equal_span(&leaf, key, RUN_SCAN, visit)? {
@@ -1539,7 +1675,9 @@ impl PagedTree {
         let mut seen = 0u64;
         while !next.is_none() {
             let guard = pool.fetch(next)?;
-            let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
+            let leaf = LeafRef::parse(&guard)?
+                .with_collations(&self.collations)
+                .with_directions(&self.directions);
             let held = self.read_extents(pool, &leaf)?;
             let leaf = leaf.with_extents(&held);
             match Self::equal_span(&leaf, key, RUN_SCAN, visit)? {
@@ -1745,7 +1883,9 @@ impl PagedTree {
                 None => pool.fetch(page)?,
             };
             let step = 'step: {
-                let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
+                let leaf = LeafRef::parse(&guard)?
+                    .with_collations(&self.collations)
+                    .with_directions(&self.directions);
                 let resolved = self.read_extents(pool, &leaf)?;
                 let leaf = leaf.with_extents(&resolved);
                 if leaf.has_writes() {
@@ -1883,8 +2023,9 @@ impl PagedTree {
                         while !here.is_none() {
                             let stepped = pool.fetch(here)?;
                             let (low, rows, next) = {
-                                let leaf =
-                                    LeafRef::parse(&stepped)?.with_collations(&self.collations);
+                                let leaf = LeafRef::parse(&stepped)?
+                                    .with_collations(&self.collations)
+                                    .with_directions(&self.directions);
                                 (
                                     leaf.upper_bound(borrowed)?,
                                     leaf.row_count(),
@@ -1924,7 +2065,8 @@ impl PagedTree {
                                 self.descend_guard(pool, seek.as_slice())?;
                             let next = {
                                 let leaf = LeafRef::parse(&landed_guard)?
-                                    .with_collations(&self.collations);
+                                    .with_collations(&self.collations)
+                                    .with_directions(&self.directions);
                                 let low = leaf.upper_bound(borrowed)?;
                                 if low < leaf.row_count() {
                                     Some((landed, low, true))
@@ -1971,7 +2113,9 @@ impl PagedTree {
     ) -> DbResult<Option<R>> {
         let key = self.encode_key_small(probe);
         let (guard, _) = self.descend_guard(pool, key.as_slice())?;
-        let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
+        let leaf = LeafRef::parse(&guard)?
+            .with_collations(&self.collations)
+            .with_directions(&self.directions);
         // **One row's out-of-line values, not the leaf's.** A leaf whose values
         // are out of line holds a great many rows - it is sixteen bytes per
         // value rather than four kilobytes - so resolving the whole leaf to
@@ -2125,8 +2269,13 @@ impl PagedTree {
                 let head: Vec<Datum<'_>> = row.iter().copied().take(self.key_columns).collect();
                 if let Some(last) = &previous {
                     let borrowed: Vec<Datum<'_>> = last.iter().map(OwnedDatum::borrow).collect();
-                    if crate::leaf::compare_rows(&borrowed, &head, self.key_columns)
-                        != std::cmp::Ordering::Less
+                    if crate::leaf::compare_rows_under(
+                        &borrowed,
+                        &head,
+                        self.key_columns,
+                        &self.collations,
+                        &self.directions,
+                    ) != std::cmp::Ordering::Less
                     {
                         return Err(corrupt("a key does not increase across the leaf chain"));
                     }
@@ -2490,7 +2639,9 @@ impl PagedTree {
         let children = {
             let guard = pool.fetch(page)?;
             if page::kind_of(&guard)? == PageKind::Leaf {
-                let leaf = LeafRef::parse(&guard)?.with_collations(&self.collations);
+                let leaf = LeafRef::parse(&guard)?
+                    .with_collations(&self.collations)
+                    .with_directions(&self.directions);
                 let held = self.read_extents(pool, &leaf)?;
                 let leaf = leaf.with_extents(&held);
                 return visit(&leaf);

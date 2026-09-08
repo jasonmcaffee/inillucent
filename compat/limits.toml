@@ -112,10 +112,15 @@ description = "Maximum index number of any bound parameter."
 [[limit]]
 name = "TriggerDepth"
 c_name = "SQLITE_LIMIT_TRIGGER_DEPTH"
-# 100, which is what the pinned build's `sqlite3_limit()` reports and what
-# `.limit` prints. The number here was 1000, taken from the documentation page
-# rather than from the binary.
-default = 100
+# **The two pinned reference artifacts disagree about this one, and the oracle
+# wins.** `sqlite3_limit(SQLITE_LIMIT_TRIGGER_DEPTH)` on the oracle - built from
+# the pinned amalgamation, whose `SQLITE_MAX_TRIGGER_DEPTH` is 1000 - answers
+# 1000; the downloaded `sqlite3.exe` answers 100, so it was compiled with a
+# lower ceiling. This file names the oracle as its authority and the compat
+# report checks these rows against it, so 1000 it is. The cost is one line of
+# `.limit` output that differs from the shell binary, which
+# `feature-comparison.md` records.
+default = 1000
 hard_max = 1000000
 minimum = 1
 description = "Maximum depth of recursion for triggers."

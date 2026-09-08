@@ -58,6 +58,66 @@ pub fn call_with(
         ScalarFunc::VectorDistanceCos => vector_pair(arguments, cosine_distance),
         ScalarFunc::VectorDistanceL2 => vector_pair(arguments, euclidean_distance),
         ScalarFunc::VectorDot => vector_pair(arguments, dot_product),
+        ScalarFunc::VectorDistanceL1 => vector_pair(arguments, taxicab_distance),
+        ScalarFunc::VectorDistanceHamming => bit_pair(arguments, hamming_distance),
+        ScalarFunc::VectorDistanceJaccard => bit_pair(arguments, jaccard_distance),
+        ScalarFunc::VectorDims => vector_dims(arguments.first()),
+        ScalarFunc::VectorNorm => vector_norm(arguments.first()),
+        ScalarFunc::VectorNormalize => vector_normalize(arguments.first()),
+        ScalarFunc::VectorQuantize => binary_quantize(arguments.first()),
+        ScalarFunc::VectorSlice => subvector(arguments),
+        ScalarFunc::VectorAdd => vector_zip(arguments, |one, two| one + two),
+        ScalarFunc::VectorSubtract => vector_zip(arguments, |one, two| one - two),
+        ScalarFunc::VectorMultiply => vector_zip(arguments, |one, two| one * two),
+        ScalarFunc::VectorConcat => vector_concat(arguments),
+        ScalarFunc::GeopolyArea => geopoly_measure(arguments, |shape| Value::Real(shape.area())),
+        ScalarFunc::GeopolyBlob => geopoly_shape(arguments, |shape| Some(shape)),
+        ScalarFunc::GeopolyJson => geopoly_measure(arguments, |shape| {
+            Value::owned_text(shape.to_json().as_bytes()).unwrap_or(Value::Null)
+        }),
+        ScalarFunc::GeopolySvg => geopoly_svg(arguments, encoding),
+        ScalarFunc::GeopolyWithin => geopoly_pair(arguments, |first, second| {
+            match crate::geopoly::overlap(first, second) {
+                2 => 1,
+                4 => 2,
+                _ => 0,
+            }
+        }),
+        ScalarFunc::GeopolyOverlap => geopoly_pair(arguments, |first, second| {
+            crate::geopoly::overlap(first, second)
+        }),
+        ScalarFunc::GeopolyContainsPoint => geopoly_measure(arguments, |shape| {
+            let x = arguments.get(1).map_or(0.0, cast::real_value);
+            let y = arguments.get(2).map_or(0.0, cast::real_value);
+            Value::Integer(shape.contains_point(x, y))
+        }),
+        // Tracing this build does not have, read and discarded, which is what
+        // a build without `GEOPOLY_ENABLE_DEBUG` does with it.
+        ScalarFunc::GeopolyDebug => Value::Null,
+        ScalarFunc::GeopolyBbox => geopoly_shape(arguments, |shape| {
+            Some(crate::geopoly::box_polygon(shape.bounds()))
+        }),
+        ScalarFunc::GeopolyCcw => geopoly_shape(arguments, |shape| Some(shape.counter_clockwise())),
+        ScalarFunc::GeopolyXform => geopoly_shape(arguments, |shape| {
+            let mut matrix = [0.0f64; 6];
+            for (at, slot) in matrix.iter_mut().enumerate() {
+                *slot = arguments.get(at + 1).map_or(0.0, cast::real_value);
+            }
+            Some(shape.transformed(matrix))
+        }),
+        ScalarFunc::GeopolyRegular => geopoly_regular(arguments),
+        ScalarFunc::RTreeDepth => rtree_depth(arguments.first()),
+        ScalarFunc::RTreeNode => rtree_node(arguments),
+        // Folded to its answer by the physical pass, which is the only place
+        // the table it names is reachable. Reaching here at all means the
+        // statement was compiled without a catalog.
+        ScalarFunc::RTreeCheck => Value::Null,
+        // Folded to its answer by the physical pass, which is the only place
+        // the tree it asks about is reachable. Reaching here means the
+        // statement was compiled without one.
+        ScalarFunc::Offset => Value::Null,
+        ScalarFunc::SqlarCompress => sqlar_compress(arguments.first()),
+        ScalarFunc::SqlarUncompress => sqlar_uncompress(arguments),
         ScalarFunc::Printf => crate::printf::format(arguments, encoding),
         ScalarFunc::OctetLength => octet_length(arguments.first()),
         ScalarFunc::Random => Value::Integer(scramble(context.seed) as i64),
@@ -66,6 +126,9 @@ pub fn call_with(
         ScalarFunc::TotalChanges => Value::Integer(context.total_changes),
         ScalarFunc::LastInsertRowid => Value::Integer(context.last_insert_rowid),
         ScalarFunc::SourceId => Value::owned_text(SOURCE_ID.as_bytes()).unwrap_or(Value::Null),
+        ScalarFunc::Fts5SourceId => {
+            Value::owned_text(FTS5_SOURCE_ID.as_bytes()).unwrap_or(Value::Null)
+        }
         ScalarFunc::Abs => unary(arguments, absolute),
         ScalarFunc::Char => char_of(arguments),
         ScalarFunc::Coalesce => coalesce(arguments),
@@ -85,12 +148,15 @@ pub fn call_with(
         // `subtype` is answered by the binder, which is the only place that
         // knows which function produced the argument; a value here carries no
         // tag, so an argument that reached this far has none.
-        ScalarFunc::Subtype => Value::Integer(0),
+        // **Only reached where the answer depends on the value.** The binder
+        // answers `subtype` outright wherever the producing call decides it;
+        // what is left is `json_extract`, which carries the JSON subtype when
+        // what it extracted was itself an array or an object.
+        ScalarFunc::Subtype => Value::Integer(json_shaped(arguments.first())),
         ScalarFunc::Unistr => unistr(arguments.first()).unwrap_or(Value::Null),
-        ScalarFunc::UnistrQuote => unistr_quote(
-            &arguments.first().cloned().unwrap_or(Value::Null),
-            encoding,
-        ),
+        ScalarFunc::UnistrQuote => {
+            unistr_quote(&arguments.first().cloned().unwrap_or(Value::Null), encoding)
+        }
         ScalarFunc::CompileOptionUsed => compile_option_used(arguments.first()),
         ScalarFunc::CompileOptionGet => compile_option_get(arguments.first()),
         // The log is written by the connection, which a scalar cannot reach.
@@ -161,6 +227,18 @@ fn unary(
 /// inform anyone.
 const SOURCE_ID: &str =
     "2025-08-13 12:00:00 0000000000000000000000000000000000000000000000000000000000000000";
+
+/// What `fts5_source_id()` reports.
+///
+/// **`fts5:` and then a build stamp, which is the shape SQLite answers in** -
+/// an application that reads it is checking which FTS5 it is talking to, and a
+/// differently shaped string breaks the parse rather than informing anybody.
+/// The stamp itself is this engine's, because claiming a particular SQLite
+/// build's hash would be a false statement about what is running. task-1869
+/// added it: it was the one FTS name of the six the audit found absent that has
+/// a faithful answer here.
+const FTS5_SOURCE_ID: &str =
+    "fts5: 2026-09-08 00:00:00 inillucent000000000000000000000000000000000000000000000000000000";
 
 /// `octet_length(x)`: the bytes a value occupies, whatever its class.
 fn octet_length(value: Option<&Value<'static>>) -> Value<'static> {
@@ -1205,8 +1283,24 @@ pub fn refusal_for(func: ScalarFunc, arguments: &[Value<'static>]) -> Option<Str
         ScalarFunc::VectorDistanceCos => "vector_distance_cos",
         ScalarFunc::VectorDistanceL2 => "vector_distance_l2",
         ScalarFunc::VectorDot => "vector_dot",
+        ScalarFunc::VectorDistanceL1 => "l1_distance",
+        ScalarFunc::VectorAdd => "vector_add",
+        ScalarFunc::VectorSubtract => "vector_sub",
+        ScalarFunc::VectorMultiply => "vector_mul",
         _ => return None,
     };
+    // **A number on one side of the three arithmetic ones is a scale**, which
+    // is what `v * 2` means in pgvector - so it is not the error this check
+    // exists to catch. The distances have no such form: a distance to a number
+    // is a question with no answer, and saying so is the point.
+    let scaling = matches!(
+        func,
+        ScalarFunc::VectorAdd | ScalarFunc::VectorSubtract | ScalarFunc::VectorMultiply
+    ) && (matches!(number_of(arguments.first()), Some(_))
+        || matches!(number_of(arguments.get(1)), Some(_)));
+    if scaling {
+        return None;
+    }
     let mut widths = [0usize; 2];
     for (at, slot) in widths.iter_mut().enumerate() {
         let value = arguments.get(at);
@@ -1226,6 +1320,436 @@ pub fn refusal_for(func: ScalarFunc, arguments: &[Value<'static>]) -> Option<Str
         return Some(format!("different vector dimensions {left} and {right}"));
     }
     None
+}
+
+/// `sqlar_compress(X)`: a blob compressed when that makes it smaller.
+///
+/// Anything that is not a blob is returned as it stands, which is the
+/// reference's rule and is what keeps a text column readable inside an archive.
+///
+/// @param value - the argument
+fn sqlar_compress(value: Option<&Value<'static>>) -> Value<'static> {
+    let Some(Value::Blob(blob)) = value else {
+        return value.cloned().unwrap_or(Value::Null);
+    };
+    let raw = blob.raw();
+    let packed = inillucent_base::deflate::zlib_compress(raw);
+    if packed.len() < raw.len() {
+        return Value::owned_blob(&packed).unwrap_or(Value::Null);
+    }
+    value.cloned().unwrap_or(Value::Null)
+}
+
+/// `sqlar_uncompress(Z, SZ)`: the inverse, given the size the row claims.
+///
+/// @param arguments - the stored blob and the content's size
+fn sqlar_uncompress(arguments: &[Value<'static>]) -> Value<'static> {
+    let Some(Value::Blob(blob)) = arguments.first() else {
+        return arguments.first().cloned().unwrap_or(Value::Null);
+    };
+    let size = arguments.get(1).and_then(Value::as_integer).unwrap_or(0);
+    if size <= 0 || size as usize == blob.raw().len() {
+        return arguments.first().cloned().unwrap_or(Value::Null);
+    }
+    match inillucent_base::deflate::zlib_decompress(blob.raw()) {
+        Ok(bytes) => Value::owned_blob(&bytes).unwrap_or(Value::Null),
+        Err(_) => Value::Null,
+    }
+}
+
+/// Returns the depth an R-Tree node's header records.
+///
+/// The first two bytes, big-endian. Zero for every node but the root, which is
+/// what makes this worth having: the root's depth is the tree's height, and a
+/// height that disagrees with a walk is a corrupt tree.
+///
+/// @param value - the node blob
+fn rtree_depth(value: Option<&Value<'static>>) -> Value<'static> {
+    let Some(Value::Blob(blob)) = value else {
+        return Value::Null;
+    };
+    let bytes = blob.raw();
+    if bytes.len() < 2 {
+        return Value::Null;
+    }
+    Value::Integer(i64::from(u16::from_be_bytes([bytes[0], bytes[1]])))
+}
+
+/// Returns an R-Tree node rendered as a readable list.
+///
+/// `{rowid x0 x1 ...} {rowid ...}`, one brace group per cell, which is the
+/// reference's own rendering - a Tcl list, because the routine was written for
+/// SQLite's Tcl test suite and the format outlived the reason.
+///
+/// @param arguments - how many dimensions, then the node blob
+fn rtree_node(arguments: &[Value<'static>]) -> Value<'static> {
+    let dimensions = arguments.first().map_or(0, cast::integer_value);
+    if !(1..=5).contains(&dimensions) {
+        return Value::Null;
+    }
+    let dimensions = dimensions as usize;
+    let Some(Value::Blob(blob)) = arguments.get(1) else {
+        return Value::Null;
+    };
+    let bytes = blob.raw();
+    if bytes.len() < 4 {
+        return Value::Null;
+    }
+    let cells = usize::from(u16::from_be_bytes([bytes[2], bytes[3]]));
+    let width = 8 + dimensions * 2 * 4;
+    if bytes.len() < 4 + cells * width {
+        return Value::Null;
+    }
+    let mut out = String::new();
+    for cell in 0..cells {
+        if cell > 0 {
+            out.push(' ');
+        }
+        let at = 4 + cell * width;
+        let mut key = [0u8; 8];
+        key.copy_from_slice(&bytes[at..at + 8]);
+        out.push_str(&format!("{{{}", i64::from_be_bytes(key)));
+        for value in 0..dimensions * 2 {
+            let from = at + 8 + value * 4;
+            let mut word = [0u8; 4];
+            word.copy_from_slice(&bytes[from..from + 4]);
+            out.push(' ');
+            out.push_str(&crate::printf::general(f64::from(f32::from_be_bytes(word))));
+        }
+        out.push('}');
+    }
+    Value::owned_text(out.as_bytes()).unwrap_or(Value::Null)
+}
+
+/// Applies a measure to a polygon, answering NULL when there is not one.
+///
+/// @param arguments - the call's arguments, the polygon first
+/// @param measure - what to compute
+fn geopoly_measure(
+    arguments: &[Value<'static>],
+    measure: impl FnOnce(&crate::geopoly::Polygon) -> Value<'static>,
+) -> Value<'static> {
+    match crate::geopoly::Polygon::parse(arguments.first()) {
+        Some(shape) => measure(&shape),
+        None => Value::Null,
+    }
+}
+
+/// Applies a transform to a polygon and answers the stored form.
+///
+/// @param arguments - the call's arguments, the polygon first
+/// @param transform - what to make of it
+fn geopoly_shape(
+    arguments: &[Value<'static>],
+    transform: impl FnOnce(crate::geopoly::Polygon) -> Option<crate::geopoly::Polygon>,
+) -> Value<'static> {
+    let Some(shape) = crate::geopoly::Polygon::parse(arguments.first()) else {
+        return Value::Null;
+    };
+    match transform(shape) {
+        Some(made) => Value::owned_blob(&made.to_blob()).unwrap_or(Value::Null),
+        None => Value::Null,
+    }
+}
+
+/// Compares two polygons, answering NULL when either is not one.
+///
+/// @param arguments - the two polygons
+/// @param compare - what to compute
+fn geopoly_pair(
+    arguments: &[Value<'static>],
+    compare: impl FnOnce(&crate::geopoly::Polygon, &crate::geopoly::Polygon) -> i64,
+) -> Value<'static> {
+    let (Some(first), Some(second)) = (
+        crate::geopoly::Polygon::parse(arguments.first()),
+        crate::geopoly::Polygon::parse(arguments.get(1)),
+    ) else {
+        return Value::Null;
+    };
+    Value::Integer(compare(&first, &second))
+}
+
+/// Renders a polygon as an SVG `<polyline>`.
+///
+/// @param arguments - the polygon, then the attributes to write into the tag
+/// @param encoding - the connection's text encoding
+fn geopoly_svg(arguments: &[Value<'static>], encoding: TextEncoding) -> Value<'static> {
+    let Some(shape) = crate::geopoly::Polygon::parse(arguments.first()) else {
+        return Value::Null;
+    };
+    let attributes: Vec<String> = arguments
+        .iter()
+        .skip(1)
+        .map(|value| {
+            String::from_utf8_lossy(&crate::printf::rendered_text(Some(value), encoding))
+                .into_owned()
+        })
+        .collect();
+    Value::owned_text(shape.to_svg(&attributes).as_bytes()).unwrap_or(Value::Null)
+}
+
+/// Builds a regular polygon around a centre.
+///
+/// @param arguments - the centre, the circumradius and how many sides
+fn geopoly_regular(arguments: &[Value<'static>]) -> Value<'static> {
+    let x = arguments.first().map_or(0.0, cast::real_value);
+    let y = arguments.get(1).map_or(0.0, cast::real_value);
+    let radius = arguments.get(2).map_or(0.0, cast::real_value);
+    let sides = arguments.get(3).map_or(0, cast::integer_value);
+    match crate::geopoly::regular(x, y, radius, sides) {
+        Some(shape) => Value::owned_blob(&shape.to_blob()).unwrap_or(Value::Null),
+        None => Value::Null,
+    }
+}
+
+/// Returns 74 when a value is JSON text for an array or an object.
+///
+/// @param value - the extracted value
+fn json_shaped(value: Option<&Value<'static>>) -> i64 {
+    let Some(Value::Text(text)) = value else {
+        return 0;
+    };
+    let raw = text.utf8_bytes();
+    match raw.iter().find(|byte| !byte.is_ascii_whitespace()) {
+        Some(b'[') | Some(b'{') => 74,
+        _ => 0,
+    }
+}
+
+/// Returns the taxicab distance between two vectors.
+fn taxicab_distance(left: &[f32], right: &[f32]) -> f64 {
+    let mut total = 0.0f64;
+    for (one, two) in left.iter().zip(right.iter()) {
+        total += (f64::from(*one) - f64::from(*two)).abs();
+    }
+    total
+}
+
+/// Returns the raw bytes of a blob argument, which is what a bit vector is.
+///
+/// **Bytes rather than components**, because pgvector's `bit` type is a string
+/// of bits and its two distances count bits rather than dimensions. The blob
+/// `binary_quantize` writes is one, and so is any blob of the same length.
+///
+/// @param value - the argument
+fn bits_of(value: Option<&Value<'static>>) -> Option<Vec<u8>> {
+    match value {
+        Some(Value::Blob(blob)) => Some(blob.raw().to_vec()),
+        _ => None,
+    }
+}
+
+/// Applies a measure over two bit vectors of the same length.
+///
+/// @param arguments - the call's arguments
+/// @param measure - what to compute
+fn bit_pair(arguments: &[Value<'static>], measure: fn(&[u8], &[u8]) -> f64) -> Value<'static> {
+    let (Some(left), Some(right)) = (bits_of(arguments.first()), bits_of(arguments.get(1))) else {
+        return Value::Null;
+    };
+    if left.len() != right.len() || left.is_empty() {
+        return Value::Null;
+    }
+    let answer = measure(&left, &right);
+    if answer.is_nan() {
+        return Value::Null;
+    }
+    Value::Real(answer)
+}
+
+/// Returns how many bits differ between two bit vectors.
+fn hamming_distance(left: &[u8], right: &[u8]) -> f64 {
+    let mut total = 0u32;
+    for (one, two) in left.iter().zip(right.iter()) {
+        total = total.saturating_add((one ^ two).count_ones());
+    }
+    f64::from(total)
+}
+
+/// Returns one minus the ratio of the shared bits to the set bits.
+///
+/// Two vectors with no bits set at all have an empty union, and a ratio over an
+/// empty union is undefined rather than zero - so it answers NULL through the
+/// NaN check, the same way an undefined cosine does.
+fn jaccard_distance(left: &[u8], right: &[u8]) -> f64 {
+    let mut shared = 0u32;
+    let mut either = 0u32;
+    for (one, two) in left.iter().zip(right.iter()) {
+        shared = shared.saturating_add((one & two).count_ones());
+        either = either.saturating_add((one | two).count_ones());
+    }
+    if either == 0 {
+        return f64::NAN;
+    }
+    1.0 - f64::from(shared) / f64::from(either)
+}
+
+/// Returns how many components a vector has.
+///
+/// @param value - the vector
+fn vector_dims(value: Option<&Value<'static>>) -> Value<'static> {
+    match vector_of(value) {
+        Some(vector) => Value::Integer(vector.len() as i64),
+        None => Value::Null,
+    }
+}
+
+/// Returns a vector's Euclidean length.
+///
+/// @param value - the vector
+fn vector_norm(value: Option<&Value<'static>>) -> Value<'static> {
+    let Some(vector) = vector_of(value) else {
+        return Value::Null;
+    };
+    let total: f64 = vector
+        .iter()
+        .map(|one| f64::from(*one) * f64::from(*one))
+        .sum();
+    Value::Real(total.sqrt())
+}
+
+/// Returns the same direction with length one.
+///
+/// A zero vector has no direction, and pgvector answers it with itself rather
+/// than with a division by zero. That is what this does too.
+///
+/// @param value - the vector
+fn vector_normalize(value: Option<&Value<'static>>) -> Value<'static> {
+    let Some(vector) = vector_of(value) else {
+        return Value::Null;
+    };
+    let total: f64 = vector
+        .iter()
+        .map(|one| f64::from(*one) * f64::from(*one))
+        .sum();
+    let length = total.sqrt();
+    if length == 0.0 {
+        return vector_value(&vector);
+    }
+    let scaled: Vec<f32> = vector
+        .iter()
+        .map(|one| (f64::from(*one) / length) as f32)
+        .collect();
+    vector_value(&scaled)
+}
+
+/// Returns one bit per component, set when the component is positive.
+///
+/// **Most significant bit first within each byte**, which is how pgvector's
+/// `bit` type is laid out and therefore what `hamming_distance` has to count
+/// over. A width that is not a multiple of eight leaves the low bits of the
+/// last byte clear, so two vectors of the same width always compare over the
+/// same padding.
+///
+/// @param value - the vector
+fn binary_quantize(value: Option<&Value<'static>>) -> Value<'static> {
+    let Some(vector) = vector_of(value) else {
+        return Value::Null;
+    };
+    let mut bytes = vec![0u8; vector.len().div_ceil(8)];
+    for (at, component) in vector.iter().enumerate() {
+        if *component > 0.0 {
+            bytes[at / 8] |= 0x80 >> (at % 8);
+        }
+    }
+    Value::owned_blob(&bytes).unwrap_or(Value::Null)
+}
+
+/// Returns a slice of a vector, counted from one.
+///
+/// A start before the first component or a count that runs off the end is a
+/// refusal in pgvector; here it is NULL, which is what every other measure in
+/// this file answers when it was handed something that is not a vector of the
+/// shape the call needs.
+///
+/// @param arguments - the vector, the one-based start, and how many
+fn subvector(arguments: &[Value<'static>]) -> Value<'static> {
+    let Some(vector) = vector_of(arguments.first()) else {
+        return Value::Null;
+    };
+    let (Some(start), Some(count)) = (
+        arguments.get(1).and_then(Value::as_integer),
+        arguments.get(2).and_then(Value::as_integer),
+    ) else {
+        return Value::Null;
+    };
+    if start < 1 || count < 1 {
+        return Value::Null;
+    }
+    let from = (start - 1) as usize;
+    let to = from.saturating_add(count as usize);
+    if to > vector.len() {
+        return Value::Null;
+    }
+    vector_value(&vector[from..to])
+}
+
+/// Applies an operation to two vectors component by component.
+///
+/// @param arguments - the two vectors
+/// @param combine - what to do with each pair of components
+fn vector_zip(arguments: &[Value<'static>], combine: fn(f32, f32) -> f32) -> Value<'static> {
+    // **A number on one side scales every component**, which is what `v * 2`
+    // means in pgvector and what the operator form of these three brought with
+    // it. `vector_mul(v, 2)` therefore means it too, because one meaning per
+    // operation is the only way the function form and the operator form can be
+    // read as the same thing.
+    let one = vector_of(arguments.first());
+    let two = vector_of(arguments.get(1));
+    if let (Some(held), None) = (&one, &two) {
+        return match number_of(arguments.get(1)) {
+            Some(scale) => {
+                let out: Vec<f32> = held.iter().map(|value| combine(*value, scale)).collect();
+                vector_value(&out)
+            }
+            None => Value::Null,
+        };
+    }
+    if let (None, Some(held)) = (&one, &two) {
+        return match number_of(arguments.first()) {
+            Some(scale) => {
+                let out: Vec<f32> = held.iter().map(|value| combine(scale, *value)).collect();
+                vector_value(&out)
+            }
+            None => Value::Null,
+        };
+    }
+    let (Some(left), Some(right)) = (one, two) else {
+        return Value::Null;
+    };
+    if left.len() != right.len() {
+        return Value::Null;
+    }
+    let combined: Vec<f32> = left
+        .iter()
+        .zip(right.iter())
+        .map(|(one, two)| combine(*one, *two))
+        .collect();
+    vector_value(&combined)
+}
+
+/// Returns one vector followed by the other.
+///
+/// @param arguments - the two vectors
+fn vector_concat(arguments: &[Value<'static>]) -> Value<'static> {
+    let (Some(left), Some(right)) = (vector_of(arguments.first()), vector_of(arguments.get(1)))
+    else {
+        return Value::Null;
+    };
+    let mut joined = left;
+    joined.extend_from_slice(&right);
+    vector_value(&joined)
+}
+
+/// Returns a vector as the blob this engine stores one in.
+///
+/// @param vector - the components
+fn vector_value(vector: &[f32]) -> Value<'static> {
+    let mut bytes = Vec::with_capacity(vector.len().saturating_mul(4));
+    for component in vector {
+        bytes.extend_from_slice(&component.to_bits().to_le_bytes());
+    }
+    Value::owned_blob(&bytes).unwrap_or(Value::Null)
 }
 
 /// Returns the cosine *distance*, `1 - cos(a, b)`, in `[0, 2]`.
@@ -1286,3 +1810,14 @@ const MODULE_NOT_FOUND: &str = "The specified module could not be found.\r\n";
 /// As above, for a loader that reports in the C library's words.
 #[cfg(not(windows))]
 const MODULE_NOT_FOUND: &str = "no such file or directory";
+
+/// Returns a value as an `f32`, when it is a number.
+///
+/// @param value - the side that is not a vector
+fn number_of(value: Option<&Value<'static>>) -> Option<f32> {
+    match value {
+        Some(Value::Integer(number)) => Some(*number as f32),
+        Some(Value::Real(number)) => Some(*number as f32),
+        _ => None,
+    }
+}

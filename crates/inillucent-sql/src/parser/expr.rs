@@ -882,6 +882,12 @@ fn binary_op(punctuator: Punctuator) -> BinaryOp {
         Punctuator::ShiftRight => BinaryOp::ShiftRight,
         Punctuator::Arrow => BinaryOp::Extract,
         Punctuator::DoubleArrow => BinaryOp::ExtractText,
+        Punctuator::L2Distance => BinaryOp::L2Distance,
+        Punctuator::CosineDistance => BinaryOp::CosineDistance,
+        Punctuator::NegativeInnerProduct => BinaryOp::NegativeInnerProduct,
+        Punctuator::L1Distance => BinaryOp::L1Distance,
+        Punctuator::HammingDistance => BinaryOp::HammingDistance,
+        Punctuator::JaccardDistance => BinaryOp::JaccardDistance,
         // Every punctuator that reaches here has an infix power, and every
         // punctuator with an infix power is listed above.
         _ => BinaryOp::Equal,

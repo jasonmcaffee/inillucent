@@ -179,11 +179,14 @@ impl VirtualCursor for PragmaCursor {
             Value::Null => None,
             other => {
                 let wanted = text_of(other);
+                // The binder's view lists a database as a name and a cookie,
+                // and the position in that list is the number the host indexes
+                // schemas by - which is the same numbering the snapshot used.
                 context.catalog.and_then(|catalog| {
                     catalog
                         .databases
                         .iter()
-                        .position(|database| database.name.eq_ignore_ascii_case(wanted.as_bytes()))
+                        .position(|(name, _)| name.eq_ignore_ascii_case(wanted.as_bytes()))
                 })
             }
         };

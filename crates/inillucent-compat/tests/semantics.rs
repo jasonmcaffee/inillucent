@@ -275,6 +275,130 @@ const CASES: &[Case] = &[
         script: "SELECT 1;\n-- trailing",
         expect: Agrees,
     },
+    // ---------------------------------------------------------- task-1860
+    //
+    // Every construct the ticket closed, in the order the ticket names them.
+    // A row here is the guard on a whole feature: `geopoly.overlap` is the
+    // sweep, `fts5.external` is the shadow-table grant, and `pgvector.ops` is
+    // the three-byte operator lexing that `<=>` needs.
+    Case {
+        name: "join.lateral",
+        kind: "join",
+        script: "CREATE TABLE t(a INTEGER);\nINSERT INTO t VALUES (2),(3);\nSELECT t.a, s.value FROM t, generate_series(1, t.a) AS s ORDER BY t.a, s.value;",
+        expect: Agrees,
+    },
+    Case {
+        name: "upsert.two.clauses",
+        kind: "dml",
+        script: "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT UNIQUE, c INTEGER);\nINSERT INTO t VALUES (1,'x',10);\nINSERT INTO t VALUES (1,'y',20) ON CONFLICT(a) DO UPDATE SET c=99 ON CONFLICT(b) DO NOTHING;\nSELECT * FROM t ORDER BY a;\nINSERT INTO t VALUES (2,'x',30) ON CONFLICT(a) DO UPDATE SET c=98 ON CONFLICT(b) DO UPDATE SET c=97;\nSELECT * FROM t ORDER BY a;",
+        expect: Agrees,
+    },
+    Case {
+        name: "fts5.highlight",
+        kind: "fts5",
+        script: "CREATE VIRTUAL TABLE f USING fts5(body);\nINSERT INTO f VALUES ('the quick brown fox');\nSELECT highlight(f, 0, '[', ']') FROM f WHERE f MATCH 'quick brown';\nSELECT highlight(f, 0, '[', ']') FROM f WHERE f MATCH '\"quick brown\"';\nSELECT snippet(f, 0, '<', '>', '...', 3) FROM f WHERE f MATCH 'brown';",
+        expect: Agrees,
+    },
+    Case {
+        name: "fts5.vocab",
+        kind: "fts5",
+        script: "CREATE VIRTUAL TABLE f USING fts5(body);\nINSERT INTO f VALUES ('one two two'),('two three');\nCREATE VIRTUAL TABLE v USING fts5vocab(f, 'row');\nSELECT term, doc, cnt FROM v ORDER BY term;\nCREATE VIRTUAL TABLE vc USING fts5vocab(f, 'col');\nSELECT term, col, doc, cnt FROM vc ORDER BY term;\nCREATE VIRTUAL TABLE vi USING fts5vocab(f, 'instance');\nSELECT term, doc, col, offset FROM vi ORDER BY term, doc, offset;",
+        expect: Agrees,
+    },
+    Case {
+        name: "fts5.external",
+        kind: "fts5",
+        script: "CREATE TABLE c(id INTEGER PRIMARY KEY, body TEXT);\nINSERT INTO c VALUES (1,'quick fox'),(2,'lazy dog');\nCREATE VIRTUAL TABLE f USING fts5(body, content='c', content_rowid='id');\nINSERT INTO f(f) VALUES ('rebuild');\nSELECT count(*) FROM f WHERE f MATCH 'fox';\nSELECT rowid, body FROM f WHERE f MATCH 'dog';\nSELECT count(*) FROM f;",
+        expect: Agrees,
+    },
+    Case {
+        name: "fts4.basic",
+        kind: "fts5",
+        script: "CREATE VIRTUAL TABLE f USING fts4(body, title);\nINSERT INTO f VALUES ('quick fox','one'),('lazy dog','two');\nSELECT count(*) FROM f WHERE f MATCH 'fox';\nSELECT docid, body FROM f WHERE f MATCH 'dog';\nSELECT snippet(f) FROM f WHERE f MATCH 'quick';\nSELECT offsets(f) FROM f WHERE f MATCH 'quick';\nDELETE FROM f WHERE docid=1;\nSELECT count(*) FROM f;",
+        expect: Agrees,
+    },
+    Case {
+        name: "fts3.basic",
+        kind: "fts5",
+        script: "CREATE VIRTUAL TABLE g USING fts3(a);\nINSERT INTO g VALUES ('hello world');\nSELECT count(*) FROM g WHERE g MATCH 'world';\nSELECT count(*) FROM g WHERE g MATCH 'a:hello';",
+        expect: Agrees,
+    },
+    Case {
+        name: "geopoly.shapes",
+        kind: "ext",
+        script: "SELECT geopoly_json('[[0,0],[3,0],[3,3],[0,3],[0,0]]');\nSELECT hex(geopoly_blob('[[0,0],[3,0],[3,3],[0,3],[0,0]]'));\nSELECT geopoly_area('[[0,0],[3,0],[3,3],[0,3],[0,0]]'), geopoly_area('[[0,0],[0,3],[3,3],[3,0],[0,0]]');\nSELECT geopoly_json(geopoly_ccw('[[0,0],[0,3],[3,3],[3,0],[0,0]]'));\nSELECT geopoly_json(geopoly_bbox('[[1,2],[5,2],[3,7],[1,2]]'));\nSELECT geopoly_json(geopoly_xform('[[0,0],[3,0],[3,3],[0,3],[0,0]]',1,0,0,1,10,20));\nSELECT geopoly_json(geopoly_regular(0,0,10,4));\nSELECT geopoly_svg('[[0,0],[3,0],[3,3],[0,0]]','fill=\"red\"');",
+        expect: Agrees,
+    },
+    Case {
+        name: "geopoly.overlap",
+        kind: "ext",
+        script: "SELECT geopoly_contains_point('[[0,0],[3,0],[3,3],[0,3],[0,0]]',1,1), geopoly_contains_point('[[0,0],[3,0],[3,3],[0,3],[0,0]]',0,0), geopoly_contains_point('[[0,0],[3,0],[3,3],[0,3],[0,0]]',9,9);\nSELECT geopoly_overlap('[[0,0],[3,0],[3,3],[0,3],[0,0]]','[[1,1],[2,1],[2,2],[1,2],[1,1]]');\nSELECT geopoly_overlap('[[0,0],[3,0],[3,3],[0,3],[0,0]]','[[9,9],[10,9],[10,10],[9,9]]');\nSELECT geopoly_overlap('[[0,0],[3,0],[3,3],[0,3],[0,0]]','[[0,0],[3,0],[3,3],[0,3],[0,0]]');\nSELECT geopoly_overlap('[[0,0],[3,0],[3,3],[0,3],[0,0]]','[[2,2],[5,2],[5,5],[2,5],[2,2]]');\nSELECT geopoly_within('[[0,0],[3,0],[3,3],[0,3],[0,0]]','[[1,1],[2,1],[2,2],[1,2],[1,1]]');",
+        expect: Agrees,
+    },
+    Case {
+        name: "geopoly.table",
+        kind: "ext",
+        script: "CREATE VIRTUAL TABLE g USING geopoly(name);\nINSERT INTO g(_shape,name) VALUES('[[0,0],[3,0],[3,3],[0,3],[0,0]]','a'),('[[10,10],[13,10],[13,13],[10,10]]','b');\nSELECT rowid, name, geopoly_json(_shape) FROM g ORDER BY rowid;\nSELECT count(*) FROM g WHERE geopoly_overlap(_shape,'[[1,1],[2,1],[2,2],[1,1]]');\nSELECT name FROM g WHERE geopoly_contains_point(_shape, 11, 11);\nUPDATE g SET name='c' WHERE rowid=1;\nSELECT rowid,name FROM g ORDER BY rowid;\nDELETE FROM g WHERE rowid=2;\nSELECT count(*) FROM g;\nPRAGMA integrity_check;",
+        expect: Agrees,
+    },
+    Case {
+        name: "geopoly.invalid",
+        kind: "ext",
+        script: "CREATE VIRTUAL TABLE g USING geopoly(name);\nINSERT INTO g(_shape,name) VALUES ('not a polygon','t1');\nINSERT INTO g(_shape,name) VALUES ('[[0,0],[3,0]]','t2');\nINSERT INTO g(_shape,name) VALUES (x'0102','t3');\nINSERT INTO g(_shape,name) VALUES (42,'t4');\nSELECT rowid, name, typeof(_shape) FROM g ORDER BY rowid;",
+        expect: Agrees,
+    },
+    Case {
+        name: "geopoly.group.bbox",
+        kind: "ext",
+        script: "CREATE TABLE p(x TEXT);\nINSERT INTO p VALUES ('[[0,0],[1,0],[1,1],[0,0]]'),('[[5,5],[6,5],[6,6],[5,5]]');\nSELECT geopoly_json(geopoly_group_bbox(x)) FROM p;",
+        expect: Agrees,
+    },
+    Case {
+        name: "rtree.helpers",
+        kind: "ext",
+        script: "CREATE VIRTUAL TABLE r USING rtree(id, x0, x1, y0, y1);\nINSERT INTO r VALUES (1, 0,1, 0,1),(2, 5,6, 5,6);\nSELECT rtreecheck('r');\nSELECT rtreedepth(data) FROM r_node WHERE nodeno=1;\nSELECT rtreenode(2, data) FROM r_node WHERE nodeno=1;",
+        expect: Agrees,
+    },
+    Case {
+        name: "json.array.insert",
+        kind: "json",
+        script: "SELECT json_array_insert('[1,2]','$[0]',9);\nSELECT json_array_insert('[1,2]','$[2]',9);\nSELECT json_array_insert('[1,2]','$[#]',9);\nSELECT json_array_insert('[1,2]','$[#-1]',9);\nSELECT json_array_insert('{\"a\":[1,2]}','$.a[1]',9);\nSELECT json_array_insert('[1,2]','$',9);\nSELECT json_array_insert('[1,2]','$[0]',9,'$[0]',8);\nSELECT json_array_insert('[1,2]','$[5]',9);\nSELECT json_array_insert(NULL,'$[0]',1), json_array_insert('[1]','$[0]',NULL);\nSELECT hex(jsonb_array_insert('[1]','$[0]',7));",
+        expect: Agrees,
+    },
+    Case {
+        name: "json.subtype",
+        kind: "json",
+        script: "SELECT subtype(json('[1]')), subtype(json_array(1)), subtype(json_object('a',1)), subtype(json_quote(1)), subtype(json_extract('[1]','$[0]')), subtype(json_extract('[[1]]','$[0]')), subtype(json_insert('[1]','$[1]',2)), subtype('[1]'), subtype(1), subtype(NULL), subtype(jsonb('[1]'));\nSELECT subtype(json_group_array(1)), subtype(json_patch('{}','{}')), subtype(json_remove('[1]','$[0]'));",
+        expect: Agrees,
+    },
+    Case {
+        name: "shell.help.topic",
+        kind: "shell",
+        script: ".help .mode",
+        expect: Agrees,
+    },
+    Case {
+        name: "introspect.completion",
+        kind: "shell",
+        script: "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);\nSELECT phase, count(*) FROM completion('') GROUP BY phase ORDER BY phase;\nSELECT candidate FROM completion('sel');",
+        expect: Agrees,
+    },
+    Case {
+        name: "ext.sqlite.offset",
+        kind: "ext",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT);
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t');
+SELECT sqlite_offset(a) IS NOT NULL FROM t LIMIT 1;
+SELECT id, sqlite_offset(a) > 0 FROM t ORDER BY id;
+SELECT sqlite_offset(1);",
+        expect: Agrees,
+    },
+    Case {
+        name: "introspect.tables.used",
+        kind: "shell",
+        script: "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);\nSELECT * FROM tables_used('SELECT * FROM t');",
+        expect: Agrees,
+    },
     // task-1859 Part G and H.
     Case {
         name: "fts5.update",
@@ -1176,6 +1300,283 @@ SELECT x.id, y.id FROM t x JOIN t y ON y.a = x.a AND y.id > x.id ORDER BY x.id;"
         name: "desc.index.compound",
         kind: "desc",
         script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT);\nCREATE INDEX ic ON t(a DESC, b);\nINSERT INTO t VALUES (1,1,'p'),(2,1,'q'),(3,2,'r'),(4,2,'s'),(5,3,'t'),(6,3,'u');\nSELECT count(*) FROM t WHERE a >= 2;\nSELECT group_concat(b) FROM (SELECT b FROM t WHERE a = 2 ORDER BY b);\nSELECT group_concat(a) FROM (SELECT a FROM t WHERE a > 1 ORDER BY a, b);",
+        expect: Agrees,
+    },
+    Case {
+        name: "desc.index.bulk",
+        kind: "desc",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, c INTEGER);
+INSERT INTO t VALUES (1,10),(2,20),(3,30),(4,40),(5,50),(6,60),(7,70),(8,80),(9,90);
+CREATE INDEX ic ON t(c DESC);
+SELECT count(*) FROM t WHERE c > 40;
+SELECT count(*) FROM t WHERE c <= 30;
+SELECT group_concat(c) FROM (SELECT c FROM t ORDER BY c);
+SELECT group_concat(c) FROM (SELECT c FROM t WHERE c > 40 AND c <= 70 ORDER BY c);
+PRAGMA integrity_check;",
+        expect: Agrees,
+    },
+    Case {
+        name: "desc.index.nulls",
+        kind: "desc",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, c INTEGER);
+CREATE INDEX ic ON t(c DESC);
+INSERT INTO t VALUES (1,10),(2,NULL),(3,30),(4,NULL),(5,50);
+SELECT count(*) FROM t WHERE c >= 10;
+SELECT count(*) FROM t WHERE c <= 30;
+SELECT count(*) FROM t WHERE c IS NULL;
+SELECT group_concat(coalesce(c,'-')) FROM (SELECT c FROM t ORDER BY c);
+SELECT group_concat(coalesce(c,'-')) FROM (SELECT c FROM t ORDER BY c DESC);",
+        expect: Agrees,
+    },
+    Case {
+        name: "reindex.forms",
+        kind: "ddl",
+        script: "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, team TEXT COLLATE NOCASE);
+CREATE INDEX t_name ON t (name);
+CREATE INDEX t_team ON t (team);
+CREATE UNIQUE INDEX t_unique ON t (name, team);
+INSERT INTO t VALUES (1,'ada','Blue'),(2,'bob','red'),(3,'cai','BLUE');
+DELETE FROM t WHERE id = 2;
+INSERT INTO t VALUES (4,'dee','green');
+REINDEX t_name;
+REINDEX t;
+REINDEX NOCASE;
+REINDEX;
+SELECT id FROM t WHERE name = 'cai';
+SELECT group_concat(id) FROM (SELECT id FROM t WHERE team = 'blue' ORDER BY id);
+SELECT count(*) FROM t;
+PRAGMA integrity_check;",
+        expect: Agrees,
+    },
+    Case {
+        name: "reindex.desc",
+        kind: "ddl",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, c INTEGER);
+CREATE INDEX ic ON t(c DESC);
+INSERT INTO t VALUES (1,10),(2,20),(3,30);
+REINDEX ic;
+SELECT group_concat(c) FROM (SELECT c FROM t ORDER BY c);
+PRAGMA integrity_check;",
+        expect: Agrees,
+    },
+    Case {
+        name: "dump.generated",
+        kind: "shell",
+        script: "CREATE TABLE t (a INTEGER PRIMARY KEY, b INTEGER, c INTEGER GENERATED ALWAYS AS (b*2) VIRTUAL, d TEXT AS (b || '!') STORED);
+INSERT INTO t (a,b) VALUES (1,10),(2,20);
+.dump",
+        expect: Agrees,
+    },
+    Case {
+        name: "dump.sequence",
+        kind: "shell",
+        script: "CREATE TABLE q(id INTEGER PRIMARY KEY AUTOINCREMENT, v);
+INSERT INTO q(v) VALUES('a'),('b');
+DELETE FROM q WHERE id = 2;
+.dump",
+        expect: Agrees,
+    },
+    Case {
+        name: "dump.quoted",
+        kind: "shell",
+        script: "CREATE TABLE \"odd name\"(x, \"y z\");
+INSERT INTO \"odd name\" VALUES(1,2);
+CREATE INDEX \"ix odd\" ON \"odd name\"(x);
+.dump",
+        expect: Agrees,
+    },
+    Case {
+        name: "dump.order",
+        kind: "shell",
+        script: "CREATE TABLE g(a INTEGER PRIMARY KEY, b);
+CREATE VIEW v1 AS SELECT a FROM g;
+CREATE INDEX i1 ON g(b);
+CREATE TRIGGER t1 AFTER INSERT ON g BEGIN UPDATE g SET b=1; END;
+CREATE INDEX i2 ON g(a,b);
+CREATE VIEW v2 AS SELECT b FROM g;
+.dump",
+        expect: Agrees,
+    },
+    Case {
+        name: "analyze.subjects",
+        kind: "ddl",
+        script: "CREATE TABLE p(a,b);
+CREATE INDEX pi ON p(a);
+INSERT INTO p VALUES(1,2),(3,4);
+CREATE VIEW pv AS SELECT a FROM p;
+CREATE TABLE q(id INTEGER PRIMARY KEY AUTOINCREMENT, v);
+INSERT INTO q(v) VALUES('a');
+ANALYZE;
+SELECT tbl, idx, stat FROM sqlite_stat1 ORDER BY tbl, idx;",
+        expect: Agrees,
+    },
+    Case {
+        name: "journal.default",
+        kind: "pragma",
+        script: "PRAGMA journal_mode;
+PRAGMA journal_mode=WAL;
+PRAGMA journal_mode=DELETE;
+PRAGMA journal_mode=MEMORY;
+PRAGMA journal_mode=TRUNCATE;
+PRAGMA journal_mode=PERSIST;
+PRAGMA journal_mode=OFF;",
+        expect: Agrees,
+    },
+    Case {
+        name: "journal.rollback.writes",
+        kind: "pragma",
+        script: "CREATE TABLE t(a);
+INSERT INTO t VALUES(1),(2),(3);
+BEGIN;
+INSERT INTO t VALUES(4);
+ROLLBACK;
+SELECT group_concat(a) FROM t;
+UPDATE t SET a = a * 10;
+SELECT group_concat(a) FROM t;
+PRAGMA integrity_check;",
+        expect: Agrees,
+    },
+    Case {
+        name: "explain.bytecode.layout",
+        kind: "explain",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER);
+EXPLAIN QUERY PLAN SELECT a FROM t WHERE id = 1;",
+        expect: Agrees,
+    },
+    Case {
+        name: "shell.dbconfig",
+        kind: "shell",
+        script: ".dbconfig
+.dbconfig defensive off
+.dbconfig defensive on
+.dbconfig enable_fkey on
+PRAGMA foreign_keys;
+.dbconfig writable_schema
+.dbconfig nosuch on",
+        expect: Agrees,
+    },
+    Case {
+        name: "shell.dbconfig.defensive",
+        kind: "shell",
+        script: "PRAGMA journal_mode=OFF;
+PRAGMA journal_mode;
+.dbconfig defensive off
+PRAGMA journal_mode=OFF;
+PRAGMA journal_mode;",
+        expect: Agrees,
+    },
+    Case {
+        name: "shell.usage.lines",
+        kind: "shell",
+        script: ".cd
+.nonce
+.scanstats
+.system
+.shell
+.auth",
+        expect: Agrees,
+    },
+    Case {
+        name: "shell.crlf",
+        kind: "shell",
+        script: ".crlf
+.crlf on
+.crlf off
+.crlf",
+        expect: Agrees,
+    },
+    Case {
+        name: "shell.testcase",
+        kind: "shell",
+        script: ".check
+.testcase one
+SELECT 1;
+.check 1
+.testcase two
+SELECT 2;
+.check 9",
+        expect: Agrees,
+    },
+    Case {
+        name: "shell.filectrl",
+        kind: "shell",
+        script: ".filectrl
+.filectrl bogus
+.filectrl psow
+.filectrl reserve_bytes",
+        expect: Agrees,
+    },
+    Case {
+        name: "shell.connection",
+        kind: "shell",
+        script: "CREATE TABLE t(a);
+.connection 1
+CREATE TABLE u(b);
+.tables
+.connection 0
+.tables
+.connection close 1
+.connection 1
+.tables
+.connection 9
+.connection 0
+.tables",
+        expect: Agrees,
+    },
+    Case {
+        name: "shell.auth",
+        kind: "shell",
+        script: "CREATE TABLE t(a, b);
+INSERT INTO t VALUES(1,'x');
+.auth on
+SELECT a FROM t;
+.auth off
+SELECT b FROM t;",
+        expect: Agrees,
+    },
+    Case {
+        name: "arith.text.class",
+        kind: "types",
+        script: "SELECT x'00' + x'00', typeof(x'00' + x'00');
+SELECT x'41' + 1;
+SELECT 'abc' + 1, typeof('abc' + 1);
+SELECT '3' + 1, typeof('3' + 1);
+SELECT '3.5' + 1, typeof('3.5' + 1);
+SELECT '3e2' + 1, typeof('3e2' + 1);
+SELECT '  7 apples' + 1;
+SELECT '-4' * 2;
+SELECT 9223372036854775807 + 1;
+SELECT '9223372036854775808' + 0, typeof('9223372036854775808' + 0);
+SELECT 1.5 + 1, typeof(1.5 + 1);
+SELECT NULL + 1;
+SELECT '' + 1, typeof('' + 1);",
+        expect: Agrees,
+    },
+    Case {
+        name: "arith.text.column",
+        kind: "types",
+        script: "CREATE TABLE t(a TEXT, b BLOB, c INTEGER);
+INSERT INTO t VALUES ('7','abc',2),('3.5',x'00',1);
+SELECT a + c, typeof(a + c) FROM t ORDER BY rowid;
+SELECT b + c, typeof(b + c) FROM t ORDER BY rowid;
+SELECT a * c, a - c FROM t ORDER BY rowid;",
+        expect: Agrees,
+    },
+    Case {
+        name: "shell.imposter",
+        kind: "shell",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT);
+INSERT INTO t VALUES(1,10,'x'),(2,20,'y');
+CREATE INDEX ia ON t(a);
+CREATE INDEX iab ON t(a,b);
+.imposter ia im
+SELECT * FROM im;
+.imposter iab im2
+SELECT * FROM im2;
+.imposter t im3
+.imposter
+.imposter off
+SELECT * FROM im;",
         expect: Agrees,
     },
 ];

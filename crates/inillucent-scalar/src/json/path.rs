@@ -235,6 +235,81 @@ pub fn apply(node: &mut Node, steps: &[Step], value: Node, edit: Edit) -> DbResu
     }
 }
 
+/// Inserts a value into an array, shifting whatever follows it along.
+///
+/// `json_array_insert(X, P, V)`, where the path's last step names a *position*
+/// in an array rather than an element to overwrite. The distinction is the
+/// whole function: `json_set('[1,2]','$[0]',9)` answers `[9,2]` and this
+/// answers `[9,1,2]`.
+///
+/// A position past the end changes nothing, `[#]` appends, and a path whose
+/// last step is a key is a **refusal** rather than a no-op - because a caller
+/// who wrote `$.b` asked to insert into something that is not an array, and
+/// answering the document back would look like it had worked.
+///
+/// @param node - the document, edited in place
+/// @param steps - the path
+/// @param value - what to insert
+/// @param written - the path as it was written, for the refusal
+pub fn insert_into_array(
+    node: &mut Node,
+    steps: &[Step],
+    value: Node,
+    written: &str,
+) -> DbResult<()> {
+    let Some((last, init)) = steps.split_last() else {
+        return Ok(());
+    };
+    if matches!(last, Step::Key(_)) {
+        return Err(inillucent_base::error::misuse(format!(
+            "not an array element: '{written}'"
+        )));
+    }
+    let Some(container) = follow(node, init) else {
+        return Ok(());
+    };
+    let Node::Array(items) = container else {
+        return Ok(());
+    };
+    let at = match last {
+        Step::Index(index) => *index,
+        Step::Append => items.len(),
+        Step::FromEnd(back) => match items.len().checked_sub(*back) {
+            Some(index) => index,
+            None => return Ok(()),
+        },
+        Step::Key(_) => return Ok(()),
+    };
+    if at > items.len() {
+        return Ok(());
+    }
+    items.insert(at, value);
+    Ok(())
+}
+
+/// Returns the node a path names, when the whole path resolves.
+///
+/// @param node - the document
+/// @param steps - the path
+fn follow<'n>(node: &'n mut Node, steps: &[Step]) -> Option<&'n mut Node> {
+    let Some((step, rest)) = steps.split_first() else {
+        return Some(node);
+    };
+    let next = match (step, node) {
+        (Step::Key(name), Node::Object(members)) => members
+            .iter_mut()
+            .find(|(label, _)| label_matches(label, name))
+            .map(|(_, held)| held)?,
+        (Step::Index(index), Node::Array(items)) => items.get_mut(*index)?,
+        (Step::FromEnd(back), Node::Array(items)) => {
+            let index = items.len().checked_sub(*back)?;
+            items.get_mut(index)?
+        }
+        _ => return None,
+    };
+    follow(next, rest)
+}
+
 /// Returns the empty container a missing intermediate step needs.
 ///
 /// The next step decides: a key needs an object to live in and an index needs

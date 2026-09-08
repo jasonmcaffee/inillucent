@@ -119,6 +119,12 @@ pub(crate) struct EntrySet {
     prefix: Vec<u64>,
     /// The collations the key columns are ordered under.
     collations: Vec<Collation>,
+    /// The direction of each key column.
+    ///
+    /// The prefix this set sorts by has to be inverted for a descending column
+    /// exactly as the tree's own key is, or the radix pass would order the
+    /// entries one way and the tree read them the other.
+    directions: Vec<bool>,
     /// How the tree encodes its keys.
     encoding: KeyEncoding,
     /// A buffer the prefix encoder reuses, so it allocates nothing per entry.
@@ -132,11 +138,13 @@ impl EntrySet {
     /// @param rows - how many entries are expected
     /// @param encoding - the tree's key encoding
     /// @param collations - the key columns' collations, in key order
+    /// @param directions - the key columns' directions, in key order
     pub(crate) fn with_capacity(
         width: usize,
         rows: usize,
         encoding: KeyEncoding,
         collations: &[Collation],
+        directions: &[bool],
     ) -> EntrySet {
         EntrySet {
             width,
@@ -148,6 +156,7 @@ impl EntrySet {
             prefix: Vec::with_capacity(rows.saturating_mul(PREFIX_WORDS)),
             collations: collations.to_vec(),
             encoding,
+            directions: directions.to_vec(),
             scratch: Vec::with_capacity(PREFIX_BYTES.saturating_mul(2)),
         }
     }
@@ -182,7 +191,13 @@ impl EntrySet {
             self.cells.push(Cell::Null);
         }
         self.scratch.clear();
-        encode_prefix(self.encoding, values, &self.collations, &mut self.scratch);
+        encode_prefix(
+            self.encoding,
+            values,
+            &self.collations,
+            &self.directions,
+            &mut self.scratch,
+        );
         for word in 0..PREFIX_WORDS {
             let base = word.saturating_mul(8);
             let mut packed = 0u64;
@@ -260,6 +275,20 @@ impl EntrySet {
                     .copied()
                     .unwrap_or(Collation::Binary),
             );
+            // **And the direction, which the radix words already carry.** The
+            // prefix is the tree's own encoding, so a `DESC` column arrives
+            // here already inverted and the radix levels order it correctly;
+            // this fallback compares the *values*, so it has to invert for
+            // itself or the two halves of the same sort disagree. A run shorter
+            // than `COMPARE_BELOW` never reaches the radix at all, which is why
+            // `CREATE INDEX ic ON t(c DESC)` over nine rows built an ascending
+            // tree that the reader then compared descending: every query over
+            // it was wrong and `PRAGMA integrity_check` said so.
+            let order = if self.directions.get(column).copied().unwrap_or(false) {
+                order.reverse()
+            } else {
+                order
+            };
             if order != std::cmp::Ordering::Equal {
                 return order;
             }
@@ -350,6 +379,22 @@ impl EntrySet {
         out
     }
 
+    /// Returns the set in key order, as rows a leaf builder can pack.
+    ///
+    /// **The reason `to_datums` is no longer on the `CREATE INDEX` path.** The
+    /// packer used to need a slice, so the arena was flattened into a
+    /// `Vec<Datum>` in key order and then sliced into a `Vec<&[Datum]>` - two
+    /// copies of the whole input, 6.4 MiB at a hundred thousand rows, purely to
+    /// satisfy a signature. [`inillucent_tree::leaf::Rows`] reads values by
+    /// index instead, and the arena already answers that question in
+    /// [`EntrySet::datum`], so the copies are gone and the packer reads the
+    /// arena directly.
+    ///
+    /// @param order - the entries in key order, from [`EntrySet::order`]
+    pub(crate) fn in_order<'a>(&'a self, order: &'a [u32]) -> Ordered<'a> {
+        Ordered { set: self, order }
+    }
+
     /// Returns one payload out of the arena.
     ///
     /// @param at - where it starts
@@ -416,11 +461,12 @@ fn encode_prefix(
     encoding: KeyEncoding,
     values: &[Datum<'_>],
     collations: &[Collation],
+    directions: &[bool],
     out: &mut Vec<u8>,
 ) {
     if encoding == KeyEncoding::Rowid {
         // Eight bytes, no class byte and no tail: the whole key is the prefix.
-        encoding.encode_into(values, collations, out);
+        encoding.encode_into(values, collations, directions, out);
         return;
     }
     let mut folded: Vec<u8> = Vec::new();
@@ -436,7 +482,18 @@ fn encode_prefix(
         };
         // BINARY, because `clip` has already applied the collation. Asking the
         // encoder to apply it a second time is what would break the prefix.
+        let start = out.len();
         key::encode_into_with(&clipped, Collation::Binary, out);
+        // The same inversion the tree's key encoding makes, for the same
+        // reason: this prefix is what the entries are sorted by, and it has to
+        // sort them into the order the tree will read them in.
+        if directions.get(index).copied().unwrap_or(false) {
+            if let Some(span) = out.get_mut(start..) {
+                for byte in span {
+                    *byte = !*byte;
+                }
+            }
+        }
     }
 }
 
@@ -557,6 +614,32 @@ fn radix_by_word(pairs: &mut Vec<(u64, u32)>, scratch: &mut Vec<(u64, u32)>) {
     }
 }
 
+
+/// One [`EntrySet`] read in the order a sort produced, for the leaf builder.
+///
+/// It owns nothing and copies nothing: a value is a lookup into the arena
+/// through the order vector, which is what lets a `CREATE INDEX` pack a tree
+/// without ever holding a second copy of its rows.
+pub(crate) struct Ordered<'a> {
+    /// The arena the values live in.
+    set: &'a EntrySet,
+    /// The entries, in key order.
+    order: &'a [u32],
+}
+
+impl<'a> inillucent_tree::leaf::Rows<'a> for Ordered<'a> {
+    fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    fn value(&self, row: usize, column: usize) -> Datum<'a> {
+        let Some(entry) = self.order.get(row).copied() else {
+            return Datum::Null;
+        };
+        self.set.datum(entry as usize, column)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,7 +652,8 @@ mod tests {
     /// The same, under a named collation.
     fn set_under(rows: &[(&str, i64)], collation: Collation) -> EntrySet {
         let collations = [collation, Collation::Binary];
-        let mut set = EntrySet::with_capacity(2, rows.len(), KeyEncoding::General, &collations);
+        let mut set =
+            EntrySet::with_capacity(2, rows.len(), KeyEncoding::General, &collations, &[]);
         for (text, rowid) in rows {
             set.push(&[Datum::Text(text.as_bytes()), Datum::Int(*rowid)]);
         }
@@ -673,7 +757,7 @@ mod tests {
     #[test]
     fn nulls_do_not_share_a_key_prefix() {
         let collations = [Collation::Binary; 2];
-        let mut set = EntrySet::with_capacity(2, 2, KeyEncoding::General, &collations);
+        let mut set = EntrySet::with_capacity(2, 2, KeyEncoding::General, &collations, &[]);
         set.push(&[Datum::Null, Datum::Int(1)]);
         set.push(&[Datum::Null, Datum::Int(2)]);
         let order = set.order();
@@ -700,7 +784,7 @@ mod tests {
     #[test]
     fn a_rowid_key_is_its_own_prefix() {
         let collations = [Collation::Binary];
-        let mut set = EntrySet::with_capacity(1, 3, KeyEncoding::Rowid, &collations);
+        let mut set = EntrySet::with_capacity(1, 3, KeyEncoding::Rowid, &collations, &[]);
         for rowid in [7i64, -1, 3] {
             set.push(&[Datum::Int(rowid)]);
         }

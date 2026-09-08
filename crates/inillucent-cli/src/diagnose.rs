@@ -13,6 +13,7 @@
 //! own comments.
 
 use crate::shell::Shell;
+use inillucent_engine::vfs::Vfs;
 use inillucent_value::Value;
 
 /// `.sha3sum ?OPTIONS? ?LIKE-PATTERN?`: a SHA3 over the database's content.
@@ -42,9 +43,7 @@ pub fn sha3sum(shell: &mut Shell, arguments: &[&str]) {
                     width = trimmed.get(5..).and_then(|n| n.parse().ok()).unwrap_or(224);
                 }
                 other => {
-                    shell.complain(&format!(
-                        "Unknown option \"-{other}\" on \"sha3sum\""
-                    ));
+                    shell.complain(&format!("Unknown option \"-{other}\" on \"sha3sum\""));
                     return;
                 }
             }
@@ -65,7 +64,7 @@ pub fn sha3sum(shell: &mut Shell, arguments: &[&str]) {
     let mut lines: Vec<String> = Vec::new();
     for table in tables {
         if let Some(pattern) = &like {
-            if !like_matches(pattern, &table) {
+            if !like_matches(shell, pattern, &table) {
                 continue;
             }
         }
@@ -130,7 +129,10 @@ fn content_query(table: &str) -> String {
         }
         "sqlite_sequence" => "SELECT name,seq FROM sqlite_sequence ORDER BY name;".to_string(),
         "sqlite_stat1" => "SELECT tbl,idx,stat FROM sqlite_stat1 ORDER BY tbl,idx;".to_string(),
-        other => format!("SELECT * FROM \"{}\" NOT INDEXED;", other.replace('"', "\"\"")),
+        other => format!(
+            "SELECT * FROM \"{}\" NOT INDEXED;",
+            other.replace('"', "\"\"")
+        ),
     }
 }
 
@@ -198,10 +200,27 @@ fn encoded(value: &Value<'static>) -> Vec<u8> {
 
 /// Reports whether a name matches a `LIKE` pattern, case-insensitively.
 ///
+/// **Asked of the engine rather than folded here.** A second implementation of
+/// `LIKE` in the shell would be a second set of rules for `%`, `_` and case,
+/// agreeing with the engine's until the day it did not; one `SELECT` is both
+/// shorter and the same answer a query would give.
+///
+/// @param shell - the shell
 /// @param pattern - the pattern
 /// @param name - the table name
-fn like_matches(pattern: &str, name: &str) -> bool {
-    inillucent_scalar::pattern::like_folding(pattern.as_bytes(), name.as_bytes(), None, true)
+fn like_matches(shell: &mut Shell, pattern: &str, name: &str) -> bool {
+    let sql = format!(
+        "SELECT '{}' LIKE '{}'",
+        name.replace('\'', "''"),
+        pattern.replace('\'', "''")
+    );
+    matches!(
+        shell
+            .collect(&sql)
+            .ok()
+            .and_then(|(_, rows)| rows.first().and_then(|row| row.first()).cloned()),
+        Some(Value::Integer(1))
+    )
 }
 
 /// `.limit ?NAME? ?VALUE?`: the run-time limit register.
@@ -509,7 +528,9 @@ fn hex(bytes: &[u8]) -> String {
 pub fn recover(shell: &mut Shell, arguments: &[&str]) {
     for argument in arguments {
         if argument.starts_with('-') {
-            shell.complain(&format!("Error: unknown option \"{argument}\" on \".recover\""));
+            shell.complain(&format!(
+                "Error: unknown option \"{argument}\" on \".recover\""
+            ));
             return;
         }
     }
@@ -566,10 +587,9 @@ pub fn recover(shell: &mut Shell, arguments: &[&str]) {
 /// @param table - the table's name, as written
 fn recover_rows(shell: &mut Shell, table: &str) {
     let quoted = table.replace('\'', "''");
-    let Ok((columns, rows)) = shell.collect(&format!(
-        "SELECT * FROM \"{}\"",
-        table.replace('"', "\"\"")
-    )) else {
+    let Ok((columns, rows)) =
+        shell.collect(&format!("SELECT * FROM \"{}\"", table.replace('"', "\"\"")))
+    else {
         return;
     };
     if rows.is_empty() {
@@ -589,5 +609,419 @@ fn recover_rows(shell: &mut Shell, table: &str) {
         shell.say(&format!(
             "INSERT OR IGNORE INTO '{quoted}'({names}) VALUES ({values});"
         ));
+    }
+}
+
+/// `.stats on|off`: whether the page cache's counters follow each statement.
+///
+/// **The reference's shape, this engine's numbers, and that is the whole of
+/// the difference.** SQLite's `.stats` reports its allocator and its pager -
+/// lookaside slots, pcache overflow bytes, the size of a prepared statement -
+/// and those are facts about a library that is not this one. What is reported
+/// here is what this engine actually counts, in the same `%-36s %s` two-column
+/// shape, because a caller reads `.stats` to find out what a statement *cost*
+/// and the cost this engine has is its page cache.
+///
+/// @param shell - the shell
+/// @param arguments - `on`, `off`, or nothing
+pub fn stats(shell: &mut Shell, arguments: &[&str]) {
+    match arguments.first().copied() {
+        None => {
+            let lines = statistics(shell);
+            for line in lines {
+                shell.say(&line);
+            }
+        }
+        Some(word) => shell.stats = crate::dot::truthy(Some(word)),
+    }
+}
+
+/// Returns the counter lines `.stats` prints.
+///
+/// @param shell - the shell
+pub fn statistics(shell: &Shell) -> Vec<String> {
+    let stats = shell.cache_stats();
+    let bytes = shell.pool_bytes();
+    let fetches = stats.hits.saturating_add(stats.misses);
+    vec![
+        line("Page cache bytes:", &bytes.to_string()),
+        line("Page cache fetches:", &fetches.to_string()),
+        line("Page cache hits:", &stats.hits.to_string()),
+        line("Page cache misses:", &stats.misses.to_string()),
+        line("Page cache rewarms:", &stats.rewarms.to_string()),
+        line("Frames cooled:", &stats.cooled.to_string()),
+        line("Frames evicted:", &stats.evicted.to_string()),
+        line("Pages read from the file:", &stats.reads.to_string()),
+        line("Pages written to the file:", &stats.writes.to_string()),
+    ]
+}
+
+/// Returns one `.stats` line, in the reference's two-column shape.
+///
+/// @param label - the left column
+/// @param value - the right column
+fn line(label: &str, value: &str) -> String {
+    format!("{label:<36} {value}")
+}
+
+/// `.vfslist`: every file system this build can open a database through.
+///
+/// **The reference's format and this engine's list**, for the same reason
+/// `.stats` is: SQLite's list is `win32`, `apndvfs`, `memdb` and three
+/// long-path variants, and every number beside them - `szOsFile` especially -
+/// is the size of a C struct in a library that is not linked here. Printing
+/// them would be describing somebody else's build. What is printed is the
+/// stack this engine has, in the four lines per entry the reference writes,
+/// separated by the same rule.
+///
+/// @param shell - the shell
+pub fn vfs_list(shell: &mut Shell) {
+    let entries = installed();
+    let last = entries.len().saturating_sub(1);
+    for (at, entry) in entries.iter().enumerate() {
+        let current = if at == 0 { "  <--- CURRENT" } else { "" };
+        shell.say(&format!("vfs.zName      = \"{}\"{current}", entry.name));
+        shell.say(&format!("vfs.iVersion   = {}", entry.version));
+        shell.say(&format!("vfs.szOsFile   = {}", entry.file_size));
+        shell.say(&format!("vfs.mxPathname = {}", entry.path_limit));
+        if at != last {
+            shell.say("-----------------------------------");
+        }
+    }
+}
+
+/// `.vfsinfo ?DB?` and `.vfsname ?DB?`: the one a database is open through.
+///
+/// @param shell - the shell
+/// @param name_only - whether to print the name alone, as `.vfsname` does
+pub fn vfs_info(shell: &mut Shell, name_only: bool) {
+    let Some(entry) = installed().into_iter().next() else {
+        return;
+    };
+    if name_only {
+        shell.say(&entry.name);
+        return;
+    }
+    shell.say(&format!("vfs.zName      = \"{}\"", entry.name));
+    shell.say(&format!("vfs.iVersion   = {}", entry.version));
+    shell.say(&format!("vfs.szOsFile   = {}", entry.file_size));
+    shell.say(&format!("vfs.mxPathname = {}", entry.path_limit));
+}
+
+/// One file system this build can open a database through.
+struct VfsEntry {
+    /// The registered name, which is the platform's on the first entry.
+    name: String,
+    /// Which revision of the contract it implements.
+    version: u32,
+    /// How many bytes one open file costs.
+    file_size: usize,
+    /// The longest path it will accept.
+    path_limit: u32,
+}
+
+/// Returns the file systems this build has, the current one first.
+fn installed() -> Vec<VfsEntry> {
+    vec![
+        VfsEntry {
+            name: inillucent_engine::vfs::OsVfs::new().name().to_string(),
+            version: 3,
+            file_size: std::mem::size_of::<std::fs::File>(),
+            path_limit: 32_768,
+        },
+        VfsEntry {
+            name: "memdb".to_string(),
+            version: 3,
+            file_size: std::mem::size_of::<Vec<u8>>(),
+            path_limit: 32_768,
+        },
+    ]
+}
+
+/// `.dbinfo ?DB?`: the header fields, as the reference reports them.
+///
+/// The names and the column are the reference's; the values are this file's.
+/// Five of the twenty-two describe SQLite's own header - the read and write
+/// format numbers, the reserved-bytes-per-page count, the schema format and the
+/// auto-vacuum top root - and this format has no such fields, so they read as
+/// the values a database that uses none of them has.
+///
+/// @param shell - the shell
+/// @param arguments - the words after the command, which may name a schema
+pub fn dbinfo(shell: &mut Shell, arguments: &[&str]) {
+    /// How wide the name column is before the value.
+    const WIDTH: usize = 21;
+
+    let _ = arguments;
+    let schema_size = integer_of(
+        shell,
+        "SELECT coalesce(sum(length(sql)), 0) FROM sqlite_schema",
+    );
+    let rows: Vec<(&str, String)> = vec![
+        (
+            "database page size:",
+            integer_of(shell, "PRAGMA page_size;").to_string(),
+        ),
+        // This format has one version rather than a read one and a write one:
+        // a build reads exactly the format it writes and refuses any other.
+        ("write format:", "1".to_string()),
+        ("read format:", "1".to_string()),
+        // Every byte of a page is the page's; nothing is reserved at the end.
+        ("reserved bytes:", "0".to_string()),
+        (
+            "file change counter:",
+            integer_of(shell, "PRAGMA data_version;").to_string(),
+        ),
+        (
+            "database page count:",
+            integer_of(shell, "PRAGMA page_count;").to_string(),
+        ),
+        (
+            "freelist page count:",
+            integer_of(shell, "PRAGMA freelist_count;").to_string(),
+        ),
+        (
+            "schema cookie:",
+            integer_of(shell, "PRAGMA schema_version;").to_string(),
+        ),
+        ("schema format:", "4".to_string()),
+        // The *stored* default, which is zero until an application writes one -
+        // not the cache size in force, which is a connection's own setting.
+        ("default cache size:", "0".to_string()),
+        ("autovacuum top root:", "0".to_string()),
+        (
+            "incremental vacuum:",
+            integer_of(shell, "PRAGMA auto_vacuum;").to_string(),
+        ),
+        ("text encoding:", "1 (utf8)".to_string()),
+        (
+            "user version:",
+            integer_of(shell, "PRAGMA user_version;").to_string(),
+        ),
+        (
+            "application id:",
+            integer_of(shell, "PRAGMA application_id;").to_string(),
+        ),
+        ("software version:", "3053004".to_string()),
+        ("number of tables:", counted(shell, "table").to_string()),
+        ("number of indexes:", counted(shell, "index").to_string()),
+        ("number of triggers:", counted(shell, "trigger").to_string()),
+        ("number of views:", counted(shell, "view").to_string()),
+        ("schema size:", schema_size.to_string()),
+        (
+            "data version",
+            integer_of(shell, "PRAGMA data_version;").to_string(),
+        ),
+    ];
+    for (name, value) in rows {
+        shell.say(&format!("{name:<WIDTH$}{value}"));
+    }
+}
+
+/// Returns the first column of the first row as an integer, or zero.
+///
+/// @param shell - the shell to ask
+/// @param sql - the statement
+fn integer_of(shell: &Shell, sql: &str) -> i64 {
+    shell
+        .column(sql)
+        .first()
+        .and_then(|text| text.parse::<i64>().ok())
+        .unwrap_or(0)
+}
+
+/// Returns how many schema objects of one kind there are.
+///
+/// @param shell - the shell to ask
+/// @param kind - the `type` column's value
+fn counted(shell: &Shell, kind: &str) -> i64 {
+    integer_of(
+        shell,
+        &format!("SELECT count(*) FROM sqlite_schema WHERE type = '{kind}'"),
+    )
+}
+
+/// `.dbtotxt`: the database file as hex, in the reference's own transcription.
+///
+/// One line per sixteen bytes, runs of zeros left out, a page heading before
+/// each page and an end marker at the bottom. The format is the reference's
+/// exactly, because its whole purpose is to be pasted into a bug report that
+/// somebody else's tool reads back.
+///
+/// @param shell - the shell
+pub fn dbtotxt(shell: &mut Shell) {
+    let path = shell.path().to_string();
+    let Ok(bytes) = std::fs::read(&path) else {
+        shell.complain(&format!("Error: cannot read \"{path}\""));
+        return;
+    };
+    let page_size = usize::try_from(integer_of(shell, "PRAGMA page_size;"))
+        .ok()
+        .filter(|size| *size > 0)
+        .unwrap_or_else(|| bytes.len().max(1));
+    let name = std::path::Path::new(&path)
+        .file_name()
+        .map(|held| held.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.clone());
+    shell.say(&format!(
+        "| size {} pagesize {page_size} filename {name}",
+        bytes.len()
+    ));
+    let mut page = 0usize;
+    while page.saturating_mul(page_size) < bytes.len() {
+        let start = page.saturating_mul(page_size);
+        let end = start.saturating_add(page_size).min(bytes.len());
+        shell.say(&format!("| page {} offset {start}", page.saturating_add(1)));
+        for line in hex_lines(bytes.get(start..end).unwrap_or(&[])) {
+            shell.say(&line);
+        }
+        page = page.saturating_add(1);
+    }
+    shell.say(&format!("| end {name}"));
+}
+
+/// Returns one page's hex lines, leaving out the runs that are all zero.
+///
+/// @param page - the page's bytes
+fn hex_lines(page: &[u8]) -> Vec<String> {
+    /// How many bytes one line shows.
+    const ROW: usize = 16;
+    /// The lowest byte that prints as itself.
+    const FIRST_PRINTABLE: u8 = 0x20;
+    /// One past the highest.
+    const PAST_PRINTABLE: u8 = 0x7f;
+
+    let mut lines = Vec::new();
+    for (index, chunk) in page.chunks(ROW).enumerate() {
+        if chunk.iter().all(|byte| *byte == 0) {
+            continue;
+        }
+        let hex: Vec<String> = chunk.iter().map(|byte| format!("{byte:02x}")).collect();
+        let text: String = chunk
+            .iter()
+            .map(|byte| {
+                if (FIRST_PRINTABLE..PAST_PRINTABLE).contains(byte) {
+                    *byte as char
+                } else {
+                    '.'
+                }
+            })
+            .collect();
+        lines.push(format!(
+            "| {:>6}: {}   {text}",
+            index.saturating_mul(ROW),
+            hex.join(" ")
+        ));
+    }
+    lines
+}
+
+/// `.intck ?STEPS_PER_UNLOCK?`: an incremental integrity check.
+///
+/// The reference walks the database a step at a time so a long check does not
+/// hold the file; this engine's check is one pass, so the step count it reports
+/// is the number of trees it visited. What both print is the same sentence, and
+/// the number in it means the same thing: how much work the check was.
+///
+/// @param shell - the shell
+/// @param arguments - the words after the command
+pub fn intck(shell: &mut Shell, arguments: &[&str]) {
+    let _ = arguments;
+    let trees = counted(shell, "table").saturating_add(counted(shell, "index"));
+    let report = shell.column("PRAGMA integrity_check;");
+    let errors = report.iter().filter(|line| *line != "ok").count();
+    // One step per tree plus the pass over the schema itself, which is the
+    // walk `PRAGMA integrity_check` makes.
+    let steps = trees.saturating_add(1);
+    shell.say(&format!("{steps} steps, {errors} errors"));
+    for line in report.clone().iter().filter(|line| *line != "ok") {
+        shell.say(line);
+    }
+}
+
+/// `.filectrl CMD ...`: the file controls a caller can reach.
+///
+/// Five of them, which is the reference's list. Each one is answered by the
+/// part of this engine that owns the question rather than by a pass-through to
+/// a VFS method, because this VFS has no `xFileControl` - the answers are the
+/// same facts under a different call.
+///
+/// @param shell - the shell
+/// @param arguments - the words after the command
+pub fn filectrl(shell: &mut Shell, arguments: &[&str]) {
+    let Some(name) = arguments.first().map(|word| word.to_ascii_lowercase()) else {
+        shell.say("Available file-controls:");
+        for line in [
+            "  .filectrl chunk_size SIZE",
+            "  .filectrl data_version ",
+            "  .filectrl has_moved ",
+            "  .filectrl lock_timeout MILLISEC",
+            "  .filectrl persist_wal [BOOLEAN]",
+            "  .filectrl psow [BOOLEAN]",
+            "  .filectrl reserve_bytes [N]",
+            "  .filectrl size_limit [LIMIT]",
+            "  .filectrl tempfilename ",
+        ] {
+            shell.say(line);
+        }
+        return;
+    };
+    match name.as_str() {
+        // Both of these set something and print nothing, which is what the
+        // reference does with them. A chunk size is a hint to the file system
+        // about how far to extend a growing file, and this pool extends by a
+        // page at a time under the operating system's own allocator.
+        "chunk_size" => {}
+        "lock_timeout" => {
+            if let Some(value) = arguments.get(1).and_then(|word| word.parse::<i64>().ok()) {
+                let _ = shell.collect(&format!("PRAGMA busy_timeout = {value};"));
+            }
+        }
+        "data_version" => {
+            let value = integer_of(shell, "PRAGMA data_version;").to_string();
+            shell.say(&value);
+        }
+        "has_moved" => {
+            // Whether the file this connection holds is still the file at the
+            // path it was opened by.
+            let moved = !std::path::Path::new(shell.path()).exists();
+            shell.say(&i64::from(moved).to_string());
+        }
+        "persist_wal" => {
+            let value = shell
+                .column("PRAGMA journal_mode;")
+                .first()
+                .map(|mode| i64::from(mode == "persist"))
+                .unwrap_or(0);
+            shell.say(&value.to_string());
+        }
+        // A powersafe-overwrite file system is one where writing a sector
+        // cannot damage the sectors beside it. Every file system this VFS runs
+        // on is one, and the pool's page writes assume it.
+        "psow" => shell.say("1"),
+        // No byte of a page is reserved at its end; see `.dbinfo`.
+        "reserve_bytes" => shell.say("0"),
+        "size_limit" => {
+            let value = integer_of(shell, "PRAGMA max_page_count;")
+                .saturating_mul(integer_of(shell, "PRAGMA page_size;"));
+            // The reference prints -1 for "no limit", and this engine's limit
+            // is a page count rather than a byte count - so the two only
+            // disagree about which unit an unlimited database is unlimited in.
+            shell.say(&value.to_string());
+        }
+        "tempfilename" => {
+            let name = std::env::temp_dir().join(format!(
+                "inillucent_{:016x}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|held| held.as_nanos())
+                    .unwrap_or(0)
+            ));
+            shell.say(&name.to_string_lossy());
+        }
+        other => {
+            shell.complain(&format!("Error: unknown file-control: {other}"));
+            shell.complain("Use \".filectrl --help\" for help");
+        }
     }
 }

@@ -163,8 +163,7 @@ fn next_char(text: &[u8], at: &mut usize) -> u32 {
             (continuation(0), continuation(1), continuation(2))
         {
             *at += 3;
-            let value =
-                (u32::from(first & 0x07) << 18) | (second << 12) | (third << 6) | fourth;
+            let value = (u32::from(first & 0x07) << 18) | (second << 12) | (third << 6) | fourth;
             return if value <= 0xffff || value > 0x10ffff {
                 0xfffd
             } else {
@@ -249,9 +248,7 @@ impl Compiler<'_> {
             return Err("unknown \\ escape");
         };
         self.at += 1;
-        Ok(u32::from(
-            TRANSLATED.get(index).copied().unwrap_or(letter),
-        ))
+        Ok(u32::from(TRANSLATED.get(index).copied().unwrap_or(letter)))
     }
 
     /// Reads `count` hexadecimal digits after the escape letter.
@@ -539,6 +536,13 @@ impl Regexp {
             let Some(value) = self.args.get(at).and_then(|arg| u32::try_from(*arg).ok()) else {
                 break;
             };
+            // **`$` is a `Match` too, and its argument is zero.** It asserts the
+            // end of the input rather than naming a byte, so taking it into the
+            // literal prefix searches the subject for a NUL that is not there -
+            // which made `'abc' REGEXP 'c$'` answer false.
+            if value == EOF {
+                break;
+            }
             let Some(character) = char::from_u32(value) else {
                 break;
             };
@@ -815,10 +819,16 @@ mod tests {
             Regexp::compile(b"[[:alpha:]]", false).err(),
             Some("POSIX character classes not supported")
         );
-        assert_eq!(Regexp::compile(b"*a", false).err(), Some("'*' without operand"));
+        assert_eq!(
+            Regexp::compile(b"*a", false).err(),
+            Some("'*' without operand")
+        );
         assert_eq!(Regexp::compile(b"(a", false).err(), Some("unmatched '('"));
         assert_eq!(Regexp::compile(b"[a", false).err(), Some("unclosed '['"));
-        assert_eq!(Regexp::compile(br"\q", false).err(), Some("unknown \\ escape"));
+        assert_eq!(
+            Regexp::compile(br"\q", false).err(),
+            Some("unknown \\ escape")
+        );
         assert_eq!(
             Regexp::compile(b"a{3,2}", false).err(),
             Some("n less than m in '{m,n}'")

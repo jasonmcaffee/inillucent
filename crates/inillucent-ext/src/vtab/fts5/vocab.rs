@@ -102,7 +102,9 @@ fn parse_arguments(arguments: &[Vec<u8>]) -> DbResult<(Vec<u8>, Shape)> {
 /// @param written - the argument as written
 fn unquote(written: &[u8]) -> Vec<u8> {
     let trimmed: &[u8] = match written.split_first() {
-        Some((b'\'', rest)) | Some((b'"', rest)) => rest.split_last().map(|(_, held)| held).unwrap_or(rest),
+        Some((b'\'', rest)) | Some((b'"', rest)) => {
+            rest.split_last().map(|(_, held)| held).unwrap_or(rest)
+        }
         _ => written,
     };
     trimmed.to_vec()

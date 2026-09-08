@@ -142,12 +142,10 @@ impl Value {
             inillucent_engine::ExprValue::Null => Value::Null,
             inillucent_engine::ExprValue::Integer(number) => Value::Integer(*number),
             inillucent_engine::ExprValue::Real(number) => Value::Real(*number),
-            inillucent_engine::ExprValue::Text(text) => {
-                match std::str::from_utf8(text.raw()) {
-                    Ok(said) => Value::Text(said.to_owned()),
-                    Err(_) => Value::Blob(text.raw().to_vec()),
-                }
-            }
+            inillucent_engine::ExprValue::Text(text) => match std::str::from_utf8(text.raw()) {
+                Ok(said) => Value::Text(said.to_owned()),
+                Err(_) => Value::Blob(text.raw().to_vec()),
+            },
             inillucent_engine::ExprValue::Blob(bytes) => Value::Blob(bytes.raw().to_vec()),
         }
     }

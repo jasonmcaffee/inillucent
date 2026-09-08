@@ -338,7 +338,6 @@ impl CollationRegistry {
     }
 }
 
-
 /// Compares two decimal numbers written as text, at unbounded precision.
 ///
 /// The comparison from `ext/misc/decimal.c`, without its arithmetic: leading
@@ -358,8 +357,10 @@ fn compare_decimal(left: &[u8], right: &[u8]) -> Ordering {
     if left_zero && right_zero {
         return Ordering::Equal;
     }
-    let magnitude =
-        compare_decimal_magnitude((&left_whole, &left_fraction), (&right_whole, &right_fraction));
+    let magnitude = compare_decimal_magnitude(
+        (&left_whole, &left_fraction),
+        (&right_whole, &right_fraction),
+    );
     match (left_negative && !left_zero, right_negative && !right_zero) {
         (false, true) => Ordering::Greater,
         (true, false) => Ordering::Less,
@@ -668,11 +669,14 @@ mod tests {
         assert_eq!(Collation::from_name("unicode61"), None);
     }
 
-    /// The registry starts with the three built-ins and hands out generations.
+    /// The registry starts with the five built-ins and hands out generations.
     #[test]
     fn the_registry_starts_with_the_built_ins() {
         let registry = CollationRegistry::default();
-        assert_eq!(registry.names(), vec!["BINARY", "NOCASE", "RTRIM"]);
+        assert_eq!(
+            registry.names(),
+            vec!["BINARY", "decimal", "NOCASE", "RTRIM", "uint"]
+        );
         assert_eq!(
             registry.get("nocase").map(|entry| entry.collation),
             Some(Collation::NoCase)

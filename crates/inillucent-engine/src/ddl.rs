@@ -207,14 +207,23 @@ impl ImportedDatabase {
             // index a module owns is built over, and the engine applies both
             // to the module inside the same transaction. task-1838 §7.
             Directive::CreateIndex {
-                using: Some(_),
+                using: Some(module),
                 name,
                 table,
                 columns,
+                settings,
                 exists,
                 if_not_exists,
                 ..
-            } => self.create_vector_index(&name, &table, &columns, exists, if_not_exists),
+            } => self.create_vector_index(
+                &module,
+                &name,
+                &table,
+                &columns,
+                &settings,
+                exists,
+                if_not_exists,
+            ),
             Directive::CreateIndex {
                 unique,
                 if_not_exists,
@@ -465,6 +474,16 @@ impl ImportedDatabase {
         // table with no such index - so the one path that can use it is never
         // offered (task-1838 §7).
         self.refresh_vector_indexes();
+        // **And the measurements, for the same reason.** `ANALYZE` writes
+        // `sqlite_stat1` and then rebuilds the catalog; a snapshot taken before
+        // the new rows were read describes tables whose row counts are still
+        // the planner's guesses, so the statement right after an `ANALYZE`
+        // would be planned as though it had not run.
+        self.republish_statistics();
+        // **And the imposters, which a rebuild would otherwise drop.** They are
+        // not schema objects, so `rebuild_tables` does not know about them;
+        // they are put back after it exactly as the module-owned indexes are.
+        self.republish_imposters();
         let mut catalog = StaticCatalog::empty();
         // **In attachment order, `main` first.** The binder numbers schemas by
         // their position here and resolves an unqualified name by walking
@@ -584,6 +603,48 @@ impl ImportedDatabase {
         // same reason: both are questions about the *pages* under every tree,
         // and a `Module` sees a shadow store rather than a pager. See
         // `crate::inspect`.
+        // **The four that describe statements are the engine's too**, for the
+        // same reason: `bytecode` and `tables_used` compile the SQL they are
+        // handed, `sqlite_stmt` reads the statement cache, and `completion`
+        // reads the keyword table and the catalog. See `crate::introspect`.
+        for (name, columns, hidden) in [
+            (
+                "bytecode",
+                crate::introspect::BYTECODE_COLUMNS,
+                &["stmt"][..],
+            ),
+            (
+                "tables_used",
+                crate::introspect::TABLES_USED_COLUMNS,
+                &["stmt"][..],
+            ),
+            ("sqlite_stmt", crate::introspect::STMT_COLUMNS, &[][..]),
+            (
+                "completion",
+                crate::introspect::COMPLETION_COLUMNS,
+                crate::introspect::COMPLETION_HIDDEN,
+            ),
+        ] {
+            let mut declared: Vec<inillucent_sql::catalog_view::ColumnInfo> = columns
+                .iter()
+                .map(|held| pragma_column(held.as_bytes(), false))
+                .collect();
+            declared.extend(
+                hidden
+                    .iter()
+                    .map(|held| pragma_column(held.as_bytes(), true)),
+            );
+            tables.push(inillucent_sql::catalog_view::TableInfo::eponymous(
+                name.as_bytes().to_vec(),
+                declared,
+                inillucent_sql::vtab::ModuleRef {
+                    name: name.as_bytes().to_vec(),
+                    folded: name.as_bytes().to_vec(),
+                    arguments: Vec::new(),
+                },
+                false,
+            ));
+        }
         for (name, columns) in [
             ("dbstat", crate::inspect::DBSTAT_COLUMNS),
             ("sqlite_dbpage", crate::inspect::DBPAGE_COLUMNS),
@@ -723,6 +784,127 @@ impl ImportedDatabase {
                 row_count: tree.row_count(),
             },
             None => inillucent_catalog::paged::TreeStats::default(),
+        }
+    }
+
+    /// Makes a table that reads one index's own b-tree, or removes them all.
+    ///
+    /// **`.imposter`'s subject, and it is a forensic tool rather than a
+    /// feature.** An index's entries are the indexed columns followed by the
+    /// row's identity, and that is a perfectly good `WITHOUT ROWID` table - so
+    /// declaring one over the index's tree lets a person read what the index
+    /// actually holds when a query over it is answering wrongly. Nothing is
+    /// written to the file: the declaration lives on this connection and goes
+    /// with it.
+    ///
+    /// @param index - the index to read, or nothing to remove every imposter
+    /// @param name - the table name to declare it under
+    pub fn imposter(&mut self, index: Option<&[u8]>, name: &[u8]) -> DbResult<Option<String>> {
+        let Some(index) = index else {
+            // **Removed from the catalog as well as from the list.**
+            // `refresh_catalog` rebuilds the *snapshot* rather than the tables,
+            // so a declaration this connection added stays until it is taken
+            // out - and `.imposter off` that left the table queryable would be
+            // the one thing the command exists to undo.
+            let held = std::mem::take(&mut self.imposters);
+            for (info, layout, _) in held {
+                self.tables.retain(|table| table.folded != info.folded);
+                self.layouts.remove(&layout.tree_key);
+                self.trees.remove(&info.root);
+            }
+            self.refresh_catalog();
+            return Ok(None);
+        };
+        let folded = index.to_ascii_lowercase();
+        let Some((owner, declared)) = self.tables.iter().find_map(|table| {
+            table
+                .indexes
+                .iter()
+                .find(|held| held.folded == folded)
+                .map(|held| (table.clone(), held.clone()))
+        }) else {
+            return Err(refusal(format!(
+                "no such index: \"{}\"",
+                String::from_utf8_lossy(index)
+            )));
+        };
+        let Some(tree) = self.trees.get(&declared.root).cloned() else {
+            return Err(refusal(format!(
+                "the index {} has no tree",
+                String::from_utf8_lossy(index)
+            )));
+        };
+        // The entry's columns, in the order the tree holds them: the index's
+        // own keys, then what identifies the table row - which is a rowid on an
+        // ordinary table and the primary key on a `WITHOUT ROWID` one. The
+        // reference calls the rowid `_ROWID_`, and so does this.
+        let mut columns: Vec<Vec<u8>> = Vec::new();
+        for key in &declared.columns {
+            let name = key
+                .column
+                .and_then(|at| owner.columns.get(usize::from(at)))
+                .map(|held| held.name.clone())
+                .unwrap_or_else(|| b"expr".to_vec());
+            columns.push(name);
+        }
+        let trailing = super::identity_columns(&owner);
+        if trailing.is_empty() {
+            columns.push(b"_ROWID_".to_vec());
+        } else {
+            for declared in &trailing {
+                columns.push(
+                    owner
+                        .columns
+                        .get(*declared)
+                        .map(|held| held.name.clone())
+                        .unwrap_or_else(|| b"key".to_vec()),
+                );
+            }
+        }
+        let quoted: Vec<String> = columns
+            .iter()
+            .map(|held| format!("\"{}\"", String::from_utf8_lossy(held)))
+            .collect();
+        let sql = format!(
+            "CREATE TABLE \"{}\"({},PRIMARY KEY({}))WITHOUT ROWID",
+            String::from_utf8_lossy(name),
+            quoted.join(","),
+            quoted.join(",")
+        );
+        // A handle of its own, so the imposter's layout does not stand on the
+        // index's - two declarations over one tree, and the planner reads a
+        // different one for each.
+        let root = self.allocate_root()?;
+        let mut info = table_from_create_sql(sql.as_bytes(), 0, root)?;
+        info.without_rowid = true;
+        let layout = SourceLayout {
+            tree_key: root,
+            slots: (0..columns.len()).map(Some).collect(),
+            // There is no rowid: the entry's own columns are the whole row.
+            rowid: None,
+            identity: (0..columns.len()).collect(),
+            types: (0..columns.len())
+                .map(|_| inillucent_exec::StaticType::Unknown)
+                .collect(),
+            width: columns.len(),
+            // Read in the tree's order, which is the order the index is in -
+            // that is the whole reason for looking at one this way.
+            key_columns: (0..columns.len()).collect(),
+        };
+        self.imposters.retain(|(held, _, _)| held.name != info.name);
+        self.imposters.push((info, layout, tree));
+        self.refresh_catalog();
+        Ok(Some(format!("{sql};")))
+    }
+
+    /// Puts the imposter declarations back after a catalog rebuild.
+    pub(crate) fn republish_imposters(&mut self) {
+        let held = self.imposters.clone();
+        for (info, layout, tree) in held {
+            self.layouts.insert(layout.tree_key, layout);
+            self.trees.insert(info.root, tree);
+            self.tables.retain(|table| table.folded != info.folded);
+            self.tables.push(info);
         }
     }
 
@@ -888,6 +1070,34 @@ impl ImportedDatabase {
         layout: SourceLayout,
         rows: &[R],
     ) -> DbResult<PageId> {
+        self.build_tree_rows(
+            root,
+            columns,
+            key_columns,
+            layout,
+            &inillucent_tree::leaf::RowSlice(rows),
+        )
+    }
+
+    /// Builds a tree from a row source rather than from a slice of rows.
+    ///
+    /// The form `CREATE INDEX` uses, so its entries are packed straight out of
+    /// the arena they were scanned into. Everything else about it is
+    /// [`Self::build_tree_from`], which is now a one-line wrapper over it.
+    ///
+    /// @param root - the identifier the tree is registered under
+    /// @param columns - the column directory, key columns first
+    /// @param key_columns - how many leading columns form the key
+    /// @param layout - how the tree's columns map onto the table's
+    /// @param rows - the rows, already in key order
+    fn build_tree_rows<'d>(
+        &mut self,
+        root: u32,
+        columns: Vec<ColumnSpec>,
+        key_columns: usize,
+        layout: SourceLayout,
+        rows: &dyn inillucent_tree::leaf::Rows<'d>,
+    ) -> DbResult<PageId> {
         let txn = self.current_txn();
         let at = self.ddl_schema;
         let local = self.local_of(at, root);
@@ -915,7 +1125,7 @@ impl ImportedDatabase {
                 session,
                 at,
             )?;
-            PagedTree::bulk_build_logged(
+            PagedTree::bulk_build_rows(
                 database,
                 Some(&mut log),
                 // **The file's own number, not the connection's.** Every record
@@ -1340,6 +1550,14 @@ impl ImportedDatabase {
             .take(key_columns)
             .map(|spec| spec.collation)
             .collect();
+        // And the directions, for the same reason: a `DESC` key column is
+        // stored descending, so the sort that packs the tree has to produce
+        // that order rather than the ascending one and let the reader cope.
+        let directions: Vec<bool> = columns
+            .iter()
+            .take(key_columns)
+            .map(|spec| spec.descending)
+            .collect();
         let scanned = std::time::Instant::now();
         // **A partial index and an index on an expression are filled by a
         // query; everything else is filled by a scan.** The scan reads columns
@@ -1352,9 +1570,23 @@ impl ImportedDatabase {
         let computed =
             index.partial_sql.is_some() || index.columns.iter().any(|key| key.expr_sql.is_some());
         let entries = if computed {
-            self.index_entries_by_query(&owner, &index, key_columns, encoding, &collations)?
+            self.index_entries_by_query(
+                &owner,
+                &index,
+                key_columns,
+                encoding,
+                &collations,
+                &directions,
+            )?
         } else {
-            self.index_entries(&owner, &index, key_columns, encoding, &collations)?
+            self.index_entries(
+                &owner,
+                &index,
+                key_columns,
+                encoding,
+                &collations,
+                &directions,
+            )?
         };
         let scan = scanned.elapsed().as_nanos();
         let sorted = std::time::Instant::now();
@@ -1365,17 +1597,18 @@ impl ImportedDatabase {
             refuse_duplicates(&entries, &order, &owner, &index, key_columns)?;
         }
         let uniqueness = checked.elapsed().as_nanos();
-        // One flat run of values in key order, and the rows are slices of it.
+        // **No flat run any more, and the stage that made one reads zero.**
+        // The packer used to need a slice, so the arena was flattened into a
+        // `Vec<Datum>` in key order and sliced into a `Vec<&[Datum]>` - 6.4 MiB
+        // of copies at a hundred thousand rows. `EntrySet::in_order` is a view
+        // over the arena and the order vector, and the packer indexes it. The
+        // timer stays so that four runs of gate output either side of the change
+        // are comparable line for line.
         let flattened = std::time::Instant::now();
-        let flat = entries.to_datums(&order);
-        let rows: Vec<&[Datum<'_>]> = if key_columns == 0 {
-            Vec::new()
-        } else {
-            flat.chunks_exact(key_columns).collect()
-        };
+        let source = entries.in_order(&order);
         let flatten = flattened.elapsed().as_nanos();
         let packed = std::time::Instant::now();
-        let page = self.build_tree_from(root, columns, key_columns, layout, &rows)?;
+        let page = self.build_tree_rows(root, columns, key_columns, layout, &source)?;
         let pack = packed.elapsed().as_nanos();
         // The tail is timed too, because it is not free and it is not the
         // build: recording the catalog row, re-deriving every table from the
@@ -1450,9 +1683,11 @@ impl ImportedDatabase {
     /// @param if_not_exists - whether the statement said `IF NOT EXISTS`
     fn create_vector_index(
         &mut self,
+        module: &[u8],
         name: &[u8],
         table: &[u8],
         columns: &[inillucent_sql::directive::IndexKeyColumn],
+        settings: &[(Vec<u8>, Vec<u8>)],
         exists: bool,
         if_not_exists: bool,
     ) -> DbResult<Outcome> {
@@ -1500,13 +1735,41 @@ impl ImportedDatabase {
                 String::from_utf8_lossy(&column.name)
             ))
         })?;
-        let store = format!(
-            "CREATE VIRTUAL TABLE {} USING inillucent_search(body, dims={}, source={}, source_column={})",
-            String::from_utf8_lossy(name),
-            dims,
-            String::from_utf8_lossy(&owner.name),
-            String::from_utf8_lossy(&column.name)
-        );
+        // The storage parameters go through as the store's own options, which
+        // is what they are: `WITH (m = 32)` and `USING inillucent_search(...,
+        // m=32)` reach the same graph, so the index form is a spelling of the
+        // table form rather than a second path into it.
+        let mut declared = String::new();
+        for (option, value) in settings {
+            declared.push_str(&format!(
+                ", {}={}",
+                String::from_utf8_lossy(option),
+                String::from_utf8_lossy(value)
+            ));
+        }
+        // **The structure the index named is the module the store uses.** An
+        // `ivfflat` is an inverted file and needs no lexical half, so it is its
+        // own module with its own three shadow tables; `inillucent_hnsw` is the
+        // graph, which is `inillucent_search` with a vector width and no text.
+        // Both answer the engine's vector probe the same way, which is the only
+        // thing above this line knows about either.
+        let store = if module == b"ivfflat" {
+            format!(
+                "CREATE VIRTUAL TABLE {} USING ivfflat(dims={}, source={}, source_column={}{declared})",
+                String::from_utf8_lossy(name),
+                dims,
+                String::from_utf8_lossy(&owner.name),
+                String::from_utf8_lossy(&column.name)
+            )
+        } else {
+            format!(
+                "CREATE VIRTUAL TABLE {} USING inillucent_search(body, dims={}, source={}, source_column={}{declared})",
+                String::from_utf8_lossy(name),
+                dims,
+                String::from_utf8_lossy(&owner.name),
+                String::from_utf8_lossy(&column.name)
+            )
+        };
         self.execute_any(&store, &inillucent_exec::physical::Params::new())?;
         // The association is only visible once the store is connected, and the
         // backfill below has to be seen by it.
@@ -1570,6 +1833,7 @@ impl ImportedDatabase {
     /// @param width - how many columns an entry has
     /// @param encoding - the index tree's key encoding
     /// @param collations - the key columns' collations, in key order
+    /// @param directions - the key columns' directions, in key order
     fn index_entries(
         &self,
         owner: &TableInfo,
@@ -1577,6 +1841,7 @@ impl ImportedDatabase {
         width: usize,
         encoding: KeyEncoding,
         collations: &[Collation],
+        directions: &[bool],
     ) -> DbResult<EntrySet> {
         let layout = self
             .layouts
@@ -1610,8 +1875,13 @@ impl ImportedDatabase {
         } else {
             layout.identity.clone()
         };
-        let mut entries =
-            EntrySet::with_capacity(width, tree.row_count() as usize, encoding, collations);
+        let mut entries = EntrySet::with_capacity(
+            width,
+            tree.row_count() as usize,
+            encoding,
+            collations,
+            directions,
+        );
         let pool = self.pool_of(owner.root)?;
         tree.visit_leaves(pool, &mut |leaf| {
             // One reusable buffer per *leaf*, not per row: the values borrow
@@ -1694,6 +1964,7 @@ impl ImportedDatabase {
     /// @param width - how many columns an entry has
     /// @param encoding - the index tree's key encoding
     /// @param collations - the key columns' collations, in key order
+    /// @param directions - the key columns' directions, in key order
     fn index_entries_by_query(
         &mut self,
         owner: &TableInfo,
@@ -1701,6 +1972,7 @@ impl ImportedDatabase {
         width: usize,
         encoding: KeyEncoding,
         collations: &[Collation],
+        directions: &[bool],
     ) -> DbResult<EntrySet> {
         let mut projected: Vec<String> = Vec::with_capacity(width);
         for key in &index.columns {
@@ -1743,7 +2015,8 @@ impl ImportedDatabase {
         let rows = self
             .execute_any(&query, &inillucent_exec::physical::Params::new())?
             .rows;
-        let mut entries = EntrySet::with_capacity(width, rows.len(), encoding, collations);
+        let mut entries =
+            EntrySet::with_capacity(width, rows.len(), encoding, collations, directions);
         let mut entry: Vec<Datum<'_>> = Vec::with_capacity(width);
         for row in &rows {
             entry.clear();
@@ -2351,20 +2624,183 @@ impl ImportedDatabase {
             .iter()
             .map(|name| name.to_ascii_lowercase())
             .collect();
-        let roots: Vec<u32> = self
+        // **Rebuilt, not inspected.** This used to run the tree's integrity
+        // check and call that a `REINDEX`, which is the one thing a `REINDEX`
+        // is not: the statement exists so a person whose collation has changed
+        // under an index can put the entries back in the order the engine now
+        // compares them in, and a check cannot move an entry. It also meant a
+        // `REINDEX` over a `NOCASE` index *failed* - the check compared with
+        // `BINARY` while the tree was ordered by `NOCASE` - so the one
+        // statement that could have repaired such an index reported it as
+        // corrupt instead.
+        let targets: Vec<(Vec<u8>, Vec<u8>)> = self
             .tables
             .iter()
-            .flat_map(|table| table.indexes.iter())
-            .filter(|index| wanted.is_empty() || wanted.contains(&index.folded))
-            .map(|index| index.root)
+            .flat_map(|table| {
+                table
+                    .indexes
+                    .iter()
+                    .map(move |index| (table.name.clone(), index.clone()))
+            })
+            // A module owns its own index and rebuilds it its own way; a b-tree
+            // rebuild has nothing to put in it.
+            .filter(|(_, index)| index.origin != inillucent_sql::catalog_view::IndexOrigin::Module)
+            .filter(|(_, index)| {
+                wanted.is_empty()
+                    || wanted.contains(&index.folded)
+                    // `REINDEX t` names a table and means every index on it;
+                    // `REINDEX NOCASE` names a collation and means every index
+                    // that uses it.
+                    || wanted.iter().any(|name| {
+                        index
+                            .columns
+                            .iter()
+                            .any(|key| key.collation.to_ascii_lowercase() == *name)
+                    })
+            })
+            .map(|(table, index)| (table, index.name.clone()))
             .collect();
-        for root in roots {
-            let pool = self.pool_of(root)?;
-            if let Some(tree) = self.trees.get(&root) {
-                tree.check(pool)?;
+        let named_table = self.tables.iter().any(|table| {
+            wanted
+                .iter()
+                .any(|name| table.folded == *name && !table.indexes.is_empty())
+        });
+        let targets: Vec<(Vec<u8>, Vec<u8>)> = if named_table {
+            self.tables
+                .iter()
+                .filter(|table| wanted.iter().any(|name| table.folded == *name))
+                .flat_map(|table| {
+                    table
+                        .indexes
+                        .iter()
+                        .filter(|index| {
+                            index.origin != inillucent_sql::catalog_view::IndexOrigin::Module
+                        })
+                        .map(move |index| (table.name.clone(), index.name.clone()))
+                })
+                .chain(targets)
+                .collect()
+        } else {
+            targets
+        };
+        let mut done: Vec<Vec<u8>> = Vec::new();
+        for (table, index) in targets {
+            if done.contains(&index) {
+                continue;
             }
+            done.push(index.clone());
+            self.rebuild_index(&table, &index)?;
+        }
+        if !done.is_empty() {
+            self.rebuild_tables()?;
+            self.refresh_catalog();
+            self.seal()?;
         }
         Ok(Outcome::empty())
+    }
+
+    /// Rebuilds one index's tree from the table it indexes.
+    ///
+    /// The entries are re-derived and repacked exactly the way
+    /// `create_index` derives them, so a rebuilt tree is byte-for-byte the tree
+    /// a `CREATE INDEX` would have produced now - which is the whole promise of
+    /// the statement. The catalog row keeps its name and its text and takes the
+    /// new root.
+    ///
+    /// @param table - the indexed table's name
+    /// @param name - the index's name
+    fn rebuild_index(&mut self, table: &[u8], name: &[u8]) -> DbResult<()> {
+        let folded = table.to_ascii_lowercase();
+        let owner = self
+            .tables
+            .iter()
+            .find(|held| held.folded == folded)
+            .cloned()
+            .ok_or_else(|| refusal(format!("no such table: {}", String::from_utf8_lossy(table))))?;
+        let index_folded = name.to_ascii_lowercase();
+        let declared = owner
+            .indexes
+            .iter()
+            .find(|held| held.folded == index_folded)
+            .cloned()
+            .ok_or_else(|| refusal(format!("no such index: {}", String::from_utf8_lossy(name))))?;
+        let rowid = self
+            .entries
+            .iter()
+            .find(|held| {
+                held.entry.kind == ObjectKind::Index
+                    && held.entry.name.to_ascii_lowercase() == index_folded
+            })
+            .map(|held| held.rowid)
+            .ok_or_else(|| refusal("the index has no catalog row"))?;
+        let sql = self
+            .entries
+            .iter()
+            .find(|held| held.rowid == rowid)
+            .map(|held| held.entry.sql.clone())
+            .unwrap_or_default();
+        let root = self.allocate_root()?;
+        let index = inillucent_sql::catalog_view::IndexInfo { root, ..declared };
+        let (columns, layout) = index_shape(&owner, &index, root);
+        let key_columns = columns.len();
+        let encoding = KeyEncoding::choose(&columns, key_columns);
+        let collations: Vec<Collation> = columns
+            .iter()
+            .take(key_columns)
+            .map(|spec| spec.collation)
+            .collect();
+        let directions: Vec<bool> = columns
+            .iter()
+            .take(key_columns)
+            .map(|spec| spec.descending)
+            .collect();
+        let computed =
+            index.partial_sql.is_some() || index.columns.iter().any(|key| key.expr_sql.is_some());
+        let entries = if computed {
+            self.index_entries_by_query(
+                &owner,
+                &index,
+                key_columns,
+                encoding,
+                &collations,
+                &directions,
+            )?
+        } else {
+            self.index_entries(
+                &owner,
+                &index,
+                key_columns,
+                encoding,
+                &collations,
+                &directions,
+            )?
+        };
+        let order = entries.order();
+        if index.unique {
+            refuse_duplicates(&entries, &order, &owner, &index, key_columns)?;
+        }
+        let flat = entries.to_datums(&order);
+        let rows: Vec<&[Datum<'_>]> = if key_columns == 0 {
+            Vec::new()
+        } else {
+            flat.chunks_exact(key_columns).collect()
+        };
+        let page = self.build_tree_from(root, columns, key_columns, layout, &rows)?;
+        // The statistics and the identifier come off the tree that was just
+        // built, exactly as `record` takes them, so the row cannot describe a
+        // different tree from the one it names.
+        let at = self.ddl_schema;
+        let entry = SchemaEntry {
+            kind: ObjectKind::Index,
+            name: index.name.clone(),
+            table: owner.name.clone(),
+            root: page,
+            sql,
+            stats: self.tree_stats(root),
+            tree_id: self.local_of(at, root),
+        };
+        self.rewrite(rowid, entry)?;
+        Ok(())
     }
 }
 

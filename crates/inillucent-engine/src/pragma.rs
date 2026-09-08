@@ -10,21 +10,24 @@
 //! answering `delete` on an engine that only has a write-ahead log is a lie a
 //! caller would act on.
 //!
-//! So the set is in three parts, and the manifest's `pragma.*` rows name them:
+//! So the set is in two parts, and the manifest's `pragma.*` rows name them:
 //!
 //! - **Honoured.** `cache_size`, `synchronous`, `busy_timeout`, `foreign_keys`,
-//!   `journal_mode`, `integrity_check`, `quick_check`, `wal_checkpoint`,
-//!   `table_info` and the rest of the schema and pager reporters. These do what
-//!   they say.
-//! - **Answered, fixed.** `journal_mode` returns `wal` and takes nothing else;
-//!   `encoding` returns `UTF-8` and takes nothing else; `locking_mode` returns
-//!   `exclusive`. The engine has one of each and the pragma says which.
-//! - **Silent.** Everything else, including the pragmas whose subject the TDD
-//!   moved to a non-goal - `auto_vacuum`, `incremental_vacuum`, `temp_store`,
-//!   `mmap_size`, `legacy_file_format`. A no-op with no rows, which is what
-//!   SQLite gives a pragma it has never heard of.
+//!   `journal_mode`, `locking_mode`, `auto_vacuum`, `secure_delete`,
+//!   `integrity_check`, `quick_check`, `wal_checkpoint`, `table_info` and the
+//!   rest of the schema and pager reporters. These do what they say.
+//! - **Reported.** A value this engine has exactly one of: `encoding` is
+//!   `UTF-8` and takes nothing else. Setting one of these to what it already is
+//!   succeeds and setting it to anything else refuses.
 //!
-//! The distinction that matters is between *silent* and *refused*. A pragma
+//! There used to be a third part, **Silent**, and there is not one any more -
+//! see the section below. `journal_mode` and `locking_mode` used to be in the
+//! second part and are both real switches now; the rollback journal and the
+//! file-locking protocol were built for task-1860, and `PRAGMA journal_mode`
+//! reports `delete` by default because the reference does and because the gate
+//! says it costs nothing.
+//!
+//! The distinction that matters is between *reported* and *refused*. A pragma
 //! that exists and was given a value the engine cannot honour is **refused**,
 //! because accepting it would be answering a question wrongly.
 //!
@@ -50,13 +53,12 @@
 //!   and `recursive_triggers` are read where they are acted on; `cache_size`
 //!   caps how many pages the pool holds.
 //! - **Reported** - a value this engine has exactly one of. Readable, and a
-//!   write that would change it is refused: `journal_mode` is `wal`,
-//!   `encoding` is `UTF-8`, `auto_vacuum` is `none`, `secure_delete` is off.
-//!   Setting one of these to what it already is succeeds; setting it to
-//!   something else refuses, which is the rule `journal_mode = DELETE` has
-//!   always followed.
-//! - **Refused** - the subject does not exist here. Named in
-//!   `feature-comparison.md` as a deliberate gap rather than dropped.
+//!   write that would change it is refused: `encoding` is `UTF-8`. Setting one
+//!   of these to what it already is succeeds; setting it to something else
+//!   refuses.
+//! - **Refused** - the subject does not exist here, and the refusal names it.
+//!   `feature-comparison.md` measures what is left in this column, which as of
+//!   task-1860 is nothing on SQLite's own list.
 
 use inillucent_base::error::refusal;
 use inillucent_base::DbResult;
@@ -151,10 +153,9 @@ impl ImportedDatabase {
             // through to the refusal - a refusal would be a difference invented
             // by the rule rather than found by it.
             b"incremental_vacuum" => self.pragma_incremental_vacuum(argument),
-            b"optimize"
-            | b"shrink_memory"
-            | b"data_store_directory"
-            | b"temp_store_directory" => Ok(Outcome::empty()),
+            b"optimize" | b"shrink_memory" | b"data_store_directory" | b"temp_store_directory" => {
+                Ok(Outcome::empty())
+            }
             // Reported: a number this engine has exactly one of. Read it and
             // get the truth; set it to that value and nothing happens; set it
             // to anything else and it refuses rather than pretending.
@@ -206,7 +207,9 @@ impl ImportedDatabase {
             b"pragma_list" => list_of("name", SQLITE_PRAGMAS),
             b"module_list" => {
                 let mut names = self.registry.module_names();
+                names.extend(ENGINE_MODULES.iter().map(|name| (*name).to_string()));
                 names.sort();
+                names.dedup();
                 list_of("name", &names)
             }
             b"function_list" => pragma_function_list(),
@@ -1087,6 +1090,15 @@ impl ImportedDatabase {
         };
         let asked = argument_text(argument);
         if let Some(mode) = inillucent_pool::journal::JournalMode::named(asked.trim()) {
+            // **Defensive mode refuses `OFF` and says so by not moving.** That
+            // is SQLite's own rule and it is why the reference's shell - which
+            // turns the flag on - answers `PRAGMA journal_mode = OFF` with the
+            // mode that was already in force. `off` protects nothing, so a
+            // connection that has asked to be protected from itself cannot have
+            // it.
+            if self.defensive && mode == inillucent_pool::journal::JournalMode::Off {
+                return Ok(word_row(self.journal_mode().word()));
+            }
             self.set_journal_mode(mode)?;
         }
         Ok(word_row(self.journal_mode().word()))
@@ -1115,7 +1127,11 @@ impl ImportedDatabase {
         };
         // An unrecognised word is a no-op in SQLite rather than an error.
         if let Some(mode) = asked {
-            if self.tables.iter().all(|table| table.folded.starts_with(b"sqlite_")) {
+            if self
+                .tables
+                .iter()
+                .all(|table| table.folded.starts_with(b"sqlite_"))
+            {
                 self.auto_vacuum = mode;
             }
         }
@@ -1567,6 +1583,29 @@ fn collation_name(folded: &[u8]) -> Vec<u8> {
     }
 }
 
+/// The eponymous tables the engine itself presents, which are modules too.
+///
+/// **They are answered by the engine rather than by a `Module`, and the
+/// register did not know about them.** `dbstat` and `sqlite_dbpage` describe
+/// the *pages* under every tree, and `bytecode`, `tables_used`, `sqlite_stmt`
+/// and `completion` describe statements - neither is a thing a `Module` can
+/// see, so both are implemented in `crate::inspect` and `crate::introspect` and
+/// registered nowhere. `pragma_module_list` therefore reported fourteen names
+/// where SQLite reports nineteen, while every one of these answered exactly as
+/// SQLite's does when it was called.
+///
+/// task-1869: a caller that reads the register to decide what it may use was
+/// being told less than the truth, silently, and that is the one shape of
+/// difference this project treats as a defect rather than a choice.
+const ENGINE_MODULES: &[&str] = &[
+    "bytecode",
+    "completion",
+    "dbstat",
+    "sqlite_dbpage",
+    "sqlite_stmt",
+    "tables_used",
+];
+
 /// The spellings that mean "off" for a pragma this engine reports as zero.
 const OFF: &[&str] = &["0", "off", "false", "no"];
 
@@ -1594,7 +1633,6 @@ const ON: &[&str] = &["1", "on", "true", "yes"];
 /// @param name - the pragma's folded name
 fn reported_value(name: &[u8]) -> Option<(i64, &'static [&'static str])> {
     Some(match name {
-
         // The pool evicts by clock rather than at a spill threshold.
         b"cache_spill" => (0, OFF),
         // Not a page format with cells to size-check.

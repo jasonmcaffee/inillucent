@@ -5,7 +5,7 @@
 # `inillucent-compat::obligations::the_registers_match_the_engine` fails if
 # this file and the engine disagree.
 
-count = 148
+count = 183
 
 [[function]]
 name = "abs"
@@ -80,6 +80,14 @@ deterministic = true
 innocuous = true
 
 [[function]]
+name = "binary_quantize"
+kind = "s"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
 name = "ceil"
 kind = "s"
 arity = 1
@@ -147,6 +155,14 @@ innocuous = true
 name = "cosh"
 kind = "s"
 arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "cosine_distance"
+kind = "s"
+arity = 2
 flags = 526336
 deterministic = true
 innocuous = true
@@ -240,6 +256,110 @@ deterministic = true
 innocuous = true
 
 [[function]]
+name = "geopoly_area"
+kind = "s"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "geopoly_bbox"
+kind = "s"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "geopoly_blob"
+kind = "s"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "geopoly_ccw"
+kind = "s"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "geopoly_contains_point"
+kind = "s"
+arity = 3
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "geopoly_debug"
+kind = "s"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "geopoly_group_bbox"
+kind = "s"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "geopoly_json"
+kind = "s"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "geopoly_overlap"
+kind = "s"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "geopoly_regular"
+kind = "s"
+arity = 4
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "geopoly_svg"
+kind = "s"
+arity = -1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "geopoly_within"
+kind = "s"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "geopoly_xform"
+kind = "s"
+arity = 7
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
 name = "glob"
 kind = "s"
 arity = 2
@@ -258,6 +378,14 @@ innocuous = true
 [[function]]
 name = "group_concat"
 kind = "a"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "hamming_distance"
+kind = "s"
 arity = 2
 flags = 526336
 deterministic = true
@@ -288,7 +416,23 @@ deterministic = true
 innocuous = true
 
 [[function]]
+name = "inner_product"
+kind = "s"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
 name = "instr"
+kind = "s"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "jaccard_distance"
 kind = "s"
 arity = 2
 flags = 526336
@@ -555,6 +699,30 @@ innocuous = true
 name = "julianday"
 kind = "s"
 arity = -1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "l1_distance"
+kind = "s"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "l2_distance"
+kind = "s"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "l2_normalize"
+kind = "s"
+arity = 1
 flags = 526336
 deterministic = true
 innocuous = true
@@ -912,6 +1080,38 @@ deterministic = true
 innocuous = true
 
 [[function]]
+name = "rtreecheck"
+kind = "s"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "rtreecheck"
+kind = "s"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "rtreedepth"
+kind = "s"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "rtreenode"
+kind = "s"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
 name = "rtrim"
 kind = "s"
 arity = 1
@@ -945,6 +1145,30 @@ innocuous = true
 
 [[function]]
 name = "sinh"
+kind = "s"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "sqlar_compress"
+kind = "s"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "sqlar_uncompress"
+kind = "s"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "sqlite_offset"
 kind = "s"
 arity = 1
 flags = 526336
@@ -1017,6 +1241,14 @@ innocuous = true
 
 [[function]]
 name = "substring"
+kind = "s"
+arity = 3
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "subvector"
 kind = "s"
 arity = 3
 flags = 526336
@@ -1160,6 +1392,30 @@ deterministic = true
 innocuous = true
 
 [[function]]
+name = "vector_add"
+kind = "s"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "vector_concat"
+kind = "s"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "vector_dims"
+kind = "s"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
 name = "vector_distance_cos"
 kind = "s"
 arity = 2
@@ -1177,6 +1433,30 @@ innocuous = true
 
 [[function]]
 name = "vector_dot"
+kind = "s"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "vector_mul"
+kind = "s"
+arity = 2
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "vector_norm"
+kind = "s"
+arity = 1
+flags = 526336
+deterministic = true
+innocuous = true
+
+[[function]]
+name = "vector_sub"
 kind = "s"
 arity = 2
 flags = 526336
