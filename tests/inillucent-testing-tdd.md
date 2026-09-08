@@ -9,7 +9,7 @@ and the commands that produce them are given so they can be taken again.
 
 ---
 
-## 1. The five rules
+## 1. The six rules
 
 Everything else here follows from these. They are written as rules because each
 one was arrived at by finding a test that broke it.
@@ -57,7 +57,17 @@ This is not theoretical. The virtual-table defect task-1857 found was invisible
 to every test that did not reopen: the *file* was correct throughout, and only
 the live connection was wrong.
 
-### 1.5 The same question, asked two ways
+### 1.5 A comment may only claim what its test proves
+
+If a test's doc comment says it pins a particular defect, that has to be checked
+by **reverting the fix and watching it fail**, not by reading the test and
+believing it. This ticket wrote a test whose comment claimed to pin a
+savepoint-level bug and which passed perfectly well with that fix reverted; the
+comment now says so instead. A test that does not discriminate is still worth
+keeping - it pins the behaviour - but a comment that oversells it is worse than
+no comment, because the next person will trust it.
+
+### 1.6 The same question, asked two ways
 
 An index the insert path maintains and the delete path forgets answers a
 covering query wrongly while every other query about the same row is right. So
@@ -72,7 +82,7 @@ version of it over the public API.
 
 ## 2. The shape of the suite
 
-**129 test targets, 2,331 tests, in nine tiers.** A target is one binary
+**129 test targets, 2,336 tests, in nine tiers.** A target is one binary
 `cargo test` builds; a tier is a band you can ask for by name. Every target is
 in exactly one tier, so the tiers partition the suite rather than overlapping
 it.
@@ -84,10 +94,10 @@ it.
 | `engine` | 34 | 222 | SQL and storage behaviour over real database files |
 | `differential` | 30 | 304 | graded against the pinned SQLite 3.53.4 |
 | `durability` | 17 | 149 | crashes, injected faults, corruption and concurrency |
-| `e2e` | 8 | 53 | the public surfaces an application binds to, end to end |
+| `e2e` | 8 | 55 | the public surfaces an application binds to, end to end |
 | `perf` | 1 | 5 | the cost guards — **runs alone**, see §5 |
 | `retrieval` | 6 | 438 | the embedding and retrieval engine, and its graded harness |
-| `tooling` | 4 | 27 | the checks that keep the repository's own rules true |
+| `tooling` | 4 | 31 | the checks that keep the repository's own rules true |
 
 The map that assigns them is `tests/selection.toml`, and it is data rather than
 code so that a person can read the whole arrangement in one file.
@@ -199,7 +209,7 @@ conflating them would let a tier choice quietly narrow a correctness question.
 | about to commit | `--changed` | seconds to a minute |
 | about to commit something structural | `--tier unit --tier engine --tier e2e` | ~55 s |
 | about to push | everything except `retrieval` | ~35 s after a warm build |
-| changing the planner, the tree, or the log | everything | ~150 s |
+| changing the planner, the tree, or the log | everything | ~155 s |
 | claiming a speedup | the gates, not the suite — see §5.3 | minutes |
 
 ---
@@ -378,10 +388,10 @@ warm build. `cargo build` time is excluded except where stated.
 | | wall | note |
 |---|---:|---|
 | `cargo test --workspace` (serial) | **315 s** | includes ~70 s of build; 164 binaries + 30 doc-test targets |
-| `inillucent-testrun` (parallel, everything) | **~146 s** | 129 targets, 2,331 tests, 1,647 s of processor time — **10.4x** |
-| `inillucent-testrun` without `retrieval` | **~35 s** | 123 targets, 1,893 tests |
+| `inillucent-testrun` (parallel, everything) | **~155 s** | 129 targets, 2,336 tests, 1,438 s of processor time — **9.0x** |
+| `inillucent-testrun` without `retrieval` | **~35 s** | 123 targets, 1,898 tests |
 
-The retrieval tier is 122 s of the 146 s, and its two largest targets —
+The retrieval tier is 121 s of the 155 s, and its two largest targets —
 `inillucent-core::lib` and `inillucent-bench` — are 100 s+ each on their own.
 **They are the floor of a full parallel run**: no scheduling improves on the
 longest single binary. Everything else finishes in the time they take.
@@ -390,15 +400,15 @@ longest single binary. Everything else finishes in the time they take.
 
 | tier | wall | targets | tests |
 |---|---:|---:|---:|
-| `smoke` | **1.3 s** | 1 | 8 |
-| `e2e` | 3.9 s | 8 | 53 |
-| `tooling` | 4.8 s | 4 | 27 |
-| `unit` | 7.7 s | 28 | 1,124 |
-| `perf` | 9.8 s | 1 | 5 |
-| `durability` | 25.7 s | 17 | 149 |
-| `differential` | 27.9 s | 30 | 304 |
-| `engine` | 43.7 s | 34 | 222 |
-| `retrieval` | 122.3 s | 6 | 438 |
+| `smoke` | **1.0 s** | 1 | 8 |
+| `e2e` | 3.2 s | 8 | 55 |
+| `tooling` | 4.6 s | 4 | 31 |
+| `unit` | 7.1 s | 28 | 1,124 |
+| `perf` | 9.1 s | 1 | 5 |
+| `durability` | 22.6 s | 17 | 149 |
+| `differential` | 13.8 s | 30 | 304 |
+| `engine` | 29.7 s | 34 | 222 |
+| `retrieval` | 121.2 s | 6 | 438 |
 
 Each figure includes the runner's own startup and its `cargo` target listing,
 about 1.2 s — which is why `smoke` reads 1.3 s and its binary reads 0.1 s.
@@ -424,8 +434,8 @@ against 146 s wall parallel.
 ## 7. What this standard found
 
 The suite described here was written for task-1857 and found four defects while
-being written. All four are fixed; each is now a test that asserts the fix.
-
+being written; reviewing the fixes found three more, in the fixes. All seven are
+fixed, and each is now a test that asserts the fix.
 **Virtual tables did not participate in their transaction.** A rolled-back
 insert into an `fts5` or `rtree` table stayed, a rolled-back delete was gone, and
 `ROLLBACK TO` did nothing — so one query answered differently before and after a
@@ -467,6 +477,42 @@ It is recorded here because it is the shape this whole document is about. A
 check that is correct at the boundary and wrong one layer in produces a **wrong
 answer rather than an error**, and the only reason it was caught in minutes
 rather than months is that the differential suites ask SQLite the same question.
+
+
+### 7.2 Three the review found in the fix itself
+
+The virtual-table rollback fix was reviewed by `codex exec review`, and the
+review found three defects **in the fix**, all on the same two lines. They are
+listed because they are more instructive than the original bug:
+
+- **A rollback could return early and leave a transaction with no data in it.**
+  The module notification's `?` sat between `undo_to` and the bookkeeping, so a
+  module whose `rollback` failed left `marks` and `batch` untouched while the
+  rows were already undone. A rollback is not a step that can be declined: every
+  step now runs and the first failure is returned afterwards.
+- **`ROLLBACK TO` told the modules the wrong number.** It passed the current
+  nesting depth rather than the level of the savepoint being returned to, so
+  `SAVEPOINT a; SAVEPOINT b; ROLLBACK TO a` said "two" where the answer is
+  "zero", and a module numbering its own marks by what it was given would keep
+  the state belonging to the savepoint just abandoned.
+- **A failed `ROLLBACK TO` had a side effect.** The level was resolved with
+  `unwrap_or(0)`, so a name no savepoint held told every module to discard and
+  *then* reported the error. A typo in a savepoint name threw away a buffered
+  virtual table's pending writes.
+
+Two lessons, and both are rules elsewhere in this document now.
+
+**A test's comment may only claim what the test proves.** The nested-savepoint
+test written for the second finding *passes with that fix reverted* - FTS5's
+`rollback_to` discards its whole buffer and ignores the level, and there is no
+module in the tree that keeps marks of its own. That was found by reverting the
+fix and running it, not by reading it, and the test's comment now says so. The
+test for the third finding was checked the same way and does go red.
+
+**Review the fix, not just the bug.** Three of the seven defects this ticket
+fixed were introduced by fixing the other four, and every one of them was in
+error handling - the paths the tests exercise least. A review pass over the diff
+is part of finishing, not a formality.
 
 ---
 
@@ -536,7 +582,7 @@ target/debug/inillucent-testrun --list-tiers        # what the tiers are
 target/debug/inillucent-testrun --tier smoke        # ~1 s
 target/debug/inillucent-testrun --changed           # what your edits can break
 target/debug/inillucent-testrun --changed --list    # ...without running it
-target/debug/inillucent-testrun                     # everything, ~146 s
+target/debug/inillucent-testrun                     # everything, ~155 s
 target/debug/inillucent-testrun --strict            # fail on a missing prerequisite
 target/debug/inillucent-testrun --record            # update tests/timings.toml
 
