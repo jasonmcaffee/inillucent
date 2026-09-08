@@ -79,11 +79,13 @@ fn run(rounds: u32) -> DbResult<()> {
         vec![
             Vector::Int64 {
                 width: 8,
+                base: 0,
                 bytes: &key_bytes,
                 class: None,
             },
             Vector::Int64 {
                 width: 8,
+                base: 0,
                 bytes: &category_bytes,
                 class: None,
             },

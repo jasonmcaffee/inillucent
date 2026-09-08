@@ -134,7 +134,10 @@ pub fn parse(text: &str) -> Result<Document, String> {
             section = None;
             continue;
         }
-        if let Some(name) = line.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')) {
+        if let Some(name) = line
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
             let name = name.trim().to_string();
             document.tables.entry(name.clone()).or_default();
             current = None;
@@ -405,9 +408,12 @@ tests = []
     /// was hiding the whole integration suite.
     #[test]
     fn a_plain_table_parses() {
-        let document = parse("[memory]
+        let document = parse(
+            "[memory]
 bar = \"0.95\"
-").expect("the table parses");
+",
+        )
+        .expect("the table parses");
         assert_eq!(
             document
                 .tables

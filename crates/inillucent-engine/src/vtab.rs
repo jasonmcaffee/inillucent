@@ -1212,7 +1212,8 @@ impl ImportedDatabase {
                 inillucent_value::collation::Collation::Binary,
             ));
         }
-        let mut batch: Vec<Vec<OwnedDatum>> = Vec::with_capacity(inillucent_exec::batch::BATCH_ROWS);
+        let mut batch: Vec<Vec<OwnedDatum>> =
+            Vec::with_capacity(inillucent_exec::batch::BATCH_ROWS);
         for row in rows {
             if !passes_rechecks(&row, &rechecks, self.case_sensitive_like)? {
                 continue;

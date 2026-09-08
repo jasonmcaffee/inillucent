@@ -1230,8 +1230,10 @@ enum KeyColumn<'p> {
     Ints(DenseInts<'p>),
     /// A fully typed variable-width column: an offset and a length per row.
     Bytes {
-        /// `rows * 8` bytes of slots.
+        /// `rows * width` bytes of slots.
         slots: &'p [u8],
+        /// How many bytes one slot occupies.
+        width: usize,
         /// The page the slots address.
         page: &'p [u8],
         /// Whether the bytes are text rather than a blob.
@@ -1252,14 +1254,21 @@ impl<'p> KeyColumn<'p> {
                 vector @ Vector::Int64 {
                     bytes: _,
                     width: _,
+                    base: _,
                     class: None,
                 },
             ) => match vector.dense_ints() {
                 Some(slots) => KeyColumn::Ints(slots),
                 None => KeyColumn::General(*vector),
             },
-            Some(Vector::Variable { slots, page, text }) => KeyColumn::Bytes {
+            Some(Vector::Variable {
                 slots,
+                width,
+                page,
+                text,
+            }) => KeyColumn::Bytes {
+                slots,
+                width: *width,
                 page,
                 text: *text,
             },
@@ -1278,21 +1287,17 @@ impl<'p> KeyColumn<'p> {
             } else {
                 Datum::Null
             }),
-            KeyColumn::Bytes { slots, page, text } => {
-                let at = row.saturating_mul(8);
-                let Some(slot) = slots.get(at..at.saturating_add(8)) else {
+            KeyColumn::Bytes {
+                slots,
+                width,
+                page,
+                text,
+            } => {
+                let at = row.saturating_mul(*width);
+                let Some(slot) = slots.get(at..at.saturating_add(*width)) else {
                     return Ok(Datum::Null);
                 };
-                let offset = u32::from_le_bytes(
-                    slot.get(..4)
-                        .and_then(|half| half.try_into().ok())
-                        .unwrap_or([0; 4]),
-                ) as usize;
-                let length = u32::from_le_bytes(
-                    slot.get(4..)
-                        .and_then(|half| half.try_into().ok())
-                        .unwrap_or([0; 4]),
-                ) as usize;
+                let (offset, length) = inillucent_tree::types::read_heap_slot(slot);
                 let bytes = page
                     .get(offset..offset.saturating_add(length))
                     .unwrap_or(&[]);
@@ -1697,6 +1702,7 @@ mod tests {
                 count,
                 vec![Vector::Int64 {
                     width: 8,
+                    base: 0,
                     bytes: &bytes,
                     class: None,
                 }],
@@ -1706,6 +1712,7 @@ mod tests {
                 selection: Some(&all),
                 columns: vec![Vector::Int64 {
                     width: 8,
+                    base: 0,
                     bytes: &bytes,
                     class: None,
                 }]
@@ -1785,6 +1792,7 @@ mod tests {
             selection: Some(&selection),
             columns: vec![Vector::Int64 {
                 width: 8,
+                base: 0,
                 bytes: &bytes,
                 class: None,
             }]
@@ -1951,11 +1959,13 @@ mod tests {
                 let columns = vec![
                     Vector::Int64 {
                         width: 8,
+                        base: 0,
                         bytes: &key_bytes,
                         class: None,
                     },
                     Vector::Int64 {
                         width: 8,
+                        base: 0,
                         bytes: &payload_bytes,
                         class: None,
                     },

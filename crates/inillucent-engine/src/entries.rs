@@ -379,6 +379,25 @@ impl EntrySet {
         out
     }
 
+    /// Drops everything only the sort needed, before the pack that follows it.
+    ///
+    /// **The arena *is* the index build's high-water mark**, so what it holds
+    /// while the leaves are being written is what the gate measures. The sort
+    /// prefix is sixteen bytes an entry - 1.6 MiB at a hundred thousand rows -
+    /// and it is dead the moment [`EntrySet::order`] has returned: the packer
+    /// reads `cells` and `bytes`, and the fallback comparison reads values
+    /// rather than the prefix. The scratch buffer goes with it.
+    ///
+    /// **The payload arena is deliberately left alone.** Shrinking `bytes` and
+    /// `cells` to fit was measured with this and returned nothing - the whole
+    /// 1.59 MiB the change is worth is the prefix - while the copy
+    /// `shrink_to_fit` makes cost about 2 ms of a 27 ms statement. Freeing what
+    /// is dead is free; compacting what is live is not.
+    pub(crate) fn release_sort_scratch(&mut self) {
+        self.prefix = Vec::new();
+        self.scratch = Vec::new();
+    }
+
     /// Returns the set in key order, as rows a leaf builder can pack.
     ///
     /// **The reason `to_datums` is no longer on the `CREATE INDEX` path.** The
@@ -613,7 +632,6 @@ fn radix_by_word(pairs: &mut Vec<(u64, u32)>, scratch: &mut Vec<(u64, u32)>) {
         std::mem::swap(pairs, scratch);
     }
 }
-
 
 /// One [`EntrySet`] read in the order a sort produced, for the leaf builder.
 ///

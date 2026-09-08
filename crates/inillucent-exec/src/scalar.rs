@@ -112,9 +112,7 @@ pub fn matches_pattern(
     let subject = eval::text_bytes(subject, TextEncoding::Utf8);
     let pattern = eval::text_bytes(pattern, TextEncoding::Utf8);
     match op {
-        PatternOperator::Like => {
-            pattern::like_folding(&pattern, &subject, None, !case_sensitive)
-        }
+        PatternOperator::Like => pattern::like_folding(&pattern, &subject, None, !case_sensitive),
         PatternOperator::Glob => pattern::glob(&pattern, &subject),
         PatternOperator::Regexp => inillucent_scalar::regexp::Regexp::compile(&pattern, false)
             .map(|compiled| compiled.matches(&subject))

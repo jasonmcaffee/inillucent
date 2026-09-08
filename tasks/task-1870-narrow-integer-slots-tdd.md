@@ -412,3 +412,131 @@ The 894 was a *churned* tree, and two defects let a churned number and a fresh o
 | **Spilling the index build's arena** | costs `schema` its 1.00x floor - the trade task-1869 said not to make | perhaps 7 MiB |
 | **Frame-of-reference coding** | needs a wider column directory entry, and the entry is full | `id` and `key` would fall to one or two bytes; the file would go under 15 MiB |
 | **Narrowing the `(offset, length)` pair to `(u16, u16)`** | the same machinery, but it touches heap addressing rather than value decode | worth as much again as the integers on `main_table` - 8 bytes a row |
+
+---
+
+## The five follow-ups, worked
+
+The verdict above named five follow-ups. All five were then implemented and measured. Four 30-round
+`inillucent-fullgate` runs each way on the finished build, medians with the 95% lower bound:
+
+| family | wide | narrow (shipping) |
+|---|---|---|
+| `read.point` | 26.22x (23.49x) | **31.88x (28.46x)** |
+| `read.range` | 4.85x (3.79x) | **5.08x (4.06x)** |
+| `read.join` | 3.83x (2.70x) | **4.25x (2.87x)** |
+| `read.analytical` | 5.89x (4.73x) | **6.79x (5.58x)** |
+| `schema` | 1.26x (1.22x) | **1.38x (1.36x)** |
+| `extension` | 1.27x (1.17x) | **1.43x (1.25x)** |
+| `large.values` | 11.44x (7.89x) | 11.19x (8.68x) |
+| `open.prepare` | 1.58x (1.18x) | 1.64x (1.21x) |
+| **`write`** | **2.08x (1.91x)** | 1.74x (1.51x) |
+| **`transaction`** | **1.24x (0.83x)** | 0.87x (**0.61x**) |
+| weighted headline | 3.76x (3.65x) | **3.82x (3.66x)** |
+| peak resident set | 49.18 MiB | **42.65 MiB** |
+| memory ratio (bar 0.95x) | 1.32x | **1.15x** |
+| the imported `.rdb` | 23,756,800 B | **17,432,576 B** |
+
+### 1. A compaction that does not rewrite the whole leaf
+
+`make_room` called `LeafRef::live`, which allocates a `Vec<Datum>` per row plus one for the outer
+vector - **3,701 allocations to repack one index leaf**, producing values that are already on the
+page. It now materialises once, **flat**: one allocation of `rows * width`, indexed directly, with
+the delta rows merged into the sorted region by binary search rather than a re-sort.
+
+`write.insert.batch` **39.8 -> 30.6 ms**.
+
+**I got this wrong twice before getting it right, and the measurement caught both.** The first
+version scanned linearly to place each delta row and re-derived a `MiniColumn` per value:
+`write.insert.batch` went to **283 ms**, four times worse than what it was meant to fix. The second
+read straight through the mini-columns with the columns derived once - correct, and still slower than
+`live` on a leaf of many small rows, because a class check and a slot decode per value cost more than
+the allocations they replaced. Flat materialisation is the version that beats both.
+
+### 2. The process floor
+
+**The number this ticket first published was wrong**, and the correction matters more than the fix.
+Measured with `inillucent-childcost`:
+
+| | peak RSS | binary |
+|---|---|---|
+| a **trivial 110 KB Rust binary** from this workspace | **4.1 MiB** | 0.11 MB |
+| `sqlite-bench`, the gate's reference arm | ~4.2 MiB | 1.34 MB |
+| `sqlite3` opening the medium `.db` | 5.2 MiB | 4.02 MB |
+| `inillucent-shell` opening the medium `.rdb` | 7.0 MiB | 8.49 MB |
+
+A Windows Rust process costs 4.1 MiB before this engine exists, which is what SQLite's harness costs
+too. So the 4.7 MiB "process floor" this document claimed was ours is not: about 2.2 MiB is the
+engine's code and statics, and the rest is the gate child's plan and opened catalog.
+
+What is ours to give: `panic = "abort"` and `strip = true`. SQLite is C and does not unwind, and the
+release profile's own comment already argues that comparing a Rust build to a C build on a different
+configuration is comparing configurations rather than engines. Nothing in the workspace uses
+`catch_unwind`, and cargo keeps unwinding for test targets. The binary goes **8.49 MB -> 6.50** and the
+floor **8.90 -> 8.49 MiB**.
+
+### 3. The index build's arena, made cheaper rather than spilled
+
+The high-water mark *is* the arena, and the sort prefix - sixteen bytes an entry, 1.6 MiB at a
+hundred thousand rows - is dead the moment `EntrySet::order` has returned: the packer reads the cells
+and the payloads, and the tie-break comparison reads values. Freed between the sort and the pack.
+
+**1.59 MiB off the peak, and `schema.index` 26.5 -> 26.1 ms** - it cost nothing. `shrink_to_fit` on the
+payload arena was tried in the same call and taken back out: it returned no memory and cost about
+2 ms of a 27 ms statement. Freeing what is dead is free; compacting what is live is not.
+
+Spilling the arena, which is what task-1869 priced, was **not** done: it costs `schema` its 1.00x
+floor, and that trade is still the wrong one.
+
+### 4. Frame of reference for integers
+
+A per-column base in a sixteen-byte directory entry, behind a `LEAF_WIDE_DIRECTORY` flag so a page
+written without one still parses. A width now comes from a column's **range** inside the leaf rather
+than its magnitude: an index leaf holds a contiguous run of its key, so `main_key` spans about three
+and a half thousand of a hundred thousand distinct values and costs two bytes rather than four.
+
+`main_key` 27 -> **23** pages, `side_owner` 6 -> **4**, `side_table` 17 -> **16**. Worth **0.33 MB**.
+
+A base of zero means plain signed truncation, so a column whose smallest value is zero keeps the
+signed width - which is what makes the reader need no flag beyond the base itself.
+
+**The decode is where the risk was, and it bit.** The first version went through a `[u8; 8]` and
+`i128` and cost `read.analytical` **6.57x -> 2.77x**. Matching the width once and adding with `i64`
+put it back to 6.79x. A scan that adds a constant to a byte should not be slower than one that does
+not, and it is not once the width is a constant to the compiler.
+
+### 5. The heap pair narrowed to `(u16, u16)`
+
+A `Text` or `Blob` slot is an `(offset, length)` pair into the page, and both halves are bounded by
+the page size - so on a page of 64 KiB or less the pair fits in two `u16`s and costs **four bytes
+instead of eight**. `main_table` carries two such pairs per row.
+
+`main_table` 415 -> **388** pages, `side_table` 21 -> **16**. Worth **1.02 MB**.
+
+### What it cost: `transaction` is under its floor
+
+`transaction` fell from 1.45x at the start of this ticket to **0.87x**, lower bound **0.61x** against
+a floor of 1.00x. That is a release-blocking condition and it is the price of everything above.
+
+One workload does it. `txn.large` is `UPDATE side_table SET note = ?2 WHERE id = ?1`, two thousand
+times in one transaction, and the harness binds `row {n} lorem ipsum...` - about fifty bytes - over a
+stored `note {n}` of about ten. **The lengths differ, so the in-place slot write refuses every time**:
+each statement becomes a tombstone plus a delta insert, and every thirty-second one a compaction over
+the whole leaf. `side_table` went from 30 pages to 16, so a leaf holds twice as many rows and each
+compaction costs twice as much: **4.1 ms -> 10.2**.
+
+`write.upsert`, which writes the one table whose columns did not narrow, is unchanged at 2.86 -> 2.84
+ms. That is the control.
+
+**`DELTA_LIMIT = 64` does not buy it back**, measured on both arms: it halves the compactions and
+doubles the distance every read of a written-to leaf walks, and the second effect is larger -
+`large.values` loses half and `write` moves by 0.01x. The remaining fix is a compaction that does not
+rewrite the whole page. Follow-up 1 improved that path but did not remove the property: it allocates
+once instead of per row, and still repacks every live row.
+
+### The bar, finally
+
+**1.15x against 0.95x** - 42.65 MiB against the 35.33 it would need. It is not met, and the file is no
+longer where the difference is: at **1.036x** of SQLite's the whole cached database is within 0.6 MiB
+of theirs. What is left is 4.3 MiB of process, most of which is the operating system's and neither
+engine escapes, and one `CREATE INDEX`.

@@ -336,7 +336,7 @@ impl RowRedo for TreeRows {
             let leaf = LeafRef::parse(&guard)?
                 .with_collations(&collations)
                 .with_directions(&directions);
-            let rows = leaf.live()?;
+            let rows = leaf.live_source()?;
             let builder =
                 LeafBuilder::new(page_size, tree, shape.columns.clone(), shape.key_columns)?;
             // **The same fill ladder the write path walked**, and for the same

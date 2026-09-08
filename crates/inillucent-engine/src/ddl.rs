@@ -1569,7 +1569,7 @@ impl ImportedDatabase {
         // same shape `create_vector_index` uses to backfill a store.
         let computed =
             index.partial_sql.is_some() || index.columns.iter().any(|key| key.expr_sql.is_some());
-        let entries = if computed {
+        let mut entries = if computed {
             self.index_entries_by_query(
                 &owner,
                 &index,
@@ -1597,6 +1597,10 @@ impl ImportedDatabase {
             refuse_duplicates(&entries, &order, &owner, &index, key_columns)?;
         }
         let uniqueness = checked.elapsed().as_nanos();
+        // The sort is finished and the uniqueness check with it, so everything
+        // only they needed goes back before the pack - which is the half of the
+        // statement the high-water mark is taken during.
+        entries.release_sort_scratch();
         // **No flat run any more, and the stage that made one reads zero.**
         // The packer used to need a slice, so the arena was flattened into a
         // `Vec<Datum>` in key order and sliced into a `Vec<&[Datum]>` - 6.4 MiB
