@@ -5,7 +5,7 @@
 # `inillucent-compat::obligations::the_registers_match_the_engine` fails if
 # this file and the engine disagree.
 
-count = 63
+count = 68
 
 [[pragma]]
 name = "analysis_limit"
@@ -53,6 +53,11 @@ columns = []
 takes_argument = true
 
 [[pragma]]
+name = "checkpoint_fullfsync"
+columns = []
+takes_argument = true
+
+[[pragma]]
 name = "collation_list"
 columns = ["seq", "name"]
 takes_argument = false
@@ -68,6 +73,11 @@ columns = []
 takes_argument = true
 
 [[pragma]]
+name = "data_store_directory"
+columns = []
+takes_argument = true
+
+[[pragma]]
 name = "data_version"
 columns = []
 takes_argument = true
@@ -76,6 +86,11 @@ takes_argument = true
 name = "database_list"
 columns = ["seq", "name", "file"]
 takes_argument = false
+
+[[pragma]]
+name = "default_cache_size"
+columns = []
+takes_argument = true
 
 [[pragma]]
 name = "defensive"
@@ -119,6 +134,11 @@ takes_argument = true
 
 [[pragma]]
 name = "full_column_names"
+columns = []
+takes_argument = true
+
+[[pragma]]
+name = "fullfsync"
 columns = []
 takes_argument = true
 
@@ -289,6 +309,11 @@ takes_argument = true
 
 [[pragma]]
 name = "temp_store"
+columns = []
+takes_argument = true
+
+[[pragma]]
+name = "temp_store_directory"
 columns = []
 takes_argument = true
 

@@ -241,7 +241,7 @@ fn a_tree_written_to_arbitrarily_still_agrees_with_a_btreemap() {
                     page
                 };
                 let path = ancestors(&tree, &database, page);
-                tree.make_room(&mut database, &mut log, page, &path, None)
+                tree.make_room(&mut database, &mut log, page, &path, None, 0)
                     .unwrap_or_else(|error| panic!("{context}: compaction failed: {error:?}"));
             }
             operations = operations.saturating_add(1);
@@ -401,7 +401,15 @@ fn a_tree_emptied_by_deletes_merges_and_still_agrees() {
     assert!(before > 8, "the fixture is not multi-leaf: {before}");
 
     // Every key but one in twenty, which empties most leaves entirely.
-    for key in 0..400i64 {
+    //
+    // **In descending key order**, because a merge needs the leaf the delete
+    // emptied *and* its right sibling to fit one page between them. Ascending,
+    // the right sibling is always the next full leaf, so whether a merge
+    // happens at all is a question about how many rows a page holds - which is
+    // a property of the fixture's page size and of how wide its slots are, not
+    // of the merge. Descending, the sibling has already been emptied, and the
+    // test asks about the merge.
+    for key in (0..400i64).rev() {
         if key % 20 == 0 {
             continue;
         }
@@ -565,4 +573,48 @@ fn every_read_path_agrees_over_a_written_to_tree() {
 
     tree.check(pool)
         .expect("integrity after the mixed workload");
+}
+
+#[test]
+fn a_bulk_built_leaf_compacts_rather_than_splitting() {
+    // **The regression this exists for**, measured on the gate's own fixture
+    // before it was fixed: one `UPDATE main_table SET key = key + 1 WHERE
+    // id % 20 = 0` - five thousand of a hundred thousand rows, *no rows added
+    // or removed* - took the `main_key` index from 57 pages to 113, because a
+    // leaf packed at `BULK_FILL` (0.9) can never be repacked into
+    // `COMPACT_FILL` (0.75) of a page, and a compaction that is refused splits.
+    let (mut database, mut tree, mut model) = fixture(4_096, 64, 3_000);
+    let mut log = NoLog::default();
+    let before = tree.leaf_count();
+    assert!(before > 4, "the fixture is too small to split anything");
+    // Replace every eighth row in place: the key stays, so the tree gains no
+    // rows at all and an honest page count cannot grow.
+    for key in (0..3_000i64).step_by(8) {
+        let label = format!("relabel-{key:06}").into_bytes();
+        tree.put(
+            &mut database,
+            &mut log,
+            &[
+                Datum::Int(key),
+                Datum::Text(&label),
+                Datum::Int(key * 3 + 1),
+            ],
+        )
+        .expect("the replacement lands");
+        model.insert(
+            key,
+            Row {
+                label,
+                counter: key * 3 + 1,
+            },
+        );
+    }
+    assert_agrees(&database, &tree, &model, "after replacing every eighth row");
+    let after = tree.leaf_count();
+    assert!(
+        after <= before + before / 8,
+        "the tree went from {before} leaves to {after} without gaining a row: \
+         a compaction was refused and split instead"
+    );
+    tree.check(database.pool()).expect("integrity");
 }

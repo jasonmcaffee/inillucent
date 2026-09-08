@@ -315,15 +315,17 @@ fn scan(tree: &Tree, shape: Shape) -> DbResult<Aggregate> {
             && keys.all_typed()
             && categories.all_typed();
         if fast {
-            let mut key_bytes = keys.inline_bytes().chunks_exact(8);
-            let mut category_bytes = categories.inline_bytes().chunks_exact(8);
+            // The stride is the leaf's, not the type's: an integer
+            // mini-column spends the narrowest of 1, 2, 4 and 8 bytes that
+            // holds its own values.
+            let mut key_bytes = keys.inline_bytes().chunks_exact(keys.width);
+            let mut category_bytes = categories.inline_bytes().chunks_exact(categories.width);
             loop {
                 let (Some(key), Some(category)) = (key_bytes.next(), category_bytes.next()) else {
                     break;
                 };
-                sum_key =
-                    sum_key.wrapping_add(i64::from_le_bytes(key.try_into().unwrap_or([0; 8])));
-                let value = i64::from_le_bytes(category.try_into().unwrap_or([0; 8]));
+                sum_key = sum_key.wrapping_add(inillucent_tree::types::read_int_slot(key));
+                let value = inillucent_tree::types::read_int_slot(category);
                 if value > max_category {
                     max_category = value;
                 }

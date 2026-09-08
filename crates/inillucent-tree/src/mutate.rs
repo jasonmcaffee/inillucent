@@ -188,11 +188,15 @@ impl<'p> LeafMut<'p> {
         let leaf = LeafRef::parse(self.page)?;
         let mut end = leaf_header::DIRECTORY.saturating_add(leaf.column_count().saturating_mul(8));
         for index in 0..leaf.column_count() {
-            let spec = leaf.spec(index)?;
             let entry = leaf_header::DIRECTORY.saturating_add(index.saturating_mul(8));
             let start = page::read_u32(self.page, entry.saturating_add(4))? as usize;
+            // The column directory's own width, not the physical type's: an
+            // integer column's slots may be one, two or four bytes wide, and a
+            // page whose end was computed at eight would leave the delta area
+            // and the tombstone bitmap floating above the free space they are
+            // supposed to be able to grow into.
             let width = class_bytes(leaf.row_count())
-                .saturating_add(leaf.row_count().saturating_mul(spec.physical.slot_width()));
+                .saturating_add(leaf.row_count().saturating_mul(leaf.column_width(index)?));
             end = end.max(align8(start.saturating_add(width)));
         }
         Ok(end)
@@ -585,13 +589,18 @@ impl<'p> LeafMut<'p> {
         row: usize,
         value: &Datum<'_>,
     ) -> DbResult<Applied> {
-        let (row_count, spec, class) = {
+        let (row_count, spec, width, class) = {
             let leaf = LeafRef::parse(self.page)?;
             if row >= leaf.row_count() {
                 return Err(misuse(format!("row {row} is not in the sorted region")));
             }
             let spec = leaf.spec(column)?;
-            (leaf.row_count(), spec, leaf.column(column)?.class_at(row)?)
+            (
+                leaf.row_count(),
+                spec,
+                leaf.column_width(column)?,
+                leaf.column(column)?.class_at(row)?,
+            )
         };
         // A row whose current value is a NULL or an exception has its class bit
         // set to something other than Typed, and changing that is a write into
@@ -605,9 +614,26 @@ impl<'p> LeafMut<'p> {
         let entry = leaf_header::DIRECTORY.saturating_add(column.saturating_mul(8));
         let base = page::read_u32(self.page, entry.saturating_add(4))? as usize;
         let values_at = base.saturating_add(class_bytes(row_count));
-        let at = values_at.saturating_add(row.saturating_mul(spec.physical.slot_width()));
+        let at = values_at.saturating_add(row.saturating_mul(width));
         let slot = match (spec.physical, value) {
-            (PhysicalType::Int64, Datum::Int(number)) => (*number) as u64,
+            (PhysicalType::Int64, Datum::Int(number)) => {
+                // **A narrow slot is a promise about the values in it, and an
+                // in-place write is the one place that promise can be broken.**
+                // A column laid out at one byte holds -128..=127; writing 300
+                // over one of them would truncate, so the write is refused and
+                // the caller's own route out - delete the row, insert it into
+                // the delta area, compact later at a width chosen from the new
+                // values - takes it instead.
+                if crate::types::int_slot_width(*number) > width {
+                    return Ok(Applied::NoRoom);
+                }
+                let target = self
+                    .page
+                    .get_mut(at..at.saturating_add(width))
+                    .ok_or_else(|| corrupt("an integer slot runs past the page"))?;
+                crate::types::write_int_slot(target, *number);
+                return Ok(Applied::Yes);
+            }
             (PhysicalType::Float64, Datum::Real(number)) => number.to_bits(),
             (PhysicalType::Float64, Datum::Int(number)) => (*number as f64).to_bits(),
             (PhysicalType::Text, Datum::Text(bytes)) | (PhysicalType::Blob, Datum::Blob(bytes)) => {
@@ -927,14 +953,20 @@ mod tests {
     #[test]
     fn a_slot_update_lands_and_the_rest_refuses() {
         let mut page = leaf_of(1_024, 8);
+        // The counter column holds 0, 10, ..., 70, so a leaf that narrows its
+        // slots gives it one byte and a four-figure value does not fit. What
+        // this test is about is that a slot update lands, so it writes a value
+        // the leaf's own width admits - and the refusal of one that does not is
+        // `a_value_too_wide_for_the_slot_is_refused`.
+        let replacement = if crate::leaf::NARROW_INT_SLOTS { 42 } else { 4_242 };
         let mut leaf = LeafMut::new(&mut page).expect("a leaf");
         assert_eq!(
-            leaf.update_slot(2, 3, &Datum::Int(4_242))
+            leaf.update_slot(2, 3, &Datum::Int(replacement))
                 .expect("an update"),
             Applied::Yes
         );
         let view = leaf.view().expect("the page parses");
-        assert_eq!(view.value(3, 2).expect("a value").as_int(), Some(4_242));
+        assert_eq!(view.value(3, 2).expect("a value").as_int(), Some(replacement));
         assert!(
             view.is_clean(),
             "a slot update took the leaf off the fast path"
@@ -955,6 +987,44 @@ mod tests {
     }
 
     /// An integer written into a `Float64` column is converted, not refused.
+    /// A value too wide for the leaf's own integer slot is refused rather than
+    /// truncated, and the page is left exactly as it was.
+    ///
+    /// The caller's route out is the one it already has for a slot it cannot
+    /// overwrite: delete the row, put the new one in the delta area, and let
+    /// the next compaction pick a width from the values it then holds.
+    #[test]
+    fn a_value_too_wide_for_the_slot_is_refused() {
+        if !crate::leaf::NARROW_INT_SLOTS {
+            return;
+        }
+        let mut page = leaf_of(4096, 8);
+        let before = page.clone();
+        let width = LeafRef::parse(&page).unwrap().column_width(2).unwrap();
+        assert_eq!(width, 1, "a column of small counters should be one byte");
+        let applied = LeafMut::new(&mut page)
+            .unwrap()
+            .update_slot(2, 0, &Datum::Int(1_000_000))
+            .unwrap();
+        assert_eq!(applied, Applied::NoRoom, "a wide value was written anyway");
+        assert_eq!(page, before, "a refused update still changed the page");
+        // A value that does fit still lands.
+        let applied = LeafMut::new(&mut page)
+            .unwrap()
+            .update_slot(2, 0, &Datum::Int(-42))
+            .unwrap();
+        assert_eq!(applied, Applied::Yes);
+        assert_eq!(
+            LeafRef::parse(&page)
+                .unwrap()
+                .value(0, 2)
+                .unwrap()
+                .as_int()
+                .unwrap(),
+            -42
+        );
+    }
+
     #[test]
     fn an_integer_into_a_real_column_is_converted() {
         let specs = vec![

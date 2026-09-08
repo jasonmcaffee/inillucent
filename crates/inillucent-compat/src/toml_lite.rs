@@ -395,12 +395,34 @@ tests = []
         assert_eq!(row.get("layer").and_then(Value::as_integer), Some(3));
     }
 
+    /// A plain table parses, which the subset refused until task-1869's
+    /// `[memory]` and `[cpu]` sections needed one.
+    ///
+    /// It is here because the refusal test below still asserted the old
+    /// behaviour after the parser gained it, so `cargo test -p
+    /// inillucent-compat` failed on its own lib target on every build - and
+    /// because cargo stops at the first failing target, that one stale line
+    /// was hiding the whole integration suite.
+    #[test]
+    fn a_plain_table_parses() {
+        let document = parse("[memory]
+bar = \"0.95\"
+").expect("the table parses");
+        assert_eq!(
+            document
+                .tables
+                .get("memory")
+                .and_then(|table| table.get("bar"))
+                .and_then(Value::as_str),
+            Some("0.95")
+        );
+    }
+
     /// Anything outside the subset must be refused with a line number, not
     /// skipped, so a mistyped row cannot silently disappear.
     #[test]
     fn anything_outside_the_subset_is_refused() {
         for (text, needle) in [
-            ("[table]\nkey = 1\n", "plain tables"),
             ("key\n", "expected `key = value`"),
             ("key = 1.5\n", "unsupported literal"),
             ("key = \"unterminated\n", "unterminated string"),

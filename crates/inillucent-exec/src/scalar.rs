@@ -75,6 +75,53 @@ pub fn to_value(datum: Datum<'_>) -> Value<'static> {
     }
 }
 
+/// One of the dialect's pattern operators, for a caller that has two values and
+/// needs the answer this crate already knows how to compute.
+///
+/// **It exists so the engine does not have to reach past this layer.** A virtual
+/// table's module may decline a `LIKE`, `GLOB` or `REGEXP` constraint, and what
+/// is left is the engine's to test - but `inillucent-engine` sits above
+/// `inillucent-scalar` with no edge to it, by the layering contract in
+/// `docs/invariants/layering.toml`, so the evaluation belongs here.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PatternOperator {
+    /// `subject LIKE pattern`, with `%` and `_`.
+    Like,
+    /// `subject GLOB pattern`, with `*`, `?` and character classes.
+    Glob,
+    /// `subject REGEXP pattern`, the port of `ext/misc/regexp.c`.
+    Regexp,
+}
+
+/// Reports whether one value matches a pattern under one of those operators.
+///
+/// Both sides are read as text, which is what the pipeline's own `Pattern`
+/// expression does. A pattern that will not compile matches nothing, which is
+/// the same answer `regexp()` gives.
+///
+/// @param op - which operator
+/// @param subject - the value being tested
+/// @param pattern - the pattern
+/// @param case_sensitive - `PRAGMA case_sensitive_like`, for `LIKE` only
+pub fn matches_pattern(
+    op: PatternOperator,
+    subject: &Value<'_>,
+    pattern: &Value<'_>,
+    case_sensitive: bool,
+) -> bool {
+    let subject = eval::text_bytes(subject, TextEncoding::Utf8);
+    let pattern = eval::text_bytes(pattern, TextEncoding::Utf8);
+    match op {
+        PatternOperator::Like => {
+            pattern::like_folding(&pattern, &subject, None, !case_sensitive)
+        }
+        PatternOperator::Glob => pattern::glob(&pattern, &subject),
+        PatternOperator::Regexp => inillucent_scalar::regexp::Regexp::compile(&pattern, false)
+            .map(|compiled| compiled.matches(&subject))
+            .unwrap_or(false),
+    }
+}
+
 /// Returns a `Value` as an owned datum.
 ///
 /// @param value - the value a function produced

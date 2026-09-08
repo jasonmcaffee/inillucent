@@ -344,3 +344,85 @@ fn a_module_and_an_ordinary_table_live_in_one_file() {
     pair.answers_agree("SELECT id FROM seed WHERE note = 'second'");
     pair.answers_agree("SELECT type, name FROM sqlite_schema ORDER BY name");
 }
+
+/// Returns the single integer one query answered with.
+///
+/// @param engine - the database to ask
+/// @param sql - a query returning one row of one integer
+fn one_number(engine: &mut ImportedDatabase, sql: &str) -> i64 {
+    let answered = engine
+        .execute_any(sql, &Params::new())
+        .unwrap_or_else(|error| panic!("{sql}: refused: {:?}", error.detail()));
+    match answered.rows.first().and_then(|row| row.first()) {
+        Some(OwnedDatum::Int(number)) => *number,
+        other => panic!("{sql} answered {other:?} rather than one integer"),
+    }
+}
+
+#[test]
+fn a_where_over_dbstat_is_applied() {
+    let Some(mut pair) = pair("dbstat") else {
+        return no_oracle();
+    };
+    pair.both("CREATE TABLE wide (id INTEGER PRIMARY KEY, body TEXT)");
+    for nth in 0..400usize {
+        pair.both(&format!(
+            "INSERT INTO wide VALUES ({nth}, '{}')",
+            "x".repeat(600)
+        ));
+    }
+    // **The filter used to be discarded outright.** `virtual_path` takes every
+    // offered predicate out of the residual on the promise that the scan puts
+    // back what it did not apply, and the branch that answers `dbstat` out of
+    // the connection returned before the recheck - so this query answered with
+    // every page in the file, and `SELECT name FROM dbstat WHERE name='wide'`
+    // answered with the name of a different tree.
+    let all = one_number(&mut pair.engine, "SELECT count(*) FROM dbstat");
+    let wide = one_number(
+        &mut pair.engine,
+        "SELECT count(*) FROM dbstat WHERE name = 'wide'",
+    );
+    let seeded = one_number(
+        &mut pair.engine,
+        "SELECT count(*) FROM dbstat WHERE name = 'seed'",
+    );
+    assert!(wide > 0, "the wide table has pages and dbstat found none");
+    assert!(
+        wide < all,
+        "a filtered dbstat returned {wide} of {all} pages: the predicate was dropped"
+    );
+    assert_eq!(
+        wide + seeded,
+        one_number(
+            &mut pair.engine,
+            "SELECT count(*) FROM dbstat WHERE name IN ('wide', 'seed')",
+        ),
+        "two names did not add up to the same pages as one and one"
+    );
+    // Every name a filtered scan reports is the name it was filtered to.
+    let answered = pair
+        .engine
+        .execute_any("SELECT DISTINCT name FROM dbstat WHERE name = 'wide'", &Params::new())
+        .expect("the query runs");
+    assert_eq!(answered.rows.len(), 1, "a filtered dbstat named other trees");
+}
+
+#[test]
+fn a_where_over_an_eponymous_function_is_applied() {
+    let Some(mut pair) = pair("eponymous") else {
+        return no_oracle();
+    };
+    pair.both("CREATE TABLE shaped (a INTEGER, b TEXT, c REAL)");
+    // A table-valued function's argument arrives as an `Eq` on its hidden
+    // column and is applied; a predicate on an ordinary column is the engine's
+    // to test, and was being dropped.
+    pair.answers_agree("SELECT name FROM pragma_table_info('shaped') WHERE name = 'b'");
+    pair.answers_agree("SELECT count(*) FROM pragma_table_info('shaped') WHERE type = 'TEXT'");
+    pair.answers_agree("SELECT name FROM pragma_table_info('shaped') WHERE cid > 0 ORDER BY cid");
+    // `LIKE`, `GLOB` and `REGEXP` used to be refused outright on a virtual
+    // table - the module had not promised them and the engine would not try -
+    // which turned statements SQLite answers into errors.
+    pair.answers_agree("SELECT value FROM json_each('[\"aa\",\"ab\",\"bb\"]') WHERE value LIKE 'a%'");
+    pair.answers_agree("SELECT value FROM json_each('[\"aa\",\"ab\",\"bb\"]') WHERE value GLOB 'a*'");
+    pair.answers_agree("SELECT name FROM pragma_table_info('shaped') WHERE name LIKE 'b%'");
+}

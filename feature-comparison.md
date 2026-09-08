@@ -64,26 +64,29 @@ this engine wins two of those three.
 | features both answer **differently** | - | 7 | **1.7%**, none of them silent |
 | vector features with no SQLite equivalent | 0 | 6 | **6 extra** |
 | **the surface audited against SQLite's own registers**, not against our case list | 218 functions, 67 pragmas, 19 modules, 5 collations, 65 dot commands | all called in both engines, and now **compared on every build** | **4 functions, 2 modules and 2 dot commands absent**, and the **silent difference is closed** - see [Is the feature list itself complete?](#is-the-feature-list-itself-complete) |
-| **Elapsed time**, weighted over the contract's ten families | the reference | 3.81x the speed | **74% less time** |
-| Elapsed time, the 95% lower bound the contract grades on | - | 3.55x | **72% less time** (bar: 67%) |
-| **Processor time**, same plan, one child process each | 1,242 ms | 406 ms | **67% less CPU** (bar: 60%) |
-| **Peak resident memory**, same plan, matched 128 MiB budget | 37.2 MiB | 53.3 MiB | **43% MORE memory** (was 102%; the bar asks for 5% *less*) |
+| **Elapsed time**, weighted over the contract's ten families | the reference | 3.71x the speed | **73% less time** |
+| Elapsed time, the 95% lower bound the contract grades on | - | 3.63x | **72% less time** (bar: 67%) |
+| **Processor time**, same plan, one child process each | 1,250 ms | 438 ms | **65% less CPU** (bar: 60%) |
+| **Peak resident memory**, same plan, matched 128 MiB budget | 37.2 MiB | 46.6 MiB | **25% MORE memory** (was 102%, then 43%; the bar asks for 5% *less*) |
+| **The database on disk**, the same fixture imported | 16.05 MiB | 17.90 MiB | **1.12x** (was 1.41x) |
 | Retrieval ranking, 17 graded comparisons against pgvector | the baseline | 15 better, 2 not worse | **none worse** |
 | Retrieval latency, unfiltered, p50 | 2.459 ms | 0.8954 ms | **64% less time** |
 | Retrieval latency, filtered to a minority source, p50 | 42.182 ms | 0.6631 ms | **98% less time** |
 
-**Read the three SQLite performance rows together.** inillucent finishes the same work in **a quarter
-of the time** while spending **less than a third of the processor**, so the speed is not bought by
-burning cores - and it holds **43% more memory** to do it, where it held 102% more before task-1869.
-The budget handed to the two engines is the same 128 MiB; what differs is how much of it each
-chooses to use.
+**Read the four SQLite performance rows together.** inillucent finishes the same work in **a quarter
+of the time** while spending **about a third of the processor**, so the speed is not bought by
+burning cores - and it holds **25% more memory** to do it, where it held 102% more before task-1869
+and 43% before task-1870. The budget handed to the two engines is the same 128 MiB; what differs is
+how much of it each chooses to use, and that is now mostly a question of how large the file is.
 
 That memory row is still the one thing on this page that is worse than SQLite, and it is now graded:
 `compat/perf/contract.toml` carries a memory bar and a processor bar, and the gate fails on them.
-[Where the memory goes](#where-the-memory-goes) has the per-workload attribution, the four changes
-that took 22 MiB off it, and the measurement that says the last 16 MiB is the **file format** rather
-than another buffer: this engine's transient is now *smaller* than SQLite's, and what is left is a
-`.rdb` that is 1.41x the `.db` plus a 4.25 MiB larger process floor.
+[Where the memory goes](#where-the-memory-goes) has the per-workload attribution, the changes that
+took 28.6 MiB off it, and what is left. task-1869's measurement said the remainder was the **file
+format** rather than another buffer; task-1870 acted on that - an integer mini-column is now as wide
+as its own values - and the file went from 1.41x the `.db` to **1.12x**, taking 4.74 MiB of page
+cache with it and making every read family *faster*. Of the 11.3 MiB still between this engine and
+its bar, **4.7 is the process floor** and the rest is the index build's own pages and arena.
 
 ---
 
@@ -1324,11 +1327,12 @@ second sizing pass, so the family's *time* is where it was while its *memory* ha
 
 ## Where the memory goes
 
-**The one row on this page that was worse than SQLite, taken apart and then acted on.** task-1861
-measured **75.25 MiB against SQLite's 37.19** - 102% more - and named four consumers. task-1869 went
-after them: the figure is now **53.3 MiB against 37.2**, **43% more**, and the attribution below is
-re-measured rather than edited. It also corrects one reading of the earlier table, and finds that the
-remaining gap is not where either ticket was looking.
+**The one row on this page that was worse than SQLite, taken apart and then acted on twice.**
+task-1861 measured **75.25 MiB against SQLite's 37.19** - 102% more - and named four consumers.
+task-1869 went after them and reached **53.3**. task-1870 then went after what task-1869's attribution
+said was left, which was not a buffer at all but the **file**: it is now **46.61 MiB against 37.19**,
+**25% more**, and the `.rdb` has gone from **1.41x** the `.db` to **1.12x**. Every number below is
+re-measured rather than edited.
 
 ### How the attribution is taken now
 
@@ -1336,52 +1340,107 @@ task-1861 found where the memory was by running the gate once per family and rea
 each run: seven runs to answer one question, at family granularity. The gate's memory child already
 walks the whole plan in one process, so it now reads its high-water mark **after every workload** and
 prints the steps, with the pool's own bytes beside them. One run, per-workload granularity, and the
-pool separated from everything else the process holds:
+pool separated from everything else the process holds. Both columns are the same plan at the same
+128 MiB budget, on the same box, minutes apart:
 
-| workload | peak MiB | rise MiB | rss MiB | pool MiB | other MiB |
-|---|---|---|---|---|---|
-| `(open)` - the file opened and the pool warmed | 28.39 | **28.39** | 28.39 | 20.00 | **8.39** |
-| every read workload, all fourteen of them | 28.45 | **0.06 total** | 28.45 | 20.00 | 8.45 |
-| `write.insert.batch` | 30.83 | 2.38 | 30.83 | 20.00 | 10.83 |
-| `write.update.indexed` | 32.71 | 1.88 | 30.84 | 20.00 | 10.84 |
-| `schema.index` | **45.15** | **12.45** | 32.95 | 20.00 | 12.95 |
-| every other workload | - | **0** | - | - | - |
+| workload | before task-1870 | | | after | | |
+|---|---|---|---|---|---|---|
+| | **peak** | pool | other | **peak** | pool | other |
+| `(open)` - the file opened and the pool warmed | 31.50 | 22.59 | 8.90 | **26.74** | **17.84** | 8.90 |
+| every read workload | 31.54 | 22.59 | 8.95 | 26.79 | 17.84 | 8.94 |
+| `write.insert.batch` | 34.73 | 22.94 | 11.55 | 30.92 | 18.19 | 12.20 |
+| `write.update.indexed` | 35.39 | 22.94 | 12.45 | 31.23 | 18.19 | 13.05 |
+| `write.upsert` | 36.59 | 22.94 | 12.53 | 32.49 | 18.19 | 13.18 |
+| `schema.index` | **51.35** | 29.84 | 12.23 | **46.61** | 24.66 | 12.78 |
 
-*(a 20 MiB budget, so the pool is at its cap throughout and every rise is heap.)*
-
-**That corrects the earlier table.** `large.values` at 37.48 MiB and `extension` at 33.14 in
-task-1861's family-by-family run are **31.5 MiB of open-and-warm plus about 6 and 1.6**; run in plan
-order neither moves the high-water mark at all. The memory was in exactly two places - one
-`CREATE INDEX`, and the writes holding their log - and one fixed cost.
+**Read the `other` column.** It does not move: 8.90 MiB of process floor at open in both, 12.2-12.8
+MiB at the peak in both. The whole 4.74 MiB is the **pool**, and the pool fell because the file did.
+That is the claim task-1869 ended on - *the cache costs what the file costs* - measured directly
+rather than inferred.
 
 ### What was fixed, each measured on its own
 
+task-1869's four changes took 75.20 MiB to 53.4: the redo buffer bounded to 512 KiB, the index build
+no longer holding three copies of the tree, a version log nothing was collecting, and the allocator's
+free list capped in bytes as well as blocks. They stand and are not repeated here.
+
+task-1870 added one change and it is a **format** change:
+
 | change | what it was | measured |
 |---|---|---|
-| **The redo buffer is bounded** - `SPILL_BYTES` = 512 KiB, flush rather than hold | `Wal::append` encoded into a buffer nothing wrote out until the commit, so it was the size of the transaction: `write.update.indexed` writes **7,927 KiB** of log and held every byte. The buffer is recycled rather than freed, so the capacity then stayed for the life of the process | **75.20 → 68.04 MiB.** Fifteen extra `write_all_at` calls on that round and **no** extra syncs |
-| **The index build streams its leaves** | `bulk_build` packed every leaf image into a `Vec<Vec<u8>>` before allocating the page run, because the run's length *is* the leaf count. `LeafBuilder::fit` answers that without encoding anything, so one image is live at a time | part of the 13 MiB below |
-| **The index build reads its rows out of the arena** | the packer took `&[R]`, so `CREATE INDEX` built a flat `Vec<Datum>` in key order **and** a `Vec<&[Datum]>` of slices into it - two copies of the whole input to satisfy a signature. `LeafBuilder::pack_rows` takes an indexed row source instead | **68.04 → 55.02 MiB**, and the `flatten` stage now reads 0.0 ms |
-| **The version log is collected** | `Engine::collect_versions` was written in Phase 3, tested, and then called by nothing but its own tests. Every before-image every write had ever published stayed for the life of the connection | a real unbounded-growth defect; small on a 30-round gate, unbounded on a long-lived connection |
-| **The allocator's free list is capped in bytes as well as blocks** | the cap was 1,024 *blocks* per class over classes whose sizes differ 256x, so the same number meant 16 KiB in the smallest class and **4 MiB** in the largest | **55.02 → 53.4 MiB.** 64 KiB per class under the old 1,024-block ceiling, so every class holds at most what it held before and the small hot ones are untouched |
+| **An integer mini-column is as wide as its own values** | an `Int64` slot was eight bytes whatever the value held, so `main_table`'s three integer columns cost 24 bytes a row where SQLite's record varints cost about five. The column directory has always carried a `slot_width` `u16` that no reader ever read; the builder now picks the narrowest of 1, 2, 4 and 8 that holds every typed value in the leaf, and every reader honours the directory - so a file written before this change reads unchanged, because its pages say eight | the `.rdb` **22.66 → 17.90 MiB**, the peak resident set **51.33 → 46.61**, and every read family *up*: `read.point` 27.06x → **30.49x**, `read.join` 3.98x → **4.44x**, `read.analytical` 6.08x → **6.68x** |
+| **A compaction that cannot use its preferred fill splits no more** | `BULK_FILL` is 0.9 and `COMPACT_FILL` is 0.75, and `make_room` refused a compaction unless every live row fitted in 0.75 of a page - which a leaf packed at 0.9 never does. So every bulk-built leaf **split on its first write, whatever the write was**, and the space was never recovered | one `UPDATE main_table SET key = key + 1 WHERE id % 20 = 0` took `main_key` from 57 pages to **113** and `main_category` from 85 to **117**; both now stay where they are after four rounds of it. SQLite, same statement: 307 pages before and after |
 
-### Where the rest of it is, and why it is not what was suspected
+### The file, tree by tree
 
-**This engine's transient is now smaller than SQLite's.** At a 20 MiB matched budget, one round:
-ours is 20.00 of pool + 8.45 fixed + 2.4 held by the writes + 12.45 for the index build; SQLite's peak
-of 36.15 is 4.2 of process floor + about 16 of cache + **15.9 MiB of its own transient** - most of it
-the sorter its own `CREATE INDEX` runs. The two index builds cost about the same.
+`dbstat` over a freshly imported medium fixture at 32 KiB pages, both builds, same fixture:
 
-What is left is two fixed quantities, and neither is on task-1861's list of suspects:
+| tree | shape | pages before | pages after | entries/page after |
+|---|---|---|---|---|
+| `main_table` | `(rowid, key, category, label, payload)` | 468 | **415** | 241 |
+| `main_category` | `(category, key, rowid)` | 85 | **34** | 2,941 |
+| `main_key` | `(key, rowid)` | 57 | **27** | 3,704 |
+| `side_table` | `(rowid, owner, note)` | 30 | **21** | 1,190 |
+| `side_owner` | `(owner, rowid)` | 15 | **6** | 4,167 |
+| `wide` | `(rowid, body)` - a text column | 58 | 58 | 6.9 |
+| **the file** | | **23,756,800 B** | **18,776,064 B** | |
+
+`main_category`'s leading column holds 64 distinct values and is therefore **one byte**, which is why
+it is the biggest winner. `wide` does not move at all, which is the check that nothing narrowed that
+should not have.
+
+### What it cost, and what would not buy it back
+
+The narrow slot is not free. Four 30-round runs each way, medians, lower bound in brackets:
+
+| family | wide | narrow |
+|---|---|---|
+| `read.point` | 27.06x (25.19x) | **30.49x (27.77x)** |
+| `read.join` | 4.08x (2.90x) | **4.44x (3.17x)** |
+| `read.analytical` | 6.08x (5.07x) | **6.68x (5.75x)** |
+| `read.range` | 4.18x (3.40x) | 4.19x (3.48x) |
+| `large.values` | 13.40x (9.35x) | 13.01x (9.33x) |
+| `schema` | 1.35x (1.31x) | 1.36x (1.30x) |
+| `extension` | 1.20x (1.02x) | 1.21x (1.04x) |
+| **`write`** | **2.03x (1.85x)** | 1.52x (1.31x) |
+| **`transaction`** | **1.45x (1.04x)** | 1.37x (1.00x) |
+| headline | **3.85x (3.71x)** | 3.71x (3.63x) |
+| processor time | 0.33x | 0.35x |
+| peak resident set | 51.33 MiB | **46.61 MiB** |
+
+The cost is in exactly three workloads and they have one cause: `write.insert.batch`
+**39.8 ms → 69.4**, `write.update.indexed` **48.6 → 95.6**, `write.delete` **15.4 → 22.4**. All three
+write `main_table` and its two indexes inside one transaction, and a compaction is one pass over
+every live row of a leaf - of which an index leaf now holds twice as many. `write.upsert`, which
+writes the one table that did **not** narrow, is unchanged at 2.86 → 2.84 ms.
+
+**`DELTA_LIMIT = 64` does not buy it back, and the negative result reproduces on both arms**, which
+is what makes it a result. Four runs each:
+
+| family | wide @32 | wide @64 | narrow @32 | narrow @64 |
+|---|---|---|---|---|
+| `write` | 2.03x (1.85x) | 2.13x (1.93x) | 1.52x (1.31x) | 1.54x (1.35x) |
+| `transaction` | 1.45x (1.04x) | 1.20x (0.88x) | 1.37x (1.00x) | 1.22x (0.85x) |
+| `large.values` | 13.40x (9.35x) | **6.84x (6.02x)** | 13.01x (9.33x) | **6.70x (5.81x)** |
+| headline | 3.85x (3.71x) | 3.74x (3.62x) | 3.71x (3.63x) | 3.58x (3.48x) |
+
+A larger delta area halves the compactions and makes every read of a written-to leaf walk twice as
+far, and the second effect is the larger one. `DELTA_LIMIT` stays at 32.
+
+### Where the rest of it is
+
+**This engine's transient is smaller than SQLite's and its file is now within 12% of SQLite's.** What
+is left is two quantities, and one of them is no longer the file:
 
 | | inillucent | SQLite | why |
 |---|---|---|---|
-| **the cached database** | 22.66 MiB | 16.05 MiB | the `.rdb` is **1.41x** the `.db`. A PAX leaf spends a fixed 8-byte slot per column where SQLite spends a 1-3 byte varint: `main_table`'s three integer columns cost 24 bytes a row here and about five there. That is the same choice that makes a point read 15-25x and a scan 6x, and it is paid again in the page cache |
-| **the process floor** | 8.45 MiB | 4.20 MiB | a Rust binary with the whole engine in it. `inillucent-shell.exe` is 8.05 MB against `sqlite-bench.exe`'s 1.34 MB, and resident code counts |
+| **the cached database** | 17.84 MiB | ~16 MiB | the `.rdb` is **1.12x** the `.db`, down from 1.41x. What remains is the class array's two bits a row, the eight-byte `(offset, length)` pair a text or blob slot still spends, and the page directory |
+| **the process floor** | 8.90 MiB | 4.20 MiB | a Rust binary with the whole engine in it. `inillucent-shell.exe` is 8.05 MB against `sqlite-bench.exe`'s 1.34 MB, and resident code counts |
+| **`schema.index`'s rise** | 14.11 MiB | ~15.9 MiB | the pages the new index occupies plus the sort's arena. Ours is the *smaller* of the two |
 
-Add those two differences - 6.6 and 4.25 - to a transient that is already the smaller of the two, and
-the 16 MiB that is left is accounted for exactly. **Beating SQLite's resident set at a matched budget
-therefore needs the leaf format, not another buffer**: until a row costs what SQLite's row costs, the
-cache costs what the file costs.
+**The bar is still missed: 1.25x against 0.95x, 46.61 MiB against the 35.33 it would need.** Of the
+11.3 MiB between them, **4.7 is the process floor** and the rest is the index build's own pages and
+arena - the two things named as follow-ups below, neither of which is the leaf format any more.
 
 ### Two causes, ruled out by task-1861 and still ruled out
 
@@ -1390,40 +1449,32 @@ cache costs what the file costs.
 | **the allocator** - a size-classed free list that recycles rather than returning pages | `inillucent-allocarm`, one binary, one code path, the allocator swapped by a flag | **86.7 MiB pooled against 84.3 MiB on the system allocator - 2.4 MiB**, and the free list is **13% less time**. What task-1869 changed is its *cap*, not the allocator: bounding the large classes recovered 1.6 MiB and left the headline where it was |
 | **the 32 KiB page size** - eight times SQLite's 4 KiB | the gate at four page sizes, the budget held at 128 MiB on both arms | **78.6 MiB at 4 KiB against 75.2 MiB at 32 KiB.** The larger page is *slightly smaller* in memory, and 4 KiB costs the headline as well - 3.51x against 3.89x |
 
-The third, **the process floor**, turns out to be half a real cause after all: 4.25 MiB of the
-remaining 16 is exactly it. `sqlite3` opens a database and runs `SELECT 1` in **4.2 MiB** and
-`inillucent-shell` in **6.0 MiB**, and the gate's child carries the plan on top of that.
+The third, **the process floor**, is now the largest single item left: 4.7 MiB of the remaining 11.3
+is exactly it. `sqlite3` opens a database and runs `SELECT 1` in **4.2 MiB** and `inillucent-shell`
+in **6.0 MiB**, and the gate's child carries the plan on top of that.
 
-### The pool default, decided by measurement and left where it was
+### The pool default, re-walked on the smaller file and left where it was
 
 `PRAGMA cache_size` answers **-131072** here - 128 MiB - and **-2000** in SQLite, and it is a real,
-working switch: a shell scanning 200,000 rows goes from 23.1 MiB to **7.6 MiB** at
-`cache_size = -250`, with the wall clock flat, landing within 6% of SQLite. So the obvious move is to
-turn the default down.
+working switch. task-1869 walked this ladder with a 22.66 MiB file; the file is now 17.90, so a 20
+MiB pool holds the whole database and the question is a different one. Seven budgets, twelve rounds
+each, on the shipping build:
 
-**The gate says not to.** The budget is matched - `fullgate` derives SQLite's `cache_size` from the
-pool's bytes - so lowering ours lowers theirs, and the two engines do not degrade at the same rate.
-Seven budgets, twelve rounds each, on the engine with every change above in it:
-
-| budget, both arms | inillucent | SQLite | ratio | weighted elapsed time (lower bound) |
+| budget, both arms | inillucent | SQLite | ratio | weighted headline (lower bound) |
 |---|---|---|---|---|
-| **128 MiB (the default)** | 55.1 MiB | 37.2 MiB | 1.48x | **3.91x (3.84x)** |
-| 32 MiB | 54.6 | 37.2 | 1.47x | 3.76x (3.65x) |
-| 24 MiB | 50.4 | 37.2 | 1.35x | 3.66x (3.58x) |
-| 20 MiB | 46.1 | 36.1 | **1.28x** | 3.45x (3.30x) |
-| 16 MiB | 42.4 | 33.0 | 1.29x | **2.82x (2.77x) - under the 3.00x bound** |
-| 8 MiB | 44.4 | 24.6 | 1.81x | - |
-| 4 MiB | 40.4 | 16.2 | 2.49x | - |
+| **128 MiB (the default)** | 46.32 MiB | 37.20 MiB | 1.25x | **3.61x (3.49x)** |
+| 32 MiB | 45.96 | 37.20 | 1.24x | 3.81x (3.58x) |
+| 24 MiB | 46.05 | 37.18 | 1.24x | 3.77x (3.73x) |
+| 20 MiB | 43.23 | 36.15 | **1.20x** | 3.61x (3.46x) |
+| 16 MiB | 40.52 | 32.97 | 1.23x | 3.37x (3.27x) |
+| 12 MiB | 36.51 | 29.19 | 1.25x | **2.40x (2.34x) - under the bound** |
+| 8 MiB | 32.23 | 24.60 | 1.31x | **2.47x (2.43x) - under the bound** |
 
-The ratio is worst at **both** ends and best at 20 MiB, which is the shape the two fixed costs
-predict: below the file's size our pool fills to the cap while SQLite's cache does not, and at 4 MiB
-our larger process floor is most of what is left. And 20 MiB costs the headline half a turn, with
-16 MiB putting it under the bound outright.
-
-**So the default stays at 4,096 frames.** Trading 0.46x of a headline that is met for 0.20x of a
-memory bar that is missed either way is not a trade worth making, and the large budget is what buys
-74% less time. `PRAGMA cache_size` remains the switch for a caller who wants the other end of this
-table. The bar it is judged against is in `compat/perf/contract.toml`, which now has one.
+**The answer is the same as task-1869's and for the same reason: the budget is matched.**
+`fullgate` derives SQLite's `cache_size` from the pool's bytes, so lowering ours lowers theirs, and
+the ratio never comes near 0.95 - the best rung is 1.20x and it costs the headline. Below 16 MiB the
+headline falls under the 3.00 bound outright. **So the default stays at 4,096 frames**, and
+`PRAGMA cache_size` remains the switch for a caller who wants the other end of this table.
 
 ### Two defaults, decided by measurement rather than by preference
 
@@ -1445,22 +1496,23 @@ here is a guess: every row names the measurement or the file it comes from.
 ### Against the first goal - a highly performant SQLite replacement
 
 The headline gap was **memory**: 102% more than SQLite on the same plan under the same budget, with
-the goal being to hold **less**. It is now **44% more**, the contract grades it, and
+the goal being to hold **less**. It is now **25% more**, the contract grades it, and
 [Where the memory goes](#where-the-memory-goes) says exactly what the remaining difference is made
-of - which is not what either ticket suspected.
+of - which is no longer the leaf format, because task-1870 fixed that.
 
 | # | gap | state | measured |
 |---|---|---|---|
 | 1 | **The contract graded no memory and no processor time at all** | **closed** | `compat/perf/contract.toml` has a `[memory]` bar of **0.95x** and a `[cpu]` bar of **0.40x**, both ratios of SQLite's on the same plan and the same budget, both read off the gate's child-process pair and printed in its verdict, and both folded into `passed`. They were written **before** the optimisation work, which is the only order in which a bar is a bar |
-| 2 | **The index build was the largest single consumer of memory on the board** | **most of the way** | 28.87 MiB of rise at a 128 MiB budget, now **12.45**. The leaf images no longer accumulate (`LeafBuilder::fit` counts the run without encoding it) and the flat `Vec<Datum>` and its slice vector are gone (`LeafBuilder::pack_rows` reads the arena). What is left is the sort's own arena - **spilling it costs about 8 ms of a 27 ms statement**, which would put `schema` under its 1.00x floor, so it is a follow-up rather than a change made here |
+| 2 | **The index build is the largest single consumer of memory on the board** | **most of the way, and now the largest item left** | 28.87 MiB of rise at a 128 MiB budget, now **14.11** - of which about half is the pages the new index legitimately occupies. The leaf images no longer accumulate (`LeafBuilder::fit` counts the run without encoding it) and the flat `Vec<Datum>` and its slice vector are gone (`LeafBuilder::pack_rows` reads the arena). What is left is the sort's own arena - **spilling it costs about 8 ms of a 27 ms statement**, which would put `schema` under its 1.00x floor, so it is a follow-up rather than a change made here |
 | 3 | **The redo buffer was held whole** | **closed** | `SPILL_BYTES` = 512 KiB. One round of `write.update.indexed` writes 7,927 KiB of log and now holds at most half a megabyte of it; **75.20 → 68.04 MiB**, fifteen extra writes, no extra syncs |
 | 4 | **Large values were said to be materialised where SQLite streams them** | **not a gap where it was thought to be** | `large.values` at 37.48 MiB in the family-by-family run is 31.5 MiB of open-and-warm plus about 6. Run in plan order, `large.read` and `large.write` **do not move the high-water mark at all**. The 6 MiB is worth having and is a follow-up; it was never the 405% the family table implied |
 | 5 | **FTS5's build accumulates** | **open** | 1.6 MiB above the baseline in isolation, and 0.28-0.48x on time. Both have one cause: **2,000 tree row writes per 500 documents** - `%_content`, `%_docsize`, then 507 dictionary rows and 507 doclists at the flush - where SQLite writes about 1,000 rows and one segment blob. The fix is the segment format, and it is the same change for the time bar |
 | 6 | **The page pool's default was not a decision anybody made** | **decided, and left where it was** | seven budgets, twelve rounds each, both numbers read off every one - the table in [Where the memory goes](#where-the-memory-goes). The ratio is worst at both ends and best at 20 MiB (1.28x), and 20 MiB costs the headline 3.91x → 3.45x while 16 MiB puts it **under the 3.00x bound**. Trading a met headline for a missed memory bar is not a trade; `PRAGMA cache_size` remains the switch |
-| 7 | **The memory bar itself is missed** | **open, and the cause is measured** | 1.43x against a 0.95x bar. This engine's *transient* is now **smaller** than SQLite's (14.85 MiB against 15.9). The whole remaining gap is two fixed quantities: the `.rdb` is **1.41x** the `.db` because a PAX leaf spends a fixed 8-byte slot per column where SQLite spends a varint, so the cache costs what the file costs; and the process floor is **8.45 MiB against 4.20**, most of it an 8 MB Rust binary against a 1.3 MB C one. **Beating SQLite here needs the leaf format, not another buffer** |
+| 7 | **The memory bar itself is missed** | **open, and one of its two halves is closed** | 1.25x against a 0.95x bar, down from 1.43x. task-1869 said the remaining gap was the file rather than a buffer, and task-1870 acted on it: an integer mini-column is as wide as its own values, the `.rdb` went **22.66 → 17.90 MiB** (1.41x the `.db` → **1.12x**), and the pool fell 22.59 → 17.84 with the process heap unmoved - so the attribution was right. Of the 11.3 MiB left, **4.7 is the process floor** (8.90 against SQLite's 4.20) and the rest is `schema.index`'s own pages and arena. The pool budget was re-walked on the smaller file and still cannot reach the bar |
 | 8 | **`open.prepare` straddles the floor** and misses its bar on every run | **open** | `prepare.trivial` - `SELECT 1`, compiled per iteration - takes 1,258 ns against SQLite's 420, in 25 allocations. `inillucent-prepareprofile` breaks it down: 320 ns to parse, 476 to bind, 608 to build the pipeline |
 | 9 | **`schema` misses its elapsed-time bar by an order of magnitude** | **open** | 1.29-1.34x against a bar of 3.00x. The stage breakdown says where: `scan 3.6 ms, sort 5.6, flatten 0.0, pack 11.5, catalog 0.2, seal 5.6` of 27 ms. `flatten` was 1.0 ms before this ticket and is now free; `pack` absorbed 4.5 ms of it, which is what the second sizing pass costs |
 | 10 | **`txn.large` and `write.insert.batch` are the two slowest workloads on the board** | **open** | 0.18-0.23x and 0.52-0.62x. Both are 2,000 statements in one transaction, where SQLite's per-statement cost is tiny and this engine's is a log record and a page touch |
+| 10a | **A compaction costs one pass over a leaf, and a leaf now holds twice as many rows** | **open, with a measured cause and a rejected fix** | task-1870's narrow integer slot took the `write` family from 2.03x to **1.52x**: `write.insert.batch` 39.8 → 69.4 ms, `write.update.indexed` 48.6 → 95.6, `write.delete` 15.4 → 22.4. All three write `main_table` and its two indexes in one transaction; `write.upsert`, on the one table that did not narrow, is unchanged. **`DELTA_LIMIT = 64` does not buy it back** - measured on both arms, it costs `large.values` half and `transaction` its floor and moves `write` not at all |
 | 11 | **The C API is 53 symbols against SQLite's ~290** | open | `drivers/abi.toml`. Serialize/deserialize, incremental blob I/O, the authorizer, the hooks, the progress handler, tracing, `unlock_notify`, snapshots, a caller-supplied VFS |
 | 12 | **Single-threaded.** SQLite has three threading modes; multi-*process* access landed in task-1860 and threading did not | open | the architecture table below |
 | 13 | **One language binding.** Python, standard library only | open | `drivers/bindings` |

@@ -153,6 +153,55 @@ const SPLIT_FILL: f64 = 0.50;
 /// descents, and twice the file.
 const APPEND_FILL: f64 = 0.95;
 
+/// The fill a compaction falls back to before it gives up and splits.
+///
+/// **Without it, every bulk-built leaf split on its first write, whatever the
+/// write was.** [`crate::tree::BULK_FILL`] is 0.9 and [`COMPACT_FILL`] is 0.75,
+/// and a compaction was refused unless every live row fitted in 0.75 of a page -
+/// which a leaf packed at 0.9 never does. So an import's leaves, and a
+/// `CREATE INDEX`'s, split at [`SPLIT_FILL`] the moment anything touched them,
+/// and the space was never recovered.
+///
+/// It was measured on the gate's own fixture, at 32 KiB pages. One
+/// `UPDATE main_table SET key = key + 1 WHERE id % 20 = 0` - the gate's
+/// `write.update.indexed`, five thousand of a hundred thousand rows, **no rows
+/// added or removed** - took `main_key` from 57 pages to 113 and
+/// `main_category` from 85 to 117. SQLite, the same statement on the same
+/// fixture, went from 307 pages to 307.
+///
+/// Ninety-five rather than a hundred so that a leaf which has just been
+/// compacted tight still has room for the delta rows that follow; the caller
+/// also checks the packed image against [`LeafMut::room_for`], so a compaction
+/// is only taken when the write that asked for it will actually land.
+const TIGHT_FILL: f64 = 0.95;
+
+/// Packs every live row of a leaf into one page, at the loosest fill that holds
+/// them all.
+///
+/// `None` when they do not fit one page at any of the fills, which is the
+/// caller's signal to split.
+///
+/// **Recovery calls this too, and that is what makes it a function rather than a
+/// loop inside `make_room`.** A `CompactLeaf` record carries no page image when
+/// the compaction moved nothing out of line; redo re-runs the pack over the same
+/// rows and must land on the same bytes, so the fill has to be chosen from the
+/// rows and nothing else.
+///
+/// @param builder - the leaf builder for this tree
+/// @param rows - the leaf's live rows, sorted
+pub fn compact_image(builder: &LeafBuilder, rows: &[Vec<Datum<'_>>]) -> DbResult<Option<Vec<u8>>> {
+    for fill in [COMPACT_FILL, TIGHT_FILL] {
+        // `pack_all` rather than `pack`: a rung that cannot hold every row
+        // costs one sizing pass here, where `pack` would encode a whole page
+        // image and then have it discarded. A leaf that arrived from a bulk
+        // build fails the first rung every time.
+        if let Some(page) = builder.pack_all(rows, fill)? {
+            return Ok(Some(page));
+        }
+    }
+    Ok(None)
+}
+
 /// Where a mutation writes its log records.
 ///
 /// A trait rather than a direct dependency on the transaction manager, because
@@ -494,7 +543,7 @@ impl PagedTree {
                         "a leaf had no room for one row after being compacted and split",
                     ));
                 }
-                self.make_room(database, log, page, &path, Some(&key))?;
+                self.make_room(database, log, page, &path, Some(&key), encoded_row.len())?;
                 continue;
             }
             // Recorded here rather than above the room check, because a retry
@@ -622,7 +671,7 @@ impl PagedTree {
                 LeafMut::new(bytes)?.has_room_for_a_tombstone()
             })?;
             if !room {
-                self.make_room(database, log, page, &path, None)?;
+                self.make_room(database, log, page, &path, None, 0)?;
                 return self.delete(database, log, key);
             }
         }
@@ -794,6 +843,7 @@ impl PagedTree {
         page: PageId,
         path: &[PageId],
         arriving: Option<&[Datum<'_>]>,
+        needed: usize,
     ) -> DbResult<()> {
         // **Packed straight out of the page.** The rows a compaction repacks are
         // already in a leaf, where a text or a blob is a slice; copying them to
@@ -875,17 +925,31 @@ impl PagedTree {
                 self.columns().to_vec(),
                 self.key_columns(),
             )?;
-            match builder.pack(&rows, COMPACT_FILL)? {
-                Packed::Filled {
-                    page: image,
-                    rows: packed,
-                } if packed == rows.len() => {
-                    Fit::Compact(image, leaf.right_sibling(), leaf.max_cts())
+            // **Two fills, and a split only when neither of them holds the
+            // rows.** The preferred fill leaves the delta room `COMPACT_FILL`
+            // exists to leave; the tight one is what stands between a leaf that
+            // arrived at 0.9 from a bulk build and two leaves at 0.5. See
+            // `TIGHT_FILL`.
+            //
+            // **The room check is on the chosen image, not part of the
+            // choosing.** Recovery replays a compaction by running
+            // `compact_image` again over the same rows, and it has no idea what
+            // row the write was making room for - so the fill has to be a
+            // function of the rows alone, or the replayed page would differ from
+            // the logged one. A compaction whose page has no room for the
+            // arriving row is therefore not a tighter compaction, it is a split.
+            let mut compacted = compact_image(&builder, &rows)?;
+            if let Some(image) = compacted.as_mut() {
+                if !LeafMut::new(image)?.room_for(needed)? {
+                    compacted = None;
                 }
+            }
+            match compacted {
+                Some(image) => Fit::Compact(image, leaf.right_sibling(), leaf.max_cts()),
                 // A split rewrites three pages and needs the rows to outlive the
                 // guard, so this is where they are copied - and a split is the
                 // rarer half by a wide margin.
-                _ => Fit::Split(
+                None => Fit::Split(
                     rows.iter()
                         .map(|row| row.iter().map(OwnedDatum::from_datum).collect())
                         .collect(),
