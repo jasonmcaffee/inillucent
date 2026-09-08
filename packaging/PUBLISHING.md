@@ -10,6 +10,20 @@ one decision that is not a script's to make.
 
 ---
 
+## Where it stands, at a glance
+
+Nothing is published yet. Updated 2026-09-08 after task-1836 pushed each route as
+far as it would go.
+
+| route | state | what it is waiting on |
+|---|---|---|
+| **npm** | ready; dry run clean, packages packed and installed from their tarballs | **Jason's npm password** (or a granular token). Not the OTP — see below |
+| **PyPI** | ready; wheel built and installed into a clean venv | **an account**, deliberately not created: it would need a password and a 2FA secret Jason would not hold |
+| **crates.io** | ready; `--workspace --dry-run` clean for all 30 crates | a token, **and the decision to make the source public** |
+| **Homebrew** | formula written, checksums scripted | a public repository, the tap, and the macOS/Linux archives |
+| **Go** | verified; `go vet` clean, 5 tests pass | a public repository and one tag |
+| **Packagist** | verified; `composer install` works end to end | a public repository and a Packagist account |
+
 ## The decision that comes first
 
 **Three of the six routes require the repository to be public**, and it is
@@ -113,10 +127,44 @@ The shape is esbuild's: `inillucent` is a shim with four
 only the one that runs on the machine. No postinstall, no download at install
 time, so `npm ci` works offline and behind a proxy.
 
-**Missing**: a valid npm token. `~/.npmrc` has one and it is **expired** —
-`npm whoami` answers `401 Unauthorized`. The account exists; the token needs
-renewing with `npm login`, which needs a browser and the one-time code npm mails
-or prompts for.
+**Missing: Jason's npm password.** Not the token, and not the emailed code —
+those were both chased down and neither is the thing in the way. What was
+established, on 2026-09-08:
+
+- `~/.npmrc` holds an `npm_…` token and it is **dead**: a direct
+  `GET /-/whoami` against the registry with it answers **401**.
+- The account exists and is **`jasonmcaffee`**, registered to
+  **`jasonlmcaffee@gmail.com`** — which *is* the mailbox Nikaya indexes, so the
+  email route was available in principle.
+- `npm login --auth-type=legacy` prompts **Username → Password → OTP**, in that
+  order.
+- **The emailed OTP is the second factor, not a way past the first.** npm's own
+  mail says so: *"It looks like you are trying to log in to npm using your
+  username and password. As an **additional** security measure you are requested
+  to enter the OTP code."* npm only sends that mail **after** the password is
+  accepted — so without the password no code is ever sent, and there is nothing
+  to go and read.
+- The Nikaya corpus was 10 days stale, so it was **synced** (`nikaya-server
+  sync`: 269 messages fetched, `lastIncrementalAt` moved from `2026-08-29T04:00Z`
+  to `2026-09-08T22:24Z`) and searched again. No npm mail from today, for the
+  reason above. The mail route itself works — the corpus holds mail through
+  2026-09-05 — it just has nothing to deliver here.
+- The **web** flow (`npm login`, the default) was the one path that could have
+  skipped the password by reusing a signed-in browser session. It cannot:
+  **neither the Chrome nor the Edge profile on this machine holds a single
+  npmjs.com cookie**, so that flow lands on a fresh sign-in page.
+
+So it is one command once you supply the password:
+
+```sh
+npm login --auth-type=legacy     # username jasonmcaffee, your password, then the
+                                 # code npm emails to jasonlmcaffee@gmail.com
+node packages/npm/build.mjs --publish
+```
+
+A **granular access token** made at <https://www.npmjs.com/settings/jasonmcaffee/tokens>
+works just as well and is better for a machine: put it in `~/.npmrc` as
+`//registry.npmjs.org/:_authToken=…` and the publish needs no login at all.
 
 **Note**: only `@inillucent/cli-win32-x64` can be built here. The other three
 platform packages need their archives from step 0. Publishing the wrapper
@@ -140,9 +188,21 @@ returned rows. It carries the four binaries, the shared library, the header and
 the reference driver binding, so `pip install inillucent` gets a command *and*
 an in-process driver with no compiler.
 
-**Missing**: a PyPI account and an API token. PyPI has required two-factor
-authentication for uploads since 2024, so this needs an authenticator app that
-belongs to a person.
+**Missing: a PyPI account, and it is deliberately not created.** There is no
+account and no `~/.pypirc` on this machine. Creating one means choosing a
+password *and* binding a second factor — PyPI has required 2FA for uploading
+since January 2024, and an API token cannot be minted without it. Both of those
+credentials would then be held by whoever created the account rather than by
+Jason, which is worse than not having the package published: it is an account in
+his name that he cannot get into.
+
+So this one stops here on purpose. Sign up, enable 2FA on your own authenticator,
+mint an API token, and then:
+
+```sh
+python -m pip install build twine
+python packages/python/build.py --publish
+```
 
 **Note**: PyPI refuses a plain `linux_x86_64` wheel; the Linux one has to be
 built in a `manylinux` container. `build.py` says so rather than uploading
