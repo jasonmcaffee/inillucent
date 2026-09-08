@@ -48,6 +48,11 @@ pub enum Vector<'p> {
         /// anything else, which is the property the vectorised paths need; what
         /// changes is the stride, and every dense loop takes it as a parameter.
         width: usize,
+        /// What the slots are measured from; see `LEAF_WIDE_DIRECTORY`.
+        ///
+        /// Zero for a column with no frame of reference, which is the case the
+        /// decode has a branch-free path for.
+        base: i64,
         /// Two bits per row, or `None` when every row is typed.
         class: Option<&'p [u8]>,
     },
@@ -71,8 +76,10 @@ pub enum Vector<'p> {
     /// difference between those two is what a text read costs over an integer
     /// one, and most of it was a class byte nobody needed to look at.
     Variable {
-        /// `rows * 8` bytes, each an offset and a length into the page.
+        /// `rows * width` bytes, each an offset and a length into the page.
         slots: &'p [u8],
+        /// How many bytes one slot occupies: four of `u16`s or eight of `u32`s.
+        width: usize,
         /// The whole page, which the slots address absolutely.
         page: &'p [u8],
         /// Whether the bytes are text rather than a blob.
@@ -102,9 +109,10 @@ impl<'p> Vector<'p> {
             Vector::Int64 {
                 bytes,
                 width,
+                base,
                 class,
             } => match class_at(*class, row)? {
-                ValueClass::Typed => Ok(Datum::Int(read_slot(bytes, *width, row))),
+                ValueClass::Typed => Ok(Datum::Int(read_slot(bytes, *width, *base, row))),
                 ValueClass::Null => Ok(Datum::Null),
                 // An exception in a typed vector is impossible: the scan puts a
                 // leaf with exceptions on the `Column` path instead. So is an
@@ -113,24 +121,22 @@ impl<'p> Vector<'p> {
                 ValueClass::Exception | ValueClass::Extent => Ok(Datum::Null),
             },
             Vector::Float64 { bytes, class } => match class_at(*class, row)? {
-                ValueClass::Typed => Ok(Datum::Real(f64::from_bits(read_slot(bytes, 8, row) as u64))),
+                ValueClass::Typed => Ok(Datum::Real(f64::from_bits(
+                    read_slot(bytes, 8, 0, row) as u64
+                ))),
                 _ => Ok(Datum::Null),
             },
-            Vector::Variable { slots, page, text } => {
-                let at = row.saturating_mul(8);
-                let Some(slot) = slots.get(at..at.saturating_add(8)) else {
+            Vector::Variable {
+                slots,
+                width,
+                page,
+                text,
+            } => {
+                let at = row.saturating_mul(*width);
+                let Some(slot) = slots.get(at..at.saturating_add(*width)) else {
                     return Ok(Datum::Null);
                 };
-                let offset = u32::from_le_bytes(
-                    slot.get(..4)
-                        .and_then(|half| half.try_into().ok())
-                        .unwrap_or([0; 4]),
-                ) as usize;
-                let length = u32::from_le_bytes(
-                    slot.get(4..)
-                        .and_then(|half| half.try_into().ok())
-                        .unwrap_or([0; 4]),
-                ) as usize;
+                let (offset, length) = inillucent_tree::types::read_heap_slot(slot);
                 let bytes = page
                     .get(offset..offset.saturating_add(length))
                     .unwrap_or(&[]);
@@ -156,10 +162,12 @@ impl<'p> Vector<'p> {
             Vector::Int64 {
                 bytes,
                 width,
+                base,
                 class: None,
             } => Some(DenseInts {
                 bytes,
                 width: *width,
+                base: *base,
             }),
             _ => None,
         }
@@ -187,6 +195,7 @@ impl<'p> Vector<'p> {
             PhysicalType::Int64 if column.all_typed() => Vector::Int64 {
                 bytes: column.inline_bytes(),
                 width: column.width,
+                base: column.base,
                 class: None,
             },
             PhysicalType::Float64 if column.all_typed() => Vector::Float64 {
@@ -195,6 +204,7 @@ impl<'p> Vector<'p> {
             },
             PhysicalType::Text | PhysicalType::Blob if column.all_typed() => Vector::Variable {
                 slots: column.inline_bytes(),
+                width: column.width,
                 page: column.page_bytes(),
                 text: column.physical == PhysicalType::Text,
             },
@@ -208,10 +218,10 @@ impl<'p> Vector<'p> {
 /// @param bytes - the value array
 /// @param width - how many bytes one slot occupies
 /// @param row - the row's position
-fn read_slot(bytes: &[u8], width: usize, row: usize) -> i64 {
+fn read_slot(bytes: &[u8], width: usize, base: i64, row: usize) -> i64 {
     let at = row.saturating_mul(width);
     match bytes.get(at..at.saturating_add(width)) {
-        Some(slice) => inillucent_tree::types::read_int_slot(slice),
+        Some(slice) => inillucent_tree::leaf::from_frame(base, width, slice),
         None => 0,
     }
 }
@@ -229,6 +239,8 @@ pub struct DenseInts<'p> {
     bytes: &'p [u8],
     /// How many bytes one value occupies: 1, 2, 4 or 8.
     width: usize,
+    /// What those values are measured from.
+    base: i64,
 }
 
 impl<'p> DenseInts<'p> {
@@ -240,6 +252,7 @@ impl<'p> DenseInts<'p> {
         DenseInts {
             bytes,
             width: width.max(1),
+            base: 0,
         }
     }
 
@@ -258,7 +271,7 @@ impl<'p> DenseInts<'p> {
     /// @param row - the value's position in the run
     #[inline]
     pub fn get(&self, row: usize) -> i64 {
-        read_slot(self.bytes, self.width, row)
+        read_slot(self.bytes, self.width, self.base, row)
     }
 
     /// Returns the sub-run `from..to`, clamped to what the run holds.
@@ -274,6 +287,7 @@ impl<'p> DenseInts<'p> {
         DenseInts {
             bytes: self.bytes.get(start..end).unwrap_or(&[]),
             width: self.width,
+            base: self.base,
         }
     }
 
@@ -286,6 +300,43 @@ impl<'p> DenseInts<'p> {
     /// @param visit - what to do with each value
     #[inline]
     pub fn for_each(&self, mut visit: impl FnMut(i64)) {
+        // **The base is added once per value, and only when there is one** -
+        // and the width is matched here rather than inside the loop, for the
+        // same reason the unframed arms below do it. A version that called a
+        // width-taking helper per value cost `read.analytical` more than half
+        // its ratio.
+        if self.base != 0 {
+            let base = self.base;
+            match self.width {
+                1 => {
+                    for byte in self.bytes {
+                        visit(base.wrapping_add(i64::from(*byte)));
+                    }
+                }
+                2 => {
+                    for chunk in self.bytes.chunks_exact(2) {
+                        visit(base.wrapping_add(i64::from(u16::from_le_bytes(
+                            chunk.try_into().unwrap_or([0; 2]),
+                        ))));
+                    }
+                }
+                4 => {
+                    for chunk in self.bytes.chunks_exact(4) {
+                        visit(base.wrapping_add(i64::from(u32::from_le_bytes(
+                            chunk.try_into().unwrap_or([0; 4]),
+                        ))));
+                    }
+                }
+                _ => {
+                    for chunk in self.bytes.chunks_exact(8) {
+                        visit(base.wrapping_add(u64::from_le_bytes(
+                            chunk.try_into().unwrap_or([0; 8]),
+                        ) as i64));
+                    }
+                }
+            }
+            return;
+        }
         match self.width {
             1 => {
                 for byte in self.bytes {

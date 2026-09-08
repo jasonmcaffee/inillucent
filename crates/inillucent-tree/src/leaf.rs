@@ -52,7 +52,8 @@ use inillucent_pool::extent::{ExtentRef, EXTENT_REF_BYTES};
 use crate::datum::Datum;
 use crate::page::{self, header, PageId, PageKind};
 use crate::types::{
-    int_slot_width, read_int_slot, write_int_slot, ColumnSpec, PhysicalType, ValueClass,
+    heap_slot_width, int_slot_width, read_heap_slot, read_int_slot, read_slot_offset,
+    write_heap_slot, write_int_slot, write_slot_offset, ColumnSpec, PhysicalType, ValueClass,
     COLUMN_ALL_TYPED, COLUMN_KEY,
 };
 
@@ -87,6 +88,19 @@ pub const LEAF_HAS_DELTA: u8 = 0b0000_0100;
 /// Bit 3: some class array holds a value stored out of line in a blob extent.
 pub const LEAF_HAS_EXTENTS: u8 = 0b0000_1000;
 
+/// Bit 4: the column directory's entries are sixteen bytes, not eight.
+///
+/// **The eight extra bytes are a per-column base**, which is what lets an
+/// integer column spend one byte a row on values that span a hundred thousand:
+/// a leaf of an index holds a contiguous *run* of its key, so the range inside
+/// one page is small even when the column's range is not, and a slot holds the
+/// distance from the base rather than the value.
+///
+/// It is a flag rather than a version because it is a property of the page. A
+/// leaf written before this existed has the bit clear, its entries are eight
+/// bytes and its bases are zero, and it reads exactly as it always did.
+pub const LEAF_WIDE_DIRECTORY: u8 = 0b0001_0000;
+
 /// The divisor that decides when a value is stored out of line.
 ///
 /// The TDD's rule, quoted: "A value longer than `page_size / 8` (4 KiB at the
@@ -103,8 +117,24 @@ pub const EXTENT_DIVISOR: usize = 8;
 /// compaction's memmove is amortised across this many inserts.
 pub const DELTA_LIMIT: usize = 32;
 
-/// The size of one column directory entry.
+/// The size of one column directory entry, without a base.
 const DIRECTORY_ENTRY: usize = 8;
+
+/// The size of one column directory entry that carries a base.
+const DIRECTORY_ENTRY_WIDE: usize = 16;
+
+/// Whether the builder gives integer columns a frame of reference.
+///
+/// **A width is chosen from a column's *range*, not its magnitude, once there is
+/// a base to measure from.** `main_key` is `(key, rowid)` and its leaves hold
+/// contiguous runs of `key`, so a leaf spans about three and a half thousand of
+/// the hundred thousand distinct values in it: four bytes without a base and two
+/// with one. `main_table`'s `id` spans about two hundred and eighty inside a
+/// leaf and needs one.
+///
+/// Requires [`NARROW_INT_SLOTS`]: the base exists to make the width smaller, and
+/// with a fixed eight-byte slot there is no width to make smaller.
+pub const FRAME_OF_REFERENCE: bool = true;
 
 /// Whether the builder narrows an integer mini-column's slots.
 ///
@@ -184,6 +214,8 @@ struct IntegerGuide<'p> {
     values: &'p [u8],
     /// How many bytes one of its slots occupies.
     width: usize,
+    /// What those slots are measured from.
+    base: i64,
     /// The value being looked for.
     target: i64,
 }
@@ -226,7 +258,7 @@ impl IntegerGuide<'_> {
             .values
             .get(at..at.saturating_add(self.width))
             .ok_or_else(|| corrupt(format!("row {row} is past the key column")))?;
-        Ok(read_int_slot(slice))
+        Ok(from_frame(self.base, self.width, slice))
     }
 }
 
@@ -237,6 +269,9 @@ impl IntegerGuide<'_> {
 /// its columns.
 #[derive(Clone, Copy, Debug)]
 pub struct LeafRef<'p> {
+    /// How many bytes one column directory entry occupies: eight, or sixteen
+    /// when the page carries a base per column. See [`LEAF_WIDE_DIRECTORY`].
+    entry_size: usize,
     /// The collation of each key column, supplied by whoever built the tree.
     ///
     /// Empty means BINARY throughout, which is what a bare [`LeafRef::parse`]
@@ -303,8 +338,13 @@ impl<'p> LeafRef<'p> {
         if (delta_count > 0) != (flags & LEAF_HAS_DELTA != 0) {
             return Err(corrupt("the delta flag disagrees with delta_count"));
         }
+        let entry_size = if flags & LEAF_WIDE_DIRECTORY != 0 {
+            DIRECTORY_ENTRY_WIDE
+        } else {
+            DIRECTORY_ENTRY
+        };
         let directory_end = leaf_header::DIRECTORY
-            .checked_add(column_count.saturating_mul(DIRECTORY_ENTRY))
+            .checked_add(column_count.saturating_mul(entry_size))
             .ok_or_else(|| corrupt("the column directory overflows"))?;
         if directory_end > pageent.len() {
             return Err(corrupt("the column directory runs past the page"));
@@ -322,6 +362,7 @@ impl<'p> LeafRef<'p> {
             collations: &[],
             directions: &[],
             page: pageent,
+            entry_size,
             row_count,
             delta_count,
             column_count,
@@ -369,7 +410,7 @@ impl<'p> LeafRef<'p> {
         // the directory and the tombstone bitmap, and 8-byte aligned so the
         // value array a vectorised scan reads is aligned.
         let directory_end = leaf_header::DIRECTORY
-            .checked_add(self.column_count.saturating_mul(DIRECTORY_ENTRY))
+            .checked_add(self.column_count.saturating_mul(self.entry_size))
             .ok_or_else(|| corrupt("the column directory overflows"))?;
         let columns_end = self.tombstones_start()?;
         for index in 0..self.column_count {
@@ -672,7 +713,7 @@ impl<'p> LeafRef<'p> {
     /// @param index - the column's position in the directory
     fn column_offset(&self, index: usize) -> DbResult<usize> {
         let entry = leaf_header::DIRECTORY
-            .checked_add(index.saturating_mul(DIRECTORY_ENTRY))
+            .checked_add(index.saturating_mul(self.entry_size))
             .ok_or_else(|| corrupt("directory index overflows"))?;
         Ok(page::read_u32(self.page, entry.saturating_add(4))? as usize)
     }
@@ -688,7 +729,7 @@ impl<'p> LeafRef<'p> {
     /// @param index - the column's position in the directory
     pub fn column_width(&self, index: usize) -> DbResult<usize> {
         let entry = leaf_header::DIRECTORY
-            .checked_add(index.saturating_mul(DIRECTORY_ENTRY))
+            .checked_add(index.saturating_mul(self.entry_size))
             .ok_or_else(|| corrupt("directory index overflows"))?;
         let physical = PhysicalType::from_code(
             self.page
@@ -705,6 +746,28 @@ impl<'p> LeafRef<'p> {
         Ok(width)
     }
 
+    /// Returns how many bytes one column directory entry occupies here.
+    pub fn directory_entry_size(&self) -> usize {
+        self.entry_size
+    }
+
+    /// Returns the frame of reference one column's slots are measured from.
+    ///
+    /// Zero for every column of a page whose directory entries are eight bytes,
+    /// which is every page written before [`LEAF_WIDE_DIRECTORY`] existed and
+    /// every column that has no use for a base.
+    ///
+    /// @param index - the column's position in the directory
+    pub fn column_base(&self, index: usize) -> DbResult<i64> {
+        if self.entry_size < DIRECTORY_ENTRY_WIDE {
+            return Ok(0);
+        }
+        let entry = leaf_header::DIRECTORY
+            .checked_add(index.saturating_mul(self.entry_size))
+            .ok_or_else(|| corrupt("directory index overflows"))?;
+        Ok(page::read_u64(self.page, entry.saturating_add(8))? as i64)
+    }
+
     /// Returns the directory entry for one column.
     ///
     /// @param index - the column's position in the directory
@@ -713,7 +776,7 @@ impl<'p> LeafRef<'p> {
             return Err(misuse(format!("column {index} does not exist")));
         }
         let entry = leaf_header::DIRECTORY
-            .checked_add(index.saturating_mul(DIRECTORY_ENTRY))
+            .checked_add(index.saturating_mul(self.entry_size))
             .ok_or_else(|| corrupt("directory index overflows"))?;
         let type_byte = self
             .page
@@ -744,6 +807,7 @@ impl<'p> LeafRef<'p> {
     pub fn column(&self, index: usize) -> DbResult<MiniColumn<'p>> {
         let spec = self.spec(index)?;
         let width = self.column_width(index)?;
+        let base = self.column_base(index)?;
         let start = self.column_offset(index)?;
         let class_len = class_bytes(self.row_count);
         let value_len = self.row_count.saturating_mul(width);
@@ -760,6 +824,7 @@ impl<'p> LeafRef<'p> {
             physical: spec.physical,
             flags: spec.flags,
             width,
+            base,
             class,
             values,
             rows: self.row_count,
@@ -1256,12 +1321,13 @@ impl<'p> LeafRef<'p> {
 
         let values = column.inline_bytes();
         let width = column.width;
+        let base = column.base;
         let read = |row: usize| -> DbResult<i64> {
             let at = row.saturating_mul(width);
             let slice = values
                 .get(at..at.saturating_add(width))
                 .ok_or_else(|| corrupt(format!("row {row} is past the key column")))?;
-            Ok(read_int_slot(slice))
+            Ok(from_frame(base, width, slice))
         };
 
         let mut low = 0usize;
@@ -1484,11 +1550,137 @@ impl<'p> LeafRef<'p> {
         Ok(Some(IntegerGuide {
             values: column.inline_bytes(),
             width: column.width,
+            base: column.base,
             target: *target,
         }))
     }
 
-    /// Materialises every live row, sorted region merged with the delta.
+    /// Returns the leaf's live rows in key order, as a source the builder reads
+    /// through.
+    ///
+    /// **The allocation-free half of [`LeafRef::live`], and the one a compaction
+    /// wants.** It also does asymptotically less work: the sorted region is
+    /// already in key order, so the delta rows - at most [`DELTA_LIMIT`] of them
+    /// - are merged into it by **binary search** rather than the whole leaf
+    /// being sorted again.
+    ///
+    /// The shadowing rules are `live`'s, and the two are checked against each
+    /// other by `live_order_agrees_with_live`.
+    pub fn live_source(&self) -> DbResult<LiveSource<'p>> {
+        let mut columns = Vec::with_capacity(self.column_count);
+        for index in 0..self.column_count {
+            columns.push(self.column(index)?);
+        }
+        // Each delta row decoded once. `delta_value` re-walks the row's tagged
+        // fields from the first for every column asked for, so decoding here is
+        // what turns a quadratic read of the delta area into a linear one.
+        let mut delta: Vec<Vec<Datum<'p>>> = Vec::with_capacity(self.delta_count);
+        for index in 0..self.delta_count {
+            let mut values = Vec::with_capacity(self.column_count);
+            for column in 0..self.column_count {
+                values.push(self.delta_value(index, column)?);
+            }
+            delta.push(values);
+        }
+
+        let mut order: Vec<LiveRow> =
+            Vec::with_capacity(self.row_count.saturating_add(self.delta_count));
+        for row in 0..self.row_count {
+            if self.is_tombstoned(row)? {
+                continue;
+            }
+            order.push(LiveRow::Sorted(row as u32));
+        }
+        // The newest entry for a key wins and "newest" is the lowest delta
+        // index, so an entry whose key a lower index already placed is dropped.
+        let mut placed: Vec<u32> = Vec::new();
+        for index in 0..self.delta_count {
+            let entry = LiveRow::Delta(index as u32);
+            let mut shadowed = false;
+            for earlier in &placed {
+                if self.compare_live(&columns, &delta, LiveRow::Delta(*earlier), entry)?
+                    == std::cmp::Ordering::Equal
+                {
+                    shadowed = true;
+                    break;
+                }
+            }
+            if shadowed {
+                continue;
+            }
+            placed.push(index as u32);
+            // Binary search, not a scan: the delta area holds at most
+            // `DELTA_LIMIT` rows and the sorted region holds thousands, and a
+            // scan per delta row made a compaction quadratic in the leaf.
+            let mut low = 0usize;
+            let mut high = order.len();
+            let mut found = None;
+            while low < high {
+                let mid = low.saturating_add(high.saturating_sub(low) / 2);
+                let held = order.get(mid).copied().unwrap_or(LiveRow::Sorted(0));
+                match self.compare_live(&columns, &delta, held, entry)? {
+                    std::cmp::Ordering::Less => low = mid.saturating_add(1),
+                    std::cmp::Ordering::Greater => high = mid,
+                    std::cmp::Ordering::Equal => {
+                        found = Some(mid);
+                        break;
+                    }
+                }
+            }
+            // A delta row is newer than the sorted region, so it *replaces* the
+            // row it shadows rather than joining it.
+            match found {
+                Some(at) => {
+                    if let Some(slot) = order.get_mut(at) {
+                        *slot = entry;
+                    }
+                }
+                None => order.insert(low, entry),
+            }
+        }
+        // The order is settled; now one flat pass to materialise it. Reading
+        // through the mini-columns here rather than in the builder's two passes
+        // means each value is decoded once instead of twice.
+        let mut values = Vec::with_capacity(order.len().saturating_mul(self.column_count));
+        for at in &order {
+            for column in 0..self.column_count {
+                values.push(live_value(&columns, &delta, *at, column)?);
+            }
+        }
+        Ok(LiveSource {
+            values,
+            width: self.column_count,
+        })
+    }
+
+    /// Compares two live rows by their key columns, reading through the views.
+    ///
+    /// @param columns - the mini-columns, derived once
+    /// @param delta - the delta rows, decoded once
+    /// @param left - one row's position
+    /// @param right - the other's
+    fn compare_live(
+        &self,
+        columns: &[MiniColumn<'p>],
+        delta: &[Vec<Datum<'p>>],
+        left: LiveRow,
+        right: LiveRow,
+    ) -> DbResult<std::cmp::Ordering> {
+        for index in 0..self.key_columns {
+            let a = live_value(columns, delta, left, index)?;
+            let b = live_value(columns, delta, right, index)?;
+            let order = self.directed(
+                crate::types::compare_under(&a, &b, self.collation_of(index)),
+                index,
+            );
+            if order != std::cmp::Ordering::Equal {
+                return Ok(order);
+            }
+        }
+        Ok(std::cmp::Ordering::Equal)
+    }
+
+    /// Materialises every live row, sorted region merged with the delta.    /// Materialises every live row, sorted region merged with the delta.
     ///
     /// This is what compaction, the property tests and every read path over a
     /// leaf that has been written to all need, and it is deliberately the one
@@ -1866,6 +2058,101 @@ pub fn tombstone_bytes(rows: usize) -> usize {
         .saturating_mul(8)
 }
 
+/// Reads one value of a live row through the derived views.
+///
+/// @param columns - the mini-columns
+/// @param delta - the decoded delta rows
+/// @param at - the row's position
+/// @param column - which column
+fn live_value<'p>(
+    columns: &[MiniColumn<'p>],
+    delta: &[Vec<Datum<'p>>],
+    at: LiveRow,
+    column: usize,
+) -> DbResult<Datum<'p>> {
+    match at {
+        LiveRow::Sorted(row) => match columns.get(column) {
+            Some(held) => held.value(row as usize),
+            None => Ok(Datum::Null),
+        },
+        LiveRow::Delta(index) => Ok(delta
+            .get(index as usize)
+            .and_then(|values| values.get(column).copied())
+            .unwrap_or(Datum::Null)),
+    }
+}
+
+/// Where one live row of a leaf sits.
+///
+/// **The positional half of [`LeafRef::live`].** A compaction wants the leaf's
+/// live rows in key order and then reads them column by column; `live` gives it
+/// that as a `Vec<Vec<Datum>>`, which is one allocation per row plus one for the
+/// outer vector. On an index leaf holding three and a half thousand entries that
+/// is three and a half thousand allocations, per compaction, to produce values
+/// that are already on the page and stay there.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LiveRow {
+    /// Still in the sorted region, at this row number.
+    Sorted(u32),
+    /// In the delta area, at this index.
+    Delta(u32),
+}
+
+/// A leaf's live rows in key order, as a [`Rows`] the builder packs from.
+///
+/// **One allocation, and a direct index per value.** `live` produces a
+/// `Vec<Vec<Datum>>`, which is one allocation per row plus one for the outer
+/// vector: on an index leaf holding three and a half thousand entries that is
+/// three and a half thousand allocations per compaction. Reading straight
+/// through the mini-columns instead removes them, but replaces every value
+/// access with a class check and a slot decode - and on a leaf of many small
+/// rows the decodes cost more than the allocations did: `txn.large` went from
+/// 4.1 ms to 5.7 measuring exactly that.
+///
+/// So the values are materialised **once, flat**: one allocation of
+/// `rows * width`, and `value` is an index into it. The builder makes two
+/// passes over them - one to size the page and one to write it - and both are
+/// a bounds-checked index.
+pub struct LiveSource<'p> {
+    /// `rows * width` values in key order.
+    values: Vec<Datum<'p>>,
+    /// How many columns each row has.
+    width: usize,
+}
+
+impl<'p> LiveSource<'p> {
+    /// How many live rows the leaf holds.
+    pub fn len(&self) -> usize {
+        if self.width == 0 {
+            return 0;
+        }
+        self.values.len() / self.width
+    }
+
+    /// Reports whether the leaf holds none.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// How many columns each row has.
+    pub fn width(&self) -> usize {
+        self.width
+    }
+}
+
+impl<'p> Rows<'p> for LiveSource<'p> {
+    fn len(&self) -> usize {
+        LiveSource::len(self)
+    }
+
+    fn value(&self, row: usize, column: usize) -> Datum<'p> {
+        self.values
+            .get(row.saturating_mul(self.width).saturating_add(column))
+            .copied()
+            .unwrap_or(Datum::Null)
+    }
+}
+
 /// A view over one column's class array and value slots.
 #[derive(Clone, Copy, Debug)]
 pub struct MiniColumn<'p> {
@@ -1878,6 +2165,11 @@ pub struct MiniColumn<'p> {
     /// `physical.slot_width()` for every type but `Int64`, which may be 1, 2, 4
     /// or 8 - see [`NARROW_INT_SLOTS`].
     pub width: usize,
+    /// What an integer slot's contents are measured from.
+    ///
+    /// Zero unless the page carries a base per column; see
+    /// [`LEAF_WIDE_DIRECTORY`].
+    pub base: i64,
     /// Two bits per row.
     pub class: &'p [u8],
     /// `rows * width` bytes.
@@ -1995,7 +2287,7 @@ impl<'p> MiniColumn<'p> {
             .values
             .get(at..at.saturating_add(self.width))
             .ok_or_else(|| corrupt(format!("row {row} is outside the value array")))?;
-        Ok(read_int_slot(slice))
+        Ok(from_frame(self.base, self.width, slice))
     }
 
     /// Returns one row's value, consulting the class array.
@@ -2035,7 +2327,7 @@ impl<'p> MiniColumn<'p> {
                 ))),
             },
             ValueClass::Exception => {
-                let offset = self.slot_u32(row)? as usize;
+                let offset = self.slot_u32(row)?;
                 let (value, _) = Datum::decode_tagged(self.page.get(offset..).unwrap_or(&[]))?;
                 Ok(value)
             }
@@ -2055,7 +2347,14 @@ impl<'p> MiniColumn<'p> {
         match self.physical {
             PhysicalType::Int64 => Ok(Datum::Int(self.int_unchecked(row)?)),
             PhysicalType::Float64 => {
-                Ok(Datum::Real(f64::from_bits(self.int_unchecked(row)? as u64)))
+                let at = row.saturating_mul(self.width);
+                let slice = self
+                    .values
+                    .get(at..at.saturating_add(self.width))
+                    .ok_or_else(|| corrupt(format!("row {row} is outside the value array")))?;
+                // A base is never applied to a double: the slot is a bit
+                // pattern, and adding to one produces a different number.
+                Ok(Datum::Real(f64::from_bits(read_int_slot(slice) as u64)))
             }
             PhysicalType::Text | PhysicalType::Blob => {
                 let bytes = self.heap_slice(row)?;
@@ -2066,7 +2365,7 @@ impl<'p> MiniColumn<'p> {
                 })
             }
             PhysicalType::Any => {
-                let offset = self.slot_u32(row)? as usize;
+                let offset = self.slot_u32(row)?;
                 let (value, _) = Datum::decode_tagged(self.page.get(offset..).unwrap_or(&[]))?;
                 Ok(value)
             }
@@ -2090,12 +2389,21 @@ impl<'p> MiniColumn<'p> {
         if self.class_at(row)? != ValueClass::Extent {
             return Err(misuse("that value is not stored out of line"));
         }
-        let offset = self.slot_u32(row)? as usize;
+        let offset = self.slot_u32(row)?;
         let raw = self
             .page
             .get(offset..offset.saturating_add(EXTENT_REF_BYTES))
             .ok_or_else(|| corrupt("an extent reference runs past the page"))?;
         ExtentRef::decode(raw)
+    }
+
+    /// Reports whether this column's heap references are `(u16, u16)` pairs.
+    ///
+    /// Four bytes rather than eight, which a page of 64 KiB or less always
+    /// admits. It changes how a *single* offset is read as well as a pair - an
+    /// exception's slot holds one - so it is asked wherever a slot is decoded.
+    fn narrow_pair(&self) -> bool {
+        matches!(self.physical, PhysicalType::Text | PhysicalType::Blob) && self.width == 4
     }
 
     /// Returns the `(offset, length)` heap slice one variable-width slot names.
@@ -2105,31 +2413,26 @@ impl<'p> MiniColumn<'p> {
         let at = row.saturating_mul(self.width);
         let slice = self
             .values
-            .get(at..at.saturating_add(8))
+            .get(at..at.saturating_add(self.width))
             .ok_or_else(|| corrupt(format!("row {row} is outside the value array")))?;
-        let mut offset_raw = [0u8; 4];
-        let mut length_raw = [0u8; 4];
-        offset_raw.copy_from_slice(slice.get(..4).unwrap_or(&[0; 4]));
-        length_raw.copy_from_slice(slice.get(4..).unwrap_or(&[0; 4]));
-        let offset = u32::from_le_bytes(offset_raw) as usize;
-        let length = u32::from_le_bytes(length_raw) as usize;
+        let (offset, length) = read_heap_slot(slice);
         self.page
             .get(offset..offset.saturating_add(length))
             .ok_or_else(|| corrupt(format!("row {row}'s heap slice runs past the page")))
     }
 
-    /// Returns the `u32` in the low half of one slot.
+    /// Returns the heap offset one slot names, for an exception or an extent.
     ///
     /// @param row - the row's position in the sorted region
-    fn slot_u32(&self, row: usize) -> DbResult<u32> {
+    fn slot_u32(&self, row: usize) -> DbResult<usize> {
+        let narrow = self.narrow_pair();
+        let wanted = if narrow { 2 } else { 4 };
         let at = row.saturating_mul(self.width);
         let slice = self
             .values
-            .get(at..at.saturating_add(4))
+            .get(at..at.saturating_add(wanted))
             .ok_or_else(|| corrupt(format!("row {row} is outside the value array")))?;
-        let mut raw = [0u8; 4];
-        raw.copy_from_slice(slice);
-        Ok(u32::from_le_bytes(raw))
+        Ok(read_slot_offset(slice, narrow))
     }
 }
 
@@ -2380,17 +2683,27 @@ impl LeafBuilder {
         rows: &[R],
         fill: f64,
     ) -> DbResult<Option<Vec<u8>>> {
-        let source = RowSlice(rows);
-        let (placed, widths) = self.fit_widths(&source, 0, fill, false);
+        self.pack_all_rows(&RowSlice(rows), fill)
+    }
+
+    /// The row-source form of [`LeafBuilder::pack_all`].
+    ///
+    /// A compaction reads its rows straight out of the page it is repacking, so
+    /// it has a [`Rows`] rather than a slice and never builds one.
+    ///
+    /// @param rows - the rows to pack, sorted by key
+    /// @param fill - the fraction of the page to fill, 0.0..=1.0
+    pub fn pack_all_rows<'d>(&self, rows: &dyn Rows<'d>, fill: f64) -> DbResult<Option<Vec<u8>>> {
+        let (placed, layout) = self.fit_widths(rows, 0, fill, false);
         if placed != rows.len() {
             return Ok(None);
         }
         Ok(Some(self.encode_rows_with(
-            &source,
+            rows,
             0,
             placed,
             None,
-            Some(&widths),
+            Some(&layout),
         )?))
     }
 
@@ -2435,52 +2748,51 @@ impl LeafBuilder {
         at: usize,
         fill: f64,
         spilling: bool,
-    ) -> (usize, Vec<usize>) {
+    ) -> (usize, Layout) {
         let budget = ((self.page_size as f64) * fill.clamp(0.05, 1.0)) as usize;
         let mut heap = 0usize;
         let mut placed = 0usize;
         let total = rows.len();
         let mut row = at;
-        // **The widths widen as rows are added, and never narrow.** A value
-        // that needs four bytes makes the whole column four bytes wide, which
-        // raises the price of the rows already placed - so the size has to be
-        // recomputed against the widened column rather than accumulated. The
-        // loop is still one forward pass and still exact.
-        let mut widths: Vec<usize> = self
-            .columns
-            .iter()
-            .map(|column| narrow_floor(column.physical))
-            .collect();
-        let mut wanted: Vec<usize> = widths.clone();
+        // **A column's shape widens as rows are added, and never narrows.** A
+        // value outside the span makes the whole column wider, which raises the
+        // price of the rows already placed - so the size is recomputed against
+        // the widened column rather than accumulated. The loop is still one
+        // forward pass and still exact.
+        let mut shapes: Vec<Shape> = vec![Shape::new(); self.columns.len()];
+        let mut wanted: Vec<Shape> = shapes.clone();
+        let mut layout = self.resolve(&shapes);
         while row < total {
             let mut row_heap = 0usize;
+            wanted.copy_from_slice(&shapes);
             for (index, column) in self.columns.iter().enumerate() {
                 let value = rows.value(row, index);
                 // **One classification per value, not two.** The heap cost and
-                // the slot width are both functions of the class, and asking
-                // for them separately classified every value of every column
-                // twice - on the path a compaction and a bulk build both take.
-                let (heap_cost, needed) =
-                    costs_at(column.physical, &value, self.threshold(index, spilling));
-                row_heap = row_heap.saturating_add(heap_cost);
-                if let Some(slot) = wanted.get_mut(index) {
-                    let held = widths.get(index).copied().unwrap_or(0);
-                    *slot = held.max(needed);
+                // the column's shape are both functions of the class, and
+                // asking for them separately classified every value of every
+                // column twice - on the path a compaction and a bulk build
+                // both take.
+                let class = classify_at(column.physical, &value, self.threshold(index, spilling));
+                row_heap = row_heap.saturating_add(heap_cost_of(column.physical, &value, class));
+                if let Some(shape) = wanted.get_mut(index) {
+                    shape.observe(column.physical, &value, class, self.page_size);
                 }
             }
             let next = placed.saturating_add(1);
+            let candidate = self.resolve(&wanted);
             let size = self
-                .fixed_size_with(next, &wanted)
+                .fixed_size_with(next, &candidate.widths, candidate.has_bases())
                 .saturating_add(heap.saturating_add(row_heap));
             if size > budget {
                 break;
             }
-            widths.copy_from_slice(&wanted);
+            shapes.copy_from_slice(&wanted);
+            layout = candidate;
             heap = heap.saturating_add(row_heap);
             placed = next;
             row = row.saturating_add(1);
         }
-        (placed, widths)
+        (placed, layout)
     }
 
     /// Packs as many rows from `at` as fit, sending oversized values out of line.
@@ -2500,11 +2812,11 @@ impl LeafBuilder {
         fill: f64,
         spill: Option<&mut dyn Spill>,
     ) -> DbResult<Packed> {
-        let (placed, widths) = self.fit_widths(rows, at, fill, spill.is_some());
+        let (placed, layout) = self.fit_widths(rows, at, fill, spill.is_some());
         if placed == 0 {
             return Ok(Packed::RowTooLarge);
         }
-        let page = self.encode_rows_with(rows, at, placed, spill, Some(&widths))?;
+        let page = self.encode_rows_with(rows, at, placed, spill, Some(&layout))?;
         Ok(Packed::Filled { page, rows: placed })
     }
 
@@ -2584,7 +2896,7 @@ impl LeafBuilder {
             .iter()
             .map(|column| column.physical.slot_width())
             .collect();
-        self.fixed_size_with(count, &widths)
+        self.fixed_size_with(count, &widths, false)
     }
 
     /// Returns the bytes a leaf of `count` rows spends before its heap, at the
@@ -2598,9 +2910,15 @@ impl LeafBuilder {
     ///
     /// @param count - how many rows
     /// @param widths - the slot width of each column, in directory order
-    fn fixed_size_with(&self, count: usize, widths: &[usize]) -> usize {
-        let mut fixed = leaf_header::DIRECTORY
-            .saturating_add(self.columns.len().saturating_mul(DIRECTORY_ENTRY));
+    /// @param wide_directory - whether the entries carry a base each
+    fn fixed_size_with(&self, count: usize, widths: &[usize], wide_directory: bool) -> usize {
+        let entry = if wide_directory {
+            DIRECTORY_ENTRY_WIDE
+        } else {
+            DIRECTORY_ENTRY
+        };
+        let mut fixed =
+            leaf_header::DIRECTORY.saturating_add(self.columns.len().saturating_mul(entry));
         for (index, column) in self.columns.iter().enumerate() {
             let width = widths
                 .get(index)
@@ -2617,46 +2935,51 @@ impl LeafBuilder {
         fixed
     }
 
-    /// Returns the slot widths a run of rows forces on this builder's columns.
+    /// Returns the layout a run of rows forces on this builder's columns.
     ///
-    /// One pass over the values, taking the widest slot each column needs. It
-    /// is the same rule [`LeafBuilder::fit`] applies incrementally, run over a
-    /// row count that has already been decided - so the page `encode_rows`
-    /// lays out is the page `fit` priced.
+    /// One pass over the values, widening each column's shape. It is the same
+    /// rule [`LeafBuilder::fit_widths`] applies incrementally, run over a row
+    /// count that has already been decided - so the page `encode_rows` lays out
+    /// is the page `fit` priced.
     ///
     /// @param rows - the rows, sorted by key
     /// @param at - the first row
     /// @param count - how many rows
     /// @param spilling - whether the real pass will have a spiller
-    fn widths_over<'d>(
+    fn layout_over<'d>(
         &self,
         rows: &dyn Rows<'d>,
         at: usize,
         count: usize,
         spilling: bool,
-    ) -> Vec<usize> {
-        let mut widths: Vec<usize> = self
-            .columns
-            .iter()
-            .map(|column| narrow_floor(column.physical))
-            .collect();
+    ) -> Layout {
+        let mut shapes: Vec<Shape> = vec![Shape::new(); self.columns.len()];
         for row in 0..count {
             for (index, column) in self.columns.iter().enumerate() {
-                let Some(held) = widths.get_mut(index) else {
+                let Some(shape) = shapes.get_mut(index) else {
                     continue;
                 };
-                if *held == column.physical.slot_width() {
-                    continue;
-                }
                 let value = rows.value(at.saturating_add(row), index);
-                *held = (*held).max(slot_need(
-                    column.physical,
-                    &value,
-                    self.threshold(index, spilling),
-                ));
+                let class = classify_at(column.physical, &value, self.threshold(index, spilling));
+                shape.observe(column.physical, &value, class, self.page_size);
             }
         }
-        widths
+        self.resolve(&shapes)
+    }
+
+    /// Turns a set of column shapes into the layout they resolve to.
+    ///
+    /// @param shapes - one shape per column
+    fn resolve(&self, shapes: &[Shape]) -> Layout {
+        let mut widths = Vec::with_capacity(self.columns.len());
+        let mut bases = Vec::with_capacity(self.columns.len());
+        for (index, column) in self.columns.iter().enumerate() {
+            let shape = shapes.get(index).copied().unwrap_or_else(Shape::new);
+            let (width, base) = shape.resolve(column.physical);
+            widths.push(width);
+            bases.push(base);
+        }
+        Layout { widths, bases }
     }
 
     /// Encodes the rows into a page.
@@ -2719,14 +3042,14 @@ impl LeafBuilder {
     /// @param at - the first row to encode
     /// @param count - how many to encode
     /// @param spill - where an oversized value goes, when there is somewhere
-    /// @param widths - the slot widths, when the caller already derived them
+    /// @param layout - the widths and bases, when the caller already derived them
     pub fn encode_rows_with<'d>(
         &self,
         rows: &dyn Rows<'d>,
         at: usize,
         count: usize,
         mut spill: Option<&mut dyn Spill>,
-        widths: Option<&[usize]>,
+        layout: Option<&Layout>,
     ) -> DbResult<Vec<u8>> {
         if count > u16::MAX as usize {
             return Err(misuse("a leaf cannot hold more than 65535 rows"));
@@ -2738,13 +3061,14 @@ impl LeafBuilder {
         // these rows by exactly this rule, so the page it priced is the page
         // laid out here either way.
         let derived;
-        let widths: &[usize] = match widths {
+        let layout: &Layout = match layout {
             Some(held) => held,
             None => {
-                derived = self.widths_over(rows, at, count, spill.is_some());
+                derived = self.layout_over(rows, at, count, spill.is_some());
                 &derived
             }
         };
+        let wide_directory = layout.has_bases();
 
         // Lay the mini-columns out first so the directory can name them.
         //
@@ -2752,18 +3076,22 @@ impl LeafBuilder {
         // and a layout cursor called the same thing shadowed it silently - which
         // would have read every value out of the wrong row.
         let mut offsets = Vec::with_capacity(self.columns.len());
-        let mut layout = align8(
-            leaf_header::DIRECTORY
-                .saturating_add(self.columns.len().saturating_mul(DIRECTORY_ENTRY)),
+        let entry_size = if wide_directory {
+            DIRECTORY_ENTRY_WIDE
+        } else {
+            DIRECTORY_ENTRY
+        };
+        let mut cursor = align8(
+            leaf_header::DIRECTORY.saturating_add(self.columns.len().saturating_mul(entry_size)),
         );
         for (index, column) in self.columns.iter().enumerate() {
-            offsets.push(layout);
-            layout = layout
+            offsets.push(cursor);
+            cursor = cursor
                 .saturating_add(class_bytes(count))
-                .saturating_add(count.saturating_mul(slot_width_at(widths, index, column)));
-            layout = align8(layout);
+                .saturating_add(count.saturating_mul(layout.width(index, column)));
+            cursor = align8(cursor);
         }
-        if layout > self.page_size {
+        if cursor > self.page_size {
             return Err(misuse("the mini-columns do not fit in one page"));
         }
 
@@ -2781,7 +3109,8 @@ impl LeafBuilder {
             let base = offsets.get(index).copied().unwrap_or(0);
             let values_at = base.saturating_add(class_bytes(count));
             let threshold = self.threshold(index, spill.is_some());
-            let width = slot_width_at(widths, index, column);
+            let width = layout.width(index, column);
+            let frame = layout.base(index);
             for row in 0..count {
                 let value = rows.value(at.saturating_add(row), index);
                 let class = classify_at(column.physical, &value, threshold);
@@ -2805,7 +3134,7 @@ impl LeafBuilder {
                             let target = page
                                 .get_mut(slot..slot.saturating_add(width))
                                 .ok_or_else(|| misuse("an integer slot runs past the page"))?;
-                            write_int_slot(target, value.as_int().unwrap_or(0));
+                            write_frame(frame, target, value.as_int().unwrap_or(0));
                         }
                         PhysicalType::Float64 => page::write_u64(
                             &mut page,
@@ -2829,8 +3158,10 @@ impl LeafBuilder {
                                 .get_mut(heap_end..heap_end.saturating_add(bytes.len()))
                                 .ok_or_else(|| misuse("the heap overflowed the page"))?;
                             target.copy_from_slice(bytes);
-                            page::write_u32(&mut page, slot, heap_end as u32)?;
-                            page::write_u32(&mut page, slot.saturating_add(4), bytes.len() as u32)?;
+                            let pair = page
+                                .get_mut(slot..slot.saturating_add(width))
+                                .ok_or_else(|| misuse("a heap slot runs past the page"))?;
+                            write_heap_slot(pair, heap_end, bytes.len());
                         }
                         PhysicalType::Any => {
                             heap_end = write_tagged(&mut page, heap_end, &value)?;
@@ -2839,7 +3170,11 @@ impl LeafBuilder {
                     },
                     ValueClass::Exception => {
                         heap_end = write_tagged(&mut page, heap_end, &value)?;
-                        page::write_u32(&mut page, slot, heap_end as u32)?;
+                        let narrow = narrow_pair_at(column.physical, width);
+                        let target = page
+                            .get_mut(slot..slot.saturating_add(width))
+                            .ok_or_else(|| misuse("a slot runs past the page"))?;
+                        write_slot_offset(target, heap_end, narrow);
                     }
                     ValueClass::Extent => {
                         // Unreachable without a spiller: `classify_at` returns
@@ -2857,13 +3192,17 @@ impl LeafBuilder {
                             .get_mut(heap_end..heap_end.saturating_add(EXTENT_REF_BYTES))
                             .ok_or_else(|| misuse("the heap overflowed the page"))?;
                         target.copy_from_slice(&reference.encode());
-                        page::write_u32(&mut page, slot, heap_end as u32)?;
+                        let narrow = narrow_pair_at(column.physical, width);
+                        let held = page
+                            .get_mut(slot..slot.saturating_add(width))
+                            .ok_or_else(|| misuse("a slot runs past the page"))?;
+                        write_slot_offset(held, heap_end, narrow);
                     }
                 }
             }
         }
 
-        if heap_end < layout {
+        if heap_end < cursor {
             return Err(misuse("the heap collided with the mini-columns"));
         }
 
@@ -2888,8 +3227,7 @@ impl LeafBuilder {
         };
         page::write_u64(&mut page, leaf_header::LOW_FENCE, low_fence as u64)?;
         for (index, column) in self.columns.iter().enumerate() {
-            let entry =
-                leaf_header::DIRECTORY.saturating_add(index.saturating_mul(DIRECTORY_ENTRY));
+            let entry = leaf_header::DIRECTORY.saturating_add(index.saturating_mul(entry_size));
             let type_slot = page
                 .get_mut(entry)
                 .ok_or_else(|| misuse("the directory does not fit"))?;
@@ -2910,13 +3248,26 @@ impl LeafBuilder {
             page::write_u16(
                 &mut page,
                 entry.saturating_add(2),
-                slot_width_at(widths, index, column) as u16,
+                layout.width(index, column) as u16,
             )?;
             page::write_u32(
                 &mut page,
                 entry.saturating_add(4),
                 offsets.get(index).copied().unwrap_or(0) as u32,
             )?;
+            if wide_directory {
+                page::write_u64(
+                    &mut page,
+                    entry.saturating_add(8),
+                    layout.base(index) as u64,
+                )?;
+            }
+        }
+        if wide_directory {
+            let flags = page
+                .get_mut(header::FLAGS)
+                .ok_or_else(|| misuse("the page has no flag byte"))?;
+            *flags |= LEAF_WIDE_DIRECTORY;
         }
         if has_exceptions || has_extents {
             let flags = page
@@ -2940,16 +3291,241 @@ fn align8(at: usize) -> usize {
     at.saturating_add(7) & !7
 }
 
-/// Returns the width one column was laid out at, falling back to the type's.
+/// How one leaf's columns are laid out: a slot width and a base each.
 ///
-/// @param widths - the widths derived from the rows
-/// @param index - the column's position
-/// @param column - the column's directory entry
-fn slot_width_at(widths: &[usize], index: usize, column: &ColumnSpec) -> usize {
-    widths
-        .get(index)
-        .copied()
-        .unwrap_or_else(|| column.physical.slot_width())
+/// Derived from the values that leaf actually holds, by
+/// [`LeafBuilder::fit_widths`] as it prices the page and by
+/// [`LeafBuilder::layout_over`] when nothing has priced it yet. The two follow
+/// the same rule over the same rows, which is what makes the page the sizing
+/// pass measured the page the encoder writes.
+#[derive(Clone, Debug, Default)]
+pub struct Layout {
+    /// How many bytes one slot of each column occupies.
+    widths: Vec<usize>,
+    /// What each column's integer slots are measured from.
+    bases: Vec<i64>,
+}
+
+impl Layout {
+    /// Returns one column's slot width, or the type's when it is out of range.
+    ///
+    /// @param index - the column's position
+    /// @param column - the column's directory entry
+    fn width(&self, index: usize, column: &ColumnSpec) -> usize {
+        self.widths
+            .get(index)
+            .copied()
+            .unwrap_or_else(|| column.physical.slot_width())
+    }
+
+    /// Returns one column's base.
+    ///
+    /// @param index - the column's position
+    fn base(&self, index: usize) -> i64 {
+        self.bases.get(index).copied().unwrap_or(0)
+    }
+
+    /// Reports whether any column carries a base, and so needs a wide entry.
+    fn has_bases(&self) -> bool {
+        self.bases.iter().any(|base| *base != 0)
+    }
+}
+
+/// What the values seen so far force on one column's layout.
+///
+/// Kept as a **span** rather than a width because that is what a frame of
+/// reference makes of it: with a base, the width comes from `high - low` and not
+/// from how large the numbers are.
+#[derive(Clone, Copy, Debug)]
+struct Shape {
+    /// The smallest and largest typed integer, when one has been seen.
+    span: Option<(i64, i64)>,
+    /// The widest slot a single value forces whatever the span is: four for an
+    /// integer column's exception, whose slot holds a heap offset, and the heap
+    /// pair's width for a text or a blob.
+    floor: usize,
+}
+
+impl Shape {
+    /// Returns the shape of a column nothing has been seen for.
+    fn new() -> Shape {
+        Shape {
+            span: None,
+            floor: 0,
+        }
+    }
+
+    /// Widens the shape by one value.
+    ///
+    /// @param physical - the column's layout
+    /// @param value - the value being placed
+    /// @param class - the class it took
+    /// @param page_size - the database's page size
+    fn observe(
+        &mut self,
+        physical: PhysicalType,
+        value: &Datum<'_>,
+        class: ValueClass,
+        page_size: usize,
+    ) {
+        match physical {
+            PhysicalType::Int64 => match class {
+                ValueClass::Typed => {
+                    let number = value.as_int().unwrap_or(0);
+                    self.span = Some(match self.span {
+                        Some((low, high)) => (low.min(number), high.max(number)),
+                        None => (number, number),
+                    });
+                }
+                ValueClass::Null => {}
+                // The slot holds a `u32` heap offset rather than a value.
+                _ => self.floor = self.floor.max(4),
+            },
+            PhysicalType::Text | PhysicalType::Blob => {
+                let longest = match class {
+                    ValueClass::Typed => value.as_bytes().map(<[u8]>::len).unwrap_or(0),
+                    _ => 0,
+                };
+                self.floor = self.floor.max(heap_slot_width(page_size, longest));
+            }
+            other => self.floor = self.floor.max(other.slot_width()),
+        }
+    }
+
+    /// Returns the width and base this shape resolves to.
+    ///
+    /// **A base of zero means plain signed truncation**, which is what every
+    /// page written before frames existed holds - so a column whose smallest
+    /// value is zero takes the signed width rather than the unsigned one, and
+    /// the reader needs no flag beyond the base itself to know which it is
+    /// looking at.
+    ///
+    /// @param physical - the column's layout
+    fn resolve(&self, physical: PhysicalType) -> (usize, i64) {
+        if !NARROW_INT_SLOTS {
+            return (physical.slot_width(), 0);
+        }
+        if physical != PhysicalType::Int64 {
+            return (self.floor.max(narrow_floor(physical, 1)), 0);
+        }
+        let (width, base) = match self.span {
+            None => (1, 0),
+            Some((low, high)) if FRAME_OF_REFERENCE && low != 0 => (frame_width(low, high), low),
+            Some((low, high)) => (int_slot_width(low).max(int_slot_width(high)), 0),
+        };
+        (width.max(self.floor).max(1), base)
+    }
+}
+
+/// Reads one integer out of a slot measured from a base.
+///
+/// With no base the slot is the value, sign-extended - which is what every page
+/// written before [`LEAF_WIDE_DIRECTORY`] holds. With one it is the **unsigned
+/// distance** from the base, so a column whose values run 900,000..900,200 is
+/// one byte a row where the values themselves need four.
+///
+/// @param base - the column's frame of reference
+/// @param width - how many bytes the slot occupies
+/// @param slot - exactly that many bytes
+#[inline]
+pub fn from_frame(base: i64, width: usize, slot: &[u8]) -> i64 {
+    if base == 0 {
+        return read_int_slot(slot);
+    }
+    // **A load, a zero-extend and an add, chosen by width.** The first version
+    // of this went through a `[u8; 8]` and `i128`, and `read.analytical` fell
+    // from 6.57x to 2.77x: a scan that adds a constant to a byte should not be
+    // slower than one that does not, and it is not once the width is a
+    // constant to the compiler.
+    base.wrapping_add(match width {
+        1 => i64::from(slot.first().copied().unwrap_or(0)),
+        2 => {
+            let mut raw = [0u8; 2];
+            raw.copy_from_slice(slot.get(..2).unwrap_or(&[0; 2]));
+            i64::from(u16::from_le_bytes(raw))
+        }
+        4 => {
+            let mut raw = [0u8; 4];
+            raw.copy_from_slice(slot.get(..4).unwrap_or(&[0; 4]));
+            i64::from(u32::from_le_bytes(raw))
+        }
+        _ => {
+            let mut raw = [0u8; 8];
+            raw.copy_from_slice(slot.get(..8).unwrap_or(&[0; 8]));
+            u64::from_le_bytes(raw) as i64
+        }
+    })
+}
+
+/// Reports whether one integer fits a slot of this width, from this base.
+///
+/// @param base - the column's frame of reference
+/// @param width - how many bytes the slot occupies
+/// @param value - the integer to store
+pub fn fits_frame(base: i64, width: usize, value: i64) -> bool {
+    if base == 0 {
+        return int_slot_width(value) <= width;
+    }
+    let delta = (value as i128).saturating_sub(base as i128);
+    if delta < 0 {
+        return false;
+    }
+    match width {
+        1 => delta <= i128::from(u8::MAX),
+        2 => delta <= i128::from(u16::MAX),
+        4 => delta <= i128::from(u32::MAX),
+        _ => true,
+    }
+}
+
+/// Writes one integer into a slot measured from a base.
+///
+/// @param base - the column's frame of reference
+/// @param slot - exactly the column's slot width
+/// @param value - the integer to store
+pub fn write_frame(base: i64, slot: &mut [u8], value: i64) {
+    if base == 0 {
+        write_int_slot(slot, value);
+        return;
+    }
+    let delta = ((value as i128) - (base as i128)) as u64;
+    let raw = delta.to_le_bytes();
+    let width = slot.len().min(8);
+    if let (Some(target), Some(source)) = (slot.get_mut(..width), raw.get(..width)) {
+        target.copy_from_slice(source);
+    }
+}
+
+/// Returns the narrowest slot the values `low..=high` fit in, from a base.
+///
+/// The range decides it, not the magnitude: `low` becomes the base and every
+/// slot holds `value - low` as an unsigned integer.
+///
+/// @param low - the smallest typed value in the column
+/// @param high - the largest
+fn frame_width(low: i64, high: i64) -> usize {
+    let span = (high as i128).saturating_sub(low as i128);
+    if span < 0 {
+        return 8;
+    }
+    let span = span as u128;
+    if span <= u128::from(u8::MAX) {
+        1
+    } else if span <= u128::from(u16::MAX) {
+        2
+    } else if span <= u128::from(u32::MAX) {
+        4
+    } else {
+        8
+    }
+}
+
+/// Reports whether a column laid out at this width holds `(u16, u16)` pairs.
+///
+/// @param physical - the column's layout
+/// @param width - the width it was laid out at
+fn narrow_pair_at(physical: PhysicalType, width: usize) -> bool {
+    matches!(physical, PhysicalType::Text | PhysicalType::Blob) && width == 4
 }
 
 /// Returns the narrowest slot a column of this type may start out at.
@@ -2958,11 +3534,17 @@ fn slot_width_at(widths: &[usize], index: usize, column: &ColumnSpec) -> usize {
 /// a leaf of small integers, or of none at all, spends a byte a row.
 ///
 /// @param physical - the column's layout
-fn narrow_floor(physical: PhysicalType) -> usize {
-    if NARROW_INT_SLOTS && physical.narrows() {
-        1
-    } else {
-        physical.slot_width()
+fn narrow_floor(physical: PhysicalType, page_size: usize) -> usize {
+    if !NARROW_INT_SLOTS {
+        return physical.slot_width();
+    }
+    match physical {
+        PhysicalType::Int64 => 1,
+        // A pair is four bytes or eight; whether four is admissible is a
+        // property of the page size, so the floor already knows the answer for
+        // every leaf this builder writes.
+        PhysicalType::Text | PhysicalType::Blob => heap_slot_width(page_size, 0),
+        other => other.slot_width(),
     }
 }
 
@@ -2976,11 +3558,21 @@ fn narrow_floor(physical: PhysicalType) -> usize {
 /// @param physical - the column's layout
 /// @param value - the value being placed
 /// @param threshold - the longest value kept in the leaf
-fn slot_need(physical: PhysicalType, value: &Datum<'_>, threshold: usize) -> usize {
+fn slot_need(
+    physical: PhysicalType,
+    value: &Datum<'_>,
+    threshold: usize,
+    page_size: usize,
+) -> usize {
     if !NARROW_INT_SLOTS || !physical.narrows() {
         return physical.slot_width();
     }
-    slot_need_of(physical, value, classify_at(physical, value, threshold))
+    slot_need_of(
+        physical,
+        value,
+        classify_at(physical, value, threshold),
+        page_size,
+    )
 }
 
 /// Returns the slot width one value forces, its class already known.
@@ -2988,14 +3580,34 @@ fn slot_need(physical: PhysicalType, value: &Datum<'_>, threshold: usize) -> usi
 /// @param physical - the column's layout
 /// @param value - the value being placed
 /// @param class - the class the value classified as
-fn slot_need_of(physical: PhysicalType, value: &Datum<'_>, class: ValueClass) -> usize {
+fn slot_need_of(
+    physical: PhysicalType,
+    value: &Datum<'_>,
+    class: ValueClass,
+    page_size: usize,
+) -> usize {
     if !NARROW_INT_SLOTS || !physical.narrows() {
         return physical.slot_width();
     }
-    match class {
-        ValueClass::Null => 1,
-        ValueClass::Typed => int_slot_width(value.as_int().unwrap_or(0)),
-        _ => 4,
+    match physical {
+        PhysicalType::Int64 => match class {
+            ValueClass::Null => 1,
+            ValueClass::Typed => int_slot_width(value.as_int().unwrap_or(0)),
+            // An exception's slot holds a heap offset rather than a value, and
+            // an integer column's offset is a `u32`.
+            _ => 4,
+        },
+        // The length is what decides it: a value longer than a `u16` needs the
+        // wide pair, and so does a page larger than 64 KiB. NULLs, exceptions
+        // and extents all fit the narrow pair - an exception stores one offset
+        // and an extent one too, and both are page offsets.
+        _ => heap_slot_width(
+            page_size,
+            match class {
+                ValueClass::Typed => value.as_bytes().map(<[u8]>::len).unwrap_or(0),
+                _ => 0,
+            },
+        ),
     }
 }
 
@@ -3007,11 +3619,16 @@ fn slot_need_of(physical: PhysicalType, value: &Datum<'_>, class: ValueClass) ->
 /// @param physical - the column's layout
 /// @param value - the value being placed
 /// @param threshold - the longest value kept in the leaf
-fn costs_at(physical: PhysicalType, value: &Datum<'_>, threshold: usize) -> (usize, usize) {
+fn costs_at(
+    physical: PhysicalType,
+    value: &Datum<'_>,
+    threshold: usize,
+    page_size: usize,
+) -> (usize, usize) {
     let class = classify_at(physical, value, threshold);
     (
         heap_cost_of(physical, value, class),
-        slot_need_of(physical, value, class),
+        slot_need_of(physical, value, class, page_size),
     )
 }
 
@@ -3542,6 +4159,59 @@ mod tests {
         }
     }
 
+    /// A column whose values sit in a narrow band far from zero costs the band,
+    /// not the magnitude - and every value still reads back exactly.
+    ///
+    /// This is what a frame of reference is for: an index leaf holds a
+    /// contiguous run of its key, so the span inside one page is small even
+    /// when the column's span is not.
+    #[test]
+    fn a_frame_of_reference_costs_the_span_not_the_magnitude() {
+        let columns = vec![
+            ColumnSpec::key(PhysicalType::Int64),
+            ColumnSpec::new(PhysicalType::Int64),
+        ];
+        let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();
+        // Two hundred keys starting at nine hundred thousand: four bytes each
+        // without a base, one with.
+        let rows: Vec<Vec<Datum<'static>>> = (0..200i64)
+            .map(|n| vec![Datum::Int(900_000 + n), Datum::Int(-500_000 - n)])
+            .collect();
+        let page = builder.encode(&rows).unwrap();
+        let leaf = LeafRef::parse(&page).unwrap();
+        if NARROW_INT_SLOTS && FRAME_OF_REFERENCE {
+            assert_eq!(leaf.column_width(0).unwrap(), 1, "the key did not narrow");
+            assert_eq!(leaf.column_base(0).unwrap(), 900_000);
+            assert_eq!(leaf.column_width(1).unwrap(), 1, "the negative column");
+            assert_eq!(leaf.column_base(1).unwrap(), -500_199);
+        }
+        for row in 0..200usize {
+            assert_eq!(
+                leaf.value(row, 0).unwrap().as_int().unwrap(),
+                900_000 + row as i64,
+                "row {row} key"
+            );
+            assert_eq!(
+                leaf.value(row, 1).unwrap().as_int().unwrap(),
+                -500_000 - row as i64,
+                "row {row} value"
+            );
+        }
+        leaf.integrity().unwrap();
+        // And the search finds every one of them, which is the path that reads
+        // the slots raw rather than through `value`.
+        for row in 0..200i64 {
+            assert_eq!(
+                leaf.search(&[Datum::Int(900_000 + row)]).unwrap(),
+                Ok(row as usize),
+                "searching for {}",
+                900_000 + row
+            );
+        }
+        assert_eq!(leaf.search(&[Datum::Int(899_999)]).unwrap(), Err(0));
+        assert_eq!(leaf.search(&[Datum::Int(900_200)]).unwrap(), Err(200));
+    }
+
     /// `fit` and `encode_rows` agree about how many rows a page holds, over a
     /// run whose width widens part way through.
     ///
@@ -3573,7 +4243,9 @@ mod tests {
             while at < rows.len() {
                 let placed = builder.fit(&RowSlice(&rows), at, fill, false);
                 assert!(placed > 0, "nothing fitted at {at}");
-                let page = builder.encode_rows(&RowSlice(&rows), at, placed, None).unwrap();
+                let page = builder
+                    .encode_rows(&RowSlice(&rows), at, placed, None)
+                    .unwrap();
                 let leaf = LeafRef::parse(&page).unwrap();
                 assert_eq!(leaf.row_count(), placed);
                 leaf.integrity().unwrap();
@@ -3622,6 +4294,63 @@ mod tests {
             assert_eq!(leaf.value(row, 1).unwrap().as_int().unwrap(), row as i64);
         }
         leaf.integrity().unwrap();
+    }
+
+    /// `live_order` names the same rows, in the same order, that `live`
+    /// materialises - over a leaf with tombstones, delta rows and a delta row
+    /// that shadows a sorted one.
+    ///
+    /// A compaction reads through `live_order` now and `live` is what every
+    /// other caller and every property test uses, so the two disagreeing would
+    /// be a compaction that silently changed the leaf's contents.
+    #[test]
+    fn live_order_agrees_with_live() {
+        let columns = vec![
+            ColumnSpec::key(PhysicalType::Int64),
+            ColumnSpec::new(PhysicalType::Text),
+            ColumnSpec::new(PhysicalType::Int64),
+        ];
+        let builder = LeafBuilder::new(4096, 1, columns.clone(), 1).unwrap();
+        let labels: Vec<String> = (0..24).map(|n| format!("row-{n:04}")).collect();
+        let rows: Vec<Vec<Datum<'_>>> = (0..24i64)
+            .map(|n| {
+                vec![
+                    Datum::Int(n * 2),
+                    Datum::Text(labels[n as usize].as_bytes()),
+                    Datum::Int(n * 5),
+                ]
+            })
+            .collect();
+        let page = builder.encode(&rows).unwrap();
+        // A delta row for a key that is not there, one that shadows a sorted
+        // row, and a tombstone over a third.
+        let fresh = vec![Datum::Int(7), Datum::Text(b"inserted"), Datum::Int(70)];
+        let shadow = vec![Datum::Int(10), Datum::Text(b"replaced"), Datum::Int(99)];
+        let mut page = with_delta(&page, &[fresh.clone(), shadow.clone()]);
+        crate::mutate::LeafMut::new(&mut page)
+            .unwrap()
+            .set_tombstone(3)
+            .unwrap();
+        let leaf = LeafRef::parse(&page).unwrap();
+        let materialised = leaf.live().unwrap();
+        let source = leaf.live_source().unwrap();
+        assert_eq!(
+            source.len(),
+            materialised.len(),
+            "live_source named {} rows where live materialised {}",
+            source.len(),
+            materialised.len()
+        );
+        for (row, expected) in materialised.iter().enumerate() {
+            for (column, want) in expected.iter().enumerate() {
+                let got = source.value(row, column);
+                assert_eq!(
+                    format!("{got:?}"),
+                    format!("{want:?}"),
+                    "row {row} column {column}"
+                );
+            }
+        }
     }
 
     /// Binary search finds every present key and reports the right insertion
@@ -3703,7 +4432,7 @@ mod tests {
         let columns = leaf.column_count();
         // The delta area goes immediately after the last mini-column, which is
         // where the free space between the columns and the heap begins.
-        let mut end = leaf_header::DIRECTORY + columns * DIRECTORY_ENTRY;
+        let mut end = leaf_header::DIRECTORY + columns * leaf.directory_entry_size();
         for index in 0..columns {
             end = align8(end);
             end += class_bytes(count) + count * leaf.column_width(index).unwrap();
@@ -4227,10 +4956,13 @@ mod tests {
             ColumnSpec::new(PhysicalType::Text),
         ];
         let builder = LeafBuilder::new(8_192, 1, columns, 1).unwrap();
-        // Sixteen rows of five hundred bytes: the mini-columns are small, so
+        // Seventeen rows of five hundred bytes: the mini-columns are small, so
         // the heap runs down into them rather than off the end of the page.
+        // Sixteen was enough while a text slot was eight bytes and is not now
+        // that it is four - the mini-columns got smaller, so the heap has
+        // further to fall before it reaches them, which is the change working.
         let long = vec![b'z'; 500];
-        let rows: Vec<Vec<Datum<'_>>> = (0..16)
+        let rows: Vec<Vec<Datum<'_>>> = (0..17)
             .map(|n| vec![Datum::Int(n as i64), Datum::Text(&long)])
             .collect();
         let error = builder.encode(&rows).unwrap_err();

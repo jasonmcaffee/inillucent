@@ -64,20 +64,28 @@ this engine wins two of those three.
 | features both answer **differently** | - | 7 | **1.7%**, none of them silent |
 | vector features with no SQLite equivalent | 0 | 6 | **6 extra** |
 | **the surface audited against SQLite's own registers**, not against our case list | 218 functions, 67 pragmas, 19 modules, 5 collations, 65 dot commands | all called in both engines, and now **compared on every build** | **4 functions, 2 modules and 2 dot commands absent**, and the **silent difference is closed** - see [Is the feature list itself complete?](#is-the-feature-list-itself-complete) |
-| **Elapsed time**, weighted over the contract's ten families | the reference | 3.71x the speed | **73% less time** |
-| Elapsed time, the 95% lower bound the contract grades on | - | 3.63x | **72% less time** (bar: 67%) |
-| **Processor time**, same plan, one child process each | 1,250 ms | 438 ms | **65% less CPU** (bar: 60%) |
-| **Peak resident memory**, same plan, matched 128 MiB budget | 37.2 MiB | 46.6 MiB | **25% MORE memory** (was 102%, then 43%; the bar asks for 5% *less*) |
-| **The database on disk**, the same fixture imported | 16.05 MiB | 17.90 MiB | **1.12x** (was 1.41x) |
+| **Elapsed time**, weighted over the contract's ten families | the reference | 3.82x the speed | **74% less time** |
+| Elapsed time, the 95% lower bound the contract grades on | - | 3.66x | **73% less time** (bar: 67%) |
+| **Processor time**, same plan, one child process each | 1,242 ms | 445 ms | **64% less CPU** (bar: 60%) |
+| **Peak resident memory**, same plan, matched 128 MiB budget | 37.2 MiB | 42.7 MiB | **15% MORE memory** (was 102%, then 43%; the bar asks for 5% *less*) |
+| **The database on disk**, the same fixture imported | 16.05 MiB | 16.62 MiB | **1.036x** (was 1.41x) |
+| The one family that is **worse** than before | - | `transaction` 0.87x, lower bound 0.61x | **under the 1.00x floor** - see [Where the memory goes](#where-the-memory-goes) |
 | Retrieval ranking, 17 graded comparisons against pgvector | the baseline | 15 better, 2 not worse | **none worse** |
 | Retrieval latency, unfiltered, p50 | 2.459 ms | 0.8954 ms | **64% less time** |
 | Retrieval latency, filtered to a minority source, p50 | 42.182 ms | 0.6631 ms | **98% less time** |
 
-**Read the four SQLite performance rows together.** inillucent finishes the same work in **a quarter
-of the time** while spending **about a third of the processor**, so the speed is not bought by
-burning cores - and it holds **25% more memory** to do it, where it held 102% more before task-1869
-and 43% before task-1870. The budget handed to the two engines is the same 128 MiB; what differs is
-how much of it each chooses to use, and that is now mostly a question of how large the file is.
+**Read the performance rows together.** inillucent finishes the same work in **a quarter of the
+time** while spending **about a third of the processor**, so the speed is not bought by burning
+cores - and it holds **15% more memory** to do it, where it held 102% more before task-1869 and 43%
+before task-1870. The budget handed to the two engines is the same 128 MiB; what differs is how much
+of it each chooses to use, and after task-1870 the file itself is within **4%** of SQLite's.
+
+**And one family is worse than it was.** `transaction` fell from 1.45x to **0.87x**, with a lower
+bound of 0.61x against a floor of 1.00x, and the cause is the same density that bought the memory:
+`txn.large` replaces a ten-byte note with a fifty-byte one two thousand times in one transaction, so
+every statement is a delta insert and every thirty-second a compaction over a whole leaf - and a leaf
+now holds twice as many rows. It is stated here rather than left in a table because it is the price
+of the row above it.
 
 That memory row is still the one thing on this page that is worse than SQLite, and it is now graded:
 `compat/perf/contract.toml` carries a memory bar and a processor bar, and the gate fails on them.
@@ -1427,6 +1435,55 @@ is what makes it a result. Four runs each:
 A larger delta area halves the compactions and makes every read of a written-to leaf walk twice as
 far, and the second effect is the larger one. `DELTA_LIMIT` stays at 32.
 
+### The five follow-ups, each measured
+
+task-1870's first pass shipped the narrow slot and named five follow-ups. All five were then worked,
+and two of them turned out to be worth less than they looked - which is the point of measuring them.
+
+| # | what | outcome |
+|---|---|---|
+| 1 | **A compaction that does not rewrite the whole leaf** | `make_room` called `LeafRef::live`, which allocates a `Vec<Datum>` per row plus one outer vector - 3,701 allocations to repack an index leaf, for values already on the page. It now materialises **once, flat**: one allocation of `rows * width`, indexed directly. `write.insert.batch` **39.8 → 30.6 ms**. Reading straight through the mini-columns instead was tried first and was *worse* - the per-value class check and slot decode cost more than the allocations on a leaf of many small rows |
+| 2 | **The process floor** | the number this document carried was wrong. A **trivial 110 KB Rust binary from this workspace has a 4.1 MiB floor**, and `sqlite-bench` has 4.2 - so almost all of it is the operating system, not the engine. What is ours is about 2.2 MiB of code and statics. `panic = "abort"` and `strip = true` take the binary from **8.49 MB to 6.50** and the floor from 8.90 MiB to **8.49**; SQLite is C and does not unwind, which is the same argument the profile already makes about LTO |
+| 3 | **The index build's arena, made cheaper rather than spilled** | the high-water mark *is* the arena, and the sort prefix - sixteen bytes an entry, 1.6 MiB - is dead the moment the order exists. Freed between the sort and the pack: **1.59 MiB off the peak at no cost**, `schema.index` 26.5 → 26.1 ms. `shrink_to_fit` on the payload arena was tried in the same call and **removed**: it returned nothing and cost 2 ms |
+| 4 | **Frame of reference for integers** | a per-column base in a sixteen-byte directory entry, so a width comes from a column's *range* rather than its magnitude. `main_key` 27 → **23** pages, `side_owner` 6 → **4**. Worth **0.33 MB** of file. The first decode went through `i128` and cost `read.analytical` **6.57x → 2.77x**; matching the width once and adding with `i64` put it back to 6.79x |
+| 5 | **The `(u32, u32)` heap pair narrowed to `(u16, u16)`** | a page of 64 KiB or less addresses every value in two `u16`s. `main_table` 415 → **388** pages, `side_table` 21 → **16**. Worth **1.02 MB** of file |
+
+Together: the `.rdb` **17.90 → 16.62 MiB**, the peak resident set **46.61 → 42.65**, and every read family
+higher than the arm without them.
+
+### What it cost, and the family that is now under its floor
+
+Four 30-round runs each way on the finished build, medians with the 95% lower bound in brackets:
+
+| family | wide | narrow (shipping) |
+|---|---|---|
+| `read.point` | 26.22x (23.49x) | **31.88x (28.46x)** |
+| `read.range` | 4.85x (3.79x) | **5.08x (4.06x)** |
+| `read.join` | 3.83x (2.70x) | **4.25x (2.87x)** |
+| `read.analytical` | 5.89x (4.73x) | **6.79x (5.58x)** |
+| `schema` | 1.26x (1.22x) | **1.38x (1.36x)** |
+| `extension` | 1.27x (1.17x) | **1.43x (1.25x)** |
+| `large.values` | 11.44x (7.89x) | 11.19x (8.68x) |
+| `open.prepare` | 1.58x (1.18x) | 1.64x (1.21x) |
+| **`write`** | **2.08x (1.91x)** | 1.74x (1.51x) |
+| **`transaction`** | **1.24x (0.83x)** | 0.87x (**0.61x**) |
+| weighted headline | 3.76x (3.65x) | **3.82x (3.66x)** |
+| peak resident set | 49.18 MiB | **42.65 MiB** |
+| memory ratio | 1.32x | **1.15x** |
+
+**`transaction` is under the 1.00x floor and that is a release-blocking condition.** One workload
+does it: `txn.large` replaces a ten-byte `note` with a fifty-byte one, two thousand times, in one
+transaction. The lengths differ, so the in-place slot write refuses every time and each statement
+becomes a delta insert - and every thirty-second one a compaction over the whole leaf. `side_table`
+went from 30 pages to 16, so a leaf holds twice as many rows and a compaction costs twice as much:
+**4.1 ms → 10.2**. `write.upsert`, which writes the one table whose columns did not narrow, is
+unchanged at 2.86 → 2.84 ms.
+
+This is the density buying memory and paying for it in one place, and **`DELTA_LIMIT = 64` does not
+buy it back** - measured on both arms, it costs `large.values` half and moves `write` by 0.01x. The
+fix is a compaction that does not rewrite the whole page, which follow-up 1 improved but did not
+remove: it now allocates once instead of per row, and still repacks every live row.
+
 ### Where the rest of it is
 
 **This engine's transient is smaller than SQLite's and its file is now within 12% of SQLite's.** What
@@ -1434,13 +1491,14 @@ is left is two quantities, and one of them is no longer the file:
 
 | | inillucent | SQLite | why |
 |---|---|---|---|
-| **the cached database** | 17.84 MiB | ~16 MiB | the `.rdb` is **1.12x** the `.db`, down from 1.41x. What remains is the class array's two bits a row, the eight-byte `(offset, length)` pair a text or blob slot still spends, and the page directory |
-| **the process floor** | 8.90 MiB | 4.20 MiB | a Rust binary with the whole engine in it. `inillucent-shell.exe` is 8.05 MB against `sqlite-bench.exe`'s 1.34 MB, and resident code counts |
-| **`schema.index`'s rise** | 14.11 MiB | ~15.9 MiB | the pages the new index occupies plus the sort's arena. Ours is the *smaller* of the two |
+| **the cached database** | 16.56 MiB | ~16 MiB | the `.rdb` is **1.036x** the `.db`, down from 1.41x. What remains is the class array's two bits a row and the page directory |
+| **the process floor** | 8.49 MiB | ~4.2 MiB | of which **4.1 MiB is what any Rust binary in this workspace costs before the engine exists** - a 110 KB one measures the same. About 2.2 is this engine's code and statics; the rest is the gate child's plan and the opened catalog, which `sqlite-bench` does not build |
+| **`schema.index`'s rise** | 12.50 MiB | ~15.9 MiB | the pages the new index occupies plus the sort's arena. Ours is the *smaller* of the two |
 
-**The bar is still missed: 1.25x against 0.95x, 46.61 MiB against the 35.33 it would need.** Of the
-11.3 MiB between them, **4.7 is the process floor** and the rest is the index build's own pages and
-arena - the two things named as follow-ups below, neither of which is the leaf format any more.
+**The bar is still missed: 1.15x against 0.95x, 42.65 MiB against the 35.33 it would need.** The file
+is no longer where it is: at 1.036x of SQLite's there is under 0.6 MiB left in the cached database.
+What is left is 4.3 MiB of process - most of it the operating system's, which neither engine escapes -
+and one `CREATE INDEX`.
 
 ### Two causes, ruled out by task-1861 and still ruled out
 

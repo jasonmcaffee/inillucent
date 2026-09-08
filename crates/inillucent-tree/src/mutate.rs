@@ -186,9 +186,11 @@ impl<'p> LeafMut<'p> {
 
     fn columns_end(&self) -> DbResult<usize> {
         let leaf = LeafRef::parse(self.page)?;
-        let mut end = leaf_header::DIRECTORY.saturating_add(leaf.column_count().saturating_mul(8));
+        let stride = leaf.directory_entry_size();
+        let mut end =
+            leaf_header::DIRECTORY.saturating_add(leaf.column_count().saturating_mul(stride));
         for index in 0..leaf.column_count() {
-            let entry = leaf_header::DIRECTORY.saturating_add(index.saturating_mul(8));
+            let entry = leaf_header::DIRECTORY.saturating_add(index.saturating_mul(stride));
             let start = page::read_u32(self.page, entry.saturating_add(4))? as usize;
             // The column directory's own width, not the physical type's: an
             // integer column's slots may be one, two or four bytes wide, and a
@@ -589,7 +591,7 @@ impl<'p> LeafMut<'p> {
         row: usize,
         value: &Datum<'_>,
     ) -> DbResult<Applied> {
-        let (row_count, spec, width, class) = {
+        let (row_count, spec, width, frame, stride, class) = {
             let leaf = LeafRef::parse(self.page)?;
             if row >= leaf.row_count() {
                 return Err(misuse(format!("row {row} is not in the sorted region")));
@@ -599,6 +601,8 @@ impl<'p> LeafMut<'p> {
                 leaf.row_count(),
                 spec,
                 leaf.column_width(column)?,
+                leaf.column_base(column)?,
+                leaf.directory_entry_size(),
                 leaf.column(column)?.class_at(row)?,
             )
         };
@@ -611,7 +615,7 @@ impl<'p> LeafMut<'p> {
         if class != crate::types::ValueClass::Typed {
             return Ok(Applied::NoRoom);
         }
-        let entry = leaf_header::DIRECTORY.saturating_add(column.saturating_mul(8));
+        let entry = leaf_header::DIRECTORY.saturating_add(column.saturating_mul(stride));
         let base = page::read_u32(self.page, entry.saturating_add(4))? as usize;
         let values_at = base.saturating_add(class_bytes(row_count));
         let at = values_at.saturating_add(row.saturating_mul(width));
@@ -624,20 +628,24 @@ impl<'p> LeafMut<'p> {
                 // the caller's own route out - delete the row, insert it into
                 // the delta area, compact later at a width chosen from the new
                 // values - takes it instead.
-                if crate::types::int_slot_width(*number) > width {
+                // **A narrow slot is a promise about the values in it**, and
+                // with a frame of reference the promise is about the distance
+                // from the base rather than the magnitude. Either way an
+                // in-place write that would not fit is refused.
+                if !crate::leaf::fits_frame(frame, width, *number) {
                     return Ok(Applied::NoRoom);
                 }
                 let target = self
                     .page
                     .get_mut(at..at.saturating_add(width))
                     .ok_or_else(|| corrupt("an integer slot runs past the page"))?;
-                crate::types::write_int_slot(target, *number);
+                crate::leaf::write_frame(frame, target, *number);
                 return Ok(Applied::Yes);
             }
             (PhysicalType::Float64, Datum::Real(number)) => number.to_bits(),
             (PhysicalType::Float64, Datum::Int(number)) => (*number as f64).to_bits(),
             (PhysicalType::Text, Datum::Text(bytes)) | (PhysicalType::Blob, Datum::Blob(bytes)) => {
-                return self.overwrite_heap_slot(at, bytes);
+                return self.overwrite_heap_slot(at, width, bytes);
             }
             // Every other combination needs the heap to move or the class to
             // change, and both are a rewrite of the mini-column rather than a
@@ -655,11 +663,20 @@ impl<'p> LeafMut<'p> {
     /// row's slot is affected. A different length would have to move every heap
     /// value after this one, which is a compaction.
     ///
-    /// @param slot_at - where the row's eight-byte slot sits in the page
+    /// @param slot_at - where the row's slot sits in the page
+    /// @param width - how wide that slot is: eight bytes of `u32`s or four of `u16`s
     /// @param bytes - the new value
-    fn overwrite_heap_slot(&mut self, slot_at: usize, bytes: &[u8]) -> DbResult<Applied> {
-        let offset = page::read_u32(self.page, slot_at)? as usize;
-        let length = page::read_u32(self.page, slot_at.saturating_add(4))? as usize;
+    fn overwrite_heap_slot(
+        &mut self,
+        slot_at: usize,
+        width: usize,
+        bytes: &[u8],
+    ) -> DbResult<Applied> {
+        let slot = self
+            .page
+            .get(slot_at..slot_at.saturating_add(width))
+            .ok_or_else(|| corrupt("a heap slot runs past the page"))?;
+        let (offset, length) = crate::types::read_heap_slot(slot);
         if length != bytes.len() {
             return Ok(Applied::NoRoom);
         }
@@ -958,7 +975,11 @@ mod tests {
         // this test is about is that a slot update lands, so it writes a value
         // the leaf's own width admits - and the refusal of one that does not is
         // `a_value_too_wide_for_the_slot_is_refused`.
-        let replacement = if crate::leaf::NARROW_INT_SLOTS { 42 } else { 4_242 };
+        let replacement = if crate::leaf::NARROW_INT_SLOTS {
+            42
+        } else {
+            4_242
+        };
         let mut leaf = LeafMut::new(&mut page).expect("a leaf");
         assert_eq!(
             leaf.update_slot(2, 3, &Datum::Int(replacement))
@@ -966,7 +987,10 @@ mod tests {
             Applied::Yes
         );
         let view = leaf.view().expect("the page parses");
-        assert_eq!(view.value(3, 2).expect("a value").as_int(), Some(replacement));
+        assert_eq!(
+            view.value(3, 2).expect("a value").as_int(),
+            Some(replacement)
+        );
         assert!(
             view.is_clean(),
             "a slot update took the leaf off the fast path"

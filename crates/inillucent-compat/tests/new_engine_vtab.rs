@@ -402,9 +402,16 @@ fn a_where_over_dbstat_is_applied() {
     // Every name a filtered scan reports is the name it was filtered to.
     let answered = pair
         .engine
-        .execute_any("SELECT DISTINCT name FROM dbstat WHERE name = 'wide'", &Params::new())
+        .execute_any(
+            "SELECT DISTINCT name FROM dbstat WHERE name = 'wide'",
+            &Params::new(),
+        )
         .expect("the query runs");
-    assert_eq!(answered.rows.len(), 1, "a filtered dbstat named other trees");
+    assert_eq!(
+        answered.rows.len(),
+        1,
+        "a filtered dbstat named other trees"
+    );
 }
 
 #[test]
@@ -422,7 +429,11 @@ fn a_where_over_an_eponymous_function_is_applied() {
     // `LIKE`, `GLOB` and `REGEXP` used to be refused outright on a virtual
     // table - the module had not promised them and the engine would not try -
     // which turned statements SQLite answers into errors.
-    pair.answers_agree("SELECT value FROM json_each('[\"aa\",\"ab\",\"bb\"]') WHERE value LIKE 'a%'");
-    pair.answers_agree("SELECT value FROM json_each('[\"aa\",\"ab\",\"bb\"]') WHERE value GLOB 'a*'");
+    pair.answers_agree(
+        "SELECT value FROM json_each('[\"aa\",\"ab\",\"bb\"]') WHERE value LIKE 'a%'",
+    );
+    pair.answers_agree(
+        "SELECT value FROM json_each('[\"aa\",\"ab\",\"bb\"]') WHERE value GLOB 'a*'",
+    );
     pair.answers_agree("SELECT name FROM pragma_table_info('shaped') WHERE name LIKE 'b%'");
 }

@@ -45,7 +45,7 @@ use inillucent_pool::{Database, PageId, Pool, Swip};
 use inillucent_wal::record::{Body, Structural};
 
 use crate::datum::{Datum, OwnedDatum};
-use crate::leaf::{LeafBuilder, LeafRef, Packed};
+use crate::leaf::{LeafBuilder, LeafRef, Packed, Rows};
 use crate::mutate::LeafMut;
 use crate::paged::PagedTree;
 
@@ -189,13 +189,16 @@ const TIGHT_FILL: f64 = 0.95;
 ///
 /// @param builder - the leaf builder for this tree
 /// @param rows - the leaf's live rows, sorted
-pub fn compact_image(builder: &LeafBuilder, rows: &[Vec<Datum<'_>>]) -> DbResult<Option<Vec<u8>>> {
+pub fn compact_image<'d>(
+    builder: &LeafBuilder,
+    rows: &dyn crate::leaf::Rows<'d>,
+) -> DbResult<Option<Vec<u8>>> {
     for fill in [COMPACT_FILL, TIGHT_FILL] {
-        // `pack_all` rather than `pack`: a rung that cannot hold every row
+        // `pack_all_rows` rather than `pack`: a rung that cannot hold every row
         // costs one sizing pass here, where `pack` would encode a whole page
         // image and then have it discarded. A leaf that arrived from a bulk
         // build fails the first rung every time.
-        if let Some(page) = builder.pack_all(rows, fill)? {
+        if let Some(page) = builder.pack_all_rows(rows, fill)? {
             return Ok(Some(page));
         }
     }
@@ -864,7 +867,13 @@ impl PagedTree {
                 .with_directions(self.directions());
             let held = self.read_extents(database.pool(), &leaf)?;
             let leaf = leaf.with_extents(&held);
-            let rows = leaf.live()?;
+            // **Positions, not values.** `live()` allocates a `Vec<Datum>` per
+            // row and one more for the outer vector; on an index leaf holding
+            // three and a half thousand entries that is three and a half
+            // thousand allocations per compaction, to produce values that are
+            // already on the page. `live_order` is one allocation of four bytes
+            // a row and the builder reads through it.
+            let source = leaf.live_source()?;
             // **A leaf with out-of-line values always takes the owned route.**
             // The fast path below packs straight out of the page, which needs
             // the guard held - and repacking an extent needs the *file*, to
@@ -904,9 +913,14 @@ impl PagedTree {
             // is needed - the page is genuinely full - because rows arriving in
             // order never come back to the page they left behind. See
             // `APPEND_FILL`.
+            let last_row: Option<Vec<Datum<'_>>> = (source.len() > 0).then(|| {
+                (0..self.key_columns())
+                    .map(|column| source.value(source.len().saturating_sub(1), column))
+                    .collect()
+            });
             let appending = leaf.right_sibling().is_none()
-                && rows.len() >= 2
-                && match (arriving, rows.last()) {
+                && source.len() >= 2
+                && match (arriving, last_row.as_deref()) {
                     (Some(key), Some(last)) => {
                         is_above(key, last, self.collations(), self.key_columns())
                     }
@@ -938,7 +952,7 @@ impl PagedTree {
             // function of the rows alone, or the replayed page would differ from
             // the logged one. A compaction whose page has no room for the
             // arriving row is therefore not a tighter compaction, it is a split.
-            let mut compacted = compact_image(&builder, &rows)?;
+            let mut compacted = compact_image(&builder, &source)?;
             if let Some(image) = compacted.as_mut() {
                 if !LeafMut::new(image)?.room_for(needed)? {
                     compacted = None;
@@ -950,8 +964,12 @@ impl PagedTree {
                 // guard, so this is where they are copied - and a split is the
                 // rarer half by a wide margin.
                 None => Fit::Split(
-                    rows.iter()
-                        .map(|row| row.iter().map(OwnedDatum::from_datum).collect())
+                    (0..source.len())
+                        .map(|row| {
+                            (0..source.width())
+                                .map(|column| OwnedDatum::from_datum(&source.value(row, column)))
+                                .collect()
+                        })
                         .collect(),
                     appending,
                 ),

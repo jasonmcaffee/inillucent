@@ -85,17 +85,23 @@ impl PhysicalType {
     /// and narrowing those is a change to the heap's addressing rather than to
     /// a value's encoding.
     pub fn narrows(self) -> bool {
-        matches!(self, PhysicalType::Int64)
+        matches!(
+            self,
+            PhysicalType::Int64 | PhysicalType::Text | PhysicalType::Blob
+        )
     }
 
     /// Reports whether a width is one this type's slots may be written at.
     ///
     /// @param width - the width a page's column directory claims
     pub fn admits_width(self, width: usize) -> bool {
-        if !self.narrows() {
-            return width == self.slot_width();
+        match self {
+            PhysicalType::Int64 => matches!(width, 1 | 2 | 4 | 8),
+            // A heap reference is a pair, so it is eight bytes of `u32`s or
+            // four of `u16`s and never anything between.
+            PhysicalType::Text | PhysicalType::Blob => matches!(width, 4 | 8),
+            other => width == other.slot_width(),
         }
-        matches!(width, 1 | 2 | 4 | 8)
     }
 
     /// Reports whether values of this type live in the value array itself.
@@ -171,6 +177,108 @@ pub fn write_int_slot(slot: &mut [u8], value: i64) {
     let width = slot.len().min(8);
     if let (Some(target), Some(source)) = (slot.get_mut(..width), raw.get(..width)) {
         target.copy_from_slice(source);
+    }
+}
+
+/// Returns the narrowest slot a heap reference fits in.
+///
+/// A `Text` or `Blob` slot is an `(offset, length)` pair into the page, and both
+/// halves are bounded by the page size - so on a page of 64 KiB or less the pair
+/// fits in two `u16`s and costs **four bytes instead of eight**. `main_table`'s
+/// `label` and `payload` are one such pair each.
+///
+/// @param page_size - the database's page size
+/// @param longest - the longest value the column holds in this leaf
+pub fn heap_slot_width(page_size: usize, longest: usize) -> usize {
+    if page_size <= u16::MAX as usize + 1 && longest <= u16::MAX as usize {
+        4
+    } else {
+        8
+    }
+}
+
+/// Reads the `(offset, length)` a heap slot names.
+///
+/// @param slot - exactly the column's slot width, four bytes or eight
+pub fn read_heap_slot(slot: &[u8]) -> (usize, usize) {
+    if slot.len() >= 8 {
+        let mut offset = [0u8; 4];
+        let mut length = [0u8; 4];
+        offset.copy_from_slice(slot.get(..4).unwrap_or(&[0; 4]));
+        length.copy_from_slice(slot.get(4..8).unwrap_or(&[0; 4]));
+        (
+            u32::from_le_bytes(offset) as usize,
+            u32::from_le_bytes(length) as usize,
+        )
+    } else {
+        let mut offset = [0u8; 2];
+        let mut length = [0u8; 2];
+        offset.copy_from_slice(slot.get(..2).unwrap_or(&[0; 2]));
+        length.copy_from_slice(slot.get(2..4).unwrap_or(&[0; 2]));
+        (
+            u16::from_le_bytes(offset) as usize,
+            u16::from_le_bytes(length) as usize,
+        )
+    }
+}
+
+/// Writes an `(offset, length)` into a heap slot.
+///
+/// The caller has already chosen a width the pair fits in.
+///
+/// @param slot - exactly the column's slot width
+/// @param offset - where the value starts in the page
+/// @param length - how long it is
+pub fn write_heap_slot(slot: &mut [u8], offset: usize, length: usize) {
+    if slot.len() >= 8 {
+        if let Some(half) = slot.get_mut(..4) {
+            half.copy_from_slice(&(offset as u32).to_le_bytes());
+        }
+        if let Some(half) = slot.get_mut(4..8) {
+            half.copy_from_slice(&(length as u32).to_le_bytes());
+        }
+    } else {
+        if let Some(half) = slot.get_mut(..2) {
+            half.copy_from_slice(&(offset as u16).to_le_bytes());
+        }
+        if let Some(half) = slot.get_mut(2..4) {
+            half.copy_from_slice(&(length as u16).to_le_bytes());
+        }
+    }
+}
+
+/// Reads the single heap offset a slot names, for an exception or an extent.
+///
+/// A `Text` or `Blob` slot at four bytes holds two `u16`s, so the offset in it
+/// is a `u16`; everywhere else it is a `u32`. Getting this wrong reads the
+/// length as half the offset and lands in the middle of the heap.
+///
+/// @param slot - exactly the column's slot width
+/// @param narrow_pair - whether this column's slots are `(u16, u16)`
+pub fn read_slot_offset(slot: &[u8], narrow_pair: bool) -> usize {
+    if narrow_pair {
+        let mut raw = [0u8; 2];
+        raw.copy_from_slice(slot.get(..2).unwrap_or(&[0; 2]));
+        u16::from_le_bytes(raw) as usize
+    } else {
+        let mut raw = [0u8; 4];
+        raw.copy_from_slice(slot.get(..4).unwrap_or(&[0; 4]));
+        u32::from_le_bytes(raw) as usize
+    }
+}
+
+/// Writes a single heap offset into a slot.
+///
+/// @param slot - exactly the column's slot width
+/// @param offset - where the tagged value or extent reference starts
+/// @param narrow_pair - whether this column's slots are `(u16, u16)`
+pub fn write_slot_offset(slot: &mut [u8], offset: usize, narrow_pair: bool) {
+    if narrow_pair {
+        if let Some(half) = slot.get_mut(..2) {
+            half.copy_from_slice(&(offset as u16).to_le_bytes());
+        }
+    } else if let Some(half) = slot.get_mut(..4) {
+        half.copy_from_slice(&(offset as u32).to_le_bytes());
     }
 }
 

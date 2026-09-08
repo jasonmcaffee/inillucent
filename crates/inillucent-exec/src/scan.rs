@@ -264,10 +264,12 @@ fn slice_vector(vector: Vector<'_>, start: usize, len: usize) -> Vector<'_> {
         Vector::Int64 {
             bytes,
             width,
+            base,
             class,
         } => Vector::Int64 {
             bytes: slice_at(bytes, width, start, len),
             width,
+            base,
             // A class array is two bits per row, so it can only be sliced at a
             // four-row boundary. Rather than carry an offset, a batch that does
             // not start on one keeps the whole array and is therefore only
@@ -278,6 +280,17 @@ fn slice_vector(vector: Vector<'_>, start: usize, len: usize) -> Vector<'_> {
         Vector::Float64 { bytes, class } => Vector::Float64 {
             bytes: slice_at(bytes, 8, start, len),
             class,
+        },
+        Vector::Variable {
+            slots,
+            width,
+            page,
+            text,
+        } => Vector::Variable {
+            slots: slice_at(slots, width, start, len),
+            width,
+            page,
+            text,
         },
         // The general path is not sliced: a batch over it addresses rows by
         // their position in the leaf, which is what `Vector::Column` expects.
@@ -298,7 +311,9 @@ fn slice_vector(vector: Vector<'_>, start: usize, len: usize) -> Vector<'_> {
 fn slice_at(bytes: &[u8], width: usize, start: usize, len: usize) -> &[u8] {
     let width = width.max(1);
     let from = start.saturating_mul(width);
-    let to = from.saturating_add(len.saturating_mul(width)).min(bytes.len());
+    let to = from
+        .saturating_add(len.saturating_mul(width))
+        .min(bytes.len());
     bytes.get(from..to).unwrap_or(&[])
 }
 
