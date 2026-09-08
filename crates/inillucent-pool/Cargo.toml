@@ -3,6 +3,7 @@ name = "inillucent-pool"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Buffer pool: frames, version latches, pointer swizzling, cooling FIFO, writeback, free map, blob extents"
 
 [dependencies]

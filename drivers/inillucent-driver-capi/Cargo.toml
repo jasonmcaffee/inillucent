@@ -3,6 +3,7 @@ name = "inillucent-driver-capi"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "The C ABI over inillucent-driver: how every language that is not Rust reaches the engine."
 
 [lib]

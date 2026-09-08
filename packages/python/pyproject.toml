@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inillucent"
+version = "0.1.0"
+description = "Embedded SQL database with full-text and vector search, a sqlite3-shaped shell, and an MCP server."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Jason McAffee" }]
+keywords = ["database", "sql", "sqlite", "vector", "embedding", "search", "mcp", "rag"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Database :: Database Engines/Servers",
+    "Topic :: Database :: Front-Ends",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+]
+
+[project.urls]
+Homepage = "https://github.com/jasonmcaffee/inillucent"
+Source = "https://github.com/jasonmcaffee/inillucent"
+Issues = "https://github.com/jasonmcaffee/inillucent/issues"
+
+# The four programs, as console scripts. Each is a two-line shim that finds the
+# bundled binary and becomes it, so `pip install inillucent` puts `inillucent`
+# on PATH the same way `npm install -g` does.
+[project.scripts]
+inillucent = "inillucent.__main__:cli"
+inillucent-shell = "inillucent.__main__:shell"
+inillucent-mcp = "inillucent.__main__:mcp"
+inillucent-migrate = "inillucent.__main__:migrate"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# The binaries and the C ABI library travel inside the package, which is what
+# makes the wheel platform-specific and what makes it work with no network at
+# install time.
+[tool.setuptools.package-data]
+inillucent = ["_bin/*", "_lib/*", "_include/*"]

@@ -1,0 +1,37 @@
+{
+    "name": "jasonmcaffee/inillucent",
+    "description": "Embedded SQL database with full-text and vector search, a sqlite3-shaped shell, and an MCP server.",
+    "keywords": ["database", "sql", "sqlite", "vector", "embedding", "search", "mcp", "rag"],
+    "homepage": "https://github.com/jasonmcaffee/inillucent",
+    "license": "MIT",
+    "type": "library",
+    "authors": [
+        {
+            "name": "Jason McAffee",
+            "homepage": "https://github.com/jasonmcaffee"
+        }
+    ],
+    "require": {
+        "php": ">=8.1",
+        "ext-json": "*"
+    },
+    "suggest": {
+        "ext-ffi": "Lets a future in-process binding load the C ABI directly. The CLI wrapper needs nothing beyond ext-json."
+    },
+    "autoload": {
+        "psr-4": {
+            "Inillucent\\": "packages/php/src/"
+        }
+    },
+    "bin": [
+        "packages/php/bin/inillucent",
+        "packages/php/bin/inillucent-install"
+    ],
+    "support": {
+        "issues": "https://github.com/jasonmcaffee/inillucent/issues",
+        "source": "https://github.com/jasonmcaffee/inillucent"
+    },
+    "config": {
+        "sort-packages": true
+    }
+}

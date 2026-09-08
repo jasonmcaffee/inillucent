@@ -1,0 +1,1065 @@
+# inillucent stable error table.
+#
+# This file is the source of truth. crates/inillucent-base/src/error/generated.rs is
+# produced from it by "cargo run -p inillucent-compat --bin inillucent-manifest -- codegen"
+# and a test in inillucent-base fails if the checked-in file drifts from these rows.
+#
+# The columns past the numeric code record what a caller may do next, which is
+# the part of the contract SQLite documents in prose rather than in a header:
+#   connection_usable       - the connection may still be used after this error
+#   statement_resettable    - the statement may be reset and re-stepped
+#   transaction_rolled_back - the error implicitly rolled the transaction back
+
+schema_version = 1
+reference = "sqlite-3.53.4"
+source = "https://sqlite.org/rescode.html"
+
+[[primary]]
+name = "Ok"
+c_name = "SQLITE_OK"
+code = 0
+message = "not an error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "Error"
+c_name = "SQLITE_ERROR"
+code = 1
+message = "SQL logic error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "Internal"
+c_name = "SQLITE_INTERNAL"
+code = 2
+message = "internal logic error"
+connection_usable = false
+statement_resettable = false
+transaction_rolled_back = true
+
+[[primary]]
+name = "Perm"
+c_name = "SQLITE_PERM"
+code = 3
+message = "access permission denied"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "Abort"
+c_name = "SQLITE_ABORT"
+code = 4
+message = "query aborted"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "Busy"
+c_name = "SQLITE_BUSY"
+code = 5
+message = "database is locked"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "Locked"
+c_name = "SQLITE_LOCKED"
+code = 6
+message = "database table is locked"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "NoMem"
+c_name = "SQLITE_NOMEM"
+code = 7
+message = "out of memory"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "ReadOnly"
+c_name = "SQLITE_READONLY"
+code = 8
+message = "attempt to write a readonly database"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "Interrupt"
+c_name = "SQLITE_INTERRUPT"
+code = 9
+message = "interrupted"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "IoErr"
+c_name = "SQLITE_IOERR"
+code = 10
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[primary]]
+name = "Corrupt"
+c_name = "SQLITE_CORRUPT"
+code = 11
+message = "database disk image is malformed"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "NotFound"
+c_name = "SQLITE_NOTFOUND"
+code = 12
+message = "unknown operation"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "Full"
+c_name = "SQLITE_FULL"
+code = 13
+message = "database or disk is full"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[primary]]
+name = "CantOpen"
+c_name = "SQLITE_CANTOPEN"
+code = 14
+message = "unable to open database file"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "Protocol"
+c_name = "SQLITE_PROTOCOL"
+code = 15
+message = "locking protocol"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "Empty"
+c_name = "SQLITE_EMPTY"
+code = 16
+message = "internal use only"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "Schema"
+c_name = "SQLITE_SCHEMA"
+code = 17
+message = "database schema has changed"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "TooBig"
+c_name = "SQLITE_TOOBIG"
+code = 18
+message = "string or blob too big"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "Constraint"
+c_name = "SQLITE_CONSTRAINT"
+code = 19
+message = "constraint failed"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "Mismatch"
+c_name = "SQLITE_MISMATCH"
+code = 20
+message = "datatype mismatch"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "Misuse"
+c_name = "SQLITE_MISUSE"
+code = 21
+message = "bad parameter or other API misuse"
+connection_usable = false
+statement_resettable = false
+transaction_rolled_back = false
+
+[[primary]]
+name = "NoLfs"
+c_name = "SQLITE_NOLFS"
+code = 22
+message = "large file support is disabled"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "Auth"
+c_name = "SQLITE_AUTH"
+code = 23
+message = "authorization denied"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "Format"
+c_name = "SQLITE_FORMAT"
+code = 24
+message = "auxiliary database format error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "Range"
+c_name = "SQLITE_RANGE"
+code = 25
+message = "column index out of range"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "NotADb"
+c_name = "SQLITE_NOTADB"
+code = 26
+message = "file is not a database"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "Notice"
+c_name = "SQLITE_NOTICE"
+code = 27
+message = "notification message"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "Warning"
+c_name = "SQLITE_WARNING"
+code = 28
+message = "warning message"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "Row"
+c_name = "SQLITE_ROW"
+code = 100
+message = "another row available"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[primary]]
+name = "Done"
+c_name = "SQLITE_DONE"
+code = 101
+message = "no more rows available"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "OkLoadPermanently"
+c_name = "SQLITE_OK_LOAD_PERMANENTLY"
+primary = "Ok"
+code = 256
+message = "not an error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "OkSymlink"
+c_name = "SQLITE_OK_SYMLINK"
+primary = "Ok"
+code = 512
+message = "not an error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "ErrorMissingCollseq"
+c_name = "SQLITE_ERROR_MISSING_COLLSEQ"
+primary = "Error"
+code = 257
+message = "no such collation sequence"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "ErrorRetry"
+c_name = "SQLITE_ERROR_RETRY"
+primary = "Error"
+code = 513
+message = "SQL logic error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "ErrorSnapshot"
+c_name = "SQLITE_ERROR_SNAPSHOT"
+primary = "Error"
+code = 769
+message = "snapshot is not available"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "IoErrRead"
+c_name = "SQLITE_IOERR_READ"
+primary = "IoErr"
+code = 266
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrShortRead"
+c_name = "SQLITE_IOERR_SHORT_READ"
+primary = "IoErr"
+code = 522
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrWrite"
+c_name = "SQLITE_IOERR_WRITE"
+primary = "IoErr"
+code = 778
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrFsync"
+c_name = "SQLITE_IOERR_FSYNC"
+primary = "IoErr"
+code = 1034
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrDirFsync"
+c_name = "SQLITE_IOERR_DIR_FSYNC"
+primary = "IoErr"
+code = 1290
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrTruncate"
+c_name = "SQLITE_IOERR_TRUNCATE"
+primary = "IoErr"
+code = 1546
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrFstat"
+c_name = "SQLITE_IOERR_FSTAT"
+primary = "IoErr"
+code = 1802
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrUnlock"
+c_name = "SQLITE_IOERR_UNLOCK"
+primary = "IoErr"
+code = 2058
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrRdlock"
+c_name = "SQLITE_IOERR_RDLOCK"
+primary = "IoErr"
+code = 2314
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrDelete"
+c_name = "SQLITE_IOERR_DELETE"
+primary = "IoErr"
+code = 2570
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrBlocked"
+c_name = "SQLITE_IOERR_BLOCKED"
+primary = "IoErr"
+code = 2826
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrNoMem"
+c_name = "SQLITE_IOERR_NOMEM"
+primary = "IoErr"
+code = 3082
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrAccess"
+c_name = "SQLITE_IOERR_ACCESS"
+primary = "IoErr"
+code = 3338
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrCheckReservedLock"
+c_name = "SQLITE_IOERR_CHECKRESERVEDLOCK"
+primary = "IoErr"
+code = 3594
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrLock"
+c_name = "SQLITE_IOERR_LOCK"
+primary = "IoErr"
+code = 3850
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrClose"
+c_name = "SQLITE_IOERR_CLOSE"
+primary = "IoErr"
+code = 4106
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrDirClose"
+c_name = "SQLITE_IOERR_DIR_CLOSE"
+primary = "IoErr"
+code = 4362
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrShmOpen"
+c_name = "SQLITE_IOERR_SHMOPEN"
+primary = "IoErr"
+code = 4618
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrShmSize"
+c_name = "SQLITE_IOERR_SHMSIZE"
+primary = "IoErr"
+code = 4874
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrShmLock"
+c_name = "SQLITE_IOERR_SHMLOCK"
+primary = "IoErr"
+code = 5130
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrShmMap"
+c_name = "SQLITE_IOERR_SHMMAP"
+primary = "IoErr"
+code = 5386
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrSeek"
+c_name = "SQLITE_IOERR_SEEK"
+primary = "IoErr"
+code = 5642
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrDeleteNoent"
+c_name = "SQLITE_IOERR_DELETE_NOENT"
+primary = "IoErr"
+code = 5898
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrMmap"
+c_name = "SQLITE_IOERR_MMAP"
+primary = "IoErr"
+code = 6154
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrGetTempPath"
+c_name = "SQLITE_IOERR_GETTEMPPATH"
+primary = "IoErr"
+code = 6410
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrConvPath"
+c_name = "SQLITE_IOERR_CONVPATH"
+primary = "IoErr"
+code = 6666
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrVnode"
+c_name = "SQLITE_IOERR_VNODE"
+primary = "IoErr"
+code = 6922
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrAuth"
+c_name = "SQLITE_IOERR_AUTH"
+primary = "IoErr"
+code = 7178
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrBeginAtomic"
+c_name = "SQLITE_IOERR_BEGIN_ATOMIC"
+primary = "IoErr"
+code = 7434
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrCommitAtomic"
+c_name = "SQLITE_IOERR_COMMIT_ATOMIC"
+primary = "IoErr"
+code = 7690
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrRollbackAtomic"
+c_name = "SQLITE_IOERR_ROLLBACK_ATOMIC"
+primary = "IoErr"
+code = 7946
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrData"
+c_name = "SQLITE_IOERR_DATA"
+primary = "IoErr"
+code = 8202
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrCorruptFs"
+c_name = "SQLITE_IOERR_CORRUPTFS"
+primary = "IoErr"
+code = 8458
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "IoErrInPage"
+c_name = "SQLITE_IOERR_IN_PAGE"
+primary = "IoErr"
+code = 8714
+message = "disk I/O error"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "LockedSharedCache"
+c_name = "SQLITE_LOCKED_SHAREDCACHE"
+primary = "Locked"
+code = 262
+message = "database table is locked"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "LockedVtab"
+c_name = "SQLITE_LOCKED_VTAB"
+primary = "Locked"
+code = 518
+message = "database table is locked"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "BusyRecovery"
+c_name = "SQLITE_BUSY_RECOVERY"
+primary = "Busy"
+code = 261
+message = "database is locked"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "BusySnapshot"
+c_name = "SQLITE_BUSY_SNAPSHOT"
+primary = "Busy"
+code = 517
+message = "database is locked"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "BusyTimeout"
+c_name = "SQLITE_BUSY_TIMEOUT"
+primary = "Busy"
+code = 773
+message = "database is locked"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "CantOpenNoTempDir"
+c_name = "SQLITE_CANTOPEN_NOTEMPDIR"
+primary = "CantOpen"
+code = 270
+message = "unable to open database file"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "CantOpenIsDir"
+c_name = "SQLITE_CANTOPEN_ISDIR"
+primary = "CantOpen"
+code = 526
+message = "unable to open database file"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "CantOpenFullPath"
+c_name = "SQLITE_CANTOPEN_FULLPATH"
+primary = "CantOpen"
+code = 782
+message = "unable to open database file"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "CantOpenConvPath"
+c_name = "SQLITE_CANTOPEN_CONVPATH"
+primary = "CantOpen"
+code = 1038
+message = "unable to open database file"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "CantOpenDirtyWal"
+c_name = "SQLITE_CANTOPEN_DIRTYWAL"
+primary = "CantOpen"
+code = 1294
+message = "unable to open database file"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "CantOpenSymlink"
+c_name = "SQLITE_CANTOPEN_SYMLINK"
+primary = "CantOpen"
+code = 1550
+message = "unable to open database file"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "CorruptVtab"
+c_name = "SQLITE_CORRUPT_VTAB"
+primary = "Corrupt"
+code = 267
+message = "database disk image is malformed"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "CorruptSequence"
+c_name = "SQLITE_CORRUPT_SEQUENCE"
+primary = "Corrupt"
+code = 523
+message = "database disk image is malformed"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "CorruptIndex"
+c_name = "SQLITE_CORRUPT_INDEX"
+primary = "Corrupt"
+code = 779
+message = "database disk image is malformed"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "ReadOnlyRecovery"
+c_name = "SQLITE_READONLY_RECOVERY"
+primary = "ReadOnly"
+code = 264
+message = "attempt to write a readonly database"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "ReadOnlyCantLock"
+c_name = "SQLITE_READONLY_CANTLOCK"
+primary = "ReadOnly"
+code = 520
+message = "attempt to write a readonly database"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "ReadOnlyRollback"
+c_name = "SQLITE_READONLY_ROLLBACK"
+primary = "ReadOnly"
+code = 776
+message = "attempt to write a readonly database"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "ReadOnlyDbMoved"
+c_name = "SQLITE_READONLY_DBMOVED"
+primary = "ReadOnly"
+code = 1032
+message = "attempt to write a readonly database"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "ReadOnlyCantInit"
+c_name = "SQLITE_READONLY_CANTINIT"
+primary = "ReadOnly"
+code = 1288
+message = "attempt to write a readonly database"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "ReadOnlyDirectory"
+c_name = "SQLITE_READONLY_DIRECTORY"
+primary = "ReadOnly"
+code = 1544
+message = "attempt to write a readonly database"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "AbortRollback"
+c_name = "SQLITE_ABORT_ROLLBACK"
+primary = "Abort"
+code = 516
+message = "abort due to ROLLBACK"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = true
+
+[[extended]]
+name = "ConstraintCheck"
+c_name = "SQLITE_CONSTRAINT_CHECK"
+primary = "Constraint"
+code = 275
+message = "constraint failed"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "ConstraintCommitHook"
+c_name = "SQLITE_CONSTRAINT_COMMITHOOK"
+primary = "Constraint"
+code = 531
+message = "constraint failed"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "ConstraintForeignKey"
+c_name = "SQLITE_CONSTRAINT_FOREIGNKEY"
+primary = "Constraint"
+code = 787
+message = "constraint failed"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "ConstraintFunction"
+c_name = "SQLITE_CONSTRAINT_FUNCTION"
+primary = "Constraint"
+code = 1043
+message = "constraint failed"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "ConstraintNotNull"
+c_name = "SQLITE_CONSTRAINT_NOTNULL"
+primary = "Constraint"
+code = 1299
+message = "constraint failed"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "ConstraintPrimaryKey"
+c_name = "SQLITE_CONSTRAINT_PRIMARYKEY"
+primary = "Constraint"
+code = 1555
+message = "constraint failed"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "ConstraintTrigger"
+c_name = "SQLITE_CONSTRAINT_TRIGGER"
+primary = "Constraint"
+code = 1811
+message = "constraint failed"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "ConstraintUnique"
+c_name = "SQLITE_CONSTRAINT_UNIQUE"
+primary = "Constraint"
+code = 2067
+message = "constraint failed"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "ConstraintVtab"
+c_name = "SQLITE_CONSTRAINT_VTAB"
+primary = "Constraint"
+code = 2323
+message = "constraint failed"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "ConstraintRowId"
+c_name = "SQLITE_CONSTRAINT_ROWID"
+primary = "Constraint"
+code = 2579
+message = "constraint failed"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "ConstraintPinned"
+c_name = "SQLITE_CONSTRAINT_PINNED"
+primary = "Constraint"
+code = 2835
+message = "constraint failed"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "ConstraintDataType"
+c_name = "SQLITE_CONSTRAINT_DATATYPE"
+primary = "Constraint"
+code = 3091
+message = "constraint failed"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "NoticeRecoverWal"
+c_name = "SQLITE_NOTICE_RECOVER_WAL"
+primary = "Notice"
+code = 283
+message = "notification message"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "NoticeRecoverRollback"
+c_name = "SQLITE_NOTICE_RECOVER_ROLLBACK"
+primary = "Notice"
+code = 539
+message = "notification message"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "NoticeRbu"
+c_name = "SQLITE_NOTICE_RBU"
+primary = "Notice"
+code = 795
+message = "notification message"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "WarningAutoIndex"
+c_name = "SQLITE_WARNING_AUTOINDEX"
+primary = "Warning"
+code = 284
+message = "warning message"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+
+[[extended]]
+name = "AuthUser"
+c_name = "SQLITE_AUTH_USER"
+primary = "Auth"
+code = 279
+message = "authorization denied"
+connection_usable = true
+statement_resettable = true
+transaction_rolled_back = false
+

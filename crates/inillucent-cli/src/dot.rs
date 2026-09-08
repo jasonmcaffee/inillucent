@@ -39,7 +39,7 @@ pub fn run(shell: &mut Shell, line: &str) {
         "mode" => mode(shell, &arguments),
         "separator" => separator(shell, &arguments),
         "nullvalue" => match arguments.first() {
-            Some(text) => shell.layout.null = (*text).to_string(),
+            Some(text) => shell.layout.null = resolve_backslashes(text),
             None => shell.complain("Usage: .nullvalue STRING"),
         },
         "width" => width(shell, &arguments),
@@ -177,6 +177,9 @@ fn log(shell: &mut Shell, arguments: &[&str]) {
 /// @param shell - the shell
 /// @param arguments - the words after the command
 fn load_extension(shell: &mut Shell, arguments: &[&str]) {
+    if shell.unsafe_refused(".load") {
+        return;
+    }
     if arguments.is_empty() {
         shell.complain("Usage: .load FILE ?ENTRYPOINT?");
         return;
@@ -673,10 +676,66 @@ fn separator(shell: &mut Shell, arguments: &[&str]) {
         shell.complain("Usage: .separator COL ?ROW?");
         return;
     };
-    shell.layout.separator = (*column).to_string();
+    shell.layout.separator = resolve_backslashes(column);
     if let Some(row) = arguments.get(1) {
-        shell.layout.row_separator = (*row).to_string();
+        shell.layout.row_separator = resolve_backslashes(row);
     }
+}
+
+/// Resolves the backslash escapes a separator or a null placeholder may carry.
+///
+/// **A port of `shell.c`'s `resolve_backslashes`, and it was missing.** Without
+/// it `.separator "\t"` set the column separator to a backslash followed by a
+/// `t`, so `sqlite3 :memory: '.separator "\t"' 'SELECT 1,2'` answered `1<tab>2`
+/// and this shell answered `1\t2` - a wrong answer rather than a refusal, in
+/// the class this repository counts. It was invisible because the separator is
+/// a *setting*: nothing in the 183-case differential probe changes one, so
+/// every comparison ran on the default and agreed.
+///
+/// The reference's rule for an unknown escape is to keep the character that
+/// followed the backslash and drop the backslash, and that is reproduced here
+/// rather than corrected: a script that writes `\q` gets `q` from both shells.
+///
+/// @param text - what the caller wrote, escapes and all
+fn resolve_backslashes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut characters = text.chars();
+    while let Some(character) = characters.next() {
+        if character != '\\' {
+            out.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some('a') => out.push('\u{7}'),
+            Some('b') => out.push('\u{8}'),
+            Some('f') => out.push('\u{c}'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('v') => out.push('\u{b}'),
+            Some('x') => {
+                // Two hexadecimal digits, and a `\x` with fewer keeps what was
+                // written - which is the reference's behaviour and is what
+                // makes a half-typed escape visible rather than silently one
+                // character shorter.
+                let digits: String = characters.clone().take(2).collect();
+                match u32::from_str_radix(&digits, 16)
+                    .ok()
+                    .and_then(char::from_u32)
+                {
+                    Some(resolved) if digits.len() == 2 => {
+                        out.push(resolved);
+                        characters.next();
+                        characters.next();
+                    }
+                    _ => out.push('x'),
+                }
+            }
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// `.width`: minimum widths for the columnar modes.

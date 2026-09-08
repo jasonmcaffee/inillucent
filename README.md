@@ -24,6 +24,78 @@ from `crates/inillucent-compat/tests/semantics.rs`, which is the review's differ
 into a checked-in test rather than a script that was run once. Where a number is quoted from an
 earlier ticket rather than re-measured, the ticket is named and the reason is given.
 
+## Install
+
+```powershell
+# Windows
+irm https://raw.githubusercontent.com/jasonmcaffee/inillucent/main/packaging/install.ps1 | iex
+```
+
+```sh
+# macOS and Linux
+curl -fsSL https://raw.githubusercontent.com/jasonmcaffee/inillucent/main/packaging/install.sh | sh
+```
+
+Or from whichever package manager is already in the project:
+
+| | |
+|---|---|
+| **npm** | `npm install -g inillucent` — or `npx inillucent help` with nothing installed |
+| **pip** | `pip install inillucent` — the wheel carries the binaries *and* an in-process driver |
+| **cargo** | `cargo install inillucent-cli` — builds from source; the fallback on any platform without a prebuilt archive |
+| **Homebrew** | `brew install jasonmcaffee/inillucent/inillucent` |
+| **Go** | `go install github.com/jasonmcaffee/inillucent/packages/go/cmd/inillucent@latest` |
+| **Composer** | `composer require jasonmcaffee/inillucent && vendor/bin/inillucent-install` |
+
+Every one of them installs the same four programs, and every downloader verifies
+the release's published SHA-256 before unpacking it. `packaging/README.md` is how
+a release is cut; `packaging/windows/README.md` and `packaging/macos/README.md`
+record what a signed installer would take on each platform and what it costs.
+
+### The four programs
+
+| | |
+|---|---|
+| `inillucent` | the command line: 28 verbs — `query`, `exec`, `describe`, `import`, `export`, `search`, `explain`, `backup`, `migrate` … |
+| `inillucent-shell` | an interactive shell shaped like `sqlite3`, with 63 of its dot commands and 48 of its 48 command-line options |
+| `inillucent-mcp` | the same 27 commands served to an AI agent over MCP |
+| `inillucent-migrate` | builds an inillucent database from a SQLite file |
+
+```sh
+inillucent create app.rdb
+inillucent --db app.rdb exec "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)"
+inillucent --db app.rdb exec "INSERT INTO notes (body) VALUES (?1)" --params '["hello"]'
+inillucent --db app.rdb query "SELECT * FROM notes"
+inillucent --db app.rdb describe notes
+inillucent help
+```
+
+Exit codes are part of the interface: `0` success, `1` failed, `2` a command line
+nobody could act on, and **`3` a construct the engine has not built yet** — so a
+script can branch on "not yet" without matching on a message. `--output json`
+turns any command's result into the same object a binding sees, with typed
+values, an exact `total`, and the driver's own status name on a failure.
+
+### For an agent
+
+```json
+{
+  "mcpServers": {
+    "inillucent": {
+      "command": "inillucent-mcp",
+      "args": ["--db", "app.rdb"]
+    }
+  }
+}
+```
+
+27 tools, generated from the same command table the CLI reads, so the two cannot
+drift — `crates/inillucent-compat/tests/command_parity.rs` fails the build if they
+do. `--readonly` refuses every statement that changes something, classified by the
+binder rather than by scanning the text; `--root DIR` refuses every path outside a
+directory. Designed in
+[`tasks/task-1836-cli-mcp-and-installers-tdd.md`](tasks/task-1836-cli-mcp-and-installers-tdd.md).
+
 ## Where it stands against the goal
 
 > **[`feature-comparison.md`](feature-comparison.md) is the side-by-side scorecard**: every SQLite
@@ -90,7 +162,8 @@ open, double-written meta pages, a segmented redo WAL (`RDBWAL01`) with crc32c o
 isolation with a version log and garbage collection, one writer at a time with `busy_timeout`, an undo
 buffer for rollback of rows and schema, and blob extents for values wider than a leaf.
 
-**Tooling**: `inillucent-shell`, a `sqlite3`-shaped shell; `inillucent-migrate`, which imports a SQLite
+**Tooling**: `inillucent`, the verb-shaped command line and its 28 commands; `inillucent-mcp`, which
+serves 27 of them to an agent over MCP; `inillucent-shell`, a `sqlite3`-shaped shell; `inillucent-migrate`, which imports a SQLite
 file or a legacy retrieval index into an `.rdb` by copy, verify by count and digest, and publish by
 rename; and `inillucent-fullgate`, `inillucent-readgate`, `inillucent-searchgate`,
 `inillucent-shellrss`, `inillucent-childcost`, `inillucent-vectorprobe` and `inillucent-probeprofile`,
@@ -639,10 +712,12 @@ the retrieval engine; `tasks/task-1816-rearchitecture-tdd.md` is the design the 
 `docs/invariants/layering.toml` is the dependency contract a test enforces. `feature-comparison.md`
 is the measured side-by-side against SQLite and against pgvector.
 
-**`drivers/` is a workspace member that is not in the repository.** `drivers/inillucent-driver` and
-`drivers/inillucent-driver-capi` are named in `Cargo.toml` and exist only on the machine task-1837 is
-being written on. Until that lands, `cargo` refuses to run at all on a fresh clone. This is item 1
-above.
+**`drivers/` is the sub project an application binds to**, and it is committed:
+`drivers/inillucent-driver` holds every decision, `drivers/inillucent-driver-capi` is the C ABI over it
+as a `cdylib` and a `staticlib`, and `drivers/README.md` is the front door for somebody writing a
+binding who is not working on the engine. `harness.rs` asserts every path in `[workspace] members`
+exists, so the next crate added before it is committed fails on the machine that added it rather than
+on the next clone.
 
 ## Building, testing and reproducing the numbers
 

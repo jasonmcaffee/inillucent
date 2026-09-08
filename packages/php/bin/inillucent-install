@@ -1,0 +1,200 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+ * `vendor/bin/inillucent-install`: download the release into the package.
+ *
+ * Composer packages do not run scripts on behalf of the project that requires
+ * them - and that is a good rule rather than a limitation to work around - so
+ * this is a command a person runs once, not a post-install hook that downloads
+ * something nobody asked for.
+ *
+ *     vendor/bin/inillucent-install
+ *     vendor/bin/inillucent-install 0.1.0
+ *
+ * It verifies the archive's SHA-256 against the release's published SHA256SUMS
+ * before unpacking it. A downloader that skips that has turned a truncated or
+ * tampered transfer into an installed program.
+ */
+
+foreach (
+    [
+        __DIR__ . '/../../../vendor/autoload.php',
+        __DIR__ . '/../../../../autoload.php',
+        __DIR__ . '/../../../vendor/autoload.php',
+    ] as $autoload
+) {
+    if (is_file($autoload)) {
+        require_once $autoload;
+        break;
+    }
+}
+
+if (!class_exists(\Inillucent\Locator::class)) {
+    fwrite(STDERR, "inillucent: composer's autoloader was not found beside this script.\n");
+    exit(1);
+}
+
+const REPOSITORY = 'jasonmcaffee/inillucent';
+const PROGRAMS = ['inillucent', 'inillucent-shell', 'inillucent-mcp', 'inillucent-migrate'];
+
+/**
+ * Returns the Rust target triple this machine's releases are built for.
+ */
+function inillucent_target(): string
+{
+    if (DIRECTORY_SEPARATOR === '\\') {
+        return 'x86_64-pc-windows-msvc';
+    }
+    $machine = strtolower(php_uname('m'));
+    $arm = str_contains($machine, 'arm') || str_contains($machine, 'aarch64');
+    if (PHP_OS_FAMILY === 'Darwin') {
+        return $arm ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin';
+    }
+    return $arm ? 'aarch64-unknown-linux-gnu' : 'x86_64-unknown-linux-gnu';
+}
+
+/**
+ * Fetches a URL, refusing anything that is not a 200.
+ *
+ * @param string $url what to fetch
+ */
+function inillucent_fetch(string $url): string
+{
+    $context = stream_context_create([
+        'http' => ['header' => "User-Agent: inillucent-install\r\n", 'timeout' => 600],
+        'ssl' => ['verify_peer' => true, 'verify_peer_name' => true],
+    ]);
+    $body = @file_get_contents($url, false, $context);
+    if ($body === false) {
+        fwrite(STDERR, "could not fetch $url\n");
+        exit(1);
+    }
+    return $body;
+}
+
+$version = $argv[1] ?? null;
+if ($version === null) {
+    $release = json_decode(
+        inillucent_fetch('https://api.github.com/repos/' . REPOSITORY . '/releases/latest'),
+        true
+    );
+    $version = ltrim((string) ($release['tag_name'] ?? ''), 'v');
+    if ($version === '') {
+        fwrite(STDERR, "could not work out the latest release; pass one as an argument.\n");
+        exit(1);
+    }
+}
+
+$triple = inillucent_target();
+$windows = DIRECTORY_SEPARATOR === '\\';
+$name = sprintf('inillucent-%s-%s%s', $version, $triple, $windows ? '.zip' : '.tar.gz');
+$base = sprintf('https://github.com/%s/releases/download/v%s', REPOSITORY, $version);
+
+echo "downloading inillucent $version for $triple\n";
+$archive = inillucent_fetch("$base/$name");
+$sums = inillucent_fetch("$base/SHA256SUMS");
+
+$actual = hash('sha256', $archive);
+$expected = null;
+foreach (explode("\n", $sums) as $line) {
+    $fields = preg_split('/\s+/', trim($line)) ?: [];
+    if (count($fields) >= 2 && end($fields) === $name) {
+        $expected = $fields[0];
+    }
+}
+if ($expected === null) {
+    fwrite(STDERR, "SHA256SUMS does not list $name\n");
+    exit(1);
+}
+// hash_equals rather than ===, because comparing a digest is exactly the shape
+// a timing comparison is for and it costs nothing to write it correctly.
+if (!hash_equals($expected, $actual)) {
+    fwrite(STDERR, "$name does not match its published checksum.\n");
+    fwrite(STDERR, "  expected $expected\n  got      $actual\n");
+    exit(1);
+}
+echo "checksum ok ($actual)\n";
+
+$runtime = dirname(__DIR__) . DIRECTORY_SEPARATOR . 'runtime';
+$binaries = $runtime . DIRECTORY_SEPARATOR . 'bin';
+if (!is_dir($binaries) && !mkdir($binaries, 0755, true) && !is_dir($binaries)) {
+    fwrite(STDERR, "could not make $binaries\n");
+    exit(1);
+}
+
+$temporary = (string) tempnam(sys_get_temp_dir(), 'inillucent');
+file_put_contents($temporary, $archive);
+$found = 0;
+
+if ($windows) {
+    if (!class_exists('ZipArchive')) {
+        fwrite(STDERR, "the archive is a zip and ext-zip is not enabled.\n");
+        fwrite(STDERR, "  Enable it, or install inillucent another way:\n");
+        fwrite(STDERR, "  https://github.com/" . REPOSITORY . "#install\n");
+        exit(1);
+    }
+    $zip = new ZipArchive();
+    if ($zip->open($temporary) !== true) {
+        fwrite(STDERR, "the archive could not be opened.\n");
+        exit(1);
+    }
+    for ($at = 0; $at < $zip->numFiles; $at++) {
+        $inside = (string) $zip->getNameIndex($at);
+        // Only from bin/, so a file that merely shares a name with a program is
+        // never written over one.
+        if (!str_contains(str_replace('\\', '/', $inside), '/bin/')) {
+            continue;
+        }
+        $leaf = basename($inside);
+        foreach (PROGRAMS as $program) {
+            if ($leaf === $program . '.exe') {
+                file_put_contents($binaries . DIRECTORY_SEPARATOR . $leaf, (string) $zip->getFromIndex($at));
+                echo '  ' . $binaries . DIRECTORY_SEPARATOR . $leaf . "\n";
+                $found++;
+            }
+        }
+    }
+    $zip->close();
+} else {
+    // `tar` rather than PharData: a .tar.gz of a directory is what tar is for,
+    // and every machine that runs PHP on a Unix has it.
+    $extracted = $runtime . DIRECTORY_SEPARATOR . 'unpacked';
+    @mkdir($extracted, 0755, true);
+    $outcome = \Inillucent\Process::run(['tar', '--directory', $extracted, '-xzf', $temporary]);
+    if ($outcome['code'] !== 0) {
+        fwrite(STDERR, 'could not unpack the archive: ' . $outcome['stderr'] . "\n");
+        exit(1);
+    }
+    foreach (PROGRAMS as $program) {
+        $matches = glob($extracted . '/*/bin/' . $program) ?: [];
+        if ($matches !== []) {
+            $to = $binaries . DIRECTORY_SEPARATOR . $program;
+            copy($matches[0], $to);
+            chmod($to, 0755);
+            echo "  $to\n";
+            $found++;
+        }
+    }
+    \Inillucent\Process::run(['rm', '-rf', $extracted]);
+}
+@unlink($temporary);
+
+if ($found !== count(PROGRAMS)) {
+    fwrite(STDERR, sprintf(
+        "the archive held %d of the %d programs. This is a packaging fault, not your mistake:\n" .
+        "  please report it at https://github.com/%s/issues\n",
+        $found,
+        count(PROGRAMS),
+        REPOSITORY
+    ));
+    exit(1);
+}
+
+echo "\ninillucent $version is installed for this project.\n";
+echo "Use it as vendor/bin/inillucent, or from PHP:\n\n";
+echo "  \$db = new Inillucent\\Inillucent('app.rdb');\n";
+echo "  \$db->exec('CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)');\n";
+echo "  print_r(\$db->query('SELECT * FROM notes'));\n";

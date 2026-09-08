@@ -1,0 +1,25 @@
+inillucent is installed.
+
+Start here:
+
+  inillucent create app.rdb
+  inillucent --db app.rdb exec "CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)"
+  inillucent --db app.rdb exec "INSERT INTO notes (body) VALUES (?1)" --params '["hello"]'
+  inillucent --db app.rdb query "SELECT * FROM notes"
+  inillucent help
+
+To give an AI agent the same commands, add this to its MCP configuration:
+
+  "inillucent": {
+    "type": "local",
+    "command": ["/usr/local/bin/inillucent-mcp", "--db", "app.rdb"],
+    "enabled": true
+  }
+
+To remove it:
+
+  sudo rm -f /usr/local/bin/inillucent /usr/local/bin/inillucent-shell \
+             /usr/local/bin/inillucent-mcp /usr/local/bin/inillucent-migrate
+  sudo rm -f /usr/local/lib/libinillucent_driver_capi.dylib
+  sudo rm -f /usr/local/include/inillucent_driver.h
+  sudo pkgutil --forget com.jasonmcaffee.inillucent

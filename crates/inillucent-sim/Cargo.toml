@@ -3,6 +3,7 @@ name = "inillucent-sim"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Deterministic simulator VFS, failure injection, crash modelling, and replay artifacts."
 
 [dependencies]

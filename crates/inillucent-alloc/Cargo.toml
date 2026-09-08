@@ -3,6 +3,7 @@ name = "inillucent-alloc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "The size-classed free list the engine's binaries install as their global allocator."
 
 # No dependencies at all, first-party or otherwise. An allocator that reached

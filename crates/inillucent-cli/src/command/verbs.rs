@@ -1,0 +1,976 @@
+//! What each command in the table actually does.
+//!
+//! Invariant: **every one of these drives the shell.** Some run SQL through
+//! `Shell::collect`, some run a dot command through `Shell` and collect what it
+//! printed, and none of them touches the engine directly. That is the same
+//! constraint the shell itself carries, one level up, and it is what makes the
+//! 416-case differential probe cover this surface too.
+//!
+//! Where a verb is a thin wrapper over a dot command, it is a *deliberate* thin
+//! wrapper: `.dump` and `.import` are the reference's own, they have been
+//! compared against `sqlite3` byte for byte, and a second implementation here
+//! would be a second set of quoting rules. Where a verb produces a table
+//! instead - `tables`, `describe`, `capabilities` - it is because a caller that
+//! is a program wants rows rather than a paragraph.
+
+use inillucent_driver::{Status, Support};
+use inillucent_value::Value;
+
+use super::outcome::{columns_from, table, Column, Failed, Outcome};
+use super::{Arguments, Context};
+use crate::json::{self, Json};
+
+/// Turns one engine value into the JSON a result carries.
+///
+/// A blob becomes its hexadecimal spelling with an `x''` wrapper, because that
+/// is a form the engine will read back as the same bytes, and because JSON has
+/// no byte string. It is text in the document and says so in the column type.
+///
+/// @param value - the cell the engine produced
+pub fn value_to_json(value: &Value<'static>) -> Json {
+    match value {
+        Value::Null => Json::Null,
+        Value::Integer(number) => Json::Int(*number),
+        Value::Real(number) => Json::Real(*number),
+        Value::Text(text) => json::text(String::from_utf8_lossy(text.raw()).into_owned()),
+        Value::Blob(bytes) => {
+            let mut rendered = String::from("x'");
+            for byte in bytes.raw() {
+                rendered.push_str(&format!("{byte:02x}"));
+            }
+            rendered.push('\'');
+            json::text(rendered)
+        }
+    }
+}
+
+/// Turns one JSON value into the SQL literal that reproduces it.
+///
+/// **Scalars only.** An array or an object is not a SQL value, and accepting one
+/// by rendering it as its JSON text would bind a string where the caller meant a
+/// structure - which is wrong quietly, in the database, rather than loudly, here.
+///
+/// @param value - what the caller passed
+fn literal_of(value: &Json) -> Result<String, Failed> {
+    match value {
+        Json::Null => Ok("NULL".to_string()),
+        Json::Bool(true) => Ok("1".to_string()),
+        Json::Bool(false) => Ok("0".to_string()),
+        Json::Int(number) => Ok(number.to_string()),
+        Json::Real(number) if number.is_finite() => Ok(format!("{number:?}")),
+        Json::Real(_) => Err(Failed::misuse(
+            "a parameter cannot be NaN or infinity: SQL has no spelling for either.",
+        )),
+        // An `x'..'` string round-trips as the blob it names, which is how a
+        // blob leaves in `value_to_json` and so how it must be allowed back in.
+        Json::Text(text) if is_blob_literal(text) => Ok(text.clone()),
+        Json::Text(text) => Ok(format!("'{}'", text.replace('\'', "''"))),
+        Json::Array(_) | Json::Object(_) => Err(Failed::misuse(
+            "a parameter has to be a string, a number, a boolean or null.",
+        )),
+    }
+}
+
+/// Returns whether a string is the `x'..'` spelling of a blob.
+///
+/// @param text - the candidate
+fn is_blob_literal(text: &str) -> bool {
+    let Some(inner) = text
+        .strip_prefix("x'")
+        .and_then(|rest| rest.strip_suffix('\''))
+    else {
+        return false;
+    };
+    !inner.is_empty()
+        && inner.len() % 2 == 0
+        && inner.chars().all(|digit| digit.is_ascii_hexdigit())
+}
+
+/// Quotes an identifier the way the engine reads it back.
+///
+/// @param name - the object name
+fn quoted(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Quotes a string as a SQL text literal.
+///
+/// @param text - the value
+fn quoted_text(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
+}
+
+/// Binds the caller's parameters, runs the statement, and builds the outcome.
+///
+/// Parameters are bound **by position** - `?1`, `?2`, ... in the order the
+/// array gives them - through `Shell::collect_bound`. A value becomes an engine
+/// value by being selected: `SELECT <literal>` puts the engine's own literal
+/// reader in the path rather than a second one here, which is the same thing
+/// `.parameter set` does and for the same reason.
+///
+/// @param context - where to run
+/// @param command - the verb, for the outcome
+/// @param sql - the statement
+/// @param params - the values for `?1`, `?2`, ...
+/// @param limit - how many rows to hand back
+fn produce(
+    context: &mut Context,
+    command: &str,
+    sql: &str,
+    params: &[Json],
+    limit: usize,
+) -> Result<Outcome, Failed> {
+    context.refuse_if_it_writes(sql)?;
+    let mut bound = Vec::with_capacity(params.len());
+    for value in params {
+        let literal = literal_of(value)?;
+        let held = context
+            .shell()
+            .collect(&format!("SELECT {literal}"))
+            .map_err(|failure| Failed::from_shell(&failure))?
+            .1
+            .first()
+            .and_then(|row| row.first())
+            .cloned()
+            .unwrap_or(Value::Null);
+        bound.push(crate::shell::datum_of(&held));
+    }
+    let started = std::time::Instant::now();
+    let collected = context.shell().collect_bound(sql, &bound);
+    let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+    let (names, rows) = collected.map_err(|failure| Failed::from_shell(&failure))?;
+    Ok(rows_to_outcome(
+        context, command, names, rows, limit, elapsed,
+    ))
+}
+
+/// Turns collected rows into an outcome, cut to the caller's limit.
+///
+/// @param context - for the null placeholder and the change counters
+/// @param command - the verb
+/// @param names - the column names
+/// @param rows - every row the statement produced
+/// @param limit - how many to hand back, zero meaning all of them
+/// @param elapsed - how long the statement took, in milliseconds
+fn rows_to_outcome(
+    context: &mut Context,
+    command: &str,
+    names: Vec<String>,
+    rows: Vec<Vec<Value<'static>>>,
+    limit: usize,
+    elapsed: f64,
+) -> Outcome {
+    let total = rows.len();
+    let kept = if limit == 0 { total } else { limit.min(total) };
+    let cells: Vec<Vec<Json>> = rows
+        .iter()
+        .take(kept)
+        .map(|row| row.iter().map(value_to_json).collect())
+        .collect();
+    let columns = columns_from(&names, &cells);
+    let connection = context.shell().connection();
+    let changes = connection.total_changes();
+    let rowid = connection.last_insert_rowid();
+    drop(connection);
+    let mut text = table(&columns, &cells, &context.null);
+    if kept < total {
+        text.push_str(&format!("\n({kept} of {total} rows)"));
+    }
+    Outcome {
+        command: command.to_string(),
+        columns,
+        rows: cells,
+        total,
+        more: kept < total,
+        changes,
+        last_insert_rowid: rowid,
+        elapsed_ms: elapsed,
+        text,
+        extra: Vec::new(),
+    }
+}
+
+/// Returns the limit a call asked for, or the context's default.
+///
+/// Zero means every row, which is what an export wants and what a console
+/// never does.
+///
+/// @param context - for the default
+/// @param arguments - what was passed
+fn limit_of(context: &Context, arguments: &Arguments) -> usize {
+    match arguments.integer("limit") {
+        Some(asked) if asked >= 0 => asked as usize,
+        Some(_) => 0,
+        None => context.limit,
+    }
+}
+
+/// `query`: runs a statement that returns rows.
+pub fn query(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let sql = arguments.required_text("sql")?.to_string();
+    let params = arguments.values("params");
+    let limit = limit_of(context, arguments);
+    produce(context, "query", &sql, &params, limit)
+}
+
+/// `exec`: runs one statement for its effect.
+pub fn exec(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let sql = arguments.required_text("sql")?.to_string();
+    let params = arguments.values("params");
+    let before = context.shell().connection().total_changes();
+    let mut produced = produce(context, "exec", &sql, &params, 0)?;
+    let after = context.shell().connection().total_changes();
+    produced.changes = after - before;
+    produced.text = match produced.rows.is_empty() {
+        true => format!(
+            "ok. {} row{} changed.",
+            produced.changes,
+            if produced.changes == 1 { "" } else { "s" }
+        ),
+        // `RETURNING` makes a write produce rows, and a caller that asked for
+        // them should be shown them rather than a count they did not ask about.
+        false => produced.text.clone(),
+    };
+    Ok(produced)
+}
+
+/// `batch`: runs several statements as one transaction.
+pub fn batch(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let sql = arguments.required_text("sql")?.to_string();
+    context.refuse_if_it_writes(&sql)?;
+    let before = context.shell().connection().total_changes();
+    context
+        .shell()
+        .execute(&sql)
+        .map_err(|message| Failed::said(Status::Syntax, message))?;
+    let after = context.shell().connection().total_changes();
+    let changes = after - before;
+    let mut produced = Outcome::said(
+        "batch",
+        format!(
+            "ok. {changes} row{} changed.",
+            if changes == 1 { "" } else { "s" }
+        ),
+    );
+    produced.changes = changes;
+    Ok(produced)
+}
+
+/// `run`: runs shell input, dot commands included, and returns what it printed.
+pub fn run_input(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let input = arguments.required_text("input")?.to_string();
+    if context.readonly() {
+        for line in input.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('.') {
+                continue;
+            }
+            context.refuse_if_it_writes(trimmed)?;
+        }
+    }
+    let printed = context.collect_output(&input);
+    let failed = context.shell().failed;
+    context.shell().failed = false;
+    let mut produced = Outcome::said("run", printed.trim_end());
+    produced = produced.with("shell_reported_an_error", Json::Bool(failed));
+    Ok(produced)
+}
+
+/// `create`: makes a new database file.
+pub fn create(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let path = arguments.required_text("path")?.to_string();
+    let confined = context.confine(&path)?;
+    if confined.exists() {
+        return Err(Failed::said(
+            Status::InvalidState,
+            format!("\"{path}\" already exists. Open it instead of creating it."),
+        ));
+    }
+    let named = confined.to_string_lossy().into_owned();
+    context.use_database(&named)?;
+    // A database file with no objects in it is not written until something is,
+    // so the file a caller asked for has to be brought into existence by an
+    // actual write. `user_version` is the smallest one that changes no schema.
+    context
+        .shell()
+        .execute("PRAGMA user_version = 0")
+        .map_err(|message| Failed::said(Status::Io, message))?;
+    Ok(Outcome::said("create", format!("created {named}")).with("path", json::text(&named)))
+}
+
+/// Runs a statement and returns its rows as an outcome, without binding.
+///
+/// @param context - where to run
+/// @param command - the verb
+/// @param sql - the statement
+fn listing(context: &mut Context, command: &str, sql: &str) -> Result<Outcome, Failed> {
+    produce(context, command, sql, &[], 0)
+}
+
+/// `tables`: the tables and views in the database.
+pub fn tables(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let mut sql = String::from(
+        "SELECT name, type FROM sqlite_master WHERE type IN ('table','view') \
+         AND name NOT LIKE 'sqlite_%'",
+    );
+    if let Some(pattern) = arguments.text("pattern") {
+        sql.push_str(&format!(" AND name LIKE {}", quoted_text(pattern)));
+    }
+    sql.push_str(" ORDER BY name");
+    listing(context, "tables", &sql)
+}
+
+/// `indexes`: the indexes in the database, and what each is on.
+pub fn indexes(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let mut sql =
+        String::from("SELECT name, tbl_name AS \"table\" FROM sqlite_master WHERE type = 'index'");
+    if let Some(pattern) = arguments.text("pattern") {
+        sql.push_str(&format!(" AND name LIKE {}", quoted_text(pattern)));
+    }
+    sql.push_str(" ORDER BY tbl_name, name");
+    listing(context, "indexes", &sql)
+}
+
+/// `databases`: what is attached, and the file behind each.
+pub fn databases(context: &mut Context, _arguments: &Arguments) -> Result<Outcome, Failed> {
+    listing(context, "databases", "PRAGMA database_list")
+}
+
+/// `schema`: the `CREATE` statements, as the shell writes them.
+pub fn schema(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let mut line = String::from(".schema");
+    if arguments.flag("indent") {
+        line.push_str(" --indent");
+    }
+    if let Some(pattern) = arguments.text("pattern") {
+        line.push(' ');
+        line.push_str(pattern);
+    }
+    let printed = context.collect_output(&line);
+    context.shell().failed = false;
+    Ok(Outcome::said("schema", printed.trim_end()))
+}
+
+/// `describe`: everything about one table, in one call.
+///
+/// **One call on purpose.** A model that has to make four - `table_info`,
+/// `index_list`, `foreign_key_list`, then the DDL - makes three of them and
+/// answers from an incomplete picture. This is the single most useful tool on
+/// the list for an agent, and it is the one whose absence was most visible when
+/// the local model was first pointed at the server.
+pub fn describe(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let name = arguments.required_text("table")?.to_string();
+    let info = format!("PRAGMA table_info({})", quoted(&name));
+    let mut produced = produce(context, "describe", &info, &[], 0)?;
+    if produced.rows.is_empty() {
+        return Err(Failed::said(
+            Status::NotFound,
+            format!("no such table: {name}"),
+        ));
+    }
+    let ddl = context
+        .shell()
+        .scalar(&format!(
+            "SELECT sql FROM sqlite_master WHERE name = {}",
+            quoted_text(&name)
+        ))
+        .unwrap_or_default();
+    let index_rows = context.shell().column(&format!(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = {} ORDER BY name",
+        quoted_text(&name)
+    ));
+    let count = context
+        .shell()
+        .scalar(&format!("SELECT count(*) FROM {}", quoted(&name)))
+        .unwrap_or_default();
+    let indexes: Vec<Json> = index_rows.iter().map(json::text).collect();
+    let drawn = table(&produced.columns, &produced.rows, &context.null);
+    produced.text = format!(
+        "{name}: {} column{}, {count} row{}\n\n{drawn}\n\nindexes: {}\n\n{ddl}",
+        produced.rows.len(),
+        if produced.rows.len() == 1 { "" } else { "s" },
+        if count == "1" { "" } else { "s" },
+        match index_rows.is_empty() {
+            true => "none".to_string(),
+            false => index_rows.join(", "),
+        }
+    );
+    Ok(produced
+        .with("table", json::text(&name))
+        .with("ddl", json::text(ddl))
+        .with("indexes", Json::Array(indexes))
+        .with(
+            "row_count_in_table",
+            Json::Int(count.parse::<i64>().unwrap_or(-1)),
+        ))
+}
+
+/// `explain`: the query plan, drawn the way the shell draws it.
+pub fn explain(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let sql = arguments.required_text("sql")?.to_string();
+    let plan = context
+        .shell()
+        .connection()
+        .explain(&sql)
+        .map_err(|error| Failed::from_engine(&error))?;
+    let rows: Vec<Vec<Json>> = plan.iter().map(|line| vec![json::text(line)]).collect();
+    let columns = vec![Column {
+        name: "plan".to_string(),
+        kind: "text".to_string(),
+    }];
+    Ok(Outcome {
+        command: "explain".to_string(),
+        text: plan.join("\n"),
+        total: rows.len(),
+        rows,
+        columns,
+        more: false,
+        changes: 0,
+        last_insert_rowid: 0,
+        elapsed_ms: 0.0,
+        extra: Vec::new(),
+    })
+}
+
+/// Runs a dot command and hands back what it printed.
+///
+/// @param context - where to run
+/// @param command - the verb, for the outcome
+/// @param line - the dot command, already assembled
+fn dot(context: &mut Context, command: &str, line: &str) -> Result<Outcome, Failed> {
+    let printed = context.collect_output(line);
+    let failed = context.shell().failed;
+    context.shell().failed = false;
+    if failed {
+        return Err(Failed::said(Status::Syntax, printed.trim_end().to_string()));
+    }
+    Ok(Outcome::said(command, printed.trim_end()))
+}
+
+/// `dump`: the database as the SQL that rebuilds it.
+pub fn dump(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let mut line = String::from(".dump");
+    if arguments.flag("data_only") {
+        line.push_str(" --data-only");
+    }
+    if let Some(objects) = arguments.text("objects") {
+        line.push(' ');
+        line.push_str(objects);
+    }
+    dot(context, "dump", &line)
+}
+
+/// `import`: reads a delimited file into a table.
+pub fn import(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let file = arguments.required_text("file")?.to_string();
+    let table_name = arguments.required_text("table")?.to_string();
+    let confined = context.confine(&file)?;
+    let mut line = String::from(".import");
+    match arguments.text("format").unwrap_or("csv") {
+        "csv" => line.push_str(" --csv"),
+        "ascii" => line.push_str(" --ascii"),
+        "tabs" => line.push_str(" --colsep \"\t\""),
+        other => {
+            return Err(Failed::misuse(format!(
+                "'{other}' is not a format this reads. Use csv, tabs or ascii."
+            )))
+        }
+    }
+    if let Some(skip) = arguments.integer("skip") {
+        line.push_str(&format!(" --skip {skip}"));
+    }
+    line.push_str(&format!(
+        " \"{}\" \"{table_name}\"",
+        confined.to_string_lossy()
+    ));
+    let before = context.shell().connection().total_changes();
+    let mut produced = dot(context, "import", &line)?;
+    let after = context.shell().connection().total_changes();
+    produced.changes = after - before;
+    if produced.text.is_empty() {
+        produced.text = format!("imported {} rows into {table_name}", produced.changes);
+    }
+    Ok(produced)
+}
+
+/// `export`: writes rows out in a chosen format.
+pub fn export(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let sql = match (arguments.text("sql"), arguments.text("table")) {
+        (Some(sql), _) => sql.to_string(),
+        (None, Some(name)) => format!("SELECT * FROM {}", quoted(name)),
+        (None, None) => return Err(Failed::misuse("export needs either 'sql' or 'table'.")),
+    };
+    let format = arguments.text("format").unwrap_or("csv").to_string();
+    let mode = match format.as_str() {
+        "csv" | "json" | "tabs" | "markdown" | "insert" | "quote" | "line" | "html" => format,
+        other => {
+            return Err(Failed::misuse(format!(
+                "'{other}' is not an export format. Use csv, json, tabs, markdown, insert, \
+                 quote, line or html."
+            )))
+        }
+    };
+    context.refuse_if_it_writes(&sql)?;
+    let mut script = format!(".mode {mode}\n.headers on\n");
+    if let Some(out) = arguments.text("out") {
+        let confined = context.confine(out)?;
+        script.push_str(&format!(".once \"{}\"\n", confined.to_string_lossy()));
+    }
+    script.push_str(&sql);
+    script.push(';');
+    let printed = context.collect_output(&script);
+    let failed = context.shell().failed;
+    context.shell().failed = false;
+    if failed {
+        return Err(Failed::said(Status::Syntax, printed.trim_end().to_string()));
+    }
+    let produced = Outcome::said("export", printed.trim_end());
+    Ok(match arguments.text("out") {
+        Some(out) => produced.with("wrote", json::text(out)),
+        None => produced,
+    })
+}
+
+/// `backup`: copies the database to a file.
+pub fn backup(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let file = arguments.required_text("file")?.to_string();
+    let confined = context.confine(&file)?;
+    let named = confined.to_string_lossy().into_owned();
+    context
+        .shell()
+        .backup_to(&named)
+        .map_err(|message| Failed::said(Status::Io, message))?;
+    Ok(Outcome::said("backup", format!("wrote {named}")).with("wrote", json::text(&named)))
+}
+
+/// `restore`: replaces this database's contents from a file.
+pub fn restore(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let file = arguments.required_text("file")?.to_string();
+    let confined = context.confine(&file)?;
+    dot(
+        context,
+        "restore",
+        &format!(".restore \"{}\"", confined.to_string_lossy()),
+    )
+}
+
+/// `checkpoint`: writes the log back into the database file.
+pub fn checkpoint(context: &mut Context, _arguments: &Arguments) -> Result<Outcome, Failed> {
+    listing(context, "checkpoint", "PRAGMA wal_checkpoint")
+}
+
+/// `integrity-check`: reads every page and says whether it holds together.
+pub fn integrity_check(context: &mut Context, _arguments: &Arguments) -> Result<Outcome, Failed> {
+    listing(context, "integrity-check", "PRAGMA integrity_check")
+}
+
+/// `analyze`: gathers the statistics the planner reads.
+pub fn analyze(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let sql = match arguments.text("table") {
+        Some(name) => format!("ANALYZE {}", quoted(name)),
+        None => "ANALYZE".to_string(),
+    };
+    context
+        .shell()
+        .execute(&sql)
+        .map_err(|message| Failed::said(Status::Syntax, message))?;
+    Ok(Outcome::said("analyze", "ok. sqlite_stat1 is up to date."))
+}
+
+/// `stats`: what the page cache and the file are doing.
+pub fn stats(context: &mut Context, _arguments: &Arguments) -> Result<Outcome, Failed> {
+    let cache = context.shell().cache_stats();
+    let pool = context.shell().pool_bytes();
+    let pages = context
+        .shell()
+        .scalar("PRAGMA page_count")
+        .unwrap_or_default();
+    let size = context
+        .shell()
+        .scalar("PRAGMA page_size")
+        .unwrap_or_default();
+    let free = context
+        .shell()
+        .scalar("PRAGMA freelist_count")
+        .unwrap_or_default();
+    let text = format!(
+        "pool bytes:      {pool}\npage size:       {size}\npage count:      {pages}\n\
+         free pages:      {free}\ncache hits:      {}\ncache misses:    {}",
+        cache.hits, cache.misses
+    );
+    Ok(Outcome::said("stats", text)
+        .with("pool_bytes", Json::Int(pool as i64))
+        .with("page_size", Json::Int(size.parse::<i64>().unwrap_or(0)))
+        .with("page_count", Json::Int(pages.parse::<i64>().unwrap_or(0)))
+        .with("free_pages", Json::Int(free.parse::<i64>().unwrap_or(0)))
+        .with("cache_hits", Json::Int(cache.hits as i64))
+        .with("cache_misses", Json::Int(cache.misses as i64)))
+}
+
+/// `search`: full-text and hybrid retrieval, without writing the idiom.
+///
+/// One statement over an `inillucent_search` or FTS5 table, in the form both
+/// modules answer: `WHERE <table> MATCH ? ORDER BY rank`. A caller that wants
+/// something else writes it with `query`; this exists because the idiom is the
+/// part nobody remembers.
+pub fn search(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let query_text = arguments.required_text("query")?.to_string();
+    let name = arguments.required_text("table")?.to_string();
+    let k = arguments.integer("k").unwrap_or(10).max(1);
+    let sql = format!(
+        "SELECT rowid, * FROM {0} WHERE {0} MATCH {1} ORDER BY rank LIMIT {k}",
+        quoted(&name),
+        quoted_text(&query_text)
+    );
+    let mut produced = produce(context, "search", &sql, &[], 0)?;
+    produced.command = "search".to_string();
+    Ok(produced.with("query", json::text(&query_text)))
+}
+
+/// `vector-search`: the nearest rows to a vector, by cosine distance.
+pub fn vector_search(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let name = arguments.required_text("table")?.to_string();
+    let column = arguments.required_text("column")?.to_string();
+    let numbers = arguments.values("vector");
+    if numbers.is_empty() {
+        return Err(Failed::misuse(
+            "'vector' has to be an array of numbers, one per dimension.",
+        ));
+    }
+    let mut blob = String::from("x'");
+    for value in &numbers {
+        let Some(number) = value.integer().map(|whole| whole as f64).or(match value {
+            Json::Real(real) => Some(*real),
+            _ => None,
+        }) else {
+            return Err(Failed::misuse(
+                "every element of 'vector' has to be a number.",
+            ));
+        };
+        for byte in (number as f32).to_bits().to_le_bytes() {
+            blob.push_str(&format!("{byte:02x}"));
+        }
+    }
+    blob.push('\'');
+    let k = arguments.integer("k").unwrap_or(10).max(1);
+    let measure = arguments.text("measure").unwrap_or("cos");
+    let function = match measure {
+        "cos" => "vector_distance_cos",
+        "l2" => "vector_distance_l2",
+        "dot" => "vector_dot",
+        other => {
+            return Err(Failed::misuse(format!(
+                "'{other}' is not a measure. Use cos, l2 or dot."
+            )))
+        }
+    };
+    let sql = format!(
+        "SELECT rowid, *, {function}({1}, {blob}) AS distance FROM {0} \
+         WHERE {1} IS NOT NULL ORDER BY {function}({1}, {blob}) LIMIT {k}",
+        quoted(&name),
+        quoted(&column)
+    );
+    produce(context, "vector-search", &sql, &[], 0)
+}
+
+/// `capabilities`: what the engine says it does, checked in both directions.
+pub fn capabilities(_context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let wanted = arguments.text("name");
+    let rows: Vec<Vec<Json>> = inillucent_driver::CAPABILITIES
+        .iter()
+        .filter(|entry| wanted.is_none_or(|name| entry.name == name))
+        .map(|entry| {
+            vec![
+                json::text(entry.name),
+                json::text(support_name(entry.support)),
+                json::text(entry.note),
+            ]
+        })
+        .collect();
+    if rows.is_empty() {
+        return Err(Failed::said(
+            Status::NotFound,
+            format!(
+                "no capability named \"{}\". An unknown name means no, never yes: a capability \
+                 that was never declared was never checked.",
+                wanted.unwrap_or_default()
+            ),
+        ));
+    }
+    let names = vec![
+        "capability".to_string(),
+        "support".to_string(),
+        "note".to_string(),
+    ];
+    let columns = columns_from(&names, &rows);
+    // **Not the aligned table, for this one command.** A note runs to two
+    // hundred characters - `cancel`'s explains why a Stop button would be a lie
+    // - and padding a column to the widest of those produces lines nothing can
+    // read, on a terminal or in a model's context. The rows are still in the
+    // result for a program; this is what a reader gets.
+    let text = wrapped_notes(&rows);
+    Ok(Outcome {
+        command: "capabilities".to_string(),
+        total: rows.len(),
+        rows,
+        columns,
+        more: false,
+        changes: 0,
+        last_insert_rowid: 0,
+        elapsed_ms: 0.0,
+        text,
+        extra: Vec::new(),
+    })
+}
+
+/// Lays capability rows out as a name, a verdict and a wrapped note.
+///
+/// @param rows - the capability rows, name then support then note
+fn wrapped_notes(rows: &[Vec<Json>]) -> String {
+    let mut lines = Vec::with_capacity(rows.len() * 3);
+    for row in rows {
+        let name = row.first().and_then(Json::text).unwrap_or_default();
+        let support = row.get(1).and_then(Json::text).unwrap_or_default();
+        let note = row.get(2).and_then(Json::text).unwrap_or_default();
+        lines.push(format!("{name:<22} {support}"));
+        for line in wrap(note, 74) {
+            lines.push(format!("    {line}"));
+        }
+    }
+    lines.join(
+        "
+",
+    )
+}
+
+/// Breaks a sentence into lines no wider than a limit, on word boundaries.
+///
+/// A word longer than the limit is left whole rather than cut: a broken
+/// identifier is harder to read than a long line, and these notes name SQL
+/// constructs.
+///
+/// @param text - the sentence
+/// @param width - the widest line to produce
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        if !current.is_empty() && current.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// Returns the word a support level is reported as.
+///
+/// @param support - the level
+fn support_name(support: Support) -> &'static str {
+    match support {
+        Support::Yes => "yes",
+        Support::Partial => "partial",
+        Support::No => "no",
+    }
+}
+
+/// `functions`: the SQL functions this engine answers.
+pub fn functions(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let mut sql = String::from("PRAGMA function_list");
+    let produced = listing(context, "functions", &sql);
+    // `function_list` is the enumeration `registers.rs` compares against the
+    // pinned library on every build, so it is the authority here. If this
+    // engine ever stops answering it, saying so is better than a hand-written
+    // list that would then be the only one.
+    let mut produced = produced?;
+    if let Some(pattern) = arguments.text("pattern") {
+        let lower = pattern.to_ascii_lowercase();
+        produced.rows.retain(|row| {
+            row.first()
+                .and_then(Json::text)
+                .is_some_and(|name| name.to_ascii_lowercase().contains(&lower))
+        });
+        produced.total = produced.rows.len();
+        produced.text = table(&produced.columns, &produced.rows, &context.null);
+    }
+    sql.clear();
+    Ok(produced)
+}
+
+/// `migrate`: brings a SQLite file or a legacy index into this engine.
+pub fn migrate(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let source = arguments.required_text("source")?.to_string();
+    let destination = arguments.required_text("destination")?.to_string();
+    let from = context.confine(&source)?;
+    let to = context.confine(&destination)?;
+    if !from.exists() {
+        return Err(Failed::said(
+            Status::NotFound,
+            format!("there is no \"{source}\" to migrate from."),
+        ));
+    }
+    if to.exists() {
+        return Err(Failed::said(
+            Status::InvalidState,
+            format!("\"{destination}\" already exists. This tool never overwrites."),
+        ));
+    }
+    match arguments.text("kind").unwrap_or("sqlite") {
+        "sqlite" => migrate_sqlite_file(&from, &to),
+        "index" => Err(Failed::unsupported(
+            "migrate --kind index",
+            "the retrieval-index migration runs in inillucent-migrate, which links the retrieval \
+             engine. Run: inillucent-migrate <source-index-dir> <destination.db>",
+        )),
+        other => Err(Failed::misuse(format!(
+            "'{other}' is not a migration kind. Use sqlite or index."
+        ))),
+    }
+}
+
+/// Imports a SQLite database file into a new `.rdb`.
+///
+/// **Staged and then published, never written where an application looks.**
+/// `import_into` takes the target rather than deriving it because that is the
+/// property a migration needs: a half-written database must not sit at the path
+/// somebody is about to open. The staging name carries the process id so two
+/// migrations at once cannot collide, and the rename is the publish.
+///
+/// @param from - the SQLite file
+/// @param to - the file to write
+fn migrate_sqlite_file(from: &std::path::Path, to: &std::path::Path) -> Result<Outcome, Failed> {
+    let mut staged = to.as_os_str().to_os_string();
+    staged.push(format!(".staging-{}", std::process::id()));
+    let staged = std::path::PathBuf::from(staged);
+    let imported = inillucent_engine::ImportedDatabase::import_into(
+        from.to_path_buf(),
+        staged.clone(),
+        inillucent_engine::connect::PAGE_SIZE,
+        DEFAULT_FRAMES,
+    )
+    .map_err(|error| Failed::from_engine(&error))?;
+    drop(imported);
+    std::fs::rename(&staged, to).map_err(|error| {
+        Failed::said(
+            Status::Io,
+            format!(
+                "built {} but could not publish it: {error}",
+                staged.display()
+            ),
+        )
+    })?;
+    Ok(Outcome::said(
+        "migrate",
+        format!("imported {} into {}", from.display(), to.display()),
+    )
+    .with("destination", json::text(to.to_string_lossy())))
+}
+
+/// How many frames the buffer pool holds while a migration runs.
+///
+/// The driver's own default, so a file built here is built by the same machine
+/// that a file opened there is read by.
+const DEFAULT_FRAMES: usize = 4_096;
+
+/// `version`: what this build is.
+pub fn version(context: &mut Context, _arguments: &Arguments) -> Result<Outcome, Failed> {
+    let printed = context.collect_output(".version");
+    context.shell().failed = false;
+    let text = format!(
+        "{}
+inillucent-cli {}
+{}",
+        printed.trim_end(),
+        env!("CARGO_PKG_VERSION"),
+        inillucent_driver::version()
+    );
+    Ok(Outcome::said("version", text)
+        .with("cli", json::text(env!("CARGO_PKG_VERSION")))
+        .with("driver", json::text(inillucent_driver::version())))
+}
+
+/// `help`: the command table, or one entry from it.
+pub fn help(_context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    match arguments.text("topic") {
+        None => {
+            let rows: Vec<Vec<Json>> = super::COMMANDS
+                .iter()
+                .map(|command| vec![json::text(command.name), json::text(command.summary)])
+                .collect();
+            let names = vec!["command".to_string(), "what it does".to_string()];
+            let columns = columns_from(&names, &rows);
+            let text = table(&columns, &rows, "");
+            Ok(Outcome {
+                command: "help".to_string(),
+                total: rows.len(),
+                rows,
+                columns,
+                more: false,
+                changes: 0,
+                last_insert_rowid: 0,
+                elapsed_ms: 0.0,
+                text,
+                extra: Vec::new(),
+            })
+        }
+        Some(topic) => {
+            let Some(command) = super::find(topic) else {
+                return Err(Failed::said(
+                    Status::NotFound,
+                    format!("there is no '{topic}' command. Run 'inillucent help' for the list."),
+                ));
+            };
+            let mut text = format!(
+                "{}\n\n{}\n\n{}",
+                command.usage(),
+                command.summary,
+                command.detail
+            );
+            if !command.params.is_empty() {
+                text.push_str("\n\nParameters:");
+                for param in command.params {
+                    text.push_str(&format!(
+                        "\n  {:<12} {}{}",
+                        param.name,
+                        if param.required { "(required) " } else { "" },
+                        param.description
+                    ));
+                }
+            }
+            Ok(Outcome::said("help", text))
+        }
+    }
+}
+
+/// `shell` and `mcp` are handled by the binary, and never reach the table.
+///
+/// They are in [`super::COMMANDS`] so that `inillucent help` lists them and so
+/// that the parity test can assert their `cli_only` reason exists. Calling one
+/// through the table is a mistake in a front end rather than in a request, and
+/// it says so.
+///
+/// @param name - which of the two was reached
+fn front_end_only(name: &'static str) -> Failed {
+    Failed::misuse(format!(
+        "'{name}' is run by the inillucent binary itself and cannot be dispatched here."
+    ))
+}
+
+/// The stand-in for `shell`.
+pub fn shell_placeholder(
+    _context: &mut Context,
+    _arguments: &Arguments,
+) -> Result<Outcome, Failed> {
+    Err(front_end_only("shell"))
+}
+
+/// The stand-in for `mcp`.
+pub fn mcp_placeholder(_context: &mut Context, _arguments: &Arguments) -> Result<Outcome, Failed> {
+    Err(front_end_only("mcp"))
+}

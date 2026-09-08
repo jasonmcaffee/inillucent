@@ -3,6 +3,7 @@ name = "inillucent-vm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Bytecode representation, compiler, verifier, virtual machine, cursors, and relational operators."
 
 [dependencies]

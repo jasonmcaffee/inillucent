@@ -2,6 +2,13 @@
 name = "inillucent-bench"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The benchmark arm: measures this engine against SQLite, PostgreSQL and pgvector."
+# Never published. It links PostgreSQL and pgvector so that the scorecard can
+# measure against them; nobody would `cargo add` it, and publishing it would put
+# a database client on crates.io as a dependency of a database.
+publish = false
 
 [dependencies]
 inillucent-core = { path = "../inillucent-core", features = ["onnx"] }

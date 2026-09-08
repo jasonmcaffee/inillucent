@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The installer's own description, read by productbuild.
+
+  `hostArchitectures` names both because the payload is universal: without it,
+  an Intel machine is told the package is not for it even though the binary
+  inside runs there natively.
+
+  There is no `<choices-outline>` with more than one choice, and that is
+  deliberate. This installs four programs, one shared library and one header,
+  all of which are the same thing; a choice screen that let somebody install the
+  shell without the CLI would produce configurations nobody tests.
+-->
+<installer-gui-script minSpecVersion="2">
+    <title>inillucent</title>
+    <organization>com.jasonmcaffee</organization>
+    <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64" />
+
+    <welcome file="welcome.txt" mime-type="text/plain" />
+    <license file="LICENSE" mime-type="text/plain" />
+    <conclusion file="conclusion.txt" mime-type="text/plain" />
+
+    <!-- Nothing older than 10.15 has a Rust toolchain target we build for. -->
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="10.15" />
+        </allowed-os-versions>
+    </volume-check>
+
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.jasonmcaffee.inillucent" />
+        </line>
+    </choices-outline>
+
+    <choice id="default" />
+    <choice id="com.jasonmcaffee.inillucent" visible="false">
+        <pkg-ref id="com.jasonmcaffee.inillucent" />
+    </choice>
+
+    <pkg-ref id="com.jasonmcaffee.inillucent" version="@VERSION@" onConclusion="none">
+        inillucent-component-@VERSION@.pkg
+    </pkg-ref>
+</installer-gui-script>

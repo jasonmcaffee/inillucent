@@ -17,6 +17,9 @@ use crate::shell::Shell;
 /// @param shell - the shell
 /// @param arguments - the words after the command
 pub fn cd(shell: &mut Shell, arguments: &[&str]) {
+    if shell.unsafe_refused(".cd") {
+        return;
+    }
     let Some(path) = arguments.first() else {
         shell.complain("Usage: .cd DIRECTORY");
         return;
@@ -34,6 +37,9 @@ pub fn cd(shell: &mut Shell, arguments: &[&str]) {
 /// @param shell - the shell
 /// @param arguments - the words after the command
 pub fn system(shell: &mut Shell, arguments: &[&str]) {
+    if shell.unsafe_refused(".system") {
+        return;
+    }
     if arguments.is_empty() {
         shell.complain("Usage: .system COMMAND");
         return;
@@ -209,6 +215,9 @@ pub fn report_tests(shell: &mut Shell) {
 /// @param shell - the shell
 /// @param html - whether the file is HTML rather than CSV
 pub fn viewer(shell: &mut Shell, html: bool) {
+    if shell.unsafe_refused(if html { ".www" } else { ".excel" }) {
+        return;
+    }
     let suffix = if html { "html" } else { "csv" };
     let path = std::env::temp_dir().join(format!(
         "inillucent-{}.{suffix}",

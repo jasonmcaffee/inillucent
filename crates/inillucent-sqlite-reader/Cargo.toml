@@ -3,6 +3,7 @@ name = "inillucent-sqlite-reader"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Read-only reader for SQLite 3 database files, for test fixtures and migration"
 
 [dependencies]

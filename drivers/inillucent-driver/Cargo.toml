@@ -3,6 +3,7 @@ name = "inillucent-driver"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "The driver: the stable surface an application uses to talk to the inillucent relational engine."
 
 [dependencies]

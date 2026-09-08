@@ -63,6 +63,8 @@ strip = true
 
 [workspace.package]
 version = "0.1.0"
+repository = "https://github.com/jasonmcaffee/inillucent"
+readme = "README.md"
 edition = "2021"
 license = "MIT"
 
@@ -71,34 +73,35 @@ license = "MIT"
 # First-party crates. Every internal edge is declared here so that the layering
 # test in inillucent-compat can read one table instead of walking the file system.
 # ---------------------------------------------------------------------------
-inillucent-alloc = { path = "crates/inillucent-alloc" }
-inillucent-base = { path = "crates/inillucent-base" }
-inillucent-vfs = { path = "crates/inillucent-vfs" }
-inillucent-sim = { path = "crates/inillucent-sim" }
-inillucent-value = { path = "crates/inillucent-value" }
-inillucent-pool = { path = "crates/inillucent-pool" }
-inillucent-wal = { path = "crates/inillucent-wal" }
-inillucent-tree = { path = "crates/inillucent-tree" }
-inillucent-txn = { path = "crates/inillucent-txn" }
-inillucent-model = { path = "crates/inillucent-model" }
-inillucent-sqlite-reader = { path = "crates/inillucent-sqlite-reader" }
-inillucent-scalar = { path = "crates/inillucent-scalar" }
-inillucent-exec = { path = "crates/inillucent-exec" }
-inillucent-engine = { path = "crates/inillucent-engine" }
-inillucent-storage = { path = "crates/inillucent-storage" }
-inillucent-transaction = { path = "crates/inillucent-transaction" }
-inillucent-catalog = { path = "crates/inillucent-catalog" }
-inillucent-sql = { path = "crates/inillucent-sql" }
-inillucent-ext = { path = "crates/inillucent-ext" }
-inillucent-vm = { path = "crates/inillucent-vm" }
-inillucent-session = { path = "crates/inillucent-session" }
-inillucent = { path = "crates/inillucent" }
-inillucent-legacy = { path = "crates/inillucent-legacy" }
-inillucent-core = { path = "crates/inillucent-core" }
-inillucent-search = { path = "crates/inillucent-search" }
-inillucent-migrate = { path = "crates/inillucent-migrate" }
-inillucent-driver = { path = "drivers/inillucent-driver" }
-inillucent-driver-capi = { path = "drivers/inillucent-driver-capi" }
+inillucent-alloc = { path = "crates/inillucent-alloc", version = "0.1.0" }
+inillucent-base = { path = "crates/inillucent-base", version = "0.1.0" }
+inillucent-vfs = { path = "crates/inillucent-vfs", version = "0.1.0" }
+inillucent-sim = { path = "crates/inillucent-sim", version = "0.1.0" }
+inillucent-value = { path = "crates/inillucent-value", version = "0.1.0" }
+inillucent-pool = { path = "crates/inillucent-pool", version = "0.1.0" }
+inillucent-wal = { path = "crates/inillucent-wal", version = "0.1.0" }
+inillucent-tree = { path = "crates/inillucent-tree", version = "0.1.0" }
+inillucent-txn = { path = "crates/inillucent-txn", version = "0.1.0" }
+inillucent-model = { path = "crates/inillucent-model", version = "0.1.0" }
+inillucent-sqlite-reader = { path = "crates/inillucent-sqlite-reader", version = "0.1.0" }
+inillucent-scalar = { path = "crates/inillucent-scalar", version = "0.1.0" }
+inillucent-exec = { path = "crates/inillucent-exec", version = "0.1.0" }
+inillucent-engine = { path = "crates/inillucent-engine", version = "0.1.0" }
+inillucent-storage = { path = "crates/inillucent-storage", version = "0.1.0" }
+inillucent-transaction = { path = "crates/inillucent-transaction", version = "0.1.0" }
+inillucent-catalog = { path = "crates/inillucent-catalog", version = "0.1.0" }
+inillucent-sql = { path = "crates/inillucent-sql", version = "0.1.0" }
+inillucent-ext = { path = "crates/inillucent-ext", version = "0.1.0" }
+inillucent-vm = { path = "crates/inillucent-vm", version = "0.1.0" }
+inillucent-session = { path = "crates/inillucent-session", version = "0.1.0" }
+inillucent = { path = "crates/inillucent", version = "0.1.0" }
+inillucent-legacy = { path = "crates/inillucent-legacy", version = "0.1.0" }
+inillucent-core = { path = "crates/inillucent-core", version = "0.1.0" }
+inillucent-cli = { path = "crates/inillucent-cli", version = "0.1.0" }
+inillucent-search = { path = "crates/inillucent-search", version = "0.1.0" }
+inillucent-migrate = { path = "crates/inillucent-migrate", version = "0.1.0" }
+inillucent-driver = { path = "drivers/inillucent-driver", version = "0.1.0" }
+inillucent-driver-capi = { path = "drivers/inillucent-driver-capi", version = "0.1.0" }
 
 # ---------------------------------------------------------------------------
 # Third-party dependencies. docs/dependency-policy.md records why each one is

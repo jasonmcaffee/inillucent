@@ -1,0 +1,134 @@
+# inillucent run-time limits.
+#
+# This file is the source of truth; crates/inillucent-base/build.rs generates the
+# Rust table from it. Each row is a limit SQLite exposes through
+# sqlite3_limit(), with the compile-time default inillucent ships and the hard
+# ceiling a caller may not raise the limit past.
+#
+# Values follow https://sqlite.org/limits.html for SQLite 3.53.4. A limit whose
+# default differs from SQLite's would be a parity deviation, so the compat
+# report checks these rows against the oracle rather than trusting them.
+
+schema_version = 1
+reference = "sqlite-3.53.4"
+source = "https://sqlite.org/limits.html"
+
+[[limit]]
+name = "Length"
+c_name = "SQLITE_LIMIT_LENGTH"
+default = 1000000000
+hard_max = 2147483645
+minimum = 0
+description = "Maximum size of any string, BLOB, or table row in bytes."
+
+[[limit]]
+name = "SqlLength"
+c_name = "SQLITE_LIMIT_SQL_LENGTH"
+default = 1000000000
+hard_max = 1073741824
+minimum = 0
+description = "Maximum length of one SQL statement in bytes."
+
+[[limit]]
+name = "Column"
+c_name = "SQLITE_LIMIT_COLUMN"
+default = 2000
+hard_max = 32767
+minimum = 1
+description = "Maximum number of columns in a table, index, view, or result set."
+
+[[limit]]
+name = "ExprDepth"
+c_name = "SQLITE_LIMIT_EXPR_DEPTH"
+default = 1000
+hard_max = 1000000
+minimum = 0
+description = "Maximum depth of the parse tree for any expression."
+
+[[limit]]
+name = "ParserDepth"
+c_name = "SQLITE_LIMIT_PARSER_DEPTH"
+# The recursive-descent parser's own recursion, which is a different thing from
+# the depth of the expression *tree* it builds: `((((1))))` is four levels of
+# parser and one level of tree, because a redundant parenthesis is not a node.
+# SQLite charges these separately - 2500 and 1000 - and charging both against
+# `ExprDepth` refused a thousand-deep parenthesisation the reference accepts.
+default = 2500
+hard_max = 2147483647
+minimum = 1
+description = "Maximum depth of the parser's own recursion."
+
+[[limit]]
+name = "CompoundSelect"
+c_name = "SQLITE_LIMIT_COMPOUND_SELECT"
+default = 500
+hard_max = 65536
+minimum = 0
+description = "Maximum number of terms in a compound SELECT."
+
+[[limit]]
+name = "VdbeOp"
+c_name = "SQLITE_LIMIT_VDBE_OP"
+default = 250000000
+hard_max = 2147483647
+minimum = 1
+description = "Maximum number of instructions in one compiled program."
+
+[[limit]]
+name = "FunctionArg"
+c_name = "SQLITE_LIMIT_FUNCTION_ARG"
+# 127 until SQLite raised it; 3.53.4 compiles SQLITE_MAX_FUNCTION_ARG as 1000,
+# and the oracle reports 1000 from sqlite3_limit(). The number here was 127
+# until the phase 2 differential run compared them directly.
+default = 1000
+hard_max = 1000
+minimum = 0
+description = "Maximum number of arguments to a SQL function."
+
+[[limit]]
+name = "Attached"
+c_name = "SQLITE_LIMIT_ATTACHED"
+default = 10
+hard_max = 125
+minimum = 0
+description = "Maximum number of attached databases."
+
+[[limit]]
+name = "LikePatternLength"
+c_name = "SQLITE_LIMIT_LIKE_PATTERN_LENGTH"
+default = 50000
+hard_max = 1073741824
+minimum = 1
+description = "Maximum length of a LIKE or GLOB pattern in bytes."
+
+[[limit]]
+name = "VariableNumber"
+c_name = "SQLITE_LIMIT_VARIABLE_NUMBER"
+default = 32766
+hard_max = 32766
+minimum = 1
+description = "Maximum index number of any bound parameter."
+
+[[limit]]
+name = "TriggerDepth"
+c_name = "SQLITE_LIMIT_TRIGGER_DEPTH"
+# **The two pinned reference artifacts disagree about this one, and the oracle
+# wins.** `sqlite3_limit(SQLITE_LIMIT_TRIGGER_DEPTH)` on the oracle - built from
+# the pinned amalgamation, whose `SQLITE_MAX_TRIGGER_DEPTH` is 1000 - answers
+# 1000; the downloaded `sqlite3.exe` answers 100, so it was compiled with a
+# lower ceiling. This file names the oracle as its authority and the compat
+# report checks these rows against it, so 1000 it is. The cost is one line of
+# `.limit` output that differs from the shell binary, which
+# `feature-comparison.md` records.
+default = 1000
+hard_max = 1000000
+minimum = 1
+description = "Maximum depth of recursion for triggers."
+
+[[limit]]
+name = "WorkerThreads"
+c_name = "SQLITE_LIMIT_WORKER_THREADS"
+default = 0
+hard_max = 8
+minimum = 0
+description = "Maximum number of auxiliary threads one prepared statement may start."
