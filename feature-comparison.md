@@ -7,6 +7,28 @@ The project has two goals and this document is the scorecard for both:
 1. a **highly performant SQLite replacement offering the same features**, and
 2. an **embedding solution that matches pgvector**.
 
+## The four numbers
+
+| | | measured |
+|---|---|---|
+| **Faster than SQLite** | **282% faster** - the same work in **74% less time** | 3.82x weighted over the contract's ten families, four consecutive 30-round runs. The 95% lower bound the gate actually grades on is **3.66x**, i.e. **266% faster / 73% less time** |
+| **Faster than pgvector** | **175% faster unfiltered, 6,262% faster filtered** - **64%** and **98% less time** | retrieval p50 0.8954 ms against 2.459, and 0.6631 ms against 42.182 with a `source =` predicate, against the *better* of the two pgvector configurations. In production, on Nikaya's 598,560-chunk mailbox, semantic p50 went 33.7 ms warm to **4.41 ms** - **664% faster**, and recall@100 0.899 to **1.000** |
+| **Less CPU** | **64% less CPU** | 445 ms of processor against SQLite's 1,242, same plan, one child process each. The contract's bar is 60% |
+| **Less RAM** | **it is not less. It is 15% MORE** | 42.7 MiB peak resident against SQLite's 37.2, on the same 128 MiB budget. It was **102% more** before task-1869 and **43% more** before task-1870, and the bar asks for **5% less** - so this is the one headline that is still a loss |
+
+**Three of the four are wins and the fourth is not, which is why it is written out rather than
+rounded off.** The speed is not bought by burning cores - a quarter of the time at a third of the
+processor - and it is not bought by holding the database in memory either: the file on disk is now
+**1.036x** SQLite's, within 4%. What the extra 5.5 MiB of RAM buys is the page pool and one
+`CREATE INDEX`'s arena, and [Where the memory goes](#where-the-memory-goes) attributes every
+megabyte of it.
+
+Against pgvector the footprint goes the other way: the whole store the queries run against is
+**46% less on disk**, and it needs **two fewer processes** because it is a library rather than a
+server plus an embedding service.
+
+---
+
 Written for task-1858, re-measured for task-1859, task-1860 and task-1861 - review 5 - and
 **re-measured again for task-1869 on 2026-09-08**, which is the ticket review 5 filed to close its
 findings. Every row below is a measurement rather than a reading of the
@@ -50,6 +72,39 @@ works because somebody implemented it is the thing the probe exists to replace.
 
 ---
 
+## Why it is 96.9% and not 100%
+
+**Thirteen of the 416 cases are not byte-equal to SQLite. Not one of them is a feature that is
+missing, and not one is silent - all thirteen answer.** Zero cases are refused here that SQLite
+answers, and zero are accepted here that SQLite rejects.
+
+| how many | what they are | can it ever be closed? |
+|---|---|---|
+| **6** | **vector-search features SQLite does not have** - the `vec0` table, the distance functions and the operator spellings. There is no SQLite output for them to be byte-equal to, so they cannot count as agreement however well they work. All six work | **No, by construction.** They are extras, not gaps |
+| **3** | **two decisions this engine made and measured**: `PRAGMA page_size` is 32768 where the reference says 4096, `PRAGMA locking_mode` is `exclusive`, and `.recover` differs on the one line of nineteen that names the page size. Adopting the reference's values was measured, not assumed: 4096 puts the `schema` family at **0.94x**, under the contract's 1.00x floor, and `normal` locking puts the headline at **3.03x** against a 3.00x bar | **Yes - at a measured cost to the performance bars.** The pragma reports what the file is, which is its job |
+| **1** | **the two pinned SQLite artifacts disagreeing with each other.** `.limit` reports `trigger_depth 1000`; the downloaded `sqlite3.exe` says 100 because it was built with `SQLITE_MAX_TRIGGER_DEPTH=100`, and the locally built oracle says 1000. Twelve of its thirteen lines agree | **No.** Whichever value is printed, one of the two references disagrees with it |
+| **3** | **numbers that describe SQLite's own C structures**: `EXPLAIN`'s bytecode program, `.vfslist`'s `szOsFile`, `.stats`' lookaside counters. Each prints the same report in the same shape over the facts *this* engine has | **No.** Printing SQLite's bytes would be a statement about a library that is not linked into this program - a fabrication, not compatibility |
+
+So: **403 of 416 agree byte for byte (96.9%)**, **409 of 416 work (98.3%)** once the six vector cases
+are counted as the extras they are, and the byte-for-byte number could reach **406 (97.6%)** by
+taking SQLite's page size and locking mode at a measured cost to the gate. **The remaining ten cannot
+be closed by any value** - six because SQLite has no such feature, three because they describe
+SQLite's own internals, and one because the two reference artifacts contradict each other.
+
+Detail for every one of the seven: [The seven rows that are not the same](#the-seven-rows-that-are-not-the-same).
+
+**Separately - and this is the more useful number - the register audit found eight names absent**,
+which is a different question from whether the 416 cases agree. Auditing against enumerations SQLite
+produces itself rather than against a case list somebody wrote, what is missing is
+**four functions** (`fts5(...)`, `fts5_locale()`, `fts5_get_locale()`, `fts5_insttoken()`),
+**two modules** (`fts4aux`, `fts3tokenize`) and **two dot commands** (`.expert`, `.session`), plus
+`fts3_tokenizer()` against the shell. Both modules and `fts3_tokenizer()` are absent from the pinned
+SQLite **library** as well, so those three are a gap against the shell rather than against the thing
+an application links. See
+[Is the feature list itself complete?](#is-the-feature-list-itself-complete).
+
+---
+
 ## At a glance
 
 The whole comparison in one table. **Less time and less CPU are wins; more memory is a loss** - and
@@ -58,7 +113,7 @@ this engine wins two of those three.
 | | SQLite 3.53.4 | inillucent | the difference |
 |---|---|---|---|
 | **SQL features probed** | 416 | 416 | - |
-| features that agree byte for byte, answers and error text alike | the reference | 403 | **96.9% of the surface** |
+| features that agree byte for byte, answers and error text alike | the reference | 403 | **96.9% of the surface** - and [here is exactly why it is not 100%](#why-it-is-969-and-not-100): 6 of the 13 are vector features SQLite does not have, and none of the 13 is missing or silent |
 | features SQLite answers and inillucent **refuses** | - | **0** | **none** |
 | features inillucent accepts that SQLite rejects | - | **0** | **none** |
 | features both answer **differently** | - | 7 | **1.7%**, none of them silent |
@@ -102,7 +157,7 @@ its bar, **4.7 is the process floor** and the rest is the index build's own page
 
 | | | at task-1860 |
 |---|---|---|
-| **416 probed features** | **403 agree with SQLite byte for byte** | 403 |
+| **416 probed features** | **403 agree with SQLite byte for byte** - [why not 416](#why-it-is-969-and-not-100) | 403 |
 | features SQLite answers and inillucent refuses | **0** | 0 |
 | features both answer, **differently** | **7** - and none of them is silent | 7 |
 | features inillucent accepts that SQLite rejects | **0** | 0 |
