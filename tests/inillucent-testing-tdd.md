@@ -1,0 +1,552 @@
+# The inillucent testing standard
+
+**What a test in this repository is for, how the suite is organised, how to run
+only the part a change can break, and what all of it costs.**
+
+Written for task-1857 on 2026-09-08. Every number below was measured on the
+machine described in [Timings](#timings), by the tools this document describes,
+and the commands that produce them are given so they can be taken again.
+
+---
+
+## 1. The five rules
+
+Everything else here follows from these. They are written as rules because each
+one was arrived at by finding a test that broke it.
+
+### 1.1 A test asserts a value, not the absence of a crash
+
+`assert!(result.is_ok())` is not a test. It passes for a function that returns
+the wrong answer, and it passes for a function that was deleted and replaced
+with `Ok(())`. Every assertion names the value it wants, and a refusal counts as
+a value: a case the engine is allowed to decline asserts *which* error code it
+declines with.
+
+### 1.2 A test that cannot fail is worse than no test
+
+The suite is full of prerequisites the workspace cannot build — the pinned
+SQLite oracle, a C compiler, the ONNX runtime — and every suite that needs one
+prints a line and returns success when it is absent. That is correct for a fresh
+clone and a trap for anybody reading the green as evidence, so the runner counts
+those suites, names them, and `--strict` turns the count into a non-zero exit.
+
+The same rule applies inside a test. A loop that asserts nothing because its
+input was empty has not tested anything; assert the input first.
+
+### 1.3 A known difference is recorded as a test that asserts it
+
+When the engine does something wrong and the fix is not this ticket's, the
+behaviour is written down as a **test that asserts what happens**, with a
+comment naming the defect and a failure message telling a future fixer which
+lines to rewrite. `crates/inillucent-compat/tests/semantics.rs` has done this
+since task-1843 and it is the discipline this repository runs on: a fix that
+lands turns the test red, so a fix cannot land unnoticed and a regression cannot
+either.
+
+The alternative — deleting the test, or `#[ignore]`ing it — makes the defect
+invisible and the suite quietly smaller.
+
+### 1.4 Durability is asserted by a handle that did not write the data
+
+A write that is only in a page pool satisfies every assertion a single
+connection can make. Any test claiming that something persists **drops the
+`Database` and opens the path again**, so what it reads has been through the
+write-ahead log and recovery.
+
+This is not theoretical. The virtual-table defect task-1857 found was invisible
+to every test that did not reopen: the *file* was correct throughout, and only
+the live connection was wrong.
+
+### 1.5 The same question, asked two ways
+
+An index the insert path maintains and the delete path forgets answers a
+covering query wrongly while every other query about the same row is right. So
+the write suites ask each question twice — once in a shape the planner answers
+from the table, once in a shape it answers from an index — and a difference
+between the two answers is reported as an index that has drifted rather than as
+a query difference. `new_engine_writes.rs` is built entirely on this, and
+`durability::churn_leaves_the_index_agreeing_with_the_table` is the small
+version of it over the public API.
+
+---
+
+## 2. The shape of the suite
+
+**129 test targets, 2,331 tests, in nine tiers.** A target is one binary
+`cargo test` builds; a tier is a band you can ask for by name. Every target is
+in exactly one tier, so the tiers partition the suite rather than overlapping
+it.
+
+| tier | targets | tests | what it is for |
+|---|---:|---:|---|
+| `smoke` | 1 | 8 | the ten-second answer: a real file opened, written, reopened, read |
+| `unit` | 28 | 1,124 | every crate's own `#[cfg(test)]` modules |
+| `engine` | 34 | 222 | SQL and storage behaviour over real database files |
+| `differential` | 30 | 304 | graded against the pinned SQLite 3.53.4 |
+| `durability` | 17 | 149 | crashes, injected faults, corruption and concurrency |
+| `e2e` | 8 | 53 | the public surfaces an application binds to, end to end |
+| `perf` | 1 | 5 | the cost guards — **runs alone**, see §5 |
+| `retrieval` | 6 | 438 | the embedding and retrieval engine, and its graded harness |
+| `tooling` | 4 | 27 | the checks that keep the repository's own rules true |
+
+The map that assigns them is `tests/selection.toml`, and it is data rather than
+code so that a person can read the whole arrangement in one file.
+
+### 2.1 Where a new test goes
+
+| what you are testing | where it goes |
+|---|---|
+| one function, one module | `#[cfg(test)]` in the crate — tier `unit` |
+| a construct SQLite also has | `inillucent-compat/tests/`, graded against the oracle — tier `differential` |
+| SQL or storage behaviour with no SQLite equivalent | `inillucent-compat/tests/` — tier `engine` |
+| what an application does with the public API | `crates/inillucent/tests/` — tier `e2e` |
+| what survives a crash or an injected fault | `inillucent-compat/tests/`, under the simulator — tier `durability` |
+| a cost that must not change shape | `crates/inillucent/tests/budget.rs` — tier `perf` |
+
+**The public facade is the newest of these and the one most easily forgotten.**
+`crates/inillucent/tests/` did not exist before task-1857, on the reasoning that
+`inillucent::Database` is a re-export of a thoroughly tested engine. The hole in
+that reasoning is that an application does not depend on the engine, it depends
+on **the name**: a re-export that stops compiling, a type that stops being
+public, a method that moves down a layer — none of those are engine defects,
+none of them fail an engine test, and every one of them breaks every caller.
+task-1838 moved that facade from one engine to another and nothing in the suite
+would have noticed if it had moved to neither.
+
+---
+
+## 3. Running only what a change can break
+
+Running everything takes minutes; running the right subset takes seconds. The
+mechanism is `inillucent-testrun --changed`.
+
+```sh
+# build it once - the feature is explained in §4.3
+cargo build -p inillucent-compat --bin inillucent-testrun --features testrun
+
+# what the working tree's changes can break
+target/debug/inillucent-testrun --changed
+
+# ...against a particular revision
+target/debug/inillucent-testrun --changed origin/main
+
+# see the selection without running it
+target/debug/inillucent-testrun --changed --list
+```
+
+### 3.1 How it decides
+
+1. **What changed.** `git diff --name-only <rev>` plus `git ls-files --others`,
+   so a brand new file counts — a selector that could not see an untracked file
+   would run nothing for exactly the change most likely to need a run.
+2. **Which packages those paths belong to.** A path inside a member directory
+   belongs to that member. A path *outside* every member is looked up in the
+   map's `[[path]]` rules, and **a path matching no rule selects everything** —
+   the safe answer, and the one that makes a new top-level directory loud rather
+   than invisible.
+3. **What sits above them.** The seed packages are closed over **reverse**
+   dependencies, so a change to `inillucent-base` reaches every crate built on
+   it. Development dependencies are edges too: a change to the simulator has to
+   re-run the campaigns that inject faults through it.
+4. **Which targets cover those packages.** Each row's `covers` list names the
+   **top** of the stack that suite drives, not everything underneath it — the
+   closure has already walked upward, so a suite that drives the shell declares
+   `inillucent-cli` and is selected by a change to the page pool.
+
+Plus two direct rules: editing a crate's own source selects that crate's own
+tests, and editing `tests/wal_crash.rs` selects `wal_crash` and not the other
+seventy-three suites in the same crate.
+
+### 3.2 Why `covers` is declared rather than derived
+
+Two thirds of this workspace's assertions live in one crate, and every one of
+its 75 suites depends on `inillucent-compat` — so a graph walk answers "a change
+to the tree layer selects all 75", which is the same as having no selector.
+
+Nor can it be read out of each suite's `use` statements, because the suites that
+cover the most import the least: `semantics`, `cli`, `pragma`, `json` and `fts5`
+drive the *shell* over a pipe, so their imports name `inillucent-compat` and
+nothing else while what they exercise is the whole engine end to end.
+
+So coverage is declared once per target, and the two failure modes a declaration
+invites are both closed by `crates/inillucent-compat/tests/selection.rs`:
+
+- **a target with no row** — it would never be selected, by `--changed` or by a
+  tier, so it would sit in the tree looking like coverage and never run;
+- **a row naming a target that does not exist** — caught at build time rather
+  than the next time somebody runs it;
+- **a test hiding where the runner does not look** — every source file carrying
+  a `#[test]` is attributed to the target that compiles it, and a target that
+  has no row fails the check. This is the one that matters: the obvious
+  optimisation is to skip bin targets, because 43 of this workspace's 45 hold no
+  tests — and the other two are `inillucent-bench` and `inillucent-shell`, whose
+  crates have **no library at all** and which hold 179 tests between them. The
+  check caught `inillucent-perfhistory` the day it was written.
+
+### 3.3 What it is allowed to get wrong
+
+Selecting too much costs time. Selecting too little costs a defect that reaches
+`main`, so every judgement call is biased toward running more. The tier a target
+is in never affects whether it is *selected*: tiers are for asking "run the
+quick ones" and selection is for asking "run what this change can break", and
+conflating them would let a tier choice quietly narrow a correctness question.
+
+### 3.4 The pragmatic ladder
+
+| you are | run | costs |
+|---|---|---|
+| mid-edit, want to know it still works | `--tier smoke` | ~1 s |
+| about to commit | `--changed` | seconds to a minute |
+| about to commit something structural | `--tier unit --tier engine --tier e2e` | ~55 s |
+| about to push | everything except `retrieval` | ~35 s after a warm build |
+| changing the planner, the tree, or the log | everything | ~150 s |
+| claiming a speedup | the gates, not the suite — see §5.3 | minutes |
+
+---
+
+## 4. Running it in parallel
+
+### 4.1 Why `cargo test` is not enough
+
+`cargo test` runs test binaries **one at a time**. That is right for a crate and
+wrong for a workspace of 129 targets on a 24-core machine, and the shape of this
+suite makes it especially wrong: **131 of the 194 binaries finish in under a
+tenth of a second**, while five account for most of the clock. Running them in
+sequence leaves the machine idle for almost all of a run.
+
+It also starts 43 bin harnesses that hold no tests, to be told they have
+nothing to run.
+
+### 4.2 What the runner does
+
+One build, then every selected binary at once, longest-first from a committed
+timing ledger (`tests/timings.toml`). Longest-processing-time-first is the
+classic answer and the reason is the tail: whatever starts last decides when the
+run ends, so the worst thing to start last is the slowest suite.
+
+```sh
+target/debug/inillucent-testrun                 # everything
+target/debug/inillucent-testrun --tier engine   # one tier
+target/debug/inillucent-testrun --target inillucent-compat::semantics
+target/debug/inillucent-testrun --jobs 12 --test-threads 4
+target/debug/inillucent-testrun --record        # update the ledger
+target/debug/inillucent-testrun --strict        # a missing prerequisite fails
+```
+
+**It never decides that a test passed.** It builds what cargo builds, runs the
+same executables cargo would run, and reports their exit status; where it
+differs is only in *which* binaries it runs and *how many at a time*.
+
+### 4.3 Three things it had to be taught
+
+**Do not rebuild yourself.** Cargo builds a package's binaries whenever that
+package has integration tests, and `inillucent-compat` has 75 — so the runner's
+own `cargo test --no-run` tried to replace the executable of the process that
+asked for it, which Windows refuses. The bin is therefore behind
+`required-features = ["testrun"]`, which is cargo's own way to say "do not build
+this unless somebody asks". Copying the binary elsewhere and re-executing does
+**not** work: the parent still holds the image.
+
+**Two artifacts per binary.** Under `--no-run` cargo emits both the program and
+the test harness compiled from the same sources, with the same name and kind.
+Only `profile.test` tells them apart, so a reader that took the first would run
+`inillucent-shell` as a program and hang the run on standard input.
+
+**Some tiers cannot share a machine** — §5.
+
+### 4.4 How many at a time
+
+Measured over `engine + differential + durability`:
+
+| `--jobs` | `--test-threads` | wall |
+|---:|---:|---:|
+| **24** | **2** | **34.2 s** |
+| 12 | 2 | 49.2 s |
+| 24 | 1 | 57.6 s |
+| 8 | 3 | 59.7 s |
+
+24×2 is the default. One thread per binary is worse because a suite with many
+tests loses its own parallelism; three threads across eight binaries is worse
+because the long tail is back.
+
+---
+
+## 5. Performance
+
+Three instruments, for three different questions. Using the wrong one is how a
+performance claim becomes untrustworthy.
+
+### 5.1 The cost guards — `crates/inillucent/tests/budget.rs`, tier `perf`
+
+Ordinary tests, run with the suite, that assert the **shape of the cost curve**
+rather than a time:
+
+- an index makes a point lookup cheaper than a scan (measured ~200x; asserted 5x);
+- one transaction around 2,000 inserts costs less than 2,000 transactions
+  (measured ~40x; asserted 2x);
+- preparing the same statement again is answered from the plan cache
+  (measured 1.08x re-binding; asserted ≤4x) **and does not grow the cache**;
+- rewriting the same 5,000 rows ten times does not grow the file (asserted ≤3x);
+- a full scan of 20,000 rows finishes at all (asserted under 10 s).
+
+Every threshold is a fraction of what it measures. That is the trade: these
+catch a change of *kind* — an index dropped, a commit per row, a cache turned
+off — and deliberately do not notice twenty per cent.
+
+**A guard that flaps gets widened, never tightened.** "One transaction beats
+many" was written at 4x, read 3.5x with 24 binaries in flight and **1.3x** under
+a full run, because at saturation both arms are dominated by scheduling. The
+number that matters is the distance from 1.0, not from 40.
+
+**And the tier runs alone.** `perf` is declared `exclusive = true` in the map;
+the runner finishes everything else and then runs it one binary at a time. That
+is the real fix for the flapping — no threshold separates "batching works" from
+"batching was removed" on a saturated machine. It costs about nine seconds.
+
+### 5.2 The history — `inillucent-perfhistory`, `tests/performance-history.tsv`
+
+What each workload costs **beside SQLite, in processor time and memory as well
+as wall clock, appended over time**.
+
+```sh
+cargo build --release -p inillucent-cli          # the engine under test
+cargo run -p inillucent-compat --bin inillucent-perfhistory -- --rounds 5
+cargo run -p inillucent-compat --bin inillucent-perfhistory -- --dry-run
+```
+
+Eight workloads, each with an **untimed** setup and a timed operation:
+`insert.10k`, `index.build`, `lookup.indexed`, `scan.aggregate`, `update.churn`,
+`join.two-tables`, `text.like`, `delete.half`.
+
+It accounts for the rest of the machine in four ways, because no one of them is
+enough:
+
+- **Interleaving.** Each round runs inillucent, then SQLite, back to back — so a
+  background job that arrives halfway slows both arms and the *ratio* survives
+  it. The ratio is the column to read across time; the absolutes catch the case
+  where both moved together.
+- **A calibration loop, before and after.** A fixed arithmetic loop that touches
+  nothing. Its size says how fast this machine is, so rows from two machines can
+  be compared; the difference between the two readings says whether the machine
+  changed *during* the run, and a row whose drift is far from 1.000 says so
+  itself rather than looking like a regression.
+- **Statistics chosen per number.** Wall clock takes the median, because one
+  round that lost the processor moves a mean. Processor time takes the mean of
+  the total, which is the opposite choice and is forced by the clock: Windows
+  accounts CPU in ~15.6 ms units, so a median of five short rounds is one of two
+  values. Peak resident set takes the largest, because that is what a peak is.
+- **Startup is subtracted.** Both shells are measured as child processes, which
+  is the only fair arrangement when one of them is a separate program — and
+  starting them costs ~18 ms and ~8 ms, which is more than some workloads spend
+  on their data. The subtraction is recorded in its own columns rather than
+  hidden, and the absolute columns are left unadjusted.
+
+**Two things this instrument taught while being built, both of which were the
+instrument's fault and not the engine's**, and both of which are worth knowing
+before writing another one:
+
+- The first version generated its rows inline with `WITH RECURSIVE`, and
+  everything came out 3x–8x slower than SQLite. A 200,000-row recursive CTE that
+  touches no table at all costs 201 ms here against SQLite's 85 ms — so the
+  workloads were a measurement of recursive-CTE throughput with a little storage
+  engine underneath. The generator moved into the untimed setup. *(That 2.4x is
+  real and is a separate finding.)*
+- The second version copied the database file between rounds and left the log
+  behind, because this engine writes a **segmented** log — `app.db-wal.0000000001`,
+  a new file per segment — and SQLite writes `-wal` and `-shm`. Every round after
+  the first opened a database beside somebody else's log. Each database now lives
+  in its own directory and the *directory* is what gets copied, which needs to
+  know nothing about either engine's file naming.
+
+### 5.3 The gates — `inillucent-fullgate` and its siblings
+
+Thirty rounds against the pinned SQLite with a geometric mean and a lower bound,
+correctness-qualified by digest. **This is where a speedup claim belongs**, and
+it is deliberately not a `cargo test`. Neither §5.1 nor §5.2 is a substitute:
+the guards assert shape, the history keeps a series, and the gate decides
+whether a number holds.
+
+---
+
+## 6. Timings
+
+Measured on Windows 11, a 24-core processor, 127.5 GB of memory, NVMe, with a
+warm build. `cargo build` time is excluded except where stated.
+
+### 6.1 The whole suite
+
+| | wall | note |
+|---|---:|---|
+| `cargo test --workspace` (serial) | **315 s** | includes ~70 s of build; 164 binaries + 30 doc-test targets |
+| `inillucent-testrun` (parallel, everything) | **~146 s** | 129 targets, 2,331 tests, 1,647 s of processor time — **10.4x** |
+| `inillucent-testrun` without `retrieval` | **~35 s** | 123 targets, 1,893 tests |
+
+The retrieval tier is 122 s of the 146 s, and its two largest targets —
+`inillucent-core::lib` and `inillucent-bench` — are 100 s+ each on their own.
+**They are the floor of a full parallel run**: no scheduling improves on the
+longest single binary. Everything else finishes in the time they take.
+
+### 6.2 Tier by tier
+
+| tier | wall | targets | tests |
+|---|---:|---:|---:|
+| `smoke` | **1.3 s** | 1 | 8 |
+| `e2e` | 3.9 s | 8 | 53 |
+| `tooling` | 4.8 s | 4 | 27 |
+| `unit` | 7.7 s | 28 | 1,124 |
+| `perf` | 9.8 s | 1 | 5 |
+| `durability` | 25.7 s | 17 | 149 |
+| `differential` | 27.9 s | 30 | 304 |
+| `engine` | 43.7 s | 34 | 222 |
+| `retrieval` | 122.3 s | 6 | 438 |
+
+Each figure includes the runner's own startup and its `cargo` target listing,
+about 1.2 s — which is why `smoke` reads 1.3 s and its binary reads 0.1 s.
+
+### 6.3 The five that matter
+
+Under the parallel runner, where contention inflates each:
+
+| target | wall |
+|---|---:|
+| `inillucent-core::lib` | 134 s |
+| `inillucent-bench::inillucent-bench` | 99 s |
+| `inillucent-migrate::corpus` | 59 s |
+| `inillucent-compat::corruption` | 49 s |
+| `inillucent-compat::semantics` | 44 s |
+
+Serially they are 40 s, 59 s, 20 s, 20 s and 10 s. The inflation is the price of
+running twenty-four at once and it is worth paying: the sum is 244 s serial
+against 146 s wall parallel.
+
+---
+
+## 7. What this standard found
+
+The suite described here was written for task-1857 and found four defects while
+being written. All four are fixed; each is now a test that asserts the fix.
+
+**Virtual tables did not participate in their transaction.** A rolled-back
+insert into an `fts5` or `rtree` table stayed, a rolled-back delete was gone, and
+`ROLLBACK TO` did nothing — so one query answered differently before and after a
+reopen with nothing written in between, wrong in whichever direction the
+abandoned transaction had written, and silent. The clue was that the *file* was
+always right, which is what a missing undo record looks like rather than a stale
+cache: `change_module` built its write log with `undo: None` where every ordinary
+write passes `Some(&self.undo)`. The write path now records before-images, the
+engine now calls `rollback`/`rollback_to` on every connected module — it only
+ever called `begin`, `sync` and `commit`, while the *old* engine has dispatched
+`Moment::Rollback` all along — and FTS5 implements the `rollback` it never had.
+
+**`Statement::bind` accepted any index.** `Params::set` did
+`index.saturating_sub(1)` into a vector it then resized to fit, so index 9 on a
+one-parameter statement grew the set and returned `Ok`, and **index 0 silently
+aliased `?1`** — a caller who believed index 0 was a no-op had overwritten its
+first parameter with nothing to say so. SQLite answers `SQLITE_RANGE` to both.
+
+**`execute_batch` could not create a trigger.** It cut the script at every
+semicolon outside a string literal and a trigger body contains one. It now walks
+the script with the parser's own `statement_length`, so there is one opinion
+about statement boundaries instead of two.
+
+**Four files were unformatted on `main`**, failing the repository's own
+`policy::the_governed_crates_are_formatted`.
+
+### 7.1 One that fixing exposed
+
+The first version of the `bind` fix routed the engine's *internal* `Params::set`
+through the same range check, and three correlated-subquery tests went red.
+`correlate::Correlation::answer` feeds an outer row's columns into a correlated
+block through parameter slots the **binder** invents above the statement's
+declared count — so the check silently dropped them and every correlated
+`EXISTS` answered against an unbound slot. The two paths are now separate: the
+engine may write any slot it invented, an application may only write the ones
+its statement declared.
+
+It is recorded here because it is the shape this whole document is about. A
+check that is correct at the boundary and wrong one layer in produces a **wrong
+answer rather than an error**, and the only reason it was caught in minutes
+rather than months is that the differential suites ask SQLite the same question.
+
+---
+
+## 8. Open, and not fixed here
+
+**`DELETE` is super-linear in the number of rows.** Measured through both
+shells, deleting every row of a table with one text column:
+
+| rows | inillucent | SQLite |
+|---:|---:|---:|
+| 1,000 | 3 ms | ~1 ms |
+| 2,000 | 11 ms | ~1 ms |
+| 4,000 | 272 ms | ~1 ms |
+| 8,000 | 2,075 ms | 2 ms |
+
+The row count quadruples from 2,000 to 8,000 and the time grows 189-fold. It is
+not the transaction boundary — the same delete inside an explicit `BEGIN`
+behaves the same — and it is not history-dependent, since a freshly built table
+shows it. It is visible in the history as `insert.10k` at 0.005x and
+`delete.half` at 0.068x, the two workloads that delete.
+
+A candidate cause was investigated and **the attempted fix was reverted**:
+`write.rs::merge_if_small` asks whether the *left* leaf has underflowed and then
+packs both leaves to see whether they fit, so a tree emptied in key order packs
+two leaves and throws the work away on every delete once the left leaf is half
+empty. Adding a cheap capacity pre-check on the right sibling moved 8,000 rows
+from 2,075 ms to 1,695 ms — an 18% improvement where a decisive one was
+predicted, which means the model was wrong. Shipping an unvalidated change to a
+B-tree on a wrong model is not worth 18%, so the tree is untouched and this is
+written down instead.
+
+Whoever takes it should profile rather than reason: `inillucent-writeprofile`
+and `inillucent-hotprofile` exist for it.
+
+---
+
+## 9. Adding to the suite
+
+**A test.** Put it where §2.1 says. If it is a new `tests/*.rs` file, add its row
+to `tests/selection.toml` — `crates/inillucent-compat/tests/selection.rs` will
+fail until you do, and its message names the target.
+
+**A tier.** Add a `[[tier]]` row and move targets into it. A declared tier that
+holds nothing fails `every_tier_is_declared`, so a tier cannot be added
+speculatively.
+
+**A performance workload.** Add a `Workload` to `perfhistory.rs` with an untimed
+`setup` and a timed `script`, and a `repeat` large enough that the timed part is
+an order of magnitude more than the ~18 ms process startup. **Never rename one**:
+a renamed workload is a new series with the old one's history thrown away.
+
+**A prerequisite.** If a suite needs something the workspace cannot build, add
+it to that row's `requires` and make the suite print one of the phrases the
+runner recognises (`is not built`, `is missing`, `; skipping`) — otherwise
+`--strict` cannot tell a real pass from an empty one. Every `differential` row
+must declare one; `every_differential_target_declares_what_it_needs` enforces it.
+
+---
+
+## 10. The commands, in one place
+
+```sh
+# build the runner (once)
+cargo build -p inillucent-compat --bin inillucent-testrun --features testrun
+
+target/debug/inillucent-testrun --list-tiers        # what the tiers are
+target/debug/inillucent-testrun --tier smoke        # ~1 s
+target/debug/inillucent-testrun --changed           # what your edits can break
+target/debug/inillucent-testrun --changed --list    # ...without running it
+target/debug/inillucent-testrun                     # everything, ~146 s
+target/debug/inillucent-testrun --strict            # fail on a missing prerequisite
+target/debug/inillucent-testrun --record            # update tests/timings.toml
+
+# the performance history
+cargo build --release -p inillucent-cli
+cargo run -p inillucent-compat --bin inillucent-perfhistory -- --rounds 5
+
+# the prerequisites the differential tier needs
+tools/sqlite-reference.ps1          # or tools/sqlite-reference.sh
+```
+
+`cargo test --workspace` still works and still means the same thing. The runner
+is faster and more selective; it is not a different definition of a pass.

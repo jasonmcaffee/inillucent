@@ -112,12 +112,7 @@ const OURS_ONLY_FUNCTIONS: &[&str] = &[
 /// functions that were present and unlisted. `fts3_tokenizer` is the sixth and
 /// is absent from the pinned *library* too, so it is a difference against the
 /// shell only and is recorded in `feature-comparison.md`.
-const STILL_ABSENT: &[&str] = &[
-    "fts5",
-    "fts5_get_locale",
-    "fts5_insttoken",
-    "fts5_locale",
-];
+const STILL_ABSENT: &[&str] = &["fts5", "fts5_get_locale", "fts5_insttoken", "fts5_locale"];
 
 /// Modules this engine has and the pinned library does not register.
 ///
@@ -321,5 +316,8 @@ fn a_name_out_of_context_reports_the_context_and_not_an_absence() {
             Step::Query("SELECT nth_value(1, 1)"),
         ],
     );
-    assert_eq!(compared, 11, "every window name was compared out of context");
+    assert_eq!(
+        compared, 11,
+        "every window name was compared out of context"
+    );
 }

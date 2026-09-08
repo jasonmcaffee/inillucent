@@ -544,10 +544,9 @@ impl Contract {
             match table.get("bar").and_then(crate::toml_lite::Value::as_str) {
                 None if table.is_empty() => Ok(None),
                 None => Err(format!("the contract's [{section}] needs a `bar`")),
-                Some(text) => text
-                    .parse::<f64>()
-                    .map(Some)
-                    .map_err(|_| format!("the contract's [{section}] bar `{text}` is not a number")),
+                Some(text) => text.parse::<f64>().map(Some).map_err(|_| {
+                    format!("the contract's [{section}] bar `{text}` is not a number")
+                }),
             }
         };
         Ok(Contract {

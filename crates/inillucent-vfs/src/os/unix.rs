@@ -257,7 +257,8 @@ pub fn try_lock_bytes(
 
 /// Releases an `fcntl` byte-range lock.
 pub fn unlock_bytes(file: &File, start: u64, len: u64, operation: VfsOperation) -> VfsResult<()> {
-    set_lock(file, start, len, libc::F_UNLCK as libc::c_short).map_err(|error| VfsError::from_io(operation, &error))
+    set_lock(file, start, len, libc::F_UNLCK as libc::c_short)
+        .map_err(|error| VfsError::from_io(operation, &error))
 }
 
 /// Reports whether an error means another holder has the range.

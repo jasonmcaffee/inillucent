@@ -582,6 +582,15 @@ impl VirtualTable for RTreeTable {
         Ok(())
     }
 
+    /// Rolls back to a savepoint, which is the same discard.
+    ///
+    /// Correct for the same reason the whole-transaction form is: the engine
+    /// flushes every module when a savepoint is taken, so what is left in the
+    /// buffer belongs entirely to the part being abandoned.
+    fn rollback_to(&mut self, context: &mut Context<'_>, _number: i32) -> DbResult<()> {
+        self.rollback(context)
+    }
+
     /// Makes the root node the first time the table is created.
     fn begin(&mut self, context: &mut Context<'_>) -> DbResult<()> {
         if !self.creating {

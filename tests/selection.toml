@@ -1,0 +1,1071 @@
+# Which tests a change has to run.
+#
+# Read by `inillucent_compat::selection`, driven by `inillucent-testrun`, and
+# kept honest by `crates/inillucent-compat/tests/selection.rs`, which fails when
+# a target in the workspace has no row here or a row here names a target that
+# does not exist. The gold standard this file serves is
+# `tests/inillucent-testing-tdd.md`.
+#
+# ## The three fields that matter
+#
+# `tier` is a band you can ask for by name. Every target is in exactly one, so
+# the tiers partition the suite rather than overlapping it - `--tier engine`
+# and `--tier differential` together are what they sound like.
+#
+# `covers` is the **top** of the stack a suite drives, not everything under it.
+# Selection closes upward over reverse dependencies first, so a suite that runs
+# the shell declares `inillucent-cli` and is selected by a change to the page
+# pool, because the pool is underneath the shell. Writing out the whole stack
+# would be writing out something the graph already knows, and it would go stale
+# the first time an edge moved.
+#
+# `covers` is omitted where it would only repeat the row's own package, which is
+# the case for every crate that holds its own tests. It is spelled out for
+# `inillucent-compat`, which sits above the entire engine: a rule that read the
+# owning package out of the closure would select all 74 of its suites for every
+# change, and a selector that always selects everything is not one.
+#
+# `requires` names what a suite needs that this workspace cannot build. Each of
+# those suites reports success when its prerequisite is absent - correct for a
+# fresh clone, and a trap for anybody reading the green as evidence - so the
+# runner counts them, names them, and fails under `--strict`.
+
+
+[[tier]]
+name = "smoke"
+purpose = "the ten-second answer: a real file opened, written, reopened, read"
+
+[[tier]]
+name = "unit"
+purpose = "every crate's own #[cfg(test)] modules"
+
+[[tier]]
+name = "engine"
+purpose = "SQL and storage behaviour over real database files"
+
+[[tier]]
+name = "differential"
+purpose = "graded against the pinned SQLite 3.53.4"
+
+[[tier]]
+name = "durability"
+purpose = "crashes, injected faults, corruption and concurrency"
+
+[[tier]]
+name = "e2e"
+purpose = "the public surfaces an application binds to, end to end"
+
+[[tier]]
+name = "perf"
+purpose = "the cost guards, so a regression fails a test rather than a benchmark"
+exclusive = true
+
+[[tier]]
+name = "retrieval"
+purpose = "the embedding and retrieval engine, and its graded harness"
+
+[[tier]]
+name = "tooling"
+purpose = "the checks that keep the repository's own rules true"
+
+# ---------------------------------------------------------------------------
+# What a change outside every crate selects.
+#
+# A path matching none of these selects EVERYTHING, and says which path did
+# it. That is the safe direction: a new top-level directory should make a run
+# loud rather than silently test nothing.
+# ---------------------------------------------------------------------------
+
+[[path]]
+prefix = "Cargo.toml"
+packages = ["*"]
+reason = "the workspace manifest decides what every crate resolves to"
+
+[[path]]
+prefix = "Cargo.lock"
+packages = ["*"]
+reason = "a version moved under every crate at once"
+
+[[path]]
+prefix = "compat/"
+packages = ["*"]
+reason = "the pinned manifest, the source register and the fixtures every differential suite reads"
+
+[[path]]
+prefix = "tests/"
+packages = ["*"]
+reason = "the shared corpora, schedules and this map itself; a change here can move any suite"
+
+[[path]]
+prefix = "tools/"
+packages = ["*"]
+reason = "the reference build and the feature probe, which decide what the suites are graded against"
+
+[[path]]
+prefix = "docs/"
+packages = ["inillucent-compat"]
+reason = "the layering contract and the invariant register, which only `policy` and `harness` read"
+
+[[path]]
+prefix = ".sqlite-ref/"
+packages = ["*"]
+reason = "the pinned reference binaries themselves"
+
+[[path]]
+prefix = "scripts/"
+packages = ["inillucent-bench"]
+reason = "corpus fetchers, used only by the grading harness"
+
+[[path]]
+prefix = "fuzz/"
+packages = []
+reason = "the fuzz targets are built and run on their own, never by the suite"
+
+[[path]]
+prefix = "_agent_output/"
+packages = []
+reason = "scratch and evidence, gitignored, read by nothing"
+
+[[path]]
+prefix = "_junk/"
+packages = []
+reason = "scratch, read by nothing"
+
+[[path]]
+prefix = "target/"
+packages = []
+reason = "build output"
+
+[[path]]
+prefix = "README.md"
+packages = []
+reason = "prose"
+
+[[path]]
+prefix = "architecture.md"
+packages = []
+reason = "prose"
+
+[[path]]
+prefix = "findings.md"
+packages = []
+reason = "prose"
+
+[[path]]
+prefix = "feature-comparison.md"
+packages = []
+reason = "prose"
+
+[[path]]
+prefix = "product-overview.md"
+packages = []
+reason = "prose"
+
+[[path]]
+prefix = "synthetic-testing.md"
+packages = []
+reason = "prose"
+
+[[path]]
+prefix = "inillucent-tdd.md"
+packages = []
+reason = "prose"
+
+[[path]]
+prefix = "inillucent-scorecard.md"
+packages = []
+reason = "prose"
+
+[[path]]
+prefix = "inillucent-scorecard.json"
+packages = []
+reason = "the scorecard's own record of a run"
+
+[[path]]
+prefix = "tasks/"
+packages = []
+reason = "design documents"
+
+[[path]]
+prefix = ".gitignore"
+packages = []
+reason = "nothing is compiled from it"
+
+# ---------------------------------------------------------------------------
+# Every test target in the workspace.
+# ---------------------------------------------------------------------------
+
+# --- smoke: the ten-second answer: a real file opened, written, reopened, read
+
+[[target]]
+package = "inillucent"
+kind = "test"
+name = "smoke"
+tier = "smoke"
+
+# --- unit: every crate's own #[cfg(test)] modules
+
+[[target]]
+package = "inillucent"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-alloc"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-base"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-capi"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-catalog"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-cli"
+kind = "bin"
+name = "inillucent-shell"
+tier = "unit"
+
+[[target]]
+package = "inillucent-compat"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-driver"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-driver-capi"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-engine"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-exec"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-ext"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-legacy"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-migrate"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-pool"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-scalar"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-session"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-sim"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-sql"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-sqlite-reader"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-storage"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-transaction"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-tree"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-txn"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-value"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-vfs"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-vm"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-wal"
+kind = "lib"
+tier = "unit"
+
+# --- engine: SQL and storage behaviour over real database files
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "autoindex_reopen"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "conformance"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "dml"
+tier = "engine"
+covers = ["inillucent-legacy"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "functions"
+tier = "engine"
+covers = ["inillucent-engine", "inillucent-ext"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "hostile"
+tier = "engine"
+covers = ["inillucent-engine", "inillucent-ext"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "levers"
+tier = "engine"
+covers = ["inillucent-legacy"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "multi_database_commit"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "multi_database_names"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "multi_database_participants"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "new_engine_connect"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "new_engine_create"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "new_engine_explain"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "new_engine_log_lead"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "new_engine_log_retire"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "new_engine_rollback"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "new_engine_search"
+tier = "engine"
+covers = ["inillucent-engine", "inillucent-search"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "new_engine_slt"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "new_engine_statement"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "new_engine_subquery"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "new_engine_surface"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "new_engine_tree_identity"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "new_engine_vtab_stream"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "plan_cache"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "search"
+tier = "engine"
+covers = ["inillucent-search"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "sql"
+tier = "engine"
+covers = ["inillucent-legacy"]
+requires = ["fixtures"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "storage"
+tier = "engine"
+covers = ["inillucent-storage"]
+requires = ["fixtures"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "vector"
+tier = "engine"
+covers = ["inillucent-engine", "inillucent-search"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "vtab"
+tier = "engine"
+covers = ["inillucent-session"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "wal"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-migrate"
+kind = "test"
+name = "corpus"
+tier = "engine"
+requires = ["fixtures"]
+
+[[target]]
+package = "inillucent-migrate"
+kind = "test"
+name = "equivalence"
+tier = "engine"
+requires = ["fixtures"]
+
+[[target]]
+package = "inillucent-migrate"
+kind = "test"
+name = "migration"
+tier = "engine"
+
+[[target]]
+package = "inillucent-tree"
+kind = "test"
+name = "write_campaign"
+tier = "engine"
+
+[[target]]
+package = "inillucent-vfs"
+kind = "test"
+name = "conformance"
+tier = "engine"
+
+# --- differential: graded against the pinned SQLite 3.53.4
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "advanced_sql"
+tier = "differential"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "attach"
+tier = "differential"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "capi"
+tier = "differential"
+covers = ["inillucent-capi"]
+requires = ["shell", "cc"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "catalog"
+tier = "differential"
+covers = ["inillucent-legacy"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "cli"
+tier = "differential"
+covers = ["inillucent-cli"]
+requires = ["shell"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "differential"
+tier = "differential"
+covers = ["inillucent-storage"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "dml_differential"
+tier = "differential"
+covers = ["inillucent-session"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "dml_subqueries"
+tier = "differential"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "foreign_keys"
+tier = "differential"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "fts5"
+tier = "differential"
+covers = ["inillucent-session"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "json"
+tier = "differential"
+covers = ["inillucent-session"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "lifecycle"
+tier = "differential"
+covers = ["inillucent-legacy"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "migrate_sqlite"
+tier = "differential"
+covers = ["inillucent-migrate"]
+requires = ["shell"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "new_engine_ddl"
+tier = "differential"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "new_engine_differential"
+tier = "differential"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "new_engine_extents"
+tier = "differential"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "new_engine_pragma"
+tier = "differential"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "new_engine_vtab"
+tier = "differential"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "new_engine_writes"
+tier = "differential"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "oracle"
+tier = "differential"
+covers = ["inillucent-storage"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "ordering"
+tier = "differential"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "planner"
+tier = "differential"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "pragma"
+tier = "differential"
+covers = ["inillucent-session"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "registers"
+tier = "differential"
+covers = ["inillucent-search", "inillucent-session"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "rtree"
+tier = "differential"
+covers = ["inillucent-session"]
+requires = ["shell"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "schema_forms"
+tier = "differential"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "semantics"
+tier = "differential"
+covers = ["inillucent-cli"]
+requires = ["shell"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "services"
+tier = "differential"
+covers = ["inillucent-legacy"]
+requires = ["shell"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "syntax"
+tier = "differential"
+covers = ["inillucent-sql"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "temp_objects"
+tier = "differential"
+covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+# --- durability: crashes, injected faults, corruption and concurrency
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "btree_model"
+tier = "durability"
+covers = ["inillucent-storage"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "concurrency"
+tier = "durability"
+covers = ["inillucent-session"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "corruption"
+tier = "durability"
+covers = ["inillucent-storage"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "durability"
+tier = "durability"
+covers = ["inillucent-session"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "fault_sweep"
+tier = "durability"
+covers = ["inillucent-storage"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "faults"
+tier = "durability"
+covers = ["inillucent-session"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "multi_database_crash"
+tier = "durability"
+covers = ["inillucent-session"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "phase2_campaigns"
+tier = "durability"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "search_crash"
+tier = "durability"
+covers = ["inillucent-search", "inillucent-session"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "storage_failure"
+tier = "durability"
+covers = ["inillucent-storage"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "wal_crash"
+tier = "durability"
+covers = ["inillucent-session"]
+
+[[target]]
+package = "inillucent-pool"
+kind = "test"
+name = "fault_campaign"
+tier = "durability"
+
+[[target]]
+package = "inillucent-sim"
+kind = "test"
+name = "simulator"
+tier = "durability"
+
+[[target]]
+package = "inillucent-txn"
+kind = "test"
+name = "durability"
+tier = "durability"
+
+[[target]]
+package = "inillucent-txn"
+kind = "test"
+name = "transactions"
+tier = "durability"
+
+[[target]]
+package = "inillucent-wal"
+kind = "test"
+name = "log"
+tier = "durability"
+
+[[target]]
+package = "inillucent-wal"
+kind = "test"
+name = "recovery"
+tier = "durability"
+
+# --- e2e: the public surfaces an application binds to, end to end
+
+[[target]]
+package = "inillucent"
+kind = "test"
+name = "application"
+tier = "e2e"
+
+[[target]]
+package = "inillucent"
+kind = "test"
+name = "durability"
+tier = "e2e"
+
+[[target]]
+package = "inillucent"
+kind = "test"
+name = "edges"
+tier = "e2e"
+
+[[target]]
+package = "inillucent-driver"
+kind = "test"
+name = "capability"
+tier = "e2e"
+
+[[target]]
+package = "inillucent-driver"
+kind = "test"
+name = "conformance"
+tier = "e2e"
+
+[[target]]
+package = "inillucent-driver"
+kind = "test"
+name = "import"
+tier = "e2e"
+
+[[target]]
+package = "inillucent-driver"
+kind = "test"
+name = "session"
+tier = "e2e"
+
+[[target]]
+package = "inillucent-driver-capi"
+kind = "test"
+name = "abi"
+tier = "e2e"
+
+# --- perf: the cost guards, so a regression fails a test rather than a benchmark
+
+[[target]]
+package = "inillucent"
+kind = "test"
+name = "budget"
+tier = "perf"
+
+# --- retrieval: the embedding and retrieval engine, and its graded harness
+
+[[target]]
+package = "inillucent-bench"
+kind = "bin"
+name = "inillucent-bench"
+tier = "retrieval"
+requires = ["onnx"]
+
+[[target]]
+package = "inillucent-core"
+kind = "lib"
+tier = "retrieval"
+requires = ["onnx"]
+
+[[target]]
+package = "inillucent-model"
+kind = "lib"
+tier = "retrieval"
+requires = ["onnx"]
+
+[[target]]
+package = "inillucent-model"
+kind = "test"
+name = "campaign"
+tier = "retrieval"
+requires = ["onnx"]
+
+[[target]]
+package = "inillucent-model"
+kind = "test"
+name = "minimal"
+tier = "retrieval"
+requires = ["onnx"]
+
+[[target]]
+package = "inillucent-search"
+kind = "lib"
+tier = "retrieval"
+
+# --- tooling: the checks that keep the repository's own rules true
+
+[[target]]
+package = "inillucent-compat"
+kind = "bin"
+name = "inillucent-perfhistory"
+tier = "tooling"
+covers = ["inillucent-compat"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "harness"
+tier = "tooling"
+covers = ["inillucent-compat"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "policy"
+tier = "tooling"
+covers = ["inillucent-compat"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "selection"
+tier = "tooling"
+covers = ["inillucent-compat"]

@@ -3251,7 +3251,12 @@ impl ImportedDatabase {
 
     /// Abandons the open transaction.
     pub fn rollback(&mut self) -> DbResult<()> {
+        // **The modules are told, or the connection goes on answering out of a
+        // transaction that did not happen.** See `rollback_modules`: the file
+        // was always put back correctly, and the module's own buffer was not.
+        let told = self.rollback_modules(None);
         self.undo_to(None)?;
+        told?;
         self.marks.clear();
         self.batch.set(None);
         // Nothing to decide: an abandoned transaction has no commit for a
@@ -3267,17 +3272,34 @@ impl ImportedDatabase {
 
     /// Names a point the transaction can be rolled back to.
     ///
+    /// **Every module is flushed here**, which is what makes rolling back to
+    /// this point correct for a module that buffers. The undo log records
+    /// writes to the shadow *trees*, so anything a module is still holding in
+    /// memory is invisible to it - and a later `ROLLBACK TO` would either keep
+    /// staged rows belonging to the abandoned part, or throw away rows written
+    /// before the point. Flushing now puts everything before the point under
+    /// the undo log, so the buffer that is left belongs entirely to the part
+    /// that may be abandoned.
+    ///
+    /// A savepoint is rare and a flush is not free, which is the right way
+    /// round: the alternative is a module buffer the undo log cannot see.
+    ///
     /// @param name - the savepoint's name
-    pub fn savepoint(&mut self, name: &[u8]) {
+    pub fn savepoint(&mut self, name: &[u8]) -> DbResult<()> {
+        self.sync_modules()?;
         let held = self.undo.borrow().len();
         self.marks.push((name.to_ascii_lowercase(), held));
+        Ok(())
     }
 
     /// Undoes back to a savepoint, keeping the transaction open.
     ///
     /// @param name - the savepoint's name
     pub fn rollback_to(&mut self, name: &[u8]) -> DbResult<()> {
+        let level = i32::try_from(self.marks.len()).unwrap_or(i32::MAX);
+        let told = self.rollback_modules(Some(level));
         self.undo_to(Some(name))?;
+        told?;
         self.refresh_catalog();
         Ok(())
     }
@@ -4332,6 +4354,27 @@ impl ImportedDatabase {
         let names = parsed.parameters.names.clone();
         self.recycle(parsed);
         Ok(names)
+    }
+
+    /// Returns the highest parameter number a statement uses.
+    ///
+    /// What `sqlite3_bind_parameter_count` answers, and what a bind has to be
+    /// checked against: an index above it is `SQLITE_RANGE` rather than a slot
+    /// nobody will ever read.
+    ///
+    /// It is a parse rather than a lookup because the compiled plan does not
+    /// carry the number - `Cached` has thirteen variants and none of them has a
+    /// place to put it. The parse reuses the recycled arena, which is most of
+    /// what a parse costs, and it happens once per `prepare` rather than once
+    /// per execution: a statement prepared once and stepped a million times
+    /// pays it once.
+    ///
+    /// @param sql - the statement text
+    pub fn parameter_count(&self, sql: &str) -> DbResult<u32> {
+        let parsed = self.parse_once(sql)?;
+        let count = parsed.parameters.count;
+        self.recycle(parsed);
+        Ok(count)
     }
 
     /// Puts a finished parse's arena back for the next statement to fill.

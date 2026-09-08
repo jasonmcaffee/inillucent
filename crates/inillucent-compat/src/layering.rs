@@ -295,12 +295,46 @@ pub fn read_workspace(root: &Path) -> Result<Vec<CrateManifest>, String> {
     Ok(manifests)
 }
 
+/// Reads the manifest of every crate the root `[workspace] members` list names,
+/// wherever in the repository it lives.
+///
+/// [`read_workspace`] walks `crates/` and is what the layering contract is
+/// checked against, because the contract is about that directory. Test
+/// selection is a different question: it needs the graph the *workspace* has,
+/// and since task-1837 that includes `drivers/`, whose two crates `read_workspace`
+/// cannot see. A driver change that selected no tests would be the selector
+/// failing silently, which is the one way a selector must never fail.
+///
+/// @param root - the workspace root
+/// @param members - the member paths, as [`workspace_members`] returned them
+pub fn read_members(root: &Path, members: &[String]) -> Result<Vec<CrateManifest>, String> {
+    let mut manifests = Vec::new();
+    for member in members {
+        let manifest = root.join(member).join("Cargo.toml");
+        if !manifest.is_file() {
+            return Err(format!(
+                "workspace member `{member}` has no Cargo.toml at {}",
+                manifest.display()
+            ));
+        }
+        manifests.push(read_manifest(&manifest)?);
+    }
+    // **In member order, deliberately not sorted.** `selection::seeds_of` pairs
+    // this list with the member paths positionally to learn which directory
+    // holds which package - the two are not the same string, because
+    // `crates/inillucent-cli` builds a binary called `inillucent-shell` and the
+    // drivers live outside `crates/`. Sorting here silently scrambled that
+    // pairing, and the symptom was a selector that answered backwards: a change
+    // to the base crate selected 8 targets and a change to the leaf selected 65.
+    Ok(manifests)
+}
+
 /// Reads one crate manifest's dependency sections.
 ///
 /// This is a deliberately small reader for the shapes the workspace uses:
 /// `[dependencies]`, `[dev-dependencies]`, and target-specific variants of
 /// both. Anything else is reported rather than ignored.
-fn read_manifest(path: &Path) -> Result<CrateManifest, String> {
+pub fn read_manifest(path: &Path) -> Result<CrateManifest, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     let mut name = String::new();

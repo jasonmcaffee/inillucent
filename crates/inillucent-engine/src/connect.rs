@@ -24,7 +24,7 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-use inillucent_base::DbResult;
+use inillucent_base::{DbError, DbResult, PrimaryCode};
 use inillucent_exec::physical::Params;
 use inillucent_tree::datum::OwnedDatum;
 
@@ -332,13 +332,52 @@ impl<'d> Connection<'d> {
 
     /// Runs one or more statements for their effect.
     ///
+    /// **Split by the grammar, not by a scan for semicolons.** The obvious
+    /// implementation - walk the text, remember whether you are inside a quote,
+    /// cut at every other `;` - is what this used to do, and it cannot express
+    /// a statement that *contains* a semicolon. A trigger body does:
+    ///
+    /// ```sql
+    /// CREATE TRIGGER t AFTER INSERT ON m FOR EACH ROW
+    ///   BEGIN UPDATE s SET n = n + NEW.d WHERE k = NEW.k; END
+    /// ```
+    ///
+    /// arrived here as two fragments, and the first is an unterminated trigger
+    /// the parser rightly refused with `incomplete input`. So an application
+    /// could not create a trigger in the same call it created the tables the
+    /// trigger is about, which is the natural way to write a schema and the way
+    /// `sqlite3_exec` accepts.
+    ///
+    /// The parser already knows where a statement ends -
+    /// [`Connection::prepare_with_tail`] has been asking it since task-1844 -
+    /// so this asks the same question and there is now one opinion about
+    /// statement boundaries instead of two.
+    ///
     /// @param sql - the statements, separated by semicolons
     pub fn execute_batch(&self, sql: &str) -> DbResult<()> {
-        for statement in split_statements(sql) {
-            let outcome = self.engine_mut().execute_any(&statement, &Params::new())?;
+        let mut rest = sql;
+        loop {
+            // Separators and trivia are not statements. The parser refuses text
+            // that holds none, so an empty batch, a trailing `;` and a script
+            // that is nothing but a comment have to be recognised here rather
+            // than reported as syntax errors - all three are things a caller
+            // legitimately passes.
+            let skipped = leading_trivia(rest);
+            rest = rest.get(skipped..).unwrap_or("");
+            if rest.is_empty() {
+                return Ok(());
+            }
+            let consumed = self.engine().statement_length(rest)?;
+            let Some(head) = rest.get(..consumed) else {
+                return Ok(());
+            };
+            if head.trim().is_empty() {
+                return Ok(());
+            }
+            let outcome = self.engine_mut().execute_any(head, &Params::new())?;
             self.database.changes.set(outcome.changes.rows as i64);
+            rest = rest.get(consumed..).unwrap_or("");
         }
-        Ok(())
     }
 
     /// Runs one statement and returns its rows.
@@ -512,11 +551,19 @@ impl<'d> Connection<'d> {
     ///
     /// @param sql - the statement
     pub fn prepare(&self, sql: &str) -> DbResult<Statement<'d>> {
+        // **The count is asked before the plan is compiled, not after.** Both
+        // go through the same recycled parse arena, and a parse clears it - so
+        // asking afterwards reached into the arena the plan had just been built
+        // out of. The symptom was not a crash: correlated subqueries in an
+        // `UPDATE` or a `DELETE` quietly answered against the wrong rows.
+        let declared = self.engine().parameter_count(sql)?;
         let compiled = self.engine().prepare_statement(sql)?;
+        let mut params = Params::new();
+        params.expect(declared);
         Ok(Statement {
             database: self.database,
             compiled,
-            params: Params::new(),
+            params,
             rows: Vec::new(),
             names: Vec::new(),
             at: 0,
@@ -606,10 +653,23 @@ pub struct Statement<'d> {
 impl Statement<'_> {
     /// Binds one parameter.
     ///
+    /// **Refuses an index the statement does not have**, with the code SQLite
+    /// uses for it. This used to answer `Ok` to anything: the parameter set did
+    /// `index.saturating_sub(1)` and then grew to fit, so binding 9 on a
+    /// one-parameter statement quietly made nine slots, and binding **0 wrote
+    /// over `?1`**. The second is the one that loses data rather than time - a
+    /// caller who thought index 0 was a no-op had replaced its first parameter,
+    /// and the statement ran with a value it never chose and no error to say so.
+    ///
     /// @param index - the one-based parameter number
     /// @param value - the value
     pub fn bind(&mut self, index: u32, value: OwnedDatum) -> DbResult<()> {
-        self.params.set(index, value);
+        if self.params.try_set(index, value).is_err() {
+            return Err(DbError::primary(PrimaryCode::Range).with_detail(format!(
+                "parameter {index} is outside the {} this statement has",
+                self.params.declared().unwrap_or(0)
+            )));
+        }
         self.run = false;
         Ok(())
     }
@@ -645,9 +705,17 @@ impl Statement<'_> {
         self.bind(index, OwnedDatum::Null)
     }
 
-    /// Unbinds every parameter.
+    /// Unbinds every parameter, keeping how many the statement has.
+    ///
+    /// The count is a property of the statement rather than of the values, so
+    /// clearing the values must not forget it - a statement whose bindings were
+    /// cleared would otherwise start accepting any index again.
     pub fn clear_bindings(&mut self) {
+        let declared = self.params.declared();
         self.params.clear();
+        if let Some(declared) = declared {
+            self.params.expect(declared);
+        }
         self.run = false;
     }
 
@@ -712,77 +780,75 @@ impl Statement<'_> {
     }
 }
 
-/// Splits a batch into statements on semicolons outside quotes.
+/// Returns how many bytes at the front of a script are not part of a statement.
 ///
-/// **Small on purpose, and not a parser.** The engine has one, and a batch that
-/// needs it should go through `parse_next_statement` rather than through this.
-/// What this handles is the shape a caller writes in a test or a schema file:
-/// statements separated by semicolons, with semicolons inside string literals
-/// and identifiers left alone. A statement it splits wrongly fails to parse and
-/// says so, rather than doing something unintended.
+/// Whitespace, statement separators, and both comment forms. The parser refuses
+/// text that holds no statement, so a caller passing an empty batch, a trailing
+/// semicolon or a file that is entirely comments would get a syntax error for
+/// something that is not an error - and all three are ordinary things to pass.
 ///
-/// @param sql - the batch
-fn split_statements(sql: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    for character in sql.chars() {
-        match quote {
-            Some(open) => {
-                current.push(character);
-                if character == open {
-                    quote = None;
+/// This is deliberately the *only* lexical scanning left in the batch path. It
+/// decides what to skip, never where a statement ends; that question goes to
+/// the parser, which is the half the old splitter got wrong.
+///
+/// @param sql - the remaining script
+fn leading_trivia(sql: &str) -> usize {
+    let bytes = sql.as_bytes();
+    let mut at = 0usize;
+    loop {
+        let before = at;
+        while let Some(byte) = bytes.get(at) {
+            if byte.is_ascii_whitespace() || *byte == b';' {
+                at += 1;
+            } else {
+                break;
+            }
+        }
+        if bytes.get(at) == Some(&b'-') && bytes.get(at + 1) == Some(&b'-') {
+            at += 2;
+            while let Some(byte) = bytes.get(at) {
+                at += 1;
+                if *byte == b'\n' {
+                    break;
                 }
             }
-            None => match character {
-                '\'' | '"' | '`' => {
-                    quote = Some(character);
-                    current.push(character);
+        }
+        if bytes.get(at) == Some(&b'/') && bytes.get(at + 1) == Some(&b'*') {
+            at += 2;
+            while at < bytes.len() {
+                if bytes.get(at) == Some(&b'*') && bytes.get(at + 1) == Some(&b'/') {
+                    at += 2;
+                    break;
                 }
-                ';' => {
-                    if !current.trim().is_empty() {
-                        out.push(current.trim().to_string());
-                    }
-                    current.clear();
-                }
-                _ => current.push(character),
-            },
+                at += 1;
+            }
+        }
+        if at == before {
+            return at;
         }
     }
-    if !current.trim().is_empty() {
-        out.push(current.trim().to_string());
-    }
-    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A batch splits on the semicolons that separate statements and no others.
+    /// Trivia is skipped, and a statement's own semicolons are not trivia.
     #[test]
-    fn a_batch_splits_on_statement_semicolons() {
-        let split = split_statements(
-            "CREATE TABLE t (a TEXT); INSERT INTO t VALUES ('one;two'); SELECT * FROM t",
+    fn leading_trivia_skips_separators_and_comments() {
+        assert_eq!(leading_trivia(""), 0);
+        assert_eq!(leading_trivia(";;;  "), 5);
+        assert_eq!(leading_trivia("-- a comment\nSELECT 1"), 13);
+        assert_eq!(leading_trivia("/* block */ SELECT 1"), 12);
+        assert_eq!(
+            leading_trivia("SELECT 1"),
+            0,
+            "a statement is not trivia, however it starts"
         );
         assert_eq!(
-            split,
-            vec![
-                "CREATE TABLE t (a TEXT)".to_string(),
-                "INSERT INTO t VALUES ('one;two')".to_string(),
-                "SELECT * FROM t".to_string(),
-            ],
-            "a semicolon inside a literal is not a separator"
-        );
-    }
-
-    /// A trailing semicolon and blank statements produce nothing extra.
-    #[test]
-    fn a_trailing_semicolon_is_not_a_statement() {
-        assert_eq!(
-            split_statements("SELECT 1;;  ;"),
-            vec!["SELECT 1".to_string()],
-            "empty statements are dropped"
+            leading_trivia("  ;\n-- one\n/* two */ ;\nSELECT 1"),
+            23,
+            "the forms mix, in any order"
         );
     }
 }

@@ -643,6 +643,7 @@ dependencies = [
  "inillucent-legacy",
  "inillucent-migrate",
  "inillucent-pool",
+ "inillucent-scalar",
  "inillucent-session",
  "inillucent-sim",
  "inillucent-sql",
