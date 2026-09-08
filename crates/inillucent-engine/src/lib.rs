@@ -3315,12 +3315,19 @@ impl ImportedDatabase {
         // A name the transaction does not hold is left to `undo_to` to refuse,
         // so that the error is the one it has always been.
         let folded = name.to_ascii_lowercase();
-        let level = self
-            .marks
-            .iter()
-            .rposition(|(held, _)| *held == folded)
-            .and_then(|position| i32::try_from(position).ok())
-            .unwrap_or(0);
+        let Some(position) = self.marks.iter().rposition(|(held, _)| *held == folded) else {
+            // **A name no savepoint holds changes nothing, modules included.**
+            // Defaulting the level to zero and telling the modules anyway made
+            // `ROLLBACK TO a_name_that_is_not_open` discard a buffered virtual
+            // table's pending writes and *then* report the error - a failed
+            // statement with a side effect, which is the one thing a failed
+            // statement may not have. `undo_to` refuses it below with the
+            // message it has always used.
+            self.undo_to(Some(name))?;
+            self.refresh_catalog();
+            return Ok(());
+        };
+        let level = i32::try_from(position).unwrap_or(i32::MAX);
         let told = self.rollback_modules(Some(level));
         let undone = self.undo_to(Some(name));
         self.refresh_catalog();
