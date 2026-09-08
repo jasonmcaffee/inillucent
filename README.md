@@ -28,11 +28,13 @@ earlier ticket rather than re-measured, the ticket is named and the reason is gi
 
 > **[`feature-comparison.md`](feature-comparison.md) is the side-by-side scorecard**: every SQLite
 > feature against inillucent, in tables, plus the retrieval engine against PostgreSQL + pgvector.
-> It was written by task-1858 from a 416-case differential probe run at commit `382eb78` - both
-> shells, one fresh database each, every byte compared - and it is the document to read before
-> asking whether something works. **302 of the 416 agree**; the rest, and the fourteen differences
-> nothing tells the caller about, are named there. The implementation ticket for its gaps is
-> task-1859.
+> It was written by task-1858 from a 416-case differential probe - both shells, one fresh database
+> each, every byte compared - and re-measured by task-1859 and task-1860. It is the document to read
+> before asking whether something works. **409 of the 416 agree**, and **nothing is refused**: of the
+> seven that answer differently, three are a page size and a locking mode this engine chose and can
+> price the alternative to, one is the two pinned SQLite artifacts disagreeing with each other, and
+> three print numbers about SQLite's own C structures - a VDBE program, `sizeof(sqlite3_file)`, a
+> lookaside allocator's counters. Each is named there with what it measures.
 
 
 The goal is a highly performant SQLite replacement offering the same features, plus embedding search
@@ -42,8 +44,8 @@ similar to pgvector. Measured against that, today:
 |---|---|---|
 | Faster than SQLite | **Yes on Windows at 100k rows and up, and by a wider margin since task-1845.** Weighted geomean 3.80x-3.91x at medium over four 30-round runs, lower bounds **3.74x, 3.75x, 3.88x, 3.44x** against a 3.00x bar, 30 of 30 workloads digest-equal on every run. It was 3.20x-3.28x (lows 3.11x-3.20x) before the engine's binaries were given a size-classed free list as their global allocator. On Linux the same binary was 1.53x at medium (task-1838 §5, not re-measured since). | task-1845's four-run gate |
 | No family slower than SQLite | **Ten of ten, on four consecutive runs.** `extension` was the last one straddling the line - its low bound read 0.99, 1.00, 0.99, 1.06 on task-1846's four runs, which is a bound cleared by luck rather than by code. task-1856 moved `extension.fts.build` from 0.29x-0.30x to 0.35x-0.37x and the family's low bound to **1.05, 1.07, 1.07, 1.09**, with the weighted lower bound 3.79x-3.96x against its 3.00x bar. `schema` crossed in task-1846 and reads 1.10-1.23. The families still under their *bars* - a different question from the floor - are `open.prepare`, `schema` and `extension`. | task-1856's four-run gate |
-| Same features as SQLite | **No wrong answer known, no refusal known - and task-1856 closed nine more that the probes were not shaped to see.** 48 of 50 inventoried constructs run. The differential probe is a checked-in test of 110 cases (`semantics.rs`), **all of which agree byte for byte**; the review's nine, task-1849's six and task-1856's nine are all closed. The three `CREATE INDEX` forms task-1845 left refused were closed by task-1846, and a `DESC` index - built and then reasoned about backwards - by task-1856. | [What it gets wrong](#what-it-gets-wrong-and-what-it-refuses) |
-| Same durability and isolation | **Yes, single process, one writer.** A checkpoint retires the segments below it since task-1845, so the same 200,000 rows are 15.9 MB rather than 110.5 MB - 1.83x SQLite's 8.7 MB, where it was 12.7x. WAL with group commit, snapshot isolation, ARIES-style redo recovery, undo for `ROLLBACK`/`SAVEPOINT`, crash campaigns under a deterministic simulator. Multi-process access and SQLite's file format are deliberate non-goals. | [Disk](#disk) |
+| Same features as SQLite | **No wrong answer known, no refusal known - and task-1856 closed nine more that the probes were not shaped to see.** 48 of 50 inventoried constructs run. The differential probe is a checked-in test of 183 cases (`semantics.rs`), **all of which agree byte for byte**; the review's nine, task-1849's six and task-1856's nine are all closed. The three `CREATE INDEX` forms task-1845 left refused were closed by task-1846, and a `DESC` index - built and then reasoned about backwards - by task-1856. | [What it gets wrong](#what-it-gets-wrong-and-what-it-refuses) |
+| Same durability and isolation | **Yes, single process, one writer.** A checkpoint retires the segments below it since task-1845, so the same 200,000 rows are 15.9 MB rather than 110.5 MB - 1.83x SQLite's 8.7 MB, where it was 12.7x. WAL with group commit, snapshot isolation, ARIES-style redo recovery, undo for `ROLLBACK`/`SAVEPOINT`, crash campaigns under a deterministic simulator. SQLite's file format is not written; multi-process access is, over the same lock protocol, under `PRAGMA locking_mode = NORMAL` (task-1860). | [Disk](#disk) |
 | Embedding search like pgvector | **Yes, and graded better than pgvector on 15 of 17 primary comparisons** with zero worse; in production on a 598,560-chunk mailbox at recall 1.000 and 27 ms p95. Reachable from ordinary SQL: a `VECTOR(N)` column, `vector_distance_cos`/`_l2`/`vector_dot`, `CREATE INDEX ... USING inillucent_hnsw`, and `ORDER BY vector_distance_cos(v, ?) LIMIT k` planned onto the index at **0.98x** the cost of querying the store directly. | `inillucent-scorecard.md`, task-1775, this ticket's `vectorprobe.txt` |
 | One engine, one repository that builds | **Half.** The repository builds from a clone again - `drivers/` is committed, and `harness.rs` now asserts every path in `[workspace] members` exists, so the next crate added before it is committed fails on the machine that added it. `inillucent::Database` reaches the new engine; the old engine is still in the tree awaiting task-1837's driver. | [Repository layout](#repository-layout) |
 
@@ -104,9 +106,9 @@ forbid `unsafe`.
 ### What it gets wrong, and what it refuses
 
 A refusal is visible and an application can work around it. A wrong answer is not. This section is
-ordered by that difference. It is no longer a report: the 110 cases behind it are
+ordered by that difference. It is no longer a report: the 183 cases behind it are
 `crates/inillucent-compat/tests/semantics.rs`, which runs each script through `inillucent-shell` and
-the pinned `sqlite3` and compares every byte of both streams. **All 110 agree.**
+the pinned `sqlite3` and compares every byte of both streams. **All 183 agree.**
 
 **Wrong answers: none known** - which is not the same as none, and each of the last three tickets to
 say it is the reason to keep saying it that way. The nine the second review found were closed by
@@ -218,9 +220,10 @@ own thread and fails on the deadline.
 
 | construct | state |
 |---|---|
-| `VACUUM`, `VACUUM INTO` | `VACUUM` checkpoints; `VACUUM INTO` writes a verified copy and refuses to overwrite (task-1859) |
-| plain `EXPLAIN` | refused on purpose: there is no bytecode to list. `EXPLAIN QUERY PLAN` is answered |
-| a second process on the same file, a second writer, SQLite's file format, the C ABI on the new engine | design non-goals of task-1816 |
+| `VACUUM`, `VACUUM INTO` | both rebuild the file and reclaim its free space (task-1860); `VACUUM INTO` writes a verified copy and refuses to overwrite |
+| plain `EXPLAIN` | answered: it lists the operator chain in the eight columns SQLite lists opcodes in (task-1860) |
+| a second process on the same file | supported over SQLite's own lock protocol under `PRAGMA locking_mode = NORMAL` (task-1860); `exclusive` is the default |
+| a second writer, SQLite's file format, the C ABI on the new engine | not built: see task-1816's design |
 
 **Closed by task-1846**, each byte-compared against `sqlite3`: **partial indexes**, **indexes on
 expressions**, and **`CREATE INDEX` on a `WITHOUT ROWID` table** - the last three refusals
@@ -252,6 +255,13 @@ corpora; and a grading harness that drives inillucent and PostgreSQL through one
 engine's own documentation follows the comparisons below.
 
 ## How it compares with SQLite 3.53.4
+
+**The current comparison lives in [`feature-comparison.md`](feature-comparison.md)**, re-measured on
+2026-09-08 for task-1861 over four consecutive 30-round runs, and it carries what this section does
+not: **processor time and peak resident memory for both engines**, every figure written as N% less
+time / less CPU / more memory, and a family-by-family attribution of where the memory goes. Its
+medium headline is **3.85x - 74% less time**, at **66% less CPU** and **102% more memory**. What
+follows is the task-1843 run, kept because it is the only one that covers all three scales.
 
 Every number in this section was measured on 2026-09-07 at commit `d885e91` on this machine
 (Windows 11, x64), and the raw gate output is under
@@ -450,14 +460,14 @@ two paths.
 |---|---|---|
 | SQL dialect | SQLite's; 60 of 60 grammar productions parse (`compat/syntax-report.md`) | reference |
 | inventoried constructs | 48 of 50 run (`new_engine_surface.rs`); the two that do not are plain `EXPLAIN` and the table-valued pragma form | reference |
-| differential probe, 61 scripts | 35 agree, 26 differ: **9 wrong answers**, 17 refusals | reference |
-| type affinity | **not applied on write**: a column stores the class it was given | applied on write |
-| `CHECK`, `STRICT` | **accepted and not enforced** | enforced |
+| differential probe, 416 scripts | **409 agree, 7 differ, 0 refused** (`feature-comparison.md`) | reference |
+| type affinity | applied on write; all 19 of the probe's `types` cases agree | applied on write |
+| `CHECK`, `STRICT` | enforced; all 16 of the probe's `constraint` cases agree | enforced |
 | `NOT NULL`, `UNIQUE`, `PRIMARY KEY`, foreign keys | enforced, with SQLite's codes and messages | enforced |
 | file format | its own (`.rdb` + `RDBWAL01` segments); SQLite files are imported, not opened | SQLite |
-| journal modes | WAL only; `journal_mode` answers `wal`, `locking_mode` answers `exclusive` | DELETE, TRUNCATE, PERSIST, MEMORY, WAL, OFF |
-| log reclamation | **none: segments accumulate** | WAL reset on checkpoint |
-| processes on one file | one; no OS file lock is taken on the new path | many, byte-range locks |
+| journal modes | all six, and `delete` is the default as it is there; `locking_mode` answers `exclusive` by default and `normal` is a real switch | DELETE, TRUNCATE, PERSIST, MEMORY, WAL, OFF |
+| log reclamation | segments are retired at a checkpoint: 20,000 rows written in WAL leave one 112-byte segment after `wal_checkpoint(TRUNCATE)` | WAL reset on checkpoint |
+| processes on one file | many, under `PRAGMA locking_mode = normal`: 37 stress rounds, two processes each writing 12,000 rows into one file, zero lost writes. The default is `exclusive` because releasing the file between statements costs the gate 3.78x to 3.03x | many, byte-range locks |
 | writers | one at a time, readers never block (snapshot isolation) | one at a time; readers block in rollback mode, not in WAL |
 | threads | single-threaded | serialised or multi-thread |
 | rollback | undo buffer of before-images, rows and schema; a `DROP` cannot be undone inside a transaction, and attempting it leaves the connection unable to read the table | rollback journal or WAL |
@@ -530,40 +540,44 @@ there, and is kept in step by the engine applying a statement's row images to th
 write and before the commit — so the table and its index are one change. `ORDER BY
 vector_distance_cos(v, ?) LIMIT k` is planned onto it as `AccessPath::VectorProbe`, graded at recall
 **1.000** against a cosine the test computes itself, and measured at **7.204 ms p50 against the store's
-own 7.325 ms** over 20,000 vectors at 256 dims — the SQL path is free. What is missing is pgvector's
-operator spellings (`<=>`, `<->`, `<#>`) and `vector_distance_l2` as an *ordering* the planner
-recognises: only the cosine is wired to the index, because cosine is the measure the store is built on.
+own 7.325 ms** over 20,000 vectors at 256 dims — the SQL path is free.
+
+**The operator spellings landed.** `<->`, `<#>`, `<=>`, `<+>`, `<~>` and `<%>` all parse and bind,
+alongside pgvector's distance and vector functions, and `CREATE INDEX ... USING ivfflat` is a second
+structure beside the graph - all of it probed in `feature-comparison.md`. What is still cosine-only
+is the *ordering the planner puts on the index*: `WITH (metric = ...)` is where a second metric goes
+when the structure has one.
 
 ## What is not there yet
 
 In priority order for the next ticket, each with the evidence already in the tree. The plan for each
 is `tasks/rust-db-phase-2-tdd.md`.
 
-1. **`schema` is the one family under the 1.00x floor**, at 0.46x-0.58x. `CREATE INDEX main_label` at
-   medium is 49.9 ms against SQLite's 30.8, and it is accounted for stage by stage: scan 13.4 ms,
-   sort 5.9 ms, pack 15.8 ms (4.4 of it turning owned rows into borrowed ones), and a 6.8 ms `seal()`
-   which is a log sync both engines pay under `synchronous = FULL` - `record`, `rebuild_tables` and
-   `refresh_catalog` together are under 200 µs, so there is no waste hiding in the tail. Reaching
-   1.00x means scan + sort + pack falling from 35 ms to about 21, and the route is the one Phase 3
-   names: build from a sorted run of **pre-encoded keys** with a radix pass rather than comparisons,
-   and log one record per packed leaf. It is a change to `bulk_build_logged` and `pack_with`, whose
-   output is compared page for page against SQLite's index by existing tests, so it wants its own
-   ticket rather than the end of another one.
-2. **Three `CREATE INDEX` forms are still refused**: partial (`CREATE INDEX ... WHERE`), on an
-   expression, and on a `WITHOUT ROWID` table. The first two are half-built already - the loader
-   parses and stores `partial_sql` and `expr_sql` - and what is missing is maintaining the entries on
-   write and, before the planner may *use* either, an implication check for the predicate and
-   expression matching for the key. The third needs an index entry whose trailing part is the table's
-   primary key rather than a rowid, which every tree here currently appends exactly one of.
-3. **Linux**: 1.53x weighted where Windows is now 3.80x-3.91x, and shown by experiment to be the same
+1. **Memory is the one measurement where SQLite wins, and there is no bar on it.** The same plan
+   under the same 128 MiB budget: **75.25 MiB against SQLite's 37.19 - 102% more** - while taking
+   74% less time and 66% less processor. `compat/perf/contract.toml` has ten elapsed-time families
+   and no memory family, so nothing fails when it rises. task-1861 attributed it family by family -
+   `schema` 66.79 MiB, `write` 45.25, `large.values` 37.48, `extension` 33.14 - and ruled out the
+   allocator (2.4 MiB, and swapping it costs 13% more time) and the 32 KiB page size (4 KiB pages are
+   *larger*). The index build is the single biggest consumer.
+2. **The default page cache is 64x SQLite's**: `PRAGMA cache_size` reports **-131072** here and
+   **-2000** there. It is a real switch, and setting it to SQLite's default takes a shell scanning
+   200,000 rows from 23.1 MiB resident to 9.3 with the wall clock unchanged - but doing the same to
+   the gate's whole plan costs the headline 3.85x to 1.76x. The default wants deciding by
+   measurement rather than leaving where it landed.
+3. **Three elapsed-time bars are missed**, on four consecutive 30-round runs: `open.prepare` 26% less
+   time against a bar asking 80%, `extension` 17% against 33%, `schema` 17% against 67%. And
+   `open.prepare`'s lower bound fell **under the 1.00x floor on two of the four runs** (0.99x,
+   0.95x), which a single run cannot settle.
+4. **Linux**: 1.53x weighted where Windows is now 3.80x-3.91x, and shown by experiment to be the same
    absolute work rather than a Linux-specific fix (task-1838 §5). The allocator that moved Windows
    from 3.24x to 3.86x has not been measured there.
-4. **`txn.large` at 0.18x-0.27x and `write.insert.batch` at 0.51x-0.56x.** Both are inside met
+5. **`txn.large` at 0.18x-0.27x and `write.insert.batch` at 0.51x-0.56x.** Both are inside met
    families now, so neither blocks the floor, and both have a named plan in Phase 3's Part E: route
    `UPDATE`'s read through the borrowing probe rather than the allocating `PagedTree::point`,
    overwrite a same-width value in place, one log record per update; and keep delta entries sorted by
    pre-encoded key and bisect.
-5. **`extension.fts.build` at 0.35x-0.37x**, which is the module's own cost - task-1835 moved the
+6. **`extension.fts.build` at 0.35x-0.37x**, which is the module's own cost - task-1835 moved the
    query path and the build path is what task-1856 profiled. The gate now prints the breakdown beside
    the ratio, the way it does for `schema.index`: 500 documents, `content` 1.3 ms, `tokenize` 0.4,
    `docsize` 1.0, `group` 0.2, `terms` 0.3, `new terms` 0.4, `dict write` 1.7, `flush` 2.7. What is
@@ -573,16 +587,17 @@ is `tasks/rust-db-phase-2-tdd.md`.
    `%_docsize`, the new term's `%_idx` row and its `%_data` doclist - where SQLite's accumulates the
    batch in memory and writes a handful of segment blobs at commit. Closing the rest is a segment
    format change touching every reader of `%_idx` and `%_data`.
-6. **Deleting the old engine.** Re-rooting is done: `inillucent` is a re-export of
+7. **Deleting the old engine.** Re-rooting is done: `inillucent` is a re-export of
    `inillucent-engine`, and the old facade is `inillucent-legacy`. What is left is the deletion -
    `inillucent-legacy`, `inillucent-capi`, `inillucent-session`, `inillucent-vm`,
    `inillucent-transaction` and `inillucent-storage` minus its reader - and it is blocked on
    **task-1837**'s driver, which is the C ABI that replaces `inillucent-capi`.
-7. **The retrieval index's footprint**: 3.83 GB resident for a 3.1 GB index of 598,560 chunks. The
+8. **The retrieval index's footprint**: 3.83 GB resident for a 3.1 GB index of 598,560 chunks. The
    postings are persisted and the graph build is parallel; nothing has tried to make the resident set
    smaller.
-8. **Multi-process and multi-thread access**, deliberate non-goals of task-1816 that a SQLite
-   replacement will eventually be asked about.
+9. **Multi-thread access.** Multi-process access landed in task-1860 - the same
+   SHARED/RESERVED/PENDING/EXCLUSIVE protocol, under `PRAGMA locking_mode = NORMAL`, measured over 37
+   stress rounds with two writing processes and no lost writes - and threading has not.
 
 **The 17 failing tests, all accounted for**, and every one of them was failing before task-1845 too.
 
