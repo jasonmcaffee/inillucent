@@ -25,7 +25,7 @@ use crate::bind::{
     BoundSource,
 };
 use crate::catalog_view::{IndexInfo, TableInfo, TableKind, TriggerEventInfo, TriggerInfo};
-use crate::diagnostic::ParseError;
+use crate::diagnostic::{ParseError, ParseErrorKind};
 use crate::lexer::Span;
 use crate::parser::parse_expression;
 
@@ -1618,8 +1618,23 @@ pub fn rowid_message(table: &TableInfo) -> (i32, String) {
 /// to *parse* here - it is a published production - so the refusal is made here
 /// instead, in the reference's words and at the reference's position.
 ///
+/// **It is an `Unexpected`, not a `Refused`, and the distinction is the whole
+/// message.** This is the one refusal whose text really is `near "X": syntax
+/// error`, because the reference's parser genuinely has no production for the
+/// word - unlike the sentence-shaped refusals task-1869 moved off that variant,
+/// which are a schema saying no to a statement that parsed. Routing it through
+/// `bind::refused` with them made it answer a bare `ORDER`, which the
+/// 416-case probe caught as `both-refuse-differently` on `DELETE ... ORDER BY
+/// ... LIMIT` and `UPDATE ... ORDER BY ... LIMIT`.
+///
 /// @param limited - the word and where it was written, from the parser
 fn limited_dml_refusal(limited: Option<(ast::Limited, Span)>) -> Option<ParseError> {
     let (word, span) = limited?;
-    Some(crate::bind::refused(word.word(), span))
+    Some(ParseError::new(
+        ParseErrorKind::Unexpected {
+            found: word.word().to_string(),
+            expected: Vec::new(),
+        },
+        span,
+    ))
 }
