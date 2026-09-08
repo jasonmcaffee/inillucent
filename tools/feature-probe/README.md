@@ -25,6 +25,7 @@ node tools/feature-probe/summarise.js            # the per-area table
 
 node tools/feature-probe/pragmas.js              # every PRAGMA the reference lists, both engines
 node tools/feature-probe/vector-features.js      # the vector surface, one pgvector feature at a time
+node tools/feature-probe/registers.js            # the completeness audit: SQLites own registers, not our list
 ```
 
 Everything is written under `_agent_output/feature-probe/`, which is gitignored: the transcripts are
@@ -36,6 +37,7 @@ case, which is what you read when a row moves.
 | | |
 |---|---|
 | `run.js` | the runner, the normaliser and the verdict rule |
+| `registers.js` | the **completeness audit**: enumerates every function, pragma, module, collation and dot command SQLite reports, calls each one in both engines, and calls the context-scoped ones properly. It exists because `cases.js` can only find what somebody thought to write down |
 | `cases.js` | the main case table, by area |
 | `cases-extra.js` | the shell, parameters, limits, and the corners the first table left |
 | `pragmas.js` | asks both engines every pragma the reference lists |
