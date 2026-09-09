@@ -143,8 +143,8 @@ say eight. Tree by tree over the medium fixture, at 32 KiB pages:
 is the biggest saving. `wide` does not move at all, which is the check that nothing narrowed that
 should not have.
 
-Built through `INSERT ... SELECT` rather than imported, the picture is different and worth knowing:
-200,000 rows are 15.9 MB here against SQLite's 8.7 MB, at 32 KiB page granularity. The redo log
+Built through `INSERT ... SELECT` rather than imported, the picture is different: 200,000 rows are
+15.9 MB here against SQLite's 8.7 MB, at 32 KiB page granularity. The redo log
 retires to **0.0 MB** at a checkpoint, where it used to hold 94.6 MB across two segments for ever.
 
 ## Linux

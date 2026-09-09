@@ -158,9 +158,8 @@ database in the process:
 | real questions the keyword branch answered with nothing | 57% | **0%** |
 | index inside the database | 3,167 MB of a 5,849 MB database | deleted |
 
-The same move found six query shapes that go quadratic on this engine and one recovery failure that
-is worth reading before a migration. Both are written up in full, including what they cost and how
-each was fixed: [Removing PostgreSQL from a 5.8 GB Gmail assistant](docs/real-world-use-cases/nikaya-postgres-to-inillucent.md).
+The same move found six query shapes that go quadratic on this engine, and one recovery failure to
+read before a migration. Both are written up in full, with what each cost and how each was fixed: [Removing PostgreSQL from a 5.8 GB Gmail assistant](docs/real-world-use-cases/nikaya-postgres-to-inillucent.md).
 
 ## Documentation
 
