@@ -778,17 +778,18 @@ impl PagedTree {
         let Located::Sorted(row_index) = self.locate(database.pool(), page, key)? else {
             return Ok(false);
         };
-        // Costed on a scratch copy: the page must not change before its record
-        // is in the log, and a slot update has no separate plan step because
-        // there is nothing to allocate - so the trial runs on a copy.
-        let mut scratch = {
-            let guard = database.pool().fetch(page)?;
-            guard.bytes().to_vec()
-        };
-        if LeafMut::new(&mut scratch)?.update_slot(column, row_index, value)?
-            != crate::mutate::Applied::Yes
+        // **Costed by asking, not by writing to a copy of the page.** The page
+        // may not change before its record is in the log, and the way this used
+        // to find out whether the slot write applied was to run it against
+        // `guard.bytes().to_vec()`: a 32 KiB allocation and a 32 KiB copy per
+        // update, and `txn.large` is two thousand updates in one transaction.
+        // `would_update_slot` asks the same questions in the same order and
+        // touches nothing.
         {
-            return Ok(false);
+            let guard = database.pool().fetch(page)?;
+            if !crate::mutate::would_update_slot(guard.bytes(), column, row_index, value)? {
+                return Ok(false);
+            }
         }
         // The whole row, not the one slot. A rollback restores a row, and a
         // record that named only the column changed would restore a row that

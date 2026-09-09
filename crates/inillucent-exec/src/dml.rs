@@ -196,7 +196,7 @@ pub trait WriteTarget {
     /// Returns a tree's layout: which tree column each declared column holds.
     ///
     /// @param root - the root page id the catalog names the tree by
-    fn layout(&self, root: u32) -> Option<&SourceLayout>;
+    fn layout(&self, root: u32) -> Option<&std::rc::Rc<SourceLayout>>;
 
     /// Records that one row was written, for `changes()` and
     /// `total_changes()`.
@@ -294,7 +294,7 @@ impl RowSpace {
     ///
     /// @param sources - the binder source number each image answers to
     /// @param layout - the table tree's layout, shared by every image
-    pub fn new(sources: &[usize], layout: &SourceLayout) -> RowSpace {
+    pub fn new(sources: &[usize], layout: &std::rc::Rc<SourceLayout>) -> RowSpace {
         let mut stages = Vec::with_capacity(sources.len());
         let mut layouts = Vec::with_capacity(sources.len());
         let mut types = Vec::with_capacity(sources.len().saturating_mul(layout.width));
@@ -310,9 +310,9 @@ impl RowSpace {
                 is_lookup: false,
                 offset: term.saturating_mul(layout.width),
                 width: layout.width,
-                layout: Some(layout.clone()),
+                layout: Some(std::rc::Rc::clone(layout)),
             });
-            layouts.push(layout.clone());
+            layouts.push(std::rc::Rc::clone(layout));
             types.extend(layout.types.iter().copied());
         }
         RowSpace {
@@ -967,8 +967,8 @@ fn insert_into_view(
 /// result columns and nothing else.
 ///
 /// @param table - the expanded view
-pub fn view_layout(table: &TableInfo) -> SourceLayout {
-    SourceLayout {
+pub fn view_layout(table: &TableInfo) -> std::rc::Rc<SourceLayout> {
+    std::rc::Rc::new(SourceLayout {
         tree_key: 0,
         slots: (0..table.columns.len()).map(Some).collect(),
         rowid: None,
@@ -978,7 +978,7 @@ pub fn view_layout(table: &TableInfo) -> SourceLayout {
         types: vec![crate::expr::StaticType::Unknown; table.columns.len()],
         width: table.columns.len(),
         key_columns: Vec::new(),
-    }
+    })
 }
 
 /// The expressions an `INSERT` evaluates, compiled once for the statement.
@@ -2915,7 +2915,7 @@ fn read_row(
 ///
 /// @param target - the file and its trees
 /// @param table - the table
-fn layout_of(target: &dyn WriteTarget, table: &TableInfo) -> DbResult<SourceLayout> {
+fn layout_of(target: &dyn WriteTarget, table: &TableInfo) -> DbResult<std::rc::Rc<SourceLayout>> {
     target.layout(table.root).cloned().ok_or_else(|| {
         misuse(format!(
             "no layout imported for {}",
@@ -2949,7 +2949,7 @@ impl WriteTarget for Borrowed<'_> {
         self.0.parts_for(root)
     }
 
-    fn layout(&self, root: u32) -> Option<&SourceLayout> {
+    fn layout(&self, root: u32) -> Option<&std::rc::Rc<SourceLayout>> {
         self.0.layout(root)
     }
 

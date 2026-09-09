@@ -185,23 +185,7 @@ impl<'p> LeafMut<'p> {
     }
 
     fn columns_end(&self) -> DbResult<usize> {
-        let leaf = LeafRef::parse(self.page)?;
-        let stride = leaf.directory_entry_size();
-        let mut end =
-            leaf_header::DIRECTORY.saturating_add(leaf.column_count().saturating_mul(stride));
-        for index in 0..leaf.column_count() {
-            let entry = leaf_header::DIRECTORY.saturating_add(index.saturating_mul(stride));
-            let start = page::read_u32(self.page, entry.saturating_add(4))? as usize;
-            // The column directory's own width, not the physical type's: an
-            // integer column's slots may be one, two or four bytes wide, and a
-            // page whose end was computed at eight would leave the delta area
-            // and the tombstone bitmap floating above the free space they are
-            // supposed to be able to grow into.
-            let width = class_bytes(leaf.row_count())
-                .saturating_add(leaf.row_count().saturating_mul(leaf.column_width(index)?));
-            end = end.max(align8(start.saturating_add(width)));
-        }
-        Ok(end)
+        columns_end(self.page)
     }
 
     /// Inserts a row into the delta area.
@@ -566,18 +550,37 @@ impl<'p> LeafMut<'p> {
         Ok(())
     }
 
+    /// Reports whether [`LeafMut::update_slot`] would write, without writing.
+    ///
+    /// The method form of [`would_update_slot`], for a caller that already holds
+    /// a `LeafMut`.
+    ///
+    /// @param column - which column would be written
+    /// @param row - the row's position in the sorted region
+    /// @param value - the new value
+    pub fn would_update_slot(
+        &self,
+        column: usize,
+        row: usize,
+        value: &Datum<'_>,
+    ) -> DbResult<bool> {
+        would_update_slot(self.page, column, row, value)
+    }
+
     /// Overwrites one slot of one sorted-region row.
     ///
     /// The only update that does not go through the delta area, and the only one
     /// that keeps a leaf on the vectorised fast path. It applies to `Int64` and
     /// `Float64` when the new value is of that class, and to `Text` and `Blob`
-    /// when the new value is **exactly as long as the one it replaces** - the
-    /// heap slot is then written over where it lies. Anything else would move
-    /// the heap, and moving the heap in place is what compaction is for.
+    /// whatever length the new value is - the same length and shorter are
+    /// written where the value lies, and longer is written at the bottom of the
+    /// heap with the slot repointed at it. See
+    /// [`LeafMut::overwrite_heap_slot`], which is where the argument for that
+    /// is.
     ///
-    /// The same-length text case is not a curiosity: it is what an `UPDATE` of
-    /// a fixed-shape string column does, which is the gate's `txn.large`, two
-    /// thousand of them in one transaction (task-1838 §4).
+    /// The text case is not a curiosity: it is what an `UPDATE` of a string
+    /// column does, which is the gate's `txn.large`, two thousand of them in one
+    /// transaction (task-1838 §4, and task-1890 for the length change).
     ///
     /// Returns [`Applied::NoRoom`] when it does not apply, which the caller
     /// turns into a delete plus a delta insert.
@@ -656,12 +659,47 @@ impl<'p> LeafMut<'p> {
         Ok(Applied::Yes)
     }
 
-    /// Writes new bytes over a heap value of exactly the same length.
+    /// Writes new bytes over a heap value, whatever length they are.
     ///
-    /// The slot itself does not change - it is still `(offset, length)` and both
-    /// halves are the same - so nothing else on the page moves and no other
-    /// row's slot is affected. A different length would have to move every heap
-    /// value after this one, which is a compaction.
+    /// Three cases, and only the third moves anything on the page:
+    ///
+    /// - **The same length.** The bytes go where the old ones were and the slot
+    ///   does not change at all.
+    /// - **Shorter.** The bytes go where the old ones were and the slot's length
+    ///   half is lowered. The tail stays where it lies as bytes nothing points
+    ///   at, which the next compaction reclaims.
+    /// - **Longer.** The value is written at a new place in the same leaf - the
+    ///   bottom of the heap, after the tombstone bitmap and the delta area have
+    ///   been moved down to make room - and the slot is repointed at it. The old
+    ///   bytes stop being pointed at in the same way.
+    ///
+    /// **The third case is what put the `transaction` family under its floor.**
+    /// Refusing a length change is one branch, and the caller's route out of it
+    /// is a tombstone plus a delta insert plus, every [`DELTA_LIMIT`] writes, a
+    /// compaction over every live row of the leaf. The gate's `txn.large` is two
+    /// thousand `UPDATE side_table SET note = ?2` in one transaction, replacing
+    /// an eight-byte `note 1234` with a forty-two byte `row 1234 lorem ipsum
+    /// ...`: not one of them reached this path. `inillucent-writegate` counted
+    /// `inplace` at 0.00 per statement, and the family measured 0.09x to 0.11x
+    /// against a floor of 1.00x on four consecutive gate runs.
+    ///
+    /// **Moving the delta area is bounded work and repacking the leaf is not.**
+    /// What moves is the tombstone bitmap and the delta area, which is
+    /// `row_count / 8` bytes and at most [`DELTA_LIMIT`] rows - about two
+    /// kilobytes on the leaves this fixture holds. A compaction rewrites every
+    /// live row, and a `side_table` leaf holds about fifteen hundred of them.
+    ///
+    /// **Bytes nothing points at are not a leak.** They are what SQLite calls
+    /// fragments: the space is inside the leaf, the leaf's own room check counts
+    /// it as used, and the next compaction packs the live rows and gets it back.
+    /// No reader walks the heap from one end to the other, so a hole in it is
+    /// not visible to any of them.
+    ///
+    /// **A value that belongs out of line is refused rather than moved.** The
+    /// format's rule is that a value longer than `page_size / EXTENT_DIVISOR`
+    /// lives in an extent, and this is the one write that could put a large
+    /// value inline behind the packer's back. Refusing sends it to `put`, which
+    /// spills it the way every other write does.
     ///
     /// @param slot_at - where the row's slot sits in the page
     /// @param width - how wide that slot is: eight bytes of `u32`s or four of `u16`s
@@ -677,14 +715,94 @@ impl<'p> LeafMut<'p> {
             .get(slot_at..slot_at.saturating_add(width))
             .ok_or_else(|| corrupt("a heap slot runs past the page"))?;
         let (offset, length) = crate::types::read_heap_slot(slot);
-        if length != bytes.len() {
-            return Ok(Applied::NoRoom);
+        if bytes.len() <= length {
+            let Some(room) = self
+                .page
+                .get_mut(offset..offset.saturating_add(bytes.len()))
+            else {
+                return Err(corrupt("a heap slice runs past the page"));
+            };
+            room.copy_from_slice(bytes);
+            if bytes.len() != length {
+                let Some(slot) = self.page.get_mut(slot_at..slot_at.saturating_add(width)) else {
+                    return Err(corrupt("a heap slot runs past the page"));
+                };
+                crate::types::write_heap_slot(slot, offset, bytes.len());
+            }
+            return Ok(Applied::Yes);
         }
-        let Some(room) = self.page.get_mut(offset..offset.saturating_add(length)) else {
-            return Err(corrupt("a heap slice runs past the page"));
+        let Some(at) = self.carve_heap(bytes.len())? else {
+            return Ok(Applied::NoRoom);
+        };
+        let Some(room) = self.page.get_mut(at..at.saturating_add(bytes.len())) else {
+            return Err(corrupt("a carved heap slice runs past the page"));
         };
         room.copy_from_slice(bytes);
+        let Some(slot) = self.page.get_mut(slot_at..slot_at.saturating_add(width)) else {
+            return Err(corrupt("a heap slot runs past the page"));
+        };
+        crate::types::write_heap_slot(slot, at, bytes.len());
         Ok(Applied::Yes)
+    }
+
+    /// Makes `wanted` bytes of heap at the bottom of the heap, and says where.
+    ///
+    /// The tombstone bitmap and the delta area sit between the free gap and the
+    /// heap, so the room is made by moving both of them down by `wanted` and
+    /// lowering `heap_start` and `delta_start` by the same amount. Every delta
+    /// row keeps its position relative to `delta_start`, which is the only thing
+    /// any reader of the area knows about it, so no row has to be re-encoded.
+    ///
+    /// `None` when the free gap is not that wide, which is the caller's signal
+    /// to take the ordinary write path and let the leaf compact.
+    ///
+    /// **Deterministic, which is what makes the logical redo record correct.**
+    /// `Body::UpdateInPlace` carries the key, the column and the value, and
+    /// recovery replays it by running [`LeafMut::update_slot`] again over a page
+    /// that LSN ordering has already put back into the state the original write
+    /// saw. The offset this returns is a function of that page and `wanted`
+    /// alone, so the replay lands on the same bytes.
+    ///
+    /// @param wanted - how many bytes of heap the caller needs
+    fn carve_room(&self, wanted: usize) -> DbResult<Option<usize>> {
+        carve_room(self.page, wanted)
+    }
+
+    /// Performs the move [`carve_room`] costed.
+    ///
+    /// @param wanted - how many bytes of heap the caller needs
+    fn carve_heap(&mut self, wanted: usize) -> DbResult<Option<usize>> {
+        if self.carve_room(wanted)?.is_none() {
+            return Ok(None);
+        }
+        let (delta_start, heap_start, row_count, has_tombstones) = {
+            let leaf = LeafRef::parse(self.page)?;
+            (
+                leaf.delta_start(),
+                leaf.heap_start(),
+                leaf.row_count(),
+                leaf.has_tombstones(),
+            )
+        };
+        let bitmap = if has_tombstones {
+            tombstone_bytes(row_count)
+        } else {
+            0
+        };
+        let new_delta_start = delta_start.saturating_sub(wanted);
+        let new_heap_start = heap_start.saturating_sub(wanted);
+        // The bitmap and the delta area, as one block, moved down together. A
+        // delta row is read from `delta_start` upwards, so moving the block and
+        // the header field by the same amount leaves every row exactly where its
+        // reader looks for it.
+        let from = delta_start.saturating_sub(bitmap);
+        if from < heap_start {
+            self.page
+                .copy_within(from..heap_start, from.saturating_sub(wanted));
+        }
+        page::write_u32(self.page, leaf_header::HEAP_START, new_heap_start as u32)?;
+        page::write_u32(self.page, leaf_header::DELTA_START, new_delta_start as u32)?;
+        Ok(Some(new_heap_start))
     }
 
     /// Records that the leaf holds at least one out-of-line value.
@@ -727,6 +845,154 @@ impl<'p> LeafMut<'p> {
 /// @param at - the offset to align
 fn align8(at: usize) -> usize {
     at.saturating_add(7) & !7
+}
+
+/// Returns where the mini-columns end, which is the floor for everything that
+/// grows downwards.
+///
+/// A free function over the page bytes rather than a method, because the write
+/// path asks this question about a page it is only allowed to read - see
+/// [`would_update_slot`].
+///
+/// @param page - the page bytes, exactly one page long
+fn columns_end(page: &[u8]) -> DbResult<usize> {
+    let leaf = LeafRef::parse(page)?;
+    let stride = leaf.directory_entry_size();
+    let mut end = leaf_header::DIRECTORY.saturating_add(leaf.column_count().saturating_mul(stride));
+    for index in 0..leaf.column_count() {
+        let entry = leaf_header::DIRECTORY.saturating_add(index.saturating_mul(stride));
+        let start = page::read_u32(page, entry.saturating_add(4))? as usize;
+        // The column directory's own width, not the physical type's: an integer
+        // column's slots may be one, two or four bytes wide, and a page whose
+        // end was computed at eight would leave the delta area and the tombstone
+        // bitmap floating above the free space they are supposed to be able to
+        // grow into.
+        let width = class_bytes(leaf.row_count())
+            .saturating_add(leaf.row_count().saturating_mul(leaf.column_width(index)?));
+        end = end.max(align8(start.saturating_add(width)));
+    }
+    Ok(end)
+}
+
+/// Returns where `wanted` bytes of heap would be carved, or `None`.
+///
+/// Reads only, so the write path can cost a relocation before its record is in
+/// the log. [`LeafMut::carve_heap`] performs what this costs, and the two must
+/// agree: the offset is `heap_start - wanted` in both.
+///
+/// @param page - the page bytes, exactly one page long
+/// @param wanted - how many bytes of heap the caller needs
+fn carve_room(page: &[u8], wanted: usize) -> DbResult<Option<usize>> {
+    // The format's own rule about where a large value lives. See
+    // `LeafMut::overwrite_heap_slot`.
+    if wanted > page.len() / crate::leaf::EXTENT_DIVISOR {
+        return Ok(None);
+    }
+    let (delta_start, heap_start, row_count, has_tombstones) = {
+        let leaf = LeafRef::parse(page)?;
+        (
+            leaf.delta_start(),
+            leaf.heap_start(),
+            leaf.row_count(),
+            leaf.has_tombstones(),
+        )
+    };
+    let bitmap = if has_tombstones {
+        tombstone_bytes(row_count)
+    } else {
+        0
+    };
+    let floor = columns_end(page)?;
+    let Some(new_delta_start) = delta_start.checked_sub(wanted) else {
+        return Ok(None);
+    };
+    if new_delta_start.saturating_sub(bitmap) < floor {
+        return Ok(None);
+    }
+    Ok(Some(heap_start.saturating_sub(wanted)))
+}
+
+/// Returns where one row's slot for one column sits in the page.
+///
+/// @param page - the page bytes, exactly one page long
+/// @param column - which column
+/// @param row - the row's position in the sorted region
+fn slot_at(page: &[u8], column: usize, row: usize) -> DbResult<usize> {
+    let (row_count, width, stride) = {
+        let leaf = LeafRef::parse(page)?;
+        (
+            leaf.row_count(),
+            leaf.column_width(column)?,
+            leaf.directory_entry_size(),
+        )
+    };
+    let entry = leaf_header::DIRECTORY.saturating_add(column.saturating_mul(stride));
+    let base = page::read_u32(page, entry.saturating_add(4))? as usize;
+    Ok(base
+        .saturating_add(class_bytes(row_count))
+        .saturating_add(row.saturating_mul(width)))
+}
+
+/// Reports whether [`LeafMut::update_slot`] would write, without writing.
+///
+/// **Because the alternative was a copy of the whole page.** A write may not
+/// change a page before its record is in the log, and the way `update_in_place`
+/// used to find out whether the slot write applied was to run it against
+/// `guard.bytes().to_vec()` - a 32 KiB allocation and a 32 KiB copy for every
+/// in-place update, and the gate's `txn.large` is two thousand of them in one
+/// transaction. Asking the same questions without writing costs a page parse and
+/// some arithmetic.
+///
+/// **Every refusal here is one `update_slot` also makes, in the same order**,
+/// and it has to stay that way: the caller logs the record on the strength of a
+/// `true` from this and then applies it for real, so a disagreement would be a
+/// record in the log describing a write that did not happen. `redo` now fails
+/// rather than continuing when the replayed `update_slot` answers `NoRoom`,
+/// which is what would catch such a disagreement.
+///
+/// @param page - the page bytes, exactly one page long
+/// @param column - which column would be written
+/// @param row - the row's position in the sorted region
+/// @param value - the new value
+pub fn would_update_slot(
+    page: &[u8],
+    column: usize,
+    row: usize,
+    value: &Datum<'_>,
+) -> DbResult<bool> {
+    let (spec, width, frame, class) = {
+        let leaf = LeafRef::parse(page)?;
+        if row >= leaf.row_count() {
+            return Err(misuse(format!("row {row} is not in the sorted region")));
+        }
+        (
+            leaf.spec(column)?,
+            leaf.column_width(column)?,
+            leaf.column_base(column)?,
+            leaf.column(column)?.class_at(row)?,
+        )
+    };
+    if class != crate::types::ValueClass::Typed {
+        return Ok(false);
+    }
+    match (spec.physical, value) {
+        (PhysicalType::Int64, Datum::Int(number)) => {
+            Ok(crate::leaf::fits_frame(frame, width, *number))
+        }
+        (PhysicalType::Float64, Datum::Real(_) | Datum::Int(_)) => Ok(true),
+        (PhysicalType::Text, Datum::Text(bytes)) | (PhysicalType::Blob, Datum::Blob(bytes)) => {
+            let at = slot_at(page, column, row)?;
+            let slot = page
+                .get(at..at.saturating_add(width))
+                .ok_or_else(|| corrupt("a heap slot runs past the page"))?;
+            let (_, length) = crate::types::read_heap_slot(slot);
+            if bytes.len() <= length {
+                return Ok(true);
+            }
+            Ok(carve_room(page, bytes.len())?.is_some())
+        }
+        _ => Ok(false),
+    }
 }
 
 #[cfg(test)]
@@ -996,11 +1262,23 @@ mod tests {
             "a slot update took the leaf off the fast path"
         );
 
-        // A text column needs the heap, so it refuses.
+        // A longer text is written at the bottom of the heap and the slot
+        // follows it, which is what took the `transaction` family off its floor
+        // when it was a refusal (task-1890). The leaf stays on the fast path:
+        // nothing went into the delta area and nothing was tombstoned.
         assert_eq!(
             leaf.update_slot(1, 3, &Datum::Text(b"longer than before"))
                 .expect("an update"),
-            Applied::NoRoom
+            Applied::Yes
+        );
+        let view = leaf.view().expect("the page parses");
+        match view.value(3, 1).expect("a value") {
+            Datum::Text(bytes) => assert_eq!(bytes, b"longer than before"),
+            other => panic!("row 3 column 1 is {other:?}, not text"),
+        }
+        assert!(
+            view.is_clean(),
+            "a relocating slot update took the leaf off the fast path"
         );
         // A NULL is a class change, so it refuses.
         assert_eq!(
@@ -1106,5 +1384,178 @@ mod tests {
         let mut page = vec![0u8; 512];
         page::write_common(&mut page, crate::page::PageKind::Interior, 1, 1).expect("a header");
         assert!(LeafMut::new(&mut page).is_err());
+    }
+
+    /// Reads one row's text out of a leaf, so a test can assert on the value
+    /// rather than on the fact that a call returned.
+    ///
+    /// @param page - the page bytes
+    /// @param row - the row's position in the sorted region
+    fn text_at(page: &[u8], row: usize) -> Vec<u8> {
+        let leaf = LeafRef::parse(page).expect("a leaf");
+        match leaf.value(row, 1).expect("a value") {
+            Datum::Text(bytes) => bytes.to_vec(),
+            other => panic!("row {row} column 1 is {other:?}, not text"),
+        }
+    }
+
+    /// A shorter value is written where the old one lay and the slot shortens.
+    ///
+    /// The rows either side are read back too: a length written into the slot
+    /// without the bytes going with it would leave this row right and its
+    /// neighbours reading into the middle of a value.
+    #[test]
+    fn a_shorter_text_is_written_in_place() {
+        let mut page = leaf_of(4_096, 40);
+        let before_heap = LeafRef::parse(&page).expect("a leaf").heap_start();
+        {
+            let mut leaf = LeafMut::new(&mut page).expect("a leaf");
+            assert_eq!(
+                leaf.update_slot(1, 7, &Datum::Text(b"ab"))
+                    .expect("applies"),
+                Applied::Yes
+            );
+        }
+        assert_eq!(text_at(&page, 7), b"ab");
+        assert_eq!(text_at(&page, 6), b"row-6");
+        assert_eq!(text_at(&page, 8), b"row-8");
+        assert_eq!(
+            LeafRef::parse(&page).expect("a leaf").heap_start(),
+            before_heap,
+            "a shorter value should not move the heap"
+        );
+    }
+
+    /// A longer value is written at the bottom of the heap and the slot follows.
+    #[test]
+    fn a_longer_text_is_relocated_within_the_leaf() {
+        let mut page = leaf_of(4_096, 40);
+        let before_heap = LeafRef::parse(&page).expect("a leaf").heap_start();
+        let longer = b"a much longer label than the one it replaces";
+        {
+            let mut leaf = LeafMut::new(&mut page).expect("a leaf");
+            assert_eq!(
+                leaf.update_slot(1, 7, &Datum::Text(longer))
+                    .expect("applies"),
+                Applied::Yes
+            );
+        }
+        assert_eq!(text_at(&page, 7), longer.to_vec());
+        assert_eq!(text_at(&page, 6), b"row-6");
+        assert_eq!(text_at(&page, 8), b"row-8");
+        assert_eq!(text_at(&page, 39), b"row-39");
+        let after = LeafRef::parse(&page).expect("a leaf");
+        assert_eq!(
+            after.heap_start(),
+            before_heap.saturating_sub(longer.len()),
+            "the heap should have grown down by exactly the new value"
+        );
+    }
+
+    /// A relocation moves the delta area with it and every delta row survives.
+    ///
+    /// **The case the header field alone would not catch.** `carve_heap` lowers
+    /// `delta_start` and moves the bytes under it by the same amount; getting
+    /// one of those without the other leaves a delta area that parses and reads
+    /// somebody else's bytes.
+    #[test]
+    fn a_relocation_carries_the_delta_area_with_it() {
+        let mut page = leaf_of(4_096, 40);
+        {
+            let mut leaf = LeafMut::new(&mut page).expect("a leaf");
+            for key in 100..104i64 {
+                assert_eq!(
+                    leaf.insert_delta(
+                        &columns(),
+                        &[Datum::Int(key), Datum::Text(b"delta"), Datum::Int(key)],
+                    )
+                    .expect("inserts"),
+                    Applied::Yes
+                );
+            }
+            assert_eq!(
+                leaf.update_slot(1, 7, &Datum::Text(b"a much longer label indeed"))
+                    .expect("applies"),
+                Applied::Yes
+            );
+        }
+        let leaf = LeafRef::parse(&page).expect("a leaf");
+        assert_eq!(
+            leaf.delta_count(),
+            4,
+            "the delta rows should still be there"
+        );
+        for index in 0..4 {
+            match leaf.delta_value(index, 1).expect("a delta value") {
+                Datum::Text(bytes) => assert_eq!(bytes, b"delta"),
+                other => panic!("delta row {index} column 1 is {other:?}"),
+            }
+        }
+        drop(leaf);
+        assert_eq!(text_at(&page, 7), b"a much longer label indeed");
+    }
+
+    /// A value with nowhere to go is refused and the page is left alone.
+    #[test]
+    fn a_relocation_with_no_room_is_refused() {
+        let mut page = leaf_of(1_024, 40);
+        let before = page.clone();
+        let enormous = vec![b'x'; 900];
+        {
+            let mut leaf = LeafMut::new(&mut page).expect("a leaf");
+            assert_eq!(
+                leaf.update_slot(1, 7, &Datum::Text(&enormous))
+                    .expect("answers"),
+                Applied::NoRoom
+            );
+        }
+        assert_eq!(page, before, "a refused update changed the page");
+    }
+
+    /// A value that belongs in an extent is refused rather than moved inline.
+    ///
+    /// The format's rule is that a value longer than `page_size /
+    /// EXTENT_DIVISOR` lives out of line, and a relocation is the one write that
+    /// could put a large value inline behind the packer's back.
+    #[test]
+    fn a_value_over_the_extent_threshold_is_refused() {
+        let mut page = leaf_of(8_192, 4);
+        let before = page.clone();
+        let over = vec![b'x'; 8_192 / crate::leaf::EXTENT_DIVISOR + 1];
+        {
+            let mut leaf = LeafMut::new(&mut page).expect("a leaf");
+            assert_eq!(
+                leaf.update_slot(1, 1, &Datum::Text(&over))
+                    .expect("answers"),
+                Applied::NoRoom
+            );
+        }
+        assert_eq!(page, before, "a refused update changed the page");
+    }
+
+    /// The read-only costing agrees with the write, which is what the log rests
+    /// on: the record is written on the strength of `would_update_slot` and then
+    /// applied by `update_slot`.
+    #[test]
+    fn the_costing_agrees_with_the_write() {
+        for (page_size, length) in [
+            (4_096usize, 2usize),
+            (4_096, 44),
+            (1_024, 900),
+            (8_192, 1_100),
+        ] {
+            let mut page = leaf_of(page_size, 40);
+            let value = vec![b'x'; length];
+            let costed = would_update_slot(&page, 1, 7, &Datum::Text(&value)).expect("costs");
+            let applied = LeafMut::new(&mut page)
+                .expect("a leaf")
+                .update_slot(1, 7, &Datum::Text(&value))
+                .expect("answers");
+            assert_eq!(
+                costed,
+                applied == Applied::Yes,
+                "page {page_size}, value {length}: costed {costed} but applied {applied:?}"
+            );
+        }
     }
 }

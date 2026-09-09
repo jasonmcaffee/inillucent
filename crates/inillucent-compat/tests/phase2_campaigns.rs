@@ -45,8 +45,8 @@ struct Fixture {
     database: Database,
     table: PagedTree,
     index: PagedTree,
-    table_layout: SourceLayout,
-    index_layout: SourceLayout,
+    table_layout: std::rc::Rc<SourceLayout>,
+    index_layout: std::rc::Rc<SourceLayout>,
     /// The schema the binder reads, built from the same DDL text the trees
     /// were built to match.
     catalog: inillucent_sql::catalog_view::StaticCatalog,
@@ -105,7 +105,7 @@ impl TreeCatalog for Fixture {
         }
     }
 
-    fn layout(&self, root: u32) -> Option<&SourceLayout> {
+    fn layout(&self, root: u32) -> Option<&std::rc::Rc<SourceLayout>> {
         match root {
             1 => Some(&self.table_layout),
             2 => Some(&self.index_layout),
@@ -213,7 +213,7 @@ fn fixture(rows: i64, page_size: usize, frames: usize) -> Fixture {
         database,
         table,
         index,
-        table_layout: SourceLayout {
+        table_layout: std::rc::Rc::new(SourceLayout {
             tree_key: 1,
             slots: vec![Some(0), Some(1), Some(2)],
             rowid: Some(0),
@@ -222,8 +222,8 @@ fn fixture(rows: i64, page_size: usize, frames: usize) -> Fixture {
             types: vec![StaticType::Int, StaticType::Int, StaticType::Text],
             width: 3,
             key_columns: vec![0],
-        },
-        index_layout: SourceLayout {
+        }),
+        index_layout: std::rc::Rc::new(SourceLayout {
             tree_key: 2,
             slots: vec![Some(1), Some(0), None],
             rowid: Some(1),
@@ -233,7 +233,7 @@ fn fixture(rows: i64, page_size: usize, frames: usize) -> Fixture {
             types: vec![StaticType::Int, StaticType::Int],
             width: 2,
             key_columns: vec![0, 1],
-        },
+        }),
     }
 }
 

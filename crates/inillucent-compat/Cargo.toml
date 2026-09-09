@@ -126,6 +126,10 @@ name = "inillucent-prepareprofile"
 path = "src/bin/prepareprofile.rs"
 
 [[bin]]
+name = "inillucent-execprofile"
+path = "src/bin/execprofile.rs"
+
+[[bin]]
 name = "inillucent-shellrss"
 path = "src/bin/shellrss.rs"
 
