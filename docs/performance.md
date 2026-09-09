@@ -14,10 +14,10 @@ Measured at 100,000 rows on Windows, over the ten workload families the performa
 
 | | SQLite 3.53.4 | inillucent | |
 |---|---|---|---|
-| **elapsed time**, weighted over the ten families | the reference | 3.95x the speed | **295% faster** |
-| **elapsed time**, the 95% lower bound the gate grades on | | 3.63x | **263% faster**, against a bar asking 200% |
-| **processor time**, one round of the whole plan | 1,293 ms | 414 ms | **68% less processor** |
-| **peak resident memory**, one round of the whole plan | 37.19 MiB | 42.59 MiB | **15% more** — the one loss |
+| **elapsed time**, weighted over the ten families | the reference | 4.26x the speed | **326% faster** |
+| **elapsed time**, the 95% lower bound the gate grades on | | 4.13x | **313% faster**, against a bar asking 200% |
+| **processor time**, one round of the whole plan | 1,266 ms | 422 ms | **67% less processor** |
+| **peak resident memory**, one round of the whole plan | 37.19 MiB | 42.61 MiB | **15% more** — the one loss |
 | **the database file**, the same imported fixture | the reference | 1.036x | within 4% |
 
 Every workload's answer is hashed and compared with SQLite's before its timing is allowed to count.
@@ -38,19 +38,20 @@ it, expressed as the family's own ratio.
 
 | family | weight | what it measures | measured | 95% lower bound | bar |
 |---|---|---|---|---|---|
-| `read.point` | 16% | one row by rowid, by integer key, and through a secondary index | **3,092% faster** (31.92x) | 28.32x | 2.00x — met |
-| `large.values` | 4% | text and blobs across the boundary where a value stops fitting in a leaf | **1,134% faster** (12.34x) | 9.27x | 1.50x — met |
-| `read.analytical` | 10% | scans, aggregates, `GROUP BY`, `DISTINCT`, sorts | **591% faster** (6.91x) | 5.62x | 5.00x — met |
-| `read.range` | 12% | selective ranges, forward and reverse, covering and not | **395% faster** (4.95x) | 3.90x | 3.00x — met |
-| `read.join` | 8% | two table and four table joins | **329% faster** (4.29x) | 2.88x | 3.00x — bar missed |
-| `write` | 20% | insert, update, delete, upsert, with and without indexes | **89% faster** (1.89x) | 1.69x | 1.50x — met |
-| `open.prepare` | 8% | parse, bind, step one row, reset | **64% faster** (1.64x) | 1.18x | 5.00x — bar missed |
-| `extension` | 8% | JSON, FTS5, R-Tree | **48% faster** (1.48x) | 1.29x | 1.50x — bar missed |
-| `schema` | 4% | `CREATE INDEX` and its backfill | **31% faster** (1.31x) | 1.27x | 3.00x — bar missed |
-| `transaction` | 10% | autocommit, small batches, large batches, savepoints | **27% slower** (0.79x) | 0.55x | no slower than SQLite — **under the floor** |
+| `read.point` | 16% | one row by rowid, by integer key, and through a secondary index | **2,658% faster** (27.58x) | 24.95x | 2.00x — met |
+| `large.values` | 4% | text and blobs across the boundary where a value stops fitting in a leaf | **1,157% faster** (12.57x) | 9.39x | 1.50x — met |
+| `read.analytical` | 10% | scans, aggregates, `GROUP BY`, `DISTINCT`, sorts | **594% faster** (6.94x) | 5.77x | 5.00x — met |
+| `read.range` | 12% | selective ranges, forward and reverse, covering and not | **381% faster** (4.81x) | 3.83x | 3.00x — met |
+| `read.join` | 8% | two table and four table joins | **311% faster** (4.11x) | 2.89x | 3.00x — bar missed on the lower bound |
+| `transaction` | 10% | autocommit, small batches, large batches, savepoints | **241% faster** (3.41x) | 2.74x | no slower than SQLite — met |
+| `write` | 20% | insert, update, delete, upsert, with and without indexes | **92% faster** (1.92x) | 1.65x | 1.50x — met |
+| `open.prepare` | 8% | parse, bind, step one row, reset | **58% faster** (1.58x) | 1.15x | 5.00x — bar missed |
+| `extension` | 8% | JSON, FTS5, R-Tree | **30% faster** (1.30x) | 1.09x | 1.50x — bar missed |
+| `schema` | 4% | `CREATE INDEX` and its backfill | **27% faster** (1.27x) | 1.24x | 3.00x — bar missed |
 
-`transaction` being slower than SQLite is a release blocking condition, and one workload causes it.
-The next section says which and why.
+**No family is below the 1.00x floor on any of the four runs**, which is the release condition.
+`transaction` was below it on all four before task-1890 and is now 3.41x; what that took, and the
+defect in the measurement it uncovered, is the section after next.
 
 ## The workloads that are slower
 
@@ -58,34 +59,69 @@ Thirty workloads. Twenty four are faster than SQLite. These six are not.
 
 | workload | family | how much slower | why |
 |---|---|---|---|
-| `txn.large` | `transaction` | **669% slower** | 2,000 `UPDATE`s in one transaction, 1,896 ns each against SQLite's 482 |
-| `extension.fts.build` | `extension` | **104% slower** | four tree writes per document — `%_content` and `%_docsize`, and at the flush a dictionary row and a doclist row for each of 507 terms — where SQLite writes about 1,000 rows and one segment blob |
-| `prepare.trivial` | `open.prepare` | **92% slower** | `SELECT 1` compiled on every call, in 25 allocations. Split by the profiler: 417 ns to parse, 520 more to bind, and the rest to build a pipeline |
-| `write.insert.batch` | `write` | **56% slower** | 2,000 inserts in one transaction; a split writes four whole page images to the log |
-| `join.range` | `read.join` | 14% slower | an index range and a row fetch per entry, where SQLite amortises one statement's overhead over two hundred rows and this does not |
-| `range.lookaside` | `read.range` | 13% slower | the same shape |
+| `extension.fts.build` | `extension` | **178% slower** | four tree writes per document — `%_content` and `%_docsize`, and at the flush a dictionary row and a doclist row for each of 507 terms — where SQLite writes about 1,000 rows and one segment blob |
+| `prepare.trivial` | `open.prepare` | **98% slower** | `SELECT 1` compiled on every call, in 25 allocations. Split by the profiler: 417 ns to parse, 520 more to bind, and the rest to build a pipeline |
+| `write.insert.batch` | `write` | **72% slower** | 2,000 inserts in one transaction; a split writes four whole page images to the log |
+| `join.range` | `read.join` | 15% slower | an index range and a row fetch per entry, where SQLite amortises one statement's overhead over two hundred rows and this does not |
+| `range.lookaside` | `read.range` | 14% slower | the same shape |
+| `extension.json` | `extension` | 5% slower | the extraction itself, plus two uncontended mutex acquisitions per call; the parse of a repeated document and path is already cached |
 
-**None of `txn.large`'s gap is in the storage engine, and that was settled by removing the storage
-engine from it.** The whole tree write was ablated out of the in-place update path — the statement
-found its row, decided what to write, and returned without writing — and the workload measured
-**1.54 microseconds against 1.53**. What is left is what a statement costs before it reaches a tree:
-an already-prepared `SELECT 1`, which reads no table and binds no parameter, costs **827 ns and
-twenty-two heap allocations**, because the operator chain, the column names and the `EXPLAIN`
-description are rebuilt on every execution. The same `UPDATE` bound to a rowid that matches nothing
-costs 950 ns, which is more than half of the 1,896 it costs when it does match.
+**`txn.large` is no longer on this list.** It was the slowest workload on the board at 0.09x, it decided
+the `transaction` floor, and it is now **3.63x** — 2.66 ms against SQLite's 9.65. Two things got it
+there and only one of them is the engine.
 
-That one cost is under `transaction`, `open.prepare`, `extension` and `schema` alike, and it is why a
-query that spreads one statement's overhead across two hundred rows — `join.range`,
-`range.lookaside` — sits just under SQLite while a point lookup sits thirty times over it. The
-mechanism that removes it is already in the tree and is not connected to anything:
-`physical::build_statement` holds the operator chain across executions and rebuilds only the source,
-and nothing in the execution path calls it. Connecting it needs the chain to stop borrowing the
-catalog and a parameter to be read when the expression is evaluated rather than folded in when it is
-built.
+### What a statement costs before it reaches a tree
 
-The other end of the same table is the `read.point` family at **3,092% faster** and `large.values` at
-**1,134% faster**. A point lookup by rowid, a lookup that misses, a lookup through a secondary index
-and a read of a value too wide for a leaf are each between ten and thirty times SQLite's speed.
+The whole tree write was ablated out of the in-place update path — the statement found its row,
+decided what to write, and returned without writing — and `txn.large` measured **1.54 microseconds
+against 1.53**. None of its gap was in leaves, delta areas or compactions. It was in what a statement
+costs to set itself up:
+
+| `UPDATE side_table SET note = ?2 WHERE id = ?1` | ns each | heap allocations |
+|---|---|---|
+| before | 2,219 | 33.7 |
+| a layout shared rather than deep-copied three times a statement | 1,896 | 21.3 |
+| the row space, assignments and declarations built once per compiled statement | 1,318 | 14.3 |
+| the undo image taken from the caller instead of read again | **1,235** | **13.3** |
+| the same statement, where no row matches | **615** | **7.0** |
+
+What made the middle row possible is that **a parameter is now read when the expression is
+evaluated** rather than folded into it when it is built. `translate` answered `?2` with an
+`Expr::Literal` holding whatever was bound at the time, so nothing compiled could outlive one
+execution's values — which is why `Statement::rebindable` existed to refuse a re-run. An
+`Expr::Parameter` reads a cell the statement refreshes instead, and it costs a repeated literal
+nothing it did not already cost: a text literal clones per evaluation either way.
+
+### The workload that was measuring nothing
+
+`fullgate` runs a round's workloads in order against one database, and `txn.batched` and `txn.large`
+are the same statement over the same scattered rowids with the same `row {iteration} lorem ipsum ...`
+text and the same repeat. So by the time `txn.large` ran, **every row it touched already held the
+bytes it was about to write** — 2,000 updates that changed nothing, under a description saying
+"2,000 `UPDATE`s in one transaction".
+
+That was hiding a real defect rather than only mis-measuring. `only_change` answered `None` both when
+*nothing* differed and when *several* columns did, so the caller took the most expensive path it has —
+a tombstone, a delta insert, and a compaction every `DELTA_LIMIT` writes — for the cheapest case
+there is. Running the same `UPDATE` twice over the same rows:
+
+| pass | ns each | allocations | inserted | in place |
+|---|---|---|---|---|
+| values differ | 1,723 | 13.3 | 0.00 | 0.25 |
+| values identical, before | 4,067 | 56.7 | 0.25 | 0.00 |
+| values identical, after | **867** | **10.8** | 0.00 | 0.00 |
+
+An update that changes nothing is no longer written at all. Nothing observable is skipped: `changes()`
+still counts the row, both trigger times still fire, `RETURNING` still returns, and the index loop
+already skipped an entry that had not moved.
+
+And because making that case cheap would otherwise have turned `txn.large` into a workload that
+measures an operation doing no work — a test that cannot fail — **the workload was corrected too**.
+`txn.batched` and `txn.large` now reset `side_table.note` first, outside the timed region on both
+arms, where `sqlite_bench.c` already runs a workload's setup. `txn.large` reads **0.09x** on the old
+workload with the old engine, **0.59x** on the old workload with this one, and **3.63x** once the
+workload asks a real question. SQLite's own arm goes from 834 microseconds to 9.65 milliseconds when
+it has to perform the same 2,000 updates.
 
 ### What an `UPDATE` that changes a value's length used to cost
 
@@ -205,12 +241,13 @@ Linux.
 
 ## What is not measured here
 
-- **One scale.** These are the medium fixture, 100,000 rows. At 5,000 rows the headline is 3.09x, and
-  at 600,000 it is 4.63x. Families behave differently at each, and two of them invert: `write` is
-  **47% slower** at 5,000 rows, 89% faster at 100,000 and **450% faster** at 600,000, because a
-  bigger table amortises what a write costs per statement over more of a page; `extension` is 29%
-  faster at small, 48% at medium and 71% at large, and it is the one family that **meets its bar at
-  600,000 rows** and misses it at the other two.
+- **One scale.** These are the medium fixture, 100,000 rows. At 5,000 rows the headline is 3.46x, and
+  at 600,000 it is 5.13x. Families behave differently at each, and `write` inverts: it is **slower
+  than SQLite** at 5,000 rows, 92% faster at 100,000 and **545% faster** at 600,000, because a bigger
+  table spreads what a statement costs to set itself up over more of a page. `extension` is the one
+  family that **meets its bar at 600,000 rows** (1.51x) and misses it at the other two, for the same
+  reason: FTS5's build is four ordinary row writes per document, and a row write is where the
+  per-statement cost lands.
 - **One machine.** Windows 11 on x64. The disk matters more than it looks: part way through a four
   run sequence, `txn.batched` — 200 commits and 200 `fsync`s — goes from 288 ms to 836 ms **on
   SQLite's own arm**, on the same fixture with the same binary, because the volume stops keeping up
