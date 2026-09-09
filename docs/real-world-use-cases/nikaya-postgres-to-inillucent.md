@@ -66,11 +66,11 @@ Two things follow, and both belong in anyone else's plan:
 
 ---
 
-## 3. Six ways the obvious SQL is quadratic here
+## 3. Seven ways the obvious SQL breaks or goes quadratic here
 
 The migration was not mostly about types. It was about query plans. Each of these was written the
-natural way, ran correctly, and was catastrophically slow — and every one of them looks fine on a
-small fixture.
+natural way and was catastrophically slow — one of them did not run at all — and every one of them
+looks fine on a small fixture.
 
 ### `LIMIT` does not bound the work
 
@@ -154,6 +154,24 @@ work queues were partial indexes carried over from PostgreSQL, so the ingestion 
 66,793 documents to find a backlog that is normally empty: **1,280 ms** per check.
 
 ---
+
+### A compound query cannot be used as a derived table
+
+`SELECT ... UNION ALL SELECT ...` runs. `SELECT ... FROM (that) alias` does not:
+
+```
+Error: the new engine's physical pass does not handle a compound query yet
+```
+
+That was the shape of the query behind every attachment card, so **`GET /api/documents/{id}` — the
+entire document detail view — answered 500 for every document in the corpus**, and it survived the
+migration undetected until the very end. Worth dwelling on why: the record benchmark measured a
+statement of its own that happened to be the first arm of the union, and the retrieval harness stops
+at the search results. Neither built an HTTP request. The pass that found it drives the real routes
+against a copy of the real corpus, and finding it took thirty seconds once that existed.
+
+Split into two statements, which is the better shape anyway — the arms answer different questions,
+and a document is one kind or the other.
 
 ## 4. Two more that shaped the design
 
@@ -271,6 +289,13 @@ Four checks, each answering something the previous one could not.
    that was not in the old answer had been *created by a sync that ran after the old index was
    saved*. The vectors came across exactly.
 
+5. **The application.** Every HTTP route driven against a copy of the corpus with the shipped
+   binary: the session gate refusing an unauthenticated read, login, `/api/status`, the label
+   drawer, all three search modes, a document, its thread, an attachment's record, its extracted
+   text and its bytes out of the object store, then logout and the gate refusing again. 37 checks.
+   The six MCP tools driven over stdio as an agent session drives them. **This is the check that
+   found the 500s**, and the other four could not have: none of them builds a request.
+
 Hybrid answers differ more (18 of 30 identical, 6 reordered, 6 with a boundary swap) and that is
 expected rather than concerning: hybrid fuses BM25, whose scores depend on corpus statistics, and the
 new index holds 1,869 more chunks. That is why the check that matters was run in semantic mode.
@@ -305,6 +330,10 @@ index whose vectors are in a file.
   per agent session and lives as long as that session; two on this box had been up since August. They
   keep answering from whatever code existed when they started — including the `retrievalEngine` field,
   which is the one field that is supposed to tell you what you are running on.
+- **Object paths in the record are absolute**, which predates this migration and did not change
+  with it, but it is the thing that makes a data root not copyable: the verification instance
+  answered 404 for every attachment download until its object store was a junction back to the
+  original directory. Worth knowing before you copy a corpus to another machine.
 - **The way back is one environment variable.** PostgreSQL, pgvector and the sealed connection URL
   are untouched.
 
@@ -316,6 +345,7 @@ file**: no server to keep running, no extension loaded by absolute path, no conn
 be right before anything works, and a corpus that can be handed to another machine by copying it.
 
 It is not worth doing on the strength of the numbers in §5 alone, and anyone reading this to justify
-a migration should read `index.pending` and `status.counts` first. Two of the six planner problems in
-§3 are things an application can work around, and four of them changed the shape of the code
-permanently.
+a migration should read `index.pending` and `status.counts` first. Two of the planner problems in §3 are
+things an application can work around, four of them changed the shape of the code permanently, and
+one of them served 500s from the main detail view of the application until an end-to-end pass caught
+it.
