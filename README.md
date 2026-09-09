@@ -83,14 +83,18 @@ libraries for eight languages, which live in
 
 | | | |
 |---|---|---|
-| TypeScript | `npm install inillucent` | koffi |
-| JavaScript | `npm install inillucent` | the same package, with a CommonJS entry point |
+| TypeScript | `npm install inillucent-client` | koffi |
+| JavaScript | `npm install inillucent-client` | the same package, with a CommonJS entry point |
 | Python | `pip install inillucent-client` | ctypes, standard library only |
 | Rust | `cargo add inillucent-client` | libloading |
 | Go | `go get github.com/jasonmcaffee/inillucent-clients/go` | purego, so cgo stays off |
-| Java | `com.inillucent:inillucent`, Java 22 or later | the Foreign Function and Memory API |
-| C# | `dotnet add package Inillucent` | `DllImport` with `SafeHandle` lifetimes |
-| PHP | `composer require inillucent/inillucent` | the FFI extension |
+| Java | `com.inillucent:inillucent-client`, Java 22 or later | the Foreign Function and Memory API |
+| C# | `dotnet add package Inillucent.Client` | `DllImport` with a resolver |
+| PHP | `composer require inillucent/client` | the FFI extension |
+
+**Those are the names these packages will have. None of them is published yet**, so until they are,
+use a client from a checkout of that repository. The client is `inillucent-client` and not
+`inillucent` because `inillucent` is already this project's command line tool on npm and on PyPI.
 
 None of them needs a C compiler to install. All eight call the same C ABI, and all eight are graded
 by [`drivers/conformance/suite.json`](drivers/conformance/suite.json) — the same 17 cases this
