@@ -77,47 +77,48 @@ sees.
 
 ## Client libraries
 
-The command line is one way in. An application calls the engine in its own process, through client
-libraries for eight languages, which live in
+An application calls the engine in its own process, through client libraries for eight languages in
 [**jasonmcaffee/inillucent-clients**](https://github.com/jasonmcaffee/inillucent-clients):
 
-| | | |
-|---|---|---|
-| TypeScript | `npm install inillucent-client` | koffi |
-| JavaScript | `npm install inillucent-client` | the same package, with a CommonJS entry point |
-| Python | `pip install inillucent-client` | ctypes, standard library only |
-| Rust | `cargo add inillucent-client` | libloading |
-| Go | `go get github.com/jasonmcaffee/inillucent-clients/go` | purego, so cgo stays off |
-| Java | `com.inillucent:inillucent-client`, Java 22 or later | the Foreign Function and Memory API |
-| C# | `dotnet add package Inillucent.Client` | `DllImport` with a resolver |
-| PHP | `composer require inillucent/client` | the FFI extension |
+| | |
+|---|---|
+| TypeScript | `npm install inillucent-client` |
+| JavaScript | `npm install inillucent-client` |
+| Python | `pip install inillucent-client` |
+| Rust | `cargo add inillucent-client` |
+| Go | `go get github.com/jasonmcaffee/inillucent-clients/go` |
+| Java | `com.inillucent:inillucent-client` |
+| C# | `dotnet add package Inillucent.Client` |
+| PHP | `composer require inillucent/client` |
 
-**Those are the names these packages will have. None of them is published yet**, so until they are,
-use a client from a checkout of that repository. The client is `inillucent-client` and not
-`inillucent` because `inillucent` is already this project's command line tool on npm and on PyPI.
+```ts
+import { connect } from 'inillucent-client';
 
-None of them needs a C compiler to install. All eight call the same C ABI, and all eight are graded
-by [`drivers/conformance/suite.json`](drivers/conformance/suite.json) — the same 17 cases this
-repository's own Rust driver runs — so a client is correct in the sense that it agrees with the
-engine rather than in the sense that somebody wrote tests for it.
+const db = connect('app.rdb');
 
-They give the same API in every language: typed values where `NULL` is not the empty string, an
-exact `total` beside the rows a limit handed back, a transaction you hold open so a write can be
-checked before the commit rather than reported after it, and a refusal that names the construct the
-engine has not built instead of calling it a syntax error.
+db.execute(
+  'INSERT INTO person (first_name, last_name, email) VALUES (?1, ?2, ?3)',
+  ['Ada', 'Lovelace', 'ada@example.com'],
+);
 
-```python
-import inillucent
+for (const person of db.query('SELECT first_name, last_name, email FROM person')) {
+  console.log(person.first_name, person.last_name, person.email);
+}
 
-with inillucent.connect("app.rdb") as db:
-    db.execute("INSERT INTO note (body) VALUES (?1)", ["hello"])
-    for row in db.query("SELECT id, body FROM note"):
-        print(row["id"], row["body"])
+db.close();
 ```
 
-[Client libraries](https://inillucent.com/docs/clients) has the installation and a worked example
-for each language. [The driver](drivers/README.md) is the C ABI underneath them, for anybody writing
-a ninth.
+The API is the same in all eight: rows come back as objects keyed by column name, values stay typed,
+`NULL` is never the empty string, and a result carries an exact `total` beside the rows a limit
+handed back. A statement the engine has not implemented fails as `unsupported` and names the
+construct, instead of failing as though the SQL were wrong.
+
+All eight are graded by [`drivers/conformance/suite.json`](drivers/conformance/suite.json), the same
+17 cases this repository's own Rust driver runs, so a client passes when it agrees with the engine.
+
+[Client libraries](https://inillucent.com/docs#clients) has an install line and a worked example for
+each language. [The driver](drivers/README.md) is the C ABI underneath them, for anybody writing a
+ninth.
 
 ## What it does
 
