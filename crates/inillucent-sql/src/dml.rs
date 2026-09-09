@@ -29,6 +29,26 @@ use crate::diagnostic::{ParseError, ParseErrorKind};
 use crate::lexer::Span;
 use crate::parser::parse_expression;
 
+/// The internal tables an application may write, as SQLite allows.
+///
+/// **Two, and neither of them is the schema** (task-1880 §17). Every table whose
+/// name begins with `sqlite_` used to be refused, which is right for
+/// `sqlite_schema` - that is what `PRAGMA writable_schema` is for - and wrong
+/// for these two, because writing them is the documented way to use them:
+///
+/// - `sqlite_sequence` holds one row per `AUTOINCREMENT` table, and
+///   `UPDATE sqlite_sequence SET seq = 0 WHERE name = 't'` is how the counter is
+///   reset. `DELETE FROM sqlite_sequence` is how it is reset for every table at
+///   once. Refusing them left no way at all to do either.
+/// - `sqlite_stat1` is what `ANALYZE` writes, and `.dump` emits
+///   `INSERT INTO sqlite_stat1 VALUES(...)` for it - so a dump this engine
+///   produced could not be replayed into it.
+///
+/// They are ordinary tables in every other respect: the rows are what they are,
+/// and a value written into one is used exactly as `ANALYZE` or the rowid
+/// allocator would have used the one it replaced.
+const WRITABLE_INTERNAL: [&'static [u8]; 2] = [b"sqlite_sequence", b"sqlite_stat1"];
+
 /// Where one column's value comes from in an INSERT.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ColumnSource {
@@ -917,7 +937,9 @@ impl<'a> Binder<'a> {
             TableKind::Subquery => return Err(unsupported("writing to a subquery", span)),
             TableKind::Table => {}
         }
-        if table.folded.starts_with(b"sqlite_") {
+        if table.folded.starts_with(b"sqlite_")
+            && !WRITABLE_INTERNAL.contains(&table.folded.as_slice())
+        {
             return Err(unsupported(
                 "writing to a table whose name begins with sqlite_",
                 span,

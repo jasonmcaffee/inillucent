@@ -417,3 +417,159 @@ fn a_subquery_in_a_values_list_and_in_a_set_is_folded() {
         "the rowid the VALUES subquery computed, or the value the SET subquery read, is wrong"
     );
 }
+
+/// A compound query is usable as a derived table, for all four set operators.
+///
+/// **What this is a regression test for (task-1880 §19).** `SELECT ... FROM (a
+/// UNION ALL b)` came back `the new engine's physical pass does not handle a
+/// compound query yet`, and the refusal was in the wrong place: the executor has
+/// answered compounds at the top level all along, and a derived table only wants
+/// the rows they produce. `plan_stages` refuses a plan carrying arms, and the
+/// materialised path went through it - so the arms were refused for a shape that
+/// had nothing to do with why they cannot be planned as one pipeline.
+///
+/// The four operators are all checked because they are not one code path: `UNION
+/// ALL` concatenates, `UNION` de-duplicates, and `EXCEPT` and `INTERSECT` need
+/// the right arm complete before the left arm's first row can be judged. A fix
+/// that reached only the first would look right on the query that reported it.
+///
+/// The expected values are written out. `price` is 250 twice on purpose, so
+/// `UNION` and `UNION ALL` differ and a fix that answered one for the other is
+/// visible.
+#[test]
+fn a_compound_query_is_usable_as_a_derived_table() {
+    let database = fixture("compound-derived");
+    let connection = database.connect();
+
+    // Two arms of two rows each, and 250 appears in both.
+    let all =
+        "SELECT price FROM item WHERE price >= 250 UNION ALL SELECT price FROM item WHERE id <= 2";
+    assert_eq!(
+        integers(&connection, &format!("SELECT count(*) FROM ({all})")),
+        vec![4],
+        "UNION ALL keeps every row of both arms"
+    );
+    assert_eq!(
+        integers(&connection, &format!("SELECT sum(price) FROM ({all})")),
+        vec![250 + 250 + 100 + 250],
+        "and the values are the arms' own"
+    );
+
+    let distinct =
+        "SELECT price FROM item WHERE price >= 250 UNION SELECT price FROM item WHERE id <= 2";
+    assert_eq!(
+        integers(&connection, &format!("SELECT count(*) FROM ({distinct})")),
+        vec![2],
+        "UNION keeps one of each value: 100 and 250"
+    );
+
+    let except = "SELECT price FROM item EXCEPT SELECT price FROM item WHERE price < 200";
+    assert_eq!(
+        integers(&connection, &format!("SELECT count(*) FROM ({except})")),
+        vec![1],
+        "EXCEPT leaves only 250"
+    );
+
+    let intersect = "SELECT price FROM item INTERSECT SELECT price FROM item WHERE id <= 2";
+    assert_eq!(
+        integers(&connection, &format!("SELECT count(*) FROM ({intersect})")),
+        vec![2],
+        "INTERSECT leaves 100 and 250"
+    );
+
+    // And the derived table is a term like any other: it can be filtered,
+    // ordered and joined, which is what says the rows really did arrive in the
+    // pipeline rather than being answered by a special case.
+    assert_eq!(
+        integers(
+            &connection,
+            &format!("SELECT price FROM ({distinct}) WHERE price > 200")
+        ),
+        vec![250],
+        "a derived compound can be filtered"
+    );
+    assert_eq!(
+        integers(
+            &connection,
+            &format!("SELECT count(*) FROM ({all}) AS c JOIN item i ON i.price = c.price")
+        ),
+        vec![6 + 1],
+        "and joined: three rows of 250 against two items each, and one of 100 against one"
+    );
+}
+
+/// `sqlite_sequence` can be written, which is how an AUTOINCREMENT counter is
+/// reset.
+///
+/// **What this is a regression test for (task-1880 §17).** Every table whose
+/// name begins with `sqlite_` was refused as a write target, which is right for
+/// the schema and wrong for the two SQLite itself lets an application write.
+/// `UPDATE sqlite_sequence SET seq = 0 WHERE name = 't'` is the documented way
+/// to restart a counter and there was no other way to do it at all.
+///
+/// The counter is checked by *using* it: the assertion is the id the next insert
+/// receives, not the row the update wrote. A fix that made the write succeed and
+/// left the allocator reading its own cached number would pass the second and
+/// fail the first.
+#[test]
+fn sqlite_sequence_can_be_written_and_the_counter_follows() {
+    let area = workspace_root().join("target/scratch/task-1880/sequence");
+    let _ = std::fs::create_dir_all(&area);
+    let path = area.join("sequence.rdb");
+    let _ = std::fs::remove_file(&path);
+    let database = Database::open(&path).expect("a fresh database opens");
+    let connection = database.connect();
+    connection
+        .execute_batch(
+            "CREATE TABLE s (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT);\
+             INSERT INTO s (v) VALUES ('a');\
+             INSERT INTO s (v) VALUES ('b');",
+        )
+        .expect("the fixture loads");
+    assert_eq!(
+        integers(
+            &connection,
+            "SELECT seq FROM sqlite_sequence WHERE name = 's'"
+        ),
+        vec![2]
+    );
+
+    connection
+        .execute_batch("UPDATE sqlite_sequence SET seq = 100 WHERE name = 's'")
+        .expect("the counter is written");
+    assert_eq!(
+        integers(
+            &connection,
+            "SELECT seq FROM sqlite_sequence WHERE name = 's'"
+        ),
+        vec![100],
+        "the row says what was written"
+    );
+    connection
+        .execute_batch("INSERT INTO s (v) VALUES ('c')")
+        .expect("a row is inserted");
+    assert_eq!(
+        integers(&connection, "SELECT max(id) FROM s"),
+        vec![101],
+        "and the allocator read it: the next id is one past the number written"
+    );
+
+    // The other half of the documented use: deleting the row restarts the
+    // counter from the table's own highest rowid rather than from one.
+    connection
+        .execute_batch("DELETE FROM sqlite_sequence WHERE name = 's'")
+        .expect("the counter row is deleted");
+    connection
+        .execute_batch("INSERT INTO s (v) VALUES ('d')")
+        .expect("a row is inserted");
+    assert_eq!(integers(&connection, "SELECT max(id) FROM s"), vec![102]);
+
+    // And the schema itself is still refused, which is what `PRAGMA
+    // writable_schema` is for and is not what this changed.
+    assert!(
+        connection
+            .execute_batch("DELETE FROM sqlite_schema WHERE name = 's'")
+            .is_err(),
+        "the schema table is still not writable"
+    );
+}

@@ -322,3 +322,94 @@ fn marked(width: usize, nth: usize) -> String {
     out.truncate(width);
     out
 }
+
+/// Churning a table of packed values leaves every tree intact.
+///
+/// **The check a cost measurement cannot make.** Packing several values into one
+/// page means a page is shared, freed only when the last slot on it goes, and
+/// handed back to the free map to become anything - a leaf, an interior page,
+/// another shared page. A reference left pointing into a page that has become
+/// something else is a corruption that reads fine until the moment it does not,
+/// and it would not show up in a test that only writes.
+///
+/// So this writes, rewrites, deletes and re-inserts values across the whole
+/// band - inline, packed, and a run of several pages - and asks
+/// `PRAGMA integrity_check` after every round. The check walks every tree in key
+/// order and compares each index against the table it is on, which is what
+/// would catch a slot the free map has since given away.
+#[test]
+fn churning_packed_values_leaves_every_tree_intact() {
+    let path = scratch("churn");
+    let database = Database::open(&path).expect("a fresh database opens");
+    let connection = database.connect();
+    connection
+        .execute_batch(
+            "CREATE TABLE t (id TEXT PRIMARY KEY, tag INTEGER, body TEXT);\
+             CREATE INDEX t_tag ON t (tag);",
+        )
+        .expect("the schema is created");
+
+    // Every width the change touches: inline, one page over the threshold, the
+    // middle of the band, and a value that needs a run of two pages.
+    let widths = [1_000usize, 4_200, 9_513, 40_000];
+    for round in 0..6usize {
+        connection.execute("BEGIN").expect("begin");
+        let mut insert = connection
+            .prepare("INSERT OR REPLACE INTO t (id, tag, body) VALUES (?1, ?2, ?3)")
+            .expect("the insert prepares");
+        for nth in 0..200usize {
+            let width = widths[(nth + round) % widths.len()];
+            insert.reset();
+            insert.bind_text(1, &format!("row-{nth:05}")).expect("bind");
+            insert.bind_integer(2, (nth % 17) as i64).expect("bind");
+            insert.bind_text(3, &marked(width, nth)).expect("bind");
+            while insert.step().expect("step") {}
+        }
+        drop(insert);
+        connection.execute("COMMIT").expect("commit");
+
+        // Every third row goes, so pages lose some slots and keep others -
+        // which is the state a page that is freed too early would be found in.
+        connection
+            .execute_batch(&format!(
+                "DELETE FROM t WHERE CAST(substr(id, 5) AS INTEGER) % 3 = {}",
+                round % 3
+            ))
+            .expect("a third of the rows are deleted");
+        database.checkpoint().expect("the file is checkpointed");
+
+        let held = connection
+            .query("PRAGMA integrity_check")
+            .expect("the check runs");
+        let said = match held.first().and_then(|row| row.first()) {
+            Some(OwnedDatum::Text(bytes)) => String::from_utf8_lossy(bytes).to_string(),
+            other => panic!("expected text, got {other:?}"),
+        };
+        assert_eq!(said, "ok", "round {round} left the database damaged");
+
+        // And every value still reads back byte for byte, which the check
+        // cannot say: it walks structure, not content.
+        let rows = connection
+            .query("SELECT id, body FROM t ORDER BY id")
+            .expect("the rows read");
+        for row in &rows {
+            let (id, body) = match row.as_slice() {
+                [OwnedDatum::Text(id), OwnedDatum::Text(body)] => (id.clone(), body.clone()),
+                other => panic!("expected two text values, got {other:?}"),
+            };
+            let nth: usize = String::from_utf8_lossy(&id)
+                .trim_start_matches("row-")
+                .parse()
+                .expect("the id carries its number");
+            let width = widths[(nth + round) % widths.len()];
+            assert_eq!(
+                body,
+                marked(width, nth).into_bytes(),
+                "row {nth} of {width} bytes did not read back after round {round}"
+            );
+        }
+    }
+    drop(connection);
+    drop(database);
+    remove(&path);
+}
