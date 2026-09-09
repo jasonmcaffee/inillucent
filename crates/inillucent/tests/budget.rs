@@ -431,3 +431,81 @@ fn a_full_scan_is_linear_enough_to_finish() {
         "scanning {ROWS} rows took {elapsed:?}, which is not a linear scan"
     );
 }
+
+/// A keyset page costs the same wherever it starts, rather than growing with
+/// what is left behind it.
+///
+/// **What this is a regression test for (task-1880 §10).** `WHERE key > ?
+/// ORDER BY key LIMIT n` is how anything walks a table it cannot hold in
+/// memory, and it was doing work proportional to the rows *after* the key
+/// rather than to the limit. So the cost **fell** as the key advanced, and a
+/// full walk of the table was quadratic in it: 601,862 rows at a page of 2,000
+/// is 90 million row materialisations instead of 601,862, and it is what
+/// stopped a real adoption pass finishing one table in twenty-five minutes.
+///
+/// The cause was not the source and not the `LIMIT` operator, both of which
+/// stop when they are told to. It was that the ordering an index had been
+/// *chosen for* was then not believed: a non-covering seek is two stages, the
+/// index and the table fetch behind it, and the rule that decided "the rows
+/// already arrive in this order" asked for exactly one stage. So `ORDER BY`
+/// fell to a `TopN`, and a `TopN` is a pipeline breaker - it reads every row of
+/// the range before it emits one.
+///
+/// **The shape is what is asserted, not a number.** A page at the start of the
+/// table and a page near the end of it do the same amount of work, so their
+/// costs are within a small factor of each other. Measured on a 60,000-row
+/// fixture before the fix: 88.3 ms at the start against 3.7 ms near the end,
+/// which is 24x the wrong way round. After it: 5.2 ms and 5.3 ms. The guard
+/// asks for 4x, which no correct plan can fail and the quadratic one cannot
+/// pass.
+///
+/// The projection is deliberately **not** covered by the index. A key-only
+/// projection was always flat, because the index answers it without touching
+/// the table - which is exactly why a first check for this defect came back
+/// clean and it went unnoticed.
+#[test]
+fn a_keyset_page_costs_the_same_wherever_it_starts() {
+    let directory = scratch("keyset");
+    let path = directory.join("keyset.rdb");
+    let database = Database::open(&path).expect("the database opens");
+    let connection = database.connect();
+    connection
+        .execute_batch("CREATE TABLE chunk (id TEXT PRIMARY KEY, body TEXT NOT NULL);")
+        .expect("the schema is created");
+    connection
+        .execute_batch("BEGIN")
+        .expect("the transaction opens");
+    let body = "x".repeat(200);
+    let mut insert = connection
+        .prepare("INSERT INTO chunk (id, body) VALUES (?1, ?2)")
+        .expect("the insert prepares");
+    for nth in 0..ROWS {
+        insert.reset();
+        insert
+            .bind_text(1, &format!("chunk-{nth:09}"))
+            .expect("the id binds");
+        insert.bind_text(2, &body).expect("the body binds");
+        while insert.step().expect("the insert runs") {}
+    }
+    drop(insert);
+    connection
+        .execute_batch("COMMIT")
+        .expect("the transaction commits");
+
+    let page = 500usize;
+    let read = |after: i64| {
+        let sql = format!(
+            "SELECT id, body FROM chunk WHERE id > 'chunk-{after:09}' ORDER BY id LIMIT {page}"
+        );
+        let rows = connection.query(&sql).expect("the page reads");
+        assert_eq!(rows.len(), page, "the page is full at {after}");
+    };
+
+    let start = measure(3, || read(0));
+    let end = measure(3, || read(ROWS - page as i64 - 1));
+    assert!(
+        start <= end * 4,
+        "a page at the start of the table took {start:?} and one at the end took {end:?}; \
+         the work is proportional to the rows after the key rather than to the limit"
+    );
+}

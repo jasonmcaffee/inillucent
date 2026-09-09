@@ -179,17 +179,30 @@ pub fn apply_statistic(tables: &mut [TableInfo], table: &[u8], index: Option<&[u
         return;
     };
     let (rows, prefixes) = crate::analyze::parse_stat(stat);
-    info.analysed_rows = Some(rows);
     let Some(index) = index else {
+        info.analysed_rows = Some(rows);
         return;
     };
     let index_folded = index.to_ascii_lowercase();
-    if let Some(entry) = info
+    let Some(entry) = info
         .indexes
         .iter_mut()
         .find(|candidate| candidate.folded == index_folded)
-    {
-        entry.prefix_rows = prefixes;
+    else {
+        return;
+    };
+    let partial = entry.partial_sql.is_some();
+    entry.prefix_rows = prefixes;
+    entry.analysed_rows = Some(rows);
+    // **A partial index's count is not the table's** (task-1880 §13). Every
+    // `sqlite_stat1` row used to set the table's row count from its own leading
+    // number, and a partial index's leading number is how many rows its
+    // predicate *accepted*. So a table of 6,000 documents with a partial index
+    // over the 120 that are not indexed yet came out as a 6,000-row table or a
+    // 120-row one depending on which statistic was applied last - and a table
+    // the planner believes holds 120 rows is a table it will always scan.
+    if !partial {
+        info.analysed_rows = Some(rows);
     }
 }
 
@@ -938,6 +951,7 @@ fn automatic_indexes(
                 origin,
                 conflict,
                 prefix_rows: Vec::new(),
+                analysed_rows: None,
             });
         }
     }
@@ -1001,6 +1015,7 @@ fn automatic_indexes(
             origin,
             conflict,
             prefix_rows: Vec::new(),
+            analysed_rows: None,
         });
     }
     (indexes, rowid_key_conflict)
@@ -1112,6 +1127,7 @@ pub fn index_from_create_sql(sql: &[u8], table: &TableInfo, root: u32) -> DbResu
         // overrides it.
         conflict: None,
         prefix_rows: Vec::new(),
+        analysed_rows: None,
     })
 }
 

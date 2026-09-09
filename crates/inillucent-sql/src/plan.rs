@@ -335,6 +335,20 @@ pub struct PlannedSource {
     /// still emitted, null-extended. Keeping it here rather than in the
     /// residual list is what stops the two being confused.
     pub on: Option<BoundExpr>,
+    /// Whether the path this term is read by enforces the whole `ON` condition.
+    ///
+    /// **What decides whether an outer join can be an index nested loop**
+    /// (task-1880 §14). That operator probes the inner tree by a key and
+    /// null-extends when the probe finds nothing; it has nowhere to test a
+    /// condition the key did not capture, so it may only be used when there is
+    /// nothing left to test. When the key is the whole condition - which
+    /// `ON b.k = a.k` over an index on `b(k)` is - the probe's answer and the
+    /// condition's answer are the same answer.
+    ///
+    /// False for every inner join, where the condition is distributed into the
+    /// statement's terms and re-tested as a residual, and false for an outer
+    /// join whose condition says more than its key does.
+    pub on_enforced: bool,
 }
 
 /// How the rows are grouped and aggregated.
@@ -649,15 +663,50 @@ pub fn plan_select_with(select: BoundSelect, levers: Levers) -> PhysicalPlan {
         // a seek would do both wrong things at once: filter the rows before the
         // null extension, and mark the term consumed so it is never re-tested.
         //
-        // So an outer term reads its whole source. A subquery, a recursive CTE
-        // and a virtual table each still resolve to what they are, because
-        // those are not access-path choices - they are what the term *is*.
+        // **Its own `ON` condition is a different question** (task-1880 §14).
+        // An outer join's `ON` decides which inner rows *match*, and a row with
+        // no match is null-extended by the join itself - so seeking the inner
+        // side by an equality the `ON` states returns exactly the matches and
+        // nothing the join needed is lost. Refusing that made
+        // `LEFT JOIN chunk c ON c.document_id = d.id` scan a 60,000-row table
+        // where the same join written `JOIN` seeks it: 138.2 ms against 0.5 ms
+        // for the same ten rows, and the gap grows with the table.
+        //
+        // Two things keep it honest. The `ON` terms are collected into a list
+        // of their own, so nothing in the statement's `WHERE` can be turned
+        // into a seek here and nothing in the statement's `consumed` is marked.
+        // And `on` below still carries the whole condition, so the join re-tests
+        // it - a seek narrows the rows the test runs over and never stands in
+        // for it.
+        //
+        // A subquery, a recursive CTE and a virtual table each still resolve to
+        // what they are, because those are not access-path choices - they are
+        // what the term *is*.
+        let mut on_enforced = false;
         let path = if is_outer(source.join) && matches!(source.rows, SourceRows::Table) {
             match source.table.module.clone() {
                 Some(_) => choose_path(level, &ids, source, &select, &terms, &mut consumed, levers),
-                None => AccessPath::TableScan {
-                    root: source.table.root,
-                },
+                None => {
+                    let mut on_terms = Vec::new();
+                    if let Some(constraint) = &source.constraint {
+                        split_conjunction(constraint, &mut on_terms);
+                    }
+                    let mut on_consumed = vec![false; on_terms.len()];
+                    let chosen = choose_path(
+                        level,
+                        &ids,
+                        source,
+                        &select,
+                        &on_terms,
+                        &mut on_consumed,
+                        levers,
+                    );
+                    // Every conjunct of the condition turned into part of the
+                    // key, so the probe answers the condition and an index
+                    // nested loop can null-extend on an empty probe.
+                    on_enforced = !on_terms.is_empty() && on_consumed.iter().all(|held| *held);
+                    chosen
+                }
             }
         } else {
             choose_path(level, &ids, source, &select, &terms, &mut consumed, levers)
@@ -674,6 +723,7 @@ pub fn plan_select_with(select: BoundSelect, levers: Levers) -> PhysicalPlan {
             on: is_outer(source.join)
                 .then(|| source.constraint.clone())
                 .flatten(),
+            on_enforced,
         });
     }
     let (residuals, constant_filter) = distribute_residuals(&terms, &consumed, &ids);
@@ -1397,6 +1447,19 @@ fn estimated_rows(table: &TableInfo) -> f64 {
 
 /// Returns how many rows an index search is estimated to return.
 fn index_matches(index: Option<&IndexInfo>, rows: f64, equalities: usize, bounds: usize) -> f64 {
+    // **A partial index walked whole returns what it holds** (task-1880 §13).
+    // With nothing to seek to, every other arm below prices this as a walk of
+    // the table - which is what it would be for an ordinary index, and is not
+    // what it is for one holding only the rows a predicate accepted.
+    if equalities == 0 && bounds == 0 {
+        if let Some(index) = index {
+            if index.partial_sql.is_some() {
+                if let Some(held) = index.analysed_rows {
+                    return (held as f64).max(1.0);
+                }
+            }
+        }
+    }
     let mut matches = match index {
         // Measured: the average number of rows sharing the prefix the search
         // pinned down. This is the number `ANALYZE` exists to supply.
@@ -2214,7 +2277,30 @@ fn index_candidate(
         .has(Levers::COVERING_INDEX)
         .then(|| covering_slots(table, index, needed, usable))
         .flatten();
-    if equalities.is_empty() && low.is_none() && high.is_none() && covering.is_none() {
+    // **A partial index whose predicate the query implies is worth walking whole**
+    // (task-1880 §13). It holds only the rows its predicate accepted, so reading
+    // every entry of it reads exactly the rows the query asked for - even with
+    // nothing to seek to and even when a lookup per entry is needed, which is
+    // the case a covering test cannot see.
+    //
+    // `CREATE INDEX document_pending_idx ON document (indexed_at) WHERE
+    // indexed_at IS NULL` over `SELECT id FROM document WHERE indexed_at IS
+    // NULL` is the shape: 120 of 6,000 documents, and `id` is not in the index,
+    // so the covering test said no and the whole candidate was dropped. The
+    // plan was `SCAN document`, over a table whose rows carry nine kilobytes of
+    // body each, and the equivalent query on the real corpus was thousands of
+    // times slower than the same question asked of PostgreSQL.
+    //
+    // It is offered rather than taken: `path_cost` compares it against the scan
+    // with the index's own entry count, which `ANALYZE` now writes for a partial
+    // index instead of the table's.
+    let partial_walk = usable && index.partial_sql.is_some();
+    if equalities.is_empty()
+        && low.is_none()
+        && high.is_none()
+        && covering.is_none()
+        && !partial_walk
+    {
         // Nothing to seek to and nothing to save by reading the entries: this
         // index has no part in answering the query.
         return None;

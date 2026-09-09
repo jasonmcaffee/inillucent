@@ -136,6 +136,16 @@ pub struct IndexInfo {
     /// not an error: the planner falls back to SQLite's own guesses, and those
     /// guesses are what make an unanalysed plan match the reference's.
     pub prefix_rows: Vec<i64>,
+    /// How many entries the index itself holds, as `ANALYZE` measured.
+    ///
+    /// **The same number as the table's row count for an ordinary index, and a
+    /// different one for a partial index** (task-1880 §13), which holds only
+    /// the rows its predicate accepted. It is what lets the planner price
+    /// reading the whole of such an index against scanning the table it is on -
+    /// 120 entries against 6,000 rows, in the case this was found on.
+    ///
+    /// `None` until the schema has been analysed.
+    pub analysed_rows: Option<i64>,
 }
 
 /// What kind of schema object a name resolves to.

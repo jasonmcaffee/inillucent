@@ -1,7 +1,7 @@
 //! `ANALYZE`, then reopened with the log unfolded.
 //!
-//! Invariant, the same one `autoindex_reopen.rs` carries: **every tree the log names has a shape the
-//! replay can be told.** Recovery refuses a record naming a tree it was not given the shape of, which
+//! Invariant: **every tree the log names has a shape the replay can be told.**
+//! The same one `autoindex_reopen.rs` carries. Recovery refuses a record naming a tree it was not given the shape of, which
 //! is the right refusal - replaying into a guessed shape corrupts a file quietly - so the shapes have
 //! to be derivable for *every* tree, not for most of them.
 //!
@@ -95,7 +95,11 @@ fn analyze_survives_a_reopen_with_the_log_unfolded() {
     );
     let rows = read_back(&path, "SELECT count(*) FROM sqlite_stat1");
     assert!(
-        rows.first().and_then(|row| row.first()).and_then(Value::as_integer).unwrap_or(0) > 0,
+        rows.first()
+            .and_then(|row| row.first())
+            .and_then(Value::as_integer)
+            .unwrap_or(0)
+            > 0,
         "ANALYZE wrote no statistics that survived the reopen"
     );
 }
@@ -112,15 +116,23 @@ fn analyze_survives_a_reopen_on_a_schema_of_many_objects() {
     let path = directory.join("stats.db");
     let mut sql = String::new();
     for table in 0..24 {
-        sql.push_str(&format!("CREATE TABLE t{table}(id TEXT PRIMARY KEY, a TEXT, b INT);\n"));
+        sql.push_str(&format!(
+            "CREATE TABLE t{table}(id TEXT PRIMARY KEY, a TEXT, b INT);\n"
+        ));
         sql.push_str(&format!("CREATE INDEX t{table}_a ON t{table}(a);\n"));
-        sql.push_str(&format!("INSERT INTO t{table} VALUES ('x', 'p', 1), ('y', 'q', 2);\n"));
+        sql.push_str(&format!(
+            "INSERT INTO t{table} VALUES ('x', 'p', 1), ('y', 'q', 2);\n"
+        ));
     }
     sql.push_str("ANALYZE;");
     write_and_abandon(&path, &sql);
     let rows = read_back(&path, "SELECT count(*) FROM sqlite_stat1");
     assert!(
-        rows.first().and_then(|row| row.first()).and_then(Value::as_integer).unwrap_or(0) > 0,
+        rows.first()
+            .and_then(|row| row.first())
+            .and_then(Value::as_integer)
+            .unwrap_or(0)
+            > 0,
         "ANALYZE wrote no statistics that survived the reopen"
     );
     // And the tables it measured still read, which is what says the replay applied rather than that
@@ -145,7 +157,9 @@ fn a_second_analyze_survives_a_reopen() {
     write_and_abandon(&path, "INSERT INTO t VALUES ('z', 3);\nANALYZE;");
     let rows = read_back(&path, "SELECT count(*) FROM t");
     assert_eq!(
-        rows.first().and_then(|row| row.first()).and_then(Value::as_integer),
+        rows.first()
+            .and_then(|row| row.first())
+            .and_then(Value::as_integer),
         Some(3)
     );
 }
@@ -167,19 +181,29 @@ fn analyze_alone_in_the_log_survives_a_reopen() {
         let connection = database.connect().expect("the connection opens");
         let mut sql = String::new();
         for table in 0..24 {
-            sql.push_str(&format!("CREATE TABLE t{table}(id TEXT PRIMARY KEY, a TEXT, b INT);
-"));
-            sql.push_str(&format!("CREATE INDEX t{table}_a ON t{table}(a);
-"));
-            sql.push_str(&format!("INSERT INTO t{table} VALUES ('x', 'p', 1), ('y', 'q', 2);
-"));
+            sql.push_str(&format!(
+                "CREATE TABLE t{table}(id TEXT PRIMARY KEY, a TEXT, b INT);
+"
+            ));
+            sql.push_str(&format!(
+                "CREATE INDEX t{table}_a ON t{table}(a);
+"
+            ));
+            sql.push_str(&format!(
+                "INSERT INTO t{table} VALUES ('x', 'p', 1), ('y', 'q', 2);
+"
+            ));
         }
         connection.execute_batch(&sql).expect("the schema is built");
     }
     write_and_abandon(&path, "ANALYZE;");
     let rows = read_back(&path, "SELECT count(*) FROM sqlite_stat1");
     assert!(
-        rows.first().and_then(|row| row.first()).and_then(Value::as_integer).unwrap_or(0) > 0,
+        rows.first()
+            .and_then(|row| row.first())
+            .and_then(Value::as_integer)
+            .unwrap_or(0)
+            > 0,
         "ANALYZE wrote no statistics that survived the reopen"
     );
     let found = read_back(&path, "SELECT b FROM t23 WHERE id = 'y'");
@@ -204,19 +228,29 @@ fn analyze_survives_a_reopen_with_an_autoincrement_table() {
 ",
         );
         for table in 0..24 {
-            sql.push_str(&format!("CREATE TABLE t{table}(id TEXT PRIMARY KEY, a TEXT, b INT);
-"));
-            sql.push_str(&format!("CREATE INDEX t{table}_a ON t{table}(a);
-"));
-            sql.push_str(&format!("INSERT INTO t{table} VALUES ('x', 'p', 1), ('y', 'q', 2);
-"));
+            sql.push_str(&format!(
+                "CREATE TABLE t{table}(id TEXT PRIMARY KEY, a TEXT, b INT);
+"
+            ));
+            sql.push_str(&format!(
+                "CREATE INDEX t{table}_a ON t{table}(a);
+"
+            ));
+            sql.push_str(&format!(
+                "INSERT INTO t{table} VALUES ('x', 'p', 1), ('y', 'q', 2);
+"
+            ));
         }
         connection.execute_batch(&sql).expect("the schema is built");
     }
     write_and_abandon(&path, "ANALYZE;");
     let rows = read_back(&path, "SELECT count(*) FROM sqlite_stat1");
     assert!(
-        rows.first().and_then(|row| row.first()).and_then(Value::as_integer).unwrap_or(0) > 0,
+        rows.first()
+            .and_then(|row| row.first())
+            .and_then(Value::as_integer)
+            .unwrap_or(0)
+            > 0,
         "ANALYZE wrote no statistics that survived the reopen"
     );
     let found = read_back(&path, "SELECT kind FROM job WHERE id = 2");

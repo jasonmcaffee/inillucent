@@ -385,6 +385,13 @@ tier = "unit"
 [[target]]
 package = "inillucent-compat"
 kind = "test"
+name = "analyze_reopen"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
 name = "autoindex_reopen"
 tier = "engine"
 covers = ["inillucent-engine"]

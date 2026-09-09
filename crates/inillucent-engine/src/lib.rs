@@ -2704,6 +2704,7 @@ impl ImportedDatabase {
                     origin: inillucent_sql::catalog_view::IndexOrigin::Module,
                     conflict: None,
                     prefix_rows: Vec::new(),
+                    analysed_rows: None,
                 });
             }
         }
