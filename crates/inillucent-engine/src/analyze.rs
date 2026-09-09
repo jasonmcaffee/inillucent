@@ -139,10 +139,17 @@ impl ImportedDatabase {
         let mut groups = vec![0i64; width];
         let mut previous: Option<Vec<OwnedDatum>> = None;
         let mut entries = 0i64;
+        // **The key columns only.** `live()` decodes every column of every live row, and refuses one
+        // held in a blob extent until the tree has read the extents in. This walks the table's own
+        // tree when the index is its primary key, so on a table carrying message bodies it failed
+        // outright with "page is not a blob extent" - which meant a real database had no statistics
+        // at all, and a planner with no selectivity falls back to scanning. `visit_live` performs the
+        // same merge of the sorted region and the delta area while decoding only what is asked for,
+        // and a key column is never out of line.
+        let measured: Vec<usize> = (0..width).collect();
         tree.visit_leaves(pool, &mut |leaf| {
-            for row in leaf.live()? {
-                let current: Vec<OwnedDatum> =
-                    row.iter().take(width).map(OwnedDatum::from_datum).collect();
+            leaf.visit_live(&measured, &mut |row| {
+                let current: Vec<OwnedDatum> = row.iter().map(OwnedDatum::from_datum).collect();
                 entries = entries.saturating_add(1);
                 match &previous {
                     None => {
@@ -168,10 +175,29 @@ impl ImportedDatabase {
                     }
                 }
                 previous = Some(current);
-            }
+                Ok(())
+            })?;
             Ok(true)
         })?;
-        let total = rows.max(entries);
+        // **A partial index holds the rows its predicate accepted, and no
+        // more** (task-1880 §13). The table's row count is the right total for
+        // an ordinary index, because every row has an entry; for a partial one
+        // it is the number the index does *not* hold, and writing it says the
+        // index returns the whole table. A planner reading that never chooses
+        // the index - not even for the predicate the index was declared with,
+        // character for character - and falls back to a scan.
+        //
+        // Measured on a fixture of 6,000 documents where 120 have a NULL
+        // `indexed_at` and `document_pending_idx` is declared
+        // `WHERE indexed_at IS NULL`: the row said `6000 6000`, the plan said
+        // `SCAN document`, and the real corpus's equivalent query was 6,000
+        // times slower than PostgreSQL's. The walk already counted the entries;
+        // this stops throwing that number away.
+        let total = if index.partial_sql.is_some() {
+            entries
+        } else {
+            rows.max(entries)
+        };
         let mut out = total.to_string();
         for group in &groups {
             let average = if *group <= 0 {
