@@ -1,7 +1,7 @@
 # Where the vectors live
 
 An inillucent retrieval index holds four things: the chunk store, the BM25 postings, the HNSW graph,
-and the vectors. On a real corpus the vectors are the largest of them, and until task-1876 they were
+and the vectors. On a real corpus the vectors are the largest of them, and they used to be
 read onto the heap whenever an index was opened.
 
 They are not any more. **A loaded index leaves its vectors in the file by default**, and reads them

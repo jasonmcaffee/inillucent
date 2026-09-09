@@ -57,7 +57,7 @@
 //!   of these to what it already is succeeds; setting it to something else
 //!   refuses.
 //! - **Refused** - the subject does not exist here, and the refusal names it.
-//!   `feature-comparison.md` measures what is left in this column, which as of
+//!   `docs/feature-comparison.md` measures what is left in this column, which as of
 //!   task-1860 is nothing on SQLite's own list.
 
 use inillucent_base::error::refusal;
@@ -1646,7 +1646,7 @@ const ON: &[&str] = &["1", "on", "true", "yes"];
 /// pool evicts by clock rather than at a threshold; `wal_autocheckpoint` is 0
 /// because the log is folded in at an explicit checkpoint rather than every
 /// thousand frames; `default_cache_size` follows the pool this file was opened
-/// with. They are named in `feature-comparison.md` for that reason.
+/// with. They are named in `docs/feature-comparison.md` for that reason.
 ///
 /// @param name - the pragma's folded name
 fn reported_value(name: &[u8]) -> Option<(i64, &'static [&'static str])> {

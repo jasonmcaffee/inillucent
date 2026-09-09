@@ -49,7 +49,7 @@ substrings so a rename does not slip past. What is allowed is infrastructure —
 OS boundary, numeric kernels — with an `[[external]]` row naming the crate, its category and every
 first-party crate that may use it, plus a sentence in `docs/dependency-policy.md`.
 
-Read the two worked arguments there first: task-1782's additions, and **the dependency task-1868 did
+Read the two worked arguments there first: the deliberate additions, and **the dependency that was deliberately
 not add**. That one is the more useful model — a PostgreSQL and MySQL client, written first-party in
 `crates/inillucent-remote` rather than pulled in, with the reasons and the limits it accepts.
 
@@ -108,7 +108,7 @@ The two rules broken most often:
 
 ## House style
 
-Read three neighbouring files before writing one. What is actually load-bearing:
+Read three neighbouring files before writing one. The conventions that carry weight:
 
 - **Every function carries a doc comment saying what it is for**, with `@param` lines. Governed
   crates `deny(missing_docs)`, and `policy.rs` checks that every module states its invariant.

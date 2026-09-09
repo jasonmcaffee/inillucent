@@ -30,7 +30,7 @@ pub enum Tokenizer {
     /// The stemmer is Snowball English, which is Porter2 rather than the
     /// original Porter that SQLite ships. They agree on the ordinary
     /// inflections - `running`, `runs` and `run` all reduce to `run` in both -
-    /// and differ on a handful of rare words; `feature-comparison.md` says so.
+    /// and differ on a handful of rare words; `docs/feature-comparison.md` says so.
     Porter(Box<Tokenizer>),
     /// `unicode61`: Unicode letters and numbers are tokens.
     Unicode61 {

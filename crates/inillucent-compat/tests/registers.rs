@@ -42,7 +42,7 @@ const AREA: &str = "task-1869/registers";
 /// had. Comparing against the shell would make this test demand forty-one
 /// functions that are not SQLite's; comparing against the library asks the
 /// question an embedder actually cares about. The shell-level tally is in
-/// `feature-comparison.md`, where it belongs, and is a fact about two command
+/// `docs/feature-comparison.md`, where it belongs, and is a fact about two command
 /// line programs.
 ///
 /// What is left, then, is names **this** engine has and the library does not,
@@ -111,7 +111,7 @@ const OURS_ONLY_FUNCTIONS: &[&str] = &[
 /// `optimize()` - both have faithful answers here - and named the fifty-one
 /// functions that were present and unlisted. `fts3_tokenizer` is the sixth and
 /// is absent from the pinned *library* too, so it is a difference against the
-/// shell only and is recorded in `feature-comparison.md`.
+/// shell only and is recorded in `docs/feature-comparison.md`.
 const STILL_ABSENT: &[&str] = &["fts5", "fts5_get_locale", "fts5_insttoken", "fts5_locale"];
 
 /// Modules this engine has and the pinned library does not register.
@@ -155,7 +155,7 @@ const OURS_ONLY_MODULES: &[&str] = &[
 ///
 /// `fts4aux` and `fts3tokenize` are the two modules the audit named against the
 /// *shell*; the pinned library does not register them either, so they are not
-/// in this comparison and are recorded in `feature-comparison.md`.
+/// in this comparison and are recorded in `docs/feature-comparison.md`.
 const OURS_MISSING_MODULES: &[&str] = &["dbstat", "pragma_module_list"];
 
 /// Asserts that one step really was compared.

@@ -9,7 +9,6 @@ binding, this file and
 [`inillucent-driver-capi/include/inillucent_driver.h`](inillucent-driver-capi/include/inillucent_driver.h)
 are what you need, and you should not have to read any Rust.
 
-Designed in [`tasks/task-1837-driver-tdd.md`](../tasks/task-1837-driver-tdd.md).
 
 ---
 
@@ -152,7 +151,7 @@ database and fails in **both** directions:
   table is stale, and the failure says so in as many words.
 
 That second half has already earned its keep. Between this driver being written
-and being finished, task-1838, task-1844 and task-1845 landed outer joins,
+and being finished, later work landed outer joins,
 recursive CTEs, foreign keys, triggers, `ATTACH`, temporary tables, `STRICT` and
 `ALTER TABLE ADD COLUMN … DEFAULT`. Every one of those turned the test red with
 a message naming the row to update, rather than leaving an application quietly
@@ -279,7 +278,7 @@ let connection = database.connect_as(session);
 ```
 
 Without it every call is a new session, and a `CREATE TEMP TABLE` typed into a
-query console is gone by the next statement (task-1848). `suite.json`'s
+query console is gone by the next statement. `suite.json`'s
 `a_temp_table_survives_a_connection_per_call` is the case for this, and it is
 the one case that sets `"connection": "per_call"`.
 

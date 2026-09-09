@@ -4,7 +4,7 @@ This is the shortest path to being useful here. Two audiences, and the split is 
 get right:
 
 - **You are USING inillucent** — putting a database in an application, querying one, migrating one
-  in. Read [§1](#1-using-inillucent) and stop. `agent-skills/` has a task-shaped page per job.
+  in. Read [§1](#1-using-inillucent) and stop. `agent-skills/` has one page per job.
 - **You are WORKING ON inillucent** — changing this repository. Read all of it. There are five
   contracts here that a test enforces, and every one of them fails a build when you guess.
 
@@ -24,8 +24,8 @@ Four programs come out of a build or an install:
 
 | | |
 |---|---|
-| `inillucent` | the verb-shaped command line: 28 commands, `--output json` on all of them |
-| `inillucent-shell` | a `sqlite3`-shaped REPL, 63 of its dot commands |
+| `inillucent` | the command line: 28 commands, with `--output json` on all of them |
+| `inillucent-shell` | an interactive shell shaped like `sqlite3`, with 63 of its dot commands |
 | `inillucent-mcp` | the same commands served to an agent over MCP |
 | `inillucent-migrate` | builds a database from a SQLite file, a PostgreSQL or MySQL server, or a legacy retrieval index |
 
@@ -58,10 +58,14 @@ inillucent help migrate         # one command, every parameter
 
 | question | file |
 |---|---|
-| does *X* work, and how does it compare to SQLite / pgvector? | `feature-comparison.md` — 416 differential cases, measured |
-| what is the state of the project against its goal? | `README.md` |
-| how do I bind this from Python / Node / Go / PHP / C? | `drivers/README.md` |
-| how does the retrieval engine work? | `architecture.md`, `product-overview.md` |
+| does *X* work? | [`docs/sql.md`](docs/sql.md), and [`docs/feature-comparison.md`](docs/feature-comparison.md) for the 416 measured cases |
+| how does it compare to SQLite? | [`docs/performance.md`](docs/performance.md) |
+| how does it compare to pgvector? | [`docs/retrieval-quality.md`](docs/retrieval-quality.md) |
+| how do I search by meaning or by exact term? | [`docs/vector-search.md`](docs/vector-search.md) |
+| how do I bind this from Python / Node / Go / PHP / C? | [`drivers/README.md`](drivers/README.md) |
+| how does any of it work? | [`docs/architecture.md`](docs/architecture.md) |
+| what is not built yet? | [`docs/roadmap.md`](docs/roadmap.md) |
+| where is everything? | [`docs/README.md`](docs/README.md), the documentation index |
 
 ---
 
@@ -74,10 +78,10 @@ you write the code; each one is short.
 
 | contract | where it lives | what fails |
 |---|---|---|
-| **Dependencies** — an allow-list, not a deny-list | `docs/dependency-policy.md`, `docs/invariants/layering.toml` | `cargo test -p inillucent-compat --test policy` |
+| **Dependencies** — an allowed list, not a denied one | `docs/dependency-policy.md`, `docs/invariants/layering.toml` | `cargo test -p inillucent-compat --test policy` |
 | **Layering** — which crate may depend on which | `docs/invariants/layering.toml` | the same suite, `the_workspace_obeys_the_dependency_contract` |
 | **Test selection** — every test target has a row | `tests/selection.toml` | `--test selection`; `no_test_hides_outside_the_map` names your target |
-| **One command table** — the CLI and MCP are generated from it | `crates/inillucent-cli/src/command/registry.rs` | `--test command_parity` |
+| **One command table** — the command line and MCP are generated from it | `crates/inillucent-cli/src/command/registry.rs` | `--test command_parity` |
 | **The testing standard** — where a new test goes and how the suite runs | `tests/inillucent-testing-tdd.md` | — |
 
 ### Adding a dependency
@@ -89,8 +93,8 @@ operating-system boundary, numeric kernels — one `[[external]]` row each, nami
 use it.
 
 Before reaching for a crate, read the two worked arguments in `docs/dependency-policy.md`: the
-additions task-1782 made, and **the dependency task-1868 did not add** — a PostgreSQL and MySQL
-client, written first-party in `crates/inillucent-remote` rather than pulled in, and why.
+additions that were made, and **the dependency that was deliberately not added** — a PostgreSQL and MySQL
+client, written here in `crates/inillucent-remote` rather than pulled in, and why.
 
 ### Running the tests
 
@@ -124,7 +128,7 @@ New `tests/*.rs` file? Add its row to `tests/selection.toml`, or `selection.rs` 
 
 ### House style
 
-Read three neighbouring files before writing one. The conventions that are actually load-bearing:
+Read three neighbouring files before writing one. The conventions that carry weight:
 
 - **Every function has a doc comment saying what it is for**, with `@param` lines. Governed crates
   `deny(missing_docs)` and a test checks that every module states its invariant.

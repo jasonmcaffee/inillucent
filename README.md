@@ -95,9 +95,9 @@ with the vector results, so `PROJ-1932` and "how does the release process work" 
 by one query. → [Vector search](docs/vector-search.md#hybrid-retrieval)
 
 **An answer of "nothing here answers that".** Every hit carries a confidence computed on absolute
-bounds, separate from the score that ordered the list. Asked 200 questions the corpus does not
-answer, PostgreSQL with pgvector returns a confident top result every single time; inillucent does it
-on one question in two hundred. → [Retrieval quality](docs/retrieval-quality.md#abstention)
+bounds, separate from the score that ordered the list. Asked questions the corpus does not answer,
+PostgreSQL with pgvector returns a confident top result every single time; inillucent does it on
+about one question in a hundred. → [Retrieval quality](docs/retrieval-quality.md#abstention)
 
 **The embedding model inside your process.** `nomic-embed-text-v1.5` at full precision through the
 ONNX runtime, on the processor or across several GPUs. No embedding server, no socket, no second

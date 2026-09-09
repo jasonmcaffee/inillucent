@@ -119,7 +119,7 @@ c_name = "SQLITE_LIMIT_TRIGGER_DEPTH"
 # lower ceiling. This file names the oracle as its authority and the compat
 # report checks these rows against it, so 1000 it is. The cost is one line of
 # `.limit` output that differs from the shell binary, which
-# `feature-comparison.md` records.
+# `docs/feature-comparison.md` records.
 default = 1000
 hard_max = 1000000
 minimum = 1

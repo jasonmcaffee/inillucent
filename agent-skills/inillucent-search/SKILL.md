@@ -108,4 +108,4 @@ Before you design around a construct, ask:
 inillucent capabilities            # every row checked against the running engine, both directions
 ```
 
-And read `feature-comparison.md` — it is the measured side-by-side, not a feature list.
+And read `docs/feature-comparison.md` — it is the measured side-by-side, not a feature list.

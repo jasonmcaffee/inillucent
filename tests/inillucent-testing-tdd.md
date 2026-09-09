@@ -3,7 +3,7 @@
 **What a test in this repository is for, how the suite is organised, how to run
 only the part a change can break, and what all of it costs.**
 
-Written for task-1857 on 2026-09-08. Every number below was measured on the
+Written on 2026-09-08. Every number below was measured on the
 machine described in [Timings](#timings), by the tools this document describes,
 and the commands that produce them are given so they can be taken again.
 
@@ -39,7 +39,7 @@ When the engine does something wrong and the fix is not this ticket's, the
 behaviour is written down as a **test that asserts what happens**, with a
 comment naming the defect and a failure message telling a future fixer which
 lines to rewrite. `crates/inillucent-compat/tests/semantics.rs` has done this
-since task-1843 and it is the discipline this repository runs on: a fix that
+for some time now, and it is the discipline this repository runs on: a fix that
 lands turns the test red, so a fix cannot land unnoticed and a regression cannot
 either.
 
@@ -53,7 +53,7 @@ connection can make. Any test claiming that something persists **drops the
 `Database` and opens the path again**, so what it reads has been through the
 write-ahead log and recovery.
 
-This is not theoretical. The virtual-table defect task-1857 found was invisible
+This is not theoretical. The virtual-table defect that prompted this suite was invisible
 to every test that did not reopen: the *file* was correct throughout, and only
 the live connection was wrong.
 
@@ -114,14 +114,14 @@ code so that a person can read the whole arrangement in one file.
 | a cost that must not change shape | `crates/inillucent/tests/budget.rs` — tier `perf` |
 
 **The public facade is the newest of these and the one most easily forgotten.**
-`crates/inillucent/tests/` did not exist before task-1857, on the reasoning that
+`crates/inillucent/tests/` did not exist until this suite was written, on the reasoning that
 `inillucent::Database` is a re-export of a thoroughly tested engine. The hole in
 that reasoning is that an application does not depend on the engine, it depends
 on **the name**: a re-export that stops compiling, a type that stops being
 public, a method that moves down a layer — none of those are engine defects,
 none of them fail an engine test, and every one of them breaks every caller.
-task-1838 moved that facade from one engine to another and nothing in the suite
-would have noticed if it had moved to neither.
+The facade was moved from one engine to another and nothing in the suite would
+have noticed if it had moved to neither.
 
 ---
 
@@ -433,8 +433,7 @@ against 146 s wall parallel.
 
 ## 7. What this standard found
 
-The suite described here was written for task-1857 and found four defects while
-being written; reviewing the fixes found three more, in the fixes. All seven are
+The suite described here found four defects while it was being written; reviewing the fixes found three more, in the fixes. All seven are
 fixed, and each is now a test that asserts the fix.
 **Virtual tables did not participate in their transaction.** A rolled-back
 insert into an `fts5` or `rtree` table stayed, a rolled-back delete was gone, and
@@ -574,7 +573,7 @@ The phrases are `; skipping`, `is not built`, `is missing`, `has not been
 built`, `is not available` and `no reference`, and **`; skipping` is the one to
 use**: every existing message already ends with it.
 
-> **This paragraph and the runner disagreed until task-1868, and the disagreement
+> **This paragraph and the runner disagreed for a while, and the disagreement
 > was the exact failure `--strict` exists to prevent.** The list here has always
 > read `is not built`, `is missing`, `; skipping`; `missing_prerequisites` in
 > `testrun.rs` matched `has not been built`, `is not available` and
