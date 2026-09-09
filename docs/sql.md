@@ -17,7 +17,7 @@ its own fresh database, and every byte of both output streams was compared.
   SQLite does not have, so there is no SQLite output for them to match.
 - **0 are refused here that SQLite answers, and 0 are accepted here that SQLite rejects.**
 
-206 of those cases are also a checked in test, `crates/inillucent-compat/tests/semantics.rs`, so a
+208 of those cases are also a checked in test, `crates/inillucent-compat/tests/semantics.rs`, so a
 construct that changes its answer in either direction fails a build rather than waiting for somebody
 to audit it. The probe harness is `tools/feature-probe/`.
 

@@ -36,7 +36,7 @@ points at `onnxruntime.dll` from the GPU release rather than at a Homebrew dynam
 | the engine | `inillucent-pool`, `inillucent-wal`, `inillucent-tree`, `inillucent-txn`, `inillucent-exec`, `inillucent-engine`, `inillucent-model` (a test oracle), `inillucent-sqlite-reader` (import only) | 54,341 |
 | the old engine, awaiting deletion | `inillucent-storage`, `inillucent-transaction`, `inillucent-vm`, `inillucent-session`, `inillucent-legacy`, `inillucent-capi` | 48,694 |
 | retrieval | `inillucent-core` (the engine), `inillucent-search` (the virtual table), `inillucent-bench` (the grading harness) | 29,825 |
-| facade and tooling | `inillucent` (a re-export of the engine), `inillucent-compat` (the manifest, the oracle, the gates, 67 test files), `inillucent-cli`, `inillucent-migrate`, `inillucent-remote` | 32,031 |
+| facade and tooling | `inillucent` (a re-export of the engine), `inillucent-compat` (the manifest, the oracle, the gates, 77 test files), `inillucent-cli`, `inillucent-migrate`, `inillucent-remote` | 32,031 |
 
 `inillucent-engine::connect::Database` is the entry point: `open` creates or opens and recovers,
 `import` reads a SQLite file, and `connect` gives a connection with `execute_batch`, `query`,
@@ -91,7 +91,7 @@ Seventeen tests fail today and every one is accounted for:
 Over 2,400 test functions across the workspace, in these classes:
 
 - **A differential harness** that runs the same SQL through the pinned SQLite 3.53.4 and compares
-  transcripts. 206 of those cases are `semantics.rs`, and 416 are the wider feature probe.
+  transcripts. 208 of those cases are `semantics.rs`, and 416 are the wider feature probe.
 - **A SQLLogicTest subset**, whose expected values were recorded from the pinned binary — so the
   suite grades this engine against SQLite on a machine that has no SQLite on it. Nothing in the
   generator reads inillucent: a corpus that recorded the engine's own answer as the thing to grade
@@ -111,7 +111,7 @@ Over 2,400 test functions across the workspace, in these classes:
   simulator — so "the simulator behaves like a disk" is a checked claim rather than a hope.
 - **100% branch coverage** held on the page pool's interior, latch, meta, extent, free map and swip
   modules, and on the tree's key codec.
-- **23 of 29 crates deny `unwrap`, `expect`, `panic` and slice indexing**, and 22 of 29 forbid
+- **28 of the 31 crates deny `unwrap`, `expect`, `panic` and slice indexing**, and 25 forbid
   `unsafe`, on every path that reads SQL text, database pages, log frames, network bytes or file
   system results.
 

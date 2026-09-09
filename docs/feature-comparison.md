@@ -40,7 +40,7 @@ figure carried forward, and re-running it is how the two refusals in
 [Why it is 96.9% and not 100%](#why-it-is-969-and-not-100) were found. Every row below is a measurement rather than a reading of the
 source: each feature is a whole SQL script run through `inillucent-shell` and through the pinned
 `sqlite3` 3.53.4, over its own fresh database, with every byte of both streams compared. That is the
-discipline `crates/inillucent-compat/tests/semantics.rs` applies - to 206 constructs - widened here to
+discipline `crates/inillucent-compat/tests/semantics.rs` applies - to 208 constructs - widened here to
 **416 cases across the whole feature surface**. The harness is checked in as `tools/feature-probe/`
 and its transcripts are under `_agent_output/`; [Reproducing this](#reproducing-this) says how to run
 it.
@@ -1834,7 +1834,7 @@ evidence for what contention looks like - the seven-budget ladder, the allocator
 per-workload attributions the memory work was steered by. That folder is not checked in; the
 commands above rebuild all of it.
 
-The cases the engine's own suite carries are `crates/inillucent-compat/tests/semantics.rs` - **206
+The cases the engine's own suite carries are `crates/inillucent-compat/tests/semantics.rs` - **208
 now**, up from 164, every one of them a construct this document moved - plus `vector.rs` for the
 filtered-search recall and `new_engine_writes.rs` for the write path. They run in CI and fail when a
 construct changes its mind in either direction. The probe is wider than the suite deliberately: it is
