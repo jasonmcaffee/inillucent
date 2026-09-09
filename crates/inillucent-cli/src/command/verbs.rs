@@ -803,10 +803,28 @@ pub fn functions(context: &mut Context, arguments: &Arguments) -> Result<Outcome
     Ok(produced)
 }
 
-/// `migrate`: brings a SQLite file or a legacy index into this engine.
+/// `migrate`: brings a SQLite file, a running server, or a legacy index into
+/// this engine.
+///
+/// **The kind is defaulted from the source and not guessed at.** The other
+/// migration tool argues, correctly, that deciding which migration to run by
+/// looking at the source would "pick wrongly exactly once, on somebody's real
+/// data" - but that argument is about a *directory* against a *file*, which are
+/// both just paths and cannot be told apart. `postgres://host/db` is not a path
+/// on any platform this runs on, so there is nothing here to be ambiguous
+/// about, and the failure mode of getting it wrong is "there is no such file"
+/// rather than a migration of the wrong thing. `--kind` still overrides it.
 pub fn migrate(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
     let source = arguments.required_text("source")?.to_string();
     let destination = arguments.required_text("destination")?.to_string();
+    let kind = arguments
+        .text("kind")
+        .map(str::to_string)
+        .unwrap_or_else(|| kind_of_source(&source));
+    if kind == "postgres" || kind == "mysql" {
+        return migrate_remote(context, &source, &destination, arguments);
+    }
+
     let from = context.confine(&source)?;
     let to = context.confine(&destination)?;
     if !from.exists() {
@@ -821,7 +839,7 @@ pub fn migrate(context: &mut Context, arguments: &Arguments) -> Result<Outcome, 
             format!("\"{destination}\" already exists. This tool never overwrites."),
         ));
     }
-    match arguments.text("kind").unwrap_or("sqlite") {
+    match kind.as_str() {
         "sqlite" => migrate_sqlite_file(&from, &to),
         "index" => Err(Failed::unsupported(
             "migrate --kind index",
@@ -829,9 +847,133 @@ pub fn migrate(context: &mut Context, arguments: &Arguments) -> Result<Outcome, 
              engine. Run: inillucent-migrate <source-index-dir> <destination.db>",
         )),
         other => Err(Failed::misuse(format!(
-            "'{other}' is not a migration kind. Use sqlite or index."
+            "'{other}' is not a migration kind. Use sqlite, postgres, mysql or index."
         ))),
     }
+}
+
+/// Returns the migration kind a source names, when it names one.
+///
+/// @param source - what the caller passed as the source
+fn kind_of_source(source: &str) -> String {
+    match inillucent_remote::ConnectionUrl::parse(source) {
+        Ok(url) => url.scheme.name().to_string(),
+        Err(_) => "sqlite".to_string(),
+    }
+}
+
+/// Migrates a running PostgreSQL or MySQL server into a new `.rdb`.
+///
+/// **Refused when the surface is confined.** `--root DIR` exists so that an MCP
+/// server can be handed to an agent without handing it the file system, and a
+/// verb that dialled an arbitrary host and port would be a hole straight
+/// through that: the confinement is about reach, not about paths. So a
+/// confined surface refuses a remote source by name, the same way `--readonly`
+/// refuses a write.
+///
+/// @param context - the surface, which may be confined
+/// @param source - the connection URL
+/// @param destination - the file to write
+/// @param arguments - the rest of the command line
+fn migrate_remote(
+    context: &mut Context,
+    source: &str,
+    destination: &str,
+    arguments: &Arguments,
+) -> Result<Outcome, Failed> {
+    if context.confined() {
+        return Err(Failed::said(
+            Status::InvalidState,
+            "this surface is confined to a directory with --root, and a migration from a server \
+             reaches a host and a port rather than a path. Run it from an unconfined command \
+             line.",
+        ));
+    }
+    let url = inillucent_remote::ConnectionUrl::parse(source)
+        .map_err(|error| Failed::misuse(error.detail().unwrap_or_else(|| error.message())))?;
+    let to = context.confine(destination)?;
+    if to.exists() {
+        return Err(Failed::said(
+            Status::InvalidState,
+            format!("\"{destination}\" already exists. This tool never overwrites."),
+        ));
+    }
+    let mut plan = inillucent_remote::Plan::new(url, &to);
+    if let Some(batch) = arguments.integer("batch") {
+        plan.batch = (batch.max(1)) as u64;
+    }
+    let report = inillucent_remote::migrate::migrate(&plan).map_err(|error| {
+        Failed::said(
+            Status::Io,
+            error.detail().unwrap_or_else(|| error.message()),
+        )
+    })?;
+
+    let checks: Vec<json::Json> = report
+        .checks
+        .iter()
+        .map(|check| {
+            json::object(vec![
+                ("name", json::text(&check.name)),
+                ("passed", json::Json::Bool(check.passed)),
+                ("detail", json::text(&check.detail)),
+            ])
+        })
+        .collect();
+    let tables: Vec<json::Json> = report
+        .tables
+        .iter()
+        .map(|table| {
+            json::object(vec![
+                ("source", json::text(&table.source)),
+                ("destination", json::text(&table.target)),
+                ("rows", json::Json::Int(table.rows as i64)),
+                ("digest", json::text(&table.digest)),
+            ])
+        })
+        .collect();
+    let not_carried: Vec<json::Json> = report
+        .not_carried
+        .iter()
+        .map(|(kind, name)| {
+            json::object(vec![("kind", json::text(kind)), ("name", json::text(name))])
+        })
+        .collect();
+
+    // **Every check is printed whether it passed or not.** A migration that is
+    // wrong is worth describing completely: knowing that the counts are right
+    // and one table's digest is not is a different problem from knowing that
+    // nothing arrived.
+    let mut text = format!(
+        "{} -> {}\n{}, {} tables, {} rows\n",
+        report.source,
+        to.display(),
+        report.server,
+        report.tables.len(),
+        report.rows()
+    );
+    for check in &report.checks {
+        text.push_str(&format!("  {}\n", check.line()));
+    }
+    if !report.passed() {
+        text.push_str(&format!(
+            "verification failed; nothing was published. The staging file is at {}",
+            report.staged.display()
+        ));
+        return Err(Failed::said(Status::Io, text));
+    }
+    text.push_str(&format!("published: {}", to.display()));
+
+    Ok(Outcome::said("migrate", text)
+        .with("destination", json::text(to.to_string_lossy()))
+        // The **redacted** URL: an MCP call's result is written into an agent
+        // transcript, and the transcript outlives the run.
+        .with("source", json::text(&report.source))
+        .with("server", json::text(&report.server))
+        .with("rows", json::Json::Int(report.rows() as i64))
+        .with("tables", json::Json::Array(tables))
+        .with("checks", json::Json::Array(checks))
+        .with("notCarried", json::Json::Array(not_carried)))
 }
 
 /// Imports a SQLite database file into a new `.rdb`.

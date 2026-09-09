@@ -6,17 +6,26 @@
 //! it or stop at a verified staging file, and which SQLite to prove the file
 //! with.
 //!
-//! Two sources, named by which one is given:
+//! Three sources, named by which one is given:
 //!
 //! ```text
 //! inillucent-migrate <source-index-dir> <destination.db> [--no-publish]
 //! inillucent-migrate --sqlite-file <source.db> <destination.rdb>
+//! inillucent-migrate --from <postgres://…|mysql://…> <destination.rdb> [--batch N]
 //! ```
 //!
 //! The second is task-1834's: a SQLite database file into the new engine's
 //! trees, verified by counts and digests and published by a rename. It takes
 //! no `--no-publish`, because it never publishes anything it has not verified
 //! and always leaves the staging file behind when it does not.
+//!
+//! The third is task-1868's: a **running** PostgreSQL or MySQL server, read
+//! over its own wire protocol inside one repeatable-read snapshot. It holds the
+//! same invariants for the same reasons, and it is also reachable as
+//! `inillucent migrate --kind postgres` from the command line and from MCP -
+//! that path is the one to prefer, and this one exists because a migration is
+//! the sort of thing somebody runs from a script against a server that is not
+//! their own.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -39,7 +48,7 @@ fn main() -> ExitCode {
     // as the source and the tool refused to overwrite the file it had just been
     // asked to read. Skipping the word after a flag that takes one is what
     // makes the two forms parse the same way.
-    let takes_a_value = ["--sqlite-file"];
+    let takes_a_value = ["--sqlite-file", "--from", "--batch"];
     let mut positional: Vec<&String> = Vec::new();
     let mut skip = false;
     for argument in &arguments {
@@ -52,6 +61,18 @@ fn main() -> ExitCode {
             continue;
         }
         positional.push(argument);
+    }
+    // A running server, named by `--from` and read over its own wire protocol.
+    if let Some(source) = text_flag(&arguments, "--from") {
+        let Some(destination) = positional.first() else {
+            eprintln!(
+                "usage: inillucent-migrate --from <postgres://…|mysql://…> <destination.rdb> \
+                 [--batch N]"
+            );
+            return ExitCode::FAILURE;
+        };
+        let batch = text_flag(&arguments, "--batch").and_then(|text| text.parse::<u64>().ok());
+        return migrate_server(&source, &PathBuf::from(destination.as_str()), batch);
     }
     // The SQLite-file source, named by its own flag rather than guessed at from
     // the shape of the path: a directory and a file are both just paths, and a
@@ -158,8 +179,76 @@ fn migrate_sqlite_file(source: &PathBuf, destination: &PathBuf) -> ExitCode {
     }
 }
 
+/// Migrates one running PostgreSQL or MySQL server into the new engine.
+///
+/// Every check is printed whether it passed or not, for the same reason the
+/// SQLite path prints them all: knowing that the counts are right and one
+/// table's digest is not is a different problem from knowing that nothing
+/// arrived. **The URL printed is the redacted one** - the source line of a
+/// migration ends up in a terminal scrollback and in a bug report.
+///
+/// @param source - the connection URL
+/// @param destination - where the verified database is published
+/// @param batch - rows per destination transaction, when the caller chose one
+fn migrate_server(source: &str, destination: &PathBuf, batch: Option<u64>) -> ExitCode {
+    let url = match inillucent_remote::ConnectionUrl::parse(source) {
+        Ok(url) => url,
+        Err(error) => {
+            eprintln!("{}", error.detail().unwrap_or_else(|| error.message()));
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut plan = inillucent_remote::Plan::new(url, destination);
+    if let Some(batch) = batch {
+        plan.batch = batch.max(1);
+    }
+    match inillucent_remote::migrate::migrate(&plan) {
+        Ok(report) => {
+            println!(
+                "{} -> {}\n{}, {} tables, {} rows",
+                report.source,
+                destination.display(),
+                report.server,
+                report.tables.len(),
+                report.rows()
+            );
+            for check in &report.checks {
+                println!("  {}", check.line());
+            }
+            for (kind, name) in &report.not_carried {
+                println!("  not carried: {kind} {name}");
+            }
+            if report.passed() {
+                println!("published: {}", destination.display());
+                ExitCode::SUCCESS
+            } else {
+                eprintln!(
+                    "verification failed; nothing was published. the staging file is at {}",
+                    report.staged.display()
+                );
+                ExitCode::FAILURE
+            }
+        }
+        Err(error) => {
+            eprintln!("{}", error.detail().unwrap_or_else(|| error.message()));
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// Returns the value of a `--flag value` argument.
 fn flag(arguments: &[String], name: &str) -> Option<PathBuf> {
+    text_flag(arguments, name).map(PathBuf::from)
+}
+
+/// Returns the value of a `--flag value` argument as it was written.
+///
+/// A connection URL is not a path, so reading one through `PathBuf` and back
+/// would put it through the platform's own separator rules on the way.
+///
+/// @param arguments - the command line
+/// @param name - the flag
+fn text_flag(arguments: &[String], name: &str) -> Option<String> {
     let position = arguments.iter().position(|argument| argument == name)?;
-    arguments.get(position.saturating_add(1)).map(PathBuf::from)
+    arguments.get(position.saturating_add(1)).cloned()
 }

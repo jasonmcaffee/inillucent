@@ -626,6 +626,7 @@ dependencies = [
  "inillucent-base",
  "inillucent-driver",
  "inillucent-engine",
+ "inillucent-remote",
  "inillucent-tree",
  "inillucent-value",
 ]
@@ -758,6 +759,7 @@ dependencies = [
  "inillucent-catalog",
  "inillucent-core",
  "inillucent-engine",
+ "inillucent-remote",
  "inillucent-search",
  "inillucent-sqlite-reader",
  "inillucent-tree",
@@ -783,6 +785,16 @@ version = "0.1.0"
 dependencies = [
  "inillucent-base",
  "inillucent-sim",
+ "inillucent-vfs",
+]
+
+[[package]]
+name = "inillucent-remote"
+version = "0.1.0"
+dependencies = [
+ "inillucent-base",
+ "inillucent-engine",
+ "inillucent-tree",
  "inillucent-vfs",
 ]
 

@@ -106,6 +106,19 @@ prefix = "docs/"
 packages = ["inillucent-compat"]
 reason = "the layering contract and the invariant register, which only `policy` and `harness` read"
 
+# task-1868. Prose for an agent to read, and nothing compiles from it - so a
+# change here should select nothing rather than the whole suite, which is what
+# an unmatched top-level directory would do.
+[[path]]
+prefix = "agent-skills/"
+packages = []
+reason = "task-shaped instructions for an agent; no code reads them"
+
+[[path]]
+prefix = "AGENTS.md"
+packages = []
+reason = "the agent front door; prose, and no code reads it"
+
 [[path]]
 prefix = ".sqlite-ref/"
 packages = ["*"]
@@ -230,6 +243,14 @@ package = "inillucent-catalog"
 kind = "lib"
 tier = "unit"
 
+# The CLI's own library, which is where the command table, the argument parser
+# and every verb live. It arrived with task-1836 and had no row until task-1868;
+# `no_test_hides_outside_the_map` had been naming it ever since.
+[[target]]
+package = "inillucent-cli"
+kind = "lib"
+tier = "unit"
+
 [[target]]
 package = "inillucent-cli"
 kind = "bin"
@@ -273,6 +294,11 @@ tier = "unit"
 
 [[target]]
 package = "inillucent-migrate"
+kind = "lib"
+tier = "unit"
+
+[[target]]
+package = "inillucent-remote"
 kind = "lib"
 tier = "unit"
 
@@ -571,6 +597,42 @@ requires = ["fixtures"]
 package = "inillucent-migrate"
 kind = "test"
 name = "migration"
+tier = "engine"
+
+# The wire clients, replayed against recorded transcripts of a real PostgreSQL
+# 17.2 and a real MySQL 8.4.6 (task-1868). It declares no `requires` on purpose:
+# the transcripts are checked in, so this suite runs on a fresh clone with no
+# database server installed, and a green here is a real green.
+[[target]]
+package = "inillucent-remote"
+kind = "test"
+name = "protocol"
+tier = "engine"
+
+# The whole procedure against a running PostgreSQL, and against a running
+# MySQL. Each skips with `; skipping` when its URL is unset, which is what lets
+# `--strict` count the skip instead of reading it as a pass.
+[[target]]
+package = "inillucent-remote"
+kind = "test"
+name = "live_postgres"
+tier = "e2e"
+requires = ["postgres"]
+
+[[target]]
+package = "inillucent-remote"
+kind = "test"
+name = "live_mysql"
+tier = "e2e"
+requires = ["mysql"]
+
+# The migration procedure itself - stage, copy, verify, publish - driven by a
+# stub source rather than by a socket, so the failure paths a real server will
+# not produce on request are reachable.
+[[target]]
+package = "inillucent-remote"
+kind = "test"
+name = "procedure"
 tier = "engine"
 
 [[target]]
@@ -1048,6 +1110,15 @@ kind = "bin"
 name = "inillucent-perfhistory"
 tier = "tooling"
 covers = ["inillucent-compat"]
+
+# The one command table against the two surfaces it generates. Also arrived with
+# task-1836 without a row.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "command_parity"
+tier = "tooling"
+covers = ["inillucent-cli"]
 
 [[target]]
 package = "inillucent-compat"

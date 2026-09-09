@@ -30,6 +30,7 @@ members = [
     "crates/inillucent-cli",
     "crates/inillucent-search",
     "crates/inillucent-migrate",
+    "crates/inillucent-remote",
     # Existing retrieval engine and its grading harness.
     "crates/inillucent-core",
     "crates/inillucent-bench",
@@ -100,6 +101,7 @@ inillucent-core = { path = "crates/inillucent-core", version = "0.1.0" }
 inillucent-cli = { path = "crates/inillucent-cli", version = "0.1.0" }
 inillucent-search = { path = "crates/inillucent-search", version = "0.1.0" }
 inillucent-migrate = { path = "crates/inillucent-migrate", version = "0.1.0" }
+inillucent-remote = { path = "crates/inillucent-remote", version = "0.1.0" }
 inillucent-driver = { path = "drivers/inillucent-driver", version = "0.1.0" }
 inillucent-driver-capi = { path = "drivers/inillucent-driver-capi", version = "0.1.0" }
 

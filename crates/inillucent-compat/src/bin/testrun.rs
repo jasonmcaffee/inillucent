@@ -868,7 +868,31 @@ fn run_one(built: &Built, threads: &str, filter: Option<&str>) -> Outcome {
         // fall back to whatever `cargo` is on PATH, which on a machine with
         // several toolchains is not necessarily this one.
         .env("CARGO", cargo())
-        .args(["--test-threads", threads]);
+        // **`--show-output`, or `--strict` cannot see a skip at all**
+        // (task-1868). libtest swallows the output of a test that *passes*, and
+        // a suite whose prerequisite is absent passes - that is the whole shape
+        // of the problem. So the sentence a skipping suite prints to say what is
+        // missing never reached this process, `missing_prerequisites`'s
+        // `announced` branch could never fire, and the only skip `--strict`
+        // could ever catch was a suite that ran literally zero tests. A run on a
+        // machine without the pinned oracle therefore reported `ok` with thirty
+        // differential suites having asserted nothing.
+        //
+        // **`--show-output` rather than `--nocapture`**, which was tried first
+        // and reverted. `--nocapture` turns the capture *off*, so every test
+        // writes straight to the pipe with no serialisation between the two
+        // threads each binary runs - and `inillucent-bench`, which loads the
+        // ONNX runtime and its CUDA provider, then died at teardown with
+        // `0xC0000409` in two of three full runs while passing every one of its
+        // 156 tests. It had not failed once in four full runs without the flag,
+        // and passed 3/3 run on its own with it, so the crash needed the flag
+        // *and* the load of a full parallel run. `--show-output` keeps the
+        // capture and prints a passing test's output in the summary instead,
+        // which is all this needs.
+        //
+        // It costs a noisier transcript, which nobody sees: the output is kept
+        // in the `Outcome` and printed only for a failure.
+        .args(["--test-threads", threads, "--show-output"]);
     if let Some(filter) = filter {
         command.arg(filter);
     }
@@ -947,9 +971,30 @@ fn missing_prerequisites<'run>(
         }
         // A suite that ran no tests at all, or that said out loud that its
         // reference is absent, evidenced nothing.
+        //
+        // **The phrase list used to miss almost every suite it was written
+        // for** (found by task-1868). It matched `has not been built`,
+        // `is not available` and `no reference`; what the suites actually
+        // print is `the pinned SQLite oracle is not built; skipping`,
+        // `the pinned shell is not present; skipping` and `no usable C
+        // compiler; skipping` - not one of which matched. §9 of
+        // `tests/inillucent-testing-tdd.md` had meanwhile told authors to print
+        // `is not built`, `is missing` or `; skipping`, so the standard and the
+        // code had been describing two different lists. The consequence was
+        // exactly what `--strict` exists to prevent: on a machine without the
+        // oracle, thirty-odd differential suites skipped every case and the run
+        // reported `ok`.
+        //
+        // `; skipping` is the one that carries it, because it is the phrase the
+        // standard asks for and the suffix every existing message already ends
+        // with. The others stay so that a message written to the old list is
+        // still recognised.
         let silent = outcome.ran == 0;
-        let announced = outcome.output.contains("has not been built")
+        let announced = outcome.output.contains("; skipping")
+            || outcome.output.contains("has not been built")
+            || outcome.output.contains("is not built")
             || outcome.output.contains("is not available")
+            || outcome.output.contains("is missing")
             || outcome.output.contains("no reference");
         if silent || announced {
             hollow.push((outcome, row.requires.clone()));
