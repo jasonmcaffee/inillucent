@@ -53,6 +53,7 @@ pub mod selection;
 pub mod slt;
 pub mod syntax;
 pub mod toml_lite;
+pub mod verdict;
 
 use std::path::{Path, PathBuf};
 

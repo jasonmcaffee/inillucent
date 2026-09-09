@@ -59,6 +59,33 @@ pub struct CacheStats {
     pub writes: u64,
 }
 
+/// What the write-ahead log has been asked to do.
+///
+/// The counters a commit moves, and the reason they are here rather than only in
+/// `inillucent-wal`: a test that wants to assert one transaction costs less than
+/// many needs a number that does not move when the machine is busy. A wall-clock
+/// ratio between the two arms measures the scheduler as much as the engine, and
+/// on a contended machine it measured 3.5x where an idle one measures 40x. These
+/// counts read the same on an idle machine and on a loaded one, so `writes` is
+/// what `crates/inillucent/tests/budget.rs` asserts on - see
+/// `one_transaction_beats_many`, which says why it is `writes` and not `syncs`.
+///
+/// Shaped here rather than re-exported so a caller reading it does not have to
+/// name the crate the log lives in, which is the same choice [`CacheStats`]
+/// makes about the pool.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LogStats {
+    /// Records appended to the log, which is one per page image plus one per
+    /// commit.
+    pub records: u64,
+    /// Calls to the log file's `write_all_at`.
+    pub writes: u64,
+    /// Calls to the log file's `sync`.
+    pub syncs: u64,
+    /// Bytes appended to the log.
+    pub bytes: u64,
+}
+
 /// An open database file.
 pub struct Database {
     /// The engine, behind a cell because a statement takes `&mut` and a caller
@@ -246,6 +273,23 @@ impl Database {
             evicted: held.evicted,
             reads: held.reads,
             writes: held.writes,
+        }
+    }
+
+    /// Returns what the write-ahead log has been asked to do.
+    ///
+    /// A commit appends a commit record and the page images the transaction
+    /// dirtied, so the count grows with the number of transactions as well as
+    /// with the amount of data. That is what makes it the right thing for a
+    /// budget guard to assert on: it is a count of work rather than a reading of
+    /// the clock, so it does not change when the machine is busy.
+    pub fn log_stats(&self) -> LogStats {
+        let held = self.engine.borrow().wal().stats();
+        LogStats {
+            records: held.records,
+            writes: held.writes,
+            syncs: held.syncs,
+            bytes: held.bytes,
         }
     }
 
