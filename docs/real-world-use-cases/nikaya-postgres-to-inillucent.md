@@ -38,7 +38,55 @@ that are not carried at all.
 
 ---
 
-## 2. The single most important thing that happened
+## 2. The two most important things that happened
+
+Both are the same failure wearing different clothes: a committed write produces a log record that
+replay turns into a database which cannot read its own rows. One arrived through a routine deploy.
+
+### A schema migration corrupted the live corpus
+
+This is the one to read if you read nothing else. Two commands, nothing between them:
+
+```
+> inillucent --db nikaya.rdb query "SELECT id, kind FROM document ORDER BY id LIMIT 3"
+0000bf8b-ac16-4aa3-ade1-a5305fcb71e3  email      (and two more)
+
+> inillucent --db nikaya.rdb exec "CREATE TABLE document_index_queue (
+    document_id TEXT PRIMARY KEY REFERENCES document(id) ON DELETE CASCADE,
+    queued_at INTEGER NOT NULL)"
+ok. 0 rows changed.
+
+> inillucent --db nikaya.rdb query "SELECT id, kind FROM document ORDER BY id LIMIT 3"
+Error [corrupt]: database disk image is malformed
+```
+
+The new table is not mentioned by the statement that fails. What breaks is narrow and repeatable:
+`count(*)` still answers 66,793, `SELECT id` alone still works, **any other column of `document`
+does not**, and `chunk` is unaffected. That points at one table's row decoding rather than at page
+damage.
+
+It reached the live database through the ordinary deployment path. The server applies pending
+migrations at startup, so deploying a binary that added one table corrupted the corpus, silently:
+`migrate` reported success and the damage appeared on the next read of a document.
+
+The damage is in the log rather than the file, which is established by restoring log segments one at
+a time and reading after each:
+
+```
+checkpoint only              reads=True   66,776 documents  601,862 chunks
++ segments 317 through 333   reads=True   66,793            602,022
++ segment 334                reads=False
+```
+
+Segment 334 is the one holding the `CREATE TABLE`. Every earlier one replays cleanly. So the recovery
+is to park that single segment, and **nothing is lost**: the database read back 66,793 documents,
+602,022 chunks, 602,022 vectors and 64,378 live messages, including a sync that had run that morning.
+
+The consequence for the application is larger than the incident: **Nikaya cannot add a table.** The
+queue that would remove its worst remaining regression is written, reconciled against the real corpus
+and deliberately not shipped, because shipping it corrupts the corpus.
+
+### A killed writer left the database unopenable
 
 **A killed writer left the database unopenable.**
 
@@ -235,26 +283,74 @@ so the server never sends the 20,000 vectors anywhere, while the inillucent side
 values with their 768 floats each. Both are honest costs on their own side and they are not the same
 work.
 
-### Retrieval, and what holding the vectors in memory buys
+### Retrieval, against pgvector, at matching answer quality
 
-The deployed configuration puts every search on the exhaustive path over all 600,589 chunks. Two
-rounds, interleaved, first pass discarded so the page cache is warm.
+The first version of this section compared a search through the whole service — embed the query,
+search the index, read twenty documents out of the record — and reported 71 to 76 ms. That is the
+right number for how long a search takes and the wrong one for comparing two stores, because two of
+the three are not the store. It is replaced here.
 
-| | p50 | p95 | peak resident |
+What is timed is `index.search` and nothing else. The thirty probes are embedded once, before the
+clock starts, and written to a file that the PostgreSQL arm reads, so both engines search for exactly
+the same points and the embedder is out of the comparison rather than assumed to cancel. Six arms,
+interleaved, two rounds, median of the rounds, first pass of each discarded. k = 20 documents.
+
+**Recall is reported beside latency, because without it the latency means nothing.** An approximate
+index is fast in proportion to how much of the corpus it declines to look at. The answer key is an
+exhaustive scan — and both engines' exhaustive scans were run, because a key produced by one side of
+a comparison is a key worth doubting. They agree on **0.992** of the answer, the remainder being the
+1,433 chunks on tombstoned documents that PostgreSQL still holds and the 160 chunks from a sync it
+never received.
+
+| | p50 | p95 | peak resident | recall@20 |
+|---|---:|---:|---:|---:|
+| PostgreSQL + pgvector, `hnsw.ef_search` 40 — **its default** | 3.71 ms | 6.55 ms | | **0.468** |
+| PostgreSQL + pgvector, `ef_search` 100 | 10.99 ms | 20.61 ms | | 0.672 |
+| PostgreSQL + pgvector, `ef_search` 400 | 18.12 ms | 36.31 ms | | 0.876 |
+| PostgreSQL + pgvector, `ef_search` 1000 | 28.08 ms | 52.47 ms | | **0.929** |
+| PostgreSQL + pgvector, index off — exact | **5,506 ms** | 14,752 ms | | 1.000 |
+| inillucent graph, vectors **filed** (the default) | **4.22 ms** | 6.19 ms | **2,080 MB** | **0.926** |
+| inillucent graph, vectors resident | 3.82 ms | 5.75 ms | 3,839 MB | 0.926 |
+| inillucent exhaustive, filed — **what Nikaya deploys** | **19.03 ms** | 23.70 ms | **2,080 MB** | **1.000** |
+| inillucent exhaustive, resident | 17.79 ms | 21.69 ms | 3,840 MB | 1.000 |
+
+Three things fall out of that table.
+
+**At matching recall, inillucent is about seven times faster.** 4.22 ms against 28.08 ms, both
+finding roughly 93% of the exact answer. Comparing 4.22 ms against pgvector's 3.71 ms would be
+comparing against an answer that is missing more than half of what the query asked for.
+
+**pgvector's default is the number most people will measure.** `hnsw.ef_search` defaults to 40, and
+at 40 it returns 0.468 of the exact answer on this corpus. Nothing warns about this: the query is
+fast, the rows come back, and they look like results. Raising the SQL `LIMIT` does not help — the
+index has already stopped producing candidates — which is why a sweep from 100 to 3,000 candidates
+moved the clock by less than a millisecond and was the thing that gave the cap away.
+
+**Exact answers are a different scale entirely.** Nikaya deploys the exhaustive path deliberately,
+because on a mailbox the cost of missing the one message you are looking for is higher than 15 ms.
+That scan reads every one of 600,589 vectors in 19 ms; PostgreSQL's equivalent, with the index turned
+off, takes **5.5 seconds**. The difference is that one of them is parallel and quantised and the
+other is a single-threaded sort.
+
+### What holding the vectors in memory buys
+
+With the embedder and the record reads out of the measurement, the residency difference is finally
+visible, and it is small:
+
+| | filed (the default) | resident | cost |
 |---|---:|---:|---:|
-| semantic, vectors **filed** (default) | 71.1–76.3 ms | 86.6–88.1 ms | **2,215 MB** |
-| semantic, vectors **resident** | 66.3–75.4 ms | 83.4–89.5 ms | **3,975 MB** |
-| hybrid, vectors **filed** (default) | 99.4–101.7 ms | 134.2–135.9 ms | **2,272 MB** |
-| hybrid, vectors **resident** | 95.7–103.6 ms | 140.0–145.6 ms | **4,032 MB** |
+| exhaustive scan, p50 | 19.03 ms | **17.79 ms** | +1,760 MB for **6%** |
+| graph, p50 | 4.22 ms | 3.82 ms | +1,759 MB, inside the round-to-round spread |
 
-**Holding the vectors on the heap costs 1,760 MB and buys nothing measurable.** The differences in
-p50 are inside the round-to-round spread on a shared machine — the filed arm is faster than the
-resident one in one of the four comparisons. That is why the default changed: the same bytes are in
-memory either way while they are being used, but as reclaimable page cache rather than as a heap
-allocation this process will never give back.
+The exhaustive path gains about 6%, consistently across both rounds, which makes sense: it reads
+every vector, so where the vectors are matters. The graph path touches a few hundred of them and the
+difference there changes sign between rounds.
 
-The caveat that number needs: this is the steady state. The first search after a reboot, with nothing
-cached, pays a read of the vector file that the resident arm paid at open instead.
+So the default changed for 1.76 GB against 6% on one path and nothing on the other. The same bytes
+are in memory either way while they are being used — the difference is whether they are reclaimable
+page cache or a heap allocation this process will never give back. The steady state is what is
+measured here; the first search after a reboot pays a read of the vector file that the resident arm
+paid at open instead.
 
 ### Everything else that was timed
 

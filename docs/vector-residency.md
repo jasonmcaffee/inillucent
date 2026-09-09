@@ -33,8 +33,8 @@ spawned once per agent session, and each copy opened its own index — most of 4
 process that usually answers two or three questions and exits. That is the reason it was configured to
 open no index at all, which meant an agent's searches ran on a different engine from the workspace's.
 
-Serving that index peaks at 3,975 MB with the vectors resident and 2,215 MB with them filed, and
-the 1,760 MB between the two is the vectors. Leaving them in the file does
+Serving that index peaks at 3,840 MB with the vectors resident and 2,080 MB with them filed, and the
+1,760 MB between the two is the vectors. Leaving them in the file does
 not make those bytes disappear when they are being used — the operating system caches the file, so a
 warm scan reads from memory either way. What changes is *whose* memory it is. Page cache is
 reclaimable: a machine that suddenly needs 2 GB for something else takes it back, and the next scan
@@ -49,37 +49,37 @@ all of them rather than on one. See `docs/real-world-use-cases/nikaya-postgres-t
 for the whole measurement and the conditions it ran under.
 
 Two rounds, interleaved, the first pass of each discarded so the page cache is warm and neither arm
-is charged for the other's cold start. `k = 20` over the whole corpus. Peak resident is the process
-high water mark, read from `PeakWorkingSet64`, not a sample taken after the search finished.
+is charged for the other's cold start. `k = 20` over the whole corpus. **The query is embedded before
+the clock starts and the matched documents are not read back**, so what is timed is the index and
+nothing else — an earlier version of this page timed a search through the whole application, where
+the embedder and twenty record reads swamped the difference this page is about. Peak resident is the
+process high water mark from `PeakWorkingSet64`, not a sample taken after the search finished.
 
-| mode | vectors | p50 (round 1 / round 2) | p95 | peak resident |
-|---|---|---:|---:|---:|
-| semantic | **filed** (default) | 76.3 / 71.1 ms | 86.6 / 88.1 ms | **2,215 MB** |
-| semantic | resident | 75.4 / 66.3 ms | 89.5 / 83.4 ms | **3,975 MB** |
-| hybrid | **filed** (default) | 99.4 / 101.7 ms | 135.9 / 134.2 ms | **2,272 MB** |
-| hybrid | resident | 95.7 / 103.6 ms | 140.0 / 145.6 ms | **4,032 MB** |
+| | p50 | p95 | peak resident |
+|---|---:|---:|---:|
+| exhaustive scan, vectors **filed** (default) | 19.03 ms | 23.70 ms | **2,080 MB** |
+| exhaustive scan, vectors resident | **17.79 ms** | 21.69 ms | **3,840 MB** |
+| graph, vectors **filed** (default) | 4.22 ms | 6.19 ms | **2,080 MB** | 
+| graph, vectors resident | 3.82 ms | 5.75 ms | 3,839 MB |
 
-**Residency costs 1,760 MB and buys nothing measurable.** The p50 differences are inside the
-round-to-round spread of a shared machine — in one of the four comparisons the filed arm is the
-faster of the two, and in another the resident arm's p95 is worse. That is the shape of noise, not of
-an effect, and it is why the default changed.
+**Residency costs about 1.76 GB and buys about 6% on a search that reads every vector, and nothing
+outside the round-to-round spread on one that walks the graph.**
 
-The reason it is a wash is in the section above: a warm scan reads the same bytes out of memory
-either way. The dot products are identical, the parallelism is identical, and what a filed scan adds
-is a `read` per 8 MB block against 8 MB of arithmetic.
+Those two results are consistent with each other rather than in tension. An exhaustive scan reads all
+600,589 vectors, so where the vectors are is most of what it does, and the resident arm was faster in
+both rounds by roughly a millisecond and a half. A graph search touches a few hundred vectors, the
+read is a rounding error next to the rest of the work, and the difference changes sign between rounds.
 
-Two things that number does not cover, and both favour residency:
+Two things the table does not cover, and both favour residency:
 
-- **A cold start.** The first search after a reboot reads the vector file, which the resident arm
-  paid for at open instead. On this corpus the first pass of each round — discarded above — ran
-  several times the warm figure on the filed arm and roughly the warm figure on the resident one.
-- **A machine under memory pressure.** Page cache is reclaimable, which is the argument for filing
-  it; the flip side is that a box which reclaims it makes the next scan pay a real disk read. If the
+- **A cold start.** The first search after a reboot reads the vector file, which the resident arm paid
+  for at open instead.
+- **A machine under memory pressure.** Page cache is reclaimable, which is the argument for filing it;
+  the other side is that a machine which reclaims it makes the next scan pay a real disk read. If the
   index is competing with something that will actually take the memory, residency is how you keep it.
 
-Nothing here says residency is slower. It says that on a warm, adequately provisioned machine it is
-1.76 GB for no measurable latency, and 1.76 GB is a real cost that shows up on every process that
-opens the index.
+Nothing here says residency is slow. It says that on a warm, adequately provisioned machine it is
+1.76 GB for six percent at best, and 1.76 GB is a cost every process that opens the index pays.
 
 ## Which to choose
 
