@@ -310,7 +310,7 @@ the 183-case `semantics.rs` suite still agrees byte for byte.
 `realpath`, `usleep`, `stmtrand`, `strtod`, `dtostr` and the `shell_*` helpers are defined in
 `shell.c` and **not in `sqlite3.c`** - checked by grepping the pinned amalgamation, both files. An
 application that links `sqlite3.h` does not get them, so they are not a gap for a library
-replacement. They *are* a gap for a shell replacement, and that is the honest way to read them.
+replacement. They *are* a gap for a shell replacement.
 
 ### What the audit confirms
 

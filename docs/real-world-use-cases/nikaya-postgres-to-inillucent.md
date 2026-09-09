@@ -15,13 +15,13 @@ and an NVMe SSD, while several other things were running. The arms are interleav
 
 ## 1. What actually moved
 
-Nikaya's *retrieval* was already inillucent: an earlier move put the vector and keyword branches into the
-in-process `inillucent-core::Index` and measured recall@100 going from pgvector's 0.899 to 1.000. What
-had not moved was the **record** — documents, chunks, participants, attachments, jobs, sessions, and
+Nikaya's *retrieval* was already inillucent: an earlier move put the vector and keyword branches
+into the in-process `inillucent-core::Index` and measured recall@100 going from pgvector's 0.899 to
+1.000. What had not moved was the **record** — documents, chunks, participants, attachments, jobs, sessions, and
 the vectors themselves — which was still PostgreSQL reached through `sqlx`, with the retrieval index
 as a projection of it.
 
-So this is the second half: 16 tables, 1,626,000 rows, and the 19 files that touched `sqlib`.
+So this is the second half: 16 tables, 1,626,000 rows, and the 19 files that touched `sqlx`.
 
 | | before | after |
 |---|---|---|
@@ -31,7 +31,7 @@ So this is the second half: 16 tables, 1,626,000 rows, and the 19 files that tou
 | processes to run | PostgreSQL, the embedder, the server | the embedder, the server |
 | on disk | 5,852 MB | 7,422 MB |
 
-The file is **larger**, and that is the first honest number. PostgreSQL compresses large values in
+The file is **larger**. PostgreSQL compresses large values in
 TOAST; this engine does not. The vectors also widen from `halfvec`'s two bytes an element to `f32`'s
 four — 925 MB becomes 1,850 MB — which is offset by 1,811 MB of HNSW and roughly 900 MB of GIN index
 that are not carried at all.
@@ -297,7 +297,7 @@ short of caching the counters, which trades a correct number for a fast one.
 
 `corpus.scan20k` is excluded rather than reported as a ratio: the PostgreSQL side counts a subquery,
 so the server never sends the 20,000 vectors anywhere, while the inillucent side builds 20,000 chunk
-values with their 768 floats each. Both are honest costs on their own side and they are not the same
+values with their 768 floats each. Each is a real cost on its own side, and they are not the same
 work.
 
 ### Retrieval, against pgvector, at matching answer quality
