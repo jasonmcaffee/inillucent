@@ -189,7 +189,7 @@ pub struct ImportedDatabase {
     catalog: StaticCatalog,
     database: Database,
     trees: HashMap<u32, PagedTree>,
-    layouts: HashMap<u32, SourceLayout>,
+    layouts: HashMap<u32, std::rc::Rc<SourceLayout>>,
     /// For each table root, its index roots ordered smallest tree first.
     covering: HashMap<u32, Vec<u32>>,
     page_size: usize,
@@ -1052,7 +1052,7 @@ impl TreeCatalog for ImportedDatabase {
         self.trees.get(&root)
     }
 
-    fn layout(&self, root: u32) -> Option<&SourceLayout> {
+    fn layout(&self, root: u32) -> Option<&std::rc::Rc<SourceLayout>> {
         self.layouts.get(&root)
     }
 
@@ -1397,7 +1397,7 @@ impl ImportedDatabase {
             });
             identifiers.push(info.root);
             shapes.insert(info.root, shape);
-            layouts.insert(info.root, layout);
+            layouts.insert(info.root, std::rc::Rc::new(layout));
             // **A descending index is imported descending**, which is how
             // SQLite stores it and what makes the two engines read one in the
             // same order.
@@ -1449,7 +1449,7 @@ impl ImportedDatabase {
                 });
                 identifiers.push(index.root);
                 shapes.insert(index.root, shape);
-                layouts.insert(index.root, layout);
+                layouts.insert(index.root, std::rc::Rc::new(layout));
                 if covers_every_row(index) {
                     covering
                         .entry(info.root)
@@ -1580,7 +1580,7 @@ impl ImportedDatabase {
         let schema_info = table_from_create_sql(schema_create_sql(), 0, schema_root)?;
         layouts.insert(
             schema_root,
-            SourceLayout {
+            std::rc::Rc::new(SourceLayout {
                 tree_key: schema_root,
                 // The rowid is the tree's key column and is not one of the five
                 // declared columns, so the record slots start at tree column 1.
@@ -1597,7 +1597,7 @@ impl ImportedDatabase {
                 ],
                 width: 6,
                 key_columns: vec![0],
-            },
+            }),
         );
         trees.insert(
             schema_root,
@@ -3141,7 +3141,7 @@ impl ImportedDatabase {
                 held.entry.stats.row_count,
             )?;
             self.trees.insert(root, tree);
-            self.layouts.insert(root, layout);
+            self.layouts.insert(root, std::rc::Rc::new(layout));
             self.owner.insert(root, at);
             restored.insert(held.rowid, root);
         }
@@ -6122,7 +6122,7 @@ struct WriteView<'a> {
     /// `main`'s.
     owner: &'a HashMap<u32, usize>,
     trees: &'a mut HashMap<u32, PagedTree>,
-    layouts: &'a HashMap<u32, SourceLayout>,
+    layouts: &'a HashMap<u32, std::rc::Rc<SourceLayout>>,
     /// The tables an index a module owns is built over, by root page.
     ///
     /// The write reports what it stored and removed for these and for nothing
@@ -6197,7 +6197,7 @@ impl WriteTarget for WriteView<'_> {
         Ok((database, self.trees, log))
     }
 
-    fn layout(&self, root: u32) -> Option<&SourceLayout> {
+    fn layout(&self, root: u32) -> Option<&std::rc::Rc<SourceLayout>> {
         self.layouts.get(&root)
     }
 
@@ -6243,7 +6243,7 @@ impl TreeCatalog for WriteView<'_> {
         self.trees.get(&root)
     }
 
-    fn layout(&self, root: u32) -> Option<&SourceLayout> {
+    fn layout(&self, root: u32) -> Option<&std::rc::Rc<SourceLayout>> {
         self.layouts.get(&root)
     }
 
@@ -7775,7 +7775,7 @@ struct LoadedSchema {
     /// Every tree this file holds, keyed by the connection's handle for it.
     trees: HashMap<u32, PagedTree>,
     /// Each tree's layout, keyed the same way.
-    layouts: HashMap<u32, SourceLayout>,
+    layouts: HashMap<u32, std::rc::Rc<SourceLayout>>,
     /// For each table's handle, its index handles.
     covering: HashMap<u32, Vec<u32>>,
     /// The catalog rows, with the handle each object's tree is registered under.
@@ -7809,7 +7809,7 @@ fn load_schema(
     allocate: &mut dyn FnMut(u32) -> u32,
 ) -> DbResult<LoadedSchema> {
     let mut trees: HashMap<u32, PagedTree> = HashMap::new();
-    let mut layouts: HashMap<u32, SourceLayout> = HashMap::new();
+    let mut layouts: HashMap<u32, std::rc::Rc<SourceLayout>> = HashMap::new();
     let mut covering: HashMap<u32, Vec<u32>> = HashMap::new();
     let mut entries: Vec<(i64, SchemaEntry)> = Vec::new();
     let mut identifiers: Vec<u32> = Vec::new();
@@ -7922,7 +7922,7 @@ fn load_schema(
             entry.stats.row_count,
         )?;
         trees.insert(identifier, tree);
-        layouts.insert(identifier, layout);
+        layouts.insert(identifier, std::rc::Rc::new(layout));
         infos.insert(info.folded.clone(), (identifier, info.clone()));
         entries.push((rowid_of_name(entry), entry.clone()));
         identifiers.push(identifier);
@@ -7997,7 +7997,7 @@ fn load_schema(
             entry.stats.row_count,
         )?;
         trees.insert(identifier, tree);
-        layouts.insert(identifier, layout);
+        layouts.insert(identifier, std::rc::Rc::new(layout));
         if covers_every_row(&index) {
             covering.entry(table_root).or_default().push(identifier);
         }
@@ -8084,7 +8084,7 @@ fn load_schema(
     let schema_info = table_from_create_sql(schema_create_sql(), index, schema_root)?;
     layouts.insert(
         schema_root,
-        SourceLayout {
+        std::rc::Rc::new(SourceLayout {
             tree_key: schema_root,
             slots: (1..=5).map(Some).collect(),
             rowid: Some(0),
@@ -8099,7 +8099,7 @@ fn load_schema(
             ],
             width: 6,
             key_columns: vec![0],
-        },
+        }),
     );
     trees.insert(schema_root, catalog_tree);
     for roots in covering.values_mut() {

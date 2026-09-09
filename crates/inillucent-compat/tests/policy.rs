@@ -73,7 +73,7 @@ const UNSAFE_CRATES: [&str; 1] = ["inillucent-capi"];
 /// about what the engine is made of, and a baseline tool that never ships is
 /// not part of it - but a file with `unsafe` in it should still have to say
 /// why, in writing, in a list somebody reads.
-const UNSAFE_ALLOWED: [&str; 8] = [
+const UNSAFE_ALLOWED: [&str; 9] = [
     "crates/inillucent-vfs/src/os/windows.rs",
     "crates/inillucent-vfs/src/os/unix.rs",
     "crates/inillucent-compat/src/bin/sqlperf.rs",
@@ -98,6 +98,14 @@ const UNSAFE_ALLOWED: [&str; 8] = [
     // The same counting allocator again, in the profiler that says which stage
     // of a compile allocates (task-1838 Part 4/5).
     "crates/inillucent-compat/src/bin/prepareprofile.rs",
+    // The same counting allocator once more, in the profiler that says what an
+    // already-prepared statement costs to *execute* (task-1890). It adds one
+    // thing the four above do not: the allocator captures a backtrace and
+    // attributes the allocation to the frame that made it, behind a thread-local
+    // reentrancy flag - a capture allocates, so an unguarded one recurses until
+    // the stack runs out. Every method still forwards to the system allocator
+    // unchanged and each one carries its own SAFETY note.
+    "crates/inillucent-compat/src/bin/execprofile.rs",
 ];
 
 /// Returns every `.rs` file under a directory.

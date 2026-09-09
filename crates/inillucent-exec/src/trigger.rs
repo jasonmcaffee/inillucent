@@ -497,7 +497,7 @@ fn keys_for_delete(
 fn layout_for(
     target: &dyn WriteTarget,
     table: &inillucent_sql::catalog_view::TableInfo,
-) -> DbResult<crate::physical::SourceLayout> {
+) -> DbResult<std::rc::Rc<crate::physical::SourceLayout>> {
     target.layout(table.root).cloned().ok_or_else(|| {
         misuse(format!(
             "a trigger body writes {}, which has no tree",

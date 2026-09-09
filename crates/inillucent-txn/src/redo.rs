@@ -569,7 +569,21 @@ impl RowRedo for TreeRows {
                     page.0
                 )));
             };
-            leaf.update_slot(column as usize, row, &new_value)?;
+            // **The answer is checked, and it was not.** `update_slot` reports
+            // `NoRoom` rather than failing when it cannot write where the value
+            // lies, and discarding that return stamped the page with the
+            // record's LSN while leaving the value the record describes
+            // unwritten - a change lost in silence, and every later record for
+            // the page then skipped on the LSN. The write path only logs this
+            // record after the same call answered `Yes` on a copy of the same
+            // page, so a `NoRoom` here means the replay is not looking at the
+            // page the record was written against, which is worth saying.
+            if leaf.update_slot(column as usize, row, &new_value)? != Applied::Yes {
+                return Err(corrupt(format!(
+                    "replaying UpdateInPlace at {lsn} found no room in leaf {}",
+                    page.0
+                )));
+            }
             leaf.set_lsn(lsn)
         })
     }

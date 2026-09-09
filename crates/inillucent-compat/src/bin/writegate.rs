@@ -234,14 +234,31 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         "workload", "find", "apply", "total", "ins", "del", "inplace", "compact"
     );
     {
-        let copy = restore(fixture, &scratch, "profile")?;
-        let mut database = ImportedDatabase::import_with(copy, settings.page_size, settings.frames)
-            .map_err(|error| format!("import failed: {}", why(&error)))?;
+        // **A fresh database per workload, because the gate gives each one a
+        // fresh database.** All of them used to run against one copy, in list
+        // order, and the numbers that came out described a file the earlier
+        // workloads had already rewritten. On the `transaction` family that was
+        // not a small distortion: `txn.autocommit`, `txn.batched` and
+        // `txn.large` bind the same scattered rowids and the same
+        // `row {iteration} lorem ipsum ...` text, so by the time `txn.large`
+        // ran, every row it touched already held the exact bytes it was about
+        // to write. Nothing differed, the in-place path is only reached when
+        // exactly one column does, and the profile reported `inplace 0.00` for
+        // a workload that in the gate takes that path on every statement.
         for workload in &plan.workloads {
+            let copy = restore(fixture, &scratch, "profile")?;
+            let mut database =
+                ImportedDatabase::import_with(copy, settings.page_size, settings.frames)
+                    .map_err(|error| format!("import failed: {}", why(&error)))?;
             let Ok(statement) = database.prepare_statement(&workload.sql) else {
                 continue;
             };
-            let iterations = workload.repeat.min(200).max(1);
+            // **The workload's own repeat, not a sample of it.** Two hundred of
+            // `txn.large`'s two thousand statements never fill a delta area, so
+            // the compaction column read 0.000 for the workload whose
+            // compactions are the reason it is on this page at all. The probe
+            // now runs exactly what one gate round runs.
+            let iterations = workload.repeat.max(1);
             let before = database.write_stats();
             database.begin_batch();
             let mut find = 0u128;

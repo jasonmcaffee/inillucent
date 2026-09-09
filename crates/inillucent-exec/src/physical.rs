@@ -161,7 +161,7 @@ pub trait TreeCatalog {
     /// Returns the layout for a plan's root page id.
     ///
     /// @param root - the root page id the plan named
-    fn layout(&self, root: u32) -> Option<&SourceLayout>;
+    fn layout(&self, root: u32) -> Option<&std::rc::Rc<SourceLayout>>;
 
     /// Returns the rows a virtual table produces, when the caller has one.
     ///
@@ -420,7 +420,7 @@ impl TreeCatalog for WithQueue<'_> {
         self.inner.tree(root)
     }
 
-    fn layout(&self, root: u32) -> Option<&SourceLayout> {
+    fn layout(&self, root: u32) -> Option<&std::rc::Rc<SourceLayout>> {
         self.inner.layout(root)
     }
 
@@ -996,7 +996,7 @@ pub struct PreparedStage {
     /// A materialised subquery has no entry in the catalog to hold it, and
     /// synthesising one *here* rather than registering it in the catalog is
     /// what keeps the catalog a description of the file.
-    pub layout: Option<SourceLayout>,
+    pub layout: Option<std::rc::Rc<SourceLayout>>,
 }
 
 /// What a statement's physical choices are, decided once.
@@ -1677,7 +1677,7 @@ fn plan_stages(
                     // A module's row is its own record, exactly as a
                     // materialised subquery's is: slot `i` is column `i`, and
                     // nothing is known about the order.
-                    layout: Some(SourceLayout {
+                    layout: Some(std::rc::Rc::new(SourceLayout {
                         tree_key: 0,
                         slots: (0..declared).map(Some).collect(),
                         rowid: carries_rowid.then_some(declared),
@@ -1687,7 +1687,7 @@ fn plan_stages(
                         types: vec![StaticType::Unknown; width],
                         width,
                         key_columns: Vec::new(),
-                    }),
+                    })),
                 });
                 offset = offset.saturating_add(width);
             }
@@ -1760,7 +1760,7 @@ pub(crate) struct Space<'c> {
     /// The stages, in order.
     pub(crate) stages: &'c [PreparedStage],
     /// Each stage's layout.
-    pub(crate) layouts: &'c [SourceLayout],
+    pub(crate) layouts: &'c [std::rc::Rc<SourceLayout>],
     /// The static type of every column of the joined row.
     pub(crate) types: &'c [StaticType],
     /// The tree columns the *joined* rows arrive sorted by, when they do.
@@ -1938,7 +1938,7 @@ pub(crate) struct HeldSpace {
     /// catalog to borrow it from - and a `Statement` owns both its `Prepared`
     /// and its space, which a borrow between them would make self-referential.
     /// It is built once per prepare and never per execution.
-    pub(crate) layouts: Vec<SourceLayout>,
+    pub(crate) layouts: Vec<std::rc::Rc<SourceLayout>>,
     /// The static type of every column of the joined row.
     pub(crate) types: Vec<StaticType>,
     /// The tree columns the joined rows arrive sorted by, when they do.
@@ -2736,7 +2736,7 @@ fn push_materialised(
         is_lookup: false,
         offset: *offset,
         width,
-        layout: Some(SourceLayout {
+        layout: Some(std::rc::Rc::new(SourceLayout {
             tree_key: 0,
             slots: (0..width).map(Some).collect(),
             rowid: None,
@@ -2746,7 +2746,7 @@ fn push_materialised(
             types: vec![StaticType::Unknown; width],
             width,
             key_columns: Vec::new(),
-        }),
+        })),
     });
     *offset = offset.saturating_add(width);
 }
@@ -4115,7 +4115,7 @@ fn is_scan_prefix(exprs: &[Expr], scan_order: &[Vec<usize>]) -> bool {
 /// @param order - the tree columns the outermost walk is ordered by
 fn order_equivalents(
     stages: &[PreparedStage],
-    layouts: &[SourceLayout],
+    layouts: &[std::rc::Rc<SourceLayout>],
     order: &[usize],
 ) -> Vec<Vec<usize>> {
     let mut classes: Vec<Vec<usize>> = order.iter().map(|column| vec![*column]).collect();
@@ -4209,7 +4209,12 @@ pub fn run_prepared(
     let sink = Box::new(CollectInto::new(std::rc::Rc::clone(&rows)));
     let (mut pipeline, shape) = build_prepared(plan, catalog, prepared, params, sink)?;
     pipeline.run()?;
-    let collected = rows.borrow().clone();
+    // **Taken, not cloned.** The sink is dropped with the pipeline and nothing
+    // reads the buffer again, so cloning it copied every row of every answer to
+    // hand back a second copy of what was about to be freed. On a one-row answer
+    // that is two allocations of the twenty-two an already-prepared `SELECT 1`
+    // makes; on a scan it is the whole result set, twice.
+    let collected = std::mem::take(&mut *rows.borrow_mut());
     Ok((collected, shape))
 }
 

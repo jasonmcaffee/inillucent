@@ -14,9 +14,9 @@ them.
 
 | | | measured |
 |---|---|---|
-| **Faster than SQLite** | **279% faster** | 3.79x weighted over the contract's ten families, median of four consecutive 30-round runs. The 95% lower bound the gate actually grades on is **3.65x**, i.e. **265% faster**, against a 3.00x bound it clears on all four |
+| **Faster than SQLite** | **295% faster** | 3.95x weighted over the contract's ten families, median of four consecutive 30-round runs. The 95% lower bound the gate actually grades on is **3.63x**, i.e. **263% faster**, against a 3.00x bound it clears on all four |
 | **Faster than pgvector** | **175% faster unfiltered, 6,262% faster filtered** | retrieval p50 0.8954 ms against 2.459, and 0.6631 ms against 42.182 with a `source =` predicate, against the *better* of the two pgvector configurations. In production, on Nikaya's 598,560-chunk mailbox, semantic p50 went 33.7 ms warm to **4.41 ms** - **664% faster**, and recall@100 0.899 to **1.000** |
-| **Less CPU** | **65% less CPU** | 445 ms of processor against SQLite's 1,266, same plan, one child process each. Ratio 0.35x against a 0.40x bar, which it meets on three of the four runs and misses on the one that read 0.41x |
+| **Less CPU** | **68% less CPU** | 414 ms of processor against SQLite's 1,293, same plan, one child process each. Ratio 0.32x against a 0.40x bar, which it meets on all four runs |
 | **Less RAM** | **it is not less. It is 15% MORE** | 42.6 MiB peak resident against SQLite's 37.2, on the same 128 MiB budget. It was **102% more** before review 6 and **43% more** before review 7, and the bar asks for **5% less** - so this is the one headline that is still a loss |
 | **Same features as SQLite** | **96.9% byte for byte, 98.3% working, 0 refused** | 403 of 416 probed cases produce SQLite's exact bytes; 6 of the other 13 are vector features SQLite does not have. There is **no case SQLite answers that this engine refuses**, and no silent difference - [why it is not 100%](#why-it-is-969-and-not-100) says what each of the 13 is and which can ever be closed |
 
@@ -137,12 +137,12 @@ and this engine wins two of those three.
 | features both answer **differently** | - | 7 | **1.7%**, none of them silent |
 | vector features with no SQLite equivalent | 0 | 6 | **6 extra** |
 | **the surface audited against SQLite's own registers**, not against our case list | 218 functions, 67 pragmas, 19 modules, 5 collations, 65 dot commands | all called in both engines, and now **compared on every build** | **4 functions, 2 modules and 2 dot commands absent**, and the **silent difference is closed** - see [Is the feature list itself complete?](#is-the-feature-list-itself-complete) |
-| **Elapsed time**, weighted over the contract's ten families | the reference | 3.79x the speed | **279% faster** |
-| Elapsed time, the 95% lower bound the contract grades on | - | 3.65x | **265% faster** (bar: 200% faster) |
-| **Processor time**, same plan, one child process each | 1,266 ms | 445 ms | **65% less CPU** (bar: 60%, met on 3 of 4 runs) |
+| **Elapsed time**, weighted over the contract's ten families | the reference | 3.95x the speed | **295% faster** |
+| Elapsed time, the 95% lower bound the contract grades on | - | 3.63x | **263% faster** (bar: 200% faster) |
+| **Processor time**, same plan, one child process each | 1,293 ms | 414 ms | **68% less CPU** (bar: 60%, met on all four runs) |
 | **Peak resident memory**, same plan, matched 128 MiB budget | 37.2 MiB | 42.6 MiB | **15% MORE memory** (was 102%, then 43%; the bar asks for 5% *less*) |
 | **The database on disk**, the same fixture imported | 16.05 MiB | 16.62 MiB | **1.036x** (was 1.41x) |
-| The one family that is **worse** than before | - | `transaction` **19% slower**, lower bound 69% slower | **under the floor, which asks for no family slower than SQLite** - see [Where the memory goes](#where-the-memory-goes) |
+| The one family that is **worse** than before | - | `transaction` **21% slower**, lower bound 45% slower | **under the floor, which asks for no family slower than SQLite** - see [Where the memory goes](#where-the-memory-goes) |
 | Retrieval ranking, 17 graded comparisons against pgvector | the baseline | 15 better, 2 not worse | **none worse** |
 | Retrieval latency, unfiltered, p50 | 2.459 ms | 0.8954 ms | **175% faster** |
 | Retrieval latency, filtered to a minority source, p50 | 42.182 ms | 0.6631 ms | **6,262% faster** |
@@ -153,11 +153,18 @@ cores - and it holds **15% more memory** to do it, where it held 102% more befor
 before review 7. The budget handed to the two engines is the same 128 MiB; what differs is how much
 of it each chooses to use, and after review 7 the file itself is within **4%** of SQLite's.
 
-**And one family is worse than it was.** `transaction` fell from 45% faster than SQLite to
-**19% slower**, with a lower bound of 69% slower against a floor asking for no slower than SQLite, and the cause is the same density that bought the memory:
-`txn.large` replaces a ten-byte note with a fifty-byte one two thousand times in one transaction, so
-every statement is a delta insert and every thirty-second a compaction over a whole leaf - and a leaf
-now holds twice as many rows. It is the price of the row above it.
+**And one family is worse than it was.** `transaction` is **21% slower** than SQLite, with a lower
+bound of 45% slower against a floor asking for no slower at all, and one workload decides it:
+`txn.large` replaces an eight-byte note with a forty-two byte one two thousand times in one
+transaction.
+
+**The cause is not the storage engine, and that was settled by removing the storage engine from it.**
+The whole tree write was ablated out of the in-place update path - the statement found its row,
+decided what to write, and returned without writing - and the workload measured **1.54 microseconds
+against 1.53**. What is left is what a statement costs before it reaches a tree: an already-prepared
+`SELECT 1` costs **827 ns and twenty-two heap allocations**, because the operator chain, the column
+names and the `EXPLAIN` description are rebuilt on every execution. That cost is under `transaction`,
+`open.prepare`, `extension` and `schema` alike.
 
 That memory row is still the one thing on this page that is worse than SQLite, and it is now graded:
 `compat/perf/contract.toml` carries a memory bar and a processor bar, and the gate fails on them.
@@ -1407,16 +1414,16 @@ what the contract gives it in the headline.
 
 | family | weight | measured | the difference | the bar asks | verdict | lower bounds |
 |---|---|---|---|---|---|---|
-| `read.point` | 16% | 27.76x | **2,676% faster** | 100% faster | **MET**, 4 of 4 | 25.2-26.5 |
-| `large.values` | 4% | 13.84x | **1,284% faster** | 50% faster | **MET**, 4 of 4 | 7.7-10.0 |
-| `read.analytical` | 10% | 6.10x | **510% faster** | 400% faster | **MET**, 4 of 4 | 5.2-5.4 |
-| `read.range` | 12% | 4.25x | **325% faster** | 200% faster | **MET**, 4 of 4 | 3.4-3.6 |
-| `read.join` | 8% | 4.17x | **317% faster** | 200% faster | MET on 3 of 4 - the lower bound sits on the bar | 3.01-3.07 |
-| `write` | 20% | 1.93x | **93% faster** | 50% faster | **MET**, 4 of 4 | 1.54-1.68 |
-| `open.prepare` | 8% | 1.40x | **40% faster** | 400% faster | **MISSED**, 4 of 4 - but **on the floor rather than under it**, 1.00-1.07 | 1.00-1.07 |
-| `schema` | 4% | 1.35x | **35% faster** | 200% faster | **MISSED**, 4 of 4 | 1.00-1.30 |
-| `extension` | 8% | 1.35x | **35% faster** | 50% faster | **MISSED**, 4 of 4, and **above the floor on all four** - it was 1.01-1.06 before this round | 1.06-1.22 |
-| `transaction` | 10% | 1.14x | **14% faster** | no slower than SQLite | **MISSED**: met on run 1, and below on the three where `txn.large` and the volume take it there | 0.63-1.04 |
+| `read.point` | 16% | 31.92x | **3,092% faster** | 100% faster | **MET**, 4 of 4 | 27.2-29.7 |
+| `large.values` | 4% | 12.34x | **1,134% faster** | 50% faster | **MET**, 4 of 4 | 7.2-9.6 |
+| `read.analytical` | 10% | 6.91x | **591% faster** | 400% faster | **MET**, 4 of 4 | 5.5-5.8 |
+| `read.range` | 12% | 4.95x | **395% faster** | 200% faster | **MET**, 4 of 4 | 3.9-4.0 |
+| `read.join` | 8% | 4.29x | **329% faster** | 200% faster | MET on 2 of 4 - the lower bound sits on the bar | 2.86-3.02 |
+| `write` | 20% | 1.89x | **89% faster** | 50% faster | **MET**, 3 of 4 | 1.49-1.83 |
+| `open.prepare` | 8% | 1.64x | **64% faster** | 400% faster | **MISSED**, 4 of 4 - but **above the floor rather than under it** | 1.14-1.27 |
+| `schema` | 4% | 1.31x | **31% faster** | 200% faster | **MISSED**, 4 of 4 | 0.81-1.31 |
+| `extension` | 8% | 1.48x | **48% faster** | 50% faster | **MISSED**, 4 of 4, and **above the floor on all four** | 1.22-1.35 |
+| `transaction` | 10% | 0.79x | **21% slower** | no slower than SQLite | **MISSED**, 4 of 4 - `txn.large` decides it | 0.52-0.73 |
 
 **The gate prints `NOT MET`, and it is exact about which tests that is.** The headline
 clears its bound on all four runs and the processor bar is met on all four. What is missed is the
@@ -1427,27 +1434,38 @@ keeping up.
 
 ### The workloads that are slower than SQLite
 
-Thirty workloads, median of four runs. Twenty-three are faster; these seven are slower.
+Thirty workloads, median of four runs. Twenty-four are faster; these six are slower.
 
 | workload | family | ratio | how much slower | why |
 |---|---|---|---|---|
-| `txn.large` | `transaction` | 0.21x | **376% slower** | 2,000 `UPDATE`s in one transaction. 1.56 µs each against SQLite's 450 ns; it is what decides the `transaction` floor |
-| `extension.fts.build` | `extension` | 0.40x | **150% slower** | **2,000 tree row writes per 500 documents** - `%_content`, `%_docsize`, then 507 dictionary rows and 507 doclists at the flush - where SQLite writes about 1,000 rows and one segment blob |
-| `prepare.trivial` | `open.prepare` | 0.42x | **138% slower** | `SELECT 1` compiled per iteration: 1,258 ns against 420, in **25 allocations**. `inillucent-prepareprofile` splits it 320 ns to parse, 476 to bind, 608 to build the pipeline |
-| `write.insert.batch` | `write` | 0.58x | **72% slower** | 2,000 inserts in one transaction, 2,491 KiB of log |
-| `range.lookaside` | `read.range` | 0.94x | **6% slower** | |
-| `join.range` | `read.join` | 0.94x | **6% slower** | |
-| `extension.json` | `extension` | 0.97x | **3% slower** | |
+| `txn.large` | `transaction` | 0.13x | **669% slower** | 2,000 `UPDATE`s in one transaction, 1,896 ns each against SQLite's 482. **Not a storage cost** - see below |
+| `extension.fts.build` | `extension` | 0.49x | **104% slower** | four tree row writes per document - `%_content` and `%_docsize`, and at the flush a dictionary row and a doclist row for each of 507 terms - where SQLite writes about 1,000 rows and one segment blob |
+| `prepare.trivial` | `open.prepare` | 0.52x | **92% slower** | `SELECT 1` compiled per iteration, in **25 allocations**. `inillucent-prepareprofile` splits it 417 ns to parse, 520 more to bind, and the rest to build a pipeline |
+| `write.insert.batch` | `write` | 0.64x | **56% slower** | 2,000 inserts in one transaction; a split writes four whole page images to the log |
+| `join.range` | `read.join` | 0.88x | **14% slower** | one statement's overhead spread over two hundred rows, where a point lookup hides it |
+| `range.lookaside` | `read.range` | 0.89x | **13% slower** | the same shape |
 
-And the other end of the same table, for scale, as ratios: `point.miss` 36.9x, `large.read` 31.1x,
-`point.rowid` 22.0x, `join.selective` 16.1x, `point.index` 13.1x, `range.reverse` 13.1x,
-`scan.aggregate` 12.3x, `scan.group` 10.4x.
+`extension.json` is no longer on this list: it reads **1.06x** now that a repeated `json_extract`
+keeps the parsed document and the parsed path.
 
-**Two of the four moved for this ticket, and in the direction the memory work was steered by.**
-`extension.fts.build` reads 0.29-0.49 where it read 0.29-0.30, and the `extension` family's lower
-bound is 1.06-1.22 where it was 1.01-1.06 - a floor cleared by code rather than by luck. `schema`'s
-`flatten` stage is now free where it cost 1.0 ms, and its `pack` stage absorbed 4.5 ms of that as the
-second sizing pass, so the family's *time* is where it was while its *memory* halved.
+And the other end of the same table, for scale, as ratios: `point.miss` 65.1x, `large.read` 42.7x,
+`point.rowid` 29.6x, `join.selective` 20.7x, `scan.aggregate` 19.2x, `point.index` 17.0x,
+`range.reverse` 15.4x, `scan.group` 12.4x.
+
+**Four of the six have one cause, and it is not the storage engine.** The whole tree write was
+ablated out of the in-place update path - the statement found its row, decided what to write, and
+returned without writing - and `txn.large` measured **1.54 microseconds against 1.53**. What is left
+is what a statement costs before it reaches a tree: an already-prepared `SELECT 1`, which reads no
+table and binds no parameter, costs **827 ns and twenty-two heap allocations**, because the operator
+chain, the column names and the `EXPLAIN` description are rebuilt on every execution. The same
+`UPDATE` bound to a rowid that matches nothing costs 950 ns of the 1,896 it costs when it matches.
+
+That is also why `join.range` and `range.lookaside` sit just under SQLite while `point.rowid` sits
+thirty times over it: a query that spreads one statement's overhead across two hundred rows shows it,
+and one that does not, hides it. `physical::build_statement` already holds an operator chain across
+executions and rebuilds only the source; nothing in the execution path calls it, and connecting it
+needs the chain to stop borrowing the catalog and a parameter to be read when the expression is
+evaluated rather than folded in when it is built.
 
 ---
 

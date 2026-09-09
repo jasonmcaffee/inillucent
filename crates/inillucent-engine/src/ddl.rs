@@ -901,7 +901,8 @@ impl ImportedDatabase {
     pub(crate) fn republish_imposters(&mut self) {
         let held = self.imposters.clone();
         for (info, layout, tree) in held {
-            self.layouts.insert(layout.tree_key, layout);
+            self.layouts
+                .insert(layout.tree_key, std::rc::Rc::new(layout));
             self.trees.insert(info.root, tree);
             self.tables.retain(|table| table.folded != info.folded);
             self.tables.push(info);
@@ -1139,7 +1140,7 @@ impl ImportedDatabase {
         };
         let page = tree.root();
         self.trees.insert(root, tree);
-        self.layouts.insert(root, layout);
+        self.layouts.insert(root, std::rc::Rc::new(layout));
         self.touched |= super::schema_bit(at);
         Ok(page)
     }
