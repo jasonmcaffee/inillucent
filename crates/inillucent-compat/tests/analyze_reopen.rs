@@ -32,8 +32,47 @@
 //! What these three cover, and it is the class rather than the case: `ANALYZE` with an unfolded log
 //! at one object, at sixty-odd objects (so the provisional counter reaches `0x8000_0040`, the exact
 //! number the real failure reported), and twice over so the second run writes into a `sqlite_stat1`
-//! the catalog already holds. All three pass, so none of those is the missing ingredient, and the
-//! next thing to vary is what the 6.9 GB database has that they do not.
+//! the catalog already holds. All three pass, and they are kept because they pin what `ANALYZE`
+//! itself must keep doing.
+//!
+//! ## What the 6.9 GB database had that a fresh one does not (task-1880 §20)
+//!
+//! **A page carrying an LSN from a log stream that no longer exists**, and `ANALYZE` is the
+//! messenger rather than the cause. Reproduced against a copy of the parked file at
+//! `J:/nikaya-data/wal-parked-task1876/nikaya.rdb.after-checkpoint-recovery`: copy it, run
+//! `analyze`, reopen. Nine seconds, deterministic, and the same message.
+//!
+//! What the file says, read out of its own bytes:
+//!
+//! ```text
+//! meta checkpoint_lsn 21,074,969,552      the position the log resumes at
+//! page 3, the catalog leaf, is stamped 21,939,058,496
+//! of the first 3,000 pages, 9 carry a stamp above the whole log's end (21,075,008,400)
+//! ```
+//!
+//! Page 3 is stamped 864 million positions **beyond** the end of the log beside it. Recovery's
+//! page-LSN rule - apply a record only when the page's stamp is below it - therefore skips every
+//! record for that page, because the stamp says the page already has them. It does not: the stamp
+//! is a position in an earlier stream that was abandoned when 24 segments were moved aside to
+//! recover the file.
+//!
+//! So `ANALYZE` wrote `sqlite_stat1`'s catalog row into page 3, the row went to the log, the reopen
+//! skipped that record, and the row was gone. A trace in `LearningRows` confirms it directly: the
+//! applier is built from 62 checkpointed entries knowing trees `0x8000_0000..=0x8000_003D`, and
+//! `learn` is **never called** for the catalog row that would have added `0x8000_003E`. The shape
+//! derivation then has nothing to register the tree under and refuses - which is the message, and it
+//! is the *second* thing that went wrong. The first is that a committed row was discarded silently.
+//!
+//! It is not specific to `ANALYZE` and not specific to the catalog. Any write to a page stamped
+//! above the log's resumed position is discarded at the next open, and `PRAGMA integrity_check`
+//! answers `ok` about the result, because the file really is structurally intact - it is missing a
+//! row nothing can see was lost.
+//!
+//! **What is not here is a reduction.** Building and checkpointing, stealing pages with a 64-frame
+//! pool, truncating the log and reopening does *not* reproduce it: the reopened write survives,
+//! because the page it lands on reaches the file again before the next open and the log is never
+//! asked. The distance matters and the reduction has not found what sets it. The recipe above needs
+//! only the parked file, which is preserved, so nobody has to guess.
 //!
 //! The tests abandon the connection the way the crash tests do, so the log is still there to replay.
 //! A tidy close checkpoints, which folds the log into the file and never reaches the code this is
