@@ -59,7 +59,7 @@ record what a signed installer would take on each platform and what it costs.
 | `inillucent` | the command line: 28 verbs — `query`, `exec`, `describe`, `import`, `export`, `search`, `explain`, `backup`, `migrate` … |
 | `inillucent-shell` | an interactive shell shaped like `sqlite3`, with 63 of its dot commands and 48 of its 48 command-line options |
 | `inillucent-mcp` | the same 27 commands served to an AI agent over MCP |
-| `inillucent-migrate` | builds an inillucent database from a SQLite file |
+| `inillucent-migrate` | builds an inillucent database from a SQLite file, a running PostgreSQL or MySQL server, or a legacy retrieval index |
 
 ```sh
 inillucent create app.rdb
@@ -75,6 +75,31 @@ nobody could act on, and **`3` a construct the engine has not built yet** — so
 script can branch on "not yet" without matching on a message. `--output json`
 turns any command's result into the same object a binding sees, with typed
 values, an exact `total`, and the driver's own status name on a failure.
+
+### Bringing a database in
+
+```sh
+inillucent migrate legacy.db                                --destination app.rdb
+inillucent migrate "postgres://jason@127.0.0.1:5432/corpus" --destination corpus.rdb
+inillucent migrate "mysql://root@127.0.0.1:3306/app"        --destination app.rdb
+```
+
+A path is a SQLite file; a `postgres://` or `mysql://` URL is a **running server**, read over its own
+wire protocol inside one repeatable-read snapshot so that every table — and the schema — is as of one
+instant. The source is never written to and the destination is never overwritten: the build is staged
+beside it and published by an atomic rename, and every table is checked by row count **and** by an
+order-independent digest before anything is published. A failure publishes nothing and leaves the
+staging file and a written report.
+
+The wire clients are **first-party and bring no third-party dependency** — `crates/inillucent-remote`
+depends on four crates in this workspace and nothing else, which is why `migrate --kind postgres` is
+reachable from the shipped CLI and from MCP rather than only from a separate tool. The argument for
+not reaching for the `postgres` and `mysql` crates is in
+[`docs/dependency-policy.md`](docs/dependency-policy.md); the design is
+[`tasks/task-1868-migrating-from-postgres-mysql-and-a-front-door-for-agents-tdd.md`](tasks/task-1868-migrating-from-postgres-mysql-and-a-front-door-for-agents-tdd.md),
+and [`agent-skills/inillucent-migrate`](agent-skills/inillucent-migrate/SKILL.md) is the operator's
+page — including what is carried, what is only reported, and the two limits (no TLS, and MySQL's
+`caching_sha2_password` full authentication) that are refused by name rather than worked around.
 
 ### For an agent
 
@@ -95,6 +120,16 @@ do. `--readonly` refuses every statement that changes something, classified by t
 binder rather than by scanning the text; `--root DIR` refuses every path outside a
 directory. Designed in
 [`tasks/task-1836-cli-mcp-and-installers-tdd.md`](tasks/task-1836-cli-mcp-and-installers-tdd.md).
+
+**[`AGENTS.md`](AGENTS.md) is the front door for an AI agent**, and it splits the two audiences:
+using inillucent, and changing it. [`agent-skills/`](agent-skills/README.md) is a task-shaped page
+per job — quickstart, querying, [migrating](agent-skills/inillucent-migrate/SKILL.md) from SQLite or
+a PostgreSQL or MySQL server, [search](agent-skills/inillucent-search/SKILL.md),
+[embedding the driver](agent-skills/inillucent-embed/SKILL.md),
+[serving MCP](agent-skills/inillucent-mcp/SKILL.md),
+[troubleshooting](agent-skills/inillucent-troubleshoot/SKILL.md), and
+[working on this repository](agent-skills/inillucent-develop/SKILL.md). They are plain `SKILL.md`
+directories, so they can be symlinked into `~/.claude/skills` or read as Markdown by anything else.
 
 ## Where it stands against the goal
 
@@ -164,8 +199,8 @@ buffer for rollback of rows and schema, and blob extents for values wider than a
 
 **Tooling**: `inillucent`, the verb-shaped command line and its 28 commands; `inillucent-mcp`, which
 serves 27 of them to an agent over MCP; `inillucent-shell`, a `sqlite3`-shaped shell; `inillucent-migrate`, which imports a SQLite
-file or a legacy retrieval index into an `.rdb` by copy, verify by count and digest, and publish by
-rename; and `inillucent-fullgate`, `inillucent-readgate`, `inillucent-searchgate`,
+file, a **running PostgreSQL or MySQL server**, or a legacy retrieval index into an `.rdb` by copy,
+verify by count and digest, and publish by rename; and `inillucent-fullgate`, `inillucent-readgate`, `inillucent-searchgate`,
 `inillucent-shellrss`, `inillucent-childcost`, `inillucent-vectorprobe` and `inillucent-probeprofile`,
 the paired benchmark instruments.
 

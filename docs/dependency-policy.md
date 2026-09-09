@@ -74,6 +74,43 @@ harness emits are all first-party, because each of them is part of a contract -
 an on-disk format, a published checksum, an evidence artifact - that must not
 change shape when a dependency is upgraded.
 
+## The dependency task-1868 did not add
+
+`inillucent migrate --kind postgres` and `--kind mysql` read a **running
+server** over its own wire protocol. The obvious implementation is the
+`postgres` crate - already on the allow-list above, as a benchmark baseline -
+plus a `mysql` one, and it was rejected. This section records why, because the
+next person to want a network client will reach for the same thing.
+
+1. **It would put an async runtime in a shipped binary.** `postgres` 0.19 is a
+   synchronous facade over `tokio-postgres`, so it brings Tokio; `mysql` brings
+   its own tree. The crate that needs the client is linked by
+   `inillucent-cli`, whose peak resident set is a number this project publishes
+   and grades itself against.
+2. **`mysql` would be a genuinely new dependency**, argued for on the grounds
+   that it is "just a client". So is a SQL parser, from a certain angle. The
+   allow-list exists because the interesting mistake is the reasonable-looking
+   crate.
+3. **Neither is needed.** The protocols are documented and stable, and the
+   subset a *reader* needs is small: a startup packet, an authentication
+   exchange, a query, and a text-format result set. `inillucent-remote` is that,
+   in about two thousand lines, with **no third-party dependency at all**.
+
+What it does own, which is the part worth checking, is four cryptographic
+primitives the two logins are specified in terms of - MD5 (PostgreSQL `md5`),
+SHA-1 (`mysql_native_password`), HMAC-SHA-256 and PBKDF2-HMAC-SHA-256
+(SCRAM-SHA-256) - plus base64. They live in `inillucent-remote/src/auth.rs`
+rather than in `inillucent-base` on purpose: they are **other people's wire
+formats**, not contracts this engine publishes, and nothing on a page or in a
+manifest is hashed with any of them. Each is checked against a published vector
+in that file's own tests, because a hash that is subtly wrong does not produce a
+wrong answer - it produces "password authentication failed", which reads as the
+operator's mistake.
+
+The limits that choice accepts are stated rather than hidden: no TLS
+(`sslmode=require` is refused by name), and no `caching_sha2_password` **full**
+authentication, whose RSA exchange is refused with the two ways around it.
+
 ## The clean-reference workflow
 
 External implementations may answer *what behaviour exists* and *what failure

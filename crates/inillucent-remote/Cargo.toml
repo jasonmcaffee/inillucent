@@ -1,0 +1,18 @@
+[package]
+name = "inillucent-remote"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reads a running PostgreSQL or MySQL server over its own wire protocol and migrates it into an inillucent database, verified."
+
+# **No third-party dependency, deliberately.** The alternative was the `postgres`
+# crate - which is already in this workspace as a benchmark baseline - plus a
+# `mysql` one. Both bring an async runtime, and this crate is linked by
+# `inillucent-cli`, whose peak resident set is a published number. See
+# `tasks/task-1868-migrating-from-postgres-mysql-and-a-front-door-for-agents-tdd.md`.
+[dependencies]
+inillucent-base = { workspace = true }
+inillucent-vfs = { workspace = true }
+inillucent-tree = { workspace = true }
+inillucent-engine = { workspace = true }

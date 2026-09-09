@@ -471,6 +471,44 @@ may_depend_on = [
   "inillucent-sqlite-reader",
   "inillucent-tree",
   "inillucent-catalog",
+  # task-1868: `--from postgres://…` and `--from mysql://…`. The wire clients
+  # live one layer down so that `inillucent-cli` can link them too; see the row
+  # for `inillucent-remote`.
+  "inillucent-remote",
+]
+
+# The wire clients for two other databases' servers (task-1868), and the
+# migration procedure over them.
+#
+# **It is a separate crate for one reason: `inillucent-migrate` links the
+# retrieval engine.** That is why `inillucent migrate --kind index` refuses and
+# points at the other binary, and if the remote sources lived there then
+# `--kind postgres` would have to refuse the same way. This crate's dependency
+# list is exactly what `inillucent-cli` already links, so the CLI, the MCP
+# server and the standalone tool all call one function and the new kinds are
+# rows in the one command table rather than a fourth surface.
+#
+# It reaches `inillucent-vfs` for one call: the operating system's own random
+# bytes, for the SCRAM client nonce. A seeded generator would be predictable to
+# anybody who knows roughly when a migration ran, and SCRAM's mutual
+# authentication rests on that nonce not being.
+#
+# **No `[[external]]` row accompanies it, and that is the point.** The obvious
+# implementation was the `postgres` crate - already allowed here as a benchmark
+# baseline - plus a `mysql` one, and both bring an async runtime into a binary
+# whose peak resident set is a published number. The protocols are documented
+# and small at the subset a reader needs, and the primitives they are specified
+# in terms of (MD5, SHA-1, HMAC-SHA-256, PBKDF2) are in `auth.rs`, each checked
+# against a published vector.
+[[crate]]
+name = "inillucent-remote"
+kind = "production"
+layer = 9
+may_depend_on = [
+  "inillucent-base",
+  "inillucent-vfs",
+  "inillucent-tree",
+  "inillucent-engine",
 ]
 
 [[crate]]
@@ -529,6 +567,10 @@ may_depend_on = [
   "inillucent-driver",
   "inillucent-engine",
   "inillucent-tree",
+  # task-1868: `migrate --kind postgres|mysql`. The edge is downward to layer 9
+  # and adds no third-party dependency to either shipped binary, which is the
+  # whole reason the wire clients are first-party.
+  "inillucent-remote",
 ]
 
 [[crate]]

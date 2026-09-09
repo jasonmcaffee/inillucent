@@ -299,7 +299,8 @@ const MIGRATE_PARAMS: &[Param] = &[
         kind: Kind::Text,
         required: true,
         positional: true,
-        description: "The SQLite database file to read. It is never written to.",
+        description: "The SQLite database file to read, or a postgres:// or mysql:// connection \
+                      URL. The source is never written to.",
     },
     Param {
         name: "destination",
@@ -313,7 +314,17 @@ const MIGRATE_PARAMS: &[Param] = &[
         kind: Kind::Text,
         required: false,
         positional: false,
-        description: "'sqlite' for a SQLite database file, which is the default.",
+        description: "'sqlite' (the default for a path), 'postgres' or 'mysql' (the default for \
+                      a URL written with that scheme), or 'index' for a legacy retrieval index.",
+    },
+    Param {
+        name: "batch",
+        kind: Kind::Integer,
+        required: false,
+        positional: false,
+        description: "Rows per destination transaction while copying from a server. Default \
+                      10000. It changes how long the migration takes and nothing about what it \
+                      produces.",
     },
 ];
 
@@ -672,11 +683,15 @@ pub static COMMANDS: &[Command] = &[
     },
     Command {
         name: "migrate",
-        summary: "Build an inillucent database from a SQLite file.",
-        detail: "Reads the SQLite database and writes a new .rdb with the same rows. The source \
-                 is never written to and the destination is never overwritten: the new file is \
-                 staged under another name and published by a rename, so a half-written database \
-                 never sits where an application would open it.",
+        summary: "Build an inillucent database from a SQLite file, PostgreSQL or MySQL.",
+        detail: "Reads the source and writes a new .rdb with the same rows. A path is a SQLite \
+                 database file; a postgres:// or mysql:// URL is a running server, read inside \
+                 one repeatable-read snapshot so that every table is as of one instant. The \
+                 source is never written to and the destination is never overwritten: the new \
+                 file is staged under another name and published by a rename, so a half-written \
+                 database never sits where an application would open it. A server migration is \
+                 verified per table by row count and by an order-independent digest, and nothing \
+                 that fails a check is published.",
         params: MIGRATE_PARAMS,
         cli_only: None,
         writes: true,

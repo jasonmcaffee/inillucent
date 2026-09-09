@@ -284,6 +284,17 @@ impl Context {
         self.readonly
     }
 
+    /// Returns whether this surface was confined to a directory.
+    ///
+    /// **Confinement is about reach, not only about paths.** `--root` exists so
+    /// that an MCP server can be handed to an agent without handing it the file
+    /// system, and a verb that dialled a host and a port would be a hole
+    /// straight through it. A command that can reach something other than a
+    /// file asks this and refuses.
+    pub fn confined(&self) -> bool {
+        self.root.is_some()
+    }
+
     /// Refuses a path outside the root, when a root was set.
     ///
     /// The check is on the *lexical* path after normalising `..`, and it is

@@ -566,9 +566,27 @@ a renamed workload is a new series with the old one's history thrown away.
 
 **A prerequisite.** If a suite needs something the workspace cannot build, add
 it to that row's `requires` and make the suite print one of the phrases the
-runner recognises (`is not built`, `is missing`, `; skipping`) — otherwise
-`--strict` cannot tell a real pass from an empty one. Every `differential` row
-must declare one; `every_differential_target_declares_what_it_needs` enforces it.
+runner recognises — otherwise `--strict` cannot tell a real pass from an empty
+one. Every `differential` row must declare one;
+`every_differential_target_declares_what_it_needs` enforces it.
+
+The phrases are `; skipping`, `is not built`, `is missing`, `has not been
+built`, `is not available` and `no reference`, and **`; skipping` is the one to
+use**: every existing message already ends with it.
+
+> **This paragraph and the runner disagreed until task-1868, and the disagreement
+> was the exact failure `--strict` exists to prevent.** The list here has always
+> read `is not built`, `is missing`, `; skipping`; `missing_prerequisites` in
+> `testrun.rs` matched `has not been built`, `is not available` and
+> `no reference`. What the suites actually print is `the pinned SQLite oracle is
+> not built; skipping`, `the pinned shell is not present; skipping` and `no
+> usable C compiler; skipping` — which matched **none** of the three the code
+> looked for. So on a machine without the pinned oracle, thirty-odd differential
+> suites would skip every case and `--strict` would still print `ok`. The runner
+> now matches all six, which makes this paragraph true rather than aspirational.
+> It is worth reading as a warning about the shape rather than about the strings:
+> a check whose *documentation* is the only place its contract is written down
+> is a check nothing verifies.
 
 ---
 
