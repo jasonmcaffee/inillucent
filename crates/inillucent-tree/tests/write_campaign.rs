@@ -216,6 +216,9 @@ fn a_tree_written_to_arbitrarily_still_agrees_with_a_btreemap() {
                         &[Datum::Int(key)],
                         2,
                         &Datum::Int(counter),
+                        // No image to hand over here, so the write reads the
+                        // row itself - the path a trigger body's write takes.
+                        None,
                     )
                     .unwrap_or_else(|error| panic!("{context}: update failed: {error:?}"));
                 if done {

@@ -1787,7 +1787,24 @@ pub fn update(
     params: &Params,
     keys: &[Row],
 ) -> DbResult<Changes> {
-    update_at(statement, target, params, keys, Depth::default())
+    update_cached(statement, target, params, keys, &UpdateCache::default())
+}
+
+/// Applies an `UPDATE`, reusing the setup a previous execution built.
+///
+/// @param statement - the bound update
+/// @param target - the file and its trees
+/// @param params - the bound parameters
+/// @param keys - the key of each row the `WHERE` selected
+/// @param cache - where the setup is kept between executions
+pub fn update_cached(
+    statement: &BoundUpdate,
+    target: &mut dyn WriteTarget,
+    params: &Params,
+    keys: &[Row],
+    cache: &UpdateCache,
+) -> DbResult<Changes> {
+    update_at_cached(statement, target, params, keys, Depth::default(), cache)
         .map_err(|error| outer_unwind(error, statement.on_conflict))
 }
 
@@ -1805,65 +1822,97 @@ pub fn update_at(
     keys: &[Row],
     depth: Depth,
 ) -> DbResult<Changes> {
+    update_at_cached(
+        statement,
+        target,
+        params,
+        keys,
+        depth,
+        &UpdateCache::default(),
+    )
+}
+
+/// Everything an `UPDATE` builds before it looks at a single row.
+///
+/// **Built once per compiled statement rather than once per execution, which is
+/// what the `transaction` family turns on.** `inillucent-execprofile` measured
+/// the gate's `txn.large` at 1,896 ns a statement against SQLite's 482, and an
+/// `UPDATE` bound to a rowid that matches **nothing** at 950 of those 1,896 - so
+/// more than half of every write statement was spent before a row was found,
+/// building this. Of its allocations, three were the row space, two the compiled
+/// assignment, and one each the declarations, the sources and the correlations.
+///
+/// None of it depends on the row being written. It depends on the plan, on the
+/// table's layout, and - until `Expr::Parameter` existed - on the bound values,
+/// which is what made it un-cacheable: `SET note = ?2` compiled the *value* into
+/// the expression. A parameter is now read when the expression is evaluated, so
+/// what is left is a function of the plan and the layout alone.
+pub struct UpdateSetup {
+    /// The table's layout, and the identity this setup is only valid for.
+    layout: std::rc::Rc<SourceLayout>,
+    /// The row images the statement can read.
+    space: RowSpace,
+    /// The correlated blocks its assignments hold, prepared once.
+    correlated: Vec<crate::correlate::Correlation>,
+    /// Each assignment's record slot and compiled value.
+    assignments: Vec<(usize, Box<dyn Eval>)>,
+    /// Where an `UPDATE ... FROM`'s already-evaluated values go.
+    projected_slots: Vec<Option<usize>>,
+    /// The compiled `RETURNING` expressions.
+    projected: Vec<Box<dyn Eval>>,
+    /// The affinities, checks, defaults and index expressions.
+    declarations: WriteDeclarations,
+    /// Whether the statement carries a `FROM`.
+    joined: bool,
+    /// The cell every `Expr::Parameter` in the compiled pieces reads.
+    bindings: crate::physical::Bindings,
+    /// Whether anything but a parameter was read while this was built.
+    ///
+    /// **The same guard `Statement::rebindable` uses, and for the same reason.**
+    /// A folded subquery, a folded `changes()` and a folded `now()` are each true
+    /// of one execution only, and each of them counts a read. A setup that
+    /// counted one is used for the execution that built it and then thrown away.
+    reusable: bool,
+}
+
+/// Where a compiled `UPDATE` keeps its setup between executions.
+///
+/// `RefCell` because the compiled statement is shared behind an `Rc` and this is
+/// the one part of it that fills in later.
+pub type UpdateCache = std::cell::RefCell<Option<std::rc::Rc<UpdateSetup>>>;
+
+/// Runs an `UPDATE`, reusing the setup a previous execution built.
+///
+/// @param statement - the bound statement
+/// @param target - where the writes go
+/// @param params - the values bound to `?1`, `?2`, ...
+/// @param keys - the rows the plan found
+/// @param depth - how many triggers deep this write already is
+/// @param cache - where the setup is kept between executions
+pub fn update_at_cached(
+    statement: &BoundUpdate,
+    target: &mut dyn WriteTarget,
+    params: &Params,
+    keys: &[Row],
+    depth: Depth,
+    cache: &UpdateCache,
+) -> DbResult<Changes> {
     let table = &statement.table;
     if table.kind == TableKind::View {
         return update_view(statement, target, params, keys, depth);
     }
     let layout = layout_of(target, table)?;
-    // **Only the images the statement can actually read.** A row space costs a
-    // layout clone and a batch column per stage, per statement, and a statement
-    // with no triggers can reach neither `OLD` nor `NEW` - so building them was
-    // three times the allocation for one image's worth of use. The gate's
-    // `txn.large` is forty of these in one transaction and pays for every one.
-    // **A correlated block in an assignment reads the row being written**, so
-    // it is not a constant for the statement and cannot be folded the way an
-    // uncorrelated one is. It is prepared once here and answered per row by
-    // `crate::correlate` - the same operator a `SELECT` uses, so there is one
-    // implementation of what a correlated block means rather than a second in
-    // the write path.
-    let correlated = update_correlations(statement, &layout)?;
-    let space = RowSpace::new(&sources_for(statement.source, &statement.triggers), &layout)
-        .with_correlations(
-            &correlated
-                .iter()
-                .map(|held| held.id)
-                .collect::<Vec<usize>>(),
-        );
-    // **An `UPDATE ... FROM` has already evaluated its values.** They read a
-    // row of the joined table, which the write path never sees: the keys query
-    // projected them beside the key, so each row handed in is
-    // `[key..., value_0, value_1, ...]` and the slot each value goes into is
-    // all this needs. An ordinary `UPDATE` compiles its assignments here as it
-    // always did.
-    let joined = !statement.from.is_empty();
-    let mut assignments = Vec::with_capacity(statement.assignments.len());
-    let mut projected_slots: Vec<Option<usize>> = Vec::new();
-    for assignment in &statement.assignments {
-        let slot = layout
-            .slots
-            .get(usize::from(assignment.column))
-            .copied()
-            .flatten();
-        if joined {
-            projected_slots.push(slot);
-            continue;
-        }
-        let Some(slot) = slot else { continue };
-        assignments.push((slot, space.compile(&assignment.value, params)?));
-    }
-    let mut projected = Vec::with_capacity(statement.returning.len());
-    for column in &statement.returning {
-        projected.push(space.compile(&column.expr, params)?);
-    }
-    let declarations = WriteDeclarations::compile(
-        table,
-        &layout,
-        &statement.checks,
-        &statement.not_null_defaults,
-        &statement.index_exprs,
-        &space,
-        params,
-    )?;
+    let held = update_setup(cache, statement, &layout, params)?;
+    let UpdateSetup {
+        space,
+        correlated,
+        assignments,
+        projected_slots,
+        projected,
+        declarations,
+        joined,
+        ..
+    } = &*held;
 
     let mut changes = Changes::default();
     let captured = target.captures(table.root);
@@ -1878,7 +1927,7 @@ pub fn update_at(
         };
         let answers = answer_correlations(&correlated, target, params, &before)?;
         let mut after = before.clone();
-        if joined {
+        if *joined {
             // The values sit after the key columns of the row the keys query
             // produced, in assignment order.
             let width = layout.key_columns.len();
@@ -1892,7 +1941,7 @@ pub fn update_at(
                 }
             }
         }
-        for (slot, eval) in &assignments {
+        for (slot, eval) in assignments {
             // Every assignment reads the *before* image, so `SET a = b, b = a`
             // swaps the two rather than making them equal.
             let value = space.evaluate_with(eval.as_ref(), &[before.as_slice()], &answers)?;
@@ -2037,7 +2086,7 @@ pub fn update_at(
         }
         if !projected.is_empty() {
             let mut out = Vec::with_capacity(projected.len());
-            for eval in &projected {
+            for eval in projected {
                 out.push(space.evaluate_with(eval.as_ref(), &[after.as_slice()], &answers)?);
             }
             changes.returned.push(out);
@@ -2050,6 +2099,142 @@ pub fn update_at(
 ///
 /// @param statement - the bound update
 /// @param layout - the table tree's layout
+/// Returns the statement's setup, building it only when it is not already
+/// there.
+///
+/// **The reuse test is the layout's identity and the read counter, and neither
+/// is a guess.** A setup describes one table's layout, so it is valid only while
+/// the catalog still holds the same one - `Rc::ptr_eq` answers that exactly,
+/// where comparing contents would be a second opinion that can go stale. And a
+/// setup that folded in something true of one execution counts a read, which is
+/// the mechanism `Statement::rebindable` already uses for a chain.
+///
+/// A reused setup has its bindings pointed at this execution's values, which is
+/// the same join-up `Statement::run` does and for the same reason: the compiled
+/// assignments read a cell, and the caller hands a different `Params` to every
+/// execution.
+///
+/// @param cache - where the setup is kept between executions
+/// @param statement - the bound statement
+/// @param layout - the table's layout, as the catalog holds it now
+/// @param params - the values bound to `?1`, `?2`, ...
+fn update_setup(
+    cache: &UpdateCache,
+    statement: &BoundUpdate,
+    layout: &std::rc::Rc<SourceLayout>,
+    params: &Params,
+) -> DbResult<std::rc::Rc<UpdateSetup>> {
+    if let Some(held) = cache.borrow().as_ref() {
+        if held.reusable && std::rc::Rc::ptr_eq(&held.layout, layout) {
+            adopt_bindings(&held.bindings, params);
+            return Ok(std::rc::Rc::clone(held));
+        }
+    }
+    let before = params.reads();
+    let built = std::rc::Rc::new(build_update_setup(statement, layout, params)?);
+    if built.reusable {
+        *cache.borrow_mut() = Some(std::rc::Rc::clone(&built));
+    }
+    let _ = before;
+    Ok(built)
+}
+
+/// Points a compiled expression's parameter cell at this execution's values.
+///
+/// @param bindings - the cell the compiled pieces read
+/// @param params - the values bound for this execution
+fn adopt_bindings(bindings: &crate::physical::Bindings, params: &Params) {
+    let source = params.bindings();
+    // **The same cell needs no copy, and locking it twice would deadlock.** A
+    // setup used by the execution that built it holds exactly this `Arc`.
+    if std::sync::Arc::ptr_eq(bindings, &source) {
+        return;
+    }
+    let (Ok(from), Ok(mut held)) = (source.lock(), bindings.lock()) else {
+        return;
+    };
+    held.clear();
+    held.extend_from_slice(&from);
+}
+
+/// Builds everything an `UPDATE` needs before it looks at a row.
+///
+/// @param statement - the bound statement
+/// @param layout - the table's layout
+/// @param params - the values bound to `?1`, `?2`, ...
+fn build_update_setup(
+    statement: &BoundUpdate,
+    layout: &std::rc::Rc<SourceLayout>,
+    params: &Params,
+) -> DbResult<UpdateSetup> {
+    let before = params.reads();
+    // **Only the images the statement can actually read.** A row space costs a
+    // layout reference and a batch column per stage, and a statement with no
+    // triggers can reach neither `OLD` nor `NEW` - so building them was three
+    // times the work for one image's worth of use.
+    // **A correlated block in an assignment reads the row being written**, so
+    // it is not a constant for the statement and cannot be folded the way an
+    // uncorrelated one is. It is prepared once here and answered per row by
+    // `crate::correlate` - the same operator a `SELECT` uses, so there is one
+    // implementation of what a correlated block means rather than a second in
+    // the write path.
+    let correlated = update_correlations(statement, layout)?;
+    let space = RowSpace::new(&sources_for(statement.source, &statement.triggers), layout)
+        .with_correlations(
+            &correlated
+                .iter()
+                .map(|held| held.id)
+                .collect::<Vec<usize>>(),
+        );
+    // **An `UPDATE ... FROM` has already evaluated its values.** They read a
+    // row of the joined table, which the write path never sees: the keys query
+    // projected them beside the key, so each row handed in is
+    // `[key..., value_0, value_1, ...]` and the slot each value goes into is
+    // all this needs. An ordinary `UPDATE` compiles its assignments here as it
+    // always did.
+    let joined = !statement.from.is_empty();
+    let mut assignments = Vec::with_capacity(statement.assignments.len());
+    let mut projected_slots: Vec<Option<usize>> = Vec::new();
+    for assignment in &statement.assignments {
+        let slot = layout
+            .slots
+            .get(usize::from(assignment.column))
+            .copied()
+            .flatten();
+        if joined {
+            projected_slots.push(slot);
+            continue;
+        }
+        let Some(slot) = slot else { continue };
+        assignments.push((slot, space.compile(&assignment.value, params)?));
+    }
+    let mut projected = Vec::with_capacity(statement.returning.len());
+    for column in &statement.returning {
+        projected.push(space.compile(&column.expr, params)?);
+    }
+    let declarations = WriteDeclarations::compile(
+        &statement.table,
+        layout,
+        &statement.checks,
+        &statement.not_null_defaults,
+        &statement.index_exprs,
+        &space,
+        params,
+    )?;
+    Ok(UpdateSetup {
+        layout: std::rc::Rc::clone(layout),
+        space,
+        correlated,
+        assignments,
+        projected_slots,
+        projected,
+        declarations,
+        joined,
+        bindings: params.bindings(),
+        reusable: params.reads() == before,
+    })
+}
+
 fn update_correlations(
     statement: &BoundUpdate,
     layout: &SourceLayout,
@@ -2405,7 +2590,26 @@ fn place_row(
     // it cannot, `put` is still the answer and nothing has been written
     // (task-1838 §4).
     if let Some(previous) = before {
-        if let Some(column) = only_change(previous, row) {
+        // **A row whose bytes do not change is not written at all.**
+        // `only_change` used to answer `None` both when *nothing* differed and
+        // when *several* columns did, and the caller then took the most
+        // expensive path it has - a tombstone, a delta insert, and a compaction
+        // every `DELTA_LIMIT` writes - for the cheapest case there is. Measured
+        // with `inillucent-execprofile`, running the same `UPDATE` twice over
+        // the same rows: the pass that changed a value cost **1,723 ns and 13.3
+        // allocations**, and the pass that wrote back what was already there
+        // cost **4,067 ns and 56.7**. An update that changes nothing was 2.4x
+        // the price of one that changes something.
+        //
+        // Nothing observable is skipped. The stored bytes are identical by
+        // definition, `count_row` is called by the caller rather than from here
+        // so `changes()` still counts the row, the index loop above already
+        // skips an entry that did not move, and both trigger times fire from
+        // the caller too.
+        if matches!(difference(previous, row), Difference::Nothing) {
+            return Ok(());
+        }
+        if let Difference::One(column) = difference(previous, row) {
             if column >= layout.key_columns.len() {
                 let key: Vec<Datum<'_>> = layout
                     .key_columns
@@ -2415,7 +2619,7 @@ fn place_row(
                 let Some(value) = borrowed.get(column).copied() else {
                     return Err(misuse("a changed column is not in the row"));
                 };
-                if tree.update_in_place(database, log, &key, column, &value)? {
+                if tree.update_in_place(database, log, &key, column, &value, Some(previous))? {
                     return Ok(());
                 }
             }
@@ -2425,17 +2629,29 @@ fn place_row(
     Ok(())
 }
 
-/// Returns the one column that differs between two images, when there is one.
+/// What differs between the row as it was and the row as it will be.
 ///
-/// `None` when nothing changed, when more than one column did, or when the two
-/// images are different widths - each of which is a case the in-place update
-/// does not cover.
+/// **Three answers rather than two, because the caller does three different
+/// things.** This was `Option<usize>`, which folded "nothing changed" and
+/// "several columns changed" into the same `None` - so a statement that changed
+/// nothing was written the slowest way there is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Difference {
+    /// No column differs, so the stored bytes would not change.
+    Nothing,
+    /// Exactly one column differs, at this position.
+    One(usize),
+    /// More than one column differs, or the two images are different widths.
+    Several,
+}
+
+/// Returns what differs between two images of a row.
 ///
 /// @param before - the row as it was
 /// @param after - the row as it will be
-fn only_change(before: &[OwnedDatum], after: &[OwnedDatum]) -> Option<usize> {
+fn difference(before: &[OwnedDatum], after: &[OwnedDatum]) -> Difference {
     if before.len() != after.len() {
-        return None;
+        return Difference::Several;
     }
     let mut found = None;
     for (index, (one, two)) in before.iter().zip(after.iter()).enumerate() {
@@ -2443,11 +2659,14 @@ fn only_change(before: &[OwnedDatum], after: &[OwnedDatum]) -> Option<usize> {
             continue;
         }
         if found.is_some() {
-            return None;
+            return Difference::Several;
         }
         found = Some(index);
     }
-    found
+    match found {
+        Some(index) => Difference::One(index),
+        None => Difference::Nothing,
+    }
 }
 
 /// Removes one row and every index entry that named it.

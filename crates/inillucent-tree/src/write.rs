@@ -767,6 +767,7 @@ impl PagedTree {
         key: &[Datum<'_>],
         column: usize,
         value: &Datum<'_>,
+        before: Option<&[OwnedDatum]>,
     ) -> DbResult<bool> {
         if column < self.key_columns() {
             // Changing a key in place would move the row, which is an insert
@@ -794,9 +795,20 @@ impl PagedTree {
         // The whole row, not the one slot. A rollback restores a row, and a
         // record that named only the column changed would restore a row that
         // never existed if two updates touched two columns of it.
+        //
+        // **Taken from the caller, which already read it.** The executor reads
+        // the row before it decides what to write - that is where the "before"
+        // image of an `UPDATE` comes from - and this went and read it again:
+        // a third descent of the same tree, a second page parse, a second walk
+        // of the delta area and a second materialisation of every column, per
+        // statement. `row_at` is still the answer when a caller has no image to
+        // give, which is what a trigger body's write is.
         if log.wants_undo() {
-            let before = self.row_at(database.pool(), page, key)?;
-            log.undo(self.tree_id(), key, before)?;
+            let held = match before {
+                Some(row) => Some(row.to_vec()),
+                None => self.row_at(database.pool(), page, key)?,
+            };
+            log.undo(self.tree_id(), key, held)?;
         }
         let mut slot = Vec::new();
         value.encode_tagged(&mut slot);
