@@ -88,7 +88,7 @@ Seventeen tests fail today and every one is accounted for:
 
 ## What the tests cover
 
-Over 2,400 test functions across the workspace. The classes worth knowing about:
+Over 2,400 test functions across the workspace, in these classes:
 
 - **A differential harness** that runs the same SQL through the pinned SQLite 3.53.4 and compares
   transcripts. 206 of those cases are `semantics.rs`, and 416 are the wider feature probe.

@@ -583,7 +583,7 @@ use**: every existing message already ends with it.
 > looked for. So on a machine without the pinned oracle, thirty-odd differential
 > suites would skip every case and `--strict` would still print `ok`. The runner
 > now matches all six, which makes this paragraph true rather than aspirational.
-> It is worth reading as a warning about the shape rather than about the strings:
+> Read it as a warning about the shape rather than about the strings:
 > a check whose *documentation* is the only place its contract is written down
 > is a check nothing verifies.
 

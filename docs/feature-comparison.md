@@ -1556,7 +1556,7 @@ far, and the second effect is the larger one. `DELTA_LIMIT` stays at 32.
 ### The five follow-ups, each measured
 
 Review 7's first pass shipped the narrow slot and named five follow-ups. All five were then worked,
-and two of them turned out to be worth less than they looked - which is the point of measuring them.
+and two of them turned out to be worth less than they looked, which is why each one was measured on its own.
 
 | # | what | outcome |
 |---|---|---|
