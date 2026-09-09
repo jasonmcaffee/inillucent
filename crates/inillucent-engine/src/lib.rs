@@ -4197,7 +4197,7 @@ impl ImportedDatabase {
             Cached::Insert(_, Some((plan, prepared)), _) => {
                 physical::run_any_prepared(plan, self, prepared, params)?.0
             }
-            Cached::Update(_, plan, prepared, _) | Cached::Delete(_, plan, prepared) => {
+            Cached::Update(_, plan, prepared, _, _) | Cached::Delete(_, plan, prepared) => {
                 self.keys_of(plan, prepared, params)?
             }
         };
@@ -4226,9 +4226,9 @@ impl ImportedDatabase {
                     dml::insert(statement, target, params, &rows)
                 })?;
             }
-            Cached::Update(statement, ..) => {
+            Cached::Update(statement, _, _, _, setup) => {
                 self.write(params, Vec::new(), |target, params| {
-                    dml::update(statement, target, params, &rows)
+                    dml::update_cached(statement, target, params, &rows, setup)
                 })?;
             }
             Cached::Delete(statement, ..) => {
@@ -4967,7 +4967,7 @@ impl ImportedDatabase {
                     |target, params| dml::insert(statement, target, params, &rows),
                 )
             }
-            Cached::Update(statement, plan, prepared, assignments_hold_subquery) => {
+            Cached::Update(statement, plan, prepared, assignments_hold_subquery, setup) => {
                 let keys = self.keys_of(plan, prepared, params)?;
                 // The same for an `UPDATE`'s assignments: the plan above finds
                 // the rows, and the values written into them are evaluated by
@@ -4987,7 +4987,7 @@ impl ImportedDatabase {
                 self.write(
                     params,
                     returning_names(&statement.returning),
-                    |target, params| dml::update(statement, target, params, &keys),
+                    |target, params| dml::update_cached(statement, target, params, &keys, setup),
                 )
             }
             Cached::VirtualUpdate(statement, plan, prepared) => {
@@ -5285,6 +5285,7 @@ impl ImportedDatabase {
                     Box::new(plan),
                     Box::new(prepared),
                     assignments_hold_subquery,
+                    dml::UpdateCache::default(),
                 ))
             }
             BoundStatement::Delete(statement)
@@ -5962,6 +5963,10 @@ enum Cached {
         Box<PhysicalPlan>,
         Box<physical::Prepared>,
         bool,
+        /// Everything the statement builds before it looks at a row, kept
+        /// between executions. See `dml::UpdateSetup`: it was more than half of
+        /// what `txn.large` cost, and none of it depends on the row.
+        dml::UpdateCache,
     ),
     /// A delete, with the plan that finds the rows it removes.
     Delete(

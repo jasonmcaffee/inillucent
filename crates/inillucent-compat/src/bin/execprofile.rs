@@ -337,5 +337,184 @@ fn run(fixture: &Path, iterations: u32, page_size: usize) -> Result<(), String> 
             let _ = database.commit_batch();
         }
     }
+    reused_chain(fixture, iterations, page_size)?;
+    second_pass(fixture, iterations, page_size)?;
+    Ok(())
+}
+
+/// The gate's own ordering: the same rows updated to the same values twice.
+///
+/// **Because the gate and this profile disagreed by two and a half times, and
+/// one of them had to be wrong about what it was measuring.** `fullgate` runs a
+/// round's workloads in order against one database, and `txn.batched` and
+/// `txn.large` are the same statement over the same scattered rowids with the
+/// same `row {iteration} lorem ipsum ...` text - so by the time `txn.large`
+/// runs, every row it touches already holds the bytes it is about to write.
+/// This runs the loop twice and prints both, so the difference between "an
+/// update that changes a value" and "an update that writes back what is already
+/// there" is a number rather than an argument.
+///
+/// @param fixture - the pristine database
+/// @param iterations - how many executions per pass
+/// @param page_size - the page size to import at
+fn second_pass(fixture: &Path, iterations: u32, page_size: usize) -> Result<(), String> {
+    let copy = restore(fixture, "second")?;
+    let mut database = ImportedDatabase::import_with(copy, page_size, 4_096)
+        .map_err(|error| format!("import failed: {error:?}"))?;
+    let sql = "UPDATE side_table SET note = ?2 WHERE id = ?1";
+    let statement = database
+        .prepare_statement(sql)
+        .map_err(|error| format!("{sql}: {error:?}"))?;
+    println!();
+    println!("## the same update, run twice over the same rows");
+    println!(
+        "  {:<28} {:>10} {:>10} {:>9} {:>9} {:>9}",
+        "pass", "ns each", "allocs", "inserted", "inplace", "compacted"
+    );
+    for pass in ["first, values differ", "second, values identical"] {
+        let before = database.write_stats();
+        let allocations = ALLOCATIONS.load(Ordering::Relaxed);
+        let started = Instant::now();
+        database.begin_batch();
+        for iteration in 0..iterations {
+            let params =
+                Params::from_values(vec![OwnedDatum::Int(scatter(iteration)), text(iteration)]);
+            database
+                .execute_timed(&statement, &params)
+                .map_err(|error| format!("{sql}: {error:?}"))?;
+        }
+        database
+            .commit_batch()
+            .map_err(|error| format!("the commit: {error:?}"))?;
+        let elapsed = started.elapsed();
+        let after = database.write_stats();
+        let each = f64::from(iterations.max(1));
+        let per = |now: u64, was: u64| (now.saturating_sub(was) as f64) / each;
+        println!(
+            "  {:<28} {:>10.1} {:>10.2} {:>9.2} {:>9.2} {:>9.3}",
+            pass,
+            elapsed.as_nanos() as f64 / each,
+            (ALLOCATIONS
+                .load(Ordering::Relaxed)
+                .saturating_sub(allocations)) as f64
+                / each,
+            per(after.inserted, before.inserted),
+            per(after.updated_in_place, before.updated_in_place),
+            per(after.compactions, before.compactions),
+        );
+    }
+    Ok(())
+}
+
+/// The same read, run twice: chain rebuilt per execution, and chain reused.
+///
+/// **The prize, measured before anything is refactored to collect it.**
+/// `physical::build_statement` already holds the operator chain across
+/// executions and rebuilds only the source, and nothing in the engine's
+/// execution path calls it. This runs both sides over the same plan, the same
+/// prepared stages and the same parameters, so the difference is the chain build
+/// and nothing else.
+///
+/// @param fixture - the pristine database
+/// @param iterations - how many executions to average over
+/// @param page_size - the page size to import at
+fn reused_chain(fixture: &Path, iterations: u32, page_size: usize) -> Result<(), String> {
+    use inillucent_exec::physical;
+    let copy = restore(fixture, "reuse")?;
+    let database = ImportedDatabase::import_with(copy, page_size, 4_096)
+        .map_err(|error| format!("import failed: {error:?}"))?;
+    println!();
+    println!("## the same statement, chain rebuilt against chain reused");
+    println!(
+        "  {:<40} {:>10} {:>10} {:>9}",
+        "statement", "rebuilt", "reused", "saved"
+    );
+    for sql in [
+        "SELECT 1",
+        "SELECT label FROM main_table WHERE id = ?1",
+        "SELECT sum(length(label)) FROM main_table WHERE key BETWEEN ?1 AND ?1 + 200",
+    ] {
+        let plan = match database.plan(sql) {
+            Ok(plan) => plan,
+            Err(error) => {
+                println!("  {sql:<40} plan refused: {error:?}");
+                continue;
+            }
+        };
+        let prepared = physical::prepare(&plan, &database, physical::ForcePlan::default())
+            .map_err(|error| format!("{sql}: {error:?}"))?;
+        let binds = |iteration: u32| {
+            if sql.contains("?1") {
+                Params::from_values(vec![OwnedDatum::Int(scatter(iteration))])
+            } else {
+                Params::new()
+            }
+        };
+        // **One closure per arm, and each arm is run twice.** The first version
+        // of this ran the rebuilt arm and then the reused one over a freshly
+        // imported database, and reported a point lookup at 4,840 ns rebuilt
+        // against 840 reused. Most of that was the **pool**: the first arm paid
+        // every page fault and the second inherited a warm cache. Both arms now
+        // get a warm pass of their own, and the whole pair runs twice with the
+        // order reversed, so a warming advantage cancels instead of being
+        // reported as a speed-up.
+        let mut run_rebuilt = |count: u32| -> Result<f64, String> {
+            let started = Instant::now();
+            for iteration in 0..count {
+                let sink = Box::new(inillucent_exec::ops::CollectInto::new(std::rc::Rc::new(
+                    std::cell::RefCell::new(Vec::new()),
+                )));
+                let (mut pipeline, _) =
+                    physical::build_prepared(&plan, &database, &prepared, &binds(iteration), sink)
+                        .map_err(|error| format!("{sql}: {error:?}"))?;
+                pipeline
+                    .run()
+                    .map_err(|error| format!("{sql}: {error:?}"))?;
+            }
+            Ok(started.elapsed().as_nanos() as f64 / f64::from(count.max(1)))
+        };
+        let warm = iterations.min(500).max(1);
+        run_rebuilt(warm)?;
+        let rebuilt_first = run_rebuilt(iterations)?;
+
+        let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let mut statement = physical::build_statement(
+            &plan,
+            &database,
+            &prepared,
+            &binds(0),
+            Box::new(inillucent_exec::ops::CollectInto::new(std::rc::Rc::clone(
+                &collected,
+            ))),
+        )
+        .map_err(|error| format!("{sql}: {error:?}"))?;
+        if !statement.rebindable() {
+            println!("  {sql:<40} the chain kept a parameter and refuses to re-run");
+            continue;
+        }
+        let mut run_reused = |count: u32| -> Result<f64, String> {
+            let started = Instant::now();
+            for iteration in 0..count {
+                collected.borrow_mut().clear();
+                statement
+                    .run(&binds(iteration))
+                    .map_err(|error| format!("{sql}: {error:?}"))?;
+            }
+            Ok(started.elapsed().as_nanos() as f64 / f64::from(count.max(1)))
+        };
+        run_reused(warm)?;
+        let reused_second = run_reused(iterations)?;
+        let reused_first = run_reused(iterations)?;
+        let rebuilt_second = run_rebuilt(iterations)?;
+        let rebuilt = rebuilt_first.min(rebuilt_second);
+        let reused = reused_first.min(reused_second);
+        println!(
+            "  {:<40} {:>9.0}ns {:>9.0}ns {:>8.0}%",
+            sql,
+            rebuilt,
+            reused,
+            (rebuilt / reused.max(1.0) - 1.0) * 100.0
+        );
+    }
     Ok(())
 }

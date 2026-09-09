@@ -771,6 +771,9 @@ pub fn plan_for(scale: &str) -> Plan {
     ));
     setup.push("ANALYZE".to_string());
 
+    // The `pre` that puts `side_table.note` back to what the fixture builder
+    // wrote, so a `transaction` workload measures updates that change a value.
+    let reset_notes = || Some("UPDATE side_table SET note = 'note ' || id".to_string());
     let workloads = vec![
         Workload {
             name: "prepare.trivial".to_string(),
@@ -1025,7 +1028,17 @@ pub fn plan_for(scale: &str) -> Plan {
             name: "txn.batched".to_string(),
             family: "transaction".to_string(),
             sql: "UPDATE side_table SET note = ?2 WHERE id = ?1".to_string(),
-            pre: None,
+            // **Put the notes back first, or this measures nothing.** The three
+            // `transaction` workloads are deliberately the same statement at
+            // three groupings, which is only a comparison if all three start
+            // from the same rows - and they bind the same scattered rowids and
+            // the same `row {iteration} lorem ipsum ...` text, so each one was
+            // writing back what the one before it had already written.
+            // Measured with `inillucent-execprofile`: an `UPDATE` that changes
+            // a value cost 1,723 ns, and the same `UPDATE` writing back what was
+            // already there cost 4,067. `pre` runs outside the timed region on
+            // both arms, exactly as `sqlite_bench.c` runs it (task-1890).
+            pre: reset_notes(),
             post: None,
             repeat: write,
             grouping: Grouping::Every(10),
@@ -1037,7 +1050,9 @@ pub fn plan_for(scale: &str) -> Plan {
             name: "txn.large".to_string(),
             family: "transaction".to_string(),
             sql: "UPDATE side_table SET note = ?2 WHERE id = ?1".to_string(),
-            pre: None,
+            // See `txn.batched`: without this, every row already held the bytes
+            // this was about to write.
+            pre: reset_notes(),
             post: None,
             repeat: write,
             grouping: Grouping::Single,

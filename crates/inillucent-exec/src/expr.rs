@@ -209,6 +209,23 @@ pub enum Expr {
     },
     /// A constant.
     Literal(OwnedDatum),
+    /// One of the statement's bound parameters, read when it is evaluated.
+    ///
+    /// **The node that lets a compiled chain outlive the values it was built
+    /// for.** `translate` used to answer `?2` with an `Expr::Literal` holding
+    /// whatever was bound at the time, so a chain was correct only for that one
+    /// execution - which is why nothing on the execution path could keep one.
+    /// This reads the cell instead, and the cell is refreshed before each run.
+    ///
+    /// It costs a repeated `Literal` nothing it did not already cost: a text or
+    /// blob literal clones per evaluation too, because the node owns the bytes
+    /// and the signature promises `'p`. A number does not clone either way.
+    Parameter {
+        /// The one-based parameter number, as the SQL wrote it.
+        index: u32,
+        /// The values the statement is running against.
+        bound: crate::physical::Bindings,
+    },
     /// A call to a scalar an application registered.
     ///
     /// The body rather than the name, resolved when the chain was built: a
@@ -524,6 +541,10 @@ pub fn compile(expr: &Expr, types: &[StaticType]) -> DbResult<Box<dyn Eval>> {
         Expr::Literal(value) => Box::new(Literal {
             value: value.clone(),
         }),
+        Expr::Parameter { index, bound } => Box::new(ParamRef {
+            at: index.saturating_sub(1) as usize,
+            bound: std::sync::Arc::clone(bound),
+        }),
         Expr::External { body, arguments } => Box::new(ExternalCall {
             body: body.clone(),
             arguments: compile_all(arguments, types)?,
@@ -770,7 +791,12 @@ pub fn static_type(expr: &Expr, types: &[StaticType]) -> StaticType {
         Expr::Column(index) => column_type(*index, types),
         // Nothing is proved about a value that is never produced, nor about
         // one somebody else's code returns.
-        Expr::Raise { .. } | Expr::External { .. } => StaticType::Unknown,
+        // A parameter's type is a property of the value bound to it, which is
+        // not known while the chain is being built and may differ on the next
+        // execution. `Unknown` costs a generic node; a claim would cost a wrong
+        // answer the first time a caller bound a string to a slot that had held
+        // a number.
+        Expr::Raise { .. } | Expr::External { .. } | Expr::Parameter { .. } => StaticType::Unknown,
         Expr::Literal(OwnedDatum::Int(_)) => StaticType::Int,
         // A file offset is an integer or it is NULL, which is the same thing a
         // rowid column proves and is what makes it comparable without a cast.
@@ -888,6 +914,34 @@ impl Eval for Literal {
             OwnedDatum::Int(number) => Computed::Borrowed(Datum::Int(*number)),
             OwnedDatum::Real(number) => Computed::Borrowed(Datum::Real(*number)),
             owned => Computed::Owned(owned.clone()),
+        })
+    }
+}
+
+/// One of the statement's bound parameters, read when it is evaluated.
+///
+/// See [`Expr::Parameter`]. A missing slot reads as NULL, which is what an
+/// unbound parameter is.
+struct ParamRef {
+    /// Where the value sits, zero-based.
+    at: usize,
+    /// The values the statement is running against.
+    bound: crate::physical::Bindings,
+}
+
+impl Eval for ParamRef {
+    fn value<'p>(&self, _batch: &Batch<'p>, _nth: usize) -> DbResult<Computed<'p>> {
+        // The same three arms `Literal` has, and for the same reason: a number
+        // is copied out of the cell and owes nothing to it, and a text or a blob
+        // cannot be borrowed past the guard so it is cloned.
+        let Ok(held) = self.bound.lock() else {
+            return Ok(Computed::Borrowed(Datum::Null));
+        };
+        Ok(match held.get(self.at) {
+            None | Some(OwnedDatum::Null) => Computed::Borrowed(Datum::Null),
+            Some(OwnedDatum::Int(number)) => Computed::Borrowed(Datum::Int(*number)),
+            Some(OwnedDatum::Real(number)) => Computed::Borrowed(Datum::Real(*number)),
+            Some(owned) => Computed::Owned(owned.clone()),
         })
     }
 }

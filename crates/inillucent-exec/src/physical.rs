@@ -555,10 +555,33 @@ impl ForcePlan {
     }
 }
 
+/// The values `?1`, `?2` ... hold for the execution now running.
+///
+/// **Shared with the compiled expression tree, which is what lets a chain built
+/// once answer a different question on the next execution.** `translate` used to
+/// fold `?2` into an `Expr::Literal`, so a chain was only ever correct for the
+/// values it was built against - which is why [`Statement::rebindable`] existed
+/// to refuse a re-run, and why nothing on the execution path could reuse a
+/// chain. An `Expr::Parameter` reads this cell when it is evaluated instead.
+///
+/// **Behind an `Arc<Mutex<_>>` rather than an `Rc<RefCell<_>>`, because `Eval`
+/// is `Send + Sync`.** The pipeline is single-threaded today and the trait does
+/// not promise it will stay that way, which is the same reason `JsonCall`'s
+/// parse cache is a `Mutex`. An uncontended lock is tens of nanoseconds and a
+/// parameter is read once per row at worst.
+pub type Bindings = std::sync::Arc<std::sync::Mutex<Vec<OwnedDatum>>>;
+
 /// The values bound to `?1`, `?2`, ... for one execution.
-#[derive(Clone, Debug, Default)]
+///
+/// **`Clone` is written out rather than derived, and the reason is the cell.**
+/// `Correlation::answer` clones the statement's parameters and writes an outer
+/// row's columns into slots above the declared count, once per row. A derived
+/// `Clone` would share the `Rc`, so those writes would land in the *outer*
+/// statement's bindings and every row of the outer query would see the last
+/// inner row's values. A copied set gets a cell of its own.
+#[derive(Debug, Default)]
 pub struct Params {
-    values: Vec<OwnedDatum>,
+    values: Bindings,
     /// How many parameters the statement has, once it has been compiled.
     ///
     /// `None` until the binder says, because a caller may bind before the
@@ -630,11 +653,24 @@ fn split_mix(seed: u64) -> u64 {
     z ^ (z >> 31)
 }
 
+impl Clone for Params {
+    fn clone(&self) -> Params {
+        Params {
+            values: Bindings::new(std::sync::Mutex::new(self.held().clone())),
+            declared: self.declared,
+            reads: std::cell::Cell::new(self.reads.get()),
+            context: self.context.clone(),
+            recursive_triggers: self.recursive_triggers.clone(),
+            subqueries: self.subqueries.clone(),
+        }
+    }
+}
+
 impl Params {
     /// Returns an empty parameter set.
     pub fn new() -> Params {
         Params {
-            values: Vec::new(),
+            values: Bindings::default(),
             declared: None,
             reads: std::cell::Cell::new(0),
             context: std::cell::Cell::new(crate::scalar::Context::default()),
@@ -648,7 +684,7 @@ impl Params {
     /// @param values - the values, in parameter order
     pub fn from_values(values: Vec<OwnedDatum>) -> Params {
         Params {
-            values,
+            values: Bindings::new(std::sync::Mutex::new(values)),
             declared: None,
             reads: std::cell::Cell::new(0),
             context: std::cell::Cell::new(crate::scalar::Context::default()),
@@ -665,7 +701,7 @@ impl Params {
     /// @param subqueries - one slot per subquery, by the binder's numbering
     pub fn with_subqueries(&self, subqueries: Vec<Option<crate::subquery::Subvalue>>) -> Params {
         Params {
-            values: self.values.clone(),
+            values: Bindings::new(std::sync::Mutex::new(self.held().clone())),
             declared: self.declared,
             reads: std::cell::Cell::new(self.reads.get()),
             context: self.context.clone(),
@@ -688,7 +724,7 @@ impl Params {
     /// to see the same binding the outer statement did.
     pub fn without_subqueries(&self) -> Params {
         Params {
-            values: self.values.clone(),
+            values: Bindings::new(std::sync::Mutex::new(self.held().clone())),
             declared: self.declared,
             reads: std::cell::Cell::new(self.reads.get()),
             context: self.context.clone(),
@@ -722,6 +758,11 @@ impl Params {
     pub fn subquery(&self, id: usize) -> Option<&crate::subquery::Subvalue> {
         self.reads.set(self.reads.get().saturating_add(1));
         self.subqueries.get(id).and_then(|slot| slot.as_ref())
+    }
+
+    /// Returns a copy of the bound values, `?1` first.
+    pub fn values(&self) -> Vec<OwnedDatum> {
+        self.held()
     }
 
     /// Returns how many parameter reads this set has answered.
@@ -784,8 +825,11 @@ impl Params {
     ///
     /// @param values - the new values, `?1` first
     pub fn refill(&mut self, values: impl IntoIterator<Item = OwnedDatum>) {
-        self.values.clear();
-        self.values.extend(values);
+        let Ok(mut held) = self.values.lock() else {
+            return;
+        };
+        held.clear();
+        held.extend(values);
     }
 
     /// Returns the value bound to a parameter.
@@ -795,10 +839,62 @@ impl Params {
     /// @param index - the one-based parameter number
     pub fn get(&self, index: u32) -> OwnedDatum {
         self.reads.set(self.reads.get().saturating_add(1));
-        self.values
+        self.held()
             .get(index.saturating_sub(1) as usize)
             .cloned()
             .unwrap_or(OwnedDatum::Null)
+    }
+
+    /// Returns the cell an `Expr::Parameter` reads when it is evaluated.
+    ///
+    /// **Not counted as a read.** Handing over the cell is the opposite of
+    /// folding a value into the chain: the chain that holds this answers
+    /// whatever is in it at the moment it runs, which is the property
+    /// [`Statement::rebindable`] exists to establish.
+    pub fn bindings(&self) -> Bindings {
+        std::sync::Arc::clone(&self.values)
+    }
+
+    /// Returns a copy of the bound values, for the paths that need them all.
+    ///
+    /// A lock that cannot be taken reads as no values bound, which is what an
+    /// unbound set is - a poisoned mutex here would otherwise turn a parameter
+    /// read into a panic on a path that is not allowed to have one.
+    fn held(&self) -> Vec<OwnedDatum> {
+        self.values
+            .lock()
+            .map(|held| held.clone())
+            .unwrap_or_default()
+    }
+
+    /// Copies another set's values into this one's cell.
+    ///
+    /// The cell is shared with a compiled chain, so this is how a statement
+    /// built against one execution's parameters is pointed at the next
+    /// execution's without rebuilding anything.
+    ///
+    /// @param from - the set holding the new values
+    pub fn adopt(&self, from: &Params) {
+        let source = from.held();
+        let Ok(mut held) = self.values.lock() else {
+            return;
+        };
+        held.clear();
+        held.extend_from_slice(&source);
+    }
+
+    /// Records that the chain being built folded in a value that is only true
+    /// of this execution.
+    ///
+    /// **`now` is the one that made this necessary.** Every `now` in one
+    /// statement is the same instant, which is SQLite's rule, so `translate`
+    /// reads the clock once and puts the reading in the node - and a chain kept
+    /// across executions would then answer `datetime('now')` with the instant it
+    /// was built. Counting it as a read is what makes
+    /// [`Statement::rebindable`] refuse to reuse such a chain, using the
+    /// mechanism already there for a folded subquery and a folded `changes()`.
+    pub fn note_execution_constant(&self) {
+        self.reads.set(self.reads.get().saturating_add(1));
     }
 
     /// Binds one parameter by its one-based number.
@@ -827,10 +923,13 @@ impl Params {
     /// @param value - the value
     pub fn set(&mut self, index: u32, value: OwnedDatum) {
         let at = index.saturating_sub(1) as usize;
-        if self.values.len() <= at {
-            self.values.resize(at.saturating_add(1), OwnedDatum::Null);
+        let Ok(mut held) = self.values.lock() else {
+            return;
+        };
+        if held.len() <= at {
+            held.resize(at.saturating_add(1), OwnedDatum::Null);
         }
-        if let Some(slot) = self.values.get_mut(at) {
+        if let Some(slot) = held.get_mut(at) {
             *slot = value;
         }
     }
@@ -863,10 +962,13 @@ impl Params {
             }
         }
         let at = (index - 1) as usize;
-        if self.values.len() <= at {
-            self.values.resize(at.saturating_add(1), OwnedDatum::Null);
+        let Ok(mut held) = self.values.lock() else {
+            return Err(());
+        };
+        if held.len() <= at {
+            held.resize(at.saturating_add(1), OwnedDatum::Null);
         }
-        if let Some(slot) = self.values.get_mut(at) {
+        if let Some(slot) = held.get_mut(at) {
             *slot = value;
         }
         Ok(())
@@ -890,17 +992,22 @@ impl Params {
 
     /// Unbinds every parameter.
     pub fn clear(&mut self) {
-        self.values.clear();
+        if let Ok(mut held) = self.values.lock() {
+            held.clear();
+        }
     }
 
     /// Returns how many parameters are bound.
     pub fn len(&self) -> usize {
-        self.values.len()
+        self.values.lock().map(|held| held.len()).unwrap_or(0)
     }
 
     /// Reports whether nothing is bound.
     pub fn is_empty(&self) -> bool {
-        self.values.is_empty()
+        self.values
+            .lock()
+            .map(|held| held.is_empty())
+            .unwrap_or(true)
     }
 }
 
@@ -2522,6 +2629,16 @@ pub struct Statement<'t> {
     shape: Shape,
     /// Whether anything but the source read a parameter while building.
     rebindable: bool,
+    /// The cell every `Expr::Parameter` in the chain reads.
+    ///
+    /// **The chain holds the cell it was built with, and the caller hands a
+    /// different `Params` to every execution**, so the two have to be joined up
+    /// before the chain runs. Leaving this out is not a slow statement, it is a
+    /// wrong answer: `SELECT category, count(*) FROM t WHERE id >= ?1 GROUP BY
+    /// category` answered its *first* execution's question on every later one,
+    /// and `a_reused_statement_answers_what_a_rebuilt_pipeline_does` is the test
+    /// that said so.
+    bindings: Bindings,
 }
 
 impl<'t> Statement<'t> {
@@ -2543,6 +2660,15 @@ impl<'t> Statement<'t> {
             return Err(misuse(
                 "this statement folded a parameter into its operator chain and cannot be re-run                  against different values",
             ));
+        }
+        // The chain reads the cell it was built with; this is where that cell
+        // learns what this execution bound. See `Statement::bindings`.
+        let source = params.bindings();
+        if !std::sync::Arc::ptr_eq(&self.bindings, &source) {
+            if let (Ok(from), Ok(mut held)) = (source.lock(), self.bindings.lock()) {
+                held.clear();
+                held.extend_from_slice(&from);
+            }
         }
         let source = {
             let space = self.held.view(&self.prepared.stages);
@@ -2590,12 +2716,14 @@ pub fn build_statement<'t>(
         build_chain(plan, catalog, &prepared, &space, params, sink)?
     };
     let rebindable = params.reads() == before;
+    let bindings = params.bindings();
     let mut operators = chain.operators;
     operators.push(describe_source(&prepared));
     operators.reverse();
     let names = chain.names;
     let pool = source_pool(catalog, &prepared);
     Ok(Statement {
+        bindings,
         plan,
         catalog,
         prepared,
@@ -3915,9 +4043,23 @@ fn constant_value(
     params: &Params,
     affinity: Option<Affinity>,
 ) -> DbResult<OwnedDatum> {
-    let translated = translate_scan(expr, space, params)?;
-    let value = fold(&translated)
-        .ok_or_else(|| misuse("a seek key or range bound reads a column, which it may not"))?;
+    // **A bare `?N` is answered without building an expression for it.** The
+    // seek key of `WHERE id = ?1` is the commonest bound there is, and once
+    // `translate` stopped folding a parameter it cost an `Expr` node, an `Arc`
+    // clone and a lock on the bindings to arrive at a value the parameter set
+    // could hand over directly. Measured on the gate: `point.miss` 199 ns to
+    // 245, `point.rowid` and `point.index` about five per cent each. Anything
+    // more than a bare parameter - `?1 + 200` is the gate's own range bound -
+    // still goes the general way below.
+    let value = match expr {
+        BoundExpr::Parameter(index) => params.get(*index),
+        other => {
+            let translated = translate_scan(other, space, params)?;
+            fold(&translated).ok_or_else(|| {
+                misuse("a seek key or range bound reads a column, which it may not")
+            })?
+        }
+    };
     // A seek key is one side of a comparison and takes the comparison's
     // affinity like any other. `WHERE id = '4'` against an `INTEGER PRIMARY
     // KEY` finds row 4 in SQLite, because the text is converted before the
@@ -3957,10 +4099,27 @@ fn with_affinity(expr: Expr, affinity: Option<Affinity>) -> Expr {
 /// Folds a constant expression to a value, or returns `None` if it reads a
 /// column.
 ///
+/// **A parameter is a constant here and nowhere else.** `translate` stopped
+/// folding `?N` into a literal so that a chain could outlive the values it was
+/// built for, and this reads the binding instead - which is correct because the
+/// only caller is [`constant_value`], and every one of *its* callers is inside
+/// `source_for` or `rowid_seek_key`. Those run **per execution**, after the
+/// window `Statement::rebindable` measures, so a value read here is never kept:
+/// a seek key and a range bound are rebuilt every time the statement runs, which
+/// is the whole reason the source is the part a reused chain does rebuild.
+///
 /// @param expr - the translated expression
 fn fold(expr: &Expr) -> Option<OwnedDatum> {
     match expr {
         Expr::Literal(value) => Some(value.clone()),
+        Expr::Parameter { index, bound } => Some(
+            bound
+                .lock()
+                .ok()?
+                .get(index.saturating_sub(1) as usize)
+                .cloned()
+                .unwrap_or(OwnedDatum::Null),
+        ),
         Expr::Arith(op, left, right) => {
             let left = fold(left)?;
             let right = fold(right)?;
@@ -5326,7 +5485,15 @@ fn translate(
         BoundExpr::Real(number) => Expr::Literal(OwnedDatum::Real(*number)),
         BoundExpr::Text(bytes) => Expr::Literal(OwnedDatum::Text(bytes.clone())),
         BoundExpr::Blob(bytes) => Expr::Literal(OwnedDatum::Blob(bytes.clone())),
-        BoundExpr::Parameter(index) => Expr::Literal(params.get(*index)),
+        // **Read when it is evaluated, not folded in here.** Answering this
+        // with `Expr::Literal(params.get(*index))` made a chain correct only for
+        // the values it was built against, which is why `Statement::rebindable`
+        // had to refuse a re-run and why nothing on the execution path could
+        // keep a chain. See `Expr::Parameter`.
+        BoundExpr::Parameter(index) => Expr::Parameter {
+            index: *index,
+            bound: params.bindings(),
+        },
         // `RAISE(...)` is a value in the grammar and a failure in practice,
         // which is why it is compiled rather than refused: the whole body of
         // every foreign-key check trigger the binder synthesises is one
@@ -5650,8 +5817,13 @@ fn translate(
                 .collect::<DbResult<Vec<Expr>>>()?,
             // Every `now` in one statement is the same instant, which is
             // SQLite's rule and the reason this is read once here rather than
-            // per row in the node.
-            now: inillucent_scalar::datetime::julian_now(),
+            // per row in the node. It is therefore true of *this* execution
+            // only, so the chain that holds it may not be kept for the next one
+            // - which is what `note_execution_constant` records.
+            now: {
+                params.note_execution_constant();
+                inillucent_scalar::datetime::julian_now()
+            },
         },
         BoundExpr::Subquery {
             id,
