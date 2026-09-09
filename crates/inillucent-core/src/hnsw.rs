@@ -367,7 +367,7 @@ impl Hnsw {
         }
         self.node_top[node as usize] = level as u8;
 
-        let query = vectors.get(node).to_vec();
+        let query = vectors.copy_of(node);
 
         let Some(entry) = self.entry else {
             self.entry = Some(node);
@@ -416,7 +416,7 @@ impl Hnsw {
         if list.len() <= cap {
             return;
         }
-        let from_vec = vectors.get(from).to_vec();
+        let from_vec = vectors.copy_of(from);
         let mut candidates: Vec<Nearest> = self.layers[layer][from as usize]
             .iter()
             .map(|n| Nearest {
@@ -457,10 +457,10 @@ impl Hnsw {
             if kept.len() >= cap {
                 break;
             }
-            let cv = vectors.get(c.node);
+            let cv = vectors.copy_of(c.node);
             let closer_to_query_than_to_kept = kept
                 .iter()
-                .all(|k| c.distance < vectors.distance(*k, cv));
+                .all(|k| c.distance < vectors.distance(*k, &cv));
             if closer_to_query_than_to_kept {
                 kept.push(c.node);
             }
@@ -871,18 +871,18 @@ impl Hnsw {
             if node as u32 == entry {
                 return;
             }
-            let query = vectors.get(node as u32);
+            let query = vectors.copy_of(node as u32);
             let level = levels[node];
 
             let mut current = entry;
             for layer in (level + 1..=entry_level).rev() {
-                current = greedy_descend_locked(&layers[layer], vectors, query, current);
+                current = greedy_descend_locked(&layers[layer], vectors, &query, current);
             }
             for layer in (0..=level.min(entry_level)).rev() {
                 let candidates = search_layer_locked(
                     &layers[layer],
                     vectors,
-                    query,
+                    &query,
                     current,
                     self.params.ef_construction,
                 );
@@ -1009,7 +1009,7 @@ impl Hnsw {
         list: &[u32],
         cap: usize,
     ) -> Vec<u32> {
-        let node_vector = vectors.get(node).to_vec();
+        let node_vector = vectors.copy_of(node);
         let mut candidates: Vec<Nearest> = list
             .iter()
             .map(|n| Nearest { distance: vectors.distance(*n, &node_vector), node: *n })
@@ -1192,7 +1192,7 @@ mod tests {
         let mut total = 0.0;
         let trials = 40;
         for t in 0..trials {
-            let q = vs.get((t * 97 % 4000) as u32).to_vec();
+            let q = vs.copy_of((t * 97 % 4000) as u32);
             let exact = flat::search(&vs, &store, &f, &q, 10);
             let approx = g.search(&vs, &store, &f, &q, 10, Some(128));
             total += recall(&approx, &exact);
@@ -1209,7 +1209,7 @@ mod tests {
         g.build(&vs);
         let f = CompiledFilter::compile(&Filter::default(), &store);
         for id in [0u32, 17, 512, 1999] {
-            let q = vs.get(id).to_vec();
+            let q = vs.copy_of(id);
             let hits = g.search(&vs, &store, &f, &q, 5, Some(128));
             assert_eq!(hits[0].chunk, id, "node {id} did not find itself");
         }
@@ -1227,7 +1227,7 @@ mod tests {
         for source in ["slack", "jira", "figma", "miro"] {
             let f = CompiledFilter::compile(&Filter::source(source), &store);
             assert!(f.pass_count() >= 50, "fixture too small for {source}");
-            let q = vs.get(123).to_vec();
+            let q = vs.copy_of(123);
             let hits = g.search(&vs, &store, &f, &q, 50, Some(64));
             assert_eq!(
                 hits.len(),
@@ -1250,7 +1250,7 @@ mod tests {
             let mut total = 0.0;
             let trials = 20;
             for t in 0..trials {
-                let q = vs.get((t * 313 % 20000) as u32).to_vec();
+                let q = vs.copy_of((t * 313 % 20000) as u32);
                 let exact = flat::search(&vs, &store, &f, &q, 10);
                 let approx = g.search(&vs, &store, &f, &q, 10, Some(256));
                 total += recall(&approx, &exact);
@@ -1271,7 +1271,7 @@ mod tests {
         g.build(&vs);
         let f = CompiledFilter::compile(&Filter::source("slack"), &store);
         let slack = store.sources.get("slack").unwrap();
-        let hits = g.search(&vs, &store, &f, &vs.get(7).to_vec(), 40, Some(128));
+        let hits = g.search(&vs, &store, &f, &vs.copy_of(7), 40, Some(128));
         assert!(!hits.is_empty());
         for h in hits {
             let doc = store.chunks[h.chunk as usize].doc;
@@ -1285,7 +1285,7 @@ mod tests {
         let mut g = Hnsw::new(HnswParams::default()); // exhaustive_below = 8000
         g.build(&vs);
         let f = CompiledFilter::compile(&Filter::source("jira"), &store);
-        let q = vs.get(11).to_vec();
+        let q = vs.copy_of(11);
         let exact = flat::search(&vs, &store, &f, &q, 10);
         let got = g.search(&vs, &store, &f, &q, 10, None);
         assert_eq!(
@@ -1301,7 +1301,7 @@ mod tests {
         g.force_graph_traversal();
         g.build(&vs);
         let f = CompiledFilter::compile(&Filter::default(), &store);
-        let q = vs.get(42).to_vec();
+        let q = vs.copy_of(42);
         let a = g.search(&vs, &store, &f, &q, 20, Some(64));
         let b = g.search(&vs, &store, &f, &q, 20, Some(64));
         assert_eq!(
@@ -1357,7 +1357,7 @@ mod tests {
         g.force_graph_traversal();
         g.build(&vs);
         let f = CompiledFilter::compile(&Filter::source("sharepoint"), &store);
-        assert!(g.search(&vs, &store, &f, &vs.get(0).to_vec(), 10, None).is_empty());
+        assert!(g.search(&vs, &store, &f, &vs.copy_of(0), 10, None).is_empty());
     }
 
     #[test]
@@ -1392,7 +1392,7 @@ mod tests {
         let mut sequential_recall = 0.0;
         let mut parallel_recall = 0.0;
         for probe in [7u32, 300, 1500, 2900, 4400, 5100] {
-            let q = vectors.get(probe).to_vec();
+            let q = vectors.copy_of(probe);
             let exact = flat::search(&vectors, &store, &filter, &q, 10);
             sequential_recall +=
                 recall(&sequential.search(&vectors, &store, &filter, &q, 10, Some(128)), &exact);
@@ -1490,7 +1490,7 @@ mod tests {
         let (vectors, _) = fixture(2000, 16);
         let mut graph = Hnsw::new(HnswParams { entry_points: 8, ..Default::default() });
         graph.build(&vectors);
-        let query = vectors.get(11).to_vec();
+        let query = vectors.copy_of(11);
         let starts = graph.entry_points(&vectors, &query);
         assert!(starts.len() >= 8, "only {} starting points: {starts:?}", starts.len());
         let unique: std::collections::HashSet<u32> = starts.iter().copied().collect();
@@ -1502,7 +1502,7 @@ mod tests {
         let (vectors, _) = fixture(500, 16);
         let mut graph = Hnsw::new(HnswParams::default());
         graph.build(&vectors);
-        let query = vectors.get(3).to_vec();
+        let query = vectors.copy_of(3);
         assert_eq!(graph.entry_points(&vectors, &query).len(), 1);
     }
 
@@ -1517,7 +1517,7 @@ mod tests {
         graph.build(&vectors);
 
         let filter = CompiledFilter::compile(&Filter::default(), &store);
-        let query = vectors.get(2_345).to_vec();
+        let query = vectors.copy_of(2_345);
         let exact = flat::search(&vectors, &store, &filter, &query, 200);
         let cutoff = exact.last().map(|n| n.distance).unwrap_or(f32::MAX);
 
@@ -1546,7 +1546,7 @@ mod tests {
         let mut single = 0.0;
         let mut multiple = 0.0;
         for probe in [11u32, 640, 1900, 3300, 4800, 5500] {
-            let q = vectors.get(probe).to_vec();
+            let q = vectors.copy_of(probe);
             let exact = flat::search(&vectors, &store, &filter, &q, 10);
             single += recall(&one.search(&vectors, &store, &filter, &q, 10, Some(32)), &exact);
             multiple += recall(&many.search(&vectors, &store, &filter, &q, 10, Some(32)), &exact);
@@ -1572,7 +1572,7 @@ mod tests {
         let filter = CompiledFilter::compile(&Filter::default(), &store);
         let mut total = 0.0;
         for probe in [3u32, 900, 2100, 3600] {
-            let q = vectors.get(probe).to_vec();
+            let q = vectors.copy_of(probe);
             let exact = flat::search(&vectors, &store, &filter, &q, 10);
             total += recall(&graph.search(&vectors, &store, &filter, &q, 10, Some(128)), &exact);
         }

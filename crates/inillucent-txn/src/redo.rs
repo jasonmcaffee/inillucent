@@ -349,10 +349,30 @@ impl RowRedo for TreeRows {
                 // The write path only logs a compaction when every live row
                 // fits; a replay that cannot fit them is looking at a different
                 // page than the one the record was written against.
+                //
+                // **What the numbers are for.** This message used to say only
+                // the page and the row count, and that is not enough to tell
+                // the two possible causes apart: a page the replay built wrong,
+                // or a page some earlier record was skipped on. The leaf's own
+                // counts and its stamp say which - a sorted region plus a delta
+                // area that add up to more live rows than the tree can hold in
+                // a page is the first, and an LSN at or above this record's is
+                // the second.
+                let live = rows.len();
+                let sorted = leaf.row_count();
+                let delta = leaf.delta_count();
+                let mut tombstoned = 0usize;
+                for row in 0..sorted {
+                    if leaf.is_tombstoned(row)? {
+                        tombstoned = tombstoned.saturating_add(1);
+                    }
+                }
                 return Err(corrupt(format!(
-                    "replaying a compaction of leaf {} could not fit its {} rows",
+                    "replaying a compaction of leaf {} at lsn {lsn} could not fit its {live} live rows: \n                     the page holds {sorted} sorted rows of which {tombstoned} are \n                     tombstoned, {delta} delta rows, {} columns of which {} are the key, \n                     and is stamped lsn {}",
                     page.0,
-                    rows.len()
+                    shape.columns.len(),
+                    shape.key_columns,
+                    inillucent_pool::page::read_u64(&guard, header::LSN).unwrap_or(0),
                 )));
             };
             inillucent_pool::page::set_right(&mut image, leaf.right_sibling())?;

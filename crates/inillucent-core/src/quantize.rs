@@ -44,18 +44,32 @@ impl QuantizedSet {
         self.codes.resize(n * dims, 0);
         self.scales.resize(n, 1.0);
 
-        for id in first..n {
-            let v = vectors.get(id as u32);
-            let peak = v.iter().fold(0f32, |acc, x| acc.max(x.abs()));
-            let scale = if peak > 0.0 { peak / 127.0 } else { 1.0 };
-            self.scales[id] = scale;
-            let base = id * dims;
-            for (d, x) in v.iter().enumerate() {
-                // round, then clamp, so a value exactly at the peak lands on 127
-                // rather than overflowing to -128.
-                let q = (x / scale).round().clamp(-127.0, 127.0);
-                self.codes[base + d] = q as i8;
+        // **Read in blocks, because this pass runs on a set that may be in a file.**
+        // The codes are derived rather than stored, so opening an index re-encodes
+        // every vector - 601,862 of them on a real corpus. One positional read each
+        // would be 601,862 reads; a block is one read per 2,730.
+        let block = vectors.block_len();
+        let mut buffer = vec![0f32; block * dims];
+        let mut id = first;
+        while id < n {
+            let read = vectors.read_block(id as u32, &mut buffer);
+            if read == 0 {
+                break;
             }
+            for nth in 0..read {
+                let v = &buffer[nth * dims..(nth + 1) * dims];
+                let peak = v.iter().fold(0f32, |acc, x| acc.max(x.abs()));
+                let scale = if peak > 0.0 { peak / 127.0 } else { 1.0 };
+                self.scales[id + nth] = scale;
+                let base = (id + nth) * dims;
+                for (d, x) in v.iter().enumerate() {
+                    // round, then clamp, so a value exactly at the peak lands on 127
+                    // rather than overflowing to -128.
+                    let q = (x / scale).round().clamp(-127.0, 127.0);
+                    self.codes[base + d] = q as i8;
+                }
+            }
+            id += read;
         }
     }
 
@@ -139,7 +153,7 @@ mod tests {
     fn quantized_similarity_tracks_full_precision_similarity() {
         let vs = random_set(500, 768);
         let q = QuantizedSet::from_vectors(&vs);
-        let query = vs.get(0).to_vec();
+        let query = vs.copy_of(0);
         let mut worst = 0f32;
         for id in 0..vs.len() as u32 {
             let exact = vs.similarity(id, &query);
@@ -153,7 +167,7 @@ mod tests {
     fn memory_is_a_quarter_of_full_precision() {
         let vs = random_set(1000, 768);
         let q = QuantizedSet::from_vectors(&vs);
-        let full = vs.raw().len() * 4;
+        let full = vs.heap_bytes();
         let ratio = full as f32 / q.bytes() as f32;
         assert!(ratio > 3.9, "compression ratio was only {ratio}");
     }
@@ -163,7 +177,7 @@ mod tests {
         let vs = random_set(300, 768);
         let q = QuantizedSet::from_vectors(&vs);
         for id in [0u32, 42, 299] {
-            let query = vs.get(id).to_vec();
+            let query = vs.copy_of(id);
             let best = (0..vs.len() as u32)
                 .max_by(|a, b| {
                     q.similarity(*a, &query)
@@ -179,7 +193,7 @@ mod tests {
     fn ranking_agrees_with_full_precision_on_the_top_ten() {
         let vs = random_set(2000, 768);
         let q = QuantizedSet::from_vectors(&vs);
-        let query = vs.get(11).to_vec();
+        let query = vs.copy_of(11);
 
         let mut exact: Vec<u32> = (0..vs.len() as u32).collect();
         exact.sort_by(|a, b| {

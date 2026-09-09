@@ -743,7 +743,34 @@ impl Shell {
         }
     }
 
+    /// Returns the text left over after the first statement, when it holds another one.
+    ///
+    /// **The parser's own count, not a scan for semicolons.** A trigger body contains a semicolon,
+    /// and a string literal can contain anything, so counting them is how a correct script gets
+    /// refused and an incorrect one gets accepted. `prepare_with_tail` reports how many bytes the
+    /// first statement used, and `leading_trivia` reports how much of what is left is not a
+    /// statement at all - which is what makes a trailing semicolon and a trailing comment not count
+    /// as a second statement. Both are the engine's own, so there is no second scanner here to
+    /// disagree with the parser.
+    ///
+    /// A script that will not compile answers `None`: it is a syntax error, and it should be
+    /// reported as the syntax error it is rather than as a script with too many statements in it.
+    ///
+    /// @param sql - the text a caller passed as one statement
+    pub fn trailing_statement(&self, sql: &str) -> Option<String> {
+        let connection = self.connection();
+        let (_, consumed) = connection.prepare_with_tail(sql).ok()?;
+        let left = sql.get(consumed..)?;
+        let rest = left.get(inillucent_engine::connect::leading_trivia(left)..)?.trim();
+        if rest.is_empty() {
+            return None;
+        }
+        Some(rest.chars().take(60).collect())
+    }
+
     /// Runs a statement for its effect, reporting only a failure.
+    ///
+    /// @param sql - the statements, separated by semicolons
     pub fn execute(&mut self, sql: &str) -> Result<(), String> {
         self.connection()
             .execute_batch(sql)
@@ -1330,4 +1357,58 @@ fn reason(error: &inillucent_base::DbError) -> String {
         .detail()
         .unwrap_or_else(|| error.message())
         .to_string()
+}
+
+#[cfg(test)]
+mod trailing_statement_tests {
+    use super::Shell;
+
+    /// Opens a scratch shell over a database that reaches no file.
+    fn shell() -> Shell {
+        Shell::open(":memory:").expect("a memory database opens")
+    }
+
+    /// One statement is one statement, however it is punctuated.
+    ///
+    /// `exec` and `query` are documented as taking one, and used to run the first of several and
+    /// report success - which is how `inillucent exec "<twenty CREATE TABLEs>"` produced a database
+    /// with one table in it and printed `ok. 0 rows changed.` (task-1876). These are the cases the
+    /// refusal must not fire on, and the one it must.
+    #[test]
+    fn a_second_statement_is_recognised_and_punctuation_is_not() {
+        let held = shell();
+        for one in [
+            "CREATE TABLE a (id INTEGER PRIMARY KEY)",
+            "CREATE TABLE a (id INTEGER PRIMARY KEY);",
+            "CREATE TABLE a (id INTEGER PRIMARY KEY);   ",
+            "CREATE TABLE a (id INTEGER PRIMARY KEY); -- and that is all",
+            "CREATE TABLE a (id INTEGER PRIMARY KEY); /* and that is all */",
+            "CREATE TABLE a (id INTEGER PRIMARY KEY);;;",
+            // A trigger body holds semicolons, which is why counting them is the wrong test.
+            "CREATE TRIGGER t AFTER INSERT ON a FOR EACH ROW BEGIN UPDATE a SET id = id; END",
+        ] {
+            assert_eq!(held.trailing_statement(one), None, "{one:?} is one statement");
+        }
+
+        let two = held
+            .trailing_statement("CREATE TABLE a (id INTEGER PRIMARY KEY); CREATE TABLE b (id INTEGER PRIMARY KEY)")
+            .expect("two statements are two statements");
+        assert!(two.starts_with("CREATE TABLE b"), "the refusal names what comes next, and said {two:?}");
+
+        // A comment between them does not hide the second one.
+        let commented = held
+            .trailing_statement("CREATE TABLE a (id INTEGER PRIMARY KEY); -- next
+CREATE TABLE b (id INTEGER PRIMARY KEY)")
+            .expect("a comment does not hide a statement");
+        assert!(commented.starts_with("CREATE TABLE b"), "said {commented:?}");
+    }
+
+    /// Text that will not compile is a syntax error, not a script with too many statements in it.
+    #[test]
+    fn text_that_does_not_compile_is_left_to_the_parser() {
+        let held = shell();
+        assert_eq!(held.trailing_statement("SELEKT 1"), None);
+        assert_eq!(held.trailing_statement(""), None);
+        assert_eq!(held.trailing_statement("-- only a comment"), None);
+    }
 }

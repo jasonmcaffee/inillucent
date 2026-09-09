@@ -2980,6 +2980,29 @@ fn highest_rowid(target: &mut dyn WriteTarget, table: &TableInfo) -> DbResult<i6
 
 /// Returns the largest integer key in a tree.
 ///
+/// **The key column and nothing else.** This used to call `LeafRef::live`, which
+/// materialises every column of every live row in the leaf, and then read the
+/// first value of the last one. That is wrong twice over.
+///
+/// It is wrong for correctness, because a value wider than an eighth of a page
+/// is held in a blob extent and a leaf answers for one only after the tree has
+/// read the extents in. `live` does not, so it refuses with "this value is
+/// stored out of line", and the refusal reaches the caller as a failed INSERT.
+/// Every insert into a table whose primary key is not INTEGER generates a rowid
+/// and so comes through here, which made a table with a TEXT primary key unable
+/// to hold a second wide row at all. That is how `inillucent migrate` failed on
+/// the first table of a real 5.8 GB PostgreSQL database (task-1876), where
+/// `attachment.id` is a UUID and `attachment.extracted_text` reaches 1.9 MB.
+///
+/// It is wrong for cost as well: reading a leaf of nine hundred rows to look at
+/// one integer is nine hundred rows of decoding per insert, and where a value is
+/// out of line it is also a page read per value.
+///
+/// `visit_live` performs the same merge of the sorted region and the delta area
+/// while reading only the columns asked for, and a key column is never out of
+/// line, so asking for column 0 alone is both correct and cheap. The rows it
+/// visits are not in key order, so this takes the maximum rather than the last.
+///
 /// @param tree - the tree
 /// @param pool - the buffer pool
 fn largest_key(tree: &PagedTree, pool: &Pool) -> DbResult<i64> {
@@ -2988,13 +3011,15 @@ fn largest_key(tree: &PagedTree, pool: &Pool) -> DbResult<i64> {
     let leaf = LeafRef::parse(&guard)?
         .with_collations(tree.collations())
         .with_directions(tree.directions());
-    let rows = leaf.live()?;
-    Ok(rows
-        .last()
-        .and_then(|row| row.first())
-        .and_then(|value| match value {
-            Datum::Int(number) => Some(*number),
-            _ => None,
-        })
-        .unwrap_or(0))
+    let mut largest: Option<i64> = None;
+    leaf.visit_live(&[0], &mut |values| {
+        if let Some(Datum::Int(number)) = values.first() {
+            largest = Some(match largest {
+                Some(held) if held >= *number => held,
+                _ => *number,
+            });
+        }
+        Ok(())
+    })?;
+    Ok(largest.unwrap_or(0))
 }

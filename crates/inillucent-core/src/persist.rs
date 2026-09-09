@@ -111,6 +111,14 @@ fn check_header(r: &mut impl Read, kind: u8) -> Result<()> {
     Ok(())
 }
 
+/// Where the first vector sits in `vectors.bin`.
+///
+/// Eight magic bytes, a four byte format version and a one byte section tag, then
+/// the two `u32` counts the vector section carries. Named rather than computed at the one call site, because a
+/// filed vector set reads by offset and an offset that is wrong by four bytes
+/// produces vectors that are subtly wrong rather than an error.
+const VECTOR_HEADER_BYTES: u64 = 8 + 4 + 1 + 8;
+
 const KIND_STORE: u8 = 1;
 const KIND_VECTORS: u8 = 2;
 const KIND_GRAPH: u8 = 3;
@@ -160,6 +168,13 @@ struct SavedConfig {
     adaptive_fusion: bool,
     adaptive: SavedAdaptive,
     mmr_lambda: f32,
+    /// Whether the vectors are read into memory when this index is opened.
+    ///
+    /// Defaulted on read, so an index saved before this option existed opens with
+    /// the vectors left in the file - which is the new default and is what the
+    /// index that wrote the file would also do today.
+    #[serde(default)]
+    resident_vectors: bool,
 }
 
 /// `Fusion` in a form that survives a round trip through JSON.
@@ -274,6 +289,7 @@ impl From<&IndexConfig> for SavedConfig {
             hnsw_entry_points: cfg.hnsw.entry_points,
             hnsw_keep_pruned_connections: cfg.hnsw.keep_pruned_connections,
             hnsw_build_threads: cfg.hnsw.build_threads,
+            resident_vectors: cfg.resident_vectors,
             fusion: cfg.fusion.into(),
             lexical_coverage: cfg.lexical_coverage,
             lexical_proximity: cfg.lexical_proximity,
@@ -319,6 +335,7 @@ impl SavedConfig {
             per_doc_cap: self.per_doc_cap,
             lexical_prefix: self.lexical_prefix,
             hnsw: self.hnsw_params(),
+            resident_vectors: self.resident_vectors,
             fusion: self.fusion.to_fusion()?,
             lexical_coverage: self.lexical_coverage,
             lexical_proximity: self.lexical_proximity,
@@ -424,8 +441,11 @@ pub fn save(index: &Index, dir: &Path) -> Result<()> {
         let vectors = index.vectors();
         w.write_all(&(vectors.dims() as u32).to_le_bytes())?;
         w.write_all(&(vectors.len() as u32).to_le_bytes())?;
-        // One write of the whole buffer; f32 little endian is the on disk form.
-        w.write_all(bytemuck::cast_slice(vectors.raw()))?;
+        // f32 little endian is the on disk form. A resident set is one write of
+        // its buffer; a filed one is copied out of the generation it was loaded
+        // from, a block at a time, followed by anything appended since. Either
+        // way the bytes written here are the bytes a load reads back.
+        vectors.write_to(w)?;
         Ok(())
     })?;
     write_file(&target.join("config.bin"), KIND_CONFIG, |w| {
@@ -489,6 +509,24 @@ const LOAD_ATTEMPTS: usize = 3;
 /// the one that vanished is the one the reader wanted anyway.
 /// @param dir - the index directory
 pub fn load(dir: &Path) -> Result<Index> {
+    load_with(dir, None)
+}
+
+/// Opens the live generation, choosing where the vectors go.
+///
+/// **Residency follows the caller, not the file.** Every other setting in `IndexConfig` is written
+/// with the index and read back with it, because an index that answers differently from the one that
+/// was saved is the failure the format version exists to prevent - a fusion method or a coverage
+/// exponent is part of what the index *is*. Where the vectors are held is not: it is a decision about
+/// the process doing the opening, like how wide to search or how many places to start from, and
+/// freezing it into the file means a machine that cannot spare two gigabytes cannot open an index
+/// that was saved on one that could.
+///
+/// `None` takes what the file was saved with, which is what a caller with no opinion should get.
+///
+/// @param dir - the index directory
+/// @param resident_vectors - hold the vectors on the heap, or leave them in the file
+pub fn load_with(dir: &Path, resident_vectors: Option<bool>) -> Result<Index> {
     let mut last: Option<anyhow::Error> = None;
     for _ in 0..LOAD_ATTEMPTS {
         let generation = read_current(dir).ok_or_else(|| {
@@ -498,7 +536,7 @@ pub fn load(dir: &Path) -> Result<Index> {
             )
         })?;
         let target = generation_dir(dir, generation);
-        match load_generation(&target) {
+        match load_generation(&target, resident_vectors) {
             Ok(index) => return Ok(index),
             // Only a vanished generation is retried. A corrupt or wrong-version
             // file is refused, because re-reading a pointer cannot fix it and
@@ -537,7 +575,10 @@ pub fn is_readable(dir: &Path) -> bool {
 }
 
 /// Reads every file of one generation directory into an index.
-fn load_generation(dir: &Path) -> Result<Index> {
+///
+/// @param dir - the generation directory
+/// @param resident_vectors - hold the vectors on the heap, or `None` to take what was saved
+fn load_generation(dir: &Path, resident_vectors: Option<bool>) -> Result<Index> {
     let saved: SavedConfig = {
         let mut r = BufReader::new(File::open(path(dir, "config.bin"))?);
         check_header(&mut r, KIND_CONFIG)?;
@@ -548,15 +589,28 @@ fn load_generation(dir: &Path) -> Result<Index> {
         check_header(&mut r, KIND_STORE)?;
         Store::read_from(&mut r).context("reading the store")?
     };
+    // **The vectors are left in the file unless the caller asked for them.** They
+    // are the largest thing an index holds - 1.85 GB for a 601,862 chunk corpus at
+    // 768 dimensions - and every process that opens the index used to pay for them
+    // whether or not it ever ran a semantic search. `resident_vectors` asks for the
+    // old behaviour; the header is read either way, because the width and the count
+    // are what say where a vector is.
     let vectors: VectorSet = {
-        let mut r = BufReader::with_capacity(1 << 20, File::open(path(dir, "vectors.bin"))?);
+        let vector_path = path(dir, "vectors.bin");
+        let mut r = BufReader::with_capacity(1 << 20, File::open(&vector_path)?);
         check_header(&mut r, KIND_VECTORS)?;
         let mut buf4 = [0u8; 4];
         r.read_exact(&mut buf4)?;
         let dims = u32::from_le_bytes(buf4) as usize;
         r.read_exact(&mut buf4)?;
         let n = u32::from_le_bytes(buf4) as usize;
-        VectorSet::from_raw(dims, crate::binio::read_pod_vec::<f32>(&mut r, dims * n)?)
+        if resident_vectors.unwrap_or(saved.resident_vectors) {
+            VectorSet::from_raw(dims, crate::binio::read_pod_vec::<f32>(&mut r, dims * n)?)
+        } else {
+            // The header is eight magic bytes, one kind byte, then the two counts.
+            let offset = VECTOR_HEADER_BYTES;
+            VectorSet::from_file(dims, n, File::open(&vector_path)?, offset)
+        }
     };
     let params = saved.hnsw_params();
     let graph: Hnsw = {
@@ -602,7 +656,7 @@ pub fn write_index(index: &Index, w: &mut impl Write) -> Result<()> {
         let set = index.vectors();
         vectors.extend_from_slice(&(set.dims() as u32).to_le_bytes());
         vectors.extend_from_slice(&(set.len() as u32).to_le_bytes());
-        vectors.extend_from_slice(bytemuck::cast_slice(set.raw()));
+        set.write_to(&mut vectors)?;
     }
     section(w, &vectors)?;
     let mut graph = Vec::new();
@@ -731,7 +785,7 @@ mod tests {
         assert_eq!(loaded.store().n_chunks(), original.store().n_chunks());
         assert_eq!(loaded.store().n_documents(), original.store().n_documents());
 
-        let query = original.vectors().get(11).to_vec();
+        let query = original.vectors().copy_of(11);
         let f_orig = original.compile(&Filter::default());
         let f_load = loaded.compile(&Filter::default());
 
@@ -886,7 +940,7 @@ mod tests {
         save(&original, &dir).unwrap();
         let loaded = load(&dir).unwrap();
 
-        let query = original.vectors().get(11).to_vec();
+        let query = original.vectors().copy_of(11);
         let f_orig = original.compile(&Filter::default());
         let f_load = loaded.compile(&Filter::default());
         let a: Vec<(u32, f32)> = original

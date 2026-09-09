@@ -42,6 +42,14 @@
 /// The error type, its codes, and the result alias every call returns.
 pub use inillucent_base::{DbError, DbResult, ExtendedCode, PrimaryCode};
 
+/// How many bytes at the front of a script are not part of a statement.
+///
+/// Whitespace, statement separators and both comment forms. Re-exported because a caller that has
+/// to decide whether text holds another statement should ask the parser rather than write a second
+/// scanner: counting semicolons is how a trigger body gets split in the middle and a trailing
+/// comment gets called a statement.
+pub use inillucent_engine::connect::leading_trivia;
+
 /// A database file, a connection to one, and a compiled statement.
 ///
 /// Re-exported rather than wrapped. The old facade wrapped its engine's types
