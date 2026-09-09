@@ -350,6 +350,21 @@ pub struct Pool {
     /// every sync, and [`Pool::writeback`] refuses a page the log has not
     /// caught up with.
     durable_lsn: Cell<u64>,
+    /// The highest LSN this pool has written into the data file.
+    ///
+    /// **A page's stamp has to be a position in the stream beside the file, and
+    /// this is the number that keeps it one** (task-1885). Recovery applies a
+    /// record to a page only when the page's stamp is below the record's, so a
+    /// page carrying a stamp from a stream that no longer exists silently
+    /// swallows every later write to it. The checkpoint records this in the
+    /// meta page and the next open resumes the log above it.
+    ///
+    /// It is collected here rather than beside the writeback's caller because
+    /// [`Pool::writeback`] is the only route a page takes to the file - the
+    /// checkpointer's flush, an eviction and a manual flush all funnel through
+    /// it, which is exactly the argument that makes the write-ahead rule
+    /// enforceable in one place.
+    high_water_lsn: Cell<u64>,
     /// What to call when a page the pool must write is ahead of the log.
     ///
     /// `None` means there is nothing to ask, which is a read-only open and a
@@ -469,6 +484,9 @@ impl Pool {
             // bulk build and a read-only open both run this way, and both are
             // correct to: a page cannot be ahead of a log that does not exist.
             durable_lsn: Cell::new(u64::MAX),
+            // Nothing has been written yet, and zero is what the meta page
+            // means by "no high water recorded".
+            high_water_lsn: Cell::new(0),
             advance_log: RefCell::new(None),
             // Nothing is uncommitted until a transaction says so.
             uncommitted_lsn: Arc::new(AtomicU64::new(u64::MAX)),
@@ -514,6 +532,25 @@ impl Pool {
     /// Returns the write-ahead watermark, or `u64::MAX` when there is no log.
     pub fn durable_lsn(&self) -> u64 {
         self.durable_lsn.get()
+    }
+
+    /// Returns the highest LSN this pool has written into the data file.
+    ///
+    /// Zero when it has written no stamped page, which is what the meta record
+    /// means by "unset" - see [`crate::meta::Meta::high_water_lsn`].
+    pub fn high_water_lsn(&self) -> u64 {
+        self.high_water_lsn.get()
+    }
+
+    /// Raises the high water to at least `lsn`.
+    ///
+    /// Used by a caller that has read a stamp the pool did not write - an open
+    /// that folds the meta page's recorded high water back in, so a run which
+    /// writes nothing does not report a lower number than the run before it.
+    ///
+    /// @param lsn - a stamp the file is known to carry
+    pub fn note_high_water_lsn(&self, lsn: u64) {
+        self.high_water_lsn.set(self.high_water_lsn.get().max(lsn));
     }
 
     /// Returns the page size in bytes.
@@ -1218,6 +1255,15 @@ impl Pool {
             bytes.clone()
         };
         let translated = self.translate_swips(&mut image)?;
+        // **Read before the checksum is recomputed, off the image that is about
+        // to reach the file.** The stamp is what a later recovery compares a
+        // record's LSN against, so the number recorded here has to be the one
+        // the file will carry rather than anything a caller remembers - the
+        // same argument `refuse_if_ahead_of_the_log` makes for reading the
+        // header rather than the bookkeeping beside it.
+        let stamp = page::read_u64(&image, page::header::LSN)?;
+        self.high_water_lsn
+            .set(self.high_water_lsn.get().max(stamp));
         page::checksum_page(&mut image)?;
         // **The old image goes to the journal before the new one goes to the
         // file**, and this is the one place either happens - so a page cannot
@@ -1611,8 +1657,15 @@ impl Pool {
     /// describing a file whose pages are a superset of what it claims, which is
     /// exactly what a checkpoint is allowed to leave behind.
     ///
+    /// The record is taken mutably because one of its fields is only knowable
+    /// **after** the flush: the high water is the highest stamp any page in the
+    /// file carries, and the pages this checkpoint is about to write are part
+    /// of the file it describes. Setting it before the flush would leave the
+    /// meta page one checkpoint behind the stamps it is meant to bound, which
+    /// is the state the next open resumes the log above.
+    ///
     /// @param meta - the record to write, with its generation already bumped
-    pub fn checkpoint(&self, meta: &Meta) -> DbResult<()> {
+    pub fn checkpoint(&self, meta: &mut Meta) -> DbResult<()> {
         // **The journal is sealed before the first page moves.** Everything
         // `save` wrote is in the file's buffers until this; a page image
         // reaching the database before its pre-image reaches the disk is the
@@ -1622,6 +1675,11 @@ impl Pool {
         self.file
             .sync(SyncMode::Normal)
             .map_err(|error| error.into_db_error())?;
+        // Every page this checkpoint wrote has now raised the high water, so
+        // the number recorded here bounds the stamps the file actually holds
+        // rather than the ones it held a checkpoint ago. It never goes
+        // backwards: a run that writes no stamped page keeps what it read.
+        meta.high_water_lsn = meta.high_water_lsn.max(self.high_water_lsn.get());
         let mut image = vec![0u8; self.page_size];
         meta.encode(&mut image)?;
         for slot in [META_PAGE, SHADOW_PAGE] {
@@ -2141,7 +2199,7 @@ mod tests {
         let mut meta = Meta::fresh(512, 1234);
         meta.page_count = 6;
         meta.generation = 2;
-        pool.checkpoint(&meta).unwrap();
+        pool.checkpoint(&mut meta).unwrap();
         let mut primary = vec![0u8; 512];
         let mut shadow = vec![0u8; 512];
         pool.read_raw(META_PAGE, &mut primary).unwrap();
