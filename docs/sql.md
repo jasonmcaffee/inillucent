@@ -104,15 +104,17 @@ That is a fabrication rather than compatibility, so none of the three will ever 
 
 ### Three are decisions this engine made, and each was measured
 
+Both experiments below were run when the weighted headline stood at 3.83x rather than today's 4.26x, and neither has been re-run since. What they measure is the *difference* between the two settings, which is why they are still quoted.
+
 **`PRAGMA page_size` reports 32768** where SQLite reports 4096. Both were measured on the same gate:
-32768 gives 3.83x weighted with the `schema` family at 1.15x; 4096 with a matched cache budget gives
+32768 gave 3.83x weighted with the `schema` family at 1.15x; 4096 with a matched cache budget gave
 3.44x with `schema` at **6% slower than SQLite**, under the floor the performance contract requires.
 The pragma reports what the file is, which is its job.
 
 **`PRAGMA locking_mode` reports `exclusive`.** `normal` works and gives real access from several
 processes: 37 stress rounds, two processes each writing 12,000 rows into one file, zero lost writes
 and zero failed integrity checks. `exclusive` is the *default* because running the gate with `normal`
-as the default reads 3.03x with a lower bound of 2.95x, under the 3.00x bar — it takes `write` from
+as the default read 3.03x with a lower bound of 2.95x, under the 3.00x bar — it takes `write` from
 1.94x to 1.19x, `transaction` from 11% slower to 170% slower, and `schema` from 1.34x to 52% slower.
 Releasing the file between statements means reading the meta record again before each one, in every
 program, including every program that never opens a second connection.

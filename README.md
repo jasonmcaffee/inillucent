@@ -1,6 +1,6 @@
 # inillucent
 
-**An embedded database for agents, written in Rust. It runs SQLite's SQL dialect 279% faster than
+**An embedded database for agents, written in Rust. It runs SQLite's SQL dialect 326% faster than
 SQLite does, and it holds vector search and keyword search in the same file — so a local AI agent can
 query a body of written material by meaning and by exact term without standing up PostgreSQL,
 pgvector and an embedding server.**
@@ -16,13 +16,13 @@ tables, a full text index and a vector index, and all three commit and roll back
 
 |  |  |  |
 |---|---|---|
-| **279% faster than SQLite 3.53.4** | the same ten workload families at 100,000 rows | [Performance](docs/performance.md) |
-| **65% less processor time** | 445 ms against SQLite's 1,266 for the same plan | [Performance](docs/performance.md) |
+| **326% faster than SQLite 3.53.4** | the same ten workload families at 100,000 rows | [Performance](docs/performance.md) |
+| **67% less processor time** | 422 ms against SQLite's 1,266 for the same plan | [Performance](docs/performance.md) |
 | **403 of 416 SQL cases byte for byte, none refused** | every case run through both engines and compared byte by byte | [SQL support](docs/sql.md) |
 | **Better than pgvector on 15 of 17 graded comparisons, worse on none** | both engines reading identical vectors | [Retrieval quality](docs/retrieval-quality.md) |
 | **15% more memory than SQLite** | 42.6 MiB against 37.2 — the one measurement SQLite still wins | [Performance](docs/performance.md#memory) |
 
-[Performance](docs/performance.md) carries every figure with its 95% interval, and names the four
+[Performance](docs/performance.md) carries every figure with its 95% interval, and names the six
 workloads that are slower than SQLite along with what each one costs.
 
 ---
@@ -236,17 +236,21 @@ each cost and how each was fixed:
 
 - **One writer at a time**, and the readers never block it. Several processes can share one file
   under `PRAGMA locking_mode = normal`; the default is `exclusive`, because releasing the file
-  between statements costs the speed headline 3.78x to 3.03x. Threads inside one process are not
-  supported.
+  between statements has to re-read the meta record before every one. Measured when the headline
+  stood at 3.78x, `normal` took it to 3.03x. Threads inside one process are not supported.
 - **The file format is this engine's own.** SQLite files are imported, not opened. A SQLite
   application moves its data across once with `inillucent migrate`.
-- **Four workloads are slower than SQLite**: 2,000 updates in one transaction (376% slower),
-  building an FTS5 index (150% slower), compiling `SELECT 1` on every call (138% slower), and a
-  2,000 row insert batch (72% slower). [Performance](docs/performance.md#the-workloads-that-are-slower)
-  says what each one costs and what is being done about it.
-- **On Linux the same binary measured 53% faster** rather than 279%. That difference was traced to
-  what SQLite pays the operating system on each platform rather than to anything this engine does
-  differently there, and the finding is in [Performance](docs/performance.md#linux).
+- **Six of the thirty workloads are slower than SQLite**: building an FTS5 index (178% slower),
+  compiling `SELECT 1` on every call (98% slower), a 2,000 row insert batch (72% slower), a join over
+  an index range (15% slower), the same shape as a plain range scan (14% slower) and `json_extract`
+  (5% slower). [Performance](docs/performance.md#the-workloads-that-are-slower) says what each one
+  costs and what is being done about it. 2,000 updates in one transaction used to lead this list at
+  669% slower; it is now 270% *faster*.
+- **On Linux the same binary measured 53% faster** where Windows measured 279% at the time. That
+  difference was traced to what SQLite pays the operating system on each platform rather than to
+  anything this engine does differently there, and the finding is in
+  [Performance](docs/performance.md#linux). The Linux arm has not been re-measured since the Windows
+  headline reached 326%.
 - **Adding content to a retrieval index rebuilds the graph**, on one thread: 132.6 s over 185,078
   passages, and about nine and a half minutes over 598,560.
 - **There is no macOS archive yet**, because each platform's archive is built on that platform.
