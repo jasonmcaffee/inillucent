@@ -88,9 +88,30 @@ mod at {
     /// by a build whose only mode was the log, and a rollback open of one is
     /// safe because recovery replays the log first either way.
     ///
-    /// The last field named here; the region continues at 108 for whatever
-    /// comes next.
+    /// Whether the database is in write-ahead-log mode - see above.
     pub const WAL: usize = 104;
+    /// The highest LSN any page in the file has ever been stamped with, 8 bytes.
+    ///
+    /// **A page's LSN has to be a position in the stream currently beside the
+    /// file, and without this it is not always** (task-1885). Recovery applies
+    /// a record to a page only when the page's stamp is below the record's, so
+    /// a page carrying a stamp from a stream that no longer exists swallows
+    /// every later write to it: the record is skipped, the file stays
+    /// structurally intact, and `PRAGMA integrity_check` answers `ok` about a
+    /// row that is gone. Measured on the parked copy of Nikaya's mail database,
+    /// where 24 log segments were moved aside to recover the file and the new
+    /// stream re-used positions the pages already carried - page 3 is stamped
+    /// 21,939,058,496 beside a log that ends at 21,075,008,440.
+    ///
+    /// The number is the highest stamp the pool has written, folded in at every
+    /// checkpoint so it never goes backwards, and an open resumes the log above
+    /// it. Zero means unset, which is what a file written before this field
+    /// existed says; such a file resumes where it always did, and the refusal
+    /// in `inillucent-wal`'s replay is what stands in front of it instead.
+    ///
+    /// The last field named here; the region continues at 116 for whatever
+    /// comes next.
+    pub const HIGH_WATER_LSN: usize = 108;
 }
 
 /// The smallest a meta page can be and still hold every field.
@@ -134,6 +155,11 @@ pub struct Meta {
     /// The one journal mode that outlives the connection that chose it - see
     /// `at::WAL`.
     pub wal: bool,
+    /// The highest LSN any page in the file has ever been stamped with.
+    ///
+    /// The log resumes above it, so a page's stamp is always a position in the
+    /// stream beside the file - see `at::HIGH_WATER_LSN`. Zero means unset.
+    pub high_water_lsn: u64,
 }
 
 impl Meta {
@@ -156,6 +182,7 @@ impl Meta {
             application_id: 0,
             schema_cookie: 0,
             wal: false,
+            high_water_lsn: 0,
         }
     }
 
@@ -187,6 +214,13 @@ impl Meta {
         put(page, at::APPLICATION_ID, &self.application_id.to_le_bytes())?;
         put(page, at::SCHEMA_COOKIE, &self.schema_cookie.to_le_bytes())?;
         put(page, at::WAL, &u32::from(self.wal).to_le_bytes())?;
+        // Written only when the page is long enough to hold it, so a page size
+        // smaller than the region is still a legal meta page rather than an
+        // encode that fails. `META_BYTES` is 92; a field at 108 is inside the
+        // reserved region, and the region is only as long as the page.
+        if page.len() >= at::HIGH_WATER_LSN.saturating_add(8) {
+            put(page, at::HIGH_WATER_LSN, &self.high_water_lsn.to_le_bytes())?;
+        }
         let sum = checksum(page)?;
         put(page, at::CHECKSUM, &sum.to_le_bytes())?;
         Ok(())
@@ -232,6 +266,7 @@ impl Meta {
             application_id: i32v(page, at::APPLICATION_ID),
             schema_cookie: i32v(page, at::SCHEMA_COOKIE),
             wal: i32v(page, at::WAL) != 0,
+            high_water_lsn: u64_or_zero(page, at::HIGH_WATER_LSN),
         })
     }
 
@@ -283,6 +318,23 @@ fn i32v(page: &[u8], offset: usize) -> i32 {
     let mut bytes = [0u8; 4];
     bytes.copy_from_slice(slice);
     i32::from_le_bytes(bytes)
+}
+
+/// Returns a 64-bit field from the reserved region, or zero when it is absent.
+///
+/// The same contract `i32v` has, and for the same reason: a page written before
+/// the field existed is not a corrupt page, it is a page whose high water was
+/// never recorded. Zero is what "never recorded" means everywhere it is read.
+///
+/// @param page - the page bytes
+/// @param offset - where the field sits
+fn u64_or_zero(page: &[u8], offset: usize) -> u64 {
+    let Some(slice) = page.get(offset..offset.saturating_add(8)) else {
+        return 0;
+    };
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(slice);
+    u64::from_le_bytes(bytes)
 }
 
 /// Copies bytes into the page at an offset, or says the page was short.
@@ -361,6 +413,8 @@ mod tests {
             schema_cookie: 3,
             // And the journal-mode flag, for the same reason.
             wal: true,
+            // And the high water, which is the field a reopen resumes above.
+            high_water_lsn: 900_000,
         };
         let mut page = vec![0u8; 32_768];
         meta.encode(&mut page).unwrap();
@@ -466,6 +520,53 @@ mod tests {
         assert!(Meta::fresh(8_192, 1).encode(&mut page).is_err());
     }
 
+    /// A meta page whose reserved region is all zeros - which is every file
+    /// written before the field existed - reads a high water of zero.
+    ///
+    /// The compatibility claim as a test rather than as a comment: zero is what
+    /// "never recorded" means, and an open that reads it resumes where it
+    /// always did.
+    #[test]
+    fn a_file_written_before_the_high_water_reads_zero() {
+        let mut page = vec![0u8; 8_192];
+        let mut meta = Meta::fresh(8_192, 3);
+        meta.high_water_lsn = 77;
+        meta.encode(&mut page).unwrap();
+        assert_eq!(Meta::decode(&page).unwrap().high_water_lsn, 77);
+        // Now blank the field the way a page written by the earlier build
+        // carries it, and re-checksum: the record still decodes, and the high
+        // water reads as unset rather than as damage.
+        let slot = page
+            .get_mut(at::HIGH_WATER_LSN..at::HIGH_WATER_LSN + 8)
+            .expect("the field is inside the page");
+        slot.copy_from_slice(&0u64.to_le_bytes());
+        let sum = checksum(&page).unwrap();
+        let slot = page
+            .get_mut(at::CHECKSUM..at::CHECKSUM + 4)
+            .expect("the checksum is inside the page");
+        slot.copy_from_slice(&sum.to_le_bytes());
+        assert_eq!(Meta::decode(&page).unwrap().high_water_lsn, 0);
+    }
+
+    /// Flipping any byte of the high water is detected, which is what says the
+    /// field is inside the checksum's range rather than beside it.
+    #[test]
+    fn corrupting_the_high_water_is_detected() {
+        let mut meta = Meta::fresh(8_192, 1);
+        meta.high_water_lsn = 21_939_058_496;
+        let mut page = vec![0u8; 8_192];
+        meta.encode(&mut page).unwrap();
+        for index in at::HIGH_WATER_LSN..at::HIGH_WATER_LSN + 8 {
+            let mut damaged = page.clone();
+            let byte = damaged.get_mut(index).expect("the index is in the page");
+            *byte ^= 0xFF;
+            assert!(
+                Meta::decode(&damaged).is_err(),
+                "flipping byte {index} of the high water went unnoticed"
+            );
+        }
+    }
+
     /// A fresh database claims the two meta pages and nothing else.
     #[test]
     fn a_fresh_database_has_two_pages() {
@@ -474,6 +575,7 @@ mod tests {
         assert_eq!(meta.generation, 1);
         assert!(meta.catalog_root.is_none());
         assert!(meta.free_map.is_none());
+        assert_eq!(meta.high_water_lsn, 0);
         assert_eq!(FIRST_DATA_PAGE, PageId(2));
         assert_eq!(META_PAGE, PageId(0));
         assert_eq!(SHADOW_PAGE, PageId(1));

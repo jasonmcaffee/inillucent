@@ -202,6 +202,12 @@ impl Database {
             return Err(corrupt("the meta pages disagree about the page size"));
         }
         let pool = Pool::new(file, page_size, frames, meta.page_count)?;
+        // **The high water the file already carries, folded back in before a
+        // page is written** (task-1885). A run that reads and checkpoints
+        // without writing a stamped page would otherwise record a lower number
+        // than the run before it, and the next open would resume the log below
+        // a stamp that is still in the file.
+        pool.note_high_water_lsn(meta.high_water_lsn);
         let mut free = FreeMap::new(page_size);
         let mut next = meta.free_map;
         while !next.is_none() {
@@ -632,8 +638,16 @@ impl Database {
         self.meta.page_count = self.pool.page_count();
         self.meta.free_map = self.free.first();
         self.meta.generation = self.meta.generation.saturating_add(1);
-        let meta = self.meta;
-        self.pool.checkpoint(&meta)
+        // **The highest stamp any page in the file carries is filled in by the
+        // pool, after the flush** (task-1885). It cannot be read here: the
+        // pages this checkpoint is about to write are part of the file the meta
+        // record describes, and they have not reached it yet. The record comes
+        // back with the number in it, and it is kept, because it must never go
+        // backwards - the next open resumes the log above it.
+        let mut meta = self.meta;
+        self.pool.checkpoint(&mut meta)?;
+        self.meta = meta;
+        Ok(())
     }
 }
 
