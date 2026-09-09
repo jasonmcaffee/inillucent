@@ -1,9 +1,9 @@
 # inillucent
 
-**An embedded database for agents, written in Rust. It runs SQLite's SQL 279% faster than SQLite,
-and it does vector and keyword search in the same file — so a local AI agent can query a body of
-written material by meaning and by exact term without standing up PostgreSQL, pgvector and an
-embedding server.**
+**An embedded database for agents, written in Rust. It runs SQLite's SQL dialect 279% faster than
+SQLite does, and it holds vector search and keyword search in the same file — so a local AI agent can
+query a body of written material by meaning and by exact term without standing up PostgreSQL,
+pgvector and an embedding server.**
 
 [inillucent.com](https://inillucent.com) &nbsp;·&nbsp;
 [Documentation](https://inillucent.com/docs) &nbsp;·&nbsp;
@@ -22,7 +22,7 @@ tables, a full text index and a vector index, and all three commit and roll back
 | **Better than pgvector on 15 of 17 graded comparisons, worse on none** | both engines reading identical vectors | [Retrieval quality](docs/retrieval-quality.md) |
 | **15% more memory than SQLite** | 42.6 MiB against 37.2 — the one measurement SQLite still wins | [Performance](docs/performance.md#memory) |
 
-[Performance](docs/performance.md) carries all four figures with their intervals, and names the four
+[Performance](docs/performance.md) carries every figure with its 95% interval, and names the four
 workloads that are slower than SQLite along with what each one costs.
 
 ---
