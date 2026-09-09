@@ -106,8 +106,10 @@ database in the process:
 | real questions the keyword branch answered with nothing | 57% | **0%** |
 | index inside the database | 3,167 MB of a 5,849 MB database | deleted |
 
-The same move found six query shapes that go quadratic on this engine and one recovery failure to
-read before a migration. Both are in
+The table above is the **retrieval** move. A second move took the **record** off PostgreSQL as well
+— 16 tables and 1.63 million rows — by which time the same mailbox had grown to 602,022 passages.
+That one found six query shapes that go quadratic on this engine, and one recovery failure to read
+before a migration. Both are in
 [Removing PostgreSQL from a 5.8 GB Gmail assistant](real-world-use-cases/nikaya-postgres-to-inillucent.md),
 along with what each one cost and how it was fixed.
 
