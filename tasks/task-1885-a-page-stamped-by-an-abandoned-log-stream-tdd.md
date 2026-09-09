@@ -82,12 +82,17 @@ checkpointer's flush, an eviction and a manual flush all funnel through it, whic
 write-ahead rule enforceable there. It already reads the page's LSN out of the image for that check.
 It records the highest one it has written in a `Cell<u64>`, and `Pool::high_water_lsn` reports it.
 
-**The checkpoint writes it.** `Database::checkpoint` sets
-`meta.high_water_lsn = max(meta.high_water_lsn, pool.high_water_lsn())` before encoding the meta
-page, so the number never goes backwards and survives a run that wrote nothing.
+**The checkpoint writes it, after the flush.** `Pool::checkpoint` takes the meta record mutably and
+sets `meta.high_water_lsn = max(meta.high_water_lsn, self.high_water_lsn())` between the flush and
+the encode. Before the flush would be wrong: the pages the checkpoint is writing are part of the file
+the record describes, so the number would be one checkpoint behind the stamps it is meant to bound.
+`Database::open` seeds the pool from the meta page, so it never goes backwards across runs and
+survives a run that wrote nothing.
 
 **The open resumes above it.** After recovery, the log opens at
-`max(recovered.next_lsn, high_water_lsn + 1)`. In every healthy file the first term already wins, so
+`max(recovered.next_lsn, high_water_lsn + 1)`, reading the high water off the pool rather than the
+meta record - the pool was seeded from the meta and has since been raised for every page this
+recovery evicted, so it is the higher of the two and never the lower. In every healthy file the first term already wins, so
 this changes nothing: the write-ahead rule puts every stamp below the durable end, and the durable
 end is at or below `recovered.next_lsn`. It only fires on a file whose log is short of what its pages
 reflect.
@@ -184,7 +189,57 @@ In `inillucent-compat/tests/analyze_reopen.rs`, beside the search that is alread
 And the real one, which is a measurement rather than a test target: the parked file, through the
 recipe in §1.
 
-## 6. What this does not do
+## 6. What it did, measured
+
+Everything in §5 is written and green, and every test was shown to fail with the change reverted
+rather than assumed to.
+
+| | |
+|---|---|
+| `inillucent-pool` lib | 91 passed |
+| `inillucent-txn` (lib, durability, transactions) | 47 passed |
+| `inillucent-wal` (lib, log, recovery) | 56 passed |
+| the changed selection, `inillucent-testrun --changed` | 127 targets, 1,594 tests |
+
+Two failures in that run, neither from this change: `inillucent-compat::policy` reports
+`crates/inillucent-exec/src/dml.rs` unformatted, and `inillucent-cli::lib` failed once in a build
+race and passes on its own (52 tests). Both belong to task-1890, which was editing
+`inillucent-exec` and `inillucent-engine` in the same checkout while this ran.
+
+### The reduction, which now exists
+
+`a_page_stamped_above_the_logs_end_refuses_the_open` and
+`a_log_below_the_files_high_water_resumes_above_it`, in `analyze_reopen.rs`. With the refusal
+removed, the first prints the silent loss in as many words:
+
+```
+the open accepted a file stamped by a stream it does not have, and the committed
+CREATE TABLE read back as Err(... "no such table: later") - which is the silent loss
+```
+
+The earlier search failed because it went after the *conditions* that set the distance. The state is
+eight bytes and they are outside the page checksum, so the test stamps the page and the variable is
+gone.
+
+### The parked file
+
+Recipe run end to end against a fresh copy of
+`J:/nikaya-data/wal-parked-task1876/nikaya.rdb.after-checkpoint-recovery`:
+
+```
+query "SELECT count(*) FROM document"   ->  66793          (a read still works)
+analyze                                 ->  ok. sqlite_stat1 is up to date.
+query "SELECT count(*) FROM document"   ->  Error [io]: database disk image is malformed:
+    page 3 carries lsn 21939058496, which is at or above the log's end 21075008440: the file
+    was stamped by a log stream this database no longer has, so replaying under the page-LSN
+    rule would discard the records for that page silently
+```
+
+The file is refused where it used to blame tree 2147483710, and the numbers in the message are the
+two the diagnosis rests on. A plain read of such a file still works, which is deliberate: refusing
+every read would take away the ability to get data out of one.
+
+## 7. What this does not do
 
 It does not repair the parked file. A file whose pages carry stamps from a stream nobody has cannot
 have those writes recovered - the records are in segments that were moved aside - and pretending
