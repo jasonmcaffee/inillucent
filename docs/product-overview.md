@@ -114,7 +114,7 @@ along with what each one cost and how it was fixed.
 ## Where to go next
 
 - [Getting started](getting-started.md) — install it and run a query
-- [Architecture](architecture.md) — how both engines work
+- [Architecture](architecture.md) — how the retrieval engine works
 - [SQL support](sql.md) — what runs, what differs, what is refused
 - [Vector search](vector-search.md) — the retrieval engine from SQL and from the library
 - [Roadmap](roadmap.md) — what is not there yet

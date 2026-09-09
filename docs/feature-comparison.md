@@ -1851,7 +1851,7 @@ the instrument that *finds* a difference, and a difference it finds becomes a ca
 | [`docs/sql.md`](sql.md) | this document's findings, told as what runs and what differs |
 | [`docs/performance.md`](performance.md) | the SQLite comparison, summarised |
 | [`docs/retrieval-quality.md`](retrieval-quality.md) | the graded comparison with pgvector |
-| [`docs/architecture.md`](architecture.md) | how both engines work |
+| [`docs/architecture.md`](architecture.md) | how the retrieval engine works |
 | [`docs/roadmap.md`](roadmap.md) | what is not there yet |
 | [`drivers/README.md`](../drivers/README.md) | the driver, for somebody writing a binding |
 | [`compat/README.md`](../compat/README.md) | the parity manifest and the harness that fills it |

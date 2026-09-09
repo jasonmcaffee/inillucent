@@ -1,9 +1,22 @@
-# Cross-crate test assets
+# Tests: the shared assets and the two standards
 
-These directories hold the assets the assurance program uses, kept out of the
-crates so that a fixture is not owned by whichever crate happened to need it
-first. Each is filled by the phase that needs it; an empty one is a phase that
-has not arrived yet.
+Two documents live here, beside the assets they describe:
+
+| | |
+|---|---|
+| [`inillucent-testing-tdd.md`](inillucent-testing-tdd.md) | the testing standard: where a new test goes, its six rules, and how the selective runner works |
+| [`synthetic-corpus.md`](synthetic-corpus.md) | building the public corpus every retrieval measurement is taken on, from download to graded run |
+
+`selection.toml` is the map from a changed path to the test targets it can break,
+enforced by `crates/inillucent-compat/tests/selection.rs`. `timings.toml` and
+`performance-history.tsv` are what the runner and the gates record.
+
+## The directories
+
+These hold the assets the assurance program uses, kept out of the crates so that
+a fixture is not owned by whichever crate happened to need it first. Each is
+filled by the phase that needs it; an empty one is a phase that has not arrived
+yet.
 
 | directory | what lands here | phase |
 |---|---|---|

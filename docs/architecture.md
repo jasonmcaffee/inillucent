@@ -1,6 +1,14 @@
-# How inillucent works
+# How the retrieval engine works
 
-This explains inillucent from the beginning, assuming no background in databases or in machine learning. Read it top to bottom; each section only uses ideas the earlier ones introduced.
+This explains the retrieval engine from the beginning, assuming no background in databases or in
+machine learning. Read it top to bottom; each section only uses ideas the earlier ones introduced.
+
+inillucent has two engines. This page is the **retrieval** one: semantic search, keyword search,
+filters, and the ranking that combines them. The **relational** engine — SQLite's SQL on B+trees, a
+page pool, a redo log, snapshot isolation and a vectorised executor — is a separate subject, and
+[SQL support](sql.md) and [Performance](performance.md) are its pages.
+[Vector search](vector-search.md) is where the two meet: a `VECTOR(N)` column and an HNSW index
+reachable from ordinary SQL.
 
 ## 1. The problem it solves
 
@@ -316,12 +324,34 @@ Its scan settings are these, each chosen from a measured sweep against an exhaus
 | `hnsw.scan_mem_multiplier` | 4 | not applicable | At the pgvector default of 1 the iterative scan exhausts its memory budget and stops early, returning as few as 30 rows of 50 and holding mean recall to 0.788. At 4 the short results stop and mean recall reaches 0.856. At 8 nothing changes. |
 | ordering | `relaxed_order` rather than `strict_order` | not applicable | 0.856 against 0.727 mean recall at the same cost. Nothing downstream depends on the within scan ordering, because Reciprocal Rank Fusion recomputes the ranking. Those figures come from the private corpus this engine was first graded on, measured against a different database. They are the reason the setting has the value it has, not a result this repository reproduces. |
 
-`hnsw.scan_mem_multiplier` is the one most easily missed. Missing it produces a baseline that looks tuned and is not, which is why the settings are written down here rather than left in the code.
+`hnsw.scan_mem_multiplier` is the one most easily missed. Missing it produces a baseline that looks tuned and is not, which is why the settings are written down here.
 
 When the iterative scan is off, `hnsw.max_scan_tuples` and `hnsw.scan_mem_multiplier` are reset rather than left set, so an unfiltered query on the same connection cannot inherit a filtered query's scan budget.
 
 A second PostgreSQL configuration is graded alongside it, running pgvector's extension defaults with no iterative scan. It is reported to show what the extension does before it is configured, and no comparison is scored against it.
 
-**Status of the numbers in this document.** They come from the first full graded run, whose baseline had `hnsw.ef_search` at 100 on filtered searches rather than 400, `hnsw.max_scan_tuples` at 200,000, iterative scan left on for unfiltered searches, and `hnsw.scan_mem_multiplier` never set, so it ran at the pgvector default of 1. Each of those makes the baseline weaker than the settings in the table above, so the PostgreSQL figures quoted here understate a correctly configured one, most of all on filtered recall. The run against the settings in the table is in progress and this document will carry its numbers. Measurements of inillucent alone, its latency, memory, disk, quantisation ladder, `ef_search` sweep and correctness gates, do not depend on the baseline.
+**Which run these numbers come from.** The PostgreSQL figures on this page are from the first full
+graded run, whose baseline had `hnsw.ef_search` at 100 on filtered searches rather than 400,
+`hnsw.max_scan_tuples` at 200,000, iterative scan left on for unfiltered searches, and
+`hnsw.scan_mem_multiplier` never set. Each of those makes the baseline weaker than the settings in
+the table above, so the PostgreSQL figures quoted here understate a correctly configured one, most of
+all on filtered recall.
 
-The engine has 118 tests of its own and the measurement program has 62. Nine of the engine's tests cover the embedding model running in process, so they need the `onnx` feature; `cargo test -p inillucent-core` alone runs the other 109.
+**[Retrieval quality](retrieval-quality.md) carries the corrected run**, against the settings in that
+table, and it is the page to read for any comparison against pgvector. This page keeps the earlier
+figures because they are what the explanations above were written against, and the shape of every
+finding is unchanged. inillucent's own measurements — latency, memory, disk, the quantisation ladder,
+the `ef_search` sweep and the correctness gates — do not depend on the baseline at all.
+
+The engine has 118 tests of its own and the measurement program has 62. Nine of the engine's tests
+cover the embedding model running in process, so they need the `onnx` feature;
+`cargo test -p inillucent-core` alone runs the other 109. [Repository](repository.md) covers the rest
+of the assurance program.
+
+## Where to go next
+
+- [Vector search](vector-search.md) — using this engine, from SQL and from the library
+- [Retrieval quality](retrieval-quality.md) — the graded comparison against pgvector
+- [Embeddings](embeddings.md) — where the vectors come from
+- [Where the vectors live](vector-residency.md) — held in memory or read from the file
+- [SQL support](sql.md) and [Performance](performance.md) — the other engine

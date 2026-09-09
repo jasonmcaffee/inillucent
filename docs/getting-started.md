@@ -159,5 +159,5 @@ Node, Go, PHP and C.
 
 - [SQL support](sql.md) — what runs, what differs from SQLite, what is refused
 - [Vector search](vector-search.md) — `VECTOR(N)` columns, HNSW, and hybrid retrieval
-- [Architecture](architecture.md) — how the storage and the retrieval engine work
+- [Architecture](architecture.md) — how the retrieval engine works
 - [Performance](performance.md) — the measurements against SQLite
