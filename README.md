@@ -75,6 +75,46 @@ Four programs come out of an install or a build:
 [Getting started](docs/getting-started.md) covers all four, the exit codes, and the JSON a binding
 sees.
 
+## Client libraries
+
+The command line is one way in. An application calls the engine in its own process, through client
+libraries for eight languages, which live in
+[**jasonmcaffee/inillucent-clients**](https://github.com/jasonmcaffee/inillucent-clients):
+
+| | | |
+|---|---|---|
+| TypeScript | `npm install inillucent` | koffi |
+| JavaScript | `npm install inillucent` | the same package, with a CommonJS entry point |
+| Python | `pip install inillucent-client` | ctypes, standard library only |
+| Rust | `cargo add inillucent-client` | libloading |
+| Go | `go get github.com/jasonmcaffee/inillucent-clients/go` | purego, so cgo stays off |
+| Java | `com.inillucent:inillucent`, Java 22 or later | the Foreign Function and Memory API |
+| C# | `dotnet add package Inillucent` | `DllImport` with `SafeHandle` lifetimes |
+| PHP | `composer require inillucent/inillucent` | the FFI extension |
+
+None of them needs a C compiler to install. All eight call the same C ABI, and all eight are graded
+by [`drivers/conformance/suite.json`](drivers/conformance/suite.json) — the same 17 cases this
+repository's own Rust driver runs — so a client is correct in the sense that it agrees with the
+engine rather than in the sense that somebody wrote tests for it.
+
+They give the same API in every language: typed values where `NULL` is not the empty string, an
+exact `total` beside the rows a limit handed back, a transaction you hold open so a write can be
+checked before the commit rather than reported after it, and a refusal that names the construct the
+engine has not built instead of calling it a syntax error.
+
+```python
+import inillucent
+
+with inillucent.connect("app.rdb") as db:
+    db.execute("INSERT INTO note (body) VALUES (?1)", ["hello"])
+    for row in db.query("SELECT id, body FROM note"):
+        print(row["id"], row["body"])
+```
+
+[Client libraries](https://inillucent.com/docs/clients) has the installation and a worked example
+for each language. [The driver](drivers/README.md) is the C ABI underneath them, for anybody writing
+a ninth.
+
 ## What it does
 
 **SQLite's SQL, on its own storage.** Joins, common table expressions including recursive ones,
