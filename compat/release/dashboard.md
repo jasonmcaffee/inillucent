@@ -1,5 +1,13 @@
 # inillucent performance dashboard
 
+> **These are the `task-1791-release` gate's own output files, taken on the engine that came
+> before the rearchitecture, and they are kept as that run's record. They are not the current
+> numbers and they are not edited by hand.** The engine measured here was slower than SQLite on
+> every family; the shipping engine is **326% faster** weighted over the same ten families, with
+> no family below the contract's 1.00x floor. The current run is
+> [docs/performance.md](../../docs/performance.md) and
+> [docs/feature-comparison.md](../../docs/feature-comparison.md).
+
 Platform `windows-x86_64`. Every number is the paired speed ratio, SQLite over inillucent, so above one is faster than the reference. Columns are runs in the order they were taken.
 
 ## Scale `small`

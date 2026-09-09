@@ -57,18 +57,26 @@ defect in the measurement it uncovered, is the section after next.
 
 Thirty workloads. Twenty four are faster than SQLite. These six are not.
 
-| workload | family | how much slower | why |
-|---|---|---|---|
-| `extension.fts.build` | `extension` | **178% slower** | four tree writes per document — `%_content` and `%_docsize`, and at the flush a dictionary row and a doclist row for each of 507 terms — where SQLite writes about 1,000 rows and one segment blob |
-| `prepare.trivial` | `open.prepare` | **98% slower** | `SELECT 1` compiled on every call, in 25 allocations. Split by the profiler: 417 ns to parse, 520 more to bind, and the rest to build a pipeline |
-| `write.insert.batch` | `write` | **72% slower** | 2,000 inserts in one transaction; a split writes four whole page images to the log |
-| `join.range` | `read.join` | 15% slower | an index range and a row fetch per entry, where SQLite amortises one statement's overhead over two hundred rows and this does not |
-| `range.lookaside` | `read.range` | 14% slower | the same shape |
-| `extension.json` | `extension` | 5% slower | the extraction itself, plus two uncontended mutex acquisitions per call; the parse of a repeated document and path is already cached |
+| workload | family | ratio | how much slower | why |
+|---|---|---|---|---|
+| `extension.fts.build` | `extension` | 0.36x | **178% slower** | four tree writes per document — `%_content` and `%_docsize`, and at the flush a dictionary row and a doclist row for each of 507 terms — where SQLite writes about 1,000 rows and one segment blob |
+| `prepare.trivial` | `open.prepare` | 0.51x | **98% slower** | `SELECT 1` compiled on every call, in 25 allocations. Split by the profiler: 417 ns to parse, 520 more to bind, and the rest to build a pipeline |
+| `write.insert.batch` | `write` | 0.58x | **72% slower** | 2,000 inserts in one transaction; a split writes four whole page images to the log |
+| `join.range` | `read.join` | 0.87x | 15% slower | an index range and a row fetch per entry, where SQLite amortises one statement's overhead over two hundred rows and this does not |
+| `range.lookaside` | `read.range` | 0.88x | 14% slower | the same shape |
+| `extension.json` | `extension` | 0.96x | 5% slower | the extraction itself, plus two uncontended mutex acquisitions per call; the parse of a repeated document and path is already cached |
 
 **`txn.large` is no longer on this list.** It was the slowest workload on the board at 0.09x, it decided
-the `transaction` floor, and it is now **3.63x** — 2.66 ms against SQLite's 9.65. Two things got it
-there and only one of them is the engine.
+the `transaction` floor, and it is now **3.70x**, where the median round takes 2.66 ms against
+SQLite's 9.65. Two things got it there and only one of them is the engine.
+
+**How a ratio on this page is taken.** A family's or a workload's ratio is the gate's own paired-round
+figure — it pairs the two arms round by round and reports the middle of the thirty — and the number
+printed here is the median of the two middle runs of four. An absolute time printed beside it is the
+median of the same four runs' own medians. The two are different summaries of one set of rounds, so
+dividing the printed times gives a number close to the printed ratio rather than exactly it: 2.66 and
+9.65 divide to 3.63 where the paired figure is 3.70. The paired figure is the one the contract grades
+and the one quoted.
 
 ### What a statement costs before it reaches a tree
 
@@ -140,7 +148,7 @@ the state the original write saw, and the relocation is a function of that page 
 
 ## Memory
 
-**42.59 MiB against SQLite's 37.19 — 15% more.** The contract asks for 5% less, so this bar is
+**42.61 MiB against SQLite's 37.19 — 15% more.** The contract asks for 5% less, so this bar is
 missed, and it is the only headline that is a loss.
 
 It has been worked twice. It was **102% more** two rounds of work ago and **43% more** one round ago.
@@ -225,8 +233,11 @@ retires to **0.0 MB** at a checkpoint, where it used to hold 94.6 MB across two 
 
 ## Linux
 
-**The same binary measured 53% faster on Linux, not 279%.** That difference was settled by
-experiment rather than argued about, and the finding is that it is not a Linux problem.
+**The same binary measured 53% faster on Linux, where Windows measured 279% at the time.** That
+difference was settled by experiment rather than argued about, and the finding is that it is not a
+Linux problem. The Linux arm has not been re-measured since; the Windows headline has moved to 326%
+in the meantime, so treat the pair as the finding it was rather than as a comparison with the number
+at the top of this page.
 
 With a size classed free list in place of the system allocator, a `SELECT 1` compile goes from
 46.95 ms to 38.97 ms on Windows (17% faster) and from 39.91 ms to 38.20 ms on Linux (4% faster) —
@@ -236,20 +247,22 @@ runtime's heap is 59% of the time.
 SQLite does per statement work with the operating system that Windows charges heavily for and Linux
 barely does. So SQLite's arm — the denominator of every ratio on this page — moves across platforms
 while this engine's does not. The absolute work is the same on both, and lowering it is what the
-missed bars need. The allocator change that took Windows from 3.24x to 3.86x has not been measured on
-Linux.
+missed bars need. Neither the allocator change that took Windows from 3.24x to 3.86x nor anything
+since has been measured on Linux.
 
 ## What is not measured here
 
 - **One scale.** These are the medium fixture, 100,000 rows. At 5,000 rows the headline is 3.46x, and
-  at 600,000 it is 5.13x. Families behave differently at each, and `write` inverts: it is **slower
-  than SQLite** at 5,000 rows, 92% faster at 100,000 and **545% faster** at 600,000, because a bigger
-  table spreads what a statement costs to set itself up over more of a page. `extension` is the one
-  family that **meets its bar at 600,000 rows** (1.51x) and misses it at the other two, for the same
-  reason: FTS5's build is four ordinary row writes per document, and a row write is where the
-  per-statement cost lands.
+  at 600,000 it is 5.13x. Families behave differently at each, and `write` inverts: it is **45% slower
+  than SQLite** at 5,000 rows (0.69x), 92% faster at 100,000 and **545% faster** at 600,000 (6.45x),
+  because a bigger table spreads what a statement costs to set itself up over more of a page.
+  `extension` moves the other way: 1.58x at 5,000 rows and 1.51x at 600,000, against 1.30x at 100,000.
+  Both of those clear the 1.50x bar's central value, but the gate grades a family on its 95% lower
+  bound, and that is 1.33x at both ends — so `extension` reads MISSED at all three scales. The reason
+  it is better at the ends than in the middle is the same one: FTS5's build is four ordinary row
+  writes per document, and a row write is where the per-statement cost lands.
 - **One machine.** Windows 11 on x64. The disk matters more than it looks: part way through a four
-  run sequence, `txn.batched` — 200 commits and 200 `fsync`s — goes from 288 ms to 836 ms **on
+  run sequence, `txn.batched` — 200 commits and 200 `fsync`s — goes from 309 ms to 895 ms **on
   SQLite's own arm**, on the same fixture with the same binary, because the volume stops keeping up
   with the couple of gigabytes a sequence writes. That row is published beside every run so a reader
   can tell a slow volume from a slow engine. Twelve runs across three sequences were taken and the

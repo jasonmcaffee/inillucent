@@ -4,8 +4,8 @@ In the order it is being worked, each with the measurement behind it.
 
 ## 1. Memory is the one headline SQLite still wins
 
-**42.61 MiB against SQLite's 37.19 — 15% more**, on the same 128 MiB budget, while taking 279% less
-wall clock and 65% less processor. The performance contract asks for 5% *less*, so this bar is
+**42.61 MiB against SQLite's 37.19 — 15% more**, on the same 128 MiB budget, while running 326%
+faster and spending 67% less processor. The performance contract asks for 5% *less*, so this bar is
 missed.
 
 It has come down twice: it was 102% more, then 43% more, now 15%. The remaining 5.4 MiB is a page
@@ -13,43 +13,53 @@ pool holding a file that is now within 4% of SQLite's, a process floor of which 
 Rust binary in this workspace costs before the engine exists**, and one `CREATE INDEX`.
 [Where the memory goes](performance.md#memory) attributes every megabyte.
 
-## 2. `transaction` is under the floor
+## 2. Four per family bars are missed
 
-**19% slower than SQLite**, with a 95% lower bound of 69% slower, against a floor that asks for no
-family slower than SQLite. This is a release blocking condition.
-
-One workload does it. `txn.large` replaces a ten byte value with a fifty byte one, two thousand times
-in one transaction. The lengths differ, so the write cannot go into the slot in place and each
-statement becomes an insert into the leaf's delta area, with every thirty second one triggering a
-compaction over the whole leaf. A leaf now holds twice as many rows as it did before the file
-narrowed, so a compaction costs twice as much: 4.1 ms against 10.2.
-
-The fix is a compaction that does not rewrite the whole page. Raising the delta area's limit from 32
-entries to 64 was measured on both arms and does not buy it back.
-
-## 3. Three per family bars are missed
-
-Each on four consecutive runs. These are targets rather than requirements, and each family is faster
-than SQLite:
+Each on four consecutive runs. These are targets rather than requirements, and every one of these
+families is still faster than SQLite. `transaction` was under the contract's **floor** on all four
+runs and is no longer on this list at all: task-1890 took it to 241% faster.
 
 | family | measured | the bar asks |
 |---|---|---|
-| `open.prepare` | 61% faster | 400% faster |
-| `schema` | 38% faster | 200% faster |
-| `extension` | 43% faster | 50% faster |
+| `open.prepare` | 58% faster (1.58x) | 400% faster |
+| `read.join` | 311% faster (4.11x) | 200% faster — missed on the 95% lower bound only, 2.89x |
+| `extension` | 30% faster (1.30x) | 50% faster |
+| `schema` | 27% faster (1.27x) | 200% faster |
 
-`open.prepare` is `SELECT 1` compiled on every call: 1,258 ns against SQLite's 420, in 25
-allocations, split 320 ns to parse, 476 to bind and 608 to build the pipeline.
+**Two of the four are not gaps, and the arithmetic says so.** `open.prepare` is `prepare.point` at
+4.96x and `prepare.trivial` at 0.51x; for the family to reach 5.00x, `prepare.trivial` would have to
+reach 5.05x, and SQLite compiles, binds, steps and resets `SELECT 1` in 483 ns — so the bar is asking
+for 96 ns. `schema` is one `CREATE INDEX`, 26.78 ms against SQLite's 33.54, whose stages are
+`scan 3.7, sort 5.5, pack 11.4, catalog 0.3, seal 5.8`: a packer costing nothing at all leaves
+15.4 ms, which is 2.18x. Neither bar has been moved — they are in `compat/perf/contract.toml`, they
+were written before any measurement, and changing one to meet a number is not a decision this
+document makes.
 
-`schema` is `CREATE INDEX` and its backfill, where the bulk builder's floor sits above the budget.
+`extension` is the reachable one, and item 6 has it. `read.join` misses on its lower bound alone, and
+what would close it is the operator chain reuse in item 3.
+
+## 3. The operator chain is rebuilt on every execution
+
+Measured, both arms warmed and the order reversed so a warm cache could not flatter either: reusing a
+compiled chain is worth **738 ns to 358** on `SELECT 1`, **1,413 to 786** on a point lookup, and
+**71,672 to 59,983** on the 200-row range scan that `join.range` and `range.lookaside` are shaped
+like — which is the 14-15% those two sit under SQLite.
+
+`physical::build_statement` already holds a chain across executions and rebuilds only the source, and
+nothing calls it. What stops it is ownership rather than effort: an index nested loop holds a borrow
+of the tree it reads, and the engine keeps its trees in a map whose write path takes them mutably, so
+caching a chain means reference counting the trees. The failure mode of getting that borrow
+discipline wrong is a runtime panic on a shape as ordinary as an `UPDATE` that reads the table it
+writes, which is why it wants its own run at it with the discipline designed rather than discovered.
 
 ## 4. Linux
 
-**53% faster there against 279% on Windows.** This was settled by experiment: with a size classed
-free list in place of the system allocator the two platforms run the same absolute speed, 38.97 ms
-against 38.20, and it is SQLite's own arm that moves across platforms rather than this engine's.
-[Linux](performance.md#linux) has the measurement. The allocator change that took Windows from 3.24x
-to 3.86x has not been measured on Linux.
+**53% faster there, where Windows measured 279% at the time.** This was settled by experiment: with
+a size classed free list in place of the system allocator the two platforms run the same absolute
+speed, 38.97 ms against 38.20, and it is SQLite's own arm that moves across platforms rather than
+this engine's. [Linux](performance.md#linux) has the measurement. Neither the allocator change that
+took Windows from 3.24x to 3.86x nor anything since has been measured on Linux, so the Linux figure
+is older than the 326% Windows headline rather than a comparison with it.
 
 ## 5. `write.insert.batch`
 
@@ -59,17 +69,21 @@ sorted by their encoded key and find them by bisection instead of scanning and d
 
 ## 6. `extension.fts.build`
 
-**150% slower than SQLite**, and what is left is not micro cost. Writing the dictionary in perfect
-key order still costs about 3.2 µs a row against about 2.4 µs for a `%_data` row, and this engine's
-own `write.insert.batch` is 15.7 µs a row — so a shadow table write is not slow.
+**178% slower than SQLite** — 10.97 ms against 3.68 — and what is left is not micro cost. Writing
+the dictionary in perfect key order still costs about 3.2 µs a row against about 2.4 µs for a
+`%_data` row, and this engine's own `write.insert.batch` is 15.7 µs a row — so a shadow table write
+is not slow.
 
 FTS5 here does four tree writes per document: `%_content`, `%_docsize`, the new term's `%_idx` row
 and its `%_data` doclist. SQLite's accumulates the batch in memory and writes a handful of segment
 blobs at commit. Closing the rest is a segment format change touching every reader of `%_idx` and
 `%_data`.
 
-The gate prints the breakdown beside the ratio: over 500 documents, `content` 1.3 ms, `tokenize` 0.4,
-`docsize` 1.0, `group` 0.2, `terms` 0.3, new terms 0.4, dictionary write 1.7, flush 2.7.
+The gate prints the breakdown beside the ratio: over 500 documents, `content` 2.1 ms, `tokenize` 0.5,
+`docsize` 1.6, `group` 0.2, `terms` 0.4, new terms 0.4 over 507 terms, dictionary write 2.2, flush
+3.6. Making the dictionary row and the doclist row one row instead of two is worth about 2.9 ms of
+the 10.97, which is what would take the family over its bar at this scale; it already reads 1.58x at
+5,000 rows and 1.51x at 600,000.
 
 ## 7. Deleting the old engine
 
