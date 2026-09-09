@@ -138,6 +138,21 @@ pub enum Body<'a> {
         page: u64,
         /// The whole page after the compaction.
         image: &'a [u8],
+        /// The LSN the page carried **before** the compaction ran.
+        ///
+        /// **A diagnosis, not a gate** (task-1880 §7). A compaction with no
+        /// image asks recovery to re-run the pack over the page's own live
+        /// rows, on the argument that redo replays in LSN order and the page is
+        /// therefore in the state the record was written against. When that
+        /// argument fails, what recovery sees is a pack that will not fit and no
+        /// way to tell whether the page is wrong or the derivation is - and the
+        /// database is unopenable while it works that out. This says which page
+        /// the writer had, so the replay can name both stamps.
+        ///
+        /// Zero when the record was written before this field existed. The
+        /// padding rule in `Record::decode` allows fewer than eight spare bytes,
+        /// so eight trailing bytes are always this field and never padding.
+        from_lsn: u64,
     },
     /// A split or a merge, as the three page images it produced.
     Structural {
@@ -481,8 +496,14 @@ fn encode_body(body: &Body<'_>, out: &mut Vec<u8>) -> DbResult<()> {
             put_bytes(out, key);
             put_bytes(out, value);
         }
-        Body::CompactLeaf { tree, page, image } => {
+        Body::CompactLeaf {
+            tree,
+            page,
+            image,
+            from_lsn,
+        } => {
             put_tree_page_bytes(out, *tree, *page, image);
+            out.extend_from_slice(&from_lsn.to_le_bytes());
         }
         Body::Structural {
             kind: _,
@@ -558,7 +579,21 @@ fn decode_body(kind: u8, payload: &[u8]) -> DbResult<(Body<'_>, usize)> {
         }
         kind::COMPACT_LEAF => {
             let (tree, page, image) = cursor.tree_page_bytes()?;
-            Body::CompactLeaf { tree, page, image }
+            // A trailing eight bytes are the page's stamp before the
+            // compaction. A record written before that field existed has none,
+            // and `Record::decode` refuses eight or more bytes of padding - so
+            // there is no length at which the two are ambiguous.
+            let from_lsn = if cursor.remaining() >= 8 {
+                cursor.u64()?
+            } else {
+                0
+            };
+            Body::CompactLeaf {
+                tree,
+                page,
+                image,
+                from_lsn,
+            }
         }
         kind::SPLIT_LEAF | kind::MERGE_LEAF => {
             let structural = if kind == kind::SPLIT_LEAF {
@@ -656,6 +691,11 @@ impl<'a> Cursor<'a> {
     /// Returns how many bytes have been consumed.
     fn used(&self) -> usize {
         self.at
+    }
+
+    /// Returns how many bytes are left.
+    fn remaining(&self) -> usize {
+        self.bytes.len().saturating_sub(self.at)
     }
 
     /// Takes `count` bytes.
@@ -805,6 +845,7 @@ mod tests {
                 tree: 7,
                 page: 9,
                 image: b"a whole page, in miniature",
+                from_lsn: 4_096,
             },
             Body::Structural {
                 kind: Structural::Split,

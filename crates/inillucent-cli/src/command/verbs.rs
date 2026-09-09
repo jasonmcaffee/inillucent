@@ -840,8 +840,8 @@ pub fn functions(context: &mut Context, arguments: &Arguments) -> Result<Outcome
 /// about, and the failure mode of getting it wrong is "there is no such file"
 /// rather than a migration of the wrong thing. `--kind` still overrides it.
 pub fn migrate(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
-    let source = arguments.required_text("source")?.to_string();
     let destination = arguments.required_text("destination")?.to_string();
+    let source = resolve_source(context, arguments.text("source"))?;
     let kind = arguments
         .text("kind")
         .map(str::to_string)
@@ -875,6 +875,70 @@ pub fn migrate(context: &mut Context, arguments: &Arguments) -> Result<Outcome, 
             "'{other}' is not a migration kind. Use sqlite, postgres, mysql or index."
         ))),
     }
+}
+
+/// The environment variable a source may be given in instead of an argument.
+const SOURCE_URL_VARIABLE: &str = "INILLUCENT_SOURCE_URL";
+
+/// Returns the source to migrate from, in the three ways it may be given.
+///
+/// **A connection URL holds a password, and an argument is in the process list
+/// for the whole run** - which for a large database is hours, and which every
+/// other process on the machine can read (task-1880 §6). So there are three
+/// ways to say it, in this order:
+///
+/// 1. the argument, when it is present and is not `-`;
+/// 2. `INILLUCENT_SOURCE_URL`, when it holds something;
+/// 3. one line of standard input, when the argument is `-`.
+///
+/// Standard input is only read for an explicit `-`, and never on a confined
+/// surface: `--root` is how this command table is handed to an agent over MCP,
+/// and MCP speaks on standard input, so a verb that read a line from it there
+/// would consume the transport rather than a URL.
+///
+/// The line is trimmed of its newline and nothing else, because a password may
+/// legitimately end in a space.
+///
+/// @param context - the surface, which may be confined
+/// @param argument - the source the caller passed, when it passed one
+fn resolve_source(context: &Context, argument: Option<&str>) -> Result<String, Failed> {
+    if let Some(source) = argument {
+        if source != "-" {
+            return Ok(source.to_string());
+        }
+    }
+    if let Ok(held) = std::env::var(SOURCE_URL_VARIABLE) {
+        if !held.trim().is_empty() {
+            return Ok(held);
+        }
+    }
+    if argument == Some("-") {
+        if context.confined() {
+            return Err(Failed::said(
+                Status::InvalidState,
+                "this surface is confined to a directory with --root, and '-' reads the source \
+                 from standard input, which such a surface does not have to itself. Set \
+                 INILLUCENT_SOURCE_URL instead.",
+            ));
+        }
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|error| Failed::said(Status::Io, format!("standard input: {error}")))?;
+        let line = line.trim_end_matches(['\r', '\n']).to_string();
+        if line.is_empty() {
+            return Err(Failed::misuse(
+                "standard input held no source. Write the file path or the connection URL on one \
+                 line.",
+            ));
+        }
+        return Ok(line);
+    }
+    Err(Failed::misuse(format!(
+        "migrate needs a source: a database file, or a postgres:// or mysql:// URL. Pass it as \
+         the first argument, set {SOURCE_URL_VARIABLE}, or pass '-' to read one line from \
+         standard input."
+    )))
 }
 
 /// Returns the migration kind a source names, when it names one.
@@ -1140,4 +1204,81 @@ pub fn shell_placeholder(
 /// The stand-in for `mcp`.
 pub fn mcp_placeholder(_context: &mut Context, _arguments: &Arguments) -> Result<Outcome, Failed> {
     Err(front_end_only("mcp"))
+}
+
+#[cfg(test)]
+mod source_tests {
+    use super::*;
+    use crate::shell::Shell;
+
+    /// Returns a surface, confined or not.
+    ///
+    /// @param root - the directory to confine to, when the case wants one
+    fn context(root: Option<std::path::PathBuf>) -> Context {
+        Context::for_test(
+            Shell::open(":memory:").expect("a memory database opens"),
+            root,
+        )
+    }
+
+    /// The argument is used when there is one, and it is not `-`.
+    #[test]
+    fn an_argument_is_the_source() {
+        let context = context(None);
+        let held = resolve_source(&context, Some("postgres://user@host/db"))
+            .expect("the argument is accepted");
+        assert_eq!(held, "postgres://user@host/db");
+    }
+
+    /// With no argument, the source comes from the environment.
+    ///
+    /// **Which is what this exists for (task-1880 §6).** A connection URL holds
+    /// a password and an argument is in the process list for the whole run.
+    #[test]
+    fn the_environment_supplies_a_source_that_was_not_an_argument() {
+        let context = context(None);
+        std::env::set_var(SOURCE_URL_VARIABLE, "postgres://user:secret@host/db");
+        let held = resolve_source(&context, None).expect("the variable is read");
+        std::env::remove_var(SOURCE_URL_VARIABLE);
+        assert_eq!(held, "postgres://user:secret@host/db");
+    }
+
+    /// With nothing anywhere, the refusal names all three ways to say it.
+    #[test]
+    fn no_source_anywhere_is_refused_by_name() {
+        let context = context(None);
+        std::env::remove_var(SOURCE_URL_VARIABLE);
+        let error = resolve_source(&context, None).expect_err("there is no source");
+        let said = format!("{error:?}");
+        assert!(said.contains(SOURCE_URL_VARIABLE), "{said}");
+        assert!(said.contains("standard input"), "{said}");
+    }
+
+    /// A confined surface refuses `-` rather than reading its own transport.
+    ///
+    /// `--root` is how this command table is handed to an agent over MCP, and
+    /// MCP speaks on standard input: a verb that read a line from it there
+    /// would consume the transport rather than a URL.
+    #[test]
+    fn a_confined_surface_refuses_to_read_standard_input() {
+        let context = context(Some(std::env::temp_dir()));
+        std::env::remove_var(SOURCE_URL_VARIABLE);
+        let error = resolve_source(&context, Some("-")).expect_err("a confined surface refuses");
+        let said = format!("{error:?}");
+        assert!(said.contains("--root"), "{said}");
+        assert!(said.contains(SOURCE_URL_VARIABLE), "{said}");
+    }
+
+    /// `-` with the variable set takes the variable and never touches stdin.
+    ///
+    /// The order matters: a caller that scripts `-` and also exports the
+    /// variable should not block on a transport nobody is writing to.
+    #[test]
+    fn the_environment_wins_over_reading_standard_input() {
+        let context = context(None);
+        std::env::set_var(SOURCE_URL_VARIABLE, "mysql://user@host/db");
+        let held = resolve_source(&context, Some("-")).expect("the variable is read");
+        std::env::remove_var(SOURCE_URL_VARIABLE);
+        assert_eq!(held, "mysql://user@host/db");
+    }
 }

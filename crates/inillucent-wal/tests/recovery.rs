@@ -419,6 +419,7 @@ fn recovering_twice_produces_the_same_file() {
             tree: 1,
             page: 10,
             image: b"compacted",
+            from_lsn: 0,
         },
     )
     .unwrap();

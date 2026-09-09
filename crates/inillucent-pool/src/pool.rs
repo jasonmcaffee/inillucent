@@ -545,6 +545,56 @@ impl Pool {
         self.budget.set(pages.clamp(1, self.buffers.len().max(1)));
     }
 
+    /// Adds frames, so a pool can hold more pages than it was opened with.
+    ///
+    /// **A frame costs a latch, a pin counter and an empty `Vec` until it is
+    /// claimed**, which is what makes this cheap enough to be a pragma rather
+    /// than a reopen: `claim_frame` gives a frame its page-sized buffer the
+    /// first time the frame is used, so growing to sixty-five thousand frames
+    /// allocates bookkeeping rather than two gigabytes.
+    ///
+    /// Nothing that exists moves. The new frames go on the end, every frame
+    /// index already handed out still names the same buffer, and the free list
+    /// gains the new indices - so a page that is resident stays resident and a
+    /// descent holding a frame number is unaffected.
+    ///
+    /// Never shrinks: a smaller cache is what [`Pool::set_budget`] is for, and
+    /// removing a frame would mean evicting whatever is in it while a caller
+    /// may be holding it.
+    ///
+    /// @param frames - how many frames the pool should hold in total
+    pub fn grow_frames(&mut self, frames: usize) -> DbResult<()> {
+        let held = self.buffers.len();
+        if frames <= held {
+            return Ok(());
+        }
+        let more = frames.saturating_sub(held);
+        self.buffers
+            .try_reserve(more)
+            .map_err(|_| no_mem(format!("{more} more frames of {} bytes", self.page_size)))?;
+        self.latches
+            .try_reserve(more)
+            .map_err(|_| no_mem(format!("{more} more frame latches")))?;
+        self.pins
+            .try_reserve(more)
+            .map_err(|_| no_mem(format!("{more} more pin counters")))?;
+        for _ in 0..more {
+            self.buffers.push(RefCell::new(Vec::new()));
+            self.latches.push(VersionLatch::new());
+            self.pins.push(Cell::new(0));
+        }
+        {
+            let mut state = self.state.borrow_mut();
+            state.frames.resize(frames, FrameMeta::empty());
+            // Pushed in reverse, the way `new` builds the list, so the next
+            // claim takes the lowest new index.
+            for index in (held..frames).rev() {
+                state.free.push(index as u32);
+            }
+        }
+        Ok(())
+    }
+
     /// Returns how many bytes the pool occupies.
     pub fn byte_size(&self) -> usize {
         self.buffers.len().saturating_mul(self.page_size)

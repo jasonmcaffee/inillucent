@@ -457,13 +457,9 @@ pub fn run(plan: &Plan, source: &mut dyn RemoteSource) -> DbResult<Report> {
             )),
         }
 
-        let mut destination = RowDigest::new();
-        let read = connection.query(&format!("SELECT * FROM {}", quoted(&table.target)));
+        let read = digest_table(&connection, &table.target);
         match read {
-            Ok(rows) => {
-                for row in &rows {
-                    destination.add(row);
-                }
+            Ok(destination) => {
                 if destination.rows == report.rows {
                     checks.push(Check::passed(
                         &format!("count.{}", table.target),
@@ -526,6 +522,70 @@ pub fn run(plan: &Plan, source: &mut dyn RemoteSource) -> DbResult<Report> {
         report.destination = PathBuf::new();
     }
     Ok(report)
+}
+
+/// How many rows one page of the verifying read holds.
+///
+/// **The verify used to read the whole table.** `connection.query("SELECT * FROM
+/// t")` and this engine's statements materialise, so checking `chunk_embedding`
+/// - 601,862 rows of 9,513-byte text - held every one of them at once: peak
+/// resident 4.7 GB, scaling with the largest table rather than with anything the
+/// operator chose. It completed on the machine it was measured on. On a smaller
+/// one it would have failed nine minutes into a migration that had already done
+/// all of its work, and the staged file would have been thrown away for a
+/// shortage of memory rather than a difference in the data (task-1880 §5).
+///
+/// Two thousand rows is a page of about 19 MB at that row width and about 2 MB
+/// at an ordinary one, and it is a page rather than a row because a statement
+/// per row would pay a prepare, a descent and a plan lookup for each.
+const VERIFY_PAGE_ROWS: usize = 2_000;
+
+/// Folds every row of a destination table into a digest, one page at a time.
+///
+/// **Paged by rowid, which every destination table has.** `SourceTable::create_sql`
+/// writes the primary key as a table constraint and never `WITHOUT ROWID`, so
+/// `rowid` is present, unique and ordered on all of them - and paging by it
+/// costs one descent per page rather than the rescan an `OFFSET` would.
+///
+/// The rowid is selected so the page can be walked and is **not** digested: the
+/// source digest was folded over the source's own columns, so the destination's
+/// have to be the same list. That is what `row.get(1..)` is for.
+///
+/// The digest does not depend on the order rows arrive in, which is what makes a
+/// paged read produce the same value as a single one.
+///
+/// @param connection - the reopened staging database
+/// @param table - the destination table's name
+fn digest_table(
+    connection: &inillucent_engine::connect::Connection<'_>,
+    table: &str,
+) -> DbResult<RowDigest> {
+    let sql = format!(
+        "SELECT rowid, * FROM {} WHERE rowid > ?1 ORDER BY rowid LIMIT {VERIFY_PAGE_ROWS}",
+        quoted(table)
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let mut digest = RowDigest::new();
+    let mut after = i64::MIN;
+    loop {
+        statement.reset();
+        statement.bind_integer(1, after)?;
+        let mut seen = 0usize;
+        while statement.step()? {
+            let row = statement.row();
+            let Some(OwnedDatum::Int(rowid)) = row.first() else {
+                return Err(corrupt(format!(
+                    "{table} answered a row with no rowid, so the verify cannot page it"
+                )));
+            };
+            after = *rowid;
+            digest.add(row.get(1..).unwrap_or(&[]));
+            seen = seen.saturating_add(1);
+        }
+        if seen < VERIFY_PAGE_ROWS {
+            return Ok(digest);
+        }
+    }
 }
 
 /// Copies one table, folding each row into a digest as it is bound.
@@ -835,5 +895,67 @@ mod tests {
         assert!(markdown.contains("public.note"));
         assert!(markdown.contains("pass count.note"));
         assert!(markdown.contains("public.recent"));
+    }
+    /// A paged verifying read digests exactly what one whole-table read does.
+    ///
+    /// **What this is a regression test for (task-1880 §5).** The verify used to
+    /// be `connection.query("SELECT * FROM t")`, and this engine's statements
+    /// materialise - so checking `chunk_embedding`, 601,862 rows of 9,513-byte
+    /// text, held 4.7 GB resident at once. The read is now paged by rowid, and
+    /// the property that makes that legitimate is the one
+    /// `the_digest_is_independent_of_row_order` pins.
+    ///
+    /// The table holds more than two full pages and its rowids have gaps, so
+    /// the paging is exercised rather than only its first page, and a pager that
+    /// assumed contiguous rowids or counted rows instead of following the key
+    /// would stop early and be caught here.
+    #[test]
+    fn a_paged_read_digests_the_same_value_as_a_whole_one() {
+        let database = inillucent_engine::connect::Database::open(":memory:")
+            .expect("an in-memory database opens");
+        let connection = database.connect();
+        connection
+            .execute_batch("CREATE TABLE t (id INTEGER, body TEXT)")
+            .expect("the schema is created");
+        let rows = VERIFY_PAGE_ROWS.saturating_mul(3).saturating_add(37);
+        connection.execute_batch("BEGIN").expect("begin");
+        let mut insert = connection
+            .prepare("INSERT INTO t (id, body) VALUES (?1, ?2)")
+            .expect("the insert prepares");
+        for nth in 0..rows {
+            insert.reset();
+            insert.bind_integer(1, nth as i64).expect("bind");
+            insert
+                .bind_text(2, &format!("row {nth} of {rows}"))
+                .expect("bind");
+            while insert.step().expect("step") {}
+        }
+        drop(insert);
+        connection.execute_batch("COMMIT").expect("commit");
+        // Gaps in the rowids, so a pager that assumed they were contiguous
+        // would read the wrong rows.
+        connection
+            .execute_batch("DELETE FROM t WHERE id % 7 = 0")
+            .expect("some rows are removed");
+
+        let whole = connection
+            .query("SELECT * FROM t")
+            .expect("the whole table reads");
+        let mut expected = RowDigest::new();
+        for row in &whole {
+            expected.add(row);
+        }
+        assert!(
+            expected.rows > VERIFY_PAGE_ROWS as u64 * 2,
+            "the fixture is only {} rows, which does not exercise paging",
+            expected.rows
+        );
+        let paged = digest_table(&connection, "t").expect("the paged read runs");
+        assert_eq!(paged.rows, expected.rows, "every row was read exactly once");
+        assert_eq!(
+            paged.hex(),
+            expected.hex(),
+            "the paged read digests what the whole read digests"
+        );
     }
 }

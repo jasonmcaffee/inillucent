@@ -83,12 +83,15 @@ pub trait RowRedo {
     /// @param tree - the tree the leaf belongs to
     /// @param page - the leaf's page number
     /// @param lsn - the record's LSN, to stamp the page with
+    /// @param from_lsn - the stamp the page carried when the record was written,
+    ///   or zero for a record written before that was recorded
     fn compact_leaf(
         &mut self,
         database: &mut Database,
         tree: u64,
         page: PageId,
         lsn: u64,
+        from_lsn: u64,
     ) -> DbResult<()>;
 
     /// Overwrites one fixed-width slot of one row.
@@ -128,6 +131,7 @@ impl RowRedo for RefuseRows {
         _tree: u64,
         page: PageId,
         _lsn: u64,
+        _from_lsn: u64,
     ) -> DbResult<()> {
         Err(misuse(format!(
             "a CompactLeaf record for page {} needs a tree to repack it",
@@ -299,6 +303,40 @@ fn decode_all(bytes: &[u8], most: usize) -> DbResult<Vec<Datum<'_>>> {
     Ok(values)
 }
 
+/// Returns a tree's key collations and directions, for a leaf a replay locates in.
+///
+/// **The write path parses every leaf `with_collations` and `with_directions`
+/// from the tree, and the replay used to parse it with neither** (task-1880 §7).
+/// A `LeafRef` with no collations compares under BINARY and a `LeafRef` with no
+/// directions searches as though every key column ascends, so `locate` on a
+/// leaf whose key column is `COLLATE NOCASE` or `DESC` looked in the wrong place
+/// and answered `Absent`.
+///
+/// What that costs is not a failed replay. An insert that does not find the row
+/// it is replacing **adds a second entry under one key**; a delete that does not
+/// find its row leaves the row behind. Either way the leaf's live rows are not
+/// the ones the writer had, and the next compaction of that leaf - which carries
+/// no page image, because a compaction is meant to be re-derivable from the page
+/// it starts from - cannot fit them. That is the same ending as the catalog
+/// defect this ticket found first, reached by a different road.
+///
+/// @param shape - the tree's column directory and key width
+fn key_order(shape: &RedoTree) -> (Vec<inillucent_value::collation::Collation>, Vec<bool>) {
+    let collations = shape
+        .columns
+        .iter()
+        .take(shape.key_columns)
+        .map(|spec| spec.collation)
+        .collect();
+    let directions = shape
+        .columns
+        .iter()
+        .take(shape.key_columns)
+        .map(|spec| spec.descending)
+        .collect();
+    (collations, directions)
+}
+
 impl RowRedo for TreeRows {
     fn compact_leaf(
         &mut self,
@@ -306,6 +344,7 @@ impl RowRedo for TreeRows {
         tree: u64,
         page: PageId,
         lsn: u64,
+        from_lsn: u64,
     ) -> DbResult<()> {
         let shape = self.shape(tree)?.clone();
         let page_size = database.page_size();
@@ -367,12 +406,35 @@ impl RowRedo for TreeRows {
                         tombstoned = tombstoned.saturating_add(1);
                     }
                 }
+                let stamped = inillucent_pool::page::read_u64(&guard, header::LSN).unwrap_or(0);
+                let against = match from_lsn {
+                    0 => "the record does not say which page it was written against".to_string(),
+                    held if held == stamped => {
+                        format!("it was written against a page stamped {held}, which is this one")
+                    }
+                    held => format!(
+                        concat!(
+                            "it was written against a page stamped {}, and this one is stamped ",
+                            "{} - so a record for this page between those two was not applied"
+                        ),
+                        held, stamped
+                    ),
+                };
                 return Err(corrupt(format!(
-                    "replaying a compaction of leaf {} at lsn {lsn} could not fit its {live} live rows: \n                     the page holds {sorted} sorted rows of which {tombstoned} are \n                     tombstoned, {delta} delta rows, {} columns of which {} are the key, \n                     and is stamped lsn {}",
+                    concat!(
+                        "replaying a compaction of leaf {} at lsn {} could not fit its {} live ",
+                        "rows: the page holds {} sorted rows of which {} are tombstoned, {} ",
+                        "delta rows, and {} columns of which {} are the key; {}"
+                    ),
                     page.0,
+                    lsn,
+                    live,
+                    sorted,
+                    tombstoned,
+                    delta,
                     shape.columns.len(),
                     shape.key_columns,
-                    inillucent_pool::page::read_u64(&guard, header::LSN).unwrap_or(0),
+                    against,
                 )));
             };
             inillucent_pool::page::set_right(&mut image, leaf.right_sibling())?;
@@ -403,12 +465,21 @@ impl RowRedo for TreeRows {
         // front of the record always decodes.
         let key = decode_all(row, shape.key_columns)?;
         let spilled = holds_extent(row, shape.columns.len())?;
+        let (collations, directions) = key_order(&shape);
         database.pool().modify(page, |bytes| {
             let mut leaf = LeafMut::new(bytes)?;
             // An insert replaces, exactly as the write path's does: whatever the
             // key already named goes first. A replay that only added would put a
             // second row under a key the tree holds once.
-            let located = leaf.view()?.locate(&key, shape.key_columns)?;
+            //
+            // **Under the tree's own order.** See `key_order`: without the
+            // collations and the directions this searches a leaf that is not
+            // sorted the way it thinks it is.
+            let located = leaf
+                .view()?
+                .with_collations(&collations)
+                .with_directions(&directions)
+                .locate(&key, shape.key_columns)?;
             match located {
                 Located::Sorted(at) => {
                     leaf.set_tombstone(at)?;
@@ -443,9 +514,15 @@ impl RowRedo for TreeRows {
     ) -> DbResult<()> {
         let shape = self.shape(tree)?.clone();
         let values = decode_all(key, shape.key_columns)?;
+        let (collations, directions) = key_order(&shape);
         database.pool().modify(page, |bytes| {
             let mut leaf = LeafMut::new(bytes)?;
-            match leaf.view()?.locate(&values, shape.key_columns)? {
+            let located = leaf
+                .view()?
+                .with_collations(&collations)
+                .with_directions(&directions)
+                .locate(&values, shape.key_columns)?;
+            match located {
                 Located::Sorted(at) => {
                     leaf.set_tombstone(at)?;
                 }
@@ -474,9 +551,15 @@ impl RowRedo for TreeRows {
         let shape = self.shape(tree)?.clone();
         let values = decode_all(key, shape.key_columns)?;
         let (new_value, _) = Datum::decode_tagged(value)?;
+        let (collations, directions) = key_order(&shape);
         database.pool().modify(page, |bytes| {
             let mut leaf = LeafMut::new(bytes)?;
-            let Located::Sorted(row) = leaf.view()?.locate(&values, shape.key_columns)? else {
+            let located = leaf
+                .view()?
+                .with_collations(&collations)
+                .with_directions(&directions)
+                .locate(&values, shape.key_columns)?;
+            let Located::Sorted(row) = located else {
                 // An in-place update is only ever logged against a row in the
                 // sorted region - that is the condition the write path checks
                 // before it takes this path at all - so anything else means the
@@ -597,9 +680,14 @@ impl<R: RowRedo> Redo for Applier<'_, R> {
             Body::WritePage { page, image } => self.put_image(page, image, lsn)?,
             // An empty image means "re-run the compaction"; one that carries a
             // page is copied, so a log written before this change still replays.
-            Body::CompactLeaf { tree, page, image } if image.is_empty() => {
+            Body::CompactLeaf {
+                tree,
+                page,
+                image,
+                from_lsn,
+            } if image.is_empty() => {
                 self.rows
-                    .compact_leaf(self.database, tree, PageId(page), lsn)?;
+                    .compact_leaf(self.database, tree, PageId(page), lsn, from_lsn)?;
                 self.stats.images = self.stats.images.saturating_add(1);
             }
             Body::CompactLeaf { page, image, .. } => self.put_image(page, image, lsn)?,

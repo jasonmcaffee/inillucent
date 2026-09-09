@@ -88,3 +88,9 @@ __pycache__/
 /vendor/
 /composer.lock
 /packages/php/runtime/
+
+# The Unluminous IDE's per-workspace state: which files are open, which folders
+# are expanded. It belongs to whoever has the checkout open, not to the
+# checkout. `tests/selection.toml` has a rule for it too, so a change to it
+# selects nothing rather than every suite in the workspace.
+/.unluminous/
