@@ -174,7 +174,7 @@ each was fixed: [Removing PostgreSQL from a 5.8 GB Gmail assistant](docs/real-wo
 | [Vector search](docs/vector-search.md) | `VECTOR(N)` columns, HNSW indexes, `inillucent_search`, hybrid ranking |
 | [Embeddings](docs/embeddings.md) | the embedding pipeline, running it on GPUs, comparing models |
 | [Migrating](docs/migrating.md) | from a SQLite file, a PostgreSQL server or a MySQL server |
-| [Architecture](docs/architecture.md) | how both engines work, in plain terms |
+| [Architecture](docs/architecture.md) | how the retrieval engine works, from first principles |
 | [Performance](docs/performance.md) | against SQLite: speed, processor time, memory, disk |
 | [Feature comparison](docs/feature-comparison.md) | the full 416-case probe, feature by feature |
 | [Retrieval quality](docs/retrieval-quality.md) | against pgvector, and how the grading decides a verdict |

@@ -1,10 +1,16 @@
-# Synthetic corpus testing
+# The synthetic corpus
 
-## What this document is for
+**Everything needed to build the graded corpus and run the full comparison between inillucent and
+PostgreSQL with pgvector, on a machine that has never done it before.** What to install, where the
+data comes from, how to assemble the corpus, how to embed it, how to load it into PostgreSQL, how the
+grading works, and which results are allowed to differ on another machine.
 
-This document is everything needed to build the graded corpus and run the full comparison between inillucent and PostgreSQL with the pgvector extension on a machine that has never done it before. It covers what to install, where the data comes from, how to assemble the corpus, how to embed it, how to load it into PostgreSQL, how the grading works, and which results are allowed to differ on a different machine.
+Nothing here depends on private data or on any other project. Every input is public, so every number
+on the score card can be reproduced by anyone with this repository, an internet connection and a few
+hours.
 
-Nothing here depends on private data or on any other project. Every input is public.
+Read [Retrieval quality](../docs/retrieval-quality.md) first if you want the results rather than the
+recipe.
 
 ## Why the corpus is built rather than shipped
 

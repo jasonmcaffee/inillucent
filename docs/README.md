@@ -13,7 +13,7 @@ said it.
 |---|---|
 | [Product overview](product-overview.md) | what inillucent is, who it is for, and the case for it against PostgreSQL with pgvector |
 | [Getting started](getting-started.md) | install it, run the four programs, make a database, read the exit codes |
-| [Architecture](architecture.md) | how both engines work, in plain terms and with no Rust in it |
+| [Architecture](architecture.md) | how the retrieval engine works, in plain terms and with no Rust in it |
 
 ## Using it
 
