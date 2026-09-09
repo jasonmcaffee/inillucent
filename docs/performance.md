@@ -136,6 +136,27 @@ Where the remaining 5.4 MiB is:
 So most of what is left is the operating system's, which neither engine escapes, and one
 `CREATE INDEX`.
 
+**And the peak is reached by that one statement.** Read afresh over four runs, the high-water mark
+after every workload:
+
+| workload | peak MiB | this workload added |
+|---|---|---|
+| the file opened and the pool warmed | 25.13 | 25.13 |
+| every read workload, all eleven of them | 25.18 | 0.05 in total |
+| `write.insert.batch` | 28.95 | 3.77 |
+| the other four write workloads | 30.07 | 1.12 in total |
+| **`schema.index`** | **42.61** | **12.54** |
+| every remaining workload | 42.61 | nothing |
+
+The whole plan holds **30.07 MiB** until it builds an index, and building one adds twelve and a half.
+So the bar is not missed by a buffer that is slightly too big everywhere; it is missed by one
+statement, and by the arena its sort holds.
+
+That arena is the one lever left, and it is priced rather than pulled: task-1869 measured spilling
+the sorted run to a temporary file at about **8 ms on a 27 ms statement**, which puts the `schema`
+family under the 1.00x floor the contract sets. Buying memory with a floor is the trade that ticket
+declined and this one declines again.
+
 ## Disk
 
 The imported fixture, both engines given the same data:

@@ -304,7 +304,7 @@ express, because every production crate forbids `unsafe`. Two things would have 
 That is a change to the expression evaluator's signature and to the operator set, across 416 measured
 feature cases and a 183-case differential probe. It is the right next change and it is the whole of
 the remaining gap on four families; it is not a change to make at the end of a ticket, and it is
-recorded here with its measurement rather than started.
+recorded here with its measurement rather than started. **It is task-1891.**
 
 **What it is worth**, from the numbers above: the per-statement floor falls from 827 ns towards the
 cost of a source rebuild and a run. `txn.large` at 482 ns is then in reach, `prepare.trivial` stops
