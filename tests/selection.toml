@@ -959,6 +959,13 @@ covers = ["inillucent-engine", "inillucent-txn"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
+name = "new_engine_free_map_recovery"
+tier = "durability"
+covers = ["inillucent-engine", "inillucent-txn", "inillucent-pool"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
 name = "search_crash"
 tier = "durability"
 covers = ["inillucent-search", "inillucent-session"]

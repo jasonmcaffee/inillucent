@@ -8302,21 +8302,26 @@ fn open_file(
         let before = attach_catalog(database.pool(), database.catalog_root())?;
         read_catalog(database.pool(), &before)?
     };
-    let (outcome, allocated, freed) = {
+    let (outcome, free_map) = {
         let mut applier =
             inillucent_txn::redo::Applier::new(&mut database, LearningRows::new(&checkpointed));
         let outcome = inillucent_wal::recover(vfs.as_ref(), db_path, start, &mut applier)?;
-        let (allocated, freed) = applier.allocations();
-        (outcome, allocated.to_vec(), freed.to_vec())
+        (outcome, applier.free_map_changes().to_vec())
     };
     // The free map is rebuilt after the scan rather than inside it: the map and
     // every page write are both behind `&mut Database`, and one record cannot
     // hold two mutable borrows of the same object.
-    for page in &allocated {
-        database.claim(*page)?;
-    }
-    for page in &freed {
-        database.release(*page, 1)?;
+    //
+    // **In log order** (task-1888). Claiming every allocation and then
+    // releasing every free gave the frees the last word, so a page freed and
+    // allocated again inside the replayed range came back free while it was
+    // live, and the next allocation handed it to a second owner. See
+    // `Applier::free_map_changes`.
+    for change in &free_map {
+        match change.allocated {
+            true => database.claim(change.page)?,
+            false => database.release(change.page, 1)?,
+        }
     }
     inillucent_wal::truncate_after(vfs.as_ref(), db_path, &outcome)?;
 
