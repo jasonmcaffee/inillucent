@@ -44,7 +44,7 @@ would cost.
 
 | program | what it is |
 |---|---|
-| `inillucent` | the command line: 28 verbs — `query`, `exec`, `describe`, `import`, `export`, `search`, `explain`, `backup`, `migrate` and the rest |
+| `inillucent` | the command line: 29 verbs — `query`, `exec`, `describe`, `import`, `export`, `search`, `explain`, `backup`, `migrate` and the rest |
 | `inillucent-shell` | an interactive shell shaped like `sqlite3`, with 63 of its 65 dot commands and all 48 of its command line options |
 | `inillucent-mcp` | 27 of the same commands served to an AI agent over MCP |
 | `inillucent-migrate` | builds a database from a SQLite file, a running PostgreSQL or MySQL server, or a legacy retrieval index |
