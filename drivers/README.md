@@ -77,14 +77,21 @@ connection.execute(
 let rows = connection.query("SELECT id, name FROM people", &[], 200)?;
 println!("{} of {}{}", rows.rows.len(), rows.total, if rows.more { "+" } else { "" });
 
-// A refusal you can act on.
-match connection.query("VACUUM", &[], 0) {
+// A refusal you can act on. One arm covers the whole class, because every
+// construct the engine has not built answers Unsupported rather than a syntax
+// error.
+match connection.query(statement, &[], 0) {
     Err(why) if why.status == Status::Unsupported => {
         println!("not yet: {}", why.feature.unwrap_or_default());
     }
     other => { other?; }
 }
 ```
+
+**No SQL statement answers `Unsupported` today.** The 416-case differential probe refuses nothing
+SQLite answers, and `VACUUM` — which this example used to name — rebuilds the file. Write the arm
+anyway: it is four lines, and the alternative is rewriting every call site the first time a construct
+arrives that does return it. `cancel` is the one capability the table still reports as absent.
 
 Rust does **not** go through the C ABI. DuckDB routes even its own first-party
 Rust binding through its C API because its core is C++ and the ABI is the

@@ -38,13 +38,20 @@ connection.execute(
 let rows = connection.query("SELECT id, name FROM people", &[], 200)?;
 println!("{} of {}{}", rows.rows.len(), rows.total, if rows.more { "+" } else { "" });
 
-match connection.query("VACUUM", &[], 0) {
+// Every statement this engine has not built answers Status::Unsupported rather
+// than a syntax error, so one arm handles the whole class. Ask the capability
+// table first if you want to know before you compose the statement.
+match connection.query(statement, &[], 0) {
     Err(why) if why.status == Status::Unsupported => {
         println!("not yet: {}", why.feature.unwrap_or_default());
     }
     other => { other?; }
 }
 ```
+
+No SQL statement answers `Unsupported` today: the 416-case probe refuses nothing SQLite answers.
+Write the arm anyway. It costs four lines, and a caller that folds this status into a general error
+type has to be rewritten the first time a construct arrives that does return it.
 
 Rust does **not** go through the C ABI — the core is Rust and its first consumer is Rust, so a
 pointer round trip and a `catch_unwind` per call would buy nothing.
