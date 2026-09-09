@@ -104,7 +104,7 @@ bug, and it is the same rule in every binding.
 
 | | |
 |---|---|
-| `inillucent help` | all 28 commands |
+| `inillucent help` | all 29 commands |
 | `inillucent help <command>` | one command, every parameter, what each is for |
 | `inillucent-shell app.rdb` | the `sqlite3`-shaped REPL, with 63 of its dot commands |
 | `inillucent-mcp --db app.rdb` | the same commands served to an agent — see the `inillucent-mcp` skill |

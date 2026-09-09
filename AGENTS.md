@@ -24,7 +24,7 @@ Four programs come out of a build or an install:
 
 | | |
 |---|---|
-| `inillucent` | the command line: 28 commands, with `--output json` on all of them |
+| `inillucent` | the command line: 29 commands, with `--output json` on all of them |
 | `inillucent-shell` | an interactive shell shaped like `sqlite3`, with 63 of its dot commands |
 | `inillucent-mcp` | the same commands served to an agent over MCP |
 | `inillucent-migrate` | builds a database from a SQLite file, a PostgreSQL or MySQL server, or a legacy retrieval index |

@@ -67,7 +67,7 @@ Four programs come out of an install or a build:
 
 | | |
 |---|---|
-| `inillucent` | the command line: 28 verbs, and `--output json` on every one of them |
+| `inillucent` | the command line: 29 verbs, and `--output json` on every one of them |
 | `inillucent-shell` | an interactive shell shaped like `sqlite3`, with 63 of its 65 dot commands |
 | `inillucent-mcp` | 27 of the same commands served to an AI agent over MCP |
 | `inillucent-migrate` | builds a database from a SQLite file, a running PostgreSQL or MySQL server, or a legacy retrieval index |
