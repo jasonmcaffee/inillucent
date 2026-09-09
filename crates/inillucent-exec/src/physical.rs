@@ -3436,8 +3436,20 @@ fn materialise_stage(
         .ok_or_else(|| misuse("a stage names a FROM term the plan does not have"))?;
     match &source_term.path {
         AccessPath::Subquery { plan: inner, .. } => {
-            let prepared = prepare(inner, catalog, ForcePlan::default())?;
-            Ok(run_prepared(inner, catalog, &prepared, params)?.0)
+            // **A compound is run as a compound** (task-1880 §19).
+            // `SELECT ... FROM (a UNION ALL b)` is an ordinary derived table
+            // whose inner plan happens to have arms, and `prepare` refuses a
+            // plan with arms by name - so the whole statement came back
+            // `the new engine's physical pass does not handle a compound query
+            // yet` for a shape the executor could already run. `run_compound`
+            // is what the top level uses for exactly this plan, and a
+            // materialised term wants what it produces: the rows, once.
+            if inner.compounds.is_empty() {
+                let prepared = prepare(inner, catalog, ForcePlan::default())?;
+                Ok(run_prepared(inner, catalog, &prepared, params)?.0)
+            } else {
+                Ok(run_compound(inner, catalog, params)?.0)
+            }
         }
         AccessPath::VirtualScan { .. } => {
             let needed = plan.select.columns_read(source_term.id);

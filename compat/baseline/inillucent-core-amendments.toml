@@ -56,9 +56,9 @@ sha256 = "c606a322fe69ffecb0e7ebc0f58771217a3fda556f24940ea9a580c575e2db31"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/main.rs"
-ticket = "task-1860"
-reason = "The same leftover as gradeembed.rs: task-1834 unformatted the crates the policy does not govern and left this file matching neither the recorded baseline nor task-1818's amendment. The content is the one committed since 6b4a96a; this re-records it rather than changing the file."
-sha256 = "3e1dbb671d3820aab21b53eeb4f62c451ca87ed736ed52e2a6abdd0525507831"
+ticket = "task-1876"
+reason = "The harness follows the VectorSet API change: index.vectors().copy_of(n) where it borrowed a slice."
+sha256 = "4d34031acedc57bbed51f7631679b522159dd3b7804cc85106d31f7a8daa15c3"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/models.rs"
@@ -121,10 +121,22 @@ reason = "task-1818 generalises the grading harness from one embedding model to 
 sha256 = "36828beae23d2a92f646cc90c2473f061a89b999a353703dd5ce38f50b639fd1"
 
 [[amendment]]
+path = "crates/inillucent-core/src/flat.rs"
+ticket = "task-1876"
+reason = "The exhaustive scan reads its vectors from the file in blocks rather than from the heap, which is the other half of the filed-by-default change."
+sha256 = "15fcee15bf5dc8769c8e95df4a8ef5d7a49fc8eb7f71f3e3ad8c44331e7af632"
+
+[[amendment]]
+path = "crates/inillucent-core/src/hnsw.rs"
+ticket = "task-1876"
+reason = "The graph scores through VectorSet::with rather than a borrowed slice, so a filed set is scored without materialising it."
+sha256 = "66050178e7efcbeaab919868f9a07fe0710215307f123bb21721e03e45ed5e9a"
+
+[[amendment]]
 path = "crates/inillucent-core/src/index.rs"
-ticket = "task-1807"
-reason = "task-1807 renamed the product from its working name to inillucent. Every change in these files is that substitution plus the crate and directory renames it implies: no logic, no format, no default and no measured number moved. persist.rs additionally accepts the pre-rename eight-byte file magic on read, so indexes already on disk still open."
-sha256 = "70da065b55f6ea01c0574b8a5f0c95befafa306b6df4c35e0b92ed9e58b633cd"
+ticket = "task-1876"
+reason = "IndexConfig::resident_vectors, defaulting to false, and the plumbing that carries it. NIKAYA_RETRIEVAL_RESIDENT_VECTORS=1 asks for the old behaviour."
+sha256 = "55f2bc000496e68710ba073623e5f0bac252619d6ba8e5ac0d14c98550582663"
 
 [[amendment]]
 path = "crates/inillucent-core/src/lib.rs"
@@ -140,9 +152,21 @@ sha256 = "cd89c11e1b0961d2b6875102712b463ef5fb335d87e9fe176f37920712e3f90d"
 
 [[amendment]]
 path = "crates/inillucent-core/src/persist.rs"
-ticket = "task-1807"
-reason = "task-1807 renamed the product from its working name to inillucent. Every change in these files is that substitution plus the crate and directory renames it implies: no logic, no format, no default and no measured number moved. persist.rs additionally accepts the pre-rename eight-byte file magic on read, so indexes already on disk still open."
-sha256 = "a914e17196b70a51dda877ce44c40bef95dedb7611cf49bade92809399b45fe4"
+ticket = "task-1876"
+reason = "Loading an index leaves vectors.bin on disk and opens it for positional reads instead of reading it into a buffer."
+sha256 = "11ddd3a4823be7436d191e4b23544e366f4ba97a6834780ed79a07995bde9f01"
+
+[[amendment]]
+path = "crates/inillucent-core/src/quantize.rs"
+ticket = "task-1876"
+reason = "Quantisation reads its input through the vector set's accessor, so it works on a filed set as well as a resident one."
+sha256 = "28f4bda2e54cc9a3acd710a9fce2ba9799f4197b7a1fdf8b2025aa6b012bf154"
+
+[[amendment]]
+path = "crates/inillucent-core/src/vectors.rs"
+ticket = "task-1876"
+reason = "Vectors are filed rather than resident by default: a loaded index leaves them in vectors.bin and reads them as it scores, which took the Nikaya serving process from 3,975 MB to 2,215 MB with no measurable change in latency. VectorSet::get answers Option<&[f32]> because a filed set has no buffer to borrow from, and copy_of is what a caller that needs the values uses."
+sha256 = "94b9cfabd335227688c9e2b66f857002dc64eed3fa59831db4d3cf27fc8e7b94"
 
 [[amendment]]
 path = "inillucent-scorecard.json"
