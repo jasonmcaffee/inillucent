@@ -26,7 +26,10 @@ dist/inillucent-<version>-<target>/
     bin/     inillucent  inillucent-shell  inillucent-mcp  inillucent-migrate
     lib/     the C ABI shared library
     include/ inillucent_driver.h
-    README.md  DRIVER.md  LICENSE  VERSION
+    docs/    the reference pages README.md links into
+    tests/   the synthetic corpus recipe and the testing standard
+    agent-skills/ one page per job, for an AI agent
+    README.md  AGENTS.md  DRIVER.md  LICENSE  VERSION
 dist/inillucent-<version>-<target>.zip   (or .tar.gz)
 dist/SHA256SUMS
 ```

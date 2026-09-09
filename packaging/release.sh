@@ -83,6 +83,23 @@ done
 cp "$root/drivers/inillucent-driver-capi/include/inillucent_driver.h" "$stage/include/"
 cp "$root/README.md" "$stage/"
 cp "$root/drivers/README.md" "$stage/DRIVER.md"
+
+# README.md links into docs/ for every subject it does not cover itself, so the
+# archive carries that directory or the front page it ships is full of dead
+# links. AGENTS.md and agent-skills/ travel with it for the same reason: the
+# readme sends an AI agent to both.
+cp -R "$root/docs" "$stage/docs"
+cp "$root/AGENTS.md" "$stage/"
+cp -R "$root/agent-skills" "$stage/agent-skills"
+
+# Two documents live under tests/ rather than under docs/, because they describe
+# assets that sit beside them. README.md and three of the docs/ pages link to
+# both, so they travel as well. Only the prose: the fixtures and the schedules
+# are not part of a binary archive.
+mkdir -p "$stage/tests"
+cp "$root/tests/synthetic-corpus.md" "$stage/tests/"
+cp "$root/tests/inillucent-testing-tdd.md" "$stage/tests/"
+
 printf '%s' "$version" > "$stage/VERSION"
 if [ -f "$root/LICENSE" ]; then
   cp "$root/LICENSE" "$stage/"
