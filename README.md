@@ -644,10 +644,20 @@ In production (task-1774, task-1775, task-1779): Nikaya, a Gmail retrieval assis
 to **4.41 ms**; the lexical branch went from returning **zero rows on 17 of 30** natural-language
 questions to zero on none; recall@100 against an exact scan went from 0.899 (min 0.77) to **1.000**,
 because the deployed configuration answers every search on the parallel exhaustive path at
-**27.1 ms p50 / 28.6 ms p95** over the whole corpus. Cost: **3.83 GB resident** and 3.1 GB on disk for
-the index, opening in **3.0 s** because the BM25 postings are written rather than rebuilt, against
-3,167 MB of pgvector and GIN index deleted from a 5,849 MB database. The MCP process that used to open
-its own copy of the index (3,831.6 MB) now asks the server and holds 13.2 MB.
+**27.1 ms p50 / 28.6 ms p95** over the whole corpus - **measured with the vectors held in memory,
+which was the only mode then and is not the default now**. Cost: **3.83 GB resident** and 3.1 GB on
+disk for the index, opening in **3.0 s** because the BM25 postings are written rather than rebuilt,
+against 3,167 MB of pgvector and GIN index deleted from a 5,849 MB database. The MCP process that used
+to open its own copy of the index (3,831.6 MB) now asks the server and holds 13.2 MB.
+
+task-1876 then moved the **record** off PostgreSQL as well - 16 tables, 1.63 M rows, no other database
+in the process - and made the vectors **filed by default**. Measured on the 600,589-chunk index in both
+modes, interleaved on one machine: semantic **76.3 / 71.1 ms p50 filed against 75.4 / 66.3 ms
+resident**, peaking at **2,215 MB against 3,975 MB**. Residency costs 1.76 GB and buys nothing
+measurable on a warm machine, which is why it is now an option rather than the default. The same run
+found six query shapes that are quadratic here and one recovery failure worth reading before a
+migration: [the write-up](docs/real-world-use-cases/nikaya-postgres-to-inillucent.md), and
+[where the vectors live](docs/vector-residency.md).
 
 **What the SQL side of vector search does and does not cover.** `CREATE INDEX ... USING
 inillucent_hnsw (v)` builds an `inillucent_search` store over the column, backfills the rows already
@@ -707,8 +717,9 @@ is `tasks/rust-db-phase-2-tdd.md`.
    `inillucent-legacy`, `inillucent-capi`, `inillucent-session`, `inillucent-vm`,
    `inillucent-transaction` and `inillucent-storage` minus its reader - and it is blocked on
    **task-1837**'s driver, which is the C ABI that replaces `inillucent-capi`.
-8. **The retrieval index's footprint**: 3.83 GB resident for a 3.1 GB index of 598,560 chunks. The
-   postings are persisted and the graph build is parallel; nothing has tried to make the resident set
+8. **The retrieval index's footprint**: 1.3 GB resident for a 3.1 GB index of 600,589 chunks with the
+   vectors filed, 3.1 GB with them resident. task-1876 took the vectors out of the default resident
+   set; the graph and the postings are still all in memory and nothing has tried to make those
    smaller.
 9. **Multi-thread access.** Multi-process access landed in task-1860 - the same
    SHARED/RESERVED/PENDING/EXCLUSIVE protocol, under `PRAGMA locking_mode = NORMAL`, measured over 37

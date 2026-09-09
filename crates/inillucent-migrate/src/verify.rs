@@ -484,7 +484,7 @@ fn retrieval(source: &Index, sql: &mut SqlIndex) -> Vec<Check> {
         let mut ours_found = 0.0f64;
         let mut probed = 0usize;
         for ordinal in sample(store.n_chunks(), PROBES) {
-            let query = source.vectors().get(ordinal as u32).to_vec();
+            let query = source.vectors().copy_of(ordinal as u32);
             let (wanted, _) = source.search_branches(
                 "",
                 &query,
@@ -552,7 +552,7 @@ fn retrieval(source: &Index, sql: &mut SqlIndex) -> Vec<Check> {
             let Some(query) = probes.get(position) else {
                 continue;
             };
-            let vector = source.vectors().get(ordinal as u32).to_vec();
+            let vector = source.vectors().copy_of(ordinal as u32);
             let (wanted, _) = source.search_branches(
                 query,
                 &vector,

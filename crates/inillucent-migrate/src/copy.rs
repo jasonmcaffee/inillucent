@@ -372,7 +372,7 @@ fn write_search(
         bind_text(&mut statement, 2, &content)?;
         if dims > 0 && ordinal < vectors.len() {
             let mut bytes = Vec::with_capacity(dims.saturating_mul(4));
-            for value in vectors.get(ordinal as u32) {
+            for value in vectors.copy_of(ordinal as u32) {
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
             statement

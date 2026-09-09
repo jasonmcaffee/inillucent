@@ -121,6 +121,7 @@ fn produce(
     limit: usize,
 ) -> Result<Outcome, Failed> {
     context.refuse_if_it_writes(sql)?;
+    refuse_a_script(context, command, sql)?;
     let mut bound = Vec::with_capacity(params.len());
     for value in params {
         let literal = literal_of(value)?;
@@ -203,6 +204,30 @@ fn limit_of(context: &Context, arguments: &Arguments) -> usize {
         Some(_) => 0,
         None => context.limit,
     }
+}
+
+/// Refuses a script where one statement was asked for.
+///
+/// `query` and `exec` both compile one statement and run it. Handed several, they used to compile
+/// the first, run it, and report success - so `inillucent exec "<twenty CREATE TABLEs>"` produced a
+/// database holding one table and printed `ok. 0 rows changed.` Nothing said the other nineteen had
+/// not run. `batch` is the verb for several statements, and it runs them in one transaction, so the
+/// refusal can name it.
+///
+/// @param context - the open shell
+/// @param command - which verb is refusing, so the message names it
+/// @param sql - the text the caller passed
+fn refuse_a_script(context: &mut Context, command: &str, sql: &str) -> Result<(), Failed> {
+    let Some(rest) = context.shell().trailing_statement(sql) else {
+        return Ok(());
+    };
+    Err(Failed::said(
+        Status::InvalidState,
+        format!(
+            "{command} runs one statement and this is several; the next one begins {rest:?}. \
+             Use `batch`, which runs them all in one transaction."
+        ),
+    ))
 }
 
 /// `query`: runs a statement that returns rows.

@@ -18,6 +18,22 @@ use crate::vectors::VectorSet;
 pub struct IndexConfig {
     pub dims: usize,
     pub hnsw: HnswParams,
+    /// Hold the full precision vectors on the heap rather than reading them from
+    /// the index file as they are scored.
+    ///
+    /// **Off by default, and that is a deliberate change from what this engine
+    /// used to do.** The vectors are the largest thing an index holds - 1.85 GB
+    /// for a 601,862 chunk corpus at 768 dimensions, against about 2 GB for
+    /// everything else - and holding them means every process that opens the index
+    /// pays for them whether or not it ever runs a semantic search. Left in the
+    /// file they are still served out of the operating system's page cache while
+    /// they are being used, but that cache is reclaimable and this process's heap
+    /// is not.
+    ///
+    /// Turn it on when the index is the only thing on the machine and the search
+    /// latency matters more than the memory. `docs/vector-residency.md` has what it
+    /// costs and what it buys, measured on a real corpus rather than estimated.
+    pub resident_vectors: bool,
     /// Build int8 codes alongside the f32 vectors and use them for the first
     /// pass, rescoring the survivors with full precision.
     pub quantized: bool,
@@ -71,6 +87,11 @@ impl Default for IndexConfig {
         IndexConfig {
             dims: 768,
             hnsw: HnswParams::default(),
+            // Off. See the field for the argument; the short version is that the
+            // vectors are the largest thing an index holds and the operating
+            // system is better placed than this process to decide whether they
+            // stay in memory.
+            resident_vectors: false,
             quantized: false,
             oversample: 3.0,
             candidates: 50,
@@ -179,6 +200,13 @@ pub struct BuildStats {
     pub lexical_postings: usize,
     pub vector_bytes: usize,
     pub quantized_bytes: usize,
+    /// Whether the full precision vectors are on this process's heap.
+    ///
+    /// Reported because it is the difference between an index that costs two
+    /// gigabytes to hold and one that costs four, and because a number measured in
+    /// one mode and read as if it were the other is the mistake this field exists
+    /// to prevent.
+    pub resident_vectors: bool,
 }
 
 /// What one incremental append did, so a sync can report it without asking the
@@ -608,7 +636,8 @@ impl Index {
             graph_layers: graph.n_layers(),
             lexical_terms: lexical.n_terms(),
             lexical_postings: lexical.n_postings(),
-            vector_bytes: self.vectors.raw().len() * 4,
+            vector_bytes: self.vectors.heap_bytes(),
+            resident_vectors: self.vectors.is_resident(),
             quantized_bytes: quantized.as_ref().map(|q| q.bytes()).unwrap_or(0),
         };
 
@@ -1193,7 +1222,7 @@ mod tests {
     fn vector_search_agrees_with_exhaustive_search_on_a_small_index() {
         let index = build(2000, 32, IndexConfig { hnsw: HnswParams { exhaustive_below: 0, ..Default::default() }, ..Default::default() });
         let f = index.compile(&Filter::default());
-        let q = index.vectors().get(5).to_vec();
+        let q = index.vectors().copy_of(5);
         let exact = index.exhaustive_search(&q, &f, 10);
         let approx = index.vector_search(&q, &f, 10, Some(200));
         let want: std::collections::HashSet<u32> = exact.iter().map(|n| n.chunk).collect();
@@ -1206,7 +1235,7 @@ mod tests {
         let index = build(20000, 32, IndexConfig { hnsw: HnswParams { exhaustive_below: 0, ..Default::default() }, ..Default::default() });
         for source in ["slack", "jira"] {
             let f = index.compile(&Filter::source(source));
-            let q = index.vectors().get(1).to_vec();
+            let q = index.vectors().copy_of(1);
             let hits = index.hybrid_search("offer eligibility rules", &q, &f, 10, Some(64));
             assert_eq!(hits.len(), 10, "{source} returned {} of 10", hits.len());
         }
@@ -1218,7 +1247,7 @@ mod tests {
         let quant = build(3000, 64, IndexConfig { quantized: true, hnsw: HnswParams { exhaustive_below: 0, ..Default::default() }, ..Default::default() });
         let f = plain.compile(&Filter::default());
         let fq = quant.compile(&Filter::default());
-        let q = plain.vectors().get(9).to_vec();
+        let q = plain.vectors().copy_of(9);
         let a = plain.vector_search(&q, &f, 10, Some(128));
         let b = quant.vector_search(&q, &fq, 10, Some(128));
         let want: std::collections::HashSet<u32> = a.iter().map(|n| n.chunk).collect();
@@ -1230,7 +1259,7 @@ mod tests {
     fn the_per_document_cap_holds_in_the_hybrid_path() {
         let index = build(400, 16, IndexConfig::default());
         let f = index.compile(&Filter::default());
-        let q = index.vectors().get(0).to_vec();
+        let q = index.vectors().copy_of(0);
         let hits = index.hybrid_search("offer eligibility", &q, &f, 20, None);
         let mut per_doc = std::collections::HashMap::new();
         for h in &hits {
@@ -1244,7 +1273,7 @@ mod tests {
         let index = build(3000, 32, IndexConfig::default());
         let slack = index.store().sources.get("slack").unwrap();
         let f = index.compile(&Filter::source("slack"));
-        let q = index.vectors().get(3).to_vec();
+        let q = index.vectors().copy_of(3);
 
         let mut chunks: Vec<u32> = index.vector_search(&q, &f, 20, None).iter().map(|n| n.chunk).collect();
         chunks.extend(index.lexical_search("offer eligibility", &f, 20).iter().map(|h| h.chunk));
@@ -1307,7 +1336,7 @@ mod tests {
     fn a_grouped_search_returns_documents_rather_than_chunks() {
         let index = build(2000, 32, IndexConfig::default());
         let f = index.compile(&Filter::default());
-        let q = index.vectors().get(0).to_vec();
+        let q = index.vectors().copy_of(0);
         let grouped = index.hybrid_search_grouped(
             "offer eligibility rules",
             &q,
@@ -1355,7 +1384,7 @@ mod tests {
     #[test]
     fn a_grouped_search_says_which_path_it_took() {
         let index = build(3000, 32, IndexConfig::default());
-        let q = index.vectors().get(0).to_vec();
+        let q = index.vectors().copy_of(0);
 
         let everything = index.compile(&Filter::default());
         let selective = index.compile(&Filter::source("jira"));
@@ -1370,7 +1399,7 @@ mod tests {
     fn corroboration_lifts_a_document_that_matched_more_than_once() {
         let index = build(400, 16, IndexConfig::default());
         let f = index.compile(&Filter::default());
-        let q = index.vectors().get(0).to_vec();
+        let q = index.vectors().copy_of(0);
 
         let none = index.hybrid_search_grouped(
             "offer eligibility",
@@ -1400,7 +1429,7 @@ mod tests {
     fn a_grouped_search_pages_without_repeating_a_document() {
         let index = build(2000, 32, IndexConfig::default());
         let f = index.compile(&Filter::default());
-        let q = index.vectors().get(0).to_vec();
+        let q = index.vectors().copy_of(0);
         let first = index.hybrid_search_grouped(
             "offer eligibility",
             &q,
@@ -1422,7 +1451,7 @@ mod tests {
     fn a_grouped_search_carries_the_confidence_of_its_best_chunk() {
         let index = build(2000, 32, IndexConfig::default());
         let f = index.compile(&Filter::default());
-        let q = index.vectors().get(0).to_vec();
+        let q = index.vectors().copy_of(0);
         let grouped =
             index.hybrid_search_grouped("offer eligibility", &q, &f, GroupedParams::default());
         for document in &grouped.documents {
@@ -1465,7 +1494,7 @@ mod tests {
         ] {
             let index = build(1000, 32, IndexConfig { fusion, ..Default::default() });
             let f = index.compile(&Filter::default());
-            let q = index.vectors().get(0).to_vec();
+            let q = index.vectors().copy_of(0);
             let hits = index.hybrid_search("offer eligibility rules", &q, &f, 10, None);
             assert_eq!(hits.len(), 10, "{fusion:?} returned {} of 10", hits.len());
         }

@@ -645,7 +645,7 @@ fn main() -> Result<()> {
 
             // Exercise every query path so the reported memory reflects a process
             // that has actually served traffic, not one that only opened files.
-            let query = index.vectors().get(7).to_vec();
+            let query = index.vectors().copy_of(7);
             for (label, filter) in [
                 ("no predicate", inillucent_core::filter::Filter::default()),
                 ("source = slack", inillucent_core::filter::Filter::source("slack")),

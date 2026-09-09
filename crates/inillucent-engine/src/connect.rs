@@ -792,7 +792,7 @@ impl Statement<'_> {
 /// the parser, which is the half the old splitter got wrong.
 ///
 /// @param sql - the remaining script
-fn leading_trivia(sql: &str) -> usize {
+pub fn leading_trivia(sql: &str) -> usize {
     let bytes = sql.as_bytes();
     let mut at = 0usize;
     loop {

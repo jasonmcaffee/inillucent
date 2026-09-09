@@ -35,7 +35,70 @@ pub fn search(
     query: &[f32],
     k: usize,
 ) -> Vec<Neighbour> {
+    // **A filed set is scanned in blocks, not one vector at a time.** Scoring
+    // through `Scorer::distance` is one positional read per chunk, and a scan of a
+    // 601,862 chunk corpus is 601,862 of them - which is the cost of the read
+    // syscall, not of the dot product. Reading 2,730 at a time makes it the
+    // sequential read it should be. A predicate selective enough for the store to
+    // list its own candidates goes the other way, because those ordinals are
+    // scattered and there is no block to read.
+    if !vectors.is_resident() && filter.candidate_chunks(store).is_none() {
+        return streaming_search(vectors, store, filter, query, k);
+    }
     search_with(vectors, store, filter, query, k)
+}
+
+/// Exhaustive top k over a set whose vectors are read from a file, block by block.
+///
+/// The blocks are independent, so they are scanned across cores the way the
+/// resident scan is, and each thread reads its own block positionally - which is
+/// why the file is read rather than seeked: a shared cursor could not be split.
+///
+/// @param vectors - the filed vector set
+/// @param store - the chunk metadata the filter reads
+/// @param filter - the compiled predicate
+/// @param query - the query vector, already normalized
+/// @param k - how many neighbours to return
+fn streaming_search(
+    vectors: &VectorSet,
+    store: &Store,
+    filter: &CompiledFilter,
+    query: &[f32],
+    k: usize,
+) -> Vec<Neighbour> {
+    if k == 0 || filter.is_dead() {
+        return Vec::new();
+    }
+    let trivial = filter.is_trivial();
+    let n = store.n_chunks().min(vectors.len());
+    let dims = vectors.dims();
+    let block = vectors.block_len();
+    if n == 0 || dims == 0 || block == 0 {
+        return Vec::new();
+    }
+    let blocks = n.div_ceil(block);
+
+    (0..blocks)
+        .into_par_iter()
+        .fold(
+            || (TopK::new(k), vec![0f32; block * dims]),
+            |(mut top, mut buffer), nth| {
+                let first = nth * block;
+                let read = vectors.read_block(first as u32, &mut buffer);
+                for at in 0..read {
+                    let chunk = (first + at) as u32;
+                    if !trivial && !filter.passes(chunk, store) {
+                        continue;
+                    }
+                    let stored = &buffer[at * dims..(at + 1) * dims];
+                    top.push(Neighbour { chunk, distance: 1.0 - crate::distance::dot(stored, query) });
+                }
+                (top, buffer)
+            },
+        )
+        .map(|(top, _)| top)
+        .reduce(|| TopK::new(k), TopK::merged)
+        .finish()
 }
 
 /// Exhaustive top k using an arbitrary scorer, so the exhaustive path is
@@ -241,7 +304,7 @@ mod tests {
     fn returns_the_nearest_first() {
         let (vs, store) = fixture(50);
         let f = CompiledFilter::compile(&Filter::default(), &store);
-        let query = vs.get(7).to_vec();
+        let query = vs.copy_of(7);
         let hits = search(&vs, &store, &f, &query, 5);
         assert_eq!(hits[0].chunk, 7, "a vector is its own nearest neighbour");
         assert!(hits[0].distance.abs() < 1e-5);
@@ -254,7 +317,7 @@ mod tests {
     fn honours_the_filter() {
         let (vs, store) = fixture(50);
         let f = CompiledFilter::compile(&Filter::source("slack"), &store);
-        let query = vs.get(7).to_vec();
+        let query = vs.copy_of(7);
         let hits = search(&vs, &store, &f, &query, 10);
         assert!(!hits.is_empty());
         for h in &hits {
@@ -267,7 +330,7 @@ mod tests {
     fn k_larger_than_the_passing_set_returns_the_whole_set() {
         let (vs, store) = fixture(10);
         let f = CompiledFilter::compile(&Filter::source("slack"), &store);
-        let hits = search(&vs, &store, &f, &vs.get(0).to_vec(), 1000);
+        let hits = search(&vs, &store, &f, &vs.copy_of(0), 1000);
         assert_eq!(hits.len(), f.pass_count());
     }
 
@@ -275,14 +338,14 @@ mod tests {
     fn a_dead_filter_returns_nothing() {
         let (vs, store) = fixture(10);
         let f = CompiledFilter::compile(&Filter::source("nowhere"), &store);
-        assert!(search(&vs, &store, &f, &vs.get(0).to_vec(), 10).is_empty());
+        assert!(search(&vs, &store, &f, &vs.copy_of(0), 10).is_empty());
     }
 
     #[test]
     fn k_zero_returns_nothing() {
         let (vs, store) = fixture(10);
         let f = CompiledFilter::compile(&Filter::default(), &store);
-        assert!(search(&vs, &store, &f, &vs.get(0).to_vec(), 0).is_empty());
+        assert!(search(&vs, &store, &f, &vs.copy_of(0), 0).is_empty());
     }
 
     /// The parallel path and the single threaded path must return the identical
@@ -292,7 +355,7 @@ mod tests {
         // Larger than PARALLEL_ABOVE, so the parallel branch is taken.
         let (vs, store) = fixture(6_000);
         let f = CompiledFilter::compile(&Filter::default(), &store);
-        let query = vs.get(11).to_vec();
+        let query = vs.copy_of(11);
         let parallel = search(&vs, &store, &f, &query, 50);
         assert_eq!(parallel.len(), 50);
         // Recompute the same answer the slow, obvious way.
@@ -316,7 +379,7 @@ mod tests {
     fn repeated_parallel_scans_return_the_same_order() {
         let (vs, store) = fixture(6_000);
         let f = CompiledFilter::compile(&Filter::default(), &store);
-        let q = vs.get(3).to_vec();
+        let q = vs.copy_of(3);
         let a = search(&vs, &store, &f, &q, 40);
         let b = search(&vs, &store, &f, &q, 40);
         assert_eq!(
@@ -333,7 +396,7 @@ mod tests {
         for source in ["slack", "confluence"] {
             let f = CompiledFilter::compile(&Filter::source(source), &store);
             assert!(f.candidate_chunks(&store).is_some(), "expected a narrowed scan");
-            let q = vs.get(29).to_vec();
+            let q = vs.copy_of(29);
             let narrowed = search(&vs, &store, &f, &q, 30);
 
             // The same answer computed without the narrowing.
@@ -364,7 +427,7 @@ mod tests {
             &Filter { source: Some("slack".into()), updated_after: Some(3_000), ..Default::default() },
             &store,
         );
-        let hits = search(&vs, &store, &f, &vs.get(1).to_vec(), 100);
+        let hits = search(&vs, &store, &f, &vs.copy_of(1), 100);
         assert!(!hits.is_empty());
         for h in &hits {
             assert!(f.passes(h.chunk, &store));
@@ -459,5 +522,54 @@ mod tests {
             right.push(*c);
         }
         assert_eq!(left.merged(right).finish(), whole.finish());
+    }
+
+    /// A filed set answers exactly what the resident one answers, on every filter shape.
+    ///
+    /// **This is the claim the whole option rests on.** Leaving the vectors in the file is only
+    /// acceptable if it changes what a search costs and nothing about what it returns, and the two
+    /// paths through `search` are different code: one scores through `Scorer::distance` and the other
+    /// reads blocks. So the test is equality of the whole result, chunk for chunk and distance for
+    /// distance, rather than a recall figure that would hide a reordering.
+    ///
+    /// The corpus is deliberately larger than one block, so the streaming path actually reads more
+    /// than one, and larger than `PARALLEL_ABOVE`, so the resident path is the parallel one.
+    #[test]
+    fn a_filed_set_returns_what_the_resident_set_returns() {
+        let (resident, store) = fixture(6_000);
+        let directory = std::env::temp_dir().join(format!(
+            "inillucent-flat-filed-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::create_dir_all(&directory);
+        let path = directory.join("vectors.raw");
+        std::fs::write(
+            &path,
+            bytemuck::cast_slice(resident.raw().expect("the fixture is resident")),
+        )
+        .expect("the vectors are written");
+        let filed = VectorSet::from_file(
+            resident.dims(),
+            resident.len(),
+            std::fs::File::open(&path).expect("it opens"),
+            0,
+        );
+        assert!(!filed.is_resident());
+        assert!(filed.len() > filed.block_len(), "the scan has to cross a block boundary");
+
+        let query: Vec<f32> = (0..8).map(|d| ((d as f32) * 0.7).cos()).collect();
+        for (name, filter) in [
+            ("no predicate", CompiledFilter::compile(&Filter::default(), &store)),
+            ("a source predicate", CompiledFilter::compile(&Filter::source("slack"), &store)),
+        ] {
+            for k in [1usize, 10, 50] {
+                let left = search(&resident, &store, &filter, &query, k);
+                let right = search(&filed, &store, &filter, &query, k);
+                assert_eq!(left.len(), right.len(), "{name}, k={k}: the same number of neighbours");
+                assert_eq!(left, right, "{name}, k={k}: the same neighbours in the same order");
+            }
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }
