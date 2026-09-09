@@ -17,7 +17,7 @@
             bin/inillucent-migrate(.exe)        the SQLite importer
             lib/inillucent_driver_capi.dll      the C ABI, for every binding
             include/inillucent_driver.h         the header a binding compiles against
-            README.md  LICENSE  VERSION
+            docs/  tests/  agent-skills/  README.md  AGENTS.md  LICENSE  VERSION
         inillucent-<version>-<target>.zip       the archive
         SHA256SUMS                              over the archive
 
@@ -131,6 +131,23 @@ Copy-Artifact -From (Join-Path $root 'drivers/inillucent-driver-capi/include/ini
     -Into (Join-Path $stage 'include')
 Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination $stage -Force
 Copy-Item -LiteralPath (Join-Path $root 'drivers/README.md') -Destination (Join-Path $stage 'DRIVER.md') -Force
+
+# README.md links into docs/ for every subject it does not cover itself, so the
+# archive carries that directory or the front page it ships is full of dead
+# links. AGENTS.md and agent-skills/ travel with it for the same reason: the
+# readme sends an AI agent to both.
+Copy-Item -LiteralPath (Join-Path $root 'docs') -Destination (Join-Path $stage 'docs') -Recurse -Force
+Copy-Item -LiteralPath (Join-Path $root 'AGENTS.md') -Destination $stage -Force
+Copy-Item -LiteralPath (Join-Path $root 'agent-skills') -Destination (Join-Path $stage 'agent-skills') -Recurse -Force
+
+# Two documents live under tests/ rather than under docs/, because they describe
+# assets that sit beside them. README.md and three of the docs/ pages link to
+# both, so they travel as well. Only the prose: the fixtures and the schedules
+# are not part of a binary archive.
+New-Item -ItemType Directory -Force -Path (Join-Path $stage 'tests') | Out-Null
+Copy-Item -LiteralPath (Join-Path $root 'tests/synthetic-corpus.md') -Destination (Join-Path $stage 'tests') -Force
+Copy-Item -LiteralPath (Join-Path $root 'tests/inillucent-testing-tdd.md') -Destination (Join-Path $stage 'tests') -Force
+
 Set-Content -Path (Join-Path $stage 'VERSION') -Value $Version -NoNewline
 
 # The licence has to travel with the binaries: MIT requires the notice to
