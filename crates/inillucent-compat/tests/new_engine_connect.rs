@@ -152,3 +152,79 @@ fn a_new_database_is_usable_immediately() {
     assert_eq!(database.path(), path.as_path());
     database.check().expect("the catalog tree is intact");
 }
+
+/// `PRAGMA cache_size` grows the pool, rather than being accepted and clamped.
+///
+/// **What this is a regression test for (task-1880 §9).** The pool's frames were
+/// allocated at open and nothing could add to them, so `PRAGMA cache_size` could
+/// only lower a ceiling inside what was already there: setting it larger read
+/// back the default, and neither the shell nor the command line has a flag for
+/// the pool either. A two-gigabyte pool was therefore reachable only from a
+/// program that linked the crate and called `Database::open_with` - which is
+/// what stopped task-1876 reducing a crash it had already hit on a live
+/// database, because it could not reproduce the pool size the crash ran under.
+///
+/// Both spellings are checked, because they are the two SQLite has and they
+/// take different arithmetic: a negative number is kibibytes and a positive one
+/// is pages.
+#[test]
+fn cache_size_grows_the_pool_and_reads_back_what_was_asked_for() {
+    let path = scratch("cache-size");
+    let database = Database::open(&path).expect("a fresh database opens");
+    let connection = database.connect();
+    connection
+        .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, body TEXT)")
+        .expect("the schema is created");
+
+    let default = connection
+        .query("PRAGMA cache_size")
+        .expect("the pragma is read");
+    let default = match default.first().and_then(|row| row.first()) {
+        Some(OwnedDatum::Int(value)) => *value,
+        other => panic!("expected an integer, got {other:?}"),
+    };
+    assert!(
+        default < 0,
+        "the default is stated in kibibytes, and read back {default}"
+    );
+
+    // Ten times the pool it opened with, in kibibytes.
+    let asked = default.saturating_mul(10);
+    connection
+        .execute_batch(&format!("PRAGMA cache_size = {asked}"))
+        .expect("the pragma is set");
+    let after = connection
+        .query("PRAGMA cache_size")
+        .expect("the pragma is read back");
+    let after = match after.first().and_then(|row| row.first()) {
+        Some(OwnedDatum::Int(value)) => *value,
+        other => panic!("expected an integer, got {other:?}"),
+    };
+    assert_eq!(
+        after, asked,
+        "a larger cache is granted rather than clamped to {default}"
+    );
+
+    // And in pages, which is the other spelling.
+    connection
+        .execute_batch("PRAGMA cache_size = 200000")
+        .expect("the pragma is set in pages");
+    let pages = connection
+        .query("PRAGMA cache_size")
+        .expect("the pragma is read back");
+    assert_eq!(
+        pages.first().and_then(|row| row.first()),
+        Some(&OwnedDatum::Int(200_000)),
+        "a cache stated in pages is granted too"
+    );
+
+    // The database still works, which is what says the grow did not disturb
+    // what was already resident: the schema above is in the pool right now.
+    connection
+        .execute_batch("INSERT INTO t (body) VALUES ('after the grow')")
+        .expect("a write still lands");
+    let rows = connection
+        .query("SELECT body FROM t")
+        .expect("the row reads back");
+    assert_eq!(column(&rows), vec!["after the grow".to_string()]);
+}

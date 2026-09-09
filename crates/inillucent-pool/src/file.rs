@@ -74,6 +74,18 @@ pub struct Database {
     meta: Meta,
     /// The free map, held resident because it is consulted on every allocation.
     free: FreeMap,
+    /// The shared extent page a small out-of-line value goes on next.
+    ///
+    /// **A hint, held only in memory** (task-1880 §4). A value that fits inside
+    /// one page is packed beside others rather than given a page of its own, and
+    /// finding a page with room by searching would be a scan of the file per
+    /// value. So the writer remembers the last page it filled and starts there;
+    /// when it is full, the next value allocates a fresh one.
+    ///
+    /// Nothing durable refers to it. A reopened database starts with `None` and
+    /// fills a new page, which costs the tail of one page per open and cannot be
+    /// wrong: every value already written is found through its own reference.
+    shared_extent: Option<PageId>,
 }
 
 impl Database {
@@ -114,6 +126,7 @@ impl Database {
             pool,
             meta,
             free: FreeMap::new(options.page_size),
+            shared_extent: None,
         };
         let mut next = FIRST_DATA_PAGE.0;
         let created = database.free.ensure(FIRST_DATA_PAGE.0, &mut next)?;
@@ -200,7 +213,37 @@ impl Database {
             free.push_page(next, image)?;
             next = after;
         }
-        Ok(Database { pool, meta, free })
+        Ok(Database {
+            pool,
+            meta,
+            free,
+            shared_extent: None,
+        })
+    }
+
+    /// Returns the buffer pool, so a caller that owns the file can grow it.
+    ///
+    /// Held apart from [`Database::pool`] because everything else about a pool
+    /// is reachable through a shared borrow: the frames themselves are the one
+    /// thing a `&Pool` cannot add to, and `PRAGMA cache_size` is the caller
+    /// that needs to.
+    pub fn pool_mut(&mut self) -> &mut Pool {
+        &mut self.pool
+    }
+
+    /// Returns the shared extent page a small value should be offered to.
+    ///
+    /// See the field. `None` means there is no page to try, and the caller
+    /// allocates one.
+    pub fn shared_extent(&self) -> Option<PageId> {
+        self.shared_extent
+    }
+
+    /// Records which shared extent page the next small value should be tried on.
+    ///
+    /// @param page - the page, or `None` to forget the one held
+    pub fn set_shared_extent(&mut self, page: Option<PageId>) {
+        self.shared_extent = page;
     }
 
     /// Returns the pool, for a reader that wants a page.

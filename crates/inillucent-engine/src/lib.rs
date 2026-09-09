@@ -6599,10 +6599,45 @@ fn let_the_pool_ask_the_log(pool: &Pool, wal: &std::rc::Rc<Wal>) {
 /// The catalog row is decoded by `inillucent-catalog`'s own decoder rather than
 /// here, because a second decoder is a second opinion about which column is
 /// which, and the columns are what the format is.
+///
+/// ## `seen` is a catalog, not a list of the rows that went past (task-1880 §7)
+///
+/// It used to be the second, and that made a database unopenable after an
+/// ordinary migration. `ALTER TABLE chunk ADD COLUMN embedded_at INTEGER`
+/// rewrites the table's catalog row - a `DeleteRow` and an `InsertRow` - so a
+/// list that only appends held **both** definitions, and `shape_of` reads the
+/// owner table with `find`, which answers with the first. Every shape derived
+/// after that ALTER therefore came from the definition before it.
+///
+/// What that costs is not a missing column in a report. `CREATE INDEX
+/// chunk_embedded_at_idx ON chunk (embedded_at)` against a table with no
+/// `embedded_at` resolves the key to no column at all, and `index_shape` gives
+/// an unresolved key column `PhysicalType::Any` where the writer used
+/// `PhysicalType::Int64`. An `Any` mini-column is wider, so recovery repacks the
+/// index's leaves less densely than the process that wrote them - and the first
+/// logical `CompactLeaf` replayed against such a leaf cannot fit rows that
+/// demonstrably fitted when they were written. The open fails with
+/// `database disk image is malformed`, and the whole database is unreachable
+/// while the log is beside it.
+///
+/// It was measured on Nikaya's real 5.8 GB corpus: `chunk`'s catalog row was
+/// rewritten at LSN 21,934,260,592 and the index's row written at
+/// 21,936,659,792, both after the last checkpoint at 21,074,969,552; recovery
+/// then refused a compaction of index leaf 237505 that held 2,031 live rows.
+/// Replaying that page's records out of the parked log with the shape read off
+/// the page fits every one of them, and with the first key column forced to
+/// `Any` it fails at the same LSN with the same 2,031 rows.
+///
+/// So a row is *remembered* rather than appended: an entry replaces the one it
+/// supersedes, by name and by tree identifier, and every shape is derived again
+/// from the catalog as it now stands. Deriving them all again rather than only
+/// the one that changed is what makes an ALTER reach the indexes on the table -
+/// their own rows may have gone past already, and their shapes come from the
+/// table's text rather than from their own.
 struct LearningRows {
     /// The applier this delegates to, gaining trees as it goes.
     rows: TreeRows,
-    /// Every catalog entry seen, so an index can find the table it is on.
+    /// The catalog as it now stands: at most one entry per object.
     seen: Vec<SchemaEntry>,
 }
 
@@ -6611,24 +6646,16 @@ impl LearningRows {
     ///
     /// @param checkpointed - the catalog as at the last checkpoint
     fn new(checkpointed: &[SchemaEntry]) -> LearningRows {
-        let mut rows = TreeRows::new().with_tree(
-            inillucent_catalog::paged::SCHEMA_TREE_ID,
-            schema_layout(),
-            1,
-        );
-        for entry in checkpointed {
-            let Ok(identifier) = identifier_of(entry) else {
-                continue;
-            };
-            let Some((columns, key_columns)) = shape_of(entry, checkpointed, identifier) else {
-                continue;
-            };
-            rows = rows.with_tree(u64::from(identifier), columns, key_columns);
-        }
-        LearningRows {
-            rows,
+        let mut learning = LearningRows {
+            rows: TreeRows::new().with_tree(
+                inillucent_catalog::paged::SCHEMA_TREE_ID,
+                schema_layout(),
+                1,
+            ),
             seen: checkpointed.to_vec(),
-        }
+        };
+        learning.derive_every_shape();
+        learning
     }
 
     /// Learns a tree's shape from a catalog row the replay is about to apply.
@@ -6645,14 +6672,48 @@ impl LearningRows {
         let Ok(entry) = inillucent_catalog::paged::entry_from_row(&values) else {
             return;
         };
-        self.seen.push(entry.clone());
-        let Ok(identifier) = identifier_of(&entry) else {
-            return;
-        };
-        if let Some((columns, key_columns)) = shape_of(&entry, &self.seen, identifier) {
-            let held = std::mem::take(&mut self.rows);
-            self.rows = held.with_tree(u64::from(identifier), columns, key_columns);
+        self.remember(entry);
+        self.derive_every_shape();
+    }
+
+    /// Puts one catalog entry in place of the one it supersedes.
+    ///
+    /// Matched on the folded name **and** on the tree identifier: an
+    /// `ALTER TABLE ... ADD COLUMN` rewrites the row under the same name, and an
+    /// `ALTER TABLE ... RENAME TO` rewrites it under a new name with the same
+    /// identifier. Both leave one entry behind, which is what the rest of this
+    /// type assumes.
+    ///
+    /// @param entry - the entry the replay just read
+    fn remember(&mut self, entry: SchemaEntry) {
+        let name = entry.name.to_ascii_lowercase();
+        let kind = entry.kind;
+        let identifier = entry.tree_id;
+        self.seen.retain(|held| {
+            let same_name = held.kind == kind && held.name.to_ascii_lowercase() == name;
+            let same_tree = identifier != 0 && held.tree_id == identifier;
+            !same_name && !same_tree
+        });
+        self.seen.push(entry);
+    }
+
+    /// Derives every tree's shape again from the catalog as it now stands.
+    ///
+    /// Every one of them, not only the entry that changed: an index's columns
+    /// come from its *table's* declaration, so a table whose row was just
+    /// rewritten changes the shape of indexes whose own rows went past earlier.
+    fn derive_every_shape(&mut self) {
+        let mut rows = std::mem::take(&mut self.rows);
+        for entry in &self.seen {
+            let Ok(identifier) = identifier_of(entry) else {
+                continue;
+            };
+            let Some((columns, key_columns)) = shape_of(entry, &self.seen, identifier) else {
+                continue;
+            };
+            rows = rows.with_tree(u64::from(identifier), columns, key_columns);
         }
+        self.rows = rows;
     }
 }
 
@@ -6716,8 +6777,9 @@ impl RowRedo for LearningRows {
         tree: u64,
         page: PageId,
         lsn: u64,
+        from_lsn: u64,
     ) -> DbResult<()> {
-        self.rows.compact_leaf(database, tree, page, lsn)
+        self.rows.compact_leaf(database, tree, page, lsn, from_lsn)
     }
 }
 
@@ -6751,7 +6813,13 @@ fn shape_of(
         }
         ObjectKind::Index => {
             let folded = entry.table.to_ascii_lowercase();
-            let owner = catalog.iter().find(|held| {
+            // **The newest matching entry, not the first.** `LearningRows`
+            // keeps one entry per object, so there is only ever one - but a
+            // caller that hands this a catalog holding a superseded definition
+            // as well should get the definition that superseded it, because the
+            // shape derived from the older one is what task-1880 §7 made an
+            // unopenable database out of.
+            let owner = catalog.iter().rev().find(|held| {
                 held.kind == ObjectKind::Table && held.name.to_ascii_lowercase() == folded
             })?;
             let mut table = table_from_create_sql(&owner.sql, 0, owner.tree_id as u32).ok()?;

@@ -208,6 +208,21 @@ impl KeyEncoding {
 /// @param pool - the buffer pool the file is open through
 /// @param reference - what the leaf holds
 pub fn read_extent(pool: &Pool, reference: ExtentRef) -> DbResult<Vec<u8>> {
+    // A value packed into a shared page is one slot of one page, so it is one
+    // fetch and one copy - there is no chain to follow and no length to
+    // reconcile beyond the one the slot itself declares.
+    if let Some(slot) = reference.slot {
+        let guard = pool.fetch(reference.first)?;
+        let held = extent::shared::read(guard.bytes(), slot)?;
+        if held.len() as u64 != reference.length {
+            return Err(corrupt(format!(
+                "a shared extent slot holds {} bytes where its reference says {}",
+                held.len(),
+                reference.length
+            )));
+        }
+        return Ok(held.to_vec());
+    }
     let mut out = Vec::with_capacity(reference.length.min(1 << 20) as usize);
     let mut page = reference.first;
     let mut pages = 0u64;
@@ -258,15 +273,99 @@ pub fn write_extent(
 ) -> DbResult<ExtentRef> {
     let page_size = database.page_size();
     let pages = extent::pages_needed(value.len() as u64, page_size).max(1);
+    // **A value that fits inside one page shares one** (task-1880 §4). A run is
+    // whole pages, so a value one byte over the spill threshold used to cost a
+    // whole page: 4,200 bytes took 32,768, and the band from there to a full
+    // page is where extracted text, JSON payloads and rendered vectors live.
+    // Nikaya's 601,862 embeddings at 9,513 bytes each were 20.5 GB of a 25.66 GB
+    // staged file for exactly this reason.
+    //
+    // Anything longer than a page keeps its contiguous run. Packing would not
+    // help it - it needs every byte of the pages it takes - and the run is the
+    // whole of the `large.values` argument.
+    if pages <= 1 {
+        return write_packed_extent(database, log, tree_id, value);
+    }
     let first = database.allocate(pages)?;
     let images = extent::encode_run(value, first, page_size, tree_id)?;
     for (id, mut image) in images {
         log_built_page(&mut Some(log), database, id, &mut image)?;
     }
-    Ok(ExtentRef {
-        first,
-        length: value.len() as u64,
-    })
+    Ok(ExtentRef::run(first, value.len() as u64))
+}
+
+/// Puts one small value into a shared extent page, allocating one if needed.
+///
+/// The page the last value went on is tried first - it is a hint on the
+/// `Database`, held only in memory - and a fresh page is allocated when it is
+/// full or there is none. Either way the whole page image is logged, so redo is
+/// a copy and no new record kind is needed for this.
+///
+/// @param database - the file the page is allocated and installed in
+/// @param log - where the records go
+/// @param tree_id - the tree the value belongs to
+/// @param value - the bytes to store
+fn write_packed_extent(
+    database: &mut Database,
+    log: &mut dyn crate::write::TreeLog,
+    tree_id: u64,
+    value: &[u8],
+) -> DbResult<ExtentRef> {
+    if let Some(page) = database.shared_extent() {
+        let held = {
+            let guard = database.pool().fetch(page)?;
+            let bytes = guard.bytes();
+            extent::shared::is_shared(bytes) && extent::shared::has_room(bytes, value.len())?
+        };
+        if held {
+            let mut image = {
+                let guard = database.pool().fetch(page)?;
+                guard.bytes().to_vec()
+            };
+            let slot = extent::shared::place(&mut image, value)?;
+            log_shared_page(log, database, page, &mut image, false)?;
+            return Ok(ExtentRef::packed(page, slot, value.len() as u64));
+        }
+    }
+    let page = database.allocate(1)?;
+    let mut image = vec![0u8; database.page_size()];
+    extent::shared::initialise(&mut image, tree_id)?;
+    let slot = extent::shared::place(&mut image, value)?;
+    log_shared_page(log, database, page, &mut image, true)?;
+    database.set_shared_extent(Some(page));
+    Ok(ExtentRef::packed(page, slot, value.len() as u64))
+}
+
+/// Logs and installs a shared extent page's whole image.
+///
+/// **The image, not the change.** A slot placed or cleared is a few bytes, but
+/// the record has to be replayable against a page recovery may be holding at any
+/// earlier state, and a whole image is the one form that always is - the same
+/// argument `WritePage` already rests on. A shared page is written once per
+/// value that lands on it, and a value that lands on it is at least four
+/// kilobytes, so the log is at most a page per four kilobytes of payload.
+///
+/// @param log - where the records go
+/// @param database - the file
+/// @param page - the page's number
+/// @param image - the page bytes, stamped with the record's LSN on return
+/// @param fresh - whether the page was just allocated
+fn log_shared_page(
+    log: &mut dyn crate::write::TreeLog,
+    database: &mut Database,
+    page: PageId,
+    image: &mut [u8],
+    fresh: bool,
+) -> DbResult<()> {
+    if fresh {
+        log.log(inillucent_wal::record::Body::AllocPage { page: page.0 })?;
+    }
+    let lsn = log.log(inillucent_wal::record::Body::WritePage {
+        page: page.0,
+        image,
+    })?;
+    page::write_u64(image, page::header::LSN, lsn)?;
+    database.install(page, image)
 }
 
 /// Gives one out-of-line value's pages back to the free map.
@@ -279,6 +378,30 @@ pub fn free_extent(
     log: &mut dyn crate::write::TreeLog,
     reference: ExtentRef,
 ) -> DbResult<()> {
+    // **A packed value gives back a slot, and the page only when it is the
+    // last** (task-1880 §4). The bytes stay where they are: compacting the page
+    // would move a value whose reference is in some other leaf, and the space a
+    // dead slot holds is bounded by the page it is on.
+    if let Some(slot) = reference.slot {
+        let mut image = {
+            let guard = database.pool().fetch(reference.first)?;
+            guard.bytes().to_vec()
+        };
+        let remaining = extent::shared::clear(&mut image, slot)?;
+        if remaining > 0 {
+            return log_shared_page(log, database, reference.first, &mut image, false);
+        }
+        // Nothing on it is live, so it goes back to the free map - and the hint
+        // has to let go of it first, or the next small value would be placed on
+        // a page that is no longer this tree's.
+        if database.shared_extent() == Some(reference.first) {
+            database.set_shared_extent(None);
+        }
+        log.log(inillucent_wal::record::Body::FreePage {
+            page: reference.first.0,
+        })?;
+        return database.release(reference.first, 1);
+    }
     let pages = extent::pages_needed(reference.length, database.page_size()).max(1);
     for offset in 0..pages {
         let page = PageId(reference.first.0.saturating_add(offset));

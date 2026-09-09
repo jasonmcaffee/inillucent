@@ -289,11 +289,25 @@ impl ImportedDatabase {
     ///
     /// SQLite states a negative `cache_size` in kibibytes and a positive one in
     /// pages; the pool is sized in frames of the file's page size, so the two
-    /// are the same number said differently. **The pool is not resized**: it is
-    /// fixed at open here and the gate's whole fairness argument rests on both
-    /// arms having one stated budget. Setting it is therefore accepted and
-    /// reported back, and a caller that reads it afterwards is told the truth
-    /// about what the engine is using rather than what it asked for.
+    /// are the same number said differently.
+    ///
+    /// **A larger cache than the pool was opened with grows the pool**
+    /// (task-1880 §9). It used to clamp: the pool's frames were allocated at
+    /// open, `set_budget` could only lower the ceiling inside them, and a
+    /// caller asking for more read back what the engine had. The comment called
+    /// that "the truth, not the request", and it was - but the request had no
+    /// other way to be granted, and there is no flag on the shell or the
+    /// command line either. So a two-gigabyte pool was reachable only by a
+    /// program that linked the crate and called `Database::open_with`, and
+    /// task-1876 could not reduce a crash it had just hit on a live database
+    /// because it could not reproduce the pool size the crash happened under.
+    ///
+    /// Growing is cheap because a frame's buffer is allocated the first time
+    /// that frame is claimed: what a large `cache_size` costs immediately is a
+    /// latch, a pin counter and an empty vector per frame, and the pages
+    /// themselves arrive as they are read. Nothing that is already resident
+    /// moves. The pool never shrinks - a smaller cache lowers the budget, which
+    /// is a ceiling on caching rather than a wall a statement runs into.
     fn pragma_cache_size(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
         let page_size = self.page_size.max(1);
         let Some(argument) = argument else {
@@ -311,13 +325,17 @@ impl ImportedDatabase {
         } else {
             asked.max(1)
         };
+        let wanted = usize::try_from(pages).unwrap_or(usize::MAX);
+        if wanted > self.database.pool().frames() {
+            self.database.pool_mut().grow_frames(wanted)?;
+            self.frames = self.database.pool().frames();
+        }
         let pool = self.database.pool();
         let held = pool.frames() as i64;
         pool.set_budget(pages.clamp(1, held) as usize);
-        // **The truth, not the request.** The pool's frames are allocated at
-        // open, so a cache larger than the pool is a cache the engine does not
-        // have; asking for one reads back what it does have rather than what
-        // was asked for, in the same units the caller used.
+        // Still the truth rather than the request, for the one case the grow
+        // could not satisfy: an allocation that the platform refused reports
+        // what the pool ended up with, in the units the caller used.
         self.cache_size = Some(if pages > held {
             if asked < 0 {
                 -(held.saturating_mul(page_size as i64) / 1024)

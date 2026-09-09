@@ -127,6 +127,8 @@ pub enum PageKind {
     Leaf,
     /// One page of a blob extent.
     BlobExtent,
+    /// One page holding several small out-of-line values side by side.
+    BlobShared,
     /// One page of the free-page bitmap.
     FreeMap,
     /// Allocated but not in use.
@@ -140,6 +142,7 @@ impl PageKind {
             PageKind::Interior => 1,
             PageKind::Leaf => 2,
             PageKind::BlobExtent => 3,
+            PageKind::BlobShared => 6,
             PageKind::FreeMap => 4,
             PageKind::Unused => 5,
         }
@@ -153,6 +156,7 @@ impl PageKind {
             1 => Ok(PageKind::Interior),
             2 => Ok(PageKind::Leaf),
             3 => Ok(PageKind::BlobExtent),
+            6 => Ok(PageKind::BlobShared),
             4 => Ok(PageKind::FreeMap),
             5 => Ok(PageKind::Unused),
             other => Err(corrupt(format!("page kind {other} is not a kind"))),
@@ -391,11 +395,12 @@ mod tests {
             PageKind::BlobExtent,
             PageKind::FreeMap,
             PageKind::Unused,
+            PageKind::BlobShared,
         ];
         for kind in kinds {
             assert_eq!(PageKind::from_code(kind.code()).unwrap(), kind);
         }
-        for code in [0u8, 6, 200, 255] {
+        for code in [0u8, 7, 200, 255] {
             assert!(PageKind::from_code(code).is_err(), "{code}");
         }
     }

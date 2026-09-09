@@ -278,10 +278,10 @@ impl crate::leaf::Spill for Measuring {
         _column: usize,
         value: &[u8],
     ) -> DbResult<inillucent_pool::extent::ExtentRef> {
-        Ok(inillucent_pool::extent::ExtentRef {
-            first: PageId(1),
-            length: value.len() as u64,
-        })
+        Ok(inillucent_pool::extent::ExtentRef::run(
+            PageId(1),
+            value.len() as u64,
+        ))
     }
 }
 
@@ -1122,10 +1122,20 @@ impl PagedTree {
         // would allocate somewhere else. Such a compaction carries its image, so
         // redo copies rather than re-runs - the `AllocPage` and `WritePage`
         // records for the new run are already in the log ahead of it.
+        // **What the page was stamped with before this.** A logical record has
+        // to be re-derived from the page it started from, and until task-1880 §7
+        // nothing in the record said which page that was - so a replay that
+        // reached it holding a different one could only report that the rows did
+        // not fit. `redo::compact_leaf` names both stamps when that happens.
+        let from_lsn = {
+            let guard = database.pool().fetch(page)?;
+            crate::page::read_u64(&guard, page::header::LSN)?
+        };
         let lsn = log.log(Body::CompactLeaf {
             tree: self.tree_id(),
             page: page.0,
             image: if logical { &[] } else { &image },
+            from_lsn,
         })?;
         page::write_u64(&mut image, page::header::LSN, lsn)?;
         database.install(page, &image)?;

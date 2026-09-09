@@ -401,7 +401,9 @@ fn a_bulk_load_of_out_of_line_values_in_one_transaction_succeeds() {
         format!("{hash:016x}-{id:08}")
     };
 
-    connection.execute_batch("BEGIN").expect("a transaction opens");
+    connection
+        .execute_batch("BEGIN")
+        .expect("a transaction opens");
     let mut statement = connection
         .prepare("INSERT INTO wide (id, body) VALUES (?1, ?2)")
         .expect("the insert prepares");
@@ -413,18 +415,18 @@ fn a_bulk_load_of_out_of_line_values_in_one_transaction_succeeds() {
         statement
             .bind(2, OwnedDatum::Text(body(id).into_bytes()))
             .expect("the value binds");
-        statement
-            .step()
-            .unwrap_or_else(|error| {
-                panic!(
-                    "row {id} could not be written: {}",
-                    error.detail().unwrap_or_else(|| error.message())
-                )
-            });
+        statement.step().unwrap_or_else(|error| {
+            panic!(
+                "row {id} could not be written: {}",
+                error.detail().unwrap_or_else(|| error.message())
+            )
+        });
         statement.reset();
     }
     drop(statement);
-    connection.execute_batch("COMMIT").expect("the transaction commits");
+    connection
+        .execute_batch("COMMIT")
+        .expect("the transaction commits");
 
     // Read back from a fresh open, because a value answered out of the pool that
     // wrote it is not evidence that it reached the file.
@@ -481,7 +483,9 @@ fn an_out_of_line_row_written_before_an_existing_one() {
         .expect("the insert prepares");
     for id in [100i64, 50, 150, 25] {
         statement.clear_bindings();
-        statement.bind(1, OwnedDatum::Int(id)).expect("the key binds");
+        statement
+            .bind(1, OwnedDatum::Int(id))
+            .expect("the key binds");
         statement
             .bind(2, OwnedDatum::Text(body(id).into_bytes()))
             .expect("the value binds");
@@ -536,7 +540,11 @@ fn two_rows_with_a_text_key_and_a_spilled_value() {
                 OwnedDatum::Int(position)
             };
             statement.bind(1, key).expect("the key binds");
-            let value = if big { "v".repeat(8_000) } else { String::from("short") };
+            let value = if big {
+                "v".repeat(8_000)
+            } else {
+                String::from("short")
+            };
             statement
                 .bind(2, OwnedDatum::Text(value.into_bytes()))
                 .expect("the value binds");

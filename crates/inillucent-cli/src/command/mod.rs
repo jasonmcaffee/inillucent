@@ -295,6 +295,26 @@ impl Context {
         self.root.is_some()
     }
 
+    /// Returns a surface over a shell a test already opened.
+    ///
+    /// Here rather than in each test module because `Context`'s fields are
+    /// private to this module, and a test that reached into them would be a
+    /// second definition of what a surface is.
+    ///
+    /// @param shell - the shell to drive
+    /// @param root - the directory to confine to, when there is one
+    #[cfg(test)]
+    pub fn for_test(shell: Shell, root: Option<PathBuf>) -> Context {
+        Context {
+            shell,
+            path: ":memory:".to_string(),
+            readonly: false,
+            root,
+            limit: 200,
+            null: String::new(),
+        }
+    }
+
     /// Refuses a path outside the root, when a root was set.
     ///
     /// The check is on the *lexical* path after normalising `..`, and it is

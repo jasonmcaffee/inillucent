@@ -297,10 +297,13 @@ const MIGRATE_PARAMS: &[Param] = &[
     Param {
         name: "source",
         kind: Kind::Text,
-        required: true,
+        required: false,
         positional: true,
         description: "The SQLite database file to read, or a postgres:// or mysql:// connection \
-                      URL. The source is never written to.",
+                      URL. The source is never written to. A connection URL holds a password, \
+                      and an argument is visible in the process list for the whole run - so it \
+                      may be left out and given in INILLUCENT_SOURCE_URL instead, or written as \
+                      '-' to read one line from standard input.",
     },
     Param {
         name: "destination",

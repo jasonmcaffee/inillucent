@@ -144,6 +144,14 @@ prefix = "_junk/"
 packages = []
 reason = "scratch, read by nothing"
 
+# The Unluminous IDE's per-workspace state - which files are open, which folders
+# are expanded. It is gitignored and nothing compiles from it, and without a rule
+# here it matched nothing and therefore selected every suite in the workspace.
+[[path]]
+prefix = ".unluminous/"
+packages = []
+reason = "the editor's own workspace state; no code reads it"
+
 [[path]]
 prefix = "target/"
 packages = []
@@ -450,6 +458,13 @@ kind = "test"
 name = "new_engine_create"
 tier = "engine"
 covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "new_engine_extent_packing"
+tier = "engine"
+covers = ["inillucent-engine", "inillucent-pool"]
 
 [[target]]
 package = "inillucent-compat"
@@ -946,6 +961,13 @@ kind = "test"
 name = "phase2_campaigns"
 tier = "durability"
 covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "new_engine_recovery_shapes"
+tier = "durability"
+covers = ["inillucent-engine", "inillucent-txn"]
 
 [[target]]
 package = "inillucent-compat"

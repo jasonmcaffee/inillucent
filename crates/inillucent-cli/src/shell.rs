@@ -761,7 +761,9 @@ impl Shell {
         let connection = self.connection();
         let (_, consumed) = connection.prepare_with_tail(sql).ok()?;
         let left = sql.get(consumed..)?;
-        let rest = left.get(inillucent_engine::connect::leading_trivia(left)..)?.trim();
+        let rest = left
+            .get(inillucent_engine::connect::leading_trivia(left)..)?
+            .trim();
         if rest.is_empty() {
             return None;
         }
@@ -1387,20 +1389,34 @@ mod trailing_statement_tests {
             // A trigger body holds semicolons, which is why counting them is the wrong test.
             "CREATE TRIGGER t AFTER INSERT ON a FOR EACH ROW BEGIN UPDATE a SET id = id; END",
         ] {
-            assert_eq!(held.trailing_statement(one), None, "{one:?} is one statement");
+            assert_eq!(
+                held.trailing_statement(one),
+                None,
+                "{one:?} is one statement"
+            );
         }
 
         let two = held
-            .trailing_statement("CREATE TABLE a (id INTEGER PRIMARY KEY); CREATE TABLE b (id INTEGER PRIMARY KEY)")
+            .trailing_statement(
+                "CREATE TABLE a (id INTEGER PRIMARY KEY); CREATE TABLE b (id INTEGER PRIMARY KEY)",
+            )
             .expect("two statements are two statements");
-        assert!(two.starts_with("CREATE TABLE b"), "the refusal names what comes next, and said {two:?}");
+        assert!(
+            two.starts_with("CREATE TABLE b"),
+            "the refusal names what comes next, and said {two:?}"
+        );
 
         // A comment between them does not hide the second one.
         let commented = held
-            .trailing_statement("CREATE TABLE a (id INTEGER PRIMARY KEY); -- next
-CREATE TABLE b (id INTEGER PRIMARY KEY)")
+            .trailing_statement(
+                "CREATE TABLE a (id INTEGER PRIMARY KEY); -- next
+CREATE TABLE b (id INTEGER PRIMARY KEY)",
+            )
             .expect("a comment does not hide a statement");
-        assert!(commented.starts_with("CREATE TABLE b"), "said {commented:?}");
+        assert!(
+            commented.starts_with("CREATE TABLE b"),
+            "said {commented:?}"
+        );
     }
 
     /// Text that will not compile is a syntax error, not a script with too many statements in it.
