@@ -260,23 +260,40 @@ deployment.
 
 ### The record layer, p50
 
-| operation | PostgreSQL, custom plan | PostgreSQL, auto | inillucent | |
-|---|---:|---:|---:|---|
-| `doc.attachments` | 0.285 ms | 0.255 ms | **0.192 ms** | 1.48x faster |
-| `doc.email` | 0.160 ms | 0.166 ms | **0.137 ms** | 1.17x |
-| `attachment.text` | 0.247 ms | 0.308 ms | **0.224 ms** | 1.10x |
-| `doc.participants` | **0.212 ms** | 0.201 ms | 0.246 ms | 0.86x |
-| `doc.load` | **0.177 ms** | 0.153 ms | 0.242 ms | 0.73x |
-| `thread.load` | **0.308 ms** | 0.363 ms | 1.716 ms | 0.18x |
-| `labels.distinct` | **45.9 ms** | 46.7 ms | 91.2 ms | 0.50x |
-| `status.counts` | **367.8 ms** | 359.5 ms | 6,228 ms | 0.06x |
-| `index.pending` | **0.553 ms** | 0.554 ms | 3,303 ms | 0.0002x |
+Measured twice, before and after the engine took the fixes these findings produced. Both columns are
+from interleaved runs over the same shared sample, so the box's drift between the two sittings falls
+on the PostgreSQL side as well and the ratio is what to read.
 
-**Point reads are a wash to slightly better. Anything that aggregates or scans is worse, and one of
-them is catastrophically worse.** `index.pending` is the ingestion queue check; it is 6,000x slower
-because the index that should serve it is not chosen, because there are no statistics, because
-`ANALYZE` fails. `status.counts` is five `count(*)` over 600,000 row tables: PostgreSQL spreads that
-across parallel workers, and this engine walks a covering index on one core.
+| operation | PostgreSQL | inillucent | |
+|---|---:|---:|---|
+| `doc.attachments` | 0.325 ms | **0.273 ms** | 1.19x faster |
+| `doc.email` | 0.237 ms | 0.267 ms | 1.13x slower |
+| `attachment.text` | 0.336 ms | 0.399 ms | 1.19x slower |
+| `doc.participants` | 0.300 ms | 0.387 ms | 1.29x slower |
+| `doc.load` | 0.169 ms | 0.423 ms | 2.5x slower |
+| `thread.load` | 0.506 ms | 1.960 ms | 3.9x slower |
+| `labels.distinct` | 44.7 ms | 92.5 ms | 2.1x slower |
+| `status.counts` | 364 ms | **5,670 ms** | 15.6x slower |
+| `index.pending` | 0.609 ms | **2,970 ms** | 4,900x slower |
+
+**Point reads are within a small factor either way. Anything that aggregates or scans is worse, and
+two are much worse.**
+
+`index.pending` asks which documents still need indexing, and the answer is normally none. It is
+planned `SCAN document` — over a table whose rows carry message bodies — because `indexed_at IS NULL`
+is not a seekable predicate here, and a partial index whose `WHERE` clause matches the query character
+for character is not chosen either. The engine's later fixes moved it from 3,303 ms to 2,970 ms,
+which is not the kind of change that matters.
+
+The application's answer to that is the same one it used for the embedding backlog: stop asking. A
+queue table written by the transactions that create the work and drained by the ones that finish it
+turns the empty case into one seek. It is written, it reconciles against the real corpus correctly
+(66,793 documents checked, none queued), **and it is not shipped**, because the `CREATE TABLE` that
+creates it corrupts the database. That is section 2.
+
+`status.counts` is five `count(*)` over 600,000 row tables. PostgreSQL spreads that across parallel
+workers; this engine walks a covering index on one core. There is no application-side trick for it
+short of caching the counters, which trades a correct number for a fast one.
 
 `corpus.scan20k` is excluded rather than reported as a ratio: the PostgreSQL side counts a subquery,
 so the server never sends the 20,000 vectors anywhere, while the inillucent side builds 20,000 chunk
