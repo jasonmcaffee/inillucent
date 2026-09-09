@@ -1994,8 +1994,31 @@ fn space_of(catalog: &dyn TreeCatalog, prepared: &Prepared) -> DbResult<HeldSpac
     // Only the outermost stage's key order survives into the joined row: a
     // nested loop emits its inner matches grouped by the outer row, which
     // preserves the outer order and destroys any inner one.
+    //
+    // **A table fetch behind a non-covering index seek is not a nested loop**
+    // (task-1880 §10). It is one row per index entry, in the index's own order,
+    // so it preserves the order rather than destroying it. This used to ask for
+    // exactly one stage, which a non-covering seek never is - so the ordering an
+    // index was chosen *for* was then not believed, `ORDER BY` fell to a `TopN`,
+    // and `TopN` is a pipeline breaker: it consumes every row of the range
+    // before it emits one. The measured shape is unmistakable, because the cost
+    // falls as the starting key advances - on a 60,000-row table, the same
+    // `WHERE id > ? ORDER BY id LIMIT 2000`:
+    //
+    // | starting after | before | after |
+    // |---|---:|---:|
+    // | row 1 | 88.3 ms | 1.1 ms |
+    // | row 20,000 | 19.6 ms | 1.1 ms |
+    // | row 40,000 | 11.0 ms | 1.1 ms |
+    // | row 58,000 | 3.7 ms | 1.1 ms |
+    //
+    // Work proportional to what is *left* rather than to the limit, which makes
+    // keyset paging quadratic in the table: 601,862 chunks at a page of 2,000 is
+    // 90 million row materialisations instead of 601,862. It is what stopped
+    // task-1876's first adoption pass finishing one table in 25 minutes.
+    let ordered_stages = prepared.stages.iter().skip(1).all(|stage| stage.is_lookup);
     let order = match (prepared.stages.first(), layouts.first()) {
-        (Some(stage), Some(layout)) if prepared.stages.len() == 1 => {
+        (Some(stage), Some(layout)) if ordered_stages => {
             if stage.kind == AccessKind::Reverse {
                 Vec::new()
             } else {
@@ -2155,7 +2178,7 @@ fn build_chain<'t>(
     }
     let needs_trim = projected.len() > result_width;
 
-    let scan_order = &space.order;
+    let scan_order = &order_equivalents(space.stages, space.layouts, space.order);
     let group_exprs = select
         .group_by
         .iter()
@@ -3033,7 +3056,26 @@ fn build_nested<'t>(
             return build_lateral_join(plan, catalog, space, params, stage, downstream);
         }
     }
-    if inillucent_sql::plan::is_outer(source_term.join) || stage.kind == AccessKind::Materialised {
+    // **An outer join whose key is its whole condition is an index nested
+    // loop** (task-1880 §14). The materialised shape below reads the inner side
+    // once into a buffer, which is linear in the inner table however few outer
+    // rows there are: `LEFT JOIN chunk c ON c.document_id = d.id` for one
+    // document read all 60,000 chunks, at 138.2 ms against 0.5 ms for the same
+    // join written `JOIN`. `IndexNestedLoopJoin` already answers `JoinKind::Left`
+    // - it null-extends an outer row whose probe found nothing - so what was
+    // missing was the permission to use it.
+    //
+    // The permission is `on_enforced`: the planner says so only when every
+    // conjunct of the `ON` became part of the key. That is the condition this
+    // operator needs, because it has nowhere to test what the key did not
+    // capture and a pair that failed such a test has to null-extend rather than
+    // vanish.
+    let outer_by_probe = inillucent_sql::plan::is_outer(source_term.join)
+        && source_term.on_enforced
+        && stage.kind != AccessKind::Materialised;
+    if (inillucent_sql::plan::is_outer(source_term.join) && !outer_by_probe)
+        || stage.kind == AccessKind::Materialised
+    {
         return build_materialised_join(plan, catalog, space, params, stage, index, downstream);
     }
     let tree = catalog
@@ -3095,7 +3137,11 @@ fn build_nested<'t>(
         .map(|expr| compile(expr, &outer_types))
         .collect::<DbResult<Vec<_>>>()?;
     Ok(Box::new(IndexNestedLoopJoin::new(
-        JoinKind::Inner,
+        // **The lookup stage carries the same kind as the seek that fed it.**
+        // A null-extended index row probes the table with a NULL identity and
+        // finds nothing; an `Inner` lookup would drop it, which would lose the
+        // very row the outer join produced it for.
+        join_kind_of(source_term.join),
         tree,
         // **This stage's pool, not the pipeline's.** The inner side of an index
         // nested loop is where a join across two databases reaches the second
@@ -4023,13 +4069,70 @@ fn projected_prefix(plan: &PhysicalPlan, space: &Space<'_>, params: &Params) -> 
 ///
 /// @param exprs - the expressions to test
 /// @param scan_order - the tree columns the leaves are ordered by
-fn is_scan_prefix(exprs: &[Expr], scan_order: &[usize]) -> bool {
+fn is_scan_prefix(exprs: &[Expr], scan_order: &[Vec<usize>]) -> bool {
     if exprs.is_empty() || exprs.len() > scan_order.len() {
         return false;
     }
-    exprs.iter().enumerate().all(|(position, expr)| {
-        matches!(expr, Expr::Column(index) if scan_order.get(position) == Some(index))
+    exprs.iter().enumerate().all(|(position, expr)| match expr {
+        Expr::Column(index) => scan_order
+            .get(position)
+            .is_some_and(|held| held.contains(index)),
+        _ => false,
     })
+}
+
+/// Returns, for each column the walk is ordered by, every joined column that
+/// carries that value.
+///
+/// **A non-covering seek carries its key twice** (task-1880 §10). The index
+/// stage holds the key columns it is ordered by, and the table fetch behind it
+/// holds the same values again under the table's own column numbers - and it is
+/// the table's numbers a select list resolves to, because that is what the
+/// caller wrote. Asking whether the ORDER BY is the index's own column
+/// therefore answered no for every query of the form `SELECT <a column the
+/// index does not cover> FROM t WHERE key > ? ORDER BY key`, which is keyset
+/// paging, which is how anything walks a large table.
+///
+/// The index layout's `slots` is the map: `slots[t] = Some(p)` says the table's
+/// column `t` sits at the index's tree column `p`. The lookup stage contributes
+/// the table's columns starting at its own offset, so the same value is at
+/// `offset + t`.
+///
+/// @param stages - the prepared stages, outermost first
+/// @param layouts - each stage's layout
+/// @param order - the tree columns the outermost walk is ordered by
+fn order_equivalents(
+    stages: &[PreparedStage],
+    layouts: &[SourceLayout],
+    order: &[usize],
+) -> Vec<Vec<usize>> {
+    let mut classes: Vec<Vec<usize>> = order.iter().map(|column| vec![*column]).collect();
+    let Some(index_layout) = layouts.first() else {
+        return classes;
+    };
+    for (stage, layout) in stages.iter().zip(layouts.iter()).skip(1) {
+        if !stage.is_lookup {
+            continue;
+        }
+        for (position, column) in order.iter().enumerate() {
+            for (slot, held) in index_layout.slots.iter().enumerate() {
+                if *held != Some(*column) {
+                    continue;
+                }
+                // **Through the lookup's own slot map, not the record slot.**
+                // A table tree carries its rowid first, so the record's slot 0
+                // is its tree column 1 - and `offset + slot` names the rowid
+                // rather than the value the index is ordered by.
+                let Some(Some(tree_column)) = layout.slots.get(slot) else {
+                    continue;
+                };
+                if let Some(class) = classes.get_mut(position) {
+                    class.push(stage.offset.saturating_add(*tree_column));
+                }
+            }
+        }
+    }
+    classes
 }
 
 /// Reports whether the projected rows already arrive in the ORDER BY's order.
@@ -4043,7 +4146,7 @@ fn output_is_sorted_by(
     sort_keys: &[SortKey],
     projected: &[Expr],
     plan: &PhysicalPlan,
-    scan_order: &[usize],
+    scan_order: &[Vec<usize>],
     grouped_walk: bool,
 ) -> bool {
     match plan.aggregation {
