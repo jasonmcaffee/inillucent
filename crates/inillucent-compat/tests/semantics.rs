@@ -109,7 +109,7 @@ const CASES: &[Case] = &[
     // reference's shell then draws a caret under the offending token in a
     // spelling this one does not use. The refusal is what the ticket is about
     // and the probe records it as agreement; a case here would be asserting on
-    // the reference's caret art. `feature-comparison.md` names it.
+    // the reference's caret art. `docs/feature-comparison.md` names it.
     Case {
         name: "upsert.arm.where",
         kind: "write",

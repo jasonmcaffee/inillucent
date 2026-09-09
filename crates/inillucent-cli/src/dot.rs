@@ -172,7 +172,7 @@ fn log(shell: &mut Shell, arguments: &[&str]) {
 /// command being absent: a script written for the reference now runs to the
 /// same message rather than stopping at "unknown command", and `.help` and the
 /// audit both see a shell with the same surface. task-1869; the inability to
-/// load a library is recorded in `feature-comparison.md` rather than hidden.
+/// load a library is recorded in `docs/feature-comparison.md` rather than hidden.
 ///
 /// @param shell - the shell
 /// @param arguments - the words after the command

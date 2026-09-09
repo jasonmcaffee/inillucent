@@ -171,7 +171,7 @@ pub fn inventory(path: &Path) -> DbResult<SqliteInventory> {
     // engine could store a trigger and list it in `sqlite_schema` but could not
     // fire one, and a database whose invariants are maintained by nothing is a
     // failure the owner finds out about from their data. task-1838 made
-    // triggers run, and every trigger case in `feature-comparison.md` agrees
+    // triggers run, and every trigger case in `docs/feature-comparison.md` agrees
     // with SQLite - so since then the refusal has been the tool declining to do
     // something the engine can do, which is the *only* reason
     // `--sqlite-file` could not be pointed at an ordinary application's

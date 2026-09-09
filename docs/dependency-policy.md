@@ -61,12 +61,12 @@ policy is an allow-list rather than a deny-list because the interesting mistake
 is not "someone added a bad crate" but "someone added a reasonable-looking crate
 that quietly implements a piece of the engine".
 
-## Deliberate additions made in task-1782
+## The deliberate additions
 
 | Crate | Category | Reason |
 |---|---|---|
-| `libc` | OS boundary | `fcntl` byte-range locking in `inillucent-vfs`; `getrusage` in `inillucent-compat`'s `procstat.rs`, so the gate can report what each arm's process cost (task-1838) |
-| `windows-sys` | OS boundary | `LockFileEx`, `GetFileInformationByHandle`, `BCryptGenRandom` in `inillucent-vfs`; `GetProcessMemoryInfo` and `GetProcessTimes` in `inillucent-compat`'s `procstat.rs` (task-1838) |
+| `libc` | OS boundary | `fcntl` byte-range locking in `inillucent-vfs`; `getrusage` in `inillucent-compat`'s `procstat.rs`, so the gate can report what each arm's process cost |
+| `windows-sys` | OS boundary | `LockFileEx`, `GetFileInformationByHandle`, `BCryptGenRandom` in `inillucent-vfs`; `GetProcessMemoryInfo` and `GetProcessTimes` in `inillucent-compat`'s `procstat.rs` |
 
 Nothing else was added. SHA-256, SHA3-256, CRC-32, the WAL checksum, the varint
 codec, the deterministic generator, the TOML subset reader and the JSON the
@@ -74,7 +74,7 @@ harness emits are all first-party, because each of them is part of a contract -
 an on-disk format, a published checksum, an evidence artifact - that must not
 change shape when a dependency is upgraded.
 
-## The dependency task-1868 did not add
+## The dependency that was deliberately not added
 
 `inillucent migrate --kind postgres` and `--kind mysql` read a **running
 server** over its own wire protocol. The obvious implementation is the
@@ -107,7 +107,7 @@ in that file's own tests, because a hash that is subtly wrong does not produce a
 wrong answer - it produces "password authentication failed", which reads as the
 operator's mistake.
 
-The limits that choice accepts are stated rather than hidden: no TLS
+The limits that choice accepts: no TLS
 (`sslmode=require` is refused by name), and no `caching_sha2_password` **full**
 authentication, whose RSA exchange is refused with the two ways around it.
 

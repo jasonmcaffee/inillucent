@@ -103,12 +103,22 @@ reason = "the reference build and the feature probe, which decide what the suite
 
 [[path]]
 prefix = "docs/"
+packages = []
+reason = "the documentation; prose, and nothing compiles from it. The two contract files below have their own rows, and a longer prefix wins"
+
+[[path]]
+prefix = "docs/invariants/"
 packages = ["inillucent-compat"]
 reason = "the layering contract and the invariant register, which only `policy` and `harness` read"
 
-# task-1868. Prose for an agent to read, and nothing compiles from it - so a
-# change here should select nothing rather than the whole suite, which is what
-# an unmatched top-level directory would do.
+[[path]]
+prefix = "docs/dependency-policy.md"
+packages = ["inillucent-compat"]
+reason = "the dependency contract `policy` enforces"
+
+# Prose for an agent to read, and nothing compiles from it - so a change here
+# should select nothing rather than the whole suite, which is what an unmatched
+# top-level directory would do.
 [[path]]
 prefix = "agent-skills/"
 packages = []
@@ -159,36 +169,6 @@ reason = "build output"
 
 [[path]]
 prefix = "README.md"
-packages = []
-reason = "prose"
-
-[[path]]
-prefix = "architecture.md"
-packages = []
-reason = "prose"
-
-[[path]]
-prefix = "findings.md"
-packages = []
-reason = "prose"
-
-[[path]]
-prefix = "feature-comparison.md"
-packages = []
-reason = "prose"
-
-[[path]]
-prefix = "product-overview.md"
-packages = []
-reason = "prose"
-
-[[path]]
-prefix = "synthetic-testing.md"
-packages = []
-reason = "prose"
-
-[[path]]
-prefix = "inillucent-tdd.md"
 packages = []
 reason = "prose"
 

@@ -4,16 +4,16 @@ Everything in this repository is built, tested and verified up to the upload.
 This file is the last mile: what each registry needs, in what order, and which
 credential is missing.
 
-**Nothing here has been published.** task-1836 built and verified all six
-routes; every one of them stops at a credential that belongs to a person, or at
-one decision that is not a script's to make.
+**Nothing here has been published.** All six routes are built and verified;
+every one of them stops at a credential that belongs to a person, or at one
+decision that is not a script's to make.
 
 ---
 
 ## Where it stands, at a glance
 
-Nothing is published yet. Updated 2026-09-08 after task-1836 pushed each route as
-far as it would go.
+Nothing is published yet. Updated 2026-09-08, after each route was pushed as far
+as it would go.
 
 | route | state | what it is waiting on |
 |---|---|---|

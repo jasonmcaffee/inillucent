@@ -39,6 +39,9 @@ confidently answers a question the corpus cannot answer.
 The one **inconclusive** row is confluence, where inillucent leads 0.9960 to 0.9720 and the interval
 runs 0.0000 to 0.0440 over 25 queries. The run declines to call that a win.
 
+Fifteen of the seventeen comparisons are tabulated above. The score card carries all seventeen, with
+every interval and every p-value beside them.
+
 ## The correctness gate
 
 This is the row that matters most and it is not a percentage.
@@ -150,8 +153,7 @@ paragraph. The last five grade the paragraph.
 | **multi-source** | two headings from documents in two different sources, joined | both sets bear evidence, and the family is scored on whether **both** arrived |
 | **unanswerable** | distinctive words of two documents from sources the builder draws from disjoint pools | nothing is relevant |
 
-The passage family's remaining bias is stated rather than hidden: its words are still drawn from the
-passage it grades. It is a much weaker bias than a title query, because the shared container text is
+The passage family has a remaining bias: its words are still drawn from the passage it grades. It is a much weaker bias than a title query, because the shared container text is
 gone and the two strongest keyword anchors with it, and the ground truth stays objective, which a
 generated paraphrase would not.
 

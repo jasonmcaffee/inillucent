@@ -29,10 +29,6 @@ feedback:
 | `meta_page` | `inillucent-pool::meta::tests::corrupting_any_byte_is_detected` |
 | `memcmp_key` | `inillucent-tree::key::tests::encoded_order_matches_value_order_over_random_tuples` |
 
-The four targets added in task-1817 are the TDD's Phase 2 list: "new targets:
-leaf decoder, interior decoder, WAL record decoder, memcmp key decoder". The WAL
-record decoder is Phase 3's, because there is no WAL yet.
-
-A crash found by a target is reproduced by its input file; record the file with
-the ticket, and add the input as a regression case in the stable counterpart so
-it is checked forever rather than only while someone is fuzzing.
+A crash found by a target is reproduced by its input file. Keep the file, and
+add the input as a regression case in the stable counterpart beside it, so it is
+checked forever rather than only while somebody is fuzzing.

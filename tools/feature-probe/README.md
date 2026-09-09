@@ -1,6 +1,6 @@
 # The feature probe
 
-The instrument behind [`feature-comparison.md`](../../feature-comparison.md).
+The instrument behind [`docs/feature-comparison.md`](../../docs/feature-comparison.md).
 
 It asks one question, 416 times: **does inillucent answer this the way SQLite 3.53.4 does?** Each
 case is a whole SQL script, run through `inillucent-shell` and through the pinned `sqlite3`, each

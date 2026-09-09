@@ -15,7 +15,7 @@ and an NVMe SSD, while several other things were running. The arms are interleav
 
 ## 1. What actually moved
 
-Nikaya's *retrieval* was already inillucent: task-1774 moved the vector and lexical branches into the
+Nikaya's *retrieval* was already inillucent: an earlier move put the vector and keyword branches into the
 in-process `inillucent-core::Index` and measured recall@100 going from pgvector's 0.899 to 1.000. What
 had not moved was the **record** — documents, chunks, participants, attachments, jobs, sessions, and
 the vectors themselves — which was still PostgreSQL reached through `sqlx`, with the retrieval index

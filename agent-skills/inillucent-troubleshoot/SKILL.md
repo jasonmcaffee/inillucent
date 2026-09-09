@@ -30,7 +30,7 @@ capability that fails and a denied one that now works each turn the build red â€
 trusting in a way a hand-written feature list is not. **A name that is not in the table answers
 *no***, because a capability nobody declared was never checked.
 
-`feature-comparison.md` is the measured side-by-side against SQLite: 416 differential cases, 409 in
+`docs/feature-comparison.md` is the measured side-by-side against SQLite: 416 differential cases, 409 in
 agreement, and every one of the seven differences named with what it measures.
 
 ## "It refuses to write the file"
@@ -110,6 +110,6 @@ headers of `crates/inillucent-remote/tests/live_postgres.rs` and `live_mysql.rs`
 | | |
 |---|---|
 | what the engine gets wrong, and what it refuses | `README.md`, "What it gets wrong" |
-| every construct, measured against SQLite | `feature-comparison.md` |
+| every construct, measured against SQLite | `docs/feature-comparison.md` |
 | what a driver promises | `drivers/README.md` |
 | how the suite decides what to run | `tests/inillucent-testing-tdd.md` |
