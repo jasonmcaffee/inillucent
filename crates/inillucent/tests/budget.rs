@@ -41,15 +41,51 @@
 //! twenty per cent. Something that fails one of these is broken rather than
 //! slow, which is why it is allowed to be a test at all.
 //!
-//! This is the `perf` tier, and the runner will schedule it alongside
-//! everything else. That is safe *because* the margins are wide; if a guard
-//! here ever starts flapping under load, the answer is to widen it or move the
-//! measurement to a gate, never to tighten it.
+//! ## When a guard here flaps, count something instead (task-1884)
+//!
+//! This file used to say that a flapping guard should be widened, or moved to a
+//! gate. It was widened - `one_transaction_beats_many` went from 4 to 2 - and it
+//! flapped again anyway on a box that had four other jobs on it, having passed
+//! three times out of three on the same commit run alone. Widening only moves
+//! the guard closer to 1.0, which is where it stops guarding, so that answer has
+//! a floor and reaches it.
+//!
+//! The old guard's ratio was then measured deliberately, in four conditions, on
+//! the same commit and the same machine:
+//!
+//! | the machine | the old ratio |
+//! |---|---|
+//! | idle | about 40x |
+//! | 20 processes spinning and calling `fsync` | 4.89 - 7.13 |
+//! | 12 copies of this suite at once, on top of that | 14.52 - 59.22 |
+//! | the same, with the load freshly started | **1.18 - 4.38, and five of the twelve failed** |
+//!
+//! One quantity, one commit, readings from 1.18 to 59.22. It moves in *both*
+//! directions, because which arm a given kind of contention hurts more depends
+//! on the kind: processor pressure costs the batched arm more, and a busy disk
+//! costs the arm that syncs 2,000 times more. No threshold survives that, which
+//! is why the answer is not a threshold.
+//!
+//! There are two better answers, and they are both used below.
+//!
+//! - **Count the work rather than timing it.** `one_transaction_beats_many` now
+//!   asserts on log writes, 1 against 2,000, which is the same number on an idle
+//!   machine and on a loaded one. Where a claim can be made as a count, it is
+//!   made as a count.
+//! - **Where it must stay a clock, interleave the arms and take a median.** The
+//!   three ratios that are about which plan was chosen have no counter to move
+//!   to, so they run five paired rounds through [`paired_ratio`] rather than
+//!   timing arm A once and then arm B once. See that function for why.
+//!
+//! This is the `perf` tier, and the runner gives it the machine to itself among
+//! the test binaries - but that says nothing about the rest of the box, which is
+//! the load that actually broke this file.
 
+use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use inillucent::{Database, OwnedDatum};
+use inillucent::{Connection, Database, OwnedDatum};
 
 /// How many rows the guards build their table from.
 ///
@@ -120,6 +156,64 @@ fn measure(rounds: u32, mut work: impl FnMut()) -> Duration {
     started.elapsed()
 }
 
+/// Returns the median of `rounds` ratios, each taken from one run of each arm.
+///
+/// **Why a median of paired rounds rather than one reading of each arm**
+/// (task-1884). Timing arm A, then timing arm B, and dividing gives a number
+/// that moves with whatever else the machine was doing between the two - and it
+/// moves asymmetrically, because a scheduler takes more from an arm that is
+/// spending its time on the processor than from one that is waiting on a file.
+/// A guard built that way fails on a busy box and teaches everybody to re-run
+/// it, which is worse than not having it.
+///
+/// Interleaving puts the two arms next to each other in time, so a load spike
+/// that arrives partway through the test lands on both. Taking the median then
+/// discards the round it landed hardest on. A real regression is in every round
+/// and the median moves with it.
+///
+/// @param rounds - how many paired rounds to take; an odd number, so the median
+///   is a reading rather than an average of two
+/// @param repeats - how many times each arm runs inside one round
+/// @param numerator - the arm on top of the ratio
+/// @param denominator - the arm underneath it
+fn paired_ratio(
+    rounds: usize,
+    repeats: u32,
+    mut numerator: impl FnMut(),
+    mut denominator: impl FnMut(),
+) -> f64 {
+    let mut ratios = Vec::with_capacity(rounds);
+    for _ in 0..rounds {
+        let top = measure(repeats, &mut numerator);
+        let bottom = measure(repeats, &mut denominator);
+        ratios.push(top.as_secs_f64() / bottom.as_secs_f64().max(f64::EPSILON));
+    }
+    ratios.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+    match ratios.get(rounds / 2) {
+        Some(ratio) => *ratio,
+        None => panic!("a paired ratio needs at least one round"),
+    }
+}
+
+/// Inserts `count` rows of one integer column, one statement per row.
+///
+/// Whether those rows land in one transaction or in `count` of them is the
+/// caller's business: it is decided by whether a `BEGIN` is open around this.
+///
+/// @param connection - the connection to write through
+/// @param table - the table to write into
+/// @param count - how many rows to write
+fn insert_rows(connection: &Connection<'_>, table: &str, count: i64) {
+    let mut insert = connection
+        .prepare(&format!("INSERT INTO {table} VALUES (?1)"))
+        .expect("the insert prepares");
+    for id in 0..count {
+        insert.reset();
+        insert.bind_integer(1, id).expect("the id binds");
+        while insert.step().expect("the insert runs") {}
+    }
+}
+
 /// Returns the one integer a single-row, single-column answer holds.
 ///
 /// @param rows - what the query returned
@@ -156,39 +250,69 @@ fn an_index_beats_a_scan() {
         "the index is not being used at all, so the ratio below would measure nothing:\n{plan}"
     );
 
-    let seek = measure(20, || {
-        let rows = connection
-            .query("SELECT id FROM t WHERE email = 'person9999@example.com'")
-            .expect("the seek runs");
-        assert_eq!(one(&rows), 9_999);
-    });
-    let scan = measure(20, || {
-        let rows = connection
-            .query("SELECT id FROM t WHERE +email = 'person9999@example.com'")
-            .expect("the scan runs");
-        assert_eq!(one(&rows), 9_999);
-    });
-    let ratio = scan.as_secs_f64() / seek.as_secs_f64().max(f64::EPSILON);
+    let ratio = paired_ratio(
+        5,
+        5,
+        || {
+            let rows = connection
+                .query("SELECT id FROM t WHERE +email = 'person9999@example.com'")
+                .expect("the scan runs");
+            assert_eq!(one(&rows), 9_999);
+        },
+        || {
+            let rows = connection
+                .query("SELECT id FROM t WHERE email = 'person9999@example.com'")
+                .expect("the seek runs");
+            assert_eq!(one(&rows), 9_999);
+        },
+    );
     assert!(
         ratio >= 5.0,
-        "a seek should be far cheaper than a scan of {ROWS} rows, but the scan \
-         was only {ratio:.1}x the seek (seek {seek:?}, scan {scan:?})"
+        "a seek should be far cheaper than a scan of {ROWS} rows, but across five \
+         paired rounds the scan was only {ratio:.1}x the seek"
     );
 }
 
-/// One transaction around many writes costs far less than one transaction each.
+/// One transaction around many writes costs far less work than one each.
 ///
-/// Measured on an idle machine: about **40 times** less at 2,000 rows. What it
-/// is protecting is the commit path - an engine that stopped batching, or
-/// started an fsync per statement, would come out near 1.0x without any answer
-/// changing.
+/// **This guard used to be a stopwatch, and task-1884 is why it is not one
+/// now.** It timed the batched arm, then timed the autocommit arm, and asserted
+/// a ratio between the two readings. That ratio measures the machine as much as
+/// the engine, and it measures the two arms unequally: the batched arm spends
+/// its time on the processor, which a busy scheduler takes away from it, and
+/// the autocommit arm spends its time waiting on file syncs, which it does not.
+/// So the threshold had already been walked from 4 down to 2 after the guard
+/// flapped at 3.5x, the next step down was 1 - where it would have asserted
+/// nothing - and it failed anyway on a box with four other jobs on it, having
+/// passed three times out of three on the same commit when run alone.
 ///
-/// **The threshold is 2, and it was 4 until this guard flapped.** Running under
-/// the parallel runner with 24 binaries in flight it measured 3.5x, because
-/// contention costs the batched arm proportionally more than the arm that is
-/// already dominated by commits. That is exactly the failure this file's header
-/// says to expect, and the rule it sets is to widen rather than tighten: the
-/// number that matters is the distance from 1.0, not the distance from 40.
+/// It counts the work instead. One transaction hands the log its records once;
+/// 2,000 autocommits hand them over 2,000 times. A count reads the same on an
+/// idle machine and on a loaded one.
+///
+/// Measured here at 2,000 rows:
+///
+/// | arm | log records | log writes | log syncs |
+/// |---|---|---|---|
+/// | one transaction | 2,063 | 1 | 1 |
+/// | 2,000 autocommits | 4,062 | 2,000 | 2,000 |
+///
+/// **Those six numbers were then read again with the machine at 100%, twelve
+/// copies of this suite running at once, and were identical in all twelve** - in
+/// the same runs where the old wall-clock guard read between 1.18 and 4.38 and
+/// failed five times out of the twelve. See this file's header for the whole
+/// table.
+///
+/// The page pool is deliberately not the instrument. Both arms fetch exactly
+/// 8,372 pages and neither writes one, because the pool writes at a checkpoint
+/// rather than at a commit - so `cache_stats` cannot tell these two arms apart
+/// at all.
+///
+/// **`writes` and not `syncs`**, though the two moved together here. `syncs` is
+/// a function of the `synchronous` policy: under `NORMAL` a commit is
+/// acknowledged once its record has been written and the log syncs only every
+/// 64 MiB, so asserting on syncs would fail this guard for a policy change that
+/// has nothing to do with batching. A commit writes under every policy.
 #[test]
 fn one_transaction_beats_many() {
     let directory = scratch("commit");
@@ -202,35 +326,17 @@ fn one_transaction_beats_many() {
         .expect("the schema is created");
 
     let count = 2_000i64;
-    let started = Instant::now();
+    let before = database.log_stats();
     connection
         .execute_batch("BEGIN")
         .expect("one transaction opens");
-    let mut insert = connection
-        .prepare("INSERT INTO batched VALUES (?1)")
-        .expect("the insert prepares");
-    for id in 0..count {
-        insert.reset();
-        insert.bind_integer(1, id).expect("the id binds");
-        while insert.step().expect("the insert runs") {}
-    }
-    drop(insert);
+    insert_rows(&connection, "batched", count);
     connection
         .execute_batch("COMMIT")
         .expect("one transaction commits");
-    let batched = started.elapsed();
-
-    let started = Instant::now();
-    let mut insert = connection
-        .prepare("INSERT INTO singly VALUES (?1)")
-        .expect("the insert prepares");
-    for id in 0..count {
-        insert.reset();
-        insert.bind_integer(1, id).expect("the id binds");
-        while insert.step().expect("the insert runs") {}
-    }
-    drop(insert);
-    let singly = started.elapsed();
+    let between = database.log_stats();
+    insert_rows(&connection, "singly", count);
+    let after = database.log_stats();
 
     assert_eq!(
         one(&connection
@@ -244,11 +350,28 @@ fn one_transaction_beats_many() {
             .expect("counted")),
         count
     );
-    let ratio = singly.as_secs_f64() / batched.as_secs_f64().max(f64::EPSILON);
+
+    let batched_writes = between.writes.saturating_sub(before.writes);
+    let singly_writes = after.writes.saturating_sub(between.writes);
+    let batched_syncs = between.syncs.saturating_sub(before.syncs);
+    let singly_syncs = after.syncs.saturating_sub(between.syncs);
+
+    // The instrument is live. If autocommit ever stopped committing per
+    // statement, both arms would be one transaction, the ratio below would be
+    // comparing a thing with itself, and this guard would pass while measuring
+    // nothing - which is the failure §1.5 of the testing standard is about.
     assert!(
-        ratio >= 2.0,
-        "committing each row should cost far more than committing once, but it \
-         was only {ratio:.1}x (batched {batched:?}, singly {singly:?})"
+        singly_writes >= count as u64,
+        "committing each of {count} rows on its own issued {singly_writes} log \
+         write(s) rather than one each, so both arms are batched and the ratio \
+         below would measure nothing"
+    );
+    assert!(
+        batched_writes.saturating_mul(100) <= singly_writes,
+        "one transaction around {count} rows issued {batched_writes} log write(s) \
+         and {batched_syncs} sync(s), against {singly_writes} write(s) and \
+         {singly_syncs} sync(s) for one transaction per row; the commit path has \
+         stopped batching"
     );
 }
 
@@ -274,45 +397,47 @@ fn re_preparing_is_cached_rather_than_recompiled() {
     let connection = database.connect();
 
     let sql = "SELECT id FROM t WHERE email = ?1";
-    let mut statement = connection.prepare(sql).expect("the statement prepares");
-    let rebound = measure(200, || {
-        statement.reset();
-        statement
-            .bind_text(1, "person12345@example.com")
-            .expect("the email binds");
-        let mut seen = 0;
-        while statement.step().expect("the query steps") {
-            seen += 1;
-        }
-        assert_eq!(seen, 1);
-    });
-    drop(statement);
-
     let before = connection.cached_plan_count();
-    let reprepared = measure(200, || {
-        let mut fresh = connection.prepare(sql).expect("the statement prepares");
-        fresh
-            .bind_text(1, "person12345@example.com")
-            .expect("the email binds");
-        let mut seen = 0;
-        while fresh.step().expect("the query steps") {
-            seen += 1;
-        }
-        assert_eq!(seen, 1);
-    });
+    let mut statement = connection.prepare(sql).expect("the statement prepares");
+    let ratio = paired_ratio(
+        5,
+        40,
+        || {
+            let mut fresh = connection.prepare(sql).expect("the statement prepares");
+            fresh
+                .bind_text(1, "person12345@example.com")
+                .expect("the email binds");
+            let mut seen = 0;
+            while fresh.step().expect("the query steps") {
+                seen += 1;
+            }
+            assert_eq!(seen, 1);
+        },
+        || {
+            statement.reset();
+            statement
+                .bind_text(1, "person12345@example.com")
+                .expect("the email binds");
+            let mut seen = 0;
+            while statement.step().expect("the query steps") {
+                seen += 1;
+            }
+            assert_eq!(seen, 1);
+        },
+    );
+    drop(statement);
     let after = connection.cached_plan_count();
 
-    let ratio = reprepared.as_secs_f64() / rebound.as_secs_f64().max(f64::EPSILON);
     assert!(
         ratio <= 4.0,
         "preparing the same statement again should be answered from the plan \
-         cache, but it cost {ratio:.1}x re-binding (rebound {rebound:?}, \
-         reprepared {reprepared:?}) - the cache is not being consulted"
+         cache, but across five paired rounds it cost {ratio:.1}x re-binding - \
+         the cache is not being consulted"
     );
     assert!(
         after <= before + 1,
-        "201 prepares of one statement grew the plan cache from {before} to \
-         {after}; it is keyed on something that varies per call"
+        "two hundred prepares of one statement grew the plan cache from {before} \
+         to {after}; it is keyed on something that varies per call"
     );
 }
 
@@ -501,11 +626,11 @@ fn a_keyset_page_costs_the_same_wherever_it_starts() {
         assert_eq!(rows.len(), page, "the page is full at {after}");
     };
 
-    let start = measure(3, || read(0));
-    let end = measure(3, || read(ROWS - page as i64 - 1));
+    let ratio = paired_ratio(5, 1, || read(0), || read(ROWS - page as i64 - 1));
     assert!(
-        start <= end * 4,
-        "a page at the start of the table took {start:?} and one at the end took {end:?}; \
-         the work is proportional to the rows after the key rather than to the limit"
+        ratio <= 4.0,
+        "across five paired rounds a page at the start of the table cost \
+         {ratio:.1}x one at the end; the work is proportional to the rows after \
+         the key rather than to the limit"
     );
 }

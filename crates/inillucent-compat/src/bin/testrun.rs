@@ -1,10 +1,29 @@
 //! The test runner: one build, then every selected binary at once.
 //!
 //! Invariant: **this runner never decides that a test passed.** It builds what
-//! `cargo` builds, runs the same executables `cargo` would run, and reports
-//! their exit status. Where it differs from `cargo test` is only in *which*
-//! binaries it runs and *how many at a time* - never in what counts as a pass.
-//! A runner that could turn a failure into a pass would be worse than no runner.
+//! `cargo` builds, runs the same executables `cargo` would run, and reports what
+//! they said about themselves. Where it differs from `cargo test` is only in
+//! *which* binaries it runs and *how many at a time* - never in what counts as a
+//! pass. A runner that could turn a failure into a pass would be worse than no
+//! runner.
+//!
+//! It has **three** answers rather than two, and task-1884 is why. It used to
+//! read the process's exit status alone, so `inillucent-bench` - which loads the
+//! ONNX runtime and its CUDA provider, and sometimes takes the process down
+//! after libtest has printed its summary - was reported as FAILED having passed
+//! all 156 of its tests. That needs no load at all to reproduce: three
+//! consecutive runs of that binary on its own each printed
+//! `test result: ok. 156 passed; 0 failed`, and the first of them exited **127**.
+//! So a target either passed, or failed, or **the runner could not tell what it
+//! did**, and the third is said out loud with its reason rather than rounded into
+//! one of the other two. `inillucent_compat::verdict` is where that reading lives
+//! and where its tests are.
+//!
+//! A target the runner could not read is run **once more, on its own, at the
+//! end**, so the answer comes from a second measurement rather than from a guess
+//! about which way to round the first. The retry fires only on an absence of
+//! information; a target that failed a test is never re-run, because a retry on a
+//! failure is how a flaky test stops being noticed.
 //!
 //! ## Why this exists
 //!
@@ -71,6 +90,7 @@ use std::time::{Duration, Instant};
 
 use inillucent_compat::layering;
 use inillucent_compat::selection::{self, Kind, Map, Row, Target};
+use inillucent_compat::verdict::{self, Undetermined, Verdict};
 use inillucent_compat::workspace_root;
 use inillucent_scalar::json::node::Node;
 use inillucent_scalar::json::{parse, render};
@@ -241,6 +261,10 @@ fn usage() -> String {
 }
 
 /// One built test binary.
+///
+/// Cloned rather than moved into its worker, because a target whose first run
+/// could not be read is started again at the end of the pass.
+#[derive(Clone)]
 struct Built {
     /// Which target it is.
     target: Target,
@@ -254,13 +278,13 @@ struct Built {
 struct Outcome {
     /// Which target ran.
     target: Target,
-    /// Whether it exited zero.
-    passed: bool,
+    /// What it did, read from its transcript and its exit status together.
+    verdict: Verdict,
     /// How long it took.
     elapsed: Duration,
     /// How many tests ran, as the harness counted them.
     ran: usize,
-    /// Everything it printed, kept for the report when it failed.
+    /// Everything it printed, kept for the report when it did not pass.
     output: String,
     /// How it exited, for the report.
     ///
@@ -270,6 +294,12 @@ struct Outcome {
     /// operating system. Without the status in the report, that failure has no
     /// visible cause at all.
     status: String,
+    /// What the first attempt looked like, when this outcome is a second one.
+    ///
+    /// Printed whether the retry settled the question or not: a target that
+    /// passes its retry still died once, and a report that hid that would be the
+    /// same silence this runner was fixed for.
+    retry_of: Option<String>,
 }
 
 /// Runs the whole thing.
@@ -335,6 +365,12 @@ fn run(options: &Options) -> Result<bool, String> {
     }
     let built = locate(&root, &selected)?;
     let ledger = read_ledger(&root.join("tests/timings.toml"));
+    // Kept by target so the retry pass can start one again. The workers take
+    // their own clone, so nothing here is a second opinion about what was built.
+    let executables: BTreeMap<Target, Built> = built
+        .iter()
+        .map(|one| (one.target.clone(), one.clone()))
+        .collect();
     let ordered = schedule(built, &ledger);
 
     // Split off the targets whose tier asked for the machine to itself. They
@@ -380,6 +416,7 @@ fn run(options: &Options) -> Result<bool, String> {
         };
         outcomes.extend(execute(alone, &solo));
     }
+    let outcomes = settle_undetermined(outcomes, &executables, options);
     let wall = started.elapsed();
 
     report(&outcomes, wall, &map, options.strict);
@@ -388,9 +425,13 @@ fn run(options: &Options) -> Result<bool, String> {
         println!("recorded {} timing(s)", outcomes.len());
     }
 
-    let failed = outcomes.iter().any(|outcome| !outcome.passed);
+    // Undetermined counts as red, and deliberately so. The run is a gate, and
+    // "the runner could not tell" is not evidence that anything passed. What
+    // stops that being the old wrong red is the retry above: a target only stays
+    // undetermined here when a second, solitary attempt could not read it either.
+    let red = outcomes.iter().any(|outcome| !outcome.verdict.is_green());
     let hollow = options.strict && !missing_prerequisites(&outcomes, &map).is_empty();
-    Ok(!failed && !hollow)
+    Ok(!red && !hollow)
 }
 
 /// Works out which rows to run.
@@ -750,7 +791,7 @@ fn write_ledger(
         // A failure's duration is not a measurement of the suite: it is a
         // measurement of how long it took to hit the first assertion, which is
         // usually much shorter and would poison the schedule.
-        if outcome.passed {
+        if outcome.verdict.is_green() {
             let milliseconds = u64::try_from(outcome.elapsed.as_millis()).unwrap_or(u64::MAX);
             times.insert(outcome.target.label(), milliseconds);
         }
@@ -840,7 +881,7 @@ fn execute(ordered: Vec<Built>, options: &Options) -> Vec<Outcome> {
         finished += 1;
         println!(
             "  [{finished:>3}/{total}] {:<7} {:<44} {:>7.2}s  {} test(s)",
-            if outcome.passed { "ok" } else { "FAILED" },
+            outcome.verdict.word(),
             outcome.target.label(),
             outcome.elapsed.as_secs_f64(),
             outcome.ran
@@ -903,49 +944,93 @@ fn run_one(built: &Built, threads: &str, filter: Option<&str>) -> Outcome {
         Ok(output) => {
             let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
             text.push_str(&String::from_utf8_lossy(&output.stderr));
+            let summary = verdict::read_summary(&text).unwrap_or_default();
             Outcome {
                 target: built.target.clone(),
-                passed: output.status.success(),
+                verdict: verdict::classify(&text, output.status.success()),
                 elapsed,
-                ran: count_tests(&text),
+                ran: summary.passed + summary.failed,
                 output: text,
                 status: match output.status.code() {
                     Some(code) => format!("exit status {code}"),
                     None => "killed by a signal".to_string(),
                 },
+                retry_of: None,
             }
         }
         Err(error) => Outcome {
             target: built.target.clone(),
-            passed: false,
+            verdict: Verdict::Undetermined(Undetermined::NeverStarted),
             elapsed,
             ran: 0,
             output: format!("cannot start {}: {error}", built.executable.display()),
             status: "never started".to_string(),
+            retry_of: None,
         },
     }
 }
 
-/// Reads how many tests a harness said it ran.
+/// Runs each target the first pass could not read once more, on its own.
 ///
-/// @param text - the harness's output
-fn count_tests(text: &str) -> usize {
-    for line in text.lines() {
-        let Some(rest) = line.strip_prefix("test result:") else {
+/// **Why this is not a retry of failures.** A runner that re-runs a failing test
+/// until it passes has stopped being a gate. This re-runs only a target whose
+/// first attempt produced no readable answer - the harness said everything passed
+/// and the process then died, or there was no summary to read at all - which is
+/// an absence of information rather than a result. One more attempt, alone,
+/// replaces a guess about which way to round the first one with a second
+/// measurement.
+///
+/// Whatever the second attempt says stands, and the first attempt's reason and
+/// exit status travel with it into the report either way.
+///
+/// @param outcomes - what the first pass produced
+/// @param executables - the built binaries, by target
+/// @param options - what the command line asked for
+fn settle_undetermined(
+    outcomes: Vec<Outcome>,
+    executables: &BTreeMap<Target, Built>,
+    options: &Options,
+) -> Vec<Outcome> {
+    let unread: Vec<(Target, Undetermined, String)> = outcomes
+        .iter()
+        .filter_map(|outcome| {
+            outcome
+                .verdict
+                .undetermined()
+                .map(|reason| (outcome.target.clone(), reason, outcome.status.clone()))
+        })
+        .collect();
+    if unread.is_empty() {
+        return outcomes;
+    }
+    let mut settled = outcomes;
+    println!(
+        "\n{} target(s) could not be read; running each one alone, once more",
+        unread.len()
+    );
+    let threads = options.test_threads.to_string();
+    for (target, reason, status) in unread {
+        let Some(built) = executables.get(&target) else {
             continue;
         };
-        let Some((passed, _)) = rest.trim().split_once(" passed;") else {
-            continue;
-        };
-        let count = passed
-            .rsplit(' ')
-            .next()
-            .and_then(|number| number.parse::<usize>().ok());
-        if let Some(count) = count {
-            return count;
+        let mut again = run_one(built, &threads, options.filter.as_deref());
+        again.retry_of = Some(format!(
+            "{} on the first attempt ({status})",
+            reason.reason()
+        ));
+        println!(
+            "  {:<7} {:<44} {:>7.2}s  {} test(s)  [second attempt]",
+            again.verdict.word(),
+            target.label(),
+            again.elapsed.as_secs_f64(),
+            again.ran
+        );
+        let _ = std::io::stdout().flush();
+        if let Some(slot) = settled.iter_mut().find(|outcome| outcome.target == target) {
+            *slot = again;
         }
     }
-    0
+    settled
 }
 
 /// Returns the selected suites whose prerequisites were not there.
@@ -963,6 +1048,13 @@ fn missing_prerequisites<'run>(
 ) -> Vec<(&'run Outcome, Vec<String>)> {
     let mut hollow = Vec::new();
     for outcome in outcomes {
+        // Only a target that passed can be hollow. One that failed, or that the
+        // runner could not read, did not "evidence nothing" - it evidenced a
+        // problem, and calling it a missing prerequisite as well would put a
+        // second wrong label on the same event (task-1884).
+        if !outcome.verdict.is_green() {
+            continue;
+        }
         let Some(row) = map.row(&outcome.target) else {
             continue;
         };
@@ -1010,20 +1102,42 @@ fn missing_prerequisites<'run>(
 /// @param map - the selection map
 /// @param strict - whether a missing prerequisite is a failure
 fn report(outcomes: &[Outcome], wall: Duration, map: &Map, strict: bool) {
-    let failures: Vec<&Outcome> = outcomes.iter().filter(|outcome| !outcome.passed).collect();
-    for failure in &failures {
-        println!("\n=== {} ({}) ===", failure.target.label(), failure.status);
-        println!("{}", failure.output.trim_end());
+    let failures: Vec<&Outcome> = outcomes
+        .iter()
+        .filter(|outcome| matches!(outcome.verdict, Verdict::Failed))
+        .collect();
+    let unread: Vec<&Outcome> = outcomes
+        .iter()
+        .filter(|outcome| outcome.verdict.undetermined().is_some())
+        .collect();
+    // The transcript of a target that could not be read is printed for the same
+    // reason a failure's is: it is the only account of what happened, and the
+    // summary line inside it is what says the tests themselves passed.
+    for outcome in failures.iter().chain(unread.iter()) {
+        match outcome.verdict.undetermined() {
+            Some(reason) => println!(
+                "\n=== {} (UNKNOWN, {}: {}) ===",
+                outcome.target.label(),
+                outcome.status,
+                reason.reason()
+            ),
+            None => println!("\n=== {} ({}) ===", outcome.target.label(), outcome.status),
+        }
+        if let Some(first) = &outcome.retry_of {
+            println!("(second attempt; {first})");
+        }
+        println!("{}", outcome.output.trim_end());
     }
 
     let tests: usize = outcomes.iter().map(|outcome| outcome.ran).sum();
     let serial: Duration = outcomes.iter().map(|outcome| outcome.elapsed).sum();
     println!("\n--- summary ---");
     println!(
-        "{} target(s), {} test(s), {} failed",
+        "{} target(s), {} test(s), {} failed, {} undetermined",
         outcomes.len(),
         tests,
-        failures.len()
+        failures.len(),
+        unread.len()
     );
     println!(
         "wall {:.1}s; the same work run one at a time is {:.1}s of processor time ({:.1}x)",
@@ -1067,12 +1181,47 @@ fn report(outcomes: &[Outcome], wall: Duration, map: &Map, strict: bool) {
         }
     }
 
-    if failures.is_empty() {
+    let settled: Vec<&Outcome> = outcomes
+        .iter()
+        .filter(|outcome| outcome.retry_of.is_some() && outcome.verdict.is_green())
+        .collect();
+    if !settled.is_empty() {
+        println!(
+            "\n{} target(s) passed on a second attempt, having been unreadable on the first:",
+            settled.len()
+        );
+        for outcome in &settled {
+            println!(
+                "  {:<44} {}",
+                outcome.target.label(),
+                outcome.retry_of.as_deref().unwrap_or("")
+            );
+        }
+    }
+
+    if failures.is_empty() && unread.is_empty() {
         println!("\nok");
-    } else {
+        return;
+    }
+    if !failures.is_empty() {
         println!("\nFAILED:");
         for failure in &failures {
             println!("  {}", failure.target.label());
+        }
+    }
+    if !unread.is_empty() {
+        println!("\nUNDETERMINED - a second attempt alone did not settle these either:");
+        for outcome in &unread {
+            println!(
+                "  {:<44} {}, {}",
+                outcome.target.label(),
+                outcome.status,
+                outcome
+                    .verdict
+                    .undetermined()
+                    .map(Undetermined::reason)
+                    .unwrap_or("")
+            );
         }
     }
 }
