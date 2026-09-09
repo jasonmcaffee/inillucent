@@ -1439,3 +1439,91 @@ fn the_policy_decides_what_survives_a_power_loss() {
          and the policy is not doing anything"
     );
 }
+
+/// A page stamped by a stream this log does not contain is refused by name.
+///
+/// **The page-LSN rule is only sound while a page's stamp is a position in the
+/// stream beside the file** (task-1885). A record at LSN *L* occupies
+/// `[L, L + length)`, so every stamp a healthy file carries is strictly below
+/// `valid_end`. A stamp at or above it reads as "the page already has this" for
+/// every record there will ever be, so every later write to that page is
+/// discarded - silently, on a file that stays structurally intact. Measured on
+/// Nikaya's parked mail database: page 3 stamped 21,939,058,496 beside a log
+/// ending at 21,075,008,440, and an `ANALYZE` that printed `ok` lost the
+/// `sqlite_stat1` catalog row it had just committed.
+#[test]
+fn a_page_stamped_by_an_abandoned_stream_is_refused_by_name() {
+    let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
+    let path = DbPath::new("stamped.rdb");
+    let wal = log_on(Arc::clone(&vfs), &path, Synchronous::Full);
+    let acknowledged = write_workload(&wal, 4);
+    assert_eq!(
+        acknowledged.len(),
+        4,
+        "the workload logged four transactions"
+    );
+    let end = wal.next_lsn();
+    wal.sync().unwrap();
+
+    // The state the parked file was in. Page 1 is the first page the replay
+    // asks about, so a refusal that fires before anything is applied leaves the
+    // store exactly as it was found - which is what says the check runs ahead
+    // of the damage rather than after it.
+    let mut store = PageStore::default();
+    store.put(
+        1,
+        b"a stream nobody has any more wrote this",
+        end + 864_049_488,
+    );
+    let before = store.image();
+
+    let error = recover::recover(vfs.as_ref(), &path, RecoveryStart::fresh(UUID), &mut store)
+        .expect_err("a stamp above the log's end is refused");
+    let detail = error.detail().unwrap_or_default().to_string();
+    assert!(detail.contains("page 1"), "the page is not named: {detail}");
+    assert!(
+        detail.contains("at or above the log's end"),
+        "the reason is not stated: {detail}"
+    );
+    assert_eq!(
+        store.image(),
+        before,
+        "a record was applied before the refusal, so the check is behind the damage"
+    );
+}
+
+/// A stamp below the log's end is still skipped, and the recovery still runs.
+///
+/// The refusal above must not have turned the page-LSN rule into a refusal of
+/// its own ordinary case: a page whose stamp is above the *record's* LSN and
+/// below the log's end is a page a previous run already applied, which is the
+/// idempotence the whole design rests on.
+#[test]
+fn a_stamp_below_the_logs_end_is_skipped_rather_than_refused() {
+    let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
+    let path = DbPath::new("already-applied.rdb");
+    let wal = log_on(Arc::clone(&vfs), &path, Synchronous::Full);
+    let acknowledged = write_workload(&wal, 4);
+    assert_eq!(acknowledged.len(), 4);
+    let end = wal.next_lsn();
+    wal.sync().unwrap();
+
+    // One below the end: the highest stamp a healthy file can carry, and the
+    // boundary the refusal is stated against.
+    let mut store = PageStore::default();
+    store.put(1, b"applied by an earlier run", end - 1);
+    let (_, outcome) = {
+        let outcome = recover::recover(vfs.as_ref(), &path, RecoveryStart::fresh(UUID), &mut store)
+            .expect("a stamp below the log's end recovers");
+        (&store, outcome)
+    };
+    assert!(outcome.applied > 0, "the replay applied nothing at all");
+    assert_eq!(
+        store.pages.get(&1).and_then(|bytes| bytes.get(8..33)),
+        Some(&b"applied by an earlier run"[..]),
+        "page 1 was rewritten, so the page-LSN rule stopped skipping"
+    );
+    // And the transactions that did not touch page 1 are all there, so the
+    // skip was one page's rather than the whole replay's.
+    assert_atomic_and_prefixed(&store, "a stamp below the log's end");
+}

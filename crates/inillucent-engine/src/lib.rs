@@ -8242,6 +8242,61 @@ struct OpenedFile {
     highest_txn: u64,
 }
 
+/// Returns where the log resumes, raising it above every stamp the file carries.
+///
+/// **A page's LSN has to be a position in the stream currently beside the file,
+/// and after a recovery whose chain was short of what the pages reflect it is
+/// not** (task-1885). Recovery applies a record to a page only when the page's
+/// stamp is below the record's, so a page stamped by a stream that no longer
+/// exists silently swallows every later write to it - the record is skipped,
+/// the file stays structurally intact, and nothing anywhere says a committed row
+/// was lost. It is how Nikaya's mail database ended up with page 3 stamped
+/// 21,939,058,496 beside a log ending at 21,075,008,440, after 24 segments were
+/// moved aside to recover it.
+///
+/// So the log resumes at `max(recovered.next_lsn, high_water + 1)`. In every
+/// healthy file the first term already wins and this changes nothing: the
+/// write-ahead rule puts every stamp below the log's durable end, and the
+/// durable end is at or below where recovery stopped. It fires only on a file
+/// whose log is short of what its pages carry.
+///
+/// Two things follow from an LSN being a **byte offset inside a segment**:
+///
+/// 1. The jump takes the *next* sequence. The write offset of a record is
+///    `header + (lsn - segment.first_lsn)`, so resuming 864 million positions
+///    into the segment recovery stopped in would ask for an 864 MB file.
+/// 2. The meta page is checkpointed before a record is written at the new
+///    position. That leaves a gap between the old segment's last byte and the
+///    new one's first, and `read_chain` stops a chain at a gap - correctly,
+///    since a gap is otherwise a lost segment - so the next recovery has to
+///    start *inside* the new segment rather than walk up to it. The claim the
+///    checkpoint makes is true at that moment: the replay's pages have just been
+///    flushed, and there are no records between the chain's end and the new
+///    position.
+///
+/// @param database - the recovered file, whose pool carries the high water
+/// @param outcome - what recovery found
+fn resume_above_every_stamp(
+    database: &mut Database,
+    outcome: &inillucent_wal::Recovered,
+) -> DbResult<(u64, u64)> {
+    let next_lsn = outcome.next_lsn.max(FIRST_LSN);
+    let sequence = outcome.sequence.max(1);
+    // Read off the pool rather than off the meta record. `Database::open` seeds
+    // it with what the meta page carried and `Pool::writeback` has raised it for
+    // every page this recovery has already evicted, so it is the higher of the
+    // two and never the lower.
+    let high_water = database.pool().high_water_lsn();
+    if high_water < next_lsn {
+        return Ok((next_lsn, sequence));
+    }
+    let resumed = high_water.saturating_add(1);
+    let rolled = sequence.saturating_add(1);
+    database.set_log_position(resumed, outcome.latest_cts, rolled);
+    database.checkpoint()?;
+    Ok((resumed, rolled))
+}
+
 /// Opens one database file, replays its log into it, and opens that log.
 ///
 /// **The one recovery path, for the file a connection is opened on and for
@@ -8336,12 +8391,16 @@ fn open_file(
     // the meta page's checkpoint points into the first stream. A test caught it
     // as a table created after an open vanishing on the one after that -
     // `no such table: second` from a file that had just been told to make it.
+    //
+    // **And above every stamp the file carries** (task-1885). See
+    // `resume_above_every_stamp`.
+    let (next_lsn, sequence) = resume_above_every_stamp(&mut database, &outcome)?;
     let wal = std::rc::Rc::new(Wal::open(
         std::sync::Arc::clone(vfs),
         db_path,
         database.uuid(),
-        outcome.next_lsn.max(FIRST_LSN),
-        outcome.sequence.max(1),
+        next_lsn,
+        sequence,
         WalOptions::default(),
     )?);
     database.pool().set_durable_lsn(wal.write_ahead_point());

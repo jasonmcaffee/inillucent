@@ -2,7 +2,7 @@
 //!
 //! Invariant: **recovery after a crash at any point yields exactly the
 //! committed prefix** - every acknowledged commit present, no unacknowledged one
-//! visible. That is the TDD's twelfth invariant. Two properties carry it, and both are structural
+//! visible. That is the TDD's twelfth invariant. Three properties carry it, and each is structural
 //! rather than careful:
 //!
 //! 1. **Redo is idempotent by page LSN.** A record is applied to a page only
@@ -18,6 +18,14 @@
 //!    record and carried on would apply a *later* record without the earlier one
 //!    it depends on, which is the one way redo can produce a state that never
 //!    existed.
+//! 3. **A stamp that cannot have come from this log is refused rather than
+//!    obeyed.** Property 1 is only sound while a page's stamp is a position in
+//!    the stream beside the file. A page stamped by a stream that was abandoned
+//!    - segments moved aside, a chain stopping at a damaged segment - reads as
+//!    "already has it" for every record, so every later write to that page is
+//!    discarded with no error at all. That is checked against `valid_end` in
+//!    `refuse_a_stamp_from_another_stream`, and the prevention that keeps a file
+//!    out of the state is `meta.high_water_lsn` and the resume above it.
 //!
 //! ## Where a scan starts
 //!
@@ -583,7 +591,10 @@ fn replay(
             // every branch.
             for (entry, page) in wanted.iter_mut().zip(pages.as_slice()) {
                 let below = match redo.page_lsn(*page)? {
-                    Some(lsn) => lsn < record.lsn,
+                    Some(lsn) => {
+                        refuse_a_stamp_from_another_stream(*page, lsn, analysis.valid_end)?;
+                        lsn < record.lsn
+                    }
                     None => true,
                 };
                 *entry = below;
@@ -601,6 +612,42 @@ fn replay(
         }
     }
     Ok(())
+}
+
+/// Refuses a page whose stamp cannot have come from the log being replayed.
+///
+/// **The page-LSN rule is only sound while a page's stamp is a position in the
+/// stream beside the file** (task-1885). A record at LSN *L* occupies
+/// `[L, L + length)`, so every stamp a healthy file carries is strictly below
+/// `valid_end`, the position past the last record the scan accepted. A stamp at
+/// or above it is a position in a stream this log does not contain - the state a
+/// file reaches when segments are moved aside, when the chain stops at a damaged
+/// segment, or when a torn tail is cut - and under the page-LSN rule every
+/// record for that page is skipped, because the stamp says the page already has
+/// it.
+///
+/// What that costs is not a failed replay: it is a committed row discarded with
+/// no error at all, on a file that `PRAGMA integrity_check` then calls `ok`
+/// because it really is structurally intact. Measured on Nikaya's parked mail
+/// database, where page 3 - the catalog leaf - carries 21,939,058,496 beside a
+/// log that ends at 21,075,008,440, and an `ANALYZE` that printed `ok` lost the
+/// `sqlite_stat1` catalog row it had just committed.
+///
+/// So it is refused, by name, before the record that names the page is applied.
+/// The stamp cannot be repaired - the records that set it are in segments
+/// nobody has - and opening the file anyway means losing writes silently, which
+/// is the worse of the two.
+///
+/// @param page - the page's number
+/// @param stamp - the LSN the page carries
+/// @param valid_end - the position past the last record the scan accepted
+fn refuse_a_stamp_from_another_stream(page: u64, stamp: u64, valid_end: u64) -> DbResult<()> {
+    if stamp < valid_end {
+        return Ok(());
+    }
+    Err(corrupt(format!(
+        "page {page} carries lsn {stamp}, which is at or above the log's end {valid_end}: the file was stamped by a log stream this database no longer has, so replaying under the page-LSN rule would discard the records for that page silently"
+    )))
 }
 
 /// Decides whether one record belongs to the committed prefix.

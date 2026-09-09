@@ -207,6 +207,47 @@ impl Default for EngineOptions {
     }
 }
 
+/// Returns where the log resumes, raising it above every stamp the file carries.
+///
+/// **A page's LSN has to be a position in the stream currently beside the file,
+/// and after a recovery whose chain was short of what the pages reflect it is
+/// not** (task-1885). Recovery applies a record to a page only when the page's
+/// stamp is below the record's, so a page stamped by a stream that no longer
+/// exists silently swallows every later write to it: the record is skipped and
+/// nothing anywhere says a committed row was lost.
+///
+/// The log therefore resumes at `max(recovered.next_lsn, high_water + 1)`. In a
+/// healthy file the first term already wins - the write-ahead rule puts every
+/// stamp below the log's durable end, and the durable end is at or below where
+/// recovery stopped - so this fires only on a file whose log is short of what
+/// its pages carry.
+///
+/// A jump takes the **next** sequence, because a record's write offset is
+/// `header + (lsn - segment.first_lsn)` and resuming far into the current
+/// segment would ask for a file that size; and it checkpoints the meta page
+/// first, because the jump leaves a gap that `read_chain` would otherwise stop
+/// the next recovery at.
+///
+/// @param database - the recovered file, whose pool carries the high water
+/// @param outcome - what recovery found
+fn resume_above_every_stamp(database: &mut Database, outcome: &Recovered) -> DbResult<(u64, u64)> {
+    let next_lsn = outcome.next_lsn.max(inillucent_wal::FIRST_LSN);
+    let sequence = outcome.sequence.max(1);
+    // Read off the pool rather than off the meta record. `Database::open` seeds
+    // it with what the meta page carried and `Pool::writeback` has raised it for
+    // every page this recovery has already evicted, so it is the higher of the
+    // two and never the lower.
+    let high_water = database.pool().high_water_lsn();
+    if high_water < next_lsn {
+        return Ok((next_lsn, sequence));
+    }
+    let resumed = high_water.saturating_add(1);
+    let rolled = sequence.saturating_add(1);
+    database.set_log_position(resumed, outcome.latest_cts, rolled);
+    database.checkpoint()?;
+    Ok((resumed, rolled))
+}
+
 impl Engine {
     /// Creates a fresh database with an empty log.
     ///
@@ -215,7 +256,16 @@ impl Engine {
     /// @param options - the page size, pool size, sync policy and timeout
     pub fn create(vfs: Arc<dyn Vfs>, path: &DbPath, options: EngineOptions) -> DbResult<Engine> {
         let database = Database::create(vfs.as_ref(), path, options.database)?;
-        Engine::assemble(vfs, path, database, options, Recovered::default())
+        // A fresh file has no stamp to resume above, so the log starts where it
+        // always did.
+        Engine::assemble(
+            vfs,
+            path,
+            database,
+            options,
+            Recovered::default(),
+            (inillucent_wal::FIRST_LSN, 1),
+        )
     }
 
     /// Opens an existing database, recovering its log.
@@ -267,7 +317,13 @@ impl Engine {
             }
         }
         recover::truncate_after(vfs.as_ref(), path, &outcome)?;
-        Engine::assemble(vfs, path, database, options, outcome)
+        // **The log resumes above every stamp the file carries** (task-1885).
+        // The one rule, in both open paths: a page's LSN has to be a position
+        // in the stream beside the file, or the page-LSN rule discards every
+        // later write to that page without saying so. See
+        // `resume_above_every_stamp`.
+        let resumed = resume_above_every_stamp(&mut database, &outcome)?;
+        Engine::assemble(vfs, path, database, options, outcome, resumed)
     }
 
     /// Ties a database and a log together.
@@ -277,20 +333,23 @@ impl Engine {
     /// @param database - the open file
     /// @param options - the sync policy and timeout
     /// @param recovered - what recovery found
+    /// @param resumed - where the log resumes, and in which segment
     fn assemble(
         vfs: Arc<dyn Vfs>,
         path: &DbPath,
         database: Database,
         options: EngineOptions,
         recovered: Recovered,
+        resumed: (u64, u64),
     ) -> DbResult<Engine> {
         let uuid = database.uuid();
-        let next_lsn = if recovered.next_lsn == 0 {
+        let (next_lsn, sequence) = resumed;
+        let next_lsn = if next_lsn == 0 {
             inillucent_wal::FIRST_LSN
         } else {
-            recovered.next_lsn
+            next_lsn
         };
-        let sequence = recovered.sequence.max(1);
+        let sequence = sequence.max(1);
         let wal = Wal::open(
             Arc::clone(&vfs),
             path,
