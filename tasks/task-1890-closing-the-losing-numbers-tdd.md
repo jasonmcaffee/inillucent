@@ -304,7 +304,7 @@ express, because every production crate forbids `unsafe`. Two things would have 
 That is a change to the expression evaluator's signature and to the operator set, across 416 measured
 feature cases and a 183-case differential probe. It is the right next change and it is the whole of
 the remaining gap on four families; it is not a change to make at the end of a ticket, and it is
-recorded here with its measurement rather than started. **It is task-1891.**
+recorded here with its measurement rather than started. **It is done here, in this ticket.**
 
 **What it is worth**, from the numbers above: the per-statement floor falls from 827 ns towards the
 cost of a source rebuild and a run. `txn.large` at 482 ns is then in reach, `prepare.trivial` stops
@@ -394,6 +394,77 @@ Differential and end to end, over the real engine, no mocks.
    416-case feature probe is re-run for `feature-comparison.md`.
 4. **`PRAGMA integrity_check`** over a database that has taken relocating updates, because a leaf
    with bytes nothing points at is exactly the shape a wrong `heap_start` would also produce.
+
+## What it turned out to be
+
+**Written after the work, because the document above was right about where the cost is and wrong
+about what could be done with it inside one ticket.**
+
+The design said the remaining gap was one cost - what a statement pays before it reaches a tree - and
+that connecting `physical::build_statement` was the way to remove it. The first half of that is
+exactly what happened. The second half is not, and the reason is worth writing down.
+
+### What was done
+
+- **A parameter is read when the expression is evaluated.** `translate` folded `?2` into an
+  `Expr::Literal`, so nothing compiled could outlive one execution's values. `Expr::Parameter` reads
+  a cell the statement refreshes instead. Three things had to hold: the cell is `Arc<Mutex<_>>`
+  because `Eval` is `Send + Sync`; `Params::clone` is written out rather than derived, because
+  `Correlation::answer` clones the parameters per row and writes into slots above the declared count;
+  and `now()` counts as a read, so a chain that folded an instant is not kept.
+- **A write statement's setup is built once per compiled statement**, guarded by the layout's
+  identity and the read counter `Statement::rebindable` already uses.
+- **`update_in_place` takes the caller's before-image** instead of reading the row a third time.
+- **An `UPDATE` whose row would not change is not written.** `only_change` answered `None` both when
+  nothing differed and when several columns did, so the cheapest case took the most expensive path.
+
+`txn.large`: **2,219 ns to 1,235**, and 33.7 heap allocations to 13.3.
+
+### What the measurement turned out to be
+
+`txn.batched` and `txn.large` bind the same rowids and the same text with the same repeat, so
+`txn.large` was writing back what the workload before it had already written. Making the unchanged
+case cheap without fixing that would have turned the family's headline into a number about an
+operation that does no work. Both are fixed; the workload resets `side_table.note` first, outside the
+timed region on both arms, and `txn.large` is published three ways so the engine's share and the
+measurement's share are separate.
+
+### What was not done, and why
+
+**The operator chain is still rebuilt on every execution.** Measured, both arms warmed and the order
+reversed: `SELECT 1` 738 ns rebuilt against 358 reused, a point lookup 1,413 against 786, and the
+200-row range scan that `join.range` and `range.lookaside` are shaped like, 71,672 against 59,983.
+That last one is the 14-15% those two sit under SQLite.
+
+It is not connected because of what the chain borrows, and it is not only the correlate operator:
+**an index nested loop holds `&'t PagedTree`**, taken from `catalog.tree(stage.root)`. The engine
+keeps its trees as `HashMap<u32, PagedTree>` and the write path takes `&mut`, so caching a chain
+means the trees become `Rc<RefCell<PagedTree>>` - and the failure mode of getting that borrow
+discipline wrong is a **runtime panic**, on a shape as ordinary as an `UPDATE` that reads the table it
+writes. That is a change to how the engine owns its storage and it wants its own design rather than
+the tail of this ticket.
+
+### The bars that are not gaps
+
+Two of the four missed bars ask for more than the workload can give:
+
+- **`open.prepare`, bar 5.00x.** `prepare.point` is 5.07x and `prepare.trivial` 0.56x, geometric mean
+  1.68x. For the family to reach 5.00x, `prepare.trivial` needs **4.93x** - and SQLite compiles,
+  binds, steps and resets `SELECT 1` in **482 ns**, so the bar asks for **98 ns**.
+- **`schema`, bar 3.00x.** Ours 26.78 ms against 33.54, stages `scan 3.2, sort 4.7, pack 10.2,
+  catalog 0.2, seal 5.4`. A packer costing **nothing** leaves 13.5 ms, which is **2.48x**.
+
+`extension` at 1.30x against 1.50x is a real gap: FTS5's build is four tree writes per document, and
+one dictionary row plus one doclist row per new term could be one row, worth about 2.9 ms of a 10.97
+ms workload. `read.join` misses on its lower bound only (2.89x against 3.00x) and was already
+recorded as a missed bar before this ticket.
+
+### The result
+
+Four consecutive 30-round runs: weighted headline **4.26x (lower bound 4.13x)** against 3.83x at the
+start, **no family below the 1.00x floor on any run**, `transaction` **3.41x** from under the floor on
+all four, `write` **1.92x** from missed. 140 test targets, 2,508 tests, 0 failed; all 30 workloads
+digest-equal on every round.
 
 ## Done means
 
