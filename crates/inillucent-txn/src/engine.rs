@@ -247,21 +247,24 @@ impl Engine {
             // was ever waiting on a decision in another one.
             doubtful: Default::default(),
         };
-        let (outcome, allocated, freed) = {
+        let (outcome, free_map) = {
             let mut applier = Applier::new(&mut database, rows);
             let outcome = recover::recover(vfs.as_ref(), path, start, &mut applier)?;
-            let (allocated, freed) = applier.allocations();
-            (outcome, allocated.to_vec(), freed.to_vec())
+            (outcome, applier.free_map_changes().to_vec())
         };
         // "Rebuild the free map if any AllocPage or FreePage was replayed."
         // Done after the scan rather than inside it, because the free map and
         // every page write are both behind `&mut Database` and one record
         // cannot hold two mutable borrows of the same object.
-        for page in &allocated {
-            database.claim(*page)?;
-        }
-        for page in &freed {
-            database.release(*page, 1)?;
+        //
+        // **In log order** (task-1888): two passes, claims then releases, made
+        // a page that was freed and allocated again inside the replayed range
+        // come back free while it was live. See `Applier::free_map_changes`.
+        for change in &free_map {
+            match change.allocated {
+                true => database.claim(change.page)?,
+                false => database.release(change.page, 1)?,
+            }
         }
         recover::truncate_after(vfs.as_ref(), path, &outcome)?;
         Engine::assemble(vfs, path, database, options, outcome)

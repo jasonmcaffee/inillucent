@@ -592,15 +592,22 @@ pub struct RedoStats {
     pub catalog_changed: bool,
 }
 
+/// One free-map change a replay saw, as the log recorded it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FreeMapChange {
+    /// The page the record named.
+    pub page: PageId,
+    /// True for an `AllocPage`, false for a `FreePage`.
+    pub allocated: bool,
+}
+
 /// Applies records to a database file.
 pub struct Applier<'a, R: RowRedo> {
     database: &'a mut Database,
     rows: R,
     stats: RedoStats,
-    /// Pages the replay allocated, so the free map can be rebuilt.
-    allocated: Vec<PageId>,
-    /// Pages the replay freed.
-    freed: Vec<PageId>,
+    /// Every `AllocPage` and `FreePage` the replay applied, in log order.
+    free_map: Vec<FreeMapChange>,
 }
 
 impl<'a, R: RowRedo> Applier<'a, R> {
@@ -613,8 +620,7 @@ impl<'a, R: RowRedo> Applier<'a, R> {
             database,
             rows,
             stats: RedoStats::default(),
-            allocated: Vec::new(),
-            freed: Vec::new(),
+            free_map: Vec::new(),
         }
     }
 
@@ -623,7 +629,7 @@ impl<'a, R: RowRedo> Applier<'a, R> {
         self.stats
     }
 
-    /// Returns the pages the replay allocated and freed, in that order.
+    /// Returns every free-map change the replay applied, in log order.
     ///
     /// The TDD says recovery must "rebuild the free map if any `AllocPage` or
     /// `FreePage` was replayed", and this is what it rebuilds from. They are
@@ -631,8 +637,21 @@ impl<'a, R: RowRedo> Applier<'a, R> {
     /// `&mut Database` and so is every page write, and doing both inside one
     /// record's application would mean holding two mutable borrows of the same
     /// object.
-    pub fn allocations(&self) -> (&[PageId], &[PageId]) {
-        (&self.allocated, &self.freed)
+    ///
+    /// **One list in log order, not an allocated list and a freed list**
+    /// (task-1888). Two lists made the caller apply every claim and then every
+    /// release, so a page freed and then allocated again inside the replayed
+    /// range ended the recovery marked **free** while it was live - the frees
+    /// had the last word whatever order the log put them in. The next
+    /// allocation was then handed a page something else already owned and
+    /// overwrote it, which is what a `CREATE TABLE` did to a `document` row's
+    /// out-of-line value on Nikaya's 6.9 GB corpus: page 211519 was allocated
+    /// at lsn 21194643632, freed at 21197118024 and allocated again at
+    /// 21197121920, all inside one segment, and the new table's root page
+    /// landed on top of it. A free-map bit has no LSN, so nothing below this
+    /// could have caught the reordering; the order has to be kept.
+    pub fn free_map_changes(&self) -> &[FreeMapChange] {
+        &self.free_map
     }
 
     /// Copies a whole page image into the file and stamps its LSN.
@@ -744,11 +763,17 @@ impl<R: RowRedo> Redo for Applier<'_, R> {
                 self.stats.rows = self.stats.rows.saturating_add(1);
             }
             Body::AllocPage { page } => {
-                self.allocated.push(PageId(page));
+                self.free_map.push(FreeMapChange {
+                    page: PageId(page),
+                    allocated: true,
+                });
                 self.stats.allocations = self.stats.allocations.saturating_add(1);
             }
             Body::FreePage { page } => {
-                self.freed.push(PageId(page));
+                self.free_map.push(FreeMapChange {
+                    page: PageId(page),
+                    allocated: false,
+                });
                 self.stats.allocations = self.stats.allocations.saturating_add(1);
             }
             Body::Commit { cts } => self.stats.latest_cts = self.stats.latest_cts.max(cts),

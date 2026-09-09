@@ -228,7 +228,22 @@ pub fn read_extent(pool: &Pool, reference: ExtentRef) -> DbResult<Vec<u8>> {
     let mut pages = 0u64;
     while !page.is_none() {
         let guard = pool.fetch(page)?;
-        let (body, next) = extent::read_page(guard.bytes())?;
+        // **The page number, because the message alone does not identify one.**
+        // A page whose kind is no longer `BlobExtent` is a page something else
+        // has taken over, and the first question anybody asks is which page it
+        // was: the answer is what tied task-1888's failing read to the root
+        // page a `CREATE TABLE` had just been handed. Reading it out of the
+        // reference costs nothing on the path that succeeds.
+        let (body, next) = extent::read_page(guard.bytes()).map_err(|error| {
+            corrupt(format!(
+                "{} at page {}, which is page {} of an extent starting at {} and {} bytes long",
+                error.detail().unwrap_or("an extent page is not readable"),
+                page.0,
+                pages.saturating_add(1),
+                reference.first.0,
+                reference.length,
+            ))
+        })?;
         out.extend_from_slice(body);
         page = next;
         pages = pages.saturating_add(1);
