@@ -12,7 +12,7 @@ decision that is not a script's to make.
 
 ## Where it stands, at a glance
 
-Updated 2026-09-10. **The GitHub release is cut**: `v0.1.0`, tagged at `ed41390`,
+Updated 2026-09-10. **The GitHub release is cut**: `v0.1.0`, tagged at `201d0b9` on Black-Rainbow-Labs/Inillucent,
 with the Windows archive, `SHA256SUMS` and `provenance.json` attached, and the
 archive verified by downloading it back off the release and comparing its SHA-256.
 No registry package is published yet.
@@ -80,11 +80,15 @@ pwsh packaging/publish-site.ps1 -Version 0.1.0 -Link
 while the repository is private, because its assets are private too. GitHub
 carries the macOS artifacts from the MacBook to the Windows box and nothing else.
 
-**Done, on 2026-09-10.** `v0.1.0` is tagged at `ed41390` and the release is at
+**Done, on 2026-09-10.** `v0.1.0` is tagged at `201d0b9` and the release is at
 <https://github.com/Black-Rainbow-Labs/Inillucent/releases/tag/v0.1.0>, carrying the
 Windows archive, `SHA256SUMS` and `provenance.json`. The archive was downloaded
 back off the release and its SHA-256 compared against the published one: they
 match, byte for byte.
+
+An earlier v0.1.0 was cut on the old `jasonmcaffee/inillucent` repository and then
+removed: it named the wrong organisation and its archive carried the README whose
+install table was not true. The release below replaces it.
 
 `provenance.json` records the commit, the tag, the toolchain and the six checks
 the release script made - clean checkout, tag matches HEAD, version agrees, built
