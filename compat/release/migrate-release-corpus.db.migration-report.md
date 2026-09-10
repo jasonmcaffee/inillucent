@@ -1,6 +1,6 @@
 # Migration report
 
-- source: `C:/jason/dev/inillucent/_agent_output/task-1790/migrate/release/index`
+- source: `C:/jason/dev/inillucent/_agent_output/migrate/release/index`
 - source generation: `g000000000001`
 - staging destination: `C:/jason/dev/inillucent/_agent_output/measurements/migrate/release\corpus.db.migrating`
 - published to: `C:/jason/dev/inillucent/_agent_output/measurements/migrate/release/corpus.db`

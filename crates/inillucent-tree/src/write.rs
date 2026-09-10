@@ -909,7 +909,7 @@ impl PagedTree {
             // the whole page to the log.
             //
             // The argument does not survive being measured on a page rather
-            // than on a workload (task-1838 §4). A leaf can only hold
+            // than on a workload. A leaf can only hold
             // `DELTA_LIMIT` rows before it is full, so forcing a split gave the
             // left page **thirty-two rows** and the right page none - and the
             // next thirty-two filled the new page and split it again. Every
@@ -1142,8 +1142,8 @@ impl PagedTree {
         // redo copies rather than re-runs - the `AllocPage` and `WritePage`
         // records for the new run are already in the log ahead of it.
         // **What the page was stamped with before this.** A logical record has
-        // to be re-derived from the page it started from, and until task-1880 §7
-        // nothing in the record said which page that was - so a replay that
+        // to be re-derived from the page it started from, and the record used
+        // to carry nothing saying which page that was - so a replay that
         // reached it holding a different one could only report that the rows did
         // not fit. `redo::compact_leaf` names both stamps when that happens.
         let from_lsn = {

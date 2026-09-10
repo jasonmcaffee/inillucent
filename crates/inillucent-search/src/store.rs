@@ -68,7 +68,7 @@ pub mod state {
     pub const BUILD: &str = "build";
     /// How many chunks the last generation build inserted into the graph.
     ///
-    /// **This is the number the bound is stated in (task-1894, M8).** A
+    /// **This is the number the bound is stated in.** A
     /// generation folded at commit inserts the rows that commit wrote; a
     /// generation built by the `compact` or `rebuild` command inserts the whole
     /// corpus. Reading it back is how an application, and the cost guard in

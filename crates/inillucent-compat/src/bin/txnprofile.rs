@@ -24,7 +24,7 @@ use inillucent_legacy::{Connection, Database};
 const ROWS: u32 = 20_000;
 
 fn main() -> ExitCode {
-    let root = PathBuf::from("_agent_output/task-1791/txnprofile");
+    let root = PathBuf::from("_agent_output/txnprofile");
     match run(&root) {
         Ok(()) => ExitCode::SUCCESS,
         Err(failure) => {

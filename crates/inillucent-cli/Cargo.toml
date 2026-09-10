@@ -19,7 +19,7 @@ path = "src/lib.rs"
 name = "inillucent-shell"
 path = "src/main.rs"
 
-# The verb-shaped command line (task-1836).
+# The verb-shaped command line.
 [[bin]]
 name = "inillucent"
 path = "src/bin/inillucent.rs"
@@ -40,7 +40,7 @@ inillucent-alloc = { workspace = true }
 inillucent-base = { workspace = true }
 inillucent-driver = { workspace = true }
 inillucent-engine = { workspace = true }
-# The remote migration sources (task-1868). It depends on base, vfs, tree and
+# The remote migration sources. It depends on base, vfs, tree and
 # engine and on nothing else, which is why `migrate --kind postgres` can live in
 # the one command table both this CLI and the MCP server are generated from.
 inillucent-remote = { workspace = true }

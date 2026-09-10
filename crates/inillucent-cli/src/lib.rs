@@ -1,7 +1,7 @@
 //! inillucent's command surface: the shell, the command table, and what reads them.
 //!
 //! Invariant: **there is one command table and every front end reads it.**
-//! task-1836 added a verb-shaped `inillucent` binary and an MCP server beside
+//! A verb-shaped `inillucent` binary and an MCP server were added beside
 //! the `sqlite3`-shaped shell that was already here, and the reason all three
 //! live in one crate is that the alternative - a second list of commands, kept
 //! in step by whoever remembers - is the failure mode `drivers/README.md`

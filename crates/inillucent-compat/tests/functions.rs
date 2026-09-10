@@ -29,7 +29,7 @@ fn single(connection: &inillucent_compat::facade::Connection, sql: &str) -> Opti
 /// moves and every assertion stays exactly as it was. A serial keeps two tests
 /// running in parallel from colliding on one file.
 fn scratch() -> std::path::PathBuf {
-    let root = inillucent_compat::workspace_root().join("_agent_output/task-1838/functions");
+    let root = inillucent_compat::workspace_root().join("_agent_output/functions");
     let _ = std::fs::create_dir_all(&root);
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

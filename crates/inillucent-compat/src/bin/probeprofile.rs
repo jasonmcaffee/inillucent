@@ -1,9 +1,9 @@
 //! Where a rowid lookup's nanoseconds actually go, stage by stage.
 //!
-//! task-1817 measured three numbers - a resident fetch, a descent, a descent
+//! An earlier measurement found three numbers - a resident fetch, a descent, a descent
 //! plus a leaf search - and concluded that `range.lookaside` and `join.range`
 //! lose on a per-probe constant. They do, but three numbers do not say which
-//! part of the constant is worth attacking, and task-1819's first job is to
+//! part of the constant is worth attacking, and this file exists to
 //! stop guessing about that.
 //!
 //! So this takes the probe apart into every stage it has, and it measures the
@@ -34,9 +34,9 @@
 /// subsystem and is compiled as one translation unit; a Rust workspace measured
 /// on the platform allocator is being measured on a build configuration rather
 /// than on an engine, which is the same reasoning that fixed fat LTO and one
-/// codegen unit in the release profile. task-1838 §5 measured the Windows CRT
-/// heap at 59% of a trivial compile and this size-classed free list at 17%
-/// overall, which is why Phase 3's Part E names it the cheapest first move.
+/// codegen unit in the release profile. The Windows C runtime heap was
+/// measured at 59% of a trivial compile and this size-classed free list at
+/// 17% overall, which is why Phase 3's Part E names it the cheapest first move.
 #[global_allocator]
 static ALLOCATOR: inillucent_alloc::Pooled = inillucent_alloc::Pooled;
 

@@ -8,9 +8,9 @@
 //!
 //! ## Why it exists
 //!
-//! task-1890 ablated the tree write out of `update_in_place` entirely - the
-//! statement found its row, decided what to write, and then returned without
-//! writing - and `txn.large`'s apply time did not move: **1.54 microseconds
+//! Ablating the tree write out of `update_in_place` entirely - the statement
+//! found its row, decided what to write, and then returned without
+//! writing - showed `txn.large`'s apply time did not move: **1.54 microseconds
 //! against 1.53**. So none of the gap that put the `transaction` family under
 //! its floor is in the storage engine, and every hour spent on leaves and delta
 //! areas was going to buy nothing. It is in the executor, ahead of the tree, and
@@ -18,7 +18,7 @@
 //!
 //! The allocation counter is the part that says what to fix. Nanoseconds say
 //! which statement is slow; allocations say why, and on this box a compile was
-//! already known to be mostly the C runtime's heap (task-1838 §5).
+//! already known to be mostly the C runtime's heap: 59% of a trivial compile.
 //!
 //! Usage:
 //!   inillucent-execprofile <sqlite fixture> [--iterations N] [--page-size N]
@@ -203,7 +203,7 @@ fn flag(arguments: &[String], name: &str) -> Option<String> {
 /// @param fixture - the pristine database
 /// @param tag - what to call the copy
 fn restore(fixture: &Path, tag: &str) -> Result<PathBuf, String> {
-    let directory = inillucent_compat::workspace_root().join("_agent_output/task-1890/execprofile");
+    let directory = inillucent_compat::workspace_root().join("_agent_output/execprofile");
     std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     let target = directory.join(format!("{tag}-{}.db", std::process::id()));
     let _ = std::fs::remove_file(&target);

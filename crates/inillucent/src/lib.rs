@@ -1,10 +1,10 @@
 //! The stable public Rust facade: `Database`, `Connection`, `Statement`, `Row`.
 //!
 //! Invariant: **this name reaches the new engine.** `inillucent::Database::open`
-//! is what an application outside this workspace writes against, and until
-//! task-1838 §9 it reached `inillucent-session` - the SQLite-file-format engine
-//! task-1816 replaced. It now reaches `inillucent-engine`, which is the engine
-//! every gate in this repository measures and every suite tests.
+//! is what an application outside this workspace writes against, and it used
+//! to reach `inillucent-session` - the SQLite-file-format engine the
+//! rearchitecture replaced. It now reaches `inillucent-engine`, which is the
+//! engine every gate in this repository measures and every suite tests.
 //!
 //! ## What that changed, and what it did not
 //!
@@ -12,8 +12,8 @@
 //! incremental blob access, `serialize`/`deserialize`, the update, commit and
 //! rollback hooks, a progress handler and a pager-counter accessor. Every one
 //! of those is a feature of the engine underneath rather than of the facade,
-//! and the new engine does not have them - task-1816 dropped the file format
-//! they were mostly for, and multi-process access with them. A facade that kept
+//! and the new engine does not have them - the rearchitecture dropped the file
+//! format they were mostly for, and multi-process access with them. A facade that kept
 //! the method names and answered "unsupported" would be a worse lie than one
 //! that does not have them, because the compiler would stop saying so.
 //!
@@ -24,12 +24,12 @@
 //!
 //! `crates/inillucent-legacy`, unchanged, still over `inillucent-session`. It
 //! has exactly one consumer left - `inillucent-capi`, the `sqlite3_*` C ABI
-//! over the old engine - and that crate's replacement is **task-1837**'s
-//! driver. When the driver lands, `inillucent-legacy`, `inillucent-capi`,
+//! over the old engine - and that crate's replacement is the driver in
+//! `drivers/`. When the driver lands, `inillucent-legacy`, `inillucent-capi`,
 //! `inillucent-session`, `inillucent-vm`, `inillucent-transaction` and
 //! `inillucent-storage` go together; until it does, deleting them would leave
-//! the workspace with no C ABI at all. That is the one thing task-1838 §9 asks
-//! for that this commit does not do, and it is written down rather than
+//! the workspace with no C ABI at all. That is the one thing this facade
+//! change does not do on its own, and it is written down rather than
 //! quietly skipped.
 
 #![forbid(unsafe_code)]

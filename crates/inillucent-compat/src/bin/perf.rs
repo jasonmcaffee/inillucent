@@ -53,7 +53,7 @@ struct Measurement {
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let out = flag(&arguments, "--out")
-        .unwrap_or_else(|| workspace_root().join("_agent_output/task-1782-engine-foundation/perf"));
+        .unwrap_or_else(|| workspace_root().join("_agent_output/engine-foundation/perf"));
     match run(&out) {
         Ok(message) => {
             println!("{message}");

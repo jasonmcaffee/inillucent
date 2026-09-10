@@ -290,7 +290,7 @@ impl<'a> Parser<'a> {
     /// per-position question SQLite's grammar asks, asked in the one place that
     /// can answer it.
     ///
-    /// It asked [`Keyword::may_fall_back`] until task-1847, which is the
+    /// It used to ask [`Keyword::may_fall_back`], which is the
     /// narrower of the two sets and made `CREATE TABLE pairs (left TEXT)` - a
     /// schema SQLite itself writes - a syntax error.
     fn token_is_name(token: Token) -> bool {
@@ -393,8 +393,7 @@ impl<'a> Parser<'a> {
         // `CREATE TABLE 'f_data'(id INTEGER PRIMARY KEY, block BLOB)` into
         // `sqlite_schema` for an FTS5 table's shadow storage, so a migration
         // that could not read it reported "the declaration of f_data did not
-        // parse: database disk image is malformed" about a perfectly good file
-        // (task-1859 Part D).
+        // parse: database disk image is malformed" about a perfectly good file.
         //
         // Only here, where the grammar *requires* a name - the lookahead
         // `at_name` is deliberately left alone, so nothing about which

@@ -582,7 +582,8 @@ impl<'p> LeafMut<'p> {
     ///
     /// The text case is not a curiosity: it is what an `UPDATE` of a string
     /// column does, which is the gate's `txn.large`, two thousand of them in one
-    /// transaction (task-1838 §4, and task-1890 for the length change).
+    /// transaction. The length-changing branches were added later; before that
+    /// the writer refused any change of length and forced a delete plus insert.
     ///
     /// Returns [`Applied::NoRoom`] when it does not apply, which the caller
     /// turns into a delete plus a delta insert.
@@ -1265,9 +1266,10 @@ mod tests {
         );
 
         // A longer text is written at the bottom of the heap and the slot
-        // follows it, which is what took the `transaction` family off its floor
-        // when it was a refusal (task-1890). The leaf stays on the fast path:
-        // nothing went into the delta area and nothing was tombstoned.
+        // follows it. Refusing that case and falling back to delete plus insert
+        // is what had taken the `transaction` benchmark family off its floor.
+        // The leaf stays on the fast path: nothing went into the delta area and
+        // nothing was tombstoned.
         assert_eq!(
             leaf.update_slot(1, 3, &Datum::Text(b"longer than before"))
                 .expect("an update"),

@@ -8,11 +8,11 @@
 //! a URL, a log line, a row in another system - point at a different row than
 //! the one it was written about.
 //!
-//! Before task-1845 this engine parsed `AUTOINCREMENT` onto
-//! `TableInfo::autoincrement`, resolved `sqlite_sequence`'s root onto
-//! `BoundInsert::sequence_root`, and then allocated from the table's own
+//! This engine used to parse `AUTOINCREMENT` onto
+//! `TableInfo::autoincrement`, resolve `sqlite_sequence`'s root onto
+//! `BoundInsert::sequence_root`, and then allocate from the table's own
 //! largest key like any other table - so one insert, a delete, and another
-//! insert handed out 1 twice where SQLite hands out 1 and then 2 (task-1843).
+//! insert handed out 1 twice where SQLite hands out 1 and then 2.
 //!
 //! ## Where the mark lives
 //!
@@ -51,7 +51,7 @@ pub struct Mark {
 /// The table's own largest key is taken as a floor. It is normally below the
 /// stored mark and can only be above it for a table whose rows arrived without
 /// the mark being written - a file another engine built, or one this engine
-/// wrote before task-1845 - and taking the larger of the two is what stops
+/// wrote before that was fixed - and taking the larger of the two is what stops
 /// either of those from handing out a key that is already there.
 ///
 /// @param target - the file and its trees

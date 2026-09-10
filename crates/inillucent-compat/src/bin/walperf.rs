@@ -150,7 +150,7 @@ fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let out = flag(&arguments, "--out").unwrap_or_else(|| workspace_root().join("compat/baseline"));
     let scratch = flag(&arguments, "--scratch")
-        .unwrap_or_else(|| workspace_root().join("_agent_output/task-1788/walperf"));
+        .unwrap_or_else(|| workspace_root().join("_agent_output/walperf"));
     if let Err(failure) = std::fs::create_dir_all(&scratch) {
         eprintln!("cannot create {}: {failure}", scratch.display());
         return ExitCode::FAILURE;

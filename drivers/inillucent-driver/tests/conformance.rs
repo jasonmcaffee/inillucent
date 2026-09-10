@@ -530,7 +530,7 @@ fn the_conformance_suite_passes() {
         // unless the session number is carried across, and a session is what
         // `temp.`, `ATTACH` and the connection pragmas are scoped to. Running
         // such a case on one long-lived connection would pass without testing
-        // anything (task-1848).
+        // anything.
         let per_call = case
             .get("connection")
             .and_then(Json::text)

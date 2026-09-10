@@ -10,7 +10,7 @@
 //! kept because they pin what `ANALYZE` must keep doing. The last two are the reduction, and they
 //! are about the rule.
 //!
-//! What the failure looks like, found on task-1876 against Nikaya's 6.9 GB mail database:
+//! What the failure looks like, found against Nikaya's 6.9 GB mail database:
 //!
 //! ```text
 //! > inillucent --db nikaya.rdb analyze
@@ -36,7 +36,7 @@
 //! the catalog already holds. All three pass, and they are kept because they pin what `ANALYZE`
 //! itself must keep doing.
 //!
-//! ## What the 6.9 GB database had that a fresh one does not (task-1880 §20)
+//! ## What the 6.9 GB database had that a fresh one does not
 //!
 //! **A page carrying an LSN from a log stream that no longer exists**, and `ANALYZE` is the
 //! messenger rather than the cause. Reproduced against a copy of the parked file at
@@ -69,9 +69,9 @@
 //! answers `ok` about the result, because the file really is structurally intact - it is missing a
 //! row nothing can see was lost.
 //!
-//! ## The reduction, found on task-1885
+//! ## The reduction
 //!
-//! There was no synthetic reduction until task-1885, and the search that failed is worth keeping:
+//! There was no synthetic reduction at first, and the search that failed is worth keeping:
 //! building and checkpointing, stealing pages with a 64-frame pool, truncating the log and
 //! reopening does *not* reproduce it, because the page the write lands on reaches the file again
 //! before the next open and the log is never asked. That search was after the *conditions* that set
@@ -82,7 +82,7 @@
 //! `PRAGMA integrity_check`, since the page is byte for byte valid. So the two tests at the bottom
 //! of this file stamp the page directly and the variable disappears:
 //! `a_page_stamped_above_the_logs_end_refuses_the_open` and
-//! `a_log_below_the_files_high_water_resumes_above_it`. Both fail with task-1885's change reverted,
+//! `a_log_below_the_files_high_water_resumes_above_it`. Both fail with the fix reverted,
 //! the first printing the silent loss in as many words - a committed `CREATE TABLE` reading back as
 //! `no such table: later`.
 //!
@@ -103,7 +103,7 @@ use inillucent_value::Value;
 /// @param name - what to name it after
 fn scratch(name: &str) -> PathBuf {
     let directory = workspace_root()
-        .join("_agent_output/task-1880/analyze-reopen")
+        .join("_agent_output/analyze-reopen")
         .join(name);
     let _ = std::fs::remove_dir_all(&directory);
     let _ = std::fs::create_dir_all(&directory);

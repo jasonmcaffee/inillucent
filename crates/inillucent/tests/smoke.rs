@@ -18,8 +18,8 @@
 //! thing an application depends on is not the engine, it is **the name**. A
 //! re-export that stops compiling, a type that stops being public, a method
 //! that moves down a layer - none of those are engine defects and none of them
-//! fail an engine test, and every one of them breaks every caller. task-1838
-//! moved this facade from one engine to another; nothing in the test suite
+//! fail an engine test, and every one of them breaks every caller. This
+//! facade was moved from one engine to another; nothing in the test suite
 //! would have noticed if it had moved to neither.
 //!
 //! ## Why the file is real

@@ -12,8 +12,8 @@
 //! The check this replaces compared normalised path *text* against the root
 //! with `starts_with`. Text is not where a file is. A Windows junction or a
 //! Unix symbolic link placed below the root has a name that passes that test
-//! and an inode that is somewhere else entirely, and task-1892 opened a
-//! database outside `--root` through exactly that. So every component is
+//! and an inode that is somewhere else entirely, and a database was once
+//! opened outside `--root` through exactly that gap. So every component is
 //! resolved through the file system as it is appended, and a component that
 //! turns out to be a link is replaced by what it points at before the next one
 //! is considered. `..` pops the *resolved* path, which is what the kernel does

@@ -74,8 +74,8 @@ pub struct Document {
     /// **One section, not a list.** A second `[memory]` header merges into the
     /// first rather than making a second table, which is what TOML itself says
     /// happens and is the only behaviour a reader of this subset could sensibly
-    /// expect. The subset refused plain tables outright until task-1869 needed
-    /// `[memory]` and `[cpu]` in the performance contract.
+    /// expect. The subset refused plain tables outright until the performance
+    /// contract needed `[memory]` and `[cpu]`.
     pub tables: BTreeMap<String, Table>,
 }
 
@@ -398,8 +398,8 @@ tests = []
         assert_eq!(row.get("layer").and_then(Value::as_integer), Some(3));
     }
 
-    /// A plain table parses, which the subset refused until task-1869's
-    /// `[memory]` and `[cpu]` sections needed one.
+    /// A plain table parses, which the subset refused until the performance
+    /// contract's `[memory]` and `[cpu]` sections needed one.
     ///
     /// It is here because the refusal test below still asserted the old
     /// behaviour after the parser gained it, so `cargo test -p

@@ -31,7 +31,7 @@ use crate::parser::parse_expression;
 
 /// The internal tables an application may write, as SQLite allows.
 ///
-/// **Two, and neither of them is the schema** (task-1880 §17). Every table whose
+/// **Two, and neither of them is the schema.** Every table whose
 /// name begins with `sqlite_` used to be refused, which is right for
 /// `sqlite_schema` - that is what `PRAGMA writable_schema` is for - and wrong
 /// for these two, because writing them is the documented way to use them:
@@ -88,7 +88,7 @@ pub struct BoundCheck {
 /// **REPLACE's rule for a `NOT NULL` violation is to substitute the column's
 /// default, and to fall back to `ABORT` only when there is no default.** So
 /// `UPDATE OR REPLACE t SET c = NULL` on `c TEXT NOT NULL DEFAULT 'd'` stores
-/// `'d'`, and this engine refused the statement instead (task-1853).
+/// `'d'`, and this engine used to refuse the statement instead.
 ///
 /// The write path cannot bind one for itself: a default is schema text, and by
 /// the time a row is being checked the parser is long out of scope. The binder
@@ -429,7 +429,7 @@ impl<'a> Binder<'a> {
         // `INSERT`, the `WHERE` of an `UPDATE` or `DELETE` - and the binder's
         // CTE stack already handles nesting, so pushing them here is all it
         // takes. They were refused rather than bound, which is what a migration
-        // script written for SQLite hits first (task-1843).
+        // script written for SQLite hits first.
         let pushed = self.push_ctes(&insert.with)?;
         let bound = self.bind_insert_body(insert);
         if pushed {
@@ -1603,8 +1603,7 @@ pub fn unique_message(table: &TableInfo, index: &IndexInfo) -> String {
 /// primary key, held in the one index whose root is the table's, so a collision
 /// reports every column of that key under `SQLITE_CONSTRAINT_PRIMARYKEY` -
 /// `UNIQUE constraint failed: t.a, t.b`. It used to answer `t.rowid`, naming a
-/// column the table does not have, on `INSERT` as well as `UPDATE`
-/// (task-1849).
+/// column the table does not have, on `INSERT` as well as `UPDATE`.
 ///
 /// @param table - the table whose key collided
 pub fn rowid_message(table: &TableInfo) -> (i32, String) {
@@ -1643,7 +1642,7 @@ pub fn rowid_message(table: &TableInfo) -> (i32, String) {
 /// **It is an `Unexpected`, not a `Refused`, and the distinction is the whole
 /// message.** This is the one refusal whose text really is `near "X": syntax
 /// error`, because the reference's parser genuinely has no production for the
-/// word - unlike the sentence-shaped refusals task-1869 moved off that variant,
+/// word - unlike the sentence-shaped refusals that were moved off that variant,
 /// which are a schema saying no to a statement that parsed. Routing it through
 /// `bind::refused` with them made it answer a bare `ORDER`, which the
 /// 416-case probe caught as `both-refuse-differently` on `DELETE ... ORDER BY

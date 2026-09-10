@@ -59,7 +59,7 @@ struct Measurement {
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let out = flag(&arguments, "--out")
-        .unwrap_or_else(|| workspace_root().join("_agent_output/task-1783-read-only-baselines"));
+        .unwrap_or_else(|| workspace_root().join("_agent_output/read-only-baselines"));
     match run(&out) {
         Ok(message) => {
             println!("{message}");
@@ -434,7 +434,7 @@ fn render_json(measurements: &[Measurement]) -> String {
         "  \"platform\": {},\n",
         json_string(&platform_name())
     ));
-    out.push_str("  \"task\": \"task-1783\",\n");
+    out.push_str("  \"captured_by\": \"readperf\",\n");
     out.push_str("  \"phase\": \"phases 2-3 read-only baselines\",\n");
     out.push_str(&format!("  \"page_size\": {PAGE_SIZE},\n"));
     out.push_str("  \"measurements\": [\n");

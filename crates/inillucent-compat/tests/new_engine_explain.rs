@@ -29,7 +29,7 @@ use inillucent_tree::datum::OwnedDatum;
 ///
 /// @param name - the test's name, which names its file
 fn fixture(name: &str) -> Database {
-    let area = workspace_root().join("target/scratch/task-1834/explain");
+    let area = workspace_root().join("target/scratch/explain");
     let _ = std::fs::create_dir_all(&area);
     let path = area.join(format!("{name}.rdb"));
     let _ = std::fs::remove_file(&path);
@@ -69,8 +69,8 @@ fn details(connection: &Connection<'_>, sql: &str) -> Vec<String> {
 /// writes `(a=?)` for an index seek where this engine wrote `(?=?)`, because
 /// the renderer was given the table's alias and not its columns - and named
 /// threading the declaration into it as "a change worth making on purpose".
-/// task-1859 made it: `AccessPath::describe_over` takes the declaration, the
-/// key column is named, and the line is the reference's line.
+/// That thread now runs: `AccessPath::describe_over` takes the declaration,
+/// the key column is named, and the line is the reference's line.
 #[test]
 fn a_query_plan_reads_the_way_sqlite_s_reads() {
     let database = fixture("shape");

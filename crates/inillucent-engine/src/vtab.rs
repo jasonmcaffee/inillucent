@@ -118,7 +118,7 @@ fn borrowed_bytes<'v>(values: &'v [Value<'static>]) -> Vec<std::borrow::Cow<'v, 
 /// **A shadow write used to copy every text and every blob twice**: once into
 /// an `OwnedDatum` and once again when the tree borrowed it back. On FTS5's
 /// `%_data` the blob is a term's whole doclist, so a flush of five hundred
-/// terms copied every doclist twice for nothing (task-1856). The bytes are
+/// terms copied every doclist twice for nothing. The bytes are
 /// borrowed from the caller's values instead, through `holder`, which has to
 /// outlive the datums for exactly that reason.
 ///
@@ -931,7 +931,7 @@ impl ImportedDatabase {
         // buffer is one batch rather than the whole answer, which is what makes
         // `SELECT value FROM generate_series(1,10) LIMIT 3` return: without it
         // the scan ran to 4,294,967,295 rows before the `LIMIT` above it saw a
-        // single one (task-1843).
+        // single one.
         let mut rows: Vec<Vec<OwnedDatum>> = Vec::with_capacity(inillucent_exec::batch::BATCH_ROWS);
         let mut stopped = false;
         cursor.filter(&mut context, &plan)?;
@@ -962,8 +962,8 @@ impl ImportedDatabase {
             // statement; a call whose arguments varied per row would be a
             // different feature and is not one the modules declare.
             //
-            // **They are passed.** An empty list went down here until
-            // task-1860, so `bm25(t, 10.0)` ignored its weights and
+            // **They are passed.** An empty list used to go down here, so
+            // `bm25(t, 10.0)` ignored its weights and
             // `highlight(t, 0, '[', ']')` could not be written at all.
             for (name, arguments) in &needed.functions {
                 let mut values: Vec<Value<'static>> = Vec::with_capacity(arguments.len());

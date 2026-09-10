@@ -47,7 +47,7 @@ use crate::vectors::VectorSet;
 pub const FORMAT_VERSION: u32 = 3;
 const MAGIC: &[u8; 8] = b"INILLUCX";
 
-/// The magic written before the engine was renamed from its working name in task-1807.
+/// The magic written before the engine was renamed from its working name.
 ///
 /// Kept, and still accepted on read, because the eight bytes are a label rather than a
 /// format: the layout behind them is identical, and every index already on disk carries

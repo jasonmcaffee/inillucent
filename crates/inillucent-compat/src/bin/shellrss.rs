@@ -9,7 +9,7 @@
 //!
 //! The two open different files, and that is the measurement rather than a
 //! flaw: each shell builds its own copy from the same SQL, then opens it.
-//! File-format compatibility was dropped by task-1816, so there is no one file
+//! File-format compatibility was dropped by the rearchitecture, so there is no one file
 //! both can read, and the question - what does it cost to hold this data and
 //! read it - is about the data rather than the file.
 //!
@@ -26,7 +26,7 @@ use inillucent_compat::workspace_root;
 /// The rows each shell is asked to hold, and how they are made.
 ///
 /// **Each engine builds its own file from the same SQL.** There is no one file
-/// both can read - task-1816 dropped the file format - so a comparison of what
+/// both can read - the rearchitecture dropped the file format - so a comparison of what
 /// it costs to hold this data has to give each engine the data rather than a
 /// file. Written through a recursive CTE so the build is one statement and the
 /// two arms are given identical text.
@@ -130,7 +130,7 @@ fn run_script(exe: &Path, database: &Path, script: &str) -> Result<ProcessCost, 
 /// @param exe - the shell that builds it
 /// @param name - what to call the file
 fn build(exe: &Path, name: &str) -> Result<std::path::PathBuf, String> {
-    let root = workspace_root().join("_agent_output/task-1838/shellrss");
+    let root = workspace_root().join("_agent_output/shellrss");
     std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
     let target = root.join(name);
     for suffix in ["", "-journal", "-wal", "-shm"] {

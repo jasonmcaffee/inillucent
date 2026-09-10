@@ -768,7 +768,7 @@ impl Sink for IndexNestedLoopJoin<'_> {
                                 // downstream as constants. That is the only
                                 // difference a write makes to this path, and
                                 // the sorted-region case below is byte for
-                                // byte what task-1819 measured.
+                                // byte the code that was benchmarked.
                                 let vector = match hit {
                                     // A leaf with an out-of-line value cannot
                                     // lend its mini-column: the slot holds a

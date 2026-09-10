@@ -938,7 +938,7 @@ impl Hnsw {
 
     /// Insert a contiguous range of new nodes, using `build_threads` threads.
     ///
-    /// **What an append pays when the graph is already large (task-1894, M8).**
+    /// **What an append pays when the graph is already large (M8).**
     /// `insert` is one node on one core. That is the right shape for a handful
     /// of rows and the wrong shape for the batch a folded generation carries:
     /// the single-pass build this replaced ran on every core, so a fold of

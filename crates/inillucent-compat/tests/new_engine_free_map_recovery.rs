@@ -6,7 +6,7 @@
 //! itself - a free-map bit carries no LSN, so nothing below recovery can catch
 //! it if the answer is wrong.
 //!
-//! ## What this is a regression test for (task-1888)
+//! ## What this is a regression test for
 //!
 //! Recovery collected the `AllocPage` records it replayed into one list and the
 //! `FreePage` records into another, and the caller then claimed every page in

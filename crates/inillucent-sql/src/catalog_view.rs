@@ -29,7 +29,7 @@ pub enum IndexOrigin {
     /// virtual table, its `root` is that table's own root, and none of the
     /// b-tree paths apply to it - there is nothing to seek and nothing to
     /// range-scan. What it can do is answer "the k nearest to this vector",
-    /// which is a whole access path of its own (task-1838 §7).
+    /// which is a whole access path of its own.
     Module,
 }
 
@@ -64,8 +64,8 @@ pub struct ColumnInfo {
     /// is no index to hang it on. Every other primary key gets an `IndexInfo`
     /// and carries it there.
     ///
-    /// Reading `not_null_conflict` for it, which is what the write path did
-    /// until task-1856, answers a question about a constraint the table may not
+    /// Reading `not_null_conflict` for it, which is what the write path used to
+    /// do, answers a question about a constraint the table may not
     /// even declare.
     pub primary_key_conflict: Option<ConflictAction>,
     /// The `DEFAULT` expression, as written.
@@ -139,7 +139,7 @@ pub struct IndexInfo {
     /// How many entries the index itself holds, as `ANALYZE` measured.
     ///
     /// **The same number as the table's row count for an ordinary index, and a
-    /// different one for a partial index** (task-1880 §13), which holds only
+    /// different one for a partial index**, which holds only
     /// the rows its predicate accepted. It is what lets the planner price
     /// reading the whole of such an index against scanning the table it is on -
     /// 120 entries against 6,000 rows, in the case this was found on.
@@ -449,7 +449,7 @@ pub struct CheckInfo {
     /// its builder never reads the clause, so such a constraint aborts like any
     /// other. It is kept here so the derivation is a full account of the text
     /// rather than a lossy one, and so the next reader finds the measurement
-    /// instead of the question (task-1853).
+    /// instead of the question.
     pub conflict: Option<ConflictAction>,
 }
 
@@ -776,7 +776,7 @@ pub struct StaticCatalog {
     /// there first.
     ///
     /// Filled by the engine from its module registry on every catalog refresh.
-    /// Before task-1845 nothing filled it and the eponymous form did not exist:
+    /// Nothing used to fill it, and the eponymous form did not exist:
     /// `FROM generate_series(1,10)` was `no such table`, which also left
     /// `json_each` unreachable from SQL by any route, because `JsonWalkModule`
     /// refuses `CREATE VIRTUAL TABLE` outright.

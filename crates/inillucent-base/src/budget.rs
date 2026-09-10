@@ -4,8 +4,8 @@
 //! which budget it was.** An MCP server hands a database to an agent, and an
 //! agent asks for what it asks for: `SELECT * FROM chunk` against six hundred
 //! thousand rows is a reasonable-looking call that materialises gigabytes, and
-//! before task-1894 nothing stopped it. `limit_of` in the command surface even
-//! turned a negative row limit into zero, which means *unlimited*.
+//! nothing stopped it before this budget existed. `limit_of` in the command
+//! surface even turned a negative row limit into zero, which means *unlimited*.
 //!
 //! ## Why it is a thread-local rather than a parameter
 //!

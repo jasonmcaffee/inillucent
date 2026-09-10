@@ -26,7 +26,7 @@ const VECTORS: usize = 500;
 ///
 /// @param name - the test's name, which names its file
 fn database(name: &str) -> Database {
-    let area = workspace_root().join("target/scratch/task-1838/vector");
+    let area = workspace_root().join("target/scratch/vector");
     let _ = std::fs::create_dir_all(&area);
     let path = area.join(format!("{name}.rdb"));
     let _ = std::fs::remove_file(&path);
@@ -160,7 +160,7 @@ fn the_distance_functions_answer_the_arithmetic() {
 
 /// The two things that still answer NULL, and the four that now refuse.
 ///
-/// **The line moved in task-1859.** Every one of these used to answer NULL,
+/// **The line moved.** Every one of these used to answer NULL,
 /// including a probe of the wrong width - so a ranking query given a 1536-wide
 /// vector against a 768-wide column came back as rows in an arbitrary order
 /// with no measure taken and nothing said. pgvector raises `different vector
@@ -643,7 +643,7 @@ fn a_vector_column_round_trips() {
 
 /// A filtered vector search answers what the exhaustive plan answers.
 ///
-/// **This is task-1859 Part A, and it was recall 0.1.** 400 vectors, a
+/// **This guards a bug that measured recall 0.1.** 400 vectors, a
 /// predicate keeping one row in twenty and `LIMIT 10`: the exhaustive plan
 /// returned ten rows and the indexed plan returned one, because the index was
 /// probed for ten neighbours and the `WHERE` then threw nine of them away.
@@ -812,7 +812,7 @@ fn a_mismatched_vector_pair_refuses() {
 /// - **`avg(v)` and `sum(v)` fold component by component**, which is what they
 ///   mean in pgvector, and the binder can choose that because the column's
 ///   declared type says it holds a vector.
-/// - **`v + v` is element-wise too.** task-1860 gave the operators back, on the
+/// - **`v + v` is element-wise too.** The operators were given back, on the
 ///   condition that keeps SQLite's answer as well: the vector meaning is chosen
 ///   from the *declared type*, which is what PostgreSQL is doing when it
 ///   overloads `+` for its own `vector`.

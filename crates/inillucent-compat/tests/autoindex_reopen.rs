@@ -20,8 +20,8 @@
 //!
 //! The visible consequence was as bad as it sounds: **a database with a
 //! `TEXT PRIMARY KEY` could not be reopened after a write**. It reproduced on
-//! three lines of SQL and it predates task-1860, which found it while building
-//! `.archive` - whose `sqlar` table is keyed by `name TEXT PRIMARY KEY`.
+//! three lines of SQL, and was found while building `.archive` - whose
+//! `sqlar` table is keyed by `name TEXT PRIMARY KEY`.
 //!
 //! The test abandons the connection the way the crash tests do, so the log is
 //! still there to replay. A tidy close checkpoints, which folds the log into the
@@ -38,7 +38,7 @@ use inillucent_value::Value;
 /// @param name - what to name it after
 fn scratch(name: &str) -> PathBuf {
     let directory = workspace_root()
-        .join("_agent_output/task-1860/autoindex-reopen")
+        .join("_agent_output/autoindex-reopen")
         .join(name);
     let _ = std::fs::remove_dir_all(&directory);
     let _ = std::fs::create_dir_all(&directory);

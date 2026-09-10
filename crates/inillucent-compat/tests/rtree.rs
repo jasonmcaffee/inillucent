@@ -15,7 +15,7 @@ use inillucent_compat::differential::{compare, sqlite_oracle, Step};
 use inillucent_compat::workspace_root;
 
 /// Where this suite's scratch databases live.
-const AREA: &str = "task-1789/rtree";
+const AREA: &str = "rtree";
 
 /// The schema every scenario starts from.
 const SCHEMA: &[Step] = &[

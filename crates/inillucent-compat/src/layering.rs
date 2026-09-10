@@ -301,7 +301,7 @@ pub fn read_workspace(root: &Path) -> Result<Vec<CrateManifest>, String> {
 /// [`read_workspace`] walks `crates/` and is what the layering contract is
 /// checked against, because the contract is about that directory. Test
 /// selection is a different question: it needs the graph the *workspace* has,
-/// and since task-1837 that includes `drivers/`, whose two crates `read_workspace`
+/// and that now includes `drivers/`, whose two crates `read_workspace`
 /// cannot see. A driver change that selected no tests would be the selector
 /// failing silently, which is the one way a selector must never fail.
 ///

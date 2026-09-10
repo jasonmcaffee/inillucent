@@ -232,8 +232,8 @@ kind = "lib"
 tier = "unit"
 
 # The CLI's own library, which is where the command table, the argument parser
-# and every verb live. It arrived with task-1836 and had no row until task-1868;
-# `no_test_hides_outside_the_map` had been naming it ever since.
+# and every verb live. It arrived with the command surface and had no row for
+# some time after; `no_test_hides_outside_the_map` had been naming it ever since.
 [[target]]
 package = "inillucent-cli"
 kind = "lib"
@@ -602,7 +602,7 @@ name = "migration"
 tier = "engine"
 
 # The wire clients, replayed against recorded transcripts of a real PostgreSQL
-# 17.2 and a real MySQL 8.4.6 (task-1868). It declares no `requires` on purpose:
+# 17.2 and a real MySQL 8.4.6. It declares no `requires` on purpose:
 # the transcripts are checked in, so this suite runs on a fresh clone with no
 # database server installed, and a green here is a real green.
 [[target]]
@@ -611,7 +611,7 @@ kind = "test"
 name = "protocol"
 tier = "engine"
 
-# Verified TLS against a real TLS server (task-1894). It needs a Python with an
+# Verified TLS against a real TLS server. It needs a Python with an
 # `ssl` module and an `openssl` to generate certificates with, neither of which
 # this workspace builds, so it reports success when they are absent.
 [[target]]
@@ -1080,7 +1080,7 @@ kind = "test"
 name = "abi"
 tier = "e2e"
 
-# The same ABI, called from C rather than compared as three lists (task-1894).
+# The same ABI, called from C rather than compared as three lists.
 # It needs a C compiler, which this workspace cannot build, so it reports
 # success when there is none and `--strict` is what names it.
 [[target]]
@@ -1148,7 +1148,7 @@ tier = "tooling"
 covers = ["inillucent-compat"]
 
 # The one command table against the two surfaces it generates. Also arrived with
-# task-1836 without a row.
+# the command surface without a row.
 [[target]]
 package = "inillucent-compat"
 kind = "test"
@@ -1156,7 +1156,7 @@ name = "command_parity"
 tier = "tooling"
 covers = ["inillucent-cli"]
 
-# `--root` against the file system rather than against path text (task-1894).
+# `--root` against the file system rather than against path text.
 # It drives the two shipped front ends, because the defect it guards was not in
 # the check's arithmetic - it was in which file operations reached the check.
 [[target]]
@@ -1173,7 +1173,7 @@ name = "confinement"
 tier = "e2e"
 covers = ["inillucent-cli"]
 
-# The documentation, checked against the engine beside it (task-1894). Prose
+# The documentation, checked against the engine beside it. Prose
 # goes stale silently, which is what makes it different from code.
 [[target]]
 package = "inillucent-compat"

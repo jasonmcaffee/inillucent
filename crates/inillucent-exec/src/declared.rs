@@ -9,7 +9,7 @@
 //! the catalog and read by nobody, `TableInfo::strict` was validated at DDL
 //! time and unenforced on write, and `ColumnInfo::affinity` was derived at load
 //! and applied only on the *read* side, so `INSERT INTO t(a INTEGER) VALUES
-//! ('42')` stored the text where SQLite stores the integer 42 (task-1843).
+//! ('42')` stored the text where SQLite stores the integer 42.
 //!
 //! ## Why it is compiled once per statement
 //!

@@ -1,6 +1,6 @@
 # inillucent performance scorecard
 
-> **These are the `task-1791-release` gate's own output files, taken on the engine that came
+> **These are the `release` gate's own output files, taken on the engine that came
 > before the rearchitecture, and they are kept as that run's record. They are not the current
 > numbers and they are not edited by hand.** The engine measured here was slower than SQLite on
 > every family; the shipping engine is **326% faster** weighted over the same ten families, with
@@ -8,7 +8,7 @@
 > [docs/performance.md](../../docs/performance.md) and
 > [docs/feature-comparison.md](../../docs/feature-comparison.md).
 
-Label `task-1791-release`, platform `windows-x86_64`, 30 paired rounds per scale, bootstrap seed 17900001. Every optimization is on, which is the shipped engine.
+Label `release`, platform `windows-x86_64`, 30 paired rounds per scale, bootstrap seed 17900001. Every optimization is on, which is the shipped engine.
 
 Both engines read the same plan file. The ratio is SQLite over inillucent, so **above one means inillucent is faster**. A workload whose two engines returned different answers is reported as a correctness failure and is not timed.
 

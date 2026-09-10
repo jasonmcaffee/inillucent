@@ -28,7 +28,7 @@ const PAGE_SIZE: usize = 32_768;
 ///
 /// @param name - the test's name
 fn scratch(name: &str) -> PathBuf {
-    let area = workspace_root().join("target/scratch/task-1834/create");
+    let area = workspace_root().join("target/scratch/create");
     let _ = std::fs::create_dir_all(&area);
     let path = area.join(format!("{name}.rdb"));
     let _ = std::fs::remove_file(&path);

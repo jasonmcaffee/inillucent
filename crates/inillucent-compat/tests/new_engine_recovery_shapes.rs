@@ -6,7 +6,7 @@
 //! uses to replay that index's leaves has to be the shape the process that
 //! wrote them used.
 //!
-//! ## What this is a regression test for (task-1880 §7)
+//! ## What this is a regression test for
 //!
 //! It was not, and the failure was total: the database could not be opened at
 //! all while its log was beside it.
@@ -261,7 +261,7 @@ fn the_same_crash_with_the_column_declared_up_front_reopens() {
 /// A `COLLATE NOCASE` index survives a crash with its entries intact.
 ///
 /// **The second way the replay could disagree with the write path, and it is a
-/// different one** (task-1880 §7). `redo::insert_row`, `delete_row` and
+/// different one.** `redo::insert_row`, `delete_row` and
 /// `update_in_place` parsed the leaf they were locating in with
 /// `LeafMut::new(bytes)` and then `view()`, which is a `LeafRef` carrying no
 /// collations and no directions - so `locate` compared under BINARY and searched

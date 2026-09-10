@@ -19,7 +19,7 @@ use inillucent_session::Connection;
 use inillucent_value::Value;
 
 /// Where this suite's scratch databases live.
-const AREA: &str = "task-1790/search";
+const AREA: &str = "search";
 
 /// Runs a statement for its effect.
 fn exec(connection: &Connection, sql: &str) {
@@ -654,7 +654,7 @@ fn hex(vector: &[f32]) -> String {
     out
 }
 
-// --- M8: what an ordinary write pays for the graph (task-1894) ---
+// --- M8: what an ordinary write pays for the graph ---
 //
 // The finding these guard is that an incremental vector insert rebuilt the
 // whole HNSW graph. It did: automatic compaction ran `build_from_rows`, which

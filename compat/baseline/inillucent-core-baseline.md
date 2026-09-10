@@ -1,44 +1,50 @@
-# inillucent-core baseline, captured by task-1782
+# inillucent-core baseline, captured by inillucent-baseline
 
 The retrieval engine as it stood before any relational work. `inillucent-baseline verify`
 re-checks every digest below, so a later story can prove it did not disturb this.
 
-- retrieval tests: **210 passed, 0 failed**
+- retrieval tests: **222 passed, 0 failed**
 - scorecard verdict: 17 primary comparisons: 15 better, 1 equivalent, 1 inconclusive, 0 worse. Correctness gates: all pass.
 - regenerate the scorecard with: `scripts/fetch-public-corpus.sh && cargo run --release -p inillucent-bench -- score --out inillucent-scorecard.json`
-- tracked files: 32
+- tracked files: 38
 
 | file | bytes | sha256 |
 |---|---|---|
-| `crates/inillucent-bench/Cargo.toml` | 370 | `16da37fe27b607f3770e631d32cd15cd18fecf1abd8b70a741a6e3c298af2bf3` |
-| `crates/inillucent-bench/src/corpus.rs` | 9423 | `3724991e7b207ee724e32c9c18553e16038d5d4bdd23b0ddf34348e0b9e97639` |
-| `crates/inillucent-bench/src/embedcheck.rs` | 5565 | `3d6e9ee3c87d160eb47924ecd66c9ee8b92bc66acd02f38690051a53e2d5e044` |
-| `crates/inillucent-bench/src/engine.rs` | 42113 | `cf78c8da15cc53ff1c16f0077af2a2b74166de0998e7eec95349739ed95392f7` |
-| `crates/inillucent-bench/src/main.rs` | 28859 | `0707307462cb12a0add15b6fddc1f41512644df03db8c5b7a0182922f7f07bbb` |
-| `crates/inillucent-bench/src/metrics.rs` | 15353 | `d8a1a6554e716d883d4c6a68a88e5f1192c9b801d600e2fefe8d2f49c535ae5e` |
-| `crates/inillucent-bench/src/queryset.rs` | 43516 | `ff5b63d6dacb8d5b239eb827a0be8c9069f934b9ebc3f0eb3322a28a55cdcbcc` |
-| `crates/inillucent-bench/src/report.rs` | 38787 | `608ecf4e712c4de68f7436b9047b2721dc7a2061bbcce78a7e43be11ae1bb624` |
-| `crates/inillucent-bench/src/runs.rs` | 10825 | `7e2b03c3126d4861bd9c2cb0b130e285c1c4c7ab11653aa6a7ca61321b0fef6f` |
-| `crates/inillucent-bench/src/scenarios.rs` | 82713 | `21e85e561a92b4ac74a104065baf9a5095878d7ff5193994c414cecad6f79205` |
+| `crates/inillucent-bench/Cargo.toml` | 964 | `a846c43d65a09d2c43c7d304595a6fdaf9e6361ef313e53746524bf9051d94a3` |
+| `crates/inillucent-bench/src/arm.rs` | 8213 | `3b63ebd7cc8fc9dc6f5ea383ef18ddbc7456174cc20e0d6369d4a1a651f92d4f` |
+| `crates/inillucent-bench/src/corpus.rs` | 28642 | `d5a8c98d234963a18d71540a2738f672228ab6089a337910d5cc377284caf19e` |
+| `crates/inillucent-bench/src/embedcheck.rs` | 16721 | `6292bc36a9499995c1d89b909c4aa1ff2ca3cd457169680f1f2cd23bffa9d04f` |
+| `crates/inillucent-bench/src/engine.rs` | 41401 | `40a2312e79b1da7cb1b74d08f57295b8eca01d5a78a373efb9fc99d54ec758d9` |
+| `crates/inillucent-bench/src/gradeembed.rs` | 100492 | `a3c30f330cbea1f4dfb0f9dee34eef40350dcc136dda7c524638d90c7db56f2c` |
+| `crates/inillucent-bench/src/http.rs` | 8666 | `23a44f8e6cff13abbbcb560968fd91429be40c4a9a9f6d7be73c25ee874f78b8` |
+| `crates/inillucent-bench/src/llamacpp.rs` | 18077 | `c606a322fe69ffecb0e7ebc0f58771217a3fda556f24940ea9a580c575e2db31` |
+| `crates/inillucent-bench/src/main.rs` | 41890 | `4d34031acedc57bbed51f7631679b522159dd3b7804cc85106d31f7a8daa15c3` |
+| `crates/inillucent-bench/src/metrics.rs` | 14943 | `9b66124d3cf8dcb43e16371918a52bedf39fe175afdc1a4cc489c5361a47d8e4` |
+| `crates/inillucent-bench/src/models.rs` | 21054 | `0248ed0dc494e9a815edcf5aa19166add598639b62640830bfcc1a3138925a32` |
+| `crates/inillucent-bench/src/queryset.rs` | 42813 | `ceb63a8753de9a2e8a8d81d20d7a075ef2e8a63629bdc06344882d1d6494ec1a` |
+| `crates/inillucent-bench/src/report.rs` | 38323 | `01190f4138afa9c926334e4ad64e3a9a36f033171f7b73284f00bd721cbee627` |
+| `crates/inillucent-bench/src/runs.rs` | 12029 | `ebf2bfe7c63a69fa70f864f026fa02d5548bab9d99db7abb35a73685f44de6cb` |
+| `crates/inillucent-bench/src/scenarios.rs` | 83968 | `2a16c2f9eb913dd41efb0b7ab212338900ce416d652b07d21dea52e218efbaef` |
 | `crates/inillucent-bench/src/stats.rs` | 13127 | `79a0a053b545d848b95ae6eebc5a11cfc69547ff5877e9aceb749ba06519fb07` |
-| `crates/inillucent-bench/src/synth.rs` | 107069 | `54f30da22cc9d9ec38d4f471d5c5b4bf784e2c5c70b57cf2093ac1c21fc523f3` |
-| `crates/inillucent-bench/src/tune.rs` | 26868 | `9a016471f18b087cd64e0b4a1d5c7ba48b9f8d40dde28750f4c7aec46638c31a` |
-| `crates/inillucent-core/Cargo.toml` | 634 | `ceb3888f3117f53f12fac9005733f18e92073222c76c55b2cd9819f02a278a17` |
-| `crates/inillucent-core/src/binio.rs` | 3803 | `e8cf308b0ede089331a1c386c66390343be5afd30d4eff516e7fd75446fe5851` |
-| `crates/inillucent-core/src/bm25.rs` | 62187 | `18d24251b6968691a86cea2184619e95e4bdbb47f36fc82a489599bb1bd739c1` |
-| `crates/inillucent-core/src/distance.rs` | 3960 | `62d0a05d0fdfaedb5f6d326588b60031b24049264f07e5709e070173f527e969` |
-| `crates/inillucent-core/src/embed.rs` | 3597 | `dabdc9b8bf3418c8825b501a2f6816d626ad06aea55d02059afce1de51e73f19` |
-| `crates/inillucent-core/src/embed_onnx.rs` | 27857 | `30bcf737c21c168be3642761dbb64a3acca6c5de1e737f65563c1e55be8a3f37` |
-| `crates/inillucent-core/src/filter.rs` | 39482 | `6ae5a038017bd3033d2ca5c1f308f262b451020abb0e063acd98e82a1ef83ac3` |
-| `crates/inillucent-core/src/flat.rs` | 17861 | `b37eb3643dfaeb24ca3a98545e474c3ca9009bbdd09504308ef983b43a3a020f` |
-| `crates/inillucent-core/src/hnsw.rs` | 64460 | `7b0fb3321f2ef047ca880d81d9a2ead4b892f61b7811f7a9cbaefb98b4a3e3dd` |
-| `crates/inillucent-core/src/index.rs` | 75634 | `3b04235579bbc4b9d4d0cb7048a67c19b13b4236f2f1b050f9f69d25d623ca83` |
-| `crates/inillucent-core/src/lib.rs` | 965 | `c741828e93878907e960a0d0a21bf2fcae43acb8163c7e9af0c44fb322dcf9e7` |
-| `crates/inillucent-core/src/persist.rs` | 42266 | `72946d152a75a07dfa6ec3f05af3691e1a8357593482c416d26b24b7cbf81352` |
-| `crates/inillucent-core/src/quantize.rs` | 7497 | `707c41caf88d25476d552f3bf69d0c1dca9379fc1de8083d4d1e6efd6bc18018` |
-| `crates/inillucent-core/src/rank.rs` | 40185 | `9bacacd7795a2c1c4770a6d8332c78ab757290a26d463740fdbce50c2ede63d5` |
-| `crates/inillucent-core/src/store.rs` | 37312 | `032fee95980718ae2d80473eb3c07a88f5c7d23251adfeda4da635eeaf0e3714` |
-| `crates/inillucent-core/src/tokenize.rs` | 16492 | `132b1a444e25aa9c4f0ded88e0fdd4a64a44e2f3fe3f29f4716839f42e545f4c` |
-| `crates/inillucent-core/src/vectors.rs` | 3772 | `1e9c75ccdae2f5cd680fd2eabe6e59b67789dda57dbace8dce218c72ff36a850` |
-| `inillucent-scorecard.json` | 1151994 | `63300397d22cc8935d6c1f97be4bb54677f6d3f07c9b277458ef2387d87b0a43` |
-| `inillucent-scorecard.md` | 25968 | `072a4747e6e1008c05f787ed48fdf1c06152e9f17d1143367645acec7491e34d` |
+| `crates/inillucent-bench/src/synth.rs` | 109187 | `98727e1c22c61c09fef9a0ae52fef3bf6dc8244de9c1e507dd8fee7c6a1a4cd1` |
+| `crates/inillucent-bench/src/tune.rs` | 26934 | `c9c667f0a3c295a45a30190827298de6c7987b32d5f33dc119e73bf0f9e95411` |
+| `crates/inillucent-core/Cargo.toml` | 616 | `eba4b8ecea88ebb6f04d3b601a41e608e497c4e2a7b5d0b2a1accc9b2427cfac` |
+| `crates/inillucent-core/src/binio.rs` | 3699 | `d5c156a15ca14b40a13ac8b80959953ff79762ca235db192523199e7b722371e` |
+| `crates/inillucent-core/src/bm25.rs` | 60854 | `3ff5060ec3a6c985fc3f9dad0f91b7fa165f2d39a789e75952596e7ca6dd1023` |
+| `crates/inillucent-core/src/distance.rs` | 3843 | `1eb12a2405dcfa34076d2d35cc278601d95efbd406b1f5b1335d2f9fe233afac` |
+| `crates/inillucent-core/src/embed.rs` | 3494 | `cb22a9903fd4a821ef882ae86620065949b58ff091614a224abbf4a5f9f1cd20` |
+| `crates/inillucent-core/src/embed_onnx.rs` | 58416 | `742643888a638e625b66f7dd2b79a2d1a04a9167c27e252f6e72ebf062accef0` |
+| `crates/inillucent-core/src/filter.rs` | 38494 | `26bf6907e024506ef79034390d9202ca6ede08196aa4bd6576bb5df709bcde37` |
+| `crates/inillucent-core/src/flat.rs` | 22365 | `15fcee15bf5dc8769c8e95df4a8ef5d7a49fc8eb7f71f3e3ad8c44331e7af632` |
+| `crates/inillucent-core/src/hnsw.rs` | 73975 | `aa23943c132835c865899f569f68df82431bb3b21ec1c00648fe17856f25bd28` |
+| `crates/inillucent-core/src/index.rs` | 76017 | `2c47e6661f15fba3c68e7f77795f772139f90d99154828b8a971ffd0b18a3918` |
+| `crates/inillucent-core/src/lib.rs` | 950 | `dc6f22c3ffd84a93dfaf499332f424d847daa32306601095b967580f4c09f667` |
+| `crates/inillucent-core/src/model.rs` | 14245 | `cd89c11e1b0961d2b6875102712b463ef5fb335d87e9fe176f37920712e3f90d` |
+| `crates/inillucent-core/src/persist.rs` | 50916 | `06aa4ce0e79c19847dbf8cccdb7d7f2859c8b8b7cfd0b952bab4cf50b3f15583` |
+| `crates/inillucent-core/src/quantize.rs` | 7973 | `28f4bda2e54cc9a3acd710a9fce2ba9799f4197b7a1fdf8b2025aa6b012bf154` |
+| `crates/inillucent-core/src/rank.rs` | 39285 | `51d5e74fa721f236ec30f3ef6beb768c9667c118a195195a782c5e883518a129` |
+| `crates/inillucent-core/src/store.rs` | 36381 | `474e946f794c61967de8b513c1abc76ef426e562038d22c0377da159976f238e` |
+| `crates/inillucent-core/src/tokenize.rs` | 16109 | `5c89348b53ea3d21cab4f67898cc49f876e4135fef245d5b8baf5c63b99b05bf` |
+| `crates/inillucent-core/src/vectors.rs` | 19757 | `f9b947db82720cc05449c044f7915add1e0896c40c8b387be882b68ed63e118b` |
+| `inillucent-scorecard.json` | 1152427 | `e77e6a18a49b3c57ab0cbc5c35d832f4989f044cda01782eaf509a1c9ff8a763` |
+| `inillucent-scorecard.md` | 26140 | `8173dba95093a77edb3e5df261365f3fa29781a8953bdcc81bd23c1d6846b615` |

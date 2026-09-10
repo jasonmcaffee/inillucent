@@ -613,7 +613,7 @@ fn replay(
 /// Refuses a page whose stamp cannot have come from the log being replayed.
 ///
 /// **The page-LSN rule is only sound while a page's stamp is a position in the
-/// stream beside the file** (task-1885). A record at LSN *L* occupies
+/// stream beside the file.** A record at LSN *L* occupies
 /// `[L, L + length)`, so every stamp a healthy file carries is strictly below
 /// `valid_end`, the position past the last record the scan accepted. A stamp at
 /// or above it is a position in a stream this log does not contain - the state a

@@ -1,7 +1,7 @@
 //! The CLI and the MCP server offer the same commands, and both are described.
 //!
 //! Invariant: **`inillucent <verb>` and `inillucent_<verb>` are the same set,
-//! and every difference is a stated one.** task-1836's whole design is that the
+//! and every difference is a stated one.** The whole design is that the
 //! command table is read by three front ends rather than copied into them, and
 //! a design like that is worth exactly as much as the test that keeps it true.
 //! `drivers/README.md` makes the same argument about the capability table:

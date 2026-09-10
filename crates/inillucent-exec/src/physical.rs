@@ -63,7 +63,8 @@ use inillucent_sql::bind::{
 use inillucent_sql::catalog_view::TableInfo;
 use inillucent_sql::function::{AggregateFunc, ScalarFunc};
 use inillucent_sql::plan::{
-    plan_select_with, AccessPath, AggregationMode, BoundKind, Levers, PhysicalPlan, RangeBound,
+    plan_select_with, AccessPath, AggregationMode, BoundKind, IndexSeekBranch, Levers,
+    PhysicalPlan, RangeBound,
 };
 use inillucent_tree::datum::{Datum, OwnedDatum};
 use inillucent_tree::PagedTree;
@@ -185,7 +186,7 @@ pub trait TreeCatalog {
     /// memory by construction". `generate_series` ships in the same registry and
     /// is a counter-example: with no `stop` constraint it is 4,294,967,295 rows,
     /// so `SELECT value FROM gs LIMIT 3` neither returned nor could be stopped -
-    /// three shapes measured past a 25-second timeout on task-1843, one of them
+    /// three shapes measured past a 25-second timeout, one of them
     /// holding about 1.2 cores for ten minutes. A `LIMIT` above the scan cannot
     /// stop a scan that has already run to completion before the operator above
     /// it sees a row.
@@ -377,7 +378,7 @@ pub trait TreeCatalog {
     /// rows live in a virtual table and the module that owns it is registered
     /// on the connection, which is above this layer - so the executor asks, the
     /// same way it asks for a module's rows, and gets back the row numbers of
-    /// the *table* rather than anything module-shaped (task-1838 §7).
+    /// the *table* rather than anything module-shaped.
     ///
     /// `None` means there is no such index, which the caller turns into a
     /// refusal rather than an empty answer: a search that quietly found nothing
@@ -1031,14 +1032,20 @@ pub enum AccessKind {
     Skip,
     /// One row by key.
     Point,
+    /// Several rows by key, several probes of the same tree concatenated -
+    /// what an `IN` list becomes once the planner turns it into seeks.
+    SeekUnion,
+    /// Several key ranges over the same tree, concatenated in the order that
+    /// keeps their combined output in the composite key's order - what a
+    /// keyset page's `OR`-shaped tuple comparison becomes.
+    RangeUnion,
     /// A probe of this tree once per row of the stage before it.
     Nested,
     /// The rows an index a module owns named, read out of the tree by rowid.
     ///
     /// The tree is the table's, so the layout and every column slot are the
     /// ordinary ones; what is different is *which* rows and in what order -
-    /// the module chose them, and the plan's own `ORDER BY` then rescores them
-    /// (task-1838 §7).
+    /// the module chose them, and the plan's own `ORDER BY` then rescores them.
     Vector,
     /// The rows a nested query produced, materialised once before the pipeline
     /// runs.
@@ -1061,6 +1068,8 @@ impl AccessKind {
             AccessKind::Reverse => "RANGE REVERSE",
             AccessKind::Skip => "SKIP SCAN",
             AccessKind::Point => "POINT PROBE",
+            AccessKind::SeekUnion => "SEEK UNION",
+            AccessKind::RangeUnion => "RANGE UNION",
             AccessKind::Nested => "INDEX NESTED LOOP",
             AccessKind::Materialised => "SCAN SUBQUERY",
         }
@@ -1206,6 +1215,16 @@ pub enum Source<'t> {
     Skip(SkipScan<'t>),
     /// One row by key.
     Point(PointProbe<'t>, Vec<OwnedDatum>),
+    /// Several rows by key, several probes of the same tree - what
+    /// `AccessKind::SeekUnion` runs. Every key has already been evaluated and
+    /// de-duplicated (a literal repeat folded at plan time, a repeat only
+    /// visible at run time folded here, against the concrete values this
+    /// execution actually bound), so every probe here is worth making.
+    SeekUnion(PointProbe<'t>, Vec<Vec<OwnedDatum>>),
+    /// Several key ranges over the same tree, concatenated in the order that
+    /// keeps their combined output in the composite key's order - what
+    /// `AccessKind::RangeUnion` runs.
+    RangeUnion(Vec<SpanScan<'t>>),
     /// The rows an index a module owns named, by rowid, in its order.
     Vector(PointProbe<'t>, Vec<i64>),
     /// Rows a nested query produced, already materialised.
@@ -1215,7 +1234,7 @@ pub enum Source<'t> {
     /// The catalog rather than the rows, because the rows do not exist yet -
     /// that is the whole point. `generate_series` with no `stop` constraint is
     /// 4,294,967,295 rows, and materialising it before the `LIMIT` above it runs
-    /// is a query that does not return (task-1843).
+    /// is a query that does not return.
     Virtual(Box<VirtualScanSource<'t>>),
     /// A fixed number of rows of no columns at all.
     ///
@@ -1301,6 +1320,44 @@ impl Source<'_> {
                 };
                 probe.run(pool, borrowed, downstream)
             }
+            Source::SeekUnion(probe, keys) => {
+                let pool = needs_pool(pool)?;
+                // One descent per key, exactly what running each branch's own
+                // `RowidSeek`/`IndexSeek` in turn would cost - and a list long
+                // enough to make that expensive is a list the planner already
+                // prices against a scan and loses.
+                let mut buffer: Vec<OwnedDatum> = Vec::new();
+                let mut rows: Vec<Vec<OwnedDatum>> = Vec::with_capacity(keys.len());
+                for key in keys {
+                    let borrowed: Vec<Datum<'_>> = key.iter().map(OwnedDatum::borrow).collect();
+                    if probe.lookup(pool, &borrowed, &mut buffer)? {
+                        rows.push(buffer.clone());
+                    }
+                }
+                crate::ops::emit_rows(&rows, downstream)?;
+                downstream.finish()
+            }
+            Source::RangeUnion(branches) => {
+                let pool = needs_pool(pool)?;
+                // Each branch is collected rather than streamed straight to
+                // `downstream`: `SpanScan::run` finishes its sink when it
+                // returns, and finishing `downstream` after the first branch
+                // would tell it the whole union was done. Collecting loses a
+                // downstream `LIMIT`'s ability to stop the *later* branches
+                // early, which is the one thing this costs next to the
+                // bytecode engine's branch-by-branch loop - the branches
+                // still only cover the keyset page's own range, never the
+                // whole table, so the seek this replaces a scan with is not
+                // what the cost was paid for.
+                let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                let mut sink = crate::ops::CollectInto::new(std::rc::Rc::clone(&collected));
+                for branch in branches {
+                    branch.run(pool, &mut sink)?;
+                }
+                let rows = collected.borrow().clone();
+                crate::ops::emit_rows(&rows, downstream)?;
+                downstream.finish()
+            }
             Source::Vector(probe, keys) => {
                 let pool = needs_pool(pool)?;
                 // One descent per candidate, and the candidates are already the
@@ -1348,6 +1405,8 @@ impl Source<'_> {
             Source::Reverse(_) => "RANGE REVERSE",
             Source::Skip(_) => "SKIP SCAN",
             Source::Point(_, _) => "POINT PROBE",
+            Source::SeekUnion(_, _) => "SEEK UNION",
+            Source::RangeUnion(_) => "RANGE UNION",
             Source::Vector(_, _) => "VECTOR SEARCH",
             Source::Rows(_) => "SCAN SUBQUERY",
             Source::Virtual(_) => "SCAN VIRTUAL TABLE",
@@ -1630,6 +1689,78 @@ fn plan_stages(
                     false,
                     &mut offset,
                 )?;
+            }
+            // A union of probes composes with a per-row nested loop exactly
+            // as a lone probe does - one more of the same thing, at every
+            // level - but this engine has no join operator that drives one
+            // yet, so it is offered only where it drives the whole pipeline.
+            // The bytecode engine does not share this limit: it compiles a
+            // union's branches the same way at any level, one loop per
+            // branch, which is why the same SQL runs on both engines while
+            // only one of them takes the fast path everywhere the planner
+            // found one.
+            AccessPath::RowidSeekUnion { root, .. } => {
+                if !outermost {
+                    return unsupported("a seek union as an inner join term");
+                }
+                push_stage(
+                    &mut stages,
+                    catalog,
+                    *root,
+                    AccessKind::SeekUnion,
+                    source.id,
+                    position,
+                    false,
+                    &mut offset,
+                )?;
+            }
+            AccessPath::IndexSeekUnion {
+                table_root,
+                index_root,
+                covering,
+                branches,
+                ..
+            } => {
+                if !outermost {
+                    return unsupported("a seek union as an inner join term");
+                }
+                // The branches of an `IN` list are bare equalities and probed
+                // like `RowidSeekUnion`'s; the branches of a keyset page are
+                // ranges, and reconstructing the page's order depends on
+                // walking each one and running them in the order they were
+                // built in - two different sources for what is, at the plan
+                // level, one shape.
+                let point_shaped = branches
+                    .iter()
+                    .all(|branch| branch.low.is_none() && branch.high.is_none());
+                let kind = if point_shaped {
+                    AccessKind::SeekUnion
+                } else {
+                    AccessKind::RangeUnion
+                };
+                push_stage(
+                    &mut stages,
+                    catalog,
+                    *index_root,
+                    kind,
+                    source.id,
+                    position,
+                    false,
+                    &mut offset,
+                )?;
+                let is_the_table = *index_root == *table_root;
+                if covering.is_none() && !is_the_table {
+                    push_stage(
+                        &mut stages,
+                        catalog,
+                        *table_root,
+                        AccessKind::Nested,
+                        source.id,
+                        position,
+                        true,
+                        &mut offset,
+                    )?;
+                }
             }
             AccessPath::IndexSeek {
                 table_root,
@@ -2109,8 +2240,8 @@ fn space_of(catalog: &dyn TreeCatalog, prepared: &Prepared) -> DbResult<HeldSpac
     // nested loop emits its inner matches grouped by the outer row, which
     // preserves the outer order and destroys any inner one.
     //
-    // **A table fetch behind a non-covering index seek is not a nested loop**
-    // (task-1880 §10). It is one row per index entry, in the index's own order,
+    // **A table fetch behind a non-covering index seek is not a nested loop.**
+    // It is one row per index entry, in the index's own order,
     // so it preserves the order rather than destroying it. This used to ask for
     // exactly one stage, which a non-covering seek never is - so the ordering an
     // index was chosen *for* was then not believed, `ORDER BY` fell to a `TopN`,
@@ -2129,7 +2260,7 @@ fn space_of(catalog: &dyn TreeCatalog, prepared: &Prepared) -> DbResult<HeldSpac
     // Work proportional to what is *left* rather than to the limit, which makes
     // keyset paging quadratic in the table: 601,862 chunks at a page of 2,000 is
     // 90 million row materialisations instead of 601,862. It is what stopped
-    // task-1876's first adoption pass finishing one table in 25 minutes.
+    // an early `inillucent migrate` run from finishing one table in 25 minutes.
     let ordered_stages = prepared.stages.iter().skip(1).all(|stage| stage.is_lookup);
     let order = match (prepared.stages.first(), layouts.first()) {
         (Some(stage), Some(layout)) if ordered_stages => {
@@ -2978,6 +3109,51 @@ fn build_source<'t>(
             )?;
             Ok(Source::Vector(probe_over, keys))
         }
+        AccessKind::SeekUnion => {
+            let probe_over = PointProbe::new(tree, projection);
+            let keys = match path {
+                AccessPath::RowidSeekUnion { keys, .. } => rowid_union_keys(keys, space, params)?,
+                AccessPath::IndexSeekUnion {
+                    branches, columns, ..
+                } => index_union_keys(branches, table, columns, space, params)?,
+                _ => return Err(misuse("a seek-union stage over a path that is not one")),
+            };
+            Ok(Source::SeekUnion(probe_over, keys))
+        }
+        AccessKind::RangeUnion => {
+            let AccessPath::IndexSeekUnion {
+                table_root,
+                index_root,
+                index_name,
+                branches,
+                collations,
+                descending,
+                columns,
+                without_rowid,
+                key_entry_slots,
+                ..
+            } = path
+            else {
+                return Err(misuse("a range-union stage over a path that is not one"));
+            };
+            let scans = range_union_bounds(
+                tree,
+                projection,
+                *table_root,
+                *index_root,
+                index_name,
+                *without_rowid,
+                key_entry_slots,
+                branches,
+                collations,
+                descending,
+                columns,
+                table,
+                space,
+                params,
+            )?;
+            Ok(Source::RangeUnion(scans))
+        }
         AccessKind::Nested => Err(misuse("a nested stage cannot drive a pipeline")),
         // Unreachable: `source_for` answers a materialised stage before it gets
         // here, because building one needs the plan and the catalog rather than
@@ -3192,7 +3368,7 @@ fn build_nested<'t>(
         }
     }
     // **An outer join whose key is its whole condition is an index nested
-    // loop** (task-1880 §14). The materialised shape below reads the inner side
+    // loop.** The materialised shape below reads the inner side
     // once into a buffer, which is linear in the inner table however few outer
     // rows there are: `LEFT JOIN chunk c ON c.document_id = d.id` for one
     // document read all 60,000 chunks, at 138.2 ms against 0.5 ms for the same
@@ -3571,7 +3747,7 @@ fn materialise_stage(
         .ok_or_else(|| misuse("a stage names a FROM term the plan does not have"))?;
     match &source_term.path {
         AccessPath::Subquery { plan: inner, .. } => {
-            // **A compound is run as a compound** (task-1880 §19).
+            // **A compound is run as a compound.**
             // `SELECT ... FROM (a UNION ALL b)` is an ordinary derived table
             // whose inner plan happens to have arms, and `prepare` refuses a
             // plan with arms by name - so the whole statement came back
@@ -3680,7 +3856,7 @@ fn run_recursive(
     // every series generator is written, and it never terminates on its own -
     // the step arm always produces a row. This ran it to the million-pass guard
     // and then refused a query SQLite answers, which is the same shape
-    // task-1845 fixed for a virtual table's scan: a producer has to be
+    // fixed for a virtual table's scan: a producer has to be
     // stoppable by the consumer above it rather than run to completion first.
     let enough = |answer: &Vec<Vec<OwnedDatum>>| limit.is_some_and(|want| answer.len() >= want);
     for _ in 0..MAX_RECURSIVE_PASSES {
@@ -3806,6 +3982,132 @@ fn point_key(path: &AccessPath, space: &Space<'_>, params: &Params) -> DbResult<
         )?]),
         _ => unsupported("a point probe over that access path"),
     }
+}
+
+/// Returns the keys a rowid seek union probes, evaluated and de-duplicated
+/// against the concrete values this execution actually bound.
+///
+/// A literal repeat is already folded at plan time; a repeat that is not
+/// visible until the parameters are bound - two different parameters given
+/// the same argument, say - is caught here instead. A rowid is unique by
+/// construction, so a repeated key is the only way two branches could
+/// produce the same row, and skipping the second probe of a key already
+/// probed is what keeps that from happening.
+/// @param keys - the keys to probe, in order
+/// @param space - the joined column space
+/// @param params - the bound parameters
+fn rowid_union_keys(
+    keys: &[BoundExpr],
+    space: &Space<'_>,
+    params: &Params,
+) -> DbResult<Vec<Vec<OwnedDatum>>> {
+    let mut seen: Vec<Vec<OwnedDatum>> = Vec::with_capacity(keys.len());
+    for expr in keys {
+        let value = vec![constant_value(
+            expr,
+            space,
+            params,
+            Some(Affinity::Integer),
+        )?];
+        if !seen.contains(&value) {
+            seen.push(value);
+        }
+    }
+    Ok(seen)
+}
+
+/// Returns the keys an index seek union's equality branches probe, evaluated
+/// and de-duplicated the same way [`rowid_union_keys`] is.
+///
+/// Only ever called for a union every branch of which is an equality with no
+/// range - the `IN`-list shape. A branch that also carries a range is a
+/// keyset-page union instead, which [`range_union_bounds`] runs, because a
+/// range cannot be probed by key and does not need this de-duplication: the
+/// keyset shape is proven disjoint before it ever reaches here.
+/// @param branches - the union's branches
+/// @param table - the indexed table, for each key column's affinity
+/// @param columns - which table column each index position holds
+/// @param space - the joined column space
+/// @param params - the bound parameters
+fn index_union_keys(
+    branches: &[IndexSeekBranch],
+    table: &TableInfo,
+    columns: &[Option<u16>],
+    space: &Space<'_>,
+    params: &Params,
+) -> DbResult<Vec<Vec<OwnedDatum>>> {
+    let mut seen: Vec<Vec<OwnedDatum>> = Vec::with_capacity(branches.len());
+    for branch in branches {
+        let mut key = Vec::with_capacity(branch.equalities.len());
+        for (position, expr) in branch.equalities.iter().enumerate() {
+            key.push(constant_value(
+                expr,
+                space,
+                params,
+                index_affinity(table, columns, position),
+            )?);
+        }
+        if !seen.contains(&key) {
+            seen.push(key);
+        }
+    }
+    Ok(seen)
+}
+
+/// Returns the range scans a keyset-range union runs, in the order the
+/// branches were built.
+///
+/// That order is also the order that keeps the branches' combined output in
+/// the composite key's own order: the planner proved it once, when it built
+/// the union, and this only has to preserve it rather than prove it again.
+/// Each branch becomes a throwaway single-branch [`AccessPath::IndexSeek`] and
+/// is priced through [`span_bounds`] exactly as a lone seek would be - the
+/// NULL handling and the descending-column handling are properties of one
+/// range, not of the union, so there is nothing for this to do differently.
+#[allow(clippy::too_many_arguments)]
+fn range_union_bounds<'t>(
+    tree: &'t PagedTree,
+    projection: Projection,
+    table_root: u32,
+    index_root: u32,
+    index_name: &[u8],
+    without_rowid: bool,
+    key_entry_slots: &[usize],
+    branches: &[IndexSeekBranch],
+    collations: &[Collation],
+    descending: &[bool],
+    columns: &[Option<u16>],
+    table: &TableInfo,
+    space: &Space<'_>,
+    params: &Params,
+) -> DbResult<Vec<SpanScan<'t>>> {
+    let mut scans = Vec::with_capacity(branches.len());
+    for branch in branches {
+        let branch_path = AccessPath::IndexSeek {
+            table_root,
+            index_root,
+            index_name: index_name.to_vec(),
+            equalities: branch.equalities.clone(),
+            low: branch.low.clone(),
+            high: branch.high.clone(),
+            collations: collations.to_vec(),
+            descending: descending.to_vec(),
+            columns: columns.to_vec(),
+            without_rowid,
+            key_entry_slots: key_entry_slots.to_vec(),
+            covering: None,
+        };
+        let bounds = span_bounds(&branch_path, table, space, params)?;
+        scans.push(SpanScan::new(
+            tree,
+            projection.clone(),
+            bounds.low,
+            bounds.low_inclusive,
+            bounds.high,
+            bounds.high_inclusive,
+        ));
+    }
+    Ok(scans)
 }
 
 /// The bounds of a range scan, with the inclusivity of each end.
@@ -4263,7 +4565,7 @@ fn is_scan_prefix(exprs: &[Expr], scan_order: &[Vec<usize>]) -> bool {
 /// Returns, for each column the walk is ordered by, every joined column that
 /// carries that value.
 ///
-/// **A non-covering seek carries its key twice** (task-1880 §10). The index
+/// **A non-covering seek carries its key twice.** The index
 /// stage holds the key columns it is ordered by, and the table fetch behind it
 /// holds the same values again under the table's own column numbers - and it is
 /// the table's numbers a select list resolves to, because that is what the

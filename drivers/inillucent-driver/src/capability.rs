@@ -22,10 +22,10 @@
 //!
 //! ## Where the gaps come from
 //!
-//! `_agent_output/task-1834-phase5/README.md` §13 enumerates them, each with a
-//! deliberately red qualification suite in `inillucent-compat` naming it. This
-//! table is that list in a form an application can read at run time. It is not
-//! a wish list and closing any of its gaps is Phase 6's work, not this crate's.
+//! Each gap traces to a deliberately red qualification suite in
+//! `inillucent-compat` naming it. This table is that list in a form an
+//! application can read at run time. It is not a wish list and closing any of
+//! its gaps is Phase 6's work, not this crate's.
 
 /// Whether the engine does a thing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -234,8 +234,8 @@ pub static CAPABILITIES: &[Capability] = &[
         note: "LEFT, RIGHT and FULL OUTER JOIN, with the ON condition evaluated per \
                candidate pair - which is what distinguishes no partner from a partner \
                that failed the condition. An earlier build answered them as inner joins \
-               and six rows came back as four nulls; task-1838 built the operator and \
-               21 join statements are graded against the pinned SQLite.",
+               and six rows came back as four nulls; the outer join operator was built \
+               afterward, and 21 join statements are graded against the pinned SQLite.",
         probe: Probe::Runs {
             setup: &[
                 "CREATE TABLE cap_ol (a INTEGER PRIMARY KEY)",
@@ -302,8 +302,7 @@ pub static CAPABILITIES: &[Capability] = &[
         support: Support::Yes,
         note: "ATTACH and DETACH work, with SQLite's name resolution. A connection is a set of \
                schemas, each with its own file, buffer pool and log; a transaction that writes \
-               two of them is committed through a super-journal, so it commits both or neither \
-               (task-1844).",
+               two of them is committed through a super-journal, so it commits both or neither.",
         probe: Probe::Runs {
             setup: &[],
             sql: "ATTACH DATABASE ':memory:' AS other",
@@ -313,7 +312,7 @@ pub static CAPABILITIES: &[Capability] = &[
         name: "temp_tables",
         support: Support::Yes,
         note: "Temporary tables, indexes, views and triggers, in a database that belongs to one \
-               connection and reaches no file (task-1844).",
+               connection and reaches no file.",
         probe: Probe::Runs {
             setup: &[],
             sql: "CREATE TEMP TABLE cap_temp (a INTEGER)",
@@ -322,8 +321,8 @@ pub static CAPABILITIES: &[Capability] = &[
     Capability {
         name: "strict_tables",
         support: Support::Yes,
-        note: "STRICT is enforced on write, after the column's affinity has been applied \
-               (task-1845): an integer written to a TEXT column becomes text and is \
+        note: "STRICT is enforced on write, after the column's affinity has been applied: \
+               an integer written to a TEXT column becomes text and is \
                accepted, and a value still of the wrong class is refused with \
                SQLITE_CONSTRAINT_DATATYPE.",
         probe: Probe::Refuses {

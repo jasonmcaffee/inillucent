@@ -132,7 +132,7 @@ impl Report {
 /// not SQLite's, a page that does not decode - each produces an error naming
 /// the file and what was wrong with it, and none of them produces a partial
 /// inventory that a later step could mistake for a whole one. That is the
-/// property the malformed half of the task-1781 corpus exists to check.
+/// property the malformed half of the migration test corpus exists to check.
 ///
 /// @param path - the SQLite database to read
 pub fn inventory(path: &Path) -> DbResult<SqliteInventory> {
@@ -170,8 +170,8 @@ pub fn inventory(path: &Path) -> DbResult<SqliteInventory> {
     // name them one by one, and the refusal was right while it stood: the new
     // engine could store a trigger and list it in `sqlite_schema` but could not
     // fire one, and a database whose invariants are maintained by nothing is a
-    // failure the owner finds out about from their data. task-1838 made
-    // triggers run, and every trigger case in `docs/feature-comparison.md` agrees
+    // failure the owner finds out about from their data. Triggers were made
+    // to fire, and every trigger case in `docs/feature-comparison.md` agrees
     // with SQLite - so since then the refusal has been the tool declining to do
     // something the engine can do, which is the *only* reason
     // `--sqlite-file` could not be pointed at an ordinary application's

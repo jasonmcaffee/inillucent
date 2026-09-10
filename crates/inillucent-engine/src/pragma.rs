@@ -22,8 +22,8 @@
 //!
 //! There used to be a third part, **Silent**, and there is not one any more -
 //! see the section below. `journal_mode` and `locking_mode` used to be in the
-//! second part and are both real switches now; the rollback journal and the
-//! file-locking protocol were built for task-1860, and `PRAGMA journal_mode`
+//! second part and are both real switches now, once the rollback journal and
+//! the file-locking protocol were built; `PRAGMA journal_mode`
 //! reports `delete` by default because the reference does and because the gate
 //! says it costs nothing.
 //!
@@ -31,7 +31,7 @@
 //! that exists and was given a value the engine cannot honour is **refused**,
 //! because accepting it would be answering a question wrongly.
 //!
-//! ## Nothing SQLite lists is silent any more (task-1859)
+//! ## Nothing SQLite lists is silent any more
 //!
 //! **Silence was the wrong third option.** Of the 67 pragmas SQLite's own
 //! `pragma_list` names, 21 answered here and *38 were accepted and answered
@@ -57,8 +57,8 @@
 //!   of these to what it already is succeeds; setting it to something else
 //!   refuses.
 //! - **Refused** - the subject does not exist here, and the refusal names it.
-//!   `docs/feature-comparison.md` measures what is left in this column, which as of
-//!   task-1860 is nothing on SQLite's own list.
+//!   `docs/feature-comparison.md` measures what is left in this column, which is
+//!   now nothing on SQLite's own list.
 
 use inillucent_base::error::refusal;
 use inillucent_base::DbResult;
@@ -291,16 +291,16 @@ impl ImportedDatabase {
     /// pages; the pool is sized in frames of the file's page size, so the two
     /// are the same number said differently.
     ///
-    /// **A larger cache than the pool was opened with grows the pool**
-    /// (task-1880 §9). It used to clamp: the pool's frames were allocated at
+    /// **A larger cache than the pool was opened with grows the pool.**
+    /// It used to clamp: the pool's frames were allocated at
     /// open, `set_budget` could only lower the ceiling inside them, and a
     /// caller asking for more read back what the engine had. The comment called
     /// that "the truth, not the request", and it was - but the request had no
     /// other way to be granted, and there is no flag on the shell or the
     /// command line either. So a two-gigabyte pool was reachable only by a
-    /// program that linked the crate and called `Database::open_with`, and
-    /// task-1876 could not reduce a crash it had just hit on a live database
-    /// because it could not reproduce the pool size the crash happened under.
+    /// program that linked the crate and called `Database::open_with`, and an
+    /// attempt to reduce a crash just hit on a live database could not
+    /// reproduce the pool size the crash happened under.
     ///
     /// Growing is cheap because a frame's buffer is allocated the first time
     /// that frame is claimed: what a large `cache_size` costs immediately is a
@@ -1469,8 +1469,8 @@ fn list_of<S: AsRef<str>>(column: &str, values: &[S]) -> Outcome {
 /// Every pragma name SQLite 3.53.4's own `pragma_list` reports.
 ///
 /// **The list is the contract.** A name here that this engine does not answer
-/// is refused by name rather than silently accepted, which is what task-1859
-/// Part C is about: 38 of these used to answer nothing at all. It is also what
+/// is refused by name rather than silently accepted - 38 of these used to
+/// answer nothing at all. It is also what
 /// `pragma_pragma_list` reports, so a tool can ask this engine what it knows
 /// about - and get the same set of names either engine would give, with the
 /// difference showing up as a refusal rather than as an absence.
@@ -1612,7 +1612,7 @@ fn collation_name(folded: &[u8]) -> Vec<u8> {
 /// where SQLite reports nineteen, while every one of these answered exactly as
 /// SQLite's does when it was called.
 ///
-/// task-1869: a caller that reads the register to decide what it may use was
+/// A caller that reads the register to decide what it may use was
 /// being told less than the truth, silently, and that is the one shape of
 /// difference this project treats as a defect rather than a choice.
 const ENGINE_MODULES: &[&str] = &[

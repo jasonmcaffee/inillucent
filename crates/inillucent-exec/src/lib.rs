@@ -8,7 +8,7 @@
 //! vectors. Sorting, hashing and aggregating copy, because they must, and the
 //! type system says so: those are the only places `OwnedDatum` appears.
 //!
-//! This is `tasks/task-1816-rearchitecture-tdd.md`'s `inillucent-exec`, which
+//! This is the rearchitecture design's `inillucent-exec`, which
 //! replaces `inillucent-vm`. What Phase 1 builds is the set the four
 //! `read.analytical` shapes need - scan, filter, project, simple and grouped
 //! aggregation, sort, top-n, distinct, limit - plus the closure compiler.
@@ -17,7 +17,7 @@
 //! ## Why there is no bytecode
 //!
 //! The old engine compiled a statement to a program and ran it one instruction
-//! per row. Fable 5.1's review of that loop (`_agent_output/task-1791/`) found
+//! per row. Fable 5.1's review of that loop found
 //! the cost was not in the dispatch at all - it was in what each instruction
 //! did per row: an `Arc` clone for the limits, a `Vec` allocation per text
 //! column, a `Value` clone into a register. A vectorised executor removes those

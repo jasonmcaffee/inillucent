@@ -640,10 +640,10 @@ fn render(day: f64, format: &[u8]) -> Value<'static> {
                 out.extend_from_slice(sixteen_significant(day).as_bytes());
             }
             // The space-padded hours, which were being echoed back as `%k` and
-            // `%l`. task-1856's lesson is written on this row of the ticket:
-            // fixing one member of a specifier family and assuming the rest is
-            // how the next three stay hidden, so the whole table was walked
-            // against the reference rather than the three that were reported.
+            // `%l`. Fixing one member of a specifier family and assuming the
+            // rest works is exactly how bugs in the others stay hidden, so the
+            // whole table was walked against the reference rather than just
+            // the ones that were reported.
             b'k' => {
                 let text = format!("{:2}", civil.hour);
                 out.extend_from_slice(text.as_bytes());
@@ -785,7 +785,7 @@ fn days_after_sunday(day: f64) -> i64 {
 /// the year's first such day are week 00 and the first is week 01. The previous
 /// implementation counted from the first *Sunday* for `%W` and was off by one
 /// besides, which put `strftime('%Y-%W','2024-03-01')` at `2024-08` against the
-/// reference's `2024-09` (task-1843).
+/// reference's `2024-09`.
 ///
 /// @param civil - the instant, as a date
 /// @param days_after_start - days since the week's first day

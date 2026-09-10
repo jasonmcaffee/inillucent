@@ -7,8 +7,8 @@
 //! both - that is a self-referential struct and Rust will not have it. A
 //! consumer in that position, which is every binding in a garbage-collected
 //! language and the C ABI too, holds the `Database` and connects per call. Every
-//! one of those was a *new session* until task-1848, and a session is what
-//! `temp.`, `ATTACH` and the connection pragmas are scoped to - so a
+//! one of those was a *new session* before [`Database::connect_as`] existed, and
+//! a session is what `temp.`, `ATTACH` and the connection pragmas are scoped to - so a
 //! `CREATE TEMP TABLE` typed into a query console was gone by the next
 //! statement, silently, with the console reporting success.
 //!

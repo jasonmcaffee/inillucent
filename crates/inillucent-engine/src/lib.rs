@@ -7,8 +7,8 @@
 //! `inillucent-vm`. A caller reaches the new engine by depending on this and
 //! on nothing else.
 //!
-//! It was `inillucent_compat::newengine` until task-1834, which is where Phases 1
-//! to 4 built and measured it: inside the test-and-bench crate, because until
+//! It was `inillucent_compat::newengine` through Phases 1 to 4, which built and
+//! measured it inside the test-and-bench crate, because until
 //! Phase 5 there was nothing above it to be the caller. That was the right
 //! place to build it and the wrong place to ship it - `inillucent-migrate` cannot
 //! depend on a test crate, and neither can a connection - so Phase 5 lifts it
@@ -340,7 +340,7 @@ pub struct ImportedDatabase {
     /// Whether the file lock is held between transactions.
     ///
     /// **`normal` is a real setting now, and the reason it can be reported
-    /// honestly.** Until task-1860 this engine took no file lock at all and
+    /// honestly.** Before that, this engine took no file lock at all and
     /// reported `exclusive`, which was the closest true description of "nobody
     /// else may touch this". Under `normal` the lock is taken for each
     /// transaction and released after it, so a second process may have the file
@@ -352,7 +352,7 @@ pub struct ImportedDatabase {
     /// The write-ahead log by default, because it is the faster of the two -
     /// one sync per commit against two. A rollback journal is what an
     /// application selects when it wants the database to be one file after a
-    /// clean close, which is the difference that made task-1860 build it.
+    /// clean close, which is the reason a rollback journal is supported at all.
     journal_mode: inillucent_pool::journal::JournalMode,
     /// Whether `PRAGMA ignore_check_constraints` has turned `CHECK` off.
     ///
@@ -521,7 +521,7 @@ pub struct ImportedDatabase {
     /// this map and the code in `write` that reads it. It is rebuilt whenever
     /// the catalog changes, from the `source=` argument the engine itself wrote
     /// when the index was created - so an index survives a close without a
-    /// second schema to keep in step with the first (task-1838 §7).
+    /// second schema to keep in step with the first.
     vector_indexes: HashMap<u32, Vec<VectorIndex>>,
     /// Where the last `CREATE INDEX` spent its time, in nanoseconds.
     ///
@@ -2556,7 +2556,7 @@ impl ImportedDatabase {
 
     /// Returns a fresh seed for the random built-ins.
     ///
-    /// **`random()` answered the same number for ever before task-1856**, in
+    /// **`random()` used to answer the same number for ever**, in
     /// every statement of every connection, because the new engine called the
     /// function library with a default context and the default seed is zero.
     /// One number is a legal answer to one call and a wrong answer to two, and
@@ -2770,11 +2770,11 @@ impl ImportedDatabase {
             // this connection when the object is dropped, and a rollback
             // restores the *rows* - the catalog row and every page of the tree,
             // which the undo log holds - but not the handle, because a handle
-            // is not a row. Before task-1845 the object came back into the
+            // is not a row. Before this was fixed, the object came back into the
             // schema with nothing behind it, the rollback was refused, and the
             // connection was then unable to read the table at all: `no layout
             // imported for root page 2147483648`. A refusal that damages the
-            // session is worse than one that does not (task-1843).
+            // session is worse than one that does not.
             //
             // The shape comes from the entry's own `CREATE` text, which is the
             // same place `define_table` derives it from - so a re-attached tree
@@ -3264,8 +3264,8 @@ impl ImportedDatabase {
     /// @param path - where the copy goes
     ///
     /// **Unreachable since `VACUUM INTO` took over producing a verified copy.**
-    /// Kept rather than deleted because task-1894 is not the ticket that
-    /// reviews it; it is listed for removal in that ticket's comments.
+    /// Kept rather than deleted for now; it is a candidate for removal in a
+    /// later cleanup pass.
     #[allow(dead_code)]
     pub(crate) fn backup_into(&mut self, path: &std::path::Path) -> DbResult<()> {
         self.checkpoint()?;
@@ -3414,20 +3414,21 @@ impl ImportedDatabase {
         // above is about one tree in isolation - its key order, its sibling
         // chain, its separators - and every one of them passes over a database
         // where an index holds two entries under one `UNIQUE` key, or an entry
-        // naming a row the table does not have. That state was reachable
-        // (task-1849) and `PRAGMA integrity_check` called it healthy, which is
-        // the detector task-1851 is about: the write path is where such a state
-        // is *created*, and there is more than one way in - an import, a crash
-        // recovery, a future write path, a bug like task-1849's.
+        // naming a row the table does not have. That state was reachable when
+        // `UPDATE` skipped a secondary `UNIQUE` index's own check, and
+        // `PRAGMA integrity_check` called it healthy - which is what this
+        // detector exists for: the write path is where such a state is
+        // *created*, and there is more than one way in - an import, a crash
+        // recovery, a future write path, a bug like that one.
         self.check_indexes_agree()
     }
 
     /// Writes one entry straight into an index tree, past the write path.
     ///
     /// **A repair and diagnosis hook, and the only way to test the integrity
-    /// checker.** Since task-1849 no SQL statement can leave an index holding
-    /// two entries under one `UNIQUE` key, or an entry naming a row the table
-    /// does not have - which is the point of that ticket, and it is also why a
+    /// checker.** Now that `UPDATE` enforces every `UNIQUE` index, no SQL
+    /// statement can leave an index holding two entries under one `UNIQUE` key,
+    /// or an entry naming a row the table does not have - which is also why a
     /// checker for those states cannot be exercised through SQL. A detector
     /// that has never been shown the damage it looks for is a detector nobody
     /// has tested.
@@ -3667,10 +3668,10 @@ impl ImportedDatabase {
         // `retire_segments_below` was written, documented as "called after a
         // checkpoint", and covered by six cases in `inillucent-wal`'s recovery
         // tests - and called from exactly one place, `inillucent-txn`'s engine,
-        // which is not the engine that ships. The consequence was measured on
-        // task-1843: the same 200,000 rows are 18.4 MB in SQLite and 179.1 MB
-        // here, 27.6 MB of data file and 151.5 MB of log segments that survive
-        // a checkpoint, a clean close, a reopen and a second checkpoint.
+        // which is not the engine that ships. The consequence was measured: the
+        // same 200,000 rows are 18.4 MB in SQLite and 179.1 MB here, 27.6 MB of
+        // data file and 151.5 MB of log segments that survive a checkpoint, a
+        // clean close, a reopen and a second checkpoint.
         //
         // It is safe to do here rather than only at close because the function
         // deletes a segment only when every record in it is below the
@@ -3736,8 +3737,8 @@ impl ImportedDatabase {
             // same trees.
             //
             // **This comment used to say the identifier was "this process's own
-            // bookkeeping and is not in the file", and that stopped being true
-            // in task-1834.** It was never quite true: every logical row record
+            // bookkeeping and is not in the file", and that is no longer true.**
+            // It was never quite true: every logical row record
             // in the log carries it, so a reader that numbered trees differently
             // would send recovery's records to the wrong tree. It is in the
             // catalog now, `open` reads it from there, and the lookup below
@@ -4578,7 +4579,7 @@ impl ImportedDatabase {
         // read once here and travel on the parameter set, which is the same
         // route a folded subquery takes and for the same reason: a plan is
         // cached by its text, and a value baked into the plan would answer with
-        // whatever was true when it was first compiled (task-1854).
+        // whatever was true when it was first compiled.
         params.set_context(self.scalar_context());
         params.set_recursive_triggers(self.recursive_triggers);
         // **The file lock, taken here and released here.** Both entry points -
@@ -5168,9 +5169,9 @@ impl ImportedDatabase {
         // algorithm is `ABORT`, which undoes *the statement* and keeps the
         // transaction, and an autocommit statement gets it too: this buffer
         // used to be `None` outside a transaction on the reasoning that
-        // "an autocommit statement cannot be abandoned", and that is what
-        // task-1850 was filed for - a four-row `INSERT` failing on its third
-        // row kept the first two and committed them.
+        // "an autocommit statement cannot be abandoned", and that was the bug -
+        // a four-row `INSERT` failing on its third row kept the first two and
+        // committed them.
         //
         // Outside a transaction it holds at most one statement: `write` clears
         // it when the statement ends, either way. Every schema's log appends to
@@ -5256,7 +5257,7 @@ impl ImportedDatabase {
             let wrote = view.logs.wrote();
             // Read on the failure path too, and for the same reason `wrote` is:
             // a statement that failed partway still wrote, and `OR FAIL` keeps
-            // it - so the counters have to see it (task-1854).
+            // it - so the counters have to see it.
             let counted = view.rows_written();
             (applied, wrote, counted)
         };
@@ -5765,7 +5766,7 @@ fn describe_statement(statement: &BoundStatement) -> &'static str {
 /// **Inline for a connection that has one file, which is almost every
 /// connection.** A `Vec` here is a heap allocation on every write, and
 /// `txn.batched` - two thousand statements inside one transaction - is where
-/// that shows: 6.17x to 6.77x on task-1838's four runs, 5.71x to 6.22x with the
+/// that shows: 6.17x to 6.77x across four measured runs, 5.71x to 6.22x with the
 /// allocation, on the same fixture, the same rounds and the same machine. It is
 /// the only measurable cost the multi-schema write path had, and this is it
 /// removed rather than argued away.
@@ -6316,7 +6317,7 @@ fn let_the_pool_ask_the_log(pool: &Pool, wal: &std::rc::Rc<Wal>) {
 /// here, because a second decoder is a second opinion about which column is
 /// which, and the columns are what the format is.
 ///
-/// ## `seen` is a catalog, not a list of the rows that went past (task-1880 §7)
+/// ## `seen` is a catalog, not a list of the rows that went past
 ///
 /// It used to be the second, and that made a database unopenable after an
 /// ordinary migration. `ALTER TABLE chunk ADD COLUMN embedded_at INTEGER`
@@ -6533,8 +6534,8 @@ fn shape_of(
             // keeps one entry per object, so there is only ever one - but a
             // caller that hands this a catalog holding a superseded definition
             // as well should get the definition that superseded it, because the
-            // shape derived from the older one is what task-1880 §7 made an
-            // unopenable database out of.
+            // shape derived from the older one is what made a database
+            // unopenable after an `ALTER TABLE`.
             let owner = catalog.iter().rev().find(|held| {
                 held.kind == ObjectKind::Table && held.name.to_ascii_lowercase() == folded
             })?;
@@ -6580,7 +6581,7 @@ fn shape_of(
 fn identifier_of(entry: &SchemaEntry) -> DbResult<u32> {
     if entry.tree_id == 0 {
         return Err(refusal(format!(
-            "the catalog row for {} carries no tree identifier; the database predates              task-1834 and has to be rebuilt",
+            "the catalog row for {} carries no tree identifier; the database was created before catalog rows carried one and has to be rebuilt",
             String::from_utf8_lossy(&entry.name)
         )));
     }
@@ -6812,8 +6813,8 @@ pub fn logical_row(
 /// wrong. This is that one rule, written where the comparison needs it.
 ///
 /// It is guarded by measurement rather than by comment: the migration
-/// acceptance runs every task-1781 fixture, and its digests fail the moment
-/// this and `classify_at` disagree about any value in any of them.
+/// acceptance runs every SQLite feature-parity fixture, and its digests fail
+/// the moment this and `classify_at` disagree about any value in any of them.
 ///
 /// @param physical - the column's layout
 /// @param value - the value as the source held it
@@ -7264,8 +7265,8 @@ fn index_shape(table: &TableInfo, index: &IndexInfo, root: u32) -> (Vec<ColumnSp
         // **A `DESC` key column is stored descending**, which is what SQLite
         // stores and what makes the two engines read a `DESC` index in the same
         // order - the trailing rowid stays ascending, so ties inside a
-        // descending column come out ascending in both. It was flattened to
-        // ascending until task-1860, and the visible cost was that `ORDER BY k`
+        // descending column come out ascending in both. It used to be flattened
+        // to ascending, and the visible cost was that `ORDER BY k`
         // over a `DESC` index answered its ties in the opposite order to
         // SQLite's, on every one of the seven statements `ordering.rs` names.
         let Some(declared) = column.column.map(usize::from) else {
@@ -7553,8 +7554,8 @@ fn load_schema(
     // it was this process's own bookkeeping. It is not: every logical row
     // record in the log carries it, so a reader that numbered trees
     // differently from the writer would hand recovery's records to the wrong
-    // tree - a wrong answer rather than a refusal. task-1834 put it in the
-    // catalog; this reads it back.
+    // tree - a wrong answer rather than a refusal. The identifier is stored in
+    // the catalog now; this reads it back.
     //
     // `next_root` is set past the largest so a `CREATE TABLE` after this
     // open cannot collide with one already in the file, which a counter that
@@ -7955,7 +7956,7 @@ struct OpenedFile {
 ///
 /// **A page's LSN has to be a position in the stream currently beside the file,
 /// and after a recovery whose chain was short of what the pages reflect it is
-/// not** (task-1885). Recovery applies a record to a page only when the page's
+/// not.** Recovery applies a record to a page only when the page's
 /// stamp is below the record's, so a page stamped by a stream that no longer
 /// exists silently swallows every later write to it - the record is skipped,
 /// the file stays structurally intact, and nothing anywhere says a committed row
@@ -8030,7 +8031,7 @@ fn open_file(
     // out of it, which is what makes this an open rather than a reader of
     // whatever the last checkpoint happened to leave behind.
     //
-    // It could not be done until task-1834 put a tree's identifier in the
+    // It could not be done before a tree's identifier was stored in the
     // catalog. `TreeRows` is keyed by that identifier, every logical row record
     // carries it, and until then the writer's numbering and a reader's were
     // different - so a replay would have put rows into the wrong tree, which is
@@ -8081,7 +8082,7 @@ fn open_file(
     // every page write are both behind `&mut Database`, and one record cannot
     // hold two mutable borrows of the same object.
     //
-    // **In log order** (task-1888). Claiming every allocation and then
+    // **In log order.** Claiming every allocation and then
     // releasing every free gave the frees the last word, so a page freed and
     // allocated again inside the replayed range came back free while it was
     // live, and the next allocation handed it to a second owner. See
@@ -8101,7 +8102,7 @@ fn open_file(
     // as a table created after an open vanishing on the one after that -
     // `no such table: second` from a file that had just been told to make it.
     //
-    // **And above every stamp the file carries** (task-1885). See
+    // **And above every stamp the file carries.** See
     // `resume_above_every_stamp`.
     let (next_lsn, sequence) = resume_above_every_stamp(&mut database, &outcome)?;
     let wal = std::rc::Rc::new(Wal::open(

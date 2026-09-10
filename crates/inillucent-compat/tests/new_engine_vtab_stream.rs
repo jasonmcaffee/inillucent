@@ -5,9 +5,9 @@
 //! that cannot stop the scan below it is not a slow query, it is one that does
 //! not return: `generate_series` with no `stop` constraint is 4,294,967,295
 //! rows, and `TreeCatalog::virtual_rows` materialised the whole scan into a
-//! `Vec` before any operator above it ran. task-1843 measured three shapes past
-//! a 25-second timeout, one run holding about 1.2 cores and a growing working
-//! set for ten minutes.
+//! `Vec` before any operator above it ran. Three shapes ran past a 25-second
+//! timeout, one run holding about 1.2 cores and a growing working set for ten
+//! minutes.
 //!
 //! ## Why every case here carries a deadline
 //!
@@ -87,7 +87,7 @@ fn answer_within(tag: &str, setup: &[&str], sql: &str) -> (Vec<String>, Duration
 
 /// A `LIMIT` stops an unbounded series.
 ///
-/// The case from task-1843, and the reason Part C exists. `generate_series(1)`
+/// The reason Part C exists. `generate_series(1)`
 /// with no `stop` is every integer up to `u32::MAX`; three rows of it have to
 /// come back at once.
 #[test]
@@ -106,8 +106,8 @@ fn a_limit_stops_an_unbounded_series() {
 
 /// The same, through `CREATE VIRTUAL TABLE`.
 ///
-/// This is the shape that could be reached *before* task-1845, because the
-/// eponymous form did not exist - so it is the case that isolates the
+/// This is the shape that could be reached *before* the eponymous form
+/// existed - so it is the case that isolates the
 /// materialisation defect from the binding one. On the tree before this change
 /// it runs past the deadline; the eponymous cases above merely report
 /// `no such table`.
@@ -148,9 +148,9 @@ fn a_bounded_series_answers_immediately() {
 /// The eponymous form exists at all, for each of the three shapes.
 ///
 /// `FROM generate_series(1,10)`, `FROM json_each(...)` and
-/// `FROM pragma_table_info('t')` were all `no such table` before task-1845,
-/// which also left `json_each` unreachable from SQL by any route - its module
-/// refuses `CREATE VIRTUAL TABLE` outright.
+/// `FROM pragma_table_info('t')` were all `no such table` before the eponymous
+/// forms were added, which also left `json_each` unreachable from SQL by any
+/// route - its module refuses `CREATE VIRTUAL TABLE` outright.
 #[test]
 fn the_eponymous_forms_bind() {
     let (series, _) = answer_within(

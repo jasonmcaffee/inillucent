@@ -629,7 +629,7 @@ fn render_markdown(
          above, so the two arms are given the same memory by construction.\n\n",
     );
     out.push_str(
-        "That is *not* automatic for the vectorised engine, and task-1816's Phase 1 numbers were \
+        "That is *not* automatic for the vectorised engine, and the Phase 1 numbers were \
          inflated because it was not: the prototype's trees were fully resident while SQLite ran \
          at the plan's 2 MB cache. Phase 2's gate (`inillucent-readgate`) closes it by deriving \
          SQLite's `cache_size` from the byte size of inillucent's own buffer pool, so `--frames` \

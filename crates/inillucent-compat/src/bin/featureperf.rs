@@ -62,7 +62,7 @@ impl Measurement {
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let out = flag(&arguments, "--out")
-        .unwrap_or_else(|| workspace_root().join("_agent_output/task-1789/perf"));
+        .unwrap_or_else(|| workspace_root().join("_agent_output/featureperf"));
     match run(&out) {
         Ok(message) => {
             println!("{message}");
@@ -352,7 +352,7 @@ fn cli_family() -> Result<Vec<Measurement>, String> {
     let Some(ours) = shell_binary("inillucent-shell") else {
         return Ok(Vec::new());
     };
-    let area = workspace_root().join("_agent_output/task-1789/perf");
+    let area = workspace_root().join("_agent_output/featureperf");
     std::fs::create_dir_all(&area).map_err(|error| error.to_string())?;
     let rows = 5_000u32;
     let csv = area.join("import.csv");

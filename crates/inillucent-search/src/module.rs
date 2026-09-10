@@ -288,10 +288,10 @@ impl SearchTable {
 
     /// Folds the delta log into a new immutable generation, at commit.
     ///
-    /// **The graph is not rebuilt here (task-1894, M8).** The built generation
+    /// **The graph is not rebuilt here.** The built generation
     /// is loaded and each pending entry is inserted into it, so the graph work
     /// this commit pays is one insert per delta entry rather than one insert
-    /// per row in the table. Before M8 this path built the whole graph in one
+    /// per row in the table. This path used to build the whole graph in one
     /// pass, which made an ordinary `INSERT` pay nine and a half minutes on the
     /// 598,560 chunk corpus this engine is deployed on - work an application
     /// cannot schedule and cannot interrupt.

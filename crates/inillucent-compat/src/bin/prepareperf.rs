@@ -6,7 +6,7 @@
 //!
 //! ## What this measures and why it is on the old engine
 //!
-//! `task-1816-rearchitecture-tdd.md` puts a plan cache in the new engine's
+//! The rearchitecture design puts a plan cache in the new engine's
 //! prepare path and asks for it measured on the existing front end first, "this
 //! proves the cache independently of the new storage". So the arms are the
 //! shipped engine and the shipped engine with `Levers::PLAN_CACHE` switched

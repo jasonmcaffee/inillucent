@@ -33,10 +33,10 @@ pub trait Host {
     /// Returns the connection as a module is allowed to see it.
     /// The module services this host offers: pragmas, and the page size.
     ///
-    /// **Boxed rather than borrowed**, and that is what task-1894 changed. A
+    /// **Boxed rather than borrowed.** A
     /// `&mut dyn` has to point at something the host already owns, and a
-    /// `Pager` owns no such field - so `inillucent-ext` carried an
-    /// `impl Host for Pager` to make one, which is one of the two edges that
+    /// `Pager` owns no such field - so `inillucent-ext` used to carry an
+    /// `impl Host for Pager` to make one, which was one of the two edges that
     /// made a crate the *new* engine links depend on the retired storage
     /// engine. A box costs one allocation per statement that opens a virtual
     /// table, which is a cost nothing measures.
@@ -103,8 +103,8 @@ impl Host for Pager {
 
 /// A pager's module services: no pragmas, and no page size worth reporting.
 ///
-/// **It exists because `inillucent-ext` stopped knowing what a `Pager` is**
-/// (task-1894, M3). `impl inillucent_ext::vtab::Host for Pager` lived in that
+/// **It exists because `inillucent-ext` stopped knowing what a `Pager` is.**
+/// `impl inillucent_ext::vtab::Host for Pager` lived in that
 /// crate, and it was one of the two edges that made a crate the *new* engine
 /// links depend on the retired storage engine. A pager on its own is only the
 /// machine's own test host, so the honest implementation is the default one.

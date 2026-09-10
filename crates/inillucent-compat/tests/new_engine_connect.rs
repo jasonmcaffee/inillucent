@@ -22,7 +22,7 @@ use inillucent_tree::datum::OwnedDatum;
 ///
 /// @param name - the test's name
 fn scratch(name: &str) -> PathBuf {
-    let area = workspace_root().join("target/scratch/task-1834/connect");
+    let area = workspace_root().join("target/scratch/connect");
     let _ = std::fs::create_dir_all(&area);
     let path = area.join(format!("{name}.rdb"));
     let _ = std::fs::remove_file(&path);
@@ -155,14 +155,14 @@ fn a_new_database_is_usable_immediately() {
 
 /// `PRAGMA cache_size` grows the pool, rather than being accepted and clamped.
 ///
-/// **What this is a regression test for (task-1880 §9).** The pool's frames were
+/// **What this is a regression test for.** The pool's frames were
 /// allocated at open and nothing could add to them, so `PRAGMA cache_size` could
 /// only lower a ceiling inside what was already there: setting it larger read
 /// back the default, and neither the shell nor the command line has a flag for
 /// the pool either. A two-gigabyte pool was therefore reachable only from a
 /// program that linked the crate and called `Database::open_with` - which is
-/// what stopped task-1876 reducing a crash it had already hit on a live
-/// database, because it could not reproduce the pool size the crash ran under.
+/// what stopped a crash already hit on a live database from being reduced,
+/// because the pool size it ran under could not be reproduced.
 ///
 /// Both spellings are checked, because they are the two SQLite has and they
 /// take different arithmetic: a negative number is kibibytes and a positive one

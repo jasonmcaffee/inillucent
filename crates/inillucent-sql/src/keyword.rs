@@ -28,8 +28,8 @@
 //! `JOIN_KW` is `CROSS FULL INNER LEFT NATURAL OUTER RIGHT`, and neither those
 //! seven nor `INDEXED` is in the fallback set - which is why transcribing
 //! `%fallback` alone was not enough. `CREATE TABLE pairs (left TEXT)` is a
-//! schema SQLite writes and accepts, and it was refused here as a syntax error
-//! until task-1847; the *reason* it was refused is that a single flat flag
+//! schema SQLite writes and accepts, and it was refused here as a syntax error;
+//! the *reason* it was refused is that a single flat flag
 //! cannot express a rule the grammar states twice. So the second set is data
 //! too, as [`Keyword::JOIN_KEYWORDS`] and [`Keyword::may_be_name`], and the
 //! parser asks whichever question the position calls for.

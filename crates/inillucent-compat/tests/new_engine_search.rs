@@ -30,7 +30,7 @@ use inillucent_session::Connection;
 use inillucent_tree::datum::OwnedDatum;
 
 /// Where this suite's scratch databases live.
-const AREA: &str = "task-1834/new-engine-search";
+const AREA: &str = "new-engine-search";
 
 /// The corpus, which is `tests/search.rs`'s so the two suites grade one thing.
 const CORPUS: [(i64, &str, &str); 5] = [
@@ -64,7 +64,7 @@ const CORPUS: [(i64, &str, &str); 5] = [
 /// The queries both stores are asked, in the order they are asked.
 ///
 /// **They project declared columns rather than `rowid`.** The new engine
-/// refuses a `rowid` read off a virtual table - deliberately, and task-1833's
+/// refuses a `rowid` read off a virtual table - deliberately, and
 /// `a_modules_rowid_and_rank_are_answered` asserts the refusal - so a
 /// comparison that selected one would be measuring that known gap on every row
 /// instead of measuring the store. The gap is real and is named in the write-up;

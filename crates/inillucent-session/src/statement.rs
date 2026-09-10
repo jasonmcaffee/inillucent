@@ -644,9 +644,9 @@ pub(crate) struct PlanKey {
 
 /// Compiled programs kept for reuse, most recently used first.
 ///
-/// `task-1816-rearchitecture-tdd.md` puts a plan cache in the new engine's
-/// prepare path and asks for the mechanism proved on the existing one first.
-/// This is that: a bounded, invalidating, exactly-keyed cache of `Compiled`,
+/// The new engine's rearchitecture plan puts a plan cache in its own prepare
+/// path, proved on this existing one first. This is that: a bounded,
+/// invalidating, exactly-keyed cache of `Compiled`,
 /// whose value is an `Arc<Program>` and a little metadata, so a hit is a
 /// refcount bump rather than a parse, a bind, a plan and a compile.
 ///

@@ -131,7 +131,7 @@ struct ConnState {
     /// **This is what makes the handle a connection rather than a name for the
     /// database.** Every entry point below borrows the `Database` for the
     /// length of one call, because `Connection` borrows it and a C handle
-    /// cannot hold a borrow - so before task-1848 each call opened a *new*
+    /// cannot hold a borrow - so each call used to open a *new*
     /// session, and everything a session scopes was gone by the next one: a
     /// `CREATE TEMP TABLE` did not survive the statement that made it, an
     /// `ATTACH` did not outlive its own call, and a connection pragma had to be

@@ -1442,7 +1442,7 @@ fn the_policy_decides_what_survives_a_power_loss() {
 /// A page stamped by a stream this log does not contain is refused by name.
 ///
 /// **The page-LSN rule is only sound while a page's stamp is a position in the
-/// stream beside the file** (task-1885). A record at LSN *L* occupies
+/// stream beside the file.** A record at LSN *L* occupies
 /// `[L, L + length)`, so every stamp a healthy file carries is strictly below
 /// `valid_end`. A stamp at or above it reads as "the page already has this" for
 /// every record there will ever be, so every later write to that page is

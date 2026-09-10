@@ -10,7 +10,7 @@ use inillucent_legacy::{Database, Value};
 
 /// Returns a scratch path nothing else is using.
 fn scratch(name: &str) -> std::path::PathBuf {
-    let directory = workspace_root().join("_agent_output/task-1786/dml");
+    let directory = workspace_root().join("_agent_output/dml");
     let _ = std::fs::create_dir_all(&directory);
     let path = directory.join(name);
     for suffix in ["", "-journal"] {

@@ -163,7 +163,7 @@ pub struct ScalarCall {
     /// Five built-ins answer a question about the connection rather than about
     /// their arguments, and the new engine used to hand them a default context
     /// - so `changes()`, `total_changes()` and `last_insert_rowid()` answered
-    /// `0` for ever and `random()` answered one constant (task-1854).
+    /// `0` for ever and `random()` answered one constant.
     ///
     /// Every field of it is a constant for the length of the statement except
     /// the seed, which is in `stream` because it has to move per call.
@@ -272,7 +272,6 @@ pub struct JsonCall {
     /// that blob back into a tree was the cost the first cache left behind: the
     /// gate's `extension.json` ran the same two literals four thousand times
     /// and paid a full document decode and a path parse on every one.
-    /// task-1838 §4.
     ///
     /// One lock rather than two, because the two are read together on every
     /// call and a second lock is a second uncontended atomic for nothing.
@@ -461,7 +460,7 @@ impl JsonCall {
         // one of those about the blob, so `json_valid('{}')` was 0 where SQLite
         // says 1 and `json_valid('{}', 4)` was 1 where SQLite says 0 - wrong in
         // both directions, from an optimisation that is invisible everywhere
-        // else (task-1843).
+        // else.
         if marks.first() == Some(&false) && self.func != JsonFunc::Valid {
             let replacement = values.first().and_then(|first| self.binary(first));
             if let (Some(blob), Some(slot)) = (replacement, values.first_mut()) {

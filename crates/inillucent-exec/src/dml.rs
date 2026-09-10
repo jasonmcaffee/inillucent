@@ -106,7 +106,7 @@ pub struct Changes {
     /// module cannot see the write. Reporting what was stored and what was
     /// removed lets the *engine* apply both to the module after the write and
     /// inside the same transaction, which is the one place that holds both
-    /// halves (task-1838 §7).
+    /// halves.
     ///
     /// Empty unless [`WriteTarget::captures`] says the table has such an index,
     /// because the images are clones and every other statement would pay for
@@ -205,7 +205,7 @@ pub trait WriteTarget {
     /// the count has to survive a failure.** A statement that fails partway is
     /// an `Err` and the `Changes` it had built is gone - and `OR FAIL` keeps
     /// what it wrote, so SQLite reports `1 | 4` where this engine reported
-    /// `0 | 0` (task-1854). The target outlives the error: it is the thing the
+    /// `0 | 0`. The target outlives the error: it is the thing the
     /// write was performed against, so the tally is read off it afterwards on
     /// either path.
     ///
@@ -710,8 +710,7 @@ pub fn insert_at(
     // only lets a view be written when it has an `INSTEAD OF` trigger for the
     // event; the statement's job is to build `NEW` and fire it, and nothing is
     // stored. Reaching the ordinary path with a view asked for the layout of a
-    // table with no tree, which is where `no layout imported for v` came from
-    // (task-1843).
+    // table with no tree, which is where `no layout imported for v` came from.
     if table.kind == TableKind::View {
         return insert_into_view(statement, target, params, supplied, depth);
     }
@@ -727,7 +726,7 @@ pub fn insert_at(
     // What the table's declarations require of every row, compiled once: the
     // affinities that convert a value on the way in, the `STRICT` type classes,
     // and the `CHECK` predicates. All three were collected by the catalog and
-    // consulted by nobody until task-1845.
+    // used to be consulted by nobody.
     let declarations = WriteDeclarations::compile(
         table,
         &layout,
@@ -820,8 +819,7 @@ pub fn insert_at(
         // `ON CONFLICT ... DO NOTHING` says nothing about one: SQLite raises
         // there, and reading the upsert here skipped the row instead - a
         // constraint silently not enforced on the ordinary
-        // `INSERT ... ON CONFLICT DO NOTHING` (found while measuring
-        // task-1853).
+        // `INSERT ... ON CONFLICT DO NOTHING`.
         let declared = resolution_of(statement.on_conflict);
         if !declarations_are_met(table, &layout, &declarations, &space, &mut image, declared)? {
             continue;
@@ -1237,7 +1235,7 @@ fn write_one(
     // consulted here is the table's own key - which is the only one there is,
     // since this arm is entered only when the table has no `UNIQUE` index. A
     // key declared `ON CONFLICT IGNORE` or `ON CONFLICT REPLACE` has an arm to
-    // run and must take the general path below (task-1853).
+    // run and must take the general path below.
     // **And only when no `ON CONFLICT` clause was written at all.** Which arm a
     // conflict selects is decided from the constraint that fired, and that is
     // not known here - so a statement with any clause takes the general path
@@ -1302,7 +1300,7 @@ fn write_one(
             // how much of what has been written goes back - which this layer
             // does not own and so says rather than does. An untagged error
             // reads as `ABORT`, so the tag is what makes the other two
-            // different from it (task-1850).
+            // different from it.
             Resolution::Raise => {
                 let unwind = unwind_of(statement.on_conflict.or(clash.conflict));
                 return Err(clash.error.or_unwind(unwind));
@@ -1336,7 +1334,7 @@ enum Resolution {
 /// **A constraint carries its own algorithm, and it is not only about the
 /// unwind.** `a TEXT UNIQUE ON CONFLICT IGNORE` means every statement that
 /// collides on `a` skips the row, with no `OR IGNORE` written anywhere - and
-/// this engine raised instead, refusing four rows SQLite writes (task-1853).
+/// this engine used to raise instead, refusing four rows SQLite writes.
 ///
 /// The precedence is SQLite's, innermost clause last: an `ON CONFLICT ... DO
 /// UPDATE` beats everything, because it is attached to the *statement* and to a
@@ -1428,8 +1426,7 @@ struct Conflict {
     /// **Read for the *unwind* and not for the resolution.** A constraint may
     /// say `ON CONFLICT ROLLBACK` or `ON CONFLICT FAIL`, which is `OR ROLLBACK`
     /// and `OR FAIL` written on the constraint instead of on the statement, and
-    /// those decide how much of the statement goes back - which is what
-    /// task-1850 is about. `ON CONFLICT IGNORE` and `ON CONFLICT REPLACE`
+    /// those decide how much of the statement goes back. `ON CONFLICT IGNORE` and `ON CONFLICT REPLACE`
     /// written here decide which *arm* runs instead, and are still ignored:
     /// that is a separate defect with its own ticket, and this field is what it
     /// will read.
@@ -1464,8 +1461,8 @@ fn unwind_of(action: Option<ConflictAction>) -> Unwind {
 /// clause, because the rowid alias is the column, so this is where a rowid
 /// collision's algorithm is written down.
 ///
-/// It is the `PRIMARY KEY`'s clause and not the `NOT NULL`'s, which is what
-/// this read until task-1856: a rowid collision was resolved by whatever a
+/// It is the `PRIMARY KEY`'s clause and not the `NOT NULL`'s. This used to read
+/// the wrong one: a rowid collision was resolved by whatever a
 /// constraint about missing values happened to say, and by nothing at all in
 /// the ordinary case where the column declares no `NOT NULL`.
 ///
@@ -1484,7 +1481,7 @@ fn rowid_conflict(table: &TableInfo) -> Option<ConflictAction> {
 ///
 /// **An `UPDATE` passes the row it is replacing**, and that changes three
 /// things, because a row must not collide with itself and cannot always be
-/// recognised by the key it is about to have (task-1849):
+/// recognised by the key it is about to have:
 ///
 /// - the table's own key is probed only when it moved, which is what the
 ///   `UPDATE` path used to decide *on its own* and is the whole of the check it
@@ -1559,9 +1556,9 @@ fn conflicting_row(
         // here so an `UPDATE` of a column no unique index holds costs two entry
         // builds and no descent.
         //
-        // task-1849 wrote this as entry equality alone and said, at this line,
-        // that it would need the predicate once partial indexes existed. They
-        // exist now, and it was right: "the entry did not move" is the correct
+        // This was originally written as entry equality alone, with a note at
+        // this line that it would need the predicate once partial indexes
+        // existed. They exist now, and the note was right: "the entry did not move" is the correct
         // test only while every row is in every index. A row that changed no
         // indexed value but crossed the predicate boundary has an **identical
         // entry and a different claim** - it is entering the index, and
@@ -1704,7 +1701,7 @@ fn upsert_row(
     // **The update arm is an update, and had the same hole `UPDATE` did.** The
     // row it writes can collide with a *third* row on another `UNIQUE` index -
     // `ON CONFLICT(a) DO UPDATE SET b = ...` onto a `b` somebody else holds -
-    // and it was written with no check at all (task-1849). It raises whatever
+    // and it used to be written with no check at all. It raises whatever
     // the statement's own `OR` algorithm says, because SQLite's `DO UPDATE` arm
     // resolves ABORT: `INSERT OR IGNORE` and `INSERT OR REPLACE` both report
     // the constraint here rather than skipping or replacing.
@@ -1715,7 +1712,7 @@ fn upsert_row(
     // **`replace_row` on both paths, because the arm can move the key.**
     // `DO UPDATE SET a = 9` over an `INTEGER PRIMARY KEY` is a row that moves,
     // and the unread path wrote the new one with `place_row` and left the old
-    // one behind - the table then held both (task-1849). The stand-in image is
+    // one behind - the table then held both. The stand-in image is
     // enough for `replace_row`: it carries the key the row is moving *from*,
     // which is all a removal needs, and that path has no index to maintain.
     replace_row(table, layout, target, &before, &after, indexes)?;
@@ -1960,8 +1957,8 @@ pub fn update_at_cached(
         // was always checked. What was not is that an `UPDATE` leaving the
         // rowid alone can still collide with *another* row on a secondary
         // `UNIQUE` index - `UPDATE t SET a = 'x'` where some other row already
-        // holds `'x'` - and the engine performed it, leaving two entries under
-        // one key and a table disagreeing with its own constraint (task-1849).
+        // holds `'x'` - and the engine used to perform it, leaving two entries
+        // under one key and a table disagreeing with its own constraint.
         // `conflicting_row` knows which row is asking, so it reports neither
         // this row's own key nor an index whose entry did not move.
         //
@@ -1979,7 +1976,7 @@ pub fn update_at_cached(
         )? {
             // The constraint's own clause, when the statement wrote none -
             // `a TEXT UNIQUE ON CONFLICT REPLACE` replaces under a plain
-            // `UPDATE`, which is task-1853's second case on the update path.
+            // `UPDATE` too.
             match resolution_of(statement.on_conflict.or(clash.conflict)) {
                 Resolution::Skip => {
                     skipped = true;
@@ -2031,7 +2028,7 @@ pub fn update_at_cached(
         // nothing has run between the first read and here, and the second read
         // was a whole row copied out of the tree and thrown away: `txn.large`
         // is two thousand updates in one transaction and paid for two thousand
-        // of them (task-1838 §4).
+        // of them.
         let resolution = resolution_of(statement.on_conflict);
         if !declarations_are_met(table, &layout, declarations, space, &mut after, resolution)? {
             continue;
@@ -2581,8 +2578,7 @@ fn place_row(
     // new one to the delta area, so a leaf compacted every `DELTA_LIMIT`
     // updates and the log carried a full row each time. It applies when exactly
     // one non-key column differs and the tree can write it where it lies; when
-    // it cannot, `put` is still the answer and nothing has been written
-    // (task-1838 §4).
+    // it cannot, `put` is still the answer and nothing has been written.
     if let Some(previous) = before {
         // **A row whose bytes do not change is not written at all.**
         // `only_change` used to answer `None` both when *nothing* differed and
@@ -2804,7 +2800,7 @@ fn index_entry(
 /// `u2 ON t(b)`, and a row taking both, answers `UNIQUE constraint failed: t.b`
 /// - and `t.a` when the two are declared the other way round. Iterating
 /// declaration-first named the wrong constraint on `INSERT` as well as
-/// `UPDATE`, and the message is the part an application matches on (task-1849).
+/// `UPDATE`, and the message is the part an application matches on.
 ///
 /// The table's own key is not in here and does not need to be: both engines
 /// check it before any index.
@@ -2815,10 +2811,11 @@ fn unique_indexes(table: &TableInfo) -> impl Iterator<Item = (usize, &IndexInfo)
         .indexes
         .iter()
         // **`enumerate` before `rev`, and the order matters more than it
-        // looks.** task-1849 reversed this so the constraint named on a
-        // collision is the last-declared index, which is what SQLite reports.
-        // task-1846 enumerates it so each index carries its position in
-        // `table.indexes` - the number the binder used when it bound the
+        // looks.** The reversal makes the constraint named on a
+        // collision the last-declared index, which is what SQLite reports.
+        // The enumeration was added later, once partial indexes existed, so
+        // each index carries its position in `table.indexes` - the number the
+        // binder used when it bound the
         // partial predicates, and the number `IndexExprs` looks them up by.
         // Reversing first would renumber them, and `holds` would then consult
         // **another index's** predicate: silently, and only on a table with two
@@ -2855,8 +2852,8 @@ fn key_of(layout: &SourceLayout, row: &[OwnedDatum]) -> Vec<OwnedDatum> {
 
 /// Refuses a row a column's declaration does not allow.
 ///
-/// **The engine accepted one until task-1838 §7 tried to write a vector into a
-/// typed column and found nothing checking anything.** `INSERT INTO t(a) VALUES
+/// **The engine used to accept one - an attempt to write a vector into a
+/// typed column found nothing checking anything.** `INSERT INTO t(a) VALUES
 /// (NULL)` on `a INTEGER NOT NULL` stored the NULL and answered success, which
 /// is the third silent wrong answer of the kind Part 1 was about and the worst
 /// of them: an application that declares a column `NOT NULL` and reads it back
@@ -2876,8 +2873,8 @@ fn key_of(layout: &SourceLayout, row: &[OwnedDatum]) -> Vec<OwnedDatum> {
 /// rule for a `NOT NULL` violation resolved as `REPLACE` is to store the
 /// column's `DEFAULT`, and to fall back to `ABORT` only when the column
 /// declares none - so `UPDATE OR REPLACE t SET c = NULL` on
-/// `c TEXT NOT NULL DEFAULT 'd'` stores `'d'`, where this engine raised
-/// (task-1853). That is why the row is taken by reference *mutably*: the check
+/// `c TEXT NOT NULL DEFAULT 'd'` stores `'d'`, where this engine used to raise.
+/// That is why the row is taken by reference *mutably*: the check
 /// is also the place the substitution happens, since it is the only place that
 /// knows which column was empty.
 ///
@@ -2904,7 +2901,7 @@ fn declarations_are_met(
         // **A `VECTOR(N)` column holds N floats or nothing.** The width is the
         // only thing the declaration promises that the storage does not already
         // enforce, and a vector of the wrong width is not a slow query, it is a
-        // distance that silently answers NULL for ever (task-1838 §7).
+        // distance that silently answers NULL for ever.
         if let Some(width) = column.vector_dimensions() {
             let wrong = match &value {
                 Some(OwnedDatum::Blob(bytes)) => bytes.len() != width.saturating_mul(4),
@@ -3070,7 +3067,7 @@ fn delete_view(
 /// comparing was two allocations and a clone per key column on every `UPDATE` -
 /// twice, because `replace_row` asked the same question again. The gate's
 /// `txn.large` is two thousand updates in one transaction and paid for all of
-/// it (task-1838 §4).
+/// it.
 ///
 /// @param layout - the table tree's layout
 /// @param before - the row as it was
@@ -3204,7 +3201,7 @@ fn highest_rowid(target: &mut dyn WriteTarget, table: &TableInfo) -> DbResult<i6
 /// Every insert into a table whose primary key is not INTEGER generates a rowid
 /// and so comes through here, which made a table with a TEXT primary key unable
 /// to hold a second wide row at all. That is how `inillucent migrate` failed on
-/// the first table of a real 5.8 GB PostgreSQL database (task-1876), where
+/// the first table of a real 5.8 GB PostgreSQL database, where
 /// `attachment.id` is a UUID and `attachment.extracted_text` reaches 1.9 MB.
 ///
 /// It is wrong for cost as well: reading a leaf of nine hundred rows to look at

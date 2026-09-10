@@ -592,7 +592,7 @@ pub fn run(plan: &Plan, source: &mut dyn RemoteSource) -> DbResult<Report> {
 /// operator chose. It completed on the machine it was measured on. On a smaller
 /// one it would have failed nine minutes into a migration that had already done
 /// all of its work, and the staged file would have been thrown away for a
-/// shortage of memory rather than a difference in the data (task-1880 §5).
+/// shortage of memory rather than a difference in the data.
 ///
 /// Two thousand rows is a page of about 19 MB at that row width and about 2 MB
 /// at an ordinary one, and it is a page rather than a row because a statement
@@ -965,7 +965,7 @@ mod tests {
     }
     /// A paged verifying read digests exactly what one whole-table read does.
     ///
-    /// **What this is a regression test for (task-1880 §5).** The verify used to
+    /// **What this is a regression test for.** The verify used to
     /// be `connection.query("SELECT * FROM t")`, and this engine's statements
     /// materialise - so checking `chunk_embedding`, 601,862 rows of 9,513-byte
     /// text, held 4.7 GB resident at once. The read is now paged by rowid, and

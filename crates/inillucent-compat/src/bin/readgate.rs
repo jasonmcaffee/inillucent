@@ -42,9 +42,9 @@
 /// subsystem and is compiled as one translation unit; a Rust workspace measured
 /// on the platform allocator is being measured on a build configuration rather
 /// than on an engine, which is the same reasoning that fixed fat LTO and one
-/// codegen unit in the release profile. task-1838 §5 measured the Windows CRT
-/// heap at 59% of a trivial compile and this size-classed free list at 17%
-/// overall, which is why Phase 3's Part E names it the cheapest first move.
+/// codegen unit in the release profile. The Windows C runtime heap was
+/// measured at 59% of a trivial compile and this size-classed free list at
+/// 17% overall, which is why Phase 3's Part E names it the cheapest first move.
 #[global_allocator]
 static ALLOCATOR: inillucent_alloc::Pooled = inillucent_alloc::Pooled;
 
@@ -405,7 +405,7 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         })
         .collect();
 
-    // The fifth fairness question, and the one task-1819 found open: both arms
+    // The fifth fairness question: both arms
     // must reuse the program they prepared. SQLite's has always done - it
     // resets, re-binds and steps a VDBE program compiled once - and ours
     // rebuilt its operator chain on every execution, which `probeprofile`
@@ -869,7 +869,7 @@ fn measure_point_probe(database: &ImportedDatabase, rows: u32) -> Result<Option<
 /// rowid alone does the identical descent and leaf search and allocates
 /// nothing, so the difference between the two numbers is the carrying.
 ///
-/// task-1834 measured this because the large fixture read 566.5 ns and
+/// This was measured because the large fixture read 566.5 ns and
 /// 1761.8 ns on two runs of one binary and the standing explanation was that
 /// the fixture had outgrown the 128 MiB pool. It has not: at 384 MiB the spread
 /// is the same and the descent is stable to 1.5%.

@@ -28,7 +28,7 @@ use inillucent_tree::datum::OwnedDatum;
 ///
 /// @param name - the test's name, which names its file
 fn fixture(name: &str) -> Database {
-    let area = workspace_root().join("target/scratch/task-1834/subquery");
+    let area = workspace_root().join("target/scratch/subquery");
     let _ = std::fs::create_dir_all(&area);
     let path = area.join(format!("{name}.rdb"));
     let _ = std::fs::remove_file(&path);
@@ -268,10 +268,11 @@ fn a_nested_subquery_is_answered_from_the_inside_out() {
 /// A correlated subquery is answered per row, not folded and not refused.
 ///
 /// It reads a column of the row being tested, so it has no single value and the
-/// fold cannot stand in for it - which is why it was refused by name until
-/// task-1838. `inillucent-exec`'s `correlate` computes it beside the row, one
-/// column per block: the block is planned **once** with its outer references
-/// rewritten into parameters, and each row binds them and runs it.
+/// fold cannot stand in for it - which is why it was refused by name before
+/// correlated subqueries were supported. `inillucent-exec`'s `correlate`
+/// computes it beside the row, one column per block: the block is planned
+/// **once** with its outer references rewritten into parameters, and each row
+/// binds them and runs it.
 ///
 /// Both directions are asserted, because a correlated `EXISTS` that answered
 /// the same thing for every row would look right on a fixture where every row
@@ -420,7 +421,7 @@ fn a_subquery_in_a_values_list_and_in_a_set_is_folded() {
 
 /// A compound query is usable as a derived table, for all four set operators.
 ///
-/// **What this is a regression test for (task-1880 §19).** `SELECT ... FROM (a
+/// **What this is a regression test for.** `SELECT ... FROM (a
 /// UNION ALL b)` came back `the new engine's physical pass does not handle a
 /// compound query yet`, and the refusal was in the wrong place: the executor has
 /// answered compounds at the top level all along, and a derived table only wants
@@ -501,7 +502,7 @@ fn a_compound_query_is_usable_as_a_derived_table() {
 /// `sqlite_sequence` can be written, which is how an AUTOINCREMENT counter is
 /// reset.
 ///
-/// **What this is a regression test for (task-1880 §17).** Every table whose
+/// **What this is a regression test for.** Every table whose
 /// name begins with `sqlite_` was refused as a write target, which is right for
 /// the schema and wrong for the two SQLite itself lets an application write.
 /// `UPDATE sqlite_sequence SET seq = 0 WHERE name = 't'` is the documented way
@@ -513,7 +514,7 @@ fn a_compound_query_is_usable_as_a_derived_table() {
 /// fail the first.
 #[test]
 fn sqlite_sequence_can_be_written_and_the_counter_follows() {
-    let area = workspace_root().join("target/scratch/task-1880/sequence");
+    let area = workspace_root().join("target/scratch/sequence");
     let _ = std::fs::create_dir_all(&area);
     let path = area.join("sequence.rdb");
     let _ = std::fs::remove_file(&path);

@@ -11,8 +11,7 @@
 //! It is written to fail in **both** directions. A construct that starts
 //! working fails here and asks to be moved, which is how the remaining work
 //! gets counted down; a construct that stops working fails here too. Either way
-//! the inventory in `_agent_output/task-1834-phase5/README.md` is wrong and
-//! says so.
+//! the recorded inventory of what still needs to move is wrong and says so.
 //!
 //! The refusals are all *named* - each says which construct it is and that the
 //! engine does not run it yet - so nothing here is a silent wrong answer. That
@@ -42,7 +41,7 @@ use Answers::{NotYet, Yes};
 ///
 /// @param name - the case's name, which names its file
 fn fresh(name: &str) -> Database {
-    let area = workspace_root().join("target/scratch/task-1834/surface");
+    let area = workspace_root().join("target/scratch/surface");
     let _ = std::fs::create_dir_all(&area);
     let path = area.join(format!("{name}.rdb"));
     let _ = std::fs::remove_file(&path);
@@ -159,7 +158,7 @@ const SURFACE: &[(&str, &str, Answers)] = &[
     ("pragma.database_list", "PRAGMA database_list", Yes),
     // The *table-valued* form, which is what a tool writes when it wants to
     // join against a pragma. `.databases` in the shell is written this way.
-    // Answered since task-1845: the eponymous form binds, and a `pragma_*`
+    // The eponymous form binds, and a `pragma_*`
     // function's rows come from the same `pragma_rows` the directive runs.
     (
         "pragma.table_valued",
@@ -203,10 +202,10 @@ const SURFACE: &[(&str, &str, Answers)] = &[
         Yes,
     ),
     ("attach", "ATTACH DATABASE ':memory:' AS other", Yes),
-    // task-1859 Part H: `VACUUM` folds the log into the file and `VACUUM INTO`
+    // `VACUUM` folds the log into the file and `VACUUM INTO`
     // writes a verified copy, which is how a backup is taken.
     ("vacuum", "VACUUM", Yes),
-    // task-1860: plain `EXPLAIN` answers. It lists the operator chain the
+    // Plain `EXPLAIN` answers. It lists the operator chain the
     // statement runs, in the eight columns SQLite lists opcodes in - see
     // `new_engine_explain::plain_explain_lists_the_chain_in_the_references_columns`.
     ("explain", "EXPLAIN SELECT a FROM t", Yes),
@@ -363,9 +362,9 @@ fn a_views_columns_are_reported() {
         "the view itself does not resolve"
     );
     // **They are reported now.** `PRAGMA table_info` on a view answered nothing
-    // at all, so an ORM reading it could not see a view's shape; task-1859
-    // Part C binds the view's `SELECT` and answers its columns, which is what
-    // the reference does.
+    // at all, so an ORM reading it could not see a view's shape; it now binds
+    // the view's `SELECT` and answers its columns, which is what the
+    // reference does.
     assert_eq!(
         connection
             .query("PRAGMA table_info(loud)")

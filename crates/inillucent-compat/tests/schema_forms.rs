@@ -1033,8 +1033,8 @@ fn without_rowid_round_trips_through_sqlite() {
 
 /// `VACUUM`, which rebuilds the database and gives the free space back.
 ///
-/// **It defragments, and this test proves it by measuring.** Until task-1860
-/// the statement was a checkpoint: the pages a `DELETE` freed went back to the
+/// **It defragments, and this test proves it by measuring.** The statement
+/// used to be a checkpoint: the pages a `DELETE` freed went back to the
 /// free map and were handed out again, the file never shrank, and this comment
 /// said so. It is now a logical rebuild - every table recreated, every row
 /// re-inserted in key order, every index built over rows that are already

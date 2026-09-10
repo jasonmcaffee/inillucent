@@ -952,7 +952,7 @@ pub struct BoundSource {
     /// The table, view or virtual table.
     /// The table this source reads, shared with the catalog rather than copied.
     ///
-    /// **It was a `TableInfo` by value until task-1834.** Every table reference
+    /// **It used to be a `TableInfo` by value.** Every table reference
     /// in every statement therefore deep-cloned the catalog's entry - two name
     /// vectors, a `ColumnInfo` per column each with its own heap fields, the
     /// full `CREATE` text, and an `IndexInfo` per index with its own column
@@ -4838,7 +4838,7 @@ fn integer_literal(text: &[u8]) -> BoundExpr {
 /// refusal that has to name a column or count something cannot be one of those,
 /// so it carries the whole sentence.
 ///
-/// **`Refused`, not `Unexpected`, since task-1869.** It used to be reported as
+/// **`Refused`, not `Unexpected`.** It used to be reported as
 /// an unexpected-input failure carrying the sentence, on the reasoning that
 /// this is the shape SQLite's own messages take - and it is not.
 /// `ParseErrorKind::Unexpected` renders as `near "X": syntax error`, so
@@ -4926,7 +4926,7 @@ fn ambiguous_column(name: &[u8], span: Span) -> ParseError {
 /// A call to one of these outside `OVER (...)` is a misuse, not an absence, and
 /// SQLite says so. Reporting it as "no such function" made an audit that
 /// enumerated by calling names count eleven functions as missing that are
-/// present and byte-identical over a real frame. task-1869.
+/// present and byte-identical over a real frame.
 const WINDOW_ONLY: &[&[u8]] = &[
     b"cume_dist",
     b"dense_rank",
@@ -4947,7 +4947,7 @@ const WINDOW_ONLY: &[&[u8]] = &[
 /// argument and are answered by the module's cursor; called anywhere else there
 /// is no cursor to ask. SQLite refuses those with "unable to use function X in
 /// the requested context", and so does this - the twelve of them were the rest
-/// of the twenty-three names the audit read as missing. task-1869.
+/// of the twenty-three names the audit read as missing.
 const CONTEXT_ONLY: &[&[u8]] = &[
     b"bm25",
     b"fts5",

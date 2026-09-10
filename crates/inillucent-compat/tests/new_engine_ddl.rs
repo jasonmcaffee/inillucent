@@ -297,11 +297,11 @@ fn dropping_takes_the_object_and_its_indexes() {
 /// **The trigger left this campaign for a while and is back.** It was here
 /// originally and it passed - the engine stored the statement byte for byte and
 /// the digest of `sqlite_schema` agreed on both sides - but what the campaign
-/// could not see is that the trigger then never fired, so task-1834 made
-/// `CREATE TRIGGER` a refusal rather than a pretence and took it out. The
-/// firing point exists now, so storage is comparable again *and* means
-/// something: `new_engine_surface.rs` asserts that it runs, and
-/// `foreign_keys.rs` grades the same mechanism against the pinned shell.
+/// could not see is that the trigger then never fired, so `CREATE TRIGGER`
+/// was made a refusal rather than a pretence and taken out. The firing point
+/// exists now, so storage is comparable again *and* means something:
+/// `new_engine_surface.rs` asserts that it runs, and `foreign_keys.rs` grades
+/// the same mechanism against the pinned shell.
 #[test]
 fn a_view_and_a_trigger_are_stored_as_written() {
     let Some(mut pair) = pair("view-trigger") else {

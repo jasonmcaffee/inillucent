@@ -112,8 +112,8 @@ fn syntax_errors_point_at_the_offending_byte() {
 /// a stack frame per nesting level.
 #[test]
 fn adversarial_depth_is_refused_rather_than_crashing() {
-    // **`ParserDepth`, not `ExprDepth`.** The two were one number until
-    // task-1860 split them: the parser's own recursion is charged to the first
+    // **`ParserDepth`, not `ExprDepth`.** The two were one number until they
+    // were split: the parser's own recursion is charged to the first
     // and the depth of the expression *tree* to the second, because a redundant
     // parenthesis is a level of one and not of the other. This test is about
     // the parser refusing rather than growing a frame per nesting level, so it

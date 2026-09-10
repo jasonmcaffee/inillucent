@@ -47,8 +47,8 @@ impl PageId {
 
 /// The page sizes a database may be created with.
 ///
-/// The default is fixed by measurement in Phase 1 rather than by preference;
-/// see `_agent_output/task-1816-phase1/`.
+/// The default is fixed by measurement rather than by preference: 16, 32, and
+/// 64 KiB were measured against `read.analytical`, and 32 KiB won.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct PageSize(u32);
 

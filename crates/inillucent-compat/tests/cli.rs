@@ -16,7 +16,7 @@ use inillucent_compat::workspace_root;
 
 /// Where this suite's scratch databases live.
 fn area() -> PathBuf {
-    let path = workspace_root().join("_agent_output/task-1789/cli");
+    let path = workspace_root().join("_agent_output/cli");
     let _ = std::fs::create_dir_all(&path);
     path
 }
@@ -309,12 +309,12 @@ fn widths_match() {
 ///
 /// **The shell is one connection, not one per statement.** `CREATE TEMP TABLE`
 /// reported success through `inillucent-shell` and the very next line answered
-/// `no such table` (task-1843), because `Shell::collect` and `Shell::execute`
+/// `no such table`, because `Shell::collect` and `Shell::execute`
 /// each called `Database::connect` and got a fresh session - and a temporary
 /// object belongs to a session.
 ///
-/// task-1844 fixed exactly this shape *inside* the engine, and its tests drive
-/// `Connection` directly, so the shell's own path was not covered. It is
+/// This exact shape was already fixed *inside* the engine, and its tests
+/// drive `Connection` directly, so the shell's own path was not covered. It is
 /// covered here, where a whole script is byte-compared against `sqlite3`, so
 /// the class of defect cannot come back unseen.
 #[test]
@@ -380,7 +380,8 @@ SELECT count(*) FROM t;
 /// The table-valued forms answer the same bytes through the shell.
 ///
 /// `FROM generate_series(1,10)`, `FROM json_each(...)` and
-/// `FROM pragma_table_info('t')` were all `no such table` before task-1845.
+/// `FROM pragma_table_info('t')` were all `no such table` before the shell
+/// learned to run table-valued forms.
 #[test]
 fn the_table_valued_functions_match() {
     check(
@@ -398,7 +399,7 @@ fn the_table_valued_functions_match() {
 ///
 /// `json_valid('{}')` answered 0 against 1, `strftime('%Y-%W','2024-03-01')`
 /// answered `2024-08` against `2024-09`, and `printf('%05.2f',3.14159)`
-/// answered `3.14` against `03.14` (task-1843). The neighbouring formats are
+/// answered `3.14` against `03.14`. The neighbouring formats are
 /// here too, because fixing three and assuming the rest is how the next three
 /// stay hidden.
 #[test]

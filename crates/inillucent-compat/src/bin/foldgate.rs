@@ -8,7 +8,7 @@
 //!
 //! ## What it is for
 //!
-//! task-1894's M8 is the finding that an incremental vector insert rebuilt the
+//! M8 is the finding that an incremental vector insert rebuilt the
 //! complete HNSW graph. It did: automatic compaction ran a single pass over
 //! every row inside the committing transaction, and `docs/roadmap.md` recorded
 //! the cost - 132.6 s over 185,078 passages, about nine and a half minutes over
@@ -485,10 +485,7 @@ fn run_one(
 
 /// Returns where this gate's databases live.
 fn area() -> PathBuf {
-    let directory = workspace_root()
-        .join("_agent_output")
-        .join("task-1894-m8")
-        .join("foldgate");
+    let directory = workspace_root().join("_agent_output").join("foldgate");
     let _ = std::fs::create_dir_all(&directory);
     directory
 }

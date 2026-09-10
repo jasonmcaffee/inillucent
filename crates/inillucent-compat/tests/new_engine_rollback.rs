@@ -36,7 +36,7 @@ use inillucent_tree::datum::OwnedDatum;
 ///
 /// @param name - the test's name, which names its file
 fn fixture(name: &str) -> Database {
-    let area = workspace_root().join("target/scratch/task-1834/rollback");
+    let area = workspace_root().join("target/scratch/rollback");
     let _ = std::fs::create_dir_all(&area);
     let path = area.join(format!("{name}.rdb"));
     let _ = std::fs::remove_file(&path);
@@ -249,7 +249,7 @@ fn a_table_created_in_an_abandoned_transaction_is_gone() {
 /// only the pages would pass every test above and fail this one.
 #[test]
 fn a_rollback_survives_the_next_open() {
-    let area = workspace_root().join("target/scratch/task-1834/rollback");
+    let area = workspace_root().join("target/scratch/rollback");
     let _ = std::fs::create_dir_all(&area);
     let path = area.join("reopened.rdb");
     let _ = std::fs::remove_file(&path);

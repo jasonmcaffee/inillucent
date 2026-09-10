@@ -9,9 +9,9 @@
 //!
 //! ## Why the engine has one at all
 //!
-//! Because allocation is where a compile goes. task-1838 §5 measured **25 heap
-//! allocations per trivial compile, with the Windows CRT heap at 59% of the
-//! time**, and measured a size-classed free list at **17% overall** on the same
+//! Because allocation is where a compile goes. A trivial compile was measured
+//! at **25 heap allocations, with the Windows C runtime heap at 59% of the
+//! time**, and a size-classed free list at **17% overall** on the same
 //! plan - which is why Phase 3's Part E names it the cheapest first move rather
 //! than one of the several structural changes beside it. The same shape is
 //! visible outside compilation: `CREATE INDEX` over a hundred thousand rows
@@ -78,7 +78,7 @@ const CLASSES: usize = LARGEST / GRAIN + 1;
 /// amount and returns the rest, so the process's footprint is bounded by the
 /// classes rather than by the workload.
 ///
-/// **Bytes rather than blocks, since task-1869.** The cap was a thousand and
+/// **Bytes rather than blocks.** The cap was a thousand and
 /// twenty-four *blocks* per class - a fixed count over classes whose sizes
 /// differ by two hundred and fifty-six times, so the same number meant sixteen
 /// kilobytes in the smallest class and four megabytes in the largest. The

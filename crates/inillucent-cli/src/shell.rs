@@ -36,11 +36,11 @@ pub struct Opened {
     /// session's own database, and a `SELECT` on a *different* session cannot
     /// see it. Calling `Database::connect` per statement opened a new session
     /// each time, so the shell reported success on the `CREATE` and then
-    /// `no such table: t` on the very next line (task-1843).
+    /// `no such table: t` on the very next line.
     ///
-    /// task-1844 fixed exactly this shape inside the engine and added
-    /// `connect_as` for callers that hand out a connection per call over one
-    /// logical connection; the shell is one of those and was not converted.
+    /// The engine was fixed to add `connect_as` for callers that hand out a
+    /// connection per call over one logical connection; the shell is one of
+    /// those and was not converted.
     session: u64,
     /// Where the database came from, for `.databases` and the prompt.
     path: String,
@@ -133,7 +133,7 @@ pub struct Shell {
     /// handler prints nothing unless `--limit` is given, and this engine's VM
     /// has no per-opcode callback to hang one on. Keeping the state means a
     /// script written for the reference sets it and runs on rather than
-    /// stopping at "unknown command". task-1869.
+    /// stopping at "unknown command".
     pub progress_interval: u64,
     /// The `--limit` `.progress` was given.
     pub progress_limit: u64,
@@ -176,7 +176,7 @@ pub struct Shell {
     /// **Not the same as `captured`, and deliberately outside it.** `captured`
     /// belongs to `.testcase`/`.check`, which compare one command's output
     /// against an expected digest; this belongs to a caller running the shell
-    /// as a subroutine - task-1836's `run` command and the MCP server behind it
+    /// as a subroutine - the `run` command and the MCP server behind it
     /// - and has to still be collecting while a `.testcase` inside the script it
     /// was given is doing its own thing. So `say` checks the testcase first and
     /// this second, and a script that uses both nests the way it reads.
@@ -215,7 +215,7 @@ pub struct Failure {
     pub compiling: bool,
     /// The engine's own error, kept so a caller can classify it.
     ///
-    /// **The message is not the classification.** task-1836's command layer
+    /// **The message is not the classification.** The command layer
     /// has to tell a caller whether a statement was refused because the engine
     /// has not built the construct - the driver's `unsupported` - or because it
     /// was mistyped, and `drivers/README.md` argues at length for why folding
@@ -668,8 +668,8 @@ impl Shell {
     /// shell's own `.parameter` table binds `:name` and `@name` markers, which
     /// is what a person typing a script wants; a command arriving over MCP or
     /// off a command line carries an ordered array and means `?1`, `?2`, ... .
-    /// Going through the named table for those was the first thing task-1836
-    /// tried and it bound nothing at all: the engine reports a numbered marker
+    /// Going through the named table for those was the first thing tried,
+    /// and it bound nothing at all: the engine reports a numbered marker
     /// under a name that is not the text `?1`, so every lookup missed and every
     /// value silently arrived as NULL. Binding by the index the parser assigned
     /// cannot miss.
@@ -1378,7 +1378,7 @@ mod trailing_statement_tests {
     ///
     /// `exec` and `query` are documented as taking one, and used to run the first of several and
     /// report success - which is how `inillucent exec "<twenty CREATE TABLEs>"` produced a database
-    /// with one table in it and printed `ok. 0 rows changed.` (task-1876). These are the cases the
+    /// with one table in it and printed `ok. 0 rows changed.` These are the cases the
     /// refusal must not fire on, and the one it must.
     #[test]
     fn a_second_statement_is_recognised_and_punctuation_is_not() {

@@ -58,7 +58,7 @@ fn workspace_root() -> PathBuf {
 /// @param variant - which build this is
 fn area(variant: &str) -> PathBuf {
     let path = workspace_root()
-        .join("_agent_output/task-1894/capi-conformance")
+        .join("_agent_output/capi-conformance")
         .join(variant);
     let _ = std::fs::create_dir_all(&path);
     path

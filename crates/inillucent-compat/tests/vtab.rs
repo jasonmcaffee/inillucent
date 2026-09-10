@@ -18,7 +18,7 @@
 use inillucent_compat::differential::{compare, compare_queries, start_inillucent, Step};
 
 /// Where this suite's scratch databases live.
-const AREA: &str = "task-1789/vtab";
+const AREA: &str = "vtab";
 
 /// Runs a list of queries against both engines, failing on any difference.
 fn check(name: &str, queries: &[&'static str]) {

@@ -1,6 +1,6 @@
 manifest 1
 tool inillucent-migrate
-source.path C:/jason/dev/inillucent/_agent_output/task-1790/migrate/release/index
+source.path C:/jason/dev/inillucent/_agent_output/migrate/release/index
 source.generation g000000000001
 source.file config.bin 697 30d01bbc0668357f54d3e93050bca520f2b0a6a413ff37435e2719f5d7e35ff8
 source.file graph.bin 353284 556a322b426ff1faba8521c36945dd346680ee94bdba53b8fbcbf29ffd895302
@@ -52,4 +52,4 @@ verify reopen ok 17 checks pass again on a fresh open
 stage verify
 destination.published C:/jason/dev/inillucent/_agent_output/measurements/migrate/release/corpus.db
 stage publish
-source.retained C:/jason/dev/inillucent/_agent_output/task-1790/migrate/release/index
+source.retained C:/jason/dev/inillucent/_agent_output/migrate/release/index

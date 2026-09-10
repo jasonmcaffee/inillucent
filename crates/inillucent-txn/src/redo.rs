@@ -306,7 +306,7 @@ fn decode_all(bytes: &[u8], most: usize) -> DbResult<Vec<Datum<'_>>> {
 /// Returns a tree's key collations and directions, for a leaf a replay locates in.
 ///
 /// **The write path parses every leaf `with_collations` and `with_directions`
-/// from the tree, and the replay used to parse it with neither** (task-1880 §7).
+/// from the tree, and the replay used to parse it with neither.**
 /// A `LeafRef` with no collations compares under BINARY and a `LeafRef` with no
 /// directions searches as though every key column ascends, so `locate` on a
 /// leaf whose key column is `COLLATE NOCASE` or `DESC` looked in the wrong place
@@ -652,8 +652,8 @@ impl<'a, R: RowRedo> Applier<'a, R> {
     /// record's application would mean holding two mutable borrows of the same
     /// object.
     ///
-    /// **One list in log order, not an allocated list and a freed list**
-    /// (task-1888). Two lists made the caller apply every claim and then every
+    /// **One list in log order, not an allocated list and a freed list.**
+    /// Two lists made the caller apply every claim and then every
     /// release, so a page freed and then allocated again inside the replayed
     /// range ended the recovery marked **free** while it was live - the frees
     /// had the last word whatever order the log put them in. The next

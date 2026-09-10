@@ -41,7 +41,7 @@
 //! twenty per cent. Something that fails one of these is broken rather than
 //! slow, which is why it is allowed to be a test at all.
 //!
-//! ## When a guard here flaps, count something instead (task-1884)
+//! ## When a guard here flaps, count something instead
 //!
 //! This file used to say that a flapping guard should be widened, or moved to a
 //! gate. It was widened - `one_transaction_beats_many` went from 4 to 2 - and it
@@ -158,8 +158,8 @@ fn measure(rounds: u32, mut work: impl FnMut()) -> Duration {
 
 /// Returns the median of `rounds` ratios, each taken from one run of each arm.
 ///
-/// **Why a median of paired rounds rather than one reading of each arm**
-/// (task-1884). Timing arm A, then timing arm B, and dividing gives a number
+/// **Why a median of paired rounds rather than one reading of each arm.**
+/// Timing arm A, then timing arm B, and dividing gives a number
 /// that moves with whatever else the machine was doing between the two - and it
 /// moves asymmetrically, because a scheduler takes more from an arm that is
 /// spending its time on the processor than from one that is waiting on a file.
@@ -275,11 +275,12 @@ fn an_index_beats_a_scan() {
 
 /// One transaction around many writes costs far less work than one each.
 ///
-/// **This guard used to be a stopwatch, and task-1884 is why it is not one
-/// now.** It timed the batched arm, then timed the autocommit arm, and asserted
-/// a ratio between the two readings. That ratio measures the machine as much as
-/// the engine, and it measures the two arms unequally: the batched arm spends
-/// its time on the processor, which a busy scheduler takes away from it, and
+/// **This guard used to be a stopwatch, and it is not one now because that
+/// stopwatch flapped under load.** It timed the batched arm, then timed the
+/// autocommit arm, and asserted a ratio between the two readings. That ratio
+/// measures the machine as much as the engine, and it measures the two arms
+/// unequally: the batched arm spends its time on the processor, which a busy
+/// scheduler takes away from it, and
 /// the autocommit arm spends its time waiting on file syncs, which it does not.
 /// So the threshold had already been walked from 4 down to 2 after the guard
 /// flapped at 3.5x, the next step down was 1 - where it would have asserted
@@ -560,7 +561,7 @@ fn a_full_scan_is_linear_enough_to_finish() {
 /// A keyset page costs the same wherever it starts, rather than growing with
 /// what is left behind it.
 ///
-/// **What this is a regression test for (task-1880 §10).** `WHERE key > ?
+/// **What this is a regression test for.** `WHERE key > ?
 /// ORDER BY key LIMIT n` is how anything walks a table it cannot hold in
 /// memory, and it was doing work proportional to the rows *after* the key
 /// rather than to the limit. So the cost **fell** as the key advanced, and a

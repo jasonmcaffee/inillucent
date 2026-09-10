@@ -18,7 +18,7 @@ use inillucent_compat::workspace_root;
 
 /// Where the probe's build artefacts go.
 fn area() -> PathBuf {
-    workspace_root().join("_agent_output/task-1789/capi")
+    workspace_root().join("_agent_output/capi")
 }
 
 /// Returns the directory holding the pinned SQLite sources, if it is there.

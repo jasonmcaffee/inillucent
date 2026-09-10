@@ -234,10 +234,10 @@ pub fn read_extent(pool: &Pool, reference: ExtentRef) -> DbResult<Vec<u8>> {
         let guard = pool.fetch(page)?;
         // **The page number, because the message alone does not identify one.**
         // A page whose kind is no longer `BlobExtent` is a page something else
-        // has taken over, and the first question anybody asks is which page it
-        // was: the answer is what tied task-1888's failing read to the root
-        // page a `CREATE TABLE` had just been handed. Reading it out of the
-        // reference costs nothing on the path that succeeds.
+        // has taken over, and naming the page number is what tied a failing
+        // read to a `CREATE TABLE`'s root page landing on a page a recovery bug
+        // had left mismarked as free while it was still live. Reading it out of
+        // the reference costs nothing on the path that succeeds.
         let (body, next) = extent::read_page(guard.bytes()).map_err(|error| {
             corrupt(format!(
                 "{} at page {}, which is page {} of an extent starting at {} and {} bytes long",
@@ -292,7 +292,7 @@ pub fn write_extent(
 ) -> DbResult<ExtentRef> {
     let page_size = database.page_size();
     let pages = extent::pages_needed(value.len() as u64, page_size).max(1);
-    // **A value that fits inside one page shares one** (task-1880 §4). A run is
+    // **A value that fits inside one page shares one.** A run is
     // whole pages, so a value one byte over the spill threshold used to cost a
     // whole page: 4,200 bytes took 32,768, and the band from there to a full
     // page is where extracted text, JSON payloads and rendered vectors live.
@@ -398,7 +398,7 @@ pub fn free_extent(
     reference: ExtentRef,
 ) -> DbResult<()> {
     // **A packed value gives back a slot, and the page only when it is the
-    // last** (task-1880 §4). The bytes stay where they are: compacting the page
+    // last.** The bytes stay where they are: compacting the page
     // would move a value whose reference is in some other leaf, and the space a
     // dead slot holds is bounded by the page it is on.
     if let Some(slot) = reference.slot {
@@ -769,7 +769,7 @@ impl PagedTree {
     ///
     /// **Two passes over the sizing arithmetic, and one leaf image in memory.**
     /// The builder allocates its leaves as one contiguous run, so it has to know
-    /// the leaf count before it writes the first one. Until task-1869 it found
+    /// the leaf count before it writes the first one. It used to find
     /// that out by packing every leaf into a `Vec<Vec<u8>>` and taking its
     /// length, which is a whole second copy of the tree held live for the sake
     /// of one integer: 6.2 MiB of a `CREATE INDEX` whose entire resident cost
@@ -2306,8 +2306,8 @@ impl PagedTree {
         // The delta area, which Phase 2 refused and Phase 3 reads. The loop is
         // guarded by `delta_count`, which is zero on every leaf that has not
         // been written to - so a clean tree pays one comparison against zero
-        // per probe and nothing else, which is what keeps `point.rowid` where
-        // task-1819 left it.
+        // per probe and nothing else, which is what keeps `point.rowid` at the
+        // 300 ns the read gate measured.
         // **As many columns as the probe supplied, not as many as the key has.**
         // A probe may be a *prefix*: an equality on the leading column of a
         // two-column index is one value against a key of `(score, rowid)`, and

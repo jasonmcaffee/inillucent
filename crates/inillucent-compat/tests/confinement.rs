@@ -3,7 +3,7 @@
 //! Invariant: **a process started with `--root DIR` cannot read, create,
 //! replace, attach, back up, restore, import, export or migrate a file that
 //! resolves outside `DIR`.** The check this suite guards used to compare
-//! normalised path text with `starts_with`, and task-1892 reproduced two ways
+//! normalised path text with `starts_with`, and there were two ways
 //! past it: a Windows junction placed below the root, whose text is inside and
 //! whose target is not, and `ATTACH DATABASE` with an absolute path, which
 //! never reached the check at all because it arrives inside a SQL statement
@@ -30,7 +30,7 @@ use inillucent_compat::workspace_root;
 /// @param name - the case's own directory, so two cases never share a root
 fn area(name: &str) -> PathBuf {
     let path = workspace_root()
-        .join("_agent_output/task-1894/confinement")
+        .join("_agent_output/confinement")
         .join(name);
     let _ = std::fs::remove_dir_all(&path);
     let _ = std::fs::create_dir_all(&path);
@@ -128,7 +128,7 @@ fn link_directory(link: &Path, target: &Path) -> bool {
 
 /// A junction below the root that points outside it does not widen the root.
 ///
-/// This is the reproduction from task-1892, inverted into a test. The read
+/// This is the junction reproduction above, inverted into a test. The read
 /// succeeded before this change: `root/escape/secret.rdb` normalises to a path
 /// under `root`, and `starts_with` said yes while the file system opened a
 /// database in a completely different directory.
@@ -268,7 +268,7 @@ fn a_path_inside_the_root_is_admitted() {
 
 /// `ATTACH DATABASE` with an absolute path outside the root is refused.
 ///
-/// The second reproduction from task-1892. The SQL path never reached the
+/// The second of the two reproductions above. The SQL path never reached the
 /// command surface's check, so a confined server could attach anything on the
 /// disk and read it with a qualified name.
 #[test]

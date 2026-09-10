@@ -140,7 +140,7 @@ fn measure(
 /// thirty-two-way join exists here to measure *planning*, and rows in the
 /// dimensions would turn it into a measurement of the cartesian product.
 fn build_database(root: &Path) -> Result<PathBuf, String> {
-    let directory = root.join("_agent_output/task-1787-perf");
+    let directory = root.join("_agent_output/planperf");
     std::fs::create_dir_all(&directory).map_err(|reason| reason.to_string())?;
     let path = directory.join("plan.db");
     for suffix in ["", "-journal"] {

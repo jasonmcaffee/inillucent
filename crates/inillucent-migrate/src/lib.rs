@@ -371,8 +371,8 @@ fn publish(staging: &Path, destination: &Path) -> Result<(), String> {
 ///
 /// **This used to run the pinned SQLite shell**, on the reasoning that "a
 /// database only this engine can read is not the file this project promises".
-/// That promise was withdrawn: `task-1816-rearchitecture-tdd.md` lists SQLite
-/// file-format compatibility among the rearchitecture's non-goals - "SQLite
+/// That promise was withdrawn: the rearchitecture's design doc lists SQLite
+/// file-format compatibility among its non-goals - "SQLite
 /// will not open our files and we will not open SQLite's, except through a
 /// test-only and migration-only reader". The comment outlived the requirement,
 /// and a probe that asked SQLite to open an `.rdb` would now be asking for

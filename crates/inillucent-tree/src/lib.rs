@@ -8,7 +8,7 @@
 //! or an out-of-bounds read. `#![forbid(unsafe_code)]` makes the last of those
 //! a compiler guarantee rather than a review promise.
 //!
-//! This crate is `tasks/task-1816-rearchitecture-tdd.md`'s `inillucent-tree`, which
+//! This crate is the rearchitecture plan's `inillucent-tree`, which
 //! replaces `inillucent-storage`. Phase 1 builds the leaf codec and an in-memory
 //! tree with no buffer pool and no disk, because the phase gate is a scan
 //! measurement and a pool would only add I/O the gate is not about. Phase 2
@@ -26,8 +26,7 @@
 //! 0.75 ns/row against 0.74 ns/row for the two-column aggregate the phase gate
 //! is about, with `target-cpu=native` giving 0.22 against 0.22. The safe form
 //! costs nothing, so there is no `unsafe` here and no argument to have about
-//! whether there should be. The measurement is in
-//! `_agent_output/task-1816-phase0/`.
+//! whether there should be.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

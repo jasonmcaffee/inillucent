@@ -803,7 +803,7 @@ impl VirtualTable for Fts5Table {
 /// **Measured rather than reasoned about**, which is the rule Phase 3's Part E
 /// states for the read families and which applies here: the build path could be
 /// tokenisation, the per-row shadow write, the doclist merge or the same
-/// allocation-per-row shape task-1846 found in the index build, and guessing
+/// allocation-per-row shape found earlier in the index build, and guessing
 /// which has been wrong twice on this project.
 ///
 /// It is kept the way `create_index`'s stage timing is kept - permanently, and
@@ -1232,7 +1232,7 @@ pub struct Pending {
     /// It was measured before it was done, which is the rule this file's own
     /// history argues for: `extension.fts.build` spent 1.8 of its 9.4 ms
     /// writing 507 of these one at a time, against 0.5 ms reading them and
-    /// 1.2 ms writing every doclist (task-1856).
+    /// 1.2 ms writing every doclist.
     ///
     /// A `BTreeMap` because the order it iterates in *is* the key order the
     /// write wants; sorting a vector at the flush would be the same thing done
@@ -1698,7 +1698,7 @@ fn term_row(
     // or above the table's: every page it has handed out is above every page in
     // the table, and a flush writes them at exactly those numbers. Asking
     // anyway was a tree walk per term of a bulk load's vocabulary - 500 of them
-    // in `extension.fts.build`, which is 500 unique tokens (task-1856).
+    // in `extension.fts.build`, which is 500 unique tokens.
     let staged = buffer.lock().map(|held| held.highest).unwrap_or(0);
     let floor = if staged > 0 {
         staged
@@ -1985,7 +1985,7 @@ impl Fts5Table {
     /// own and both are per term per document: a five-hundred-document build
     /// over a ten-term vocabulary is fifteen thousand lock/unlock pairs and ten
     /// thousand allocations, and `extension.fts.build` spent 3.5 of its 8.7 ms
-    /// in here (task-1856).
+    /// in here.
     ///
     /// Everything the fast path needs is in the buffer, so it is one critical
     /// section: find the term's page, append the entry to the staged doclist,
@@ -2886,7 +2886,7 @@ impl VirtualCursor for Fts5Cursor {
         // never segments to merge and the answer is the second case, always.
         // Saying so is the truthful answer; refusing the name was not, and it
         // was the last function of SQLite's register that this engine answered
-        // to by another route and did not name. task-1869.
+        // to by another route and did not name.
         if name == b"optimize" && self.dialect == Dialect::Three {
             return Value::owned_text(b"Index already optimal");
         }

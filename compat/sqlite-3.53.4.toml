@@ -12,7 +12,7 @@
 
 schema_version = 1
 reference = "sqlite-3.53.4"
-generated_by = "task-1782, extended by task-1784, task-1785 and task-1786"
+generated_by = "the original parity manifest, extended across three follow-up passes"
 
 [[capability]]
 id = "harness.manifest.schema"
@@ -1573,7 +1573,7 @@ status = "pass"
 tests = ["inillucent-compat::the_policy_pragmas_are_flags"]
 
 # ---------------------------------------------------------------------------
-# The rearchitecture's re-profiled PRAGMA set (task-1833, the TDD's Phase 4).
+# The rearchitecture's re-profiled PRAGMA set, from the design's Phase 4.
 #
 # The TDD keeps the pragmas that mean something on the new engine and asks that
 # the rest be *documented* rather than silently absent. These three rows are

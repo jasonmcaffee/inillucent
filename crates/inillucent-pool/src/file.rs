@@ -76,7 +76,7 @@ pub struct Database {
     free: FreeMap,
     /// The shared extent page a small out-of-line value goes on next.
     ///
-    /// **A hint, held only in memory** (task-1880 §4). A value that fits inside
+    /// **A hint, held only in memory.** A value that fits inside
     /// one page is packed beside others rather than given a page of its own, and
     /// finding a page with room by searching would be a scan of the file per
     /// value. So the writer remembers the last page it filled and starts there;
@@ -203,7 +203,7 @@ impl Database {
         }
         let pool = Pool::new(file, page_size, frames, meta.page_count)?;
         // **The high water the file already carries, folded back in before a
-        // page is written** (task-1885). A run that reads and checkpoints
+        // page is written.** A run that reads and checkpoints
         // without writing a stamped page would otherwise record a lower number
         // than the run before it, and the next open would resume the log below
         // a stamp that is still in the file.
@@ -639,7 +639,7 @@ impl Database {
         self.meta.free_map = self.free.first();
         self.meta.generation = self.meta.generation.saturating_add(1);
         // **The highest stamp any page in the file carries is filled in by the
-        // pool, after the flush** (task-1885). It cannot be read here: the
+        // pool, after the flush.** It cannot be read here: the
         // pages this checkpoint is about to write are part of the file the meta
         // record describes, and they have not reached it yet. The record comes
         // back with the number in it, and it is kept, because it must never go
@@ -755,7 +755,7 @@ mod tests {
     /// reports, and what the reference reports for the same file. This used to
     /// assert the opposite, because `free_pages` counted every bit the map had
     /// room for rather than the pages the file holds: six figures on a
-    /// three-page database (task-1859 Part C).
+    /// three-page database.
     #[test]
     fn a_fresh_database_is_two_meta_pages_and_a_map() {
         let vfs = MemoryVfs::new();

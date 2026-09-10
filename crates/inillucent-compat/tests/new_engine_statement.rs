@@ -24,7 +24,7 @@ use inillucent_tree::datum::OwnedDatum;
 ///
 /// @param name - the test's name, which names its file
 fn fixture(name: &str) -> Database {
-    let area = workspace_root().join("target/scratch/task-1834/statement");
+    let area = workspace_root().join("target/scratch/statement");
     let _ = std::fs::create_dir_all(&area);
     let path = area.join(format!("{name}.rdb"));
     let _ = std::fs::remove_file(&path);

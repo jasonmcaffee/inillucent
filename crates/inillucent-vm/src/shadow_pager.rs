@@ -5,7 +5,7 @@
 //! is what FTS5 and the R-Tree call; the new engine implements it over PAX
 //! trees, and this implements it over a `Pager` and SQLite-format b-trees.
 //!
-//! ## Why it moved here (task-1894, M3)
+//! ## Why it moved here
 //!
 //! It used to live in `inillucent-ext`, as a second arm inside every method of
 //! `ShadowTables`: the store when the caller supplied one, and a pager

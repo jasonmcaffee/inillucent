@@ -171,8 +171,8 @@ fn log(shell: &mut Shell, arguments: &[&str]) {
 /// That is a smaller difference than it looks and a much smaller one than the
 /// command being absent: a script written for the reference now runs to the
 /// same message rather than stopping at "unknown command", and `.help` and the
-/// audit both see a shell with the same surface. task-1869; the inability to
-/// load a library is recorded in `docs/feature-comparison.md` rather than hidden.
+/// audit both see a shell with the same surface. The inability to load a
+/// library is recorded in `docs/feature-comparison.md` rather than hidden.
 ///
 /// @param shell - the shell
 /// @param arguments - the words after the command
@@ -232,8 +232,7 @@ fn progress(shell: &mut Shell, arguments: &[&str]) {
 ///
 /// **The one dot command with no substitute.** A bound parameter could not be
 /// exercised from this shell at all - `SELECT :x + 1` had nothing to bind `:x`
-/// to - so the whole parameter surface was untestable from a script, which is
-/// what task-1859 Part H names first.
+/// to - so the whole parameter surface was untestable from a script.
 ///
 /// The value is a SQL expression, evaluated by the engine rather than parsed
 /// here: SQLite runs `SELECT <value>` for it, so `.parameter set :n 1+1` binds

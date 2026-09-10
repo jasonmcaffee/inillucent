@@ -98,7 +98,7 @@ const FILTERED_EF_SEARCH: usize = 400;
 /// 5.85 ms, 9.58 ms and 16.75 ms: 400 costs nearly three times as much for 0.015
 /// more recall, so 100 is the value.
 ///
-/// Those figures come from the private database task-26 validated the change
+/// Those figures come from the private database this change was validated
 /// against, not from this repository's corpus, so they are the reason for the
 /// value rather than a result this repository reproduces. What this corpus
 /// measures is in the score card.
@@ -108,7 +108,7 @@ const UNFILTERED_EF_SEARCH: usize = 100;
 /// at 0.788 between 20,000 and 200,000, so the larger value buys no accuracy and
 /// only costs latency.
 ///
-/// Those two figures were measured by task-23 against a different corpus on a
+/// Those two figures were measured against a different corpus on a
 /// different database, not against the corpus this repository grades, so they are
 /// the reason the value was chosen rather than a number this repository can
 /// reproduce. What this repository does measure is in the score card.
@@ -121,7 +121,7 @@ const FILTERED_MAX_SCAN_TUPLES: usize = 40_000;
 /// Raising it to 4 removed the short results and raised mean recall to 0.856.
 /// Raising it to 8 changed nothing, so 4 is the value.
 ///
-/// Those figures are task-23's, measured against a different corpus on a
+/// Those figures were measured against a different corpus on a
 /// different database. They are why the value is 4, not a result this repository
 /// reproduces. What this repository measures is in the score card.
 const FILTERED_SCAN_MEM_MULTIPLIER: usize = 4;
@@ -147,7 +147,7 @@ pub fn pg_session_settings(mode: PgMode, filter: &Filter, k: usize) -> Vec<Strin
     let iterative_scan = match (mode, filtered) {
         // `relaxed_order` rather than `strict_order`: at the same cost,
         // `relaxed_order` reached mean recall 0.856 against `strict_order`'s
-        // 0.727. Those two figures are task-23's, measured against a different
+        // 0.727. Those two figures were measured against a different
         // corpus on a different database, so they are the reason for the choice
         // rather than something this repository reproduces. Nothing downstream
         // depends on pgvector's within-scan ordering in any case, because
@@ -163,7 +163,7 @@ pub fn pg_session_settings(mode: PgMode, filter: &Filter, k: usize) -> Vec<Strin
         // So it is turned off because it changes nothing on an unfiltered query,
         // and the simpler configuration is the one to report.
         //
-        // Those figures are from the private database task-26 validated against,
+        // Those figures are from the private database this was validated against,
         // not this repository's corpus. A 20 probe run of the same measurement
         // appeared to show recall 0.9670 off against 0.9960 on; that was too small
         // a sample and the difference did not survive 50 probes. Recorded so the

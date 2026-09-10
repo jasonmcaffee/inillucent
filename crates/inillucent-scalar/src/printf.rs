@@ -489,7 +489,7 @@ fn pad(out: &mut Vec<u8>, body: &[u8], spec: &Spec) {
     // renders `%08.3d` of 42 as `00000042` and `%08.3x` of 255 as `000000ff`.
     // Applying the C rule here made `printf('%05.2f', 3.14159)` answer `3.14`
     // against the reference's `03.14` - and the guard was wrong for the integer
-    // conversions it was written for as well (task-1843).
+    // conversions it was written for as well.
     let numeric_conversion = matches!(
         spec.conversion,
         b'd' | b'i' | b'u' | b'x' | b'X' | b'o' | b'f' | b'e' | b'E' | b'g' | b'G'

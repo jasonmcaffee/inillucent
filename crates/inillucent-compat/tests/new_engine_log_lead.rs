@@ -48,12 +48,12 @@ const FRAMES: usize = 64;
 /// @param tag - what to name the copy
 fn fixture(tag: &str) -> Option<PathBuf> {
     let source = workspace_root()
-        .join("_agent_output/task-1832-phase3/fixtures")
+        .join("_agent_output/fixtures")
         .join("medium.db");
     if !source.is_file() {
         return None;
     }
-    let area = workspace_root().join("target/scratch/task-1834/log-lead");
+    let area = workspace_root().join("target/scratch/log-lead");
     let _ = std::fs::create_dir_all(&area);
     let target = area.join(format!("{tag}.db"));
     let _ = std::fs::remove_file(&target);

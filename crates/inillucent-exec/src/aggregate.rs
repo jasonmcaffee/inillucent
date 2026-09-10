@@ -1030,8 +1030,8 @@ mod tests {
         // **An integer sum that will not fit is an error, not a bigger
         // number.** It used to become a double, which is a total that is wrong
         // by a rounding and that a caller reading an integer column has no
-        // reason to suspect; the reference raises `integer overflow`
-        // (task-1859 Part E). `total` and `avg` are documented doubles and
+        // reason to suspect; the reference raises `integer overflow`.
+        // `total` and `avg` are documented doubles and
         // still answer one over the same values.
         let mut over = Accumulator::new(AggregateKind::Sum);
         over.push(&Datum::Int(i64::MAX));

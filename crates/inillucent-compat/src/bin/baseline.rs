@@ -140,7 +140,7 @@ fn collect(root: &Path, directory: &Path, found: &mut Vec<Digest>) -> Result<(),
 /// That is not hypothetical. Five files were reported as moved when the working
 /// tree was clean and none of them had been edited since before the baseline was
 /// captured - the byte difference was exactly each file's line count, and
-/// `persist.rs` matched its own task-1790 amendment digest once the line endings
+/// `persist.rs` matched its own earlier amendment digest once the line endings
 /// were normalised. The same check would also disagree with itself between this
 /// machine and the Linux evidence run, which is the platform matrix the release
 /// is supposed to be qualified on.
@@ -241,7 +241,7 @@ fn capture(root: &Path, out: &Path) -> Result<String, String> {
     json.push_str("{\n");
     json.push_str(&format!(
         "  \"captured_by\": {},\n",
-        json_string("task-1782")
+        json_string("inillucent-baseline")
     ));
     json.push_str(&format!(
         "  \"platform\": {},\n",
@@ -274,7 +274,7 @@ fn capture(root: &Path, out: &Path) -> Result<String, String> {
         .map_err(|error| format!("cannot write the baseline: {error}"))?;
 
     let mut markdown = String::new();
-    markdown.push_str("# inillucent-core baseline, captured by task-1782\n\n");
+    markdown.push_str("# inillucent-core baseline, captured by inillucent-baseline\n\n");
     markdown.push_str(
         "The retrieval engine as it stood before any relational work. `inillucent-baseline verify`\n",
     );

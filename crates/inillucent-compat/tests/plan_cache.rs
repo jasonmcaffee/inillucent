@@ -24,7 +24,7 @@ use inillucent_value::Value;
 /// @param name - the test's name, which names its directory
 fn scratch(name: &str) -> std::path::PathBuf {
     let root = inillucent_compat::workspace_root()
-        .join("_agent_output/task-1816-plan-cache")
+        .join("_agent_output/plan-cache")
         .join(name);
     std::fs::create_dir_all(&root).expect("the scratch directory");
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);

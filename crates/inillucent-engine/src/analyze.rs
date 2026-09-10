@@ -180,7 +180,7 @@ impl ImportedDatabase {
             Ok(true)
         })?;
         // **A partial index holds the rows its predicate accepted, and no
-        // more** (task-1880 §13). The table's row count is the right total for
+        // more.** The table's row count is the right total for
         // an ordinary index, because every row has an entry; for a partial one
         // it is the number the index does *not* hold, and writing it says the
         // index returns the whole table. A planner reading that never chooses

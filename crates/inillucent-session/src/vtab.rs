@@ -249,8 +249,8 @@ pub fn with_table<T>(
 
 /// A moment in a transaction that a module is entitled to be told about.
 ///
-/// The contract has always declared these methods; before task-1790 only
-/// `CREATE VIRTUAL TABLE` ever called them, which was enough for FTS5 and the
+/// The contract has always declared these methods; only `CREATE VIRTUAL TABLE`
+/// used to call them, which was enough for FTS5 and the
 /// R-Tree because both write their whole state through `update` and inherit the
 /// pager's atomicity. A module that has to *decide* something at a transaction
 /// boundary - which commit sequence its changes were published under, or

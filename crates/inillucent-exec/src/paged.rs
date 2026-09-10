@@ -553,8 +553,8 @@ impl<'t> PointProbe<'t> {
                     if let Some(slot) = inline.get_mut(at) {
                         // A row in the delta area has no mini-column to borrow,
                         // so its values go downstream as constants. The sorted
-                        // case is byte for byte what task-1819 measured, and it
-                        // is the case a leaf is in until something writes to it
+                        // case is byte for byte the code that was benchmarked,
+                        // and it is the case a leaf is in until something writes to it
                         // and again after the next compaction.
                         *slot = match hit {
                             // A leaf with an out-of-line value cannot lend its

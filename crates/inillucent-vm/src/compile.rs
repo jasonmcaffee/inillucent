@@ -23,8 +23,8 @@ use inillucent_sql::bind::{
 };
 use inillucent_sql::catalog_view::TableInfo;
 use inillucent_sql::plan::{
-    is_outer, plan_select_with, AccessPath, AggregationMode, BoundKind, Levers, PhysicalPlan,
-    RangeBound,
+    is_outer, plan_select_with, AccessPath, AggregationMode, BoundKind, IndexSeekBranch, Levers,
+    PhysicalPlan, RangeBound,
 };
 use inillucent_value::{Affinity, Collation};
 
@@ -846,6 +846,9 @@ impl Compiler {
                         AccessPath::IndexSeek {
                             covering: Some(_),
                             ..
+                        } | AccessPath::IndexSeekUnion {
+                            covering: Some(_),
+                            ..
                         }
                     ) {
                         self.emit(
@@ -860,6 +863,7 @@ impl Compiler {
                     }
                     let index = match path {
                         AccessPath::IndexSeek { index_root, .. }
+                        | AccessPath::IndexSeekUnion { index_root, .. }
                             if source.table.without_rowid && *index_root == source.table.root =>
                         {
                             // The seek is on the table's own key, and the table
@@ -869,6 +873,12 @@ impl Compiler {
                             Some(table)
                         }
                         AccessPath::IndexSeek {
+                            index_root,
+                            collations,
+                            descending,
+                            ..
+                        }
+                        | AccessPath::IndexSeekUnion {
                             index_root,
                             collations,
                             descending,
@@ -926,6 +936,10 @@ impl Compiler {
                         },
                     );
                     if let AccessPath::IndexSeek {
+                        covering: Some(slots),
+                        ..
+                    }
+                    | AccessPath::IndexSeekUnion {
                         covering: Some(slots),
                         ..
                     } = path
@@ -2492,6 +2506,37 @@ impl Compiler {
                     &key_entry_slots,
                     covering.is_some(),
                     reverse,
+                    None,
+                    inner,
+                )?;
+            }
+            AccessPath::RowidSeekUnion { keys, .. } => {
+                self.compile_rowid_seek_union(body, level, cursors, &keys, inner)?;
+            }
+            AccessPath::IndexSeekUnion {
+                branches,
+                collations,
+                columns,
+                descending,
+                without_rowid,
+                key_entry_slots,
+                covering,
+                dedup,
+                ..
+            } => {
+                self.compile_index_seek_union(
+                    body,
+                    level,
+                    cursors,
+                    &branches,
+                    collations.first().copied().unwrap_or(Collation::Binary),
+                    &named_columns(columns),
+                    &descending,
+                    without_rowid,
+                    &key_entry_slots,
+                    covering.is_some(),
+                    reverse,
+                    dedup,
                     inner,
                 )?;
             }
@@ -2626,6 +2671,7 @@ impl Compiler {
         key_slots: &[usize],
         covering: bool,
         reverse: bool,
+        dedup: Option<u32>,
         inner: &InnerBody,
     ) -> DbResult<()> {
         let Some(index_cursor) = cursors.index else {
@@ -2713,6 +2759,20 @@ impl Compiler {
                 -1,
                 0,
             )));
+        }
+        // One branch of a seek union, skipped whole when its own key has
+        // already been probed by an earlier branch. Checked (and recorded)
+        // on the equality prefix alone, before the seek runs - a repeated key
+        // seeks to the same starting entry and walks the same run of matches
+        // every time, so a branch whose key was already used cannot produce a
+        // row the earlier branch did not already produce.
+        if let Some(set) = dedup {
+            null_key.push(
+                self.emit_jump(
+                    Instruction::new(Opcode::DistinctCheck, set as i32, -1, key as i32)
+                        .with_p5(equalities.len() as u16),
+                ),
+            );
         }
         // With nothing to seek to, the path is a scan of the whole index -
         // which is worth choosing when the index carries every column the query
@@ -2860,6 +2920,130 @@ impl Compiler {
         self.patch_here(empty);
         for label in null_key {
             self.patch_here(label);
+        }
+        Ok(())
+    }
+
+    /// Opens a distinct set sized for one seek-key column, for a seek union
+    /// that has to skip a branch whose key an earlier branch already used.
+    /// @param collation - the collation the key column compares under
+    fn open_seek_key_distinct(&mut self, collation: Collation) -> u32 {
+        let set = self.distincts;
+        self.distincts = self.distincts.saturating_add(1);
+        let key = SortKey {
+            columns: vec![SortColumn {
+                descending: false,
+                nulls_first: true,
+                collation,
+            }],
+        };
+        self.emit(
+            Instruction::new(Opcode::DistinctOpen, set as i32, 0, 0).with_p4(Operand::SortKey(key)),
+        );
+        set
+    }
+
+    /// Compiles a union of rowid seeks: one branch per key, run one after
+    /// another, each skipped whole when an earlier branch already used its
+    /// key.
+    ///
+    /// Every key is exactly what a lone [`AccessPath::RowidSeek`] would seek
+    /// to; a rowid is unique by construction, so a repeated key is the only
+    /// way two branches could produce the same row, and skipping the second
+    /// probe of a key already probed is what keeps that from happening. A
+    /// union of one key opens no set at all - there is nothing for it to
+    /// repeat against.
+    /// @param keys - the keys to probe, in order
+    fn compile_rowid_seek_union(
+        &mut self,
+        body: &Body<'_>,
+        level: usize,
+        cursors: SourceCursors,
+        keys: &[BoundExpr],
+        inner: &InnerBody,
+    ) -> DbResult<()> {
+        let set = (keys.len() > 1).then(|| self.open_seek_key_distinct(Collation::Binary));
+        for key in keys {
+            let register = self.compile_expr(key)?;
+            let mut skip_branch: Vec<Label> = Vec::new();
+            if let Some(set) = set {
+                // A rowid is always compared as an integer, so the key is cast
+                // before it is recorded - otherwise `IN ('5', 5)` would be
+                // recorded as two different keys and probed twice.
+                self.emit(
+                    Instruction::new(Opcode::Cast, register as i32, register as i32, 0)
+                        .with_p4(Operand::Affinity(Affinity::Integer)),
+                );
+                skip_branch.push(
+                    self.emit_jump(
+                        Instruction::new(Opcode::DistinctCheck, set as i32, -1, register as i32)
+                            .with_p5(1),
+                    ),
+                );
+            }
+            let missing = self.emit_jump(Instruction::new(
+                Opcode::SeekRowid,
+                cursors.table as i32,
+                -1,
+                register as i32,
+            ));
+            let skip = self.compile_residual(body, level)?;
+            self.compile_level(body, level.saturating_add(1), inner)?;
+            for label in skip {
+                self.patch_here(label);
+            }
+            self.patch_here(missing);
+            for label in skip_branch {
+                self.patch_here(label);
+            }
+        }
+        Ok(())
+    }
+
+    /// Compiles a union of index seeks: one branch after another, each
+    /// exactly what a lone [`AccessPath::IndexSeek`] would compile to.
+    ///
+    /// The branches share one index and one table, which is why every
+    /// parameter past `branches` is the same for all of them - only the
+    /// equality prefix and the range differ, and those live on each branch.
+    /// @param dedup - whether a branch's key can repeat one an earlier branch
+    ///   already used and so has to be checked before it is probed; `false`
+    ///   for the keyset-range shape, which is proven disjoint at plan time
+    #[allow(clippy::too_many_arguments)]
+    fn compile_index_seek_union(
+        &mut self,
+        body: &Body<'_>,
+        level: usize,
+        cursors: SourceCursors,
+        branches: &[IndexSeekBranch],
+        collation: Collation,
+        columns: &[u16],
+        descending: &[bool],
+        without_rowid: bool,
+        key_slots: &[usize],
+        covering: bool,
+        reverse: bool,
+        dedup: bool,
+        inner: &InnerBody,
+    ) -> DbResult<()> {
+        let set = (dedup && branches.len() > 1).then(|| self.open_seek_key_distinct(collation));
+        for branch in branches {
+            self.compile_index_seek(
+                body,
+                level,
+                cursors,
+                &branch.equalities,
+                branch.low.clone(),
+                branch.high.clone(),
+                columns,
+                descending,
+                without_rowid,
+                key_slots,
+                covering,
+                reverse,
+                set,
+                inner,
+            )?;
         }
         Ok(())
     }

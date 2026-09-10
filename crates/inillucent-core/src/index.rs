@@ -534,7 +534,7 @@ impl Index {
         // `insert_batch` rather than a loop over `insert`, because a batch large
         // enough to be worth it goes in on every core the caller asked for -
         // which is what stops a bounded append being slower in wall clock than
-        // the unbounded rebuild it replaced (task-1894, M8). A batch below the
+        // the unbounded rebuild it replaced (M8). A batch below the
         // floor, or a caller who left `build_threads` at one, gets exactly the
         // loop it always got.
         if let Some(graph) = self.graph.as_mut() {

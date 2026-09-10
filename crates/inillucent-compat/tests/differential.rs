@@ -68,7 +68,7 @@ fn announce_skip() {
 /// journal or a WAL beside a file it opens, and the read-only proof in
 /// `storage.rs` asserts that the corpus directory does not change.
 fn scratch_dir() -> PathBuf {
-    let directory = workspace_root().join("_agent_output/task-1783/oracle-scratch");
+    let directory = workspace_root().join("_agent_output/oracle-scratch");
     let _ = std::fs::create_dir_all(&directory);
     directory
 }

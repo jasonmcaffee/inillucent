@@ -284,7 +284,7 @@ pub struct Pool {
     /// **Empty until claimed, which is what keeps a pool a budget rather than a
     /// reservation.** Allocating and zeroing every frame at open made the pool's
     /// configured size the process's resident set from the first statement:
-    /// task-1838 measured a 128 MiB pool as 128 MiB of resident memory against
+    /// a 128 MiB pool was measured as 128 MiB of resident memory against
     /// SQLite's 37 MiB at the same `cache_size`, on a fixture that only ever
     /// touched a quarter of it. SQLite grows into its cache and so does this
     /// now. A frame is sized once, in `claim_frame`, and an evicted frame keeps
@@ -353,7 +353,7 @@ pub struct Pool {
     /// The highest LSN this pool has written into the data file.
     ///
     /// **A page's stamp has to be a position in the stream beside the file, and
-    /// this is the number that keeps it one** (task-1885). Recovery applies a
+    /// this is the number that keeps it one.** Recovery applies a
     /// record to a page only when the page's stamp is below the record's, so a
     /// page carrying a stamp from a stream that no longer exists silently
     /// swallows every later write to it. The checkpoint records this in the

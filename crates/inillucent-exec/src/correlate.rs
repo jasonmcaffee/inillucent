@@ -11,8 +11,8 @@
 //! [`crate::expr::Eval`] is `Send + Sync`, deliberately: it is what lets a
 //! compiled expression be held by a prepared statement and shared. A catalog is
 //! neither, so an expression node cannot reach the trees and a subquery cannot
-//! be evaluated from inside one. That bound is not relaxed here (task-1834
-//! §5m); instead the value is computed *beside* the row, one column per
+//! be evaluated from inside one. That bound is not relaxed here;
+//! instead the value is computed *beside* the row, one column per
 //! correlated block, and the expression reads that column - which is exactly
 //! how a virtual table's auxiliary functions (`bm25(t)`, `score(t)`) already
 //! reach an expression that cannot call a module.

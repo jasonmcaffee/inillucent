@@ -124,8 +124,8 @@ pub struct SchemaEntry {
     /// That was harmless for exactly as long as nothing durable referred to
     /// one. The write-ahead log does, so recovery would have handed a row
     /// record to whichever tree happened to hold the writer's number in the
-    /// reader's numbering - a wrong answer rather than a refusal. task-1834
-    /// put the identifier in the file so that every process derives the same
+    /// reader's numbering - a wrong answer rather than a refusal. The
+    /// identifier is put in the file so that every process derives the same
     /// one from the same bytes.
     pub tree_id: u64,
     /// What the tree's shape is, so opening the file does not have to walk it.
@@ -139,7 +139,7 @@ pub struct SchemaEntry {
 /// count, and none of the three can be read off the root page: the leaf count is
 /// the length of the sibling chain and the row count is the sum over it. Phase 2
 /// carried them from the build, which works only for a file this process just
-/// wrote - task-1817 named that as the gap and this closes it.
+/// wrote - opening a file an earlier process wrote is the gap this closes.
 ///
 /// They are also what the planner will read for cardinality once `ANALYZE`
 /// exists, which is the second reason the TDD puts them here rather than in a

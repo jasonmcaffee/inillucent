@@ -11,7 +11,7 @@
 //! the other engine. FTS5 and R-Tree both keep their whole state this way, and
 //! it is why a database either of them writes can be opened by SQLite.
 //!
-//! ## One arm, not two (task-1894, M3)
+//! ## One arm, not two
 //!
 //! Every method here used to carry a second arm that reached a `Pager`
 //! directly, which is what made this crate - a crate the *new* engine links -

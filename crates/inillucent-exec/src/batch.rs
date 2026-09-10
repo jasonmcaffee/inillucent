@@ -12,7 +12,7 @@
 //!
 //! A `Vector::Int64` holds `&[u8]` and reads values with `chunks_exact(8)`
 //! rather than holding a `&[i64]`. Turning page bytes into a typed slice needs
-//! `unsafe`, and the measurement in `_agent_output/task-1816-phase0/` shows it
+//! `unsafe`, and the Phase 0 benchmark measurement shows it
 //! buys nothing: 0.75 ns/row against 0.74 for the two-column aggregate, under
 //! the workspace release profile. The whole raw scan measures 1.8-4.6 ns/row
 //! this way.

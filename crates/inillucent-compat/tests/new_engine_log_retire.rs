@@ -8,10 +8,10 @@
 //! `Wal::retire_segments_below` was written, documented as "called after a
 //! checkpoint", and covered by six cases in `inillucent-wal/tests/recovery.rs`,
 //! and the shipping engine never called it: the one caller was
-//! `inillucent-txn`, which is not the engine that ships. task-1843 measured the
-//! consequence - the same 200,000 rows are 18.4 MB in SQLite and 179.1 MB here,
-//! 27.6 MB of data and 151.5 MB of log segments that survive a checkpoint, a
-//! clean close, a reopen and a second checkpoint.
+//! `inillucent-txn`, which is not the engine that ships. The consequence: the
+//! same 200,000 rows are 18.4 MB in SQLite and 179.1 MB here, 27.6 MB of data
+//! and 151.5 MB of log segments that survive a checkpoint, a clean close, a
+//! reopen and a second checkpoint.
 //!
 //! ## Why a checkpoint also rolls the segment
 //!
@@ -124,7 +124,7 @@ fn rows(database: &mut ImportedDatabase) -> i64 {
 ///
 /// The measurement, in a test: a build that writes tens of megabytes of log
 /// leaves a log smaller than the data it describes once it has been
-/// checkpointed. Before task-1845 the segments were all still there.
+/// checkpointed. Before the fix the segments were all still there.
 #[test]
 fn a_checkpoint_reclaims_the_log() {
     let path = scratch("reclaims");
