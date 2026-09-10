@@ -11,12 +11,12 @@ expected output printed beside every command.
 
 ```powershell
 # Windows
-irm https://raw.githubusercontent.com/jasonmcaffee/inillucent/main/packaging/install.ps1 | iex
+irm https://raw.githubusercontent.com/Black-Rainbow-Labs/Inillucent/main/packaging/install.ps1 | iex
 ```
 
 ```sh
 # macOS and Linux
-curl -fsSL https://raw.githubusercontent.com/jasonmcaffee/inillucent/main/packaging/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Black-Rainbow-Labs/Inillucent/main/packaging/install.sh | sh
 ```
 
 Or through a package manager:
@@ -26,9 +26,9 @@ Or through a package manager:
 | **npm** | `npm install -g inillucent`, or `npx inillucent help` with nothing installed |
 | **pip** | `pip install inillucent` — the wheel carries the four programs and an in process driver |
 | **cargo** | `cargo install inillucent-cli` — builds from source, and the fallback on any platform with no prebuilt archive |
-| **Homebrew** | `brew install jasonmcaffee/inillucent/inillucent` |
-| **Go** | `go install github.com/jasonmcaffee/inillucent/packages/go/cmd/inillucent@latest` |
-| **Composer** | `composer require jasonmcaffee/inillucent && vendor/bin/inillucent-install` |
+| **Homebrew** | `brew install black-rainbow-labs/inillucent/inillucent` |
+| **Go** | `go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent@latest` |
+| **Composer** | `composer require black-rainbow-labs/inillucent && vendor/bin/inillucent-install` |
 
 Each of them installs the same four programs, and each downloader checks the release's published
 SHA-256 before unpacking the archive.

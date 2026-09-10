@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{ name = "Jason McAffee" }]
+authors = [{ name = "Black Rainbow Labs" }]
 keywords = ["database", "sql", "sqlite", "vector", "embedding", "search", "mcp", "rag"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -25,9 +25,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jasonmcaffee/inillucent"
-Source = "https://github.com/jasonmcaffee/inillucent"
-Issues = "https://github.com/jasonmcaffee/inillucent/issues"
+Homepage = "https://github.com/Black-Rainbow-Labs/Inillucent"
+Source = "https://github.com/Black-Rainbow-Labs/Inillucent"
+Issues = "https://github.com/Black-Rainbow-Labs/Inillucent/issues"
 
 # The four programs, as console scripts. Each is a two-line shim that finds the
 # bundled binary and becomes it, so `pip install inillucent` puts `inillucent`

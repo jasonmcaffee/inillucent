@@ -19,7 +19,7 @@
 //
 // # Getting the binary
 //
-//	go install github.com/jasonmcaffee/inillucent/packages/go/cmd/inillucent@latest
+//	go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent@latest
 //
 // installs a small program that downloads the inillucent release for this
 // machine, verifies its SHA-256 and puts the four binaries in GOBIN. After that

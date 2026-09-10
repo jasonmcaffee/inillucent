@@ -63,8 +63,8 @@ pointer round trip and a `catch_unwind` per call would buy nothing.
 ```sh
 pip install inillucent          # the wheel carries the binaries and the driver
 npm install inillucent
-go get github.com/jasonmcaffee/inillucent/packages/go
-composer require jasonmcaffee/inillucent
+go get github.com/Black-Rainbow-Labs/Inillucent/packages/go
+composer require black-rainbow-labs/inillucent
 ```
 
 For a language with no package here, bind the C ABI:

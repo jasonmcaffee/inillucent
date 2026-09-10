@@ -29,6 +29,24 @@ workloads that are slower than SQLite along with what each one costs.
 
 ## Install
 
+**None of the package managers below is published yet, and the download site is
+not serving the installers yet.** Checked on 2026-09-10: `npm`, PyPI, crates.io,
+the Homebrew tap, the Go module proxy and Packagist all answer 404, and so do
+`https://inillucent.com/downloads/install.ps1` and `install.sh`. What follows is
+what the install will be, kept here so the shape is reviewable. To get inillucent
+today, build it:
+
+```sh
+git clone https://github.com/Black-Rainbow-Labs/Inillucent
+cargo build --release -p inillucent-cli
+```
+
+and the four programs are in `target/release`. `packaging/install.ps1 -FromDist`
+installs a locally built archive on Windows, and `packaging/release.ps1` is what
+builds one.
+
+### What it will be, once the packages are out
+
 ```powershell
 # Windows
 irm https://inillucent.com/downloads/install.ps1 | iex
@@ -46,12 +64,14 @@ Or from the package manager the project already uses:
 | **npm** | `npm install -g inillucent`, or `npx inillucent help` with nothing installed |
 | **pip** | `pip install inillucent` — the wheel carries the programs and an in process driver |
 | **cargo** | `cargo install inillucent-cli` — builds from source, and the fallback on any platform with no prebuilt archive |
-| **Homebrew** | `brew install jasonmcaffee/inillucent/inillucent` |
-| **Go** | `go install github.com/jasonmcaffee/inillucent/packages/go/cmd/inillucent@latest` |
-| **Composer** | `composer require jasonmcaffee/inillucent && vendor/bin/inillucent-install` |
+| **Homebrew** | `brew install black-rainbow-labs/inillucent/inillucent` |
+| **Go** | `go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent@latest` |
+| **Composer** | `composer require black-rainbow-labs/inillucent && vendor/bin/inillucent-install` |
 
 Every one of them installs the same four programs, and every downloader checks the release's
-published SHA-256 before it unpacks anything.
+published SHA-256 before it unpacks anything. `packaging/PUBLISHING.md` tracks what each one is
+still waiting on.
+
 
 ## A first database
 

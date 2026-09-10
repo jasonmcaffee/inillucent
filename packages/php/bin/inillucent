@@ -19,7 +19,7 @@ declare(strict_types=1);
 // file directly, and this repository's own checkout.
 //
 // The counting matters and was wrong: installed, this file sits at
-// `vendor/jasonmcaffee/inillucent/packages/php/bin/`, so the project's
+// `vendor/black-rainbow-labs/inillucent/packages/php/bin/`, so the project's
 // autoloader is **five** levels up, not three. With three, `vendor/bin/inillucent`
 // answered "composer's autoloader was not found" on a correct install - which is
 // the shim failing at the one job it has.

@@ -54,7 +54,7 @@ export function resolveBinary(program) {
     throw new Error(
       `inillucent has no prebuilt binary for ${process.platform}-${process.arch}.\n` +
         `  Build it from source instead:  cargo install inillucent-cli\n` +
-        `  Or open an issue: https://github.com/jasonmcaffee/inillucent/issues`,
+        `  Or open an issue: https://github.com/Black-Rainbow-Labs/Inillucent/issues`,
     );
   }
   const suffix = process.platform === 'win32' ? '.exe' : '';
@@ -79,7 +79,7 @@ export function resolveBinary(program) {
     // failure it produces otherwise is EACCES from execve with no explanation.
     throw new Error(
       `${path} is not executable.\n  Fix it with:  chmod +x ${path}\n` +
-        `  Then please report it: https://github.com/jasonmcaffee/inillucent/issues`,
+        `  Then please report it: https://github.com/Black-Rainbow-Labs/Inillucent/issues`,
     );
   }
   return path;

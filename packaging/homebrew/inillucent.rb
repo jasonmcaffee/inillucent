@@ -1,6 +1,6 @@
-# The Homebrew formula, for the tap `jasonmcaffee/homebrew-inillucent`.
+# The Homebrew formula, for the tap `Black-Rainbow-Labs/homebrew-inillucent`.
 #
-#   brew install jasonmcaffee/inillucent/inillucent
+#   brew install black-rainbow-labs/inillucent/inillucent
 #
 # It installs the release tarball rather than building from source, so a `brew
 # install` is a download and an unpack rather than a fifteen-minute LTO build of
@@ -13,7 +13,7 @@
 # repository holding only this file, so the source can stay private while the
 # formula is fetchable.
 #
-# To publish it: create the repository `jasonmcaffee/homebrew-inillucent` on
+# To publish it: create the repository `Black-Rainbow-Labs/homebrew-inillucent` on
 # GitHub, put this file in `Formula/inillucent.rb`, and fill in the sha256
 # values from the release's own SHA256SUMS. `packaging/homebrew/update.sh` does
 # both of those from a built dist/ so the numbers are never typed by hand.
@@ -42,7 +42,7 @@ class Inillucent < Formula
   end
 
   head do
-    url "https://github.com/jasonmcaffee/inillucent.git", branch: "main"
+    url "https://github.com/Black-Rainbow-Labs/Inillucent.git", branch: "main"
     depends_on "rust" => :build
   end
 

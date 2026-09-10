@@ -2,16 +2,26 @@
   "name": "inillucent",
   "version": "0.1.0",
   "description": "Embedded SQL database with full-text and vector search, an MCP server, and a sqlite3-shaped shell. No native build step: the binaries ship as platform packages.",
-  "keywords": ["database", "sql", "sqlite", "vector", "embedding", "search", "mcp", "cli", "rag"],
-  "homepage": "https://github.com/jasonmcaffee/inillucent#readme",
-  "bugs": "https://github.com/jasonmcaffee/inillucent/issues",
+  "keywords": [
+    "database",
+    "sql",
+    "sqlite",
+    "vector",
+    "embedding",
+    "search",
+    "mcp",
+    "cli",
+    "rag"
+  ],
+  "homepage": "https://github.com/Black-Rainbow-Labs/Inillucent#readme",
+  "bugs": "https://github.com/Black-Rainbow-Labs/Inillucent/issues",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jasonmcaffee/inillucent.git",
+    "url": "git+https://github.com/Black-Rainbow-Labs/Inillucent.git",
     "directory": "packages/npm/inillucent"
   },
   "license": "MIT",
-  "author": "Jason McAffee",
+  "author": "Black Rainbow Labs",
   "type": "module",
   "engines": {
     "node": ">=18"
@@ -26,7 +36,12 @@
   "exports": {
     ".": "./index.mjs"
   },
-  "files": ["bin", "index.mjs", "resolve.mjs", "README.md"],
+  "files": [
+    "bin",
+    "index.mjs",
+    "resolve.mjs",
+    "README.md"
+  ],
   "optionalDependencies": {
     "@inillucent/cli-win32-x64": "0.1.0",
     "@inillucent/cli-darwin-arm64": "0.1.0",

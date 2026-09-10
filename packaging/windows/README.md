@@ -6,7 +6,7 @@ the machine's architecture, checks its SHA-256 against the release's
 `bin` on the user `PATH`.
 
 ```powershell
-irm https://raw.githubusercontent.com/jasonmcaffee/inillucent/main/packaging/install.ps1 | iex
+irm https://raw.githubusercontent.com/Black-Rainbow-Labs/Inillucent/main/packaging/install.ps1 | iex
 ```
 
 `-FromDist` installs the archive `packaging/release.ps1` just built, which is

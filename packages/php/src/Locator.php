@@ -53,7 +53,7 @@ final class Locator
             sprintf(
                 "%s is not installed.\n" .
                 "  Run:  vendor/bin/inillucent-install\n" .
-                "  Or install it another way: https://github.com/jasonmcaffee/inillucent#install\n" .
+                "  Or install it another way: https://github.com/Black-Rainbow-Labs/Inillucent#install\n" .
                 "  Or point INILLUCENT_BIN at a binary you already have.",
                 $program
             ),
