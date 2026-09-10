@@ -12,11 +12,14 @@ decision that is not a script's to make.
 
 ## Where it stands, at a glance
 
-Nothing is published yet. Updated 2026-09-08, after each route was pushed as far
-as it would go.
+Updated 2026-09-10. **The GitHub release is cut**: `v0.1.0`, tagged at `ed41390`,
+with the Windows archive, `SHA256SUMS` and `provenance.json` attached, and the
+archive verified by downloading it back off the release and comparing its SHA-256.
+No registry package is published yet.
 
 | route | state | what it is waiting on |
 |---|---|---|
+| **GitHub release** | **done** - `v0.1.0`, Windows archive attached, checksum verified end to end | the macOS and Linux archives, and the decision on repository visibility |
 | **npm** | ready; dry run clean, packages packed and installed from their tarballs | **Jason's npm password** (or a granular token). Not the OTP — see below |
 | **PyPI** | ready; wheel built and installed into a clean venv | **an account**, deliberately not created: it would need a password and a 2FA secret Jason would not hold |
 | **crates.io** | ready; `--workspace --dry-run` clean for all 30 crates | a token, **and the decision to make the source public** |
@@ -77,12 +80,24 @@ pwsh packaging/publish-site.ps1 -Version 0.1.0 -Link
 while the repository is private, because its assets are private too. GitHub
 carries the macOS artifacts from the MacBook to the Windows box and nothing else.
 
-**Done here**: every Linux and Windows artifact builds on the Windows box, and
-`tools/release-verify-linux.sh` passes on all of them - glibc floor 2.28, nothing
-linked outside the C library, the modes intact through the archive, and a
-database round trip.
-**Still needed**: the Developer ID certificate, so that the macOS half can be
-signed at all.
+**Done, on 2026-09-10.** `v0.1.0` is tagged at `ed41390` and the release is at
+<https://github.com/jasonmcaffee/inillucent/releases/tag/v0.1.0>, carrying the
+Windows archive, `SHA256SUMS` and `provenance.json`. The archive was downloaded
+back off the release and its SHA-256 compared against the published one: they
+match, byte for byte.
+
+`provenance.json` records the commit, the tag, the toolchain and the six checks
+the release script made - clean checkout, tag matches HEAD, version agrees, built
+from source, installed and run, C ABI linked - with **no waivers**. The script
+refuses to build an untagged archive at all, so the tag came first rather than
+being passed over with `-AllowUntagged`.
+
+**Still needed**: the three non-Windows archives, built on their own machines
+with `packaging/release.sh --target <triple>` and added to the same release.
+
+**The repository is still private**, so the release and its assets are reachable
+only by somebody with access, and the `curl`-to-shell installers in the release
+notes do not resolve for anybody else yet.
 
 ## crates.io
 
@@ -168,6 +183,29 @@ npm login --auth-type=legacy     # username jasonmcaffee, your password, then th
                                  # code npm emails to jasonlmcaffee@gmail.com
 node packages/npm/build.mjs --publish
 ```
+
+**A second npm account does not get round this.** This was asked for on
+2026-09-10 - reuse the Black Rainbow Labs identity from task-1898 for the
+registries - and it does not help, for two reasons worth writing down so nobody
+tries it again:
+
+- **npm will not take the address.** `jasonlmcaffee@gmail.com` already belongs to
+  `jasonmcaffee`, and npm allows one account per verified address.
+- **The Black Rainbow Labs address is being deleted.**
+  `the.black.rainbow.labs@gmail.com` was flagged by Google during task-1898 and
+  has no recovery phone and no recovery email, so there is nothing to appeal
+  with. An npm account registered to it would lose its recovery address, and
+  reading a verification code out of it means putting a browser back on a Google
+  login page - which is what caused the flag, and what `~/.claude/CLAUDE.md` now
+  forbids.
+
+For a Black Rainbow Labs identity on the registries the mailbox has to come
+first, and it must not be a Google account that an automation signs into. All
+three domains - `inillucent.com`, `blackrainbowlabs.com`, `jasonmcaffee.com` -
+are on Cloudflare and **none has an MX record today**. Cloudflare Email Routing
+is free and takes a few minutes: point `npm@inillucent.com` at whichever inbox
+is already read. After that a signup needs no Google login at all.
+
 
 A **granular access token** made at <https://www.npmjs.com/settings/jasonmcaffee/tokens>
 works just as well and is better for a machine: put it in `~/.npmrc` as
