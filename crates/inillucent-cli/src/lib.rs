@@ -51,4 +51,5 @@ pub mod import;
 pub mod json;
 pub mod mcp;
 pub mod render;
+pub mod setup;
 pub mod shell;

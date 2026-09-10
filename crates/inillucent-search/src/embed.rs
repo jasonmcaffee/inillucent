@@ -2,10 +2,10 @@
 //!
 //! Invariant: **the model is loaded once and never guessed at.** A caller who
 //! asks for an embedding gets one from the model this build was pointed at, or
-//! a refusal naming the variable that points at it - never a vector of zeroes,
-//! never a vector from a different model, and never a silent NULL. An
-//! embedding whose provenance is unknown is worse than no embedding: it goes
-//! into an index, and every neighbour it is ever compared against is wrong.
+//! a refusal naming what is missing - never a vector of zeroes, never a vector
+//! from a different model, and never a silent NULL. An embedding whose
+//! provenance is unknown is worse than no embedding: it goes into an index, and
+//! every neighbour it is ever compared against is wrong.
 //!
 //! ## Why it is here
 //!
@@ -18,53 +18,72 @@
 //!
 //! ## Where the model comes from
 //!
-//! `INILLUCENT_ONNX_DIR`, when it is set, and otherwise the two directories the
-//! retrieval engine's own tests look in. The rule is deliberately the same one:
-//! a build that can run those tests can run this function, and a build that
-//! cannot says so in the same words.
+//! `inillucent_core::install::model_dir`, which is the same function
+//! `inillucent setup-embeddings` writes into. So a person who has run that
+//! command has a working `embed(TEXT)` with nothing exported by hand, and
+//! `INILLUCENT_ONNX_DIR` stays as the override for a machine that keeps its
+//! weights somewhere the installer would never have put them.
+//!
+//! ## When the model is in memory
+//!
+//! Whatever [`Residency::configured`] says, which is
+//! `INILLUCENT_EMBED_RESIDENCY` first, then the profile the install recorded,
+//! then `idle:5m`. It matters here more than anywhere else: a `.rdb` file gets
+//! opened by processes that answer one question and exit, and holding 1.9 GB of
+//! weights for the life of one of those is the failure
+//! `docs/vector-residency.md` already describes for the vectors.
 
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use inillucent_base::{error, DbResult};
-use inillucent_core::embed_onnx::{OnnxEmbedder, OnnxOptions};
+use inillucent_core::embed_onnx::OnnxOptions;
+use inillucent_core::install;
+use inillucent_core::model::ModelManifest;
+use inillucent_core::residency::{ManagedEmbedder, Residency};
 use inillucent_value::Value;
 
-/// The environment variable naming the directory the weights are in.
-const MODEL_DIR: &str = "INILLUCENT_ONNX_DIR";
-
 /// The model this function embeds with.
-const MODEL: &str = "nomic-embed-text-v1.5";
+const MODEL: &str = install::DEFAULT_MODEL;
 
-/// Where the weights are looked for when the variable is not set.
-const ROOTS: [&str; 2] = [
-    "J:/inillucent-embeddings/models",
-    "~/.cache/inillucent-models",
-];
-
-/// The loaded embedder, and whether loading was even attempted.
+/// The managed embedder, and whether building one was even possible.
 ///
-/// A `Mutex` because the session is not `Sync` in the way a shared reference
-/// would need, and because two statements embedding at once would otherwise
-/// have to load it twice. The lock is held for one call to the model.
-static EMBEDDER: OnceLock<Mutex<Option<OnnxEmbedder>>> = OnceLock::new();
+/// A `OnceLock` because resolving the model directory reads the file system and
+/// two statements embedding at once should not both do it. The manager itself
+/// is what decides when the weights are in memory, so this holding a value does
+/// not mean the model is loaded.
+static EMBEDDER: OnceLock<Option<ManagedEmbedder>> = OnceLock::new();
 
-/// Returns the directory the weights are in, when there is one.
-fn model_dir() -> Option<PathBuf> {
-    if let Some(named) = std::env::var(MODEL_DIR).ok().map(PathBuf::from) {
-        return named.join("model.onnx").exists().then_some(named);
-    }
-    for root in ROOTS {
-        let root = match root.strip_prefix("~/") {
-            Some(rest) => PathBuf::from(std::env::var("HOME").ok()?).join(rest),
-            None => PathBuf::from(root),
-        };
-        let dir = root.join(MODEL);
-        if dir.join("model.onnx").exists() && dir.join("tokenizer.json").exists() {
-            return Some(dir);
-        }
-    }
-    None
+/// Builds the managed embedder, when this machine has a model to build it over.
+///
+/// The manifest is read from the model directory when it has one, and falls
+/// back to the baseline contract for `nomic-embed-text-v1.5` when it does not -
+/// which is the same rule the grading harness applies, and for the same reason:
+/// the baseline is the one model whose contract this repository knows by heart,
+/// and any other model without a manifest would be run on somebody else's
+/// prefixes.
+fn build() -> Option<ManagedEmbedder> {
+    let dir = install::model_dir(MODEL)?;
+    let manifest = ModelManifest::read(&dir).unwrap_or_else(|_| ModelManifest::nomic_v1_5());
+    let options = OnnxOptions::for_model(&manifest);
+    Some(ManagedEmbedder::new(
+        &dir,
+        manifest.model_file.clone(),
+        options,
+        Residency::configured(),
+    ))
+}
+
+/// The refusal a machine with no model installed gets.
+///
+/// It names the command that fixes it rather than the variable that would work
+/// around it, because a person reading this has almost always never installed
+/// the model and the command is one line.
+fn no_model() -> error::DbError {
+    error::misuse(format!(
+        "embed: no embedding model is installed. Run `inillucent setup-embeddings` to download \
+         {MODEL} and the ONNX Runtime it needs, or set {} to a directory that already holds them",
+        install::MODEL_DIR_VAR
+    ))
 }
 
 /// Returns one text's embedding as the bytes a `VECTOR(n)` column holds.
@@ -85,22 +104,12 @@ fn embed(arguments: &[Value<'static>]) -> DbResult<Value<'static>> {
         Some(Value::Integer(number)) => number.to_string(),
         Some(Value::Real(number)) => number.to_string(),
     };
-    let held = EMBEDDER.get_or_init(|| {
-        Mutex::new(
-            model_dir().and_then(|dir| OnnxEmbedder::open(&dir, OnnxOptions::default()).ok()),
-        )
-    });
-    let Ok(mut guard) = held.lock() else {
-        return Err(error::misuse("embed: the embedder is poisoned"));
-    };
-    let Some(embedder) = guard.as_mut() else {
-        return Err(error::misuse(format!(
-            "embed: no embedding model is loaded; set {MODEL_DIR} to the directory holding {MODEL}"
-        )));
+    let Some(embedder) = EMBEDDER.get_or_init(build) else {
+        return Err(no_model());
     };
     let vectors = embedder
         .embed_prefixed(&[text])
-        .map_err(|reason| error::misuse(format!("embed: {reason}")))?;
+        .map_err(|reason| error::misuse(format!("embed: {reason:#}")))?;
     let Some(vector) = vectors.first() else {
         return Err(error::misuse("embed: the model returned no vector"));
     };
@@ -141,5 +150,17 @@ mod tests {
         register(&mut registry);
         assert!(registry.function(b"embed", 1).is_some());
         assert!(registry.function(b"EMBED", 1).is_some());
+    }
+
+    /// The refusal names the command that installs the model.
+    ///
+    /// A person reading it has almost always never run the installer, and a
+    /// message that named only an environment variable would send them to
+    /// download five files by hand instead.
+    #[test]
+    fn the_refusal_names_the_command_that_fixes_it() {
+        let message = format!("{}", no_model());
+        assert!(message.contains("inillucent setup-embeddings"), "{message}");
+        assert!(message.contains(MODEL), "{message}");
     }
 }

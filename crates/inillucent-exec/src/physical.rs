@@ -2012,9 +2012,8 @@ pub(crate) struct Space<'c> {
     pub(crate) order: &'c [usize],
     /// Where an application-registered function's body is looked up.
     ///
-    /// `None` on the write path, whose row space is built from a layout rather
-    /// than from a catalog. A registered scalar reached from there refuses by
-    /// name rather than answering as though it were absent.
+    /// `None` on the write path and on the two constant folds with no catalog in
+    /// scope; a registered scalar there refuses by name - roadmap item 13.
     pub(crate) catalog: Option<&'c dyn TreeCatalog>,
     /// Which joined-row column each correlated subquery's answer sits in.
     ///
@@ -2150,7 +2149,8 @@ pub fn build_prepared<'t>(
     let folded = crate::subquery::fold(plan, catalog, params)?;
     let params = folded.as_ref().unwrap_or(params);
     let held = space_of(catalog, prepared)?;
-    let space = held.view(&prepared.stages);
+    let mut space = held.view(&prepared.stages);
+    space.catalog = Some(catalog);
     let chain = build_chain(plan, catalog, prepared, &space, params, sink)?;
     let (source, description) = source_for(plan, catalog, &space, params, prepared, chain.limit)?;
     let mut operators = chain.operators;
@@ -2809,7 +2809,8 @@ impl<'t> Statement<'t> {
             }
         }
         let source = {
-            let space = self.held.view(&self.prepared.stages);
+            let mut space = self.held.view(&self.prepared.stages);
+            space.catalog = Some(self.catalog);
             source_for(
                 self.plan,
                 self.catalog,
@@ -2850,7 +2851,8 @@ pub fn build_statement<'t>(
     // so they do not count against re-running.
     let before = params.reads();
     let chain = {
-        let space = held.view(&prepared.stages);
+        let mut space = held.view(&prepared.stages);
+        space.catalog = Some(catalog);
         build_chain(plan, catalog, &prepared, &space, params, sink)?
     };
     let rebindable = params.reads() == before;

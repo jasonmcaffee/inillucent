@@ -39,6 +39,8 @@
 //! | [`url`] | one connection URL, two schemes, and a `Display` that redacts the password |
 //! | [`auth`] | MD5, SHA-1, HMAC-SHA-256, PBKDF2-HMAC-SHA-256 and base64 |
 //! | [`stream`] | the socket, and the bounded reading both protocols are written against |
+//! | [`http`] | a verified `GET` to a file on disk, for `inillucent setup-embeddings` |
+//! | [`archive`] | zip and gzipped tar, far enough to take one file out |
 //! | [`tls`] | verified TLS, through the platform's own implementation |
 //! | [`postgres`] | the version 3 frontend/backend protocol |
 //! | [`mysql`] | the MySQL and MariaDB client protocol |
@@ -70,7 +72,9 @@
     )
 )]
 
+pub mod archive;
 pub mod auth;
+pub mod http;
 pub mod migrate;
 pub mod mysql;
 pub mod postgres;

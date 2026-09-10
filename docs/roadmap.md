@@ -143,6 +143,38 @@ for every metric. pgvector spells the same restriction as an operator class, and
 Every platform's archive is built on that platform, and there is no macOS build machine.
 `cargo install inillucent-cli` builds it from source in the meantime.
 
+## 13. A registered function cannot be called from the write path
+
+`embed(TEXT)` works in a projection, in a `WHERE` predicate, in an `ORDER BY` and in an
+`INSERT ... SELECT`. It is refused, with the `unsupported` status and exit code 3, in three places:
+
+```sql
+INSERT INTO note (body, v) VALUES (?1, embed(?1));   -- refused
+UPDATE note SET v = embed(body) WHERE id = 1;        -- refused
+INSERT INTO note (body) VALUES (?1) RETURNING embed(body);  -- refused
+```
+
+The reason is one field. The physical pass resolves a registered function's body through the
+catalog, and a `RowSpace` — the space the write path compiles its expressions against — is built
+from a table's layout rather than from a catalog, because a `RowSpace` is carried through about a
+dozen signatures and holding a borrow would put a lifetime on all of them. So the lookup finds
+nothing and the translation refuses by name rather than treating the function as absent, which is the
+right behaviour for a gap and the wrong behaviour to leave in place.
+
+**The fix is a catalog parameter on `RowSpace::compile` and on the callers that reach it**, every one
+of which already has a `Target` and therefore a `Target::catalog()`. It was scoped out of task-1900
+because that ticket's subject was installing the embedder rather than the DML expression path, and
+because the shape that matters for an embedding — `ORDER BY vector_distance_cos(v, embed('…'))` —
+was the half that could be fixed in three lines and was.
+
+`crates/inillucent-compat/tests/functions.rs` holds both halves:
+`a_registered_scalar_reaches_order_by_and_where` is what task-1900 made work, and
+`a_registered_scalar_in_a_values_row_refuses_by_name` pins what it did not, so closing this gap is a
+deliberate change to a named expectation rather than something that quietly starts working.
+
+Until then, `INSERT ... SELECT` is the documented shape for writing a computed vector, and it is what
+`docs/embeddings.md` and the search skill show.
+
 ## The failing tests
 
 Seventeen, all accounted for, and every one of them failed before the last two rounds of work as

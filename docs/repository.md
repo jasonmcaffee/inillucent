@@ -18,14 +18,24 @@ on the machine first:
 
 | feature | needs |
 |---|---|
-| `onnx` — the embedding model in process | the ONNX Runtime shared library, and `ORT_DYLIB_PATH` pointing at it |
+| `onnx` — the embedding model in process | the ONNX Runtime shared library |
 | `embed` — `embed(TEXT)` as a SQL function | the same, plus the weights |
+
+Both are installed by one command, on any of the three platforms:
+
+```sh
+inillucent setup-embeddings all
+```
+
+which is also how a developer gets them: nothing has to be exported afterwards, because the engine
+looks where the command put them. `ORT_DYLIB_PATH` and `INILLUCENT_ONNX_DIR` remain overrides for a
+machine that already has a copy somewhere else — which is what this repository's own grading
+harness uses, since its eight models live on a drive the installer would never write to.
 
 [Embeddings](embeddings.md) covers both.
 
 **On Windows**, Git Bash does not inherit the MSVC `INCLUDE` and `LIB` that `onig_sys` needs. Dump
-them out of `vcvars64.bat` once and export them into the shell before `cargo build`. `ORT_DYLIB_PATH`
-points at `onnxruntime.dll` from the GPU release rather than at a Homebrew dynamic library.
+them out of `vcvars64.bat` once and export them into the shell before `cargo build`.
 
 ## The crates
 

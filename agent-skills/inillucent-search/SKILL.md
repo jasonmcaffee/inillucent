@@ -17,6 +17,40 @@ Three surfaces, and picking the right one is most of the work:
 | keyword search over text | an **FTS5** table, with `bm25()` |
 | both at once over one corpus, fused and scored | an **`inillucent_search`** virtual table |
 
+## Where the vectors come from
+
+You can supply them, and most callers do. inillucent can also produce them, in this process, with no
+embedding server and no socket:
+
+```sh
+inillucent setup-embeddings all     # ONNX Runtime + nomic-embed-text-v1.5, about 620 MB, once
+```
+
+```sql
+INSERT INTO note (body, v) SELECT ?1, embed(?1);
+SELECT id FROM note ORDER BY vector_distance_cos(v, embed('flight details')) LIMIT 10;
+```
+
+`embed(TEXT)` returns the 3,072 bytes a `VECTOR(768)` column holds. Three things to know before
+reaching for it:
+
+- **It is behind `--features embed` and off by default.** A build that does not have it refuses by
+  name and tells you the command that installs the model, rather than returning a NULL or a vector of
+  zeroes. A vector whose provenance is unknown is worse than no vector: it goes into an index, and
+  every neighbour it is ever compared against is wrong.
+- **Nothing has to be exported after the install.** The engine finds the runtime and the weights
+  where the command put them. `ORT_DYLIB_PATH` and `INILLUCENT_ONNX_DIR` still override.
+- **Write it through `INSERT ... SELECT`, not `INSERT ... VALUES`.** A registered function in a
+  `VALUES` row, an `UPDATE ... SET` or a `RETURNING` clause is refused with the `unsupported`
+  status and exit code 3: the write path builds its row space from a layout rather than from a
+  catalog, so there is no function body to look up. `INSERT INTO t (...) SELECT ..., embed(?1)`
+  goes through the read path and works. `docs/roadmap.md` records the gap.
+- **Loading the model costs 650 to 800 ms and an embedding costs 12 to 36 ms**, so when it is in
+  memory matters. `--residency resident` keeps it, `on-demand` drops it after every call, and the
+  default `idle:5m` keeps it through a burst of questions and lets it go afterwards. A process that
+  answers one question and exits wants `on-demand`; an ingestion run wants `resident`.
+  → [Embeddings](../../docs/embeddings.md)
+
 ## Vectors, from ordinary SQL
 
 ```sql

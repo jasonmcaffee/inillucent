@@ -62,6 +62,113 @@ fn a_registered_scalar_is_callable() {
     assert_eq!(single(&connection, "SELECT twice(21)"), Some(42));
 }
 
+/// A registered scalar is callable from `ORDER BY` and from `WHERE`, not only
+/// from the projection.
+///
+/// **This was refused until task-1900.** The physical pass looks a registered
+/// function's body up through the catalog, and the space a statement's stages
+/// are viewed through carried no catalog - so the call worked in a projection,
+/// which builds its space elsewhere, and failed everywhere else with
+/// `unsupported`. Nobody had noticed because `embed(TEXT)` is the only
+/// registered function this workspace ships and it had only ever been called as
+/// `SELECT embed('...')`.
+///
+/// `ORDER BY` is the shape that matters: `ORDER BY vector_distance_cos(v,
+/// embed('a question')) LIMIT k` is what a semantic search *is*, and without
+/// this the function could not be used for the thing it exists for.
+#[test]
+fn a_registered_scalar_reaches_order_by_and_where() {
+    let connection = connect();
+    connection
+        .create_scalar_function(
+            "negate",
+            1,
+            FunctionFlags::external(),
+            Arc::new(|arguments: &[Value<'static>]| {
+                let value = arguments.first().and_then(Value::as_integer).unwrap_or(0);
+                Ok(Value::Integer(-value))
+            }),
+        )
+        .expect("registers");
+    connection
+        .execute("CREATE TABLE n (id INTEGER PRIMARY KEY, weight INTEGER)")
+        .expect("creates");
+    for (id, weight) in [(1, 10), (2, 30), (3, 20)] {
+        connection
+            .execute(&format!(
+                "INSERT INTO n (id, weight) VALUES ({id}, {weight})"
+            ))
+            .expect("inserts");
+    }
+
+    // Ordering by the function's value, which reverses the natural order of the
+    // weights: 30, 20, 10 becomes -30, -20, -10.
+    let rows = connection
+        .query("SELECT id FROM n ORDER BY negate(weight) LIMIT 3")
+        .expect("orders by the registered function");
+    let ordered: Vec<i64> = rows
+        .iter()
+        .filter_map(|row| row.first().and_then(Value::as_integer))
+        .collect();
+    assert_eq!(ordered, vec![2, 3, 1], "the heaviest row sorts first");
+
+    // And in a predicate, where the same lookup happens.
+    assert_eq!(
+        single(
+            &connection,
+            "SELECT count(*) FROM n WHERE negate(weight) < -15"
+        ),
+        Some(2)
+    );
+
+    // And in an INSERT that takes its rows from a SELECT, which is the shape
+    // `docs/embeddings.md` documents for writing a computed vector.
+    connection
+        .execute("CREATE TABLE m (id INTEGER PRIMARY KEY, weight INTEGER)")
+        .expect("creates");
+    connection
+        .execute("INSERT INTO m (id, weight) SELECT id, negate(weight) FROM n")
+        .expect("inserts from a select");
+    assert_eq!(single(&connection, "SELECT sum(weight) FROM m"), Some(-60));
+}
+
+/// A registered scalar in an INSERT's `VALUES` is refused by name rather than
+/// answered wrongly.
+///
+/// The write path builds its row space from a layout rather than from a
+/// catalog, so there is no body to look up, and it says so with the
+/// `unsupported` status rather than treating the function as absent. That is a
+/// gap rather than a design - `docs/roadmap.md` records it - and this test is
+/// here so that closing it is a deliberate change to a named expectation rather
+/// than something that quietly starts working.
+#[test]
+fn a_registered_scalar_in_a_values_row_refuses_by_name() {
+    let connection = connect();
+    connection
+        .create_scalar_function(
+            "negate",
+            1,
+            FunctionFlags::external(),
+            Arc::new(|arguments: &[Value<'static>]| {
+                let value = arguments.first().and_then(Value::as_integer).unwrap_or(0);
+                Ok(Value::Integer(-value))
+            }),
+        )
+        .expect("registers");
+    connection
+        .execute("CREATE TABLE n (id INTEGER PRIMARY KEY, weight INTEGER)")
+        .expect("creates");
+
+    let refused = connection
+        .execute("INSERT INTO n (id, weight) VALUES (1, negate(10))")
+        .expect_err("the write path has no catalog to resolve the body through");
+    let said = format!("{refused:?}");
+    assert!(
+        said.contains("negate"),
+        "the refusal names the function: {said}"
+    );
+}
+
 /// A registration replaces a built-in of the same name and arity.
 #[test]
 fn a_registration_overrides_a_builtin() {
