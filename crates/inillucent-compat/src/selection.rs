@@ -143,8 +143,18 @@ pub struct Tier {
     /// was removed" in that state.
     ///
     /// So the runner finishes everything else first and then runs an exclusive
-    /// tier on its own, one binary at a time. It costs the length of that tier
-    /// - nine seconds here - and it is what makes a timing guard mean anything.
+    /// tier on its own, one binary at a time **and one thread inside each
+    /// binary**. The second half was missing until task-1886: the tier got the
+    /// machine to itself among the binaries and then ran its own six guards two
+    /// at a time against each other, which is the same contention at a smaller
+    /// scale. It costs the length of that tier - about half a minute here.
+    ///
+    /// **What it cannot do is give the tier the box.** Four agent terminals and
+    /// a training run are outside this runner's reach, and that is the load that
+    /// actually broke `inillucent::budget` twice. Exclusivity is worth having
+    /// and it is not a fix; the fix was to stop asserting on a clock at all, and
+    /// `crates/inillucent/tests/budget.rs` now asserts on counts. This flag
+    /// protects the one ceiling left in that file.
     pub exclusive: bool,
 }
 

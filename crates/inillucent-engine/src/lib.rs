@@ -85,6 +85,7 @@ pub(crate) mod import;
 mod inspect;
 mod introspect;
 pub mod multi;
+mod plans;
 pub mod pragma;
 mod rebuild;
 pub mod vtab;
@@ -225,6 +226,22 @@ pub struct ImportedDatabase {
     /// Keyed by the statement text, which is what a caller re-issues. Behind an
     /// `Rc` so an entry can be held across the `&mut self` a write needs.
     statements: std::cell::RefCell<HashMap<u64, HashMap<String, std::rc::Rc<Cached>>>>,
+    /// How many statements this connection has actually compiled.
+    ///
+    /// **The counter a plan-cache guard needs, and the reason it is a counter.**
+    /// "Preparing the same statement again is answered from the cache" used to
+    /// be asserted as a ratio between two stopwatch readings, and a stopwatch
+    /// reading is decided by whatever else the machine is running: the same
+    /// assertion read 1.08x on an idle box and 6.6x on a loaded one, and failed
+    /// there while announcing that the plan cache was not being consulted. It
+    /// was. This number is 1 in both cases, because it counts the compilations
+    /// rather than timing them.
+    ///
+    /// It counts every call to [`ImportedDatabase::compile`], so a prepare
+    /// answered from the cache leaves it alone and a prepare that recompiled
+    /// moves it. A lever change, a new authorizer or a registration empties the
+    /// cache, and the compiles that follow are counted, because they were paid.
+    compiles: std::cell::Cell<u64>,
     /// The transaction every statement joins, when one has been opened.
     ///
     /// `None` is autocommit: each statement is its own transaction and pays for
@@ -1372,6 +1389,7 @@ impl ImportedDatabase {
             seed: std::cell::Cell::new(fresh_seed()),
             changed_ever: std::cell::Cell::new(0),
             statements: std::cell::RefCell::new(HashMap::new()),
+            compiles: std::cell::Cell::new(0),
             batch: std::cell::Cell::new(None),
             undo: std::cell::RefCell::new(Vec::new()),
             touched: 0,
@@ -1666,6 +1684,7 @@ impl ImportedDatabase {
             seed: std::cell::Cell::new(fresh_seed()),
             changed_ever: std::cell::Cell::new(0),
             statements: std::cell::RefCell::new(HashMap::new()),
+            compiles: std::cell::Cell::new(0),
             batch: std::cell::Cell::new(None),
             undo: std::cell::RefCell::new(Vec::new()),
             touched: 0,
@@ -4242,24 +4261,6 @@ impl ImportedDatabase {
         Ok(())
     }
 
-    /// Returns the key a compiled statement is held under.
-    ///
-    /// The lever mask and the session, packed. Two connections' plans are kept
-    /// apart because a temporary table makes the same text mean two different
-    /// tables; two lever settings' plans are kept apart because a plan built
-    /// with the covering-index rule on is that rule's answer.
-    fn plan_key(&self) -> u64 {
-        (self.session.get() << 32) | u64::from(self.levers.disabled())
-    }
-
-    /// Returns how many statements are compiled and held.
-    ///
-    /// The plan cache's size, which is what a test asserting that a
-    /// registration invalidated it asks about.
-    pub fn cached_plan_count(&self) -> usize {
-        self.statements.borrow().values().map(HashMap::len).sum()
-    }
-
     /// Puts the connection into or out of defensive mode.
     ///
     /// @param on - whether the flag is in force
@@ -4281,17 +4282,6 @@ impl ImportedDatabase {
     ) {
         self.authorizer = authorizer;
         self.statements.borrow_mut().clear();
-    }
-
-    /// Reports whether a compiled plan may be reused.
-    ///
-    /// Only when nothing can refuse a statement: an authorizer that could
-    /// answer differently this time has to be asked this time.
-    fn cacheable(&self) -> bool {
-        match &self.authorizer {
-            Some(held) => held.allows_everything(),
-            None => true,
-        }
     }
 
     /// Turns off one or more planner optimizations for this connection.
@@ -4788,60 +4778,6 @@ impl ImportedDatabase {
         inillucent_exec::subquery::fold_expressions(&values, self, params)
     }
 
-    /// Returns one statement compiled, from the cache or by compiling it.
-    ///
-    /// Everything that does not depend on the bound parameters happens here and
-    /// happens once: the parse, the bind, the plan and the structural choice.
-    /// What is left per execution is the parameters and the work.
-    ///
-    /// @param sql - the statement text
-    fn compiled(&self, sql: &str) -> DbResult<std::rc::Rc<Cached>> {
-        // **An authorizer that can refuse is asked every time.** A cached plan
-        // is a plan whose authorizer already said yes once, and reusing it
-        // would skip the callback on every later execution - so a connection
-        // with a real authorizer compiles per statement, which is what SQLite
-        // does for the same reason.
-        if !self.cacheable() {
-            return Ok(std::rc::Rc::new(self.compile(sql)?));
-        }
-        if !self.levers.has(Levers::PLAN_CACHE) {
-            // The lever is off, so nothing is held and every execution
-            // compiles. It exists so a measurement can price the compile.
-            return Ok(std::rc::Rc::new(self.compile(sql)?));
-        }
-        // **Keyed by the levers as well as the text, and nested rather than
-        // paired.** A plan built with the covering-index rule on is that rule's
-        // answer, so the same SQL under two settings is two entries rather than
-        // one the second setting silently inherits - which is what makes an A/B
-        // measurement of a lever trustworthy on a connection that has already
-        // run the other arm.
-        //
-        // The nesting is what keeps the *hit* free. A `(String, u32)` key has
-        // to be built before the map can be asked, so every lookup allocated a
-        // copy of the SQL - about 90 ns on a 1,163 ns compile, and paid again
-        // on every execution of an already-cached statement, which is the one
-        // path a plan cache exists to make cheap.
-        // **And by the session**, because `SELECT * FROM t` binds to a
-        // different table in a connection that has shadowed `t` with a `TEMP`
-        // one. Packed into one `u64` so the lookup stays a single hash of the
-        // SQL text: a paired key would have to be built before the map could be
-        // asked, which is an allocation on the one path a plan cache exists to
-        // make free.
-        let key = self.plan_key();
-        let held = self.statements.borrow();
-        if let Some(found) = held.get(&key).and_then(|under| under.get(sql)) {
-            return Ok(std::rc::Rc::clone(found));
-        }
-        drop(held);
-        let compiled = std::rc::Rc::new(self.compile(sql)?);
-        self.statements
-            .borrow_mut()
-            .entry(key)
-            .or_default()
-            .insert(sql.to_string(), std::rc::Rc::clone(&compiled));
-        Ok(compiled)
-    }
-
     /// Compiles an `EXPLAIN`, which the two forms of do different things.
     ///
     /// **`EXPLAIN QUERY PLAN` is answerable and plain `EXPLAIN` is not**, and
@@ -4918,6 +4854,9 @@ impl ImportedDatabase {
     ///
     /// @param sql - the statement text
     fn compile(&self, sql: &str) -> DbResult<Cached> {
+        // Counted here rather than at the three call sites, so a fourth path to
+        // a compilation cannot be added without moving this number with it.
+        self.compiles.set(self.compiles.get().saturating_add(1));
         // `EXPLAIN` is decided before binding, because the binder's job is the
         // statement being explained and not the explaining. The old engine did
         // this a level up, where a VDBE program was available to render; here

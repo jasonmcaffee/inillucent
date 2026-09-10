@@ -1,9 +1,10 @@
 //! The cost guards: the regressions that a correctness suite cannot see.
 //!
-//! Invariant: **every guard here is a ratio between two things measured in the
+//! Invariant: **every guard here is a ratio between two counts taken in the
 //! same run, or a ceiling so loose that only a change of complexity can cross
-//! it.** No guard is a stopwatch reading compared against a number somebody
-//! wrote down on a different machine.
+//! it.** Nothing here reads a clock and compares it against a number somebody
+//! wrote down, and after task-1886 nothing here reads a clock at all except the
+//! one ceiling that says so in its own name.
 //!
 //! ## Why ratios, and why that is not a dodge
 //!
@@ -24,8 +25,9 @@
 //! - one transaction around ten thousand inserts costs far less than ten
 //!   thousand transactions, because the second pays a commit each time - so a
 //!   commit path that started flushing per statement fails here;
-//! - preparing once and re-binding costs less than preparing each time, which
-//!   is what the plan cache is for;
+//! - preparing the same statement two hundred times compiles it once, because
+//!   the plan cache answers the other hundred and ninety-nine - so a cache that
+//!   stopped being consulted fails here;
 //! - the file is proportional to the data, not to the number of times it was
 //!   written - so a free list that stopped being reused fails here.
 //!
@@ -41,7 +43,7 @@
 //! twenty per cent. Something that fails one of these is broken rather than
 //! slow, which is why it is allowed to be a test at all.
 //!
-//! ## When a guard here flaps, count something instead
+//! ## Nothing here is a stopwatch, and that took three attempts
 //!
 //! This file used to say that a flapping guard should be widened, or moved to a
 //! gate. It was widened - `one_transaction_beats_many` went from 4 to 2 - and it
@@ -66,26 +68,53 @@
 //! costs the arm that syncs 2,000 times more. No threshold survives that, which
 //! is why the answer is not a threshold.
 //!
-//! There are two better answers, and they are both used below.
+//! **The second attempt kept the clock and made it fairer.** The three ratios
+//! about which plan was chosen ran five interleaved rounds and took the median,
+//! so a load spike landed on both arms and the worst round was discarded. That
+//! is a better clock and it is still a clock: the next contended run moved the
+//! failure to `re_preparing_is_cached_rather_than_recompiled`, which read 6.6x
+//! against a bound of 4 and announced that the plan cache was not being
+//! consulted. It was. The reprepare arm had been descheduled.
 //!
-//! - **Count the work rather than timing it.** `one_transaction_beats_many` now
-//!   asserts on log writes, 1 against 2,000, which is the same number on an idle
-//!   machine and on a loaded one. Where a claim can be made as a count, it is
-//!   made as a count.
-//! - **Where it must stay a clock, interleave the arms and take a median.** The
-//!   three ratios that are about which plan was chosen have no counter to move
-//!   to, so they run five paired rounds through [`paired_ratio`] rather than
-//!   timing arm A once and then arm B once. See that function for why.
+//! **So the third attempt has no clock in it.** Every ratio below is a ratio of
+//! counts:
+//!
+//! | guard | what it counts | idle | broken |
+//! |---|---|---|---|
+//! | `an_index_beats_a_scan` | pages fetched | 33 against 2 | 33 against 33 |
+//! | `one_transaction_beats_many` | log writes | 1 against 2,000 | 1 against 1 |
+//! | `re_preparing_is_cached_rather_than_recompiled` | statements compiled | 1 for 200 prepares | 200 |
+//! | `a_keyset_page_costs_the_same_wherever_it_starts` | pages fetched | 502 against 502 | ~20,000 against 502 |
+//!
+//! A count reads the same on an idle machine and on a loaded one, which a
+//! processor-time reading does not quite: the arm that touches more memory
+//! loses more cycles under a 24-wide test pool, and the two arms of these guards
+//! touch very different amounts of memory. `tasks/task-1886-a-guard-the-box-cannot-decide-tdd.md`
+//! has the whole argument, including why the processor-time primitive that
+//! `inillucent-compat` already owns was not moved down into `inillucent-base` to
+//! serve this file.
+//!
+//! One clock is left, in `a_full_scan_is_linear_enough_to_finish`. Its own doc
+//! comment says what it is for - a quadratic that does no extra I/O, which no
+//! count in this file can see - and why 3 ms against a ten-second bound is not a
+//! number this box decides.
+//!
+//! ## An assertion says what it measured, and stops
+//!
+//! No message here names a cause. `- the cache is not being consulted` was
+//! printed by a guard whose cache was fine, and whoever read it would have gone
+//! looking for a defect that did not exist. A guard reports the two numbers and
+//! what it expected of them; working out why is the reader's job and the reader
+//! has the whole repository to do it with.
 //!
 //! This is the `perf` tier, and the runner gives it the machine to itself among
-//! the test binaries - but that says nothing about the rest of the box, which is
-//! the load that actually broke this file.
+//! the test binaries and runs it with one test thread, so its own guards do not
+//! contend with each other either.
 
-use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use inillucent::{Connection, Database, OwnedDatum};
+use inillucent::{Connection, Database, Levers, OwnedDatum};
 
 /// How many rows the guards build their table from.
 ///
@@ -143,56 +172,19 @@ fn build(path: &PathBuf) -> Database {
     database
 }
 
-/// Times a closure, running it once first so a cold plan is not the measurement.
+/// Returns how many pages the pool has been asked for since the file opened.
 ///
-/// @param rounds - how many times to run it
-/// @param work - what to time
-fn measure(rounds: u32, mut work: impl FnMut()) -> Duration {
-    work();
-    let started = Instant::now();
-    for _ in 0..rounds {
-        work();
-    }
-    started.elapsed()
-}
-
-/// Returns the median of `rounds` ratios, each taken from one run of each arm.
+/// **Fetches rather than reads.** `reads` counts the ones that missed the pool
+/// and went to the file, so a guard built on it would be asserting something
+/// about the pool's size: every arm below reads 0, because these fixtures fit
+/// in the pool. `hits + misses` is every page the engine asked for, which is
+/// the work the engine did rather than the work the disk did, and it is the
+/// same number on an idle machine and on a loaded one.
 ///
-/// **Why a median of paired rounds rather than one reading of each arm.**
-/// Timing arm A, then timing arm B, and dividing gives a number
-/// that moves with whatever else the machine was doing between the two - and it
-/// moves asymmetrically, because a scheduler takes more from an arm that is
-/// spending its time on the processor than from one that is waiting on a file.
-/// A guard built that way fails on a busy box and teaches everybody to re-run
-/// it, which is worse than not having it.
-///
-/// Interleaving puts the two arms next to each other in time, so a load spike
-/// that arrives partway through the test lands on both. Taking the median then
-/// discards the round it landed hardest on. A real regression is in every round
-/// and the median moves with it.
-///
-/// @param rounds - how many paired rounds to take; an odd number, so the median
-///   is a reading rather than an average of two
-/// @param repeats - how many times each arm runs inside one round
-/// @param numerator - the arm on top of the ratio
-/// @param denominator - the arm underneath it
-fn paired_ratio(
-    rounds: usize,
-    repeats: u32,
-    mut numerator: impl FnMut(),
-    mut denominator: impl FnMut(),
-) -> f64 {
-    let mut ratios = Vec::with_capacity(rounds);
-    for _ in 0..rounds {
-        let top = measure(repeats, &mut numerator);
-        let bottom = measure(repeats, &mut denominator);
-        ratios.push(top.as_secs_f64() / bottom.as_secs_f64().max(f64::EPSILON));
-    }
-    ratios.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
-    match ratios.get(rounds / 2) {
-        Some(ratio) => *ratio,
-        None => panic!("a paired ratio needs at least one round"),
-    }
+/// @param database - the database to ask
+fn fetches(database: &Database) -> u64 {
+    let stats = database.cache_stats();
+    stats.hits.saturating_add(stats.misses)
 }
 
 /// Inserts `count` rows of one integer column, one statement per row.
@@ -229,12 +221,26 @@ fn one(rows: &[Vec<OwnedDatum>]) -> i64 {
 
 /// An index makes a point lookup cheaper than a scan of the same table.
 ///
-/// Measured on a 24-core Windows machine at 20,000 rows: the scan costs about
-/// **200 times** the seek. The guard asks for 5, which no correct planner using
-/// the index can fail and no planner that stopped using it can pass.
+/// **What is counted, and why it is not the clock any more.** Both arms ask the
+/// same question of the same 20,000 rows, and the guard is the number of pages
+/// the pool was asked for while each one answered. Measured here, with both
+/// arms run once first so neither pays for a plan the other already has:
+/// **33 fetches for the scan and 2 for the seek**. The scan's count grows with
+/// the table and the seek's does not - it is an index descent and one row - so
+/// the margin widens as `ROWS` does rather than narrowing.
+///
+/// A planner that stopped using the index makes the seek arm a scan, both arms
+/// read 33, and the ratio falls to 1. That was measured, by pointing both arms
+/// at the scan. The guard asks for 4, which is bounded away from a broken
+/// reading rather than away from a slow one - and that is the whole difference
+/// between a count and a stopwatch, whose 200x margin was that wide because its
+/// noise was.
 ///
 /// The `+email` in the scan arm is what stops the planner using the index for
-/// it: it is the same question, asked in a way the index cannot answer.
+/// it: it is the same question, asked in a way the index cannot answer. The
+/// `explain` assertion below is what keeps the instrument live - without it, a
+/// planner that used the index for neither arm would read 33 against 33, fail,
+/// and be right to.
 #[test]
 fn an_index_beats_a_scan() {
     let directory = scratch("index");
@@ -244,32 +250,40 @@ fn an_index_beats_a_scan() {
     let plan = connection
         .explain("SELECT id FROM t WHERE email = 'person9999@example.com'")
         .expect("the plan is explained")
-        .join("\n");
+        .join(" | ");
     assert!(
         plan.contains("t_email"),
-        "the index is not being used at all, so the ratio below would measure nothing:\n{plan}"
+        "the index is not being used at all, so the counts below would measure \
+         nothing: {plan}"
     );
 
-    let ratio = paired_ratio(
-        5,
-        5,
-        || {
-            let rows = connection
-                .query("SELECT id FROM t WHERE +email = 'person9999@example.com'")
-                .expect("the scan runs");
-            assert_eq!(one(&rows), 9_999);
-        },
-        || {
-            let rows = connection
-                .query("SELECT id FROM t WHERE email = 'person9999@example.com'")
-                .expect("the seek runs");
-            assert_eq!(one(&rows), 9_999);
-        },
+    let scan_sql = "SELECT id FROM t WHERE +email = 'person9999@example.com'";
+    let seek_sql = "SELECT id FROM t WHERE email = 'person9999@example.com'";
+    let run = |sql: &str| {
+        let rows = connection.query(sql).expect("the query runs");
+        assert_eq!(one(&rows), 9_999);
+    };
+    // Once each first, so neither arm pays for a plan the other already has.
+    run(scan_sql);
+    run(seek_sql);
+
+    let before = fetches(&database);
+    run(scan_sql);
+    let between = fetches(&database);
+    run(seek_sql);
+    let after = fetches(&database);
+    let scan = between.saturating_sub(before);
+    let seek = after.saturating_sub(between);
+
+    assert!(
+        seek > 0,
+        "the seek fetched no pages at all, so the comparison below would be \
+         against nothing"
     );
     assert!(
-        ratio >= 5.0,
-        "a seek should be far cheaper than a scan of {ROWS} rows, but across five \
-         paired rounds the scan was only {ratio:.1}x the seek"
+        scan >= seek.saturating_mul(4),
+        "a scan and a seek over {ROWS} rows fetched {scan} and {seek} page(s); \
+         the guard asks the scan for at least four times the seek"
     );
 }
 
@@ -376,21 +390,34 @@ fn one_transaction_beats_many() {
     );
 }
 
-/// Preparing the same statement again is nearly free, and does not grow the
-/// plan cache.
+/// Preparing the same statement again is answered from the plan cache, and does
+/// not grow it.
 ///
-/// This guard was originally written the other way round - "re-binding must
-/// beat re-preparing" - on the assumption that preparing recompiles. It does
-/// not: measured here, re-preparing 200 times costs **1.08x** re-binding,
-/// because the plan cache answers the second prepare from the first. The
-/// assumption was wrong and the measurement is the better guard, so the test
-/// asserts what is actually true and what would actually break.
+/// **This guard is the reason the whole file stopped using a clock.** It was a
+/// ratio of two wall-clock readings, and on a box with two other jobs on it it
+/// read 6.6x against a bound of 4 and failed - saying, in the failure message,
+/// that the plan cache was not being consulted. The plan cache was fine. The
+/// arm that reprepares had been descheduled, and the same test passed six times
+/// out of six when run on its own.
 ///
-/// Two things break it. A plan cache that stopped caching sends the ratio up,
-/// because every prepare recompiles. A cache that stopped being *bounded* -
-/// keyed on something that varies per call, say - leaves the ratio alone and
-/// grows the cache without limit, which is a leak no timing notices. So both
-/// are asserted.
+/// It counts compilations instead. `Connection::compiled_statement_count`
+/// increments inside the one function that turns SQL text into a plan, so a
+/// prepare answered from the cache does not move it and a prepare that
+/// recompiled does. Two hundred prepares of one statement move it by **1**, on
+/// any machine and under any load.
+///
+/// **The instrument is proved live in the same run.** A counter that had stopped
+/// counting would read 0 and pass, which is the failure §1.5 of the testing
+/// standard is about. So a second database runs the identical loop with
+/// `Levers::PLAN_CACHE` switched off - the lever exists precisely so a
+/// measurement can price the compile - and that arm must read 200. One run
+/// therefore shows the cache saving 199 compilations and shows the counter able
+/// to report them.
+///
+/// A second defect leaves the compile count alone: a cache that is consulted but
+/// no longer *bounded*, keyed on something that varies per call, grows without
+/// limit while every prepare still hits. That is a leak no count of compilations
+/// notices, so the cache's size is asserted as well.
 #[test]
 fn re_preparing_is_cached_rather_than_recompiled() {
     let directory = scratch("prepare");
@@ -398,47 +425,59 @@ fn re_preparing_is_cached_rather_than_recompiled() {
     let connection = database.connect();
 
     let sql = "SELECT id FROM t WHERE email = ?1";
+    let rounds = 200;
     let before = connection.cached_plan_count();
-    let mut statement = connection.prepare(sql).expect("the statement prepares");
-    let ratio = paired_ratio(
-        5,
-        40,
-        || {
-            let mut fresh = connection.prepare(sql).expect("the statement prepares");
-            fresh
-                .bind_text(1, "person12345@example.com")
-                .expect("the email binds");
-            let mut seen = 0;
-            while fresh.step().expect("the query steps") {
-                seen += 1;
-            }
-            assert_eq!(seen, 1);
-        },
-        || {
-            statement.reset();
-            statement
-                .bind_text(1, "person12345@example.com")
-                .expect("the email binds");
-            let mut seen = 0;
-            while statement.step().expect("the query steps") {
-                seen += 1;
-            }
-            assert_eq!(seen, 1);
-        },
-    );
-    drop(statement);
+    let compiles_before = connection.compiled_statement_count();
+    for _ in 0..rounds {
+        let mut fresh = connection.prepare(sql).expect("the statement prepares");
+        fresh
+            .bind_text(1, "person12345@example.com")
+            .expect("the email binds");
+        let mut seen = 0;
+        while fresh.step().expect("the query steps") {
+            seen += 1;
+        }
+        assert_eq!(seen, 1);
+    }
+    let cached_compiles = connection
+        .compiled_statement_count()
+        .saturating_sub(compiles_before);
     let after = connection.cached_plan_count();
 
+    // The same loop with the cache switched off, so this run contains a reading
+    // of what "not cached" costs rather than a claim about it.
+    let uncached_directory = scratch("prepare-uncached");
+    let uncached_database = build(&uncached_directory.join("b.rdb"));
+    let uncached = uncached_database.connect();
+    uncached.disable_optimizations(Levers::PLAN_CACHE);
+    let uncached_before = uncached.compiled_statement_count();
+    for _ in 0..rounds {
+        let mut fresh = uncached.prepare(sql).expect("the statement prepares");
+        fresh
+            .bind_text(1, "person12345@example.com")
+            .expect("the email binds");
+        while fresh.step().expect("the query steps") {}
+    }
+    let uncached_compiles = uncached
+        .compiled_statement_count()
+        .saturating_sub(uncached_before);
+
+    assert_eq!(
+        uncached_compiles, rounds as u64,
+        "with the plan cache switched off, {rounds} prepares of one statement \
+         compiled it {uncached_compiles} time(s) rather than {rounds}; the \
+         counter the assertion below reads is not counting compilations"
+    );
     assert!(
-        ratio <= 4.0,
-        "preparing the same statement again should be answered from the plan \
-         cache, but across five paired rounds it cost {ratio:.1}x re-binding - \
-         the cache is not being consulted"
+        cached_compiles <= 1,
+        "{rounds} prepares of one statement compiled it {cached_compiles} \
+         time(s), against {uncached_compiles} with the plan cache switched off; \
+         the guard asks for at most one"
     );
     assert!(
         after <= before + 1,
-        "two hundred prepares of one statement grew the plan cache from {before} \
-         to {after}; it is keyed on something that varies per call"
+        "{rounds} prepares of one statement grew the plan cache from {before} \
+         to {after}; the guard asks for at most one new entry"
     );
 }
 
@@ -530,31 +569,54 @@ fn file_bytes(path: &PathBuf) -> u64 {
     total
 }
 
-/// Reading every row of a large table finishes in a time only a change of
-/// complexity could cross.
+/// Reading every row of a large table stays proportional to the table.
 ///
-/// This is the one absolute ceiling in the file, and it is set at roughly a
-/// hundred times what it measures - twenty thousand rows scanned in well under
-/// a tenth of a second here. It exists to catch an accidental quadratic, which
-/// no ratio in this file would notice because both of its arms would slow down
-/// together.
+/// **The one remaining clock in this file, and it is a ceiling rather than a
+/// ratio.** It exists to catch an accidental quadratic, which no ratio here
+/// would notice because both arms of a ratio would slow down together.
+///
+/// An accidental quadratic has two shapes and they need two instruments:
+///
+/// - one re-reaches for rows it already has - re-descending the tree per row,
+///   say - and that shows up as **pages fetched**. Measured here, a scan of
+///   20,000 rows fetches **20** pages; the guard asks for at most 200, which
+///   is the whole table ten times over.
+/// - the other is quadratic *inside* the rows already fetched, does no extra
+///   I/O at all, and shows up only as time. Measured here at **2.99 ms**; the
+///   guard asks for under ten seconds.
+///
+/// **Why a clock is acceptable here when it is nowhere else in this file.** The
+/// headroom is 3,300x. The worst load factor this repository has measured is
+/// about 50x - `inillucent::budget` taking 43 to 55 seconds under a 24-wide
+/// `--strict` run against 1 to 3 seconds alone - so the bound has sixty times
+/// more room than the worst load anybody has seen here. The ratios that were
+/// removed from this file had margins of 4x against noise that reached 6.6x,
+/// which is the difference.
 #[test]
 fn a_full_scan_is_linear_enough_to_finish() {
     let directory = scratch("scan");
     let database = build(&directory.join("b.rdb"));
     let connection = database.connect();
+    let before = fetches(&database);
     let started = Instant::now();
     let rows = connection
         .query("SELECT count(*), sum(bucket) FROM t")
         .expect("the scan runs");
     let elapsed = started.elapsed();
+    let fetched = fetches(&database).saturating_sub(before);
     match rows.first().map(Vec::as_slice) {
         Some([OwnedDatum::Int(count), OwnedDatum::Int(_)]) => assert_eq!(*count, ROWS),
         other => panic!("expected a count and a sum, got {other:?}"),
     }
     assert!(
+        fetched <= 200,
+        "scanning {ROWS} rows fetched {fetched} page(s); the guard asks for at \
+         most 200, which is the whole table ten times over"
+    );
+    assert!(
         elapsed < Duration::from_secs(10),
-        "scanning {ROWS} rows took {elapsed:?}, which is not a linear scan"
+        "scanning {ROWS} rows took {elapsed:?} and fetched {fetched} page(s); \
+         the guard asks for under ten seconds"
     );
 }
 
@@ -577,13 +639,23 @@ fn a_full_scan_is_linear_enough_to_finish() {
 /// fell to a `TopN`, and a `TopN` is a pipeline breaker - it reads every row of
 /// the range before it emits one.
 ///
-/// **The shape is what is asserted, not a number.** A page at the start of the
-/// table and a page near the end of it do the same amount of work, so their
-/// costs are within a small factor of each other. Measured on a 60,000-row
-/// fixture before the fix: 88.3 ms at the start against 3.7 ms near the end,
-/// which is 24x the wrong way round. After it: 5.2 ms and 5.3 ms. The guard
-/// asks for 4x, which no correct plan can fail and the quadratic one cannot
-/// pass.
+/// **The shape is what is asserted, and it is asserted as a count of pages
+/// rather than as a stopwatch.** A page at the start of the table and a page
+/// near the end of it do the same amount of work, so they ask the pool for the
+/// same number of pages: measured here, **502 fetches at each end**. The guard
+/// asks the start arm for at most four times the end arm.
+///
+/// **The instrument is proved live in the same run.** The pipeline breaker read
+/// every row of the range, so a third arm reads exactly that - the same query
+/// with the limit taken off - and it costs **20,014 fetches against the page's
+/// 502**, which is 39.9x. That number is measured beside the assertion rather
+/// than quoted from the bug report, so a fixture that had quietly shrunk, or a
+/// counter that had stopped counting, fails here instead of passing quietly.
+///
+/// This used to be a ratio of two wall-clock readings, at 88.3 ms against 3.7 ms
+/// before the fix and 5.2 against 5.3 after it. Those numbers are what the
+/// defect looked like; they are not what the guard reads, because on a busy
+/// machine two readings 0.1 ms apart are decided by the scheduler.
 ///
 /// The projection is deliberately **not** covered by the index. A key-only
 /// projection was always flat, because the index answers it without touching
@@ -626,12 +698,51 @@ fn a_keyset_page_costs_the_same_wherever_it_starts() {
         let rows = connection.query(&sql).expect("the page reads");
         assert_eq!(rows.len(), page, "the page is full at {after}");
     };
+    // The same range with no limit on it, which is what the pipeline breaker
+    // this test was written for made the start arm cost. It is read here rather
+    // than quoted from the bug report, so the run that asserts the guard also
+    // contains the number the guard is bounded against.
+    let whole_range = || {
+        let rows = connection
+            .query("SELECT id, body FROM chunk WHERE id > 'chunk-000000000' ORDER BY id")
+            .expect("the whole range reads");
+        assert_eq!(rows.len(), ROWS as usize - 1);
+    };
+    let last = ROWS - page as i64 - 1;
+    // Once each first, so no arm pays for a plan another already has.
+    read(0);
+    read(last);
+    whole_range();
 
-    let ratio = paired_ratio(5, 1, || read(0), || read(ROWS - page as i64 - 1));
+    let before = fetches(&database);
+    read(0);
+    let between = fetches(&database);
+    read(last);
+    let after = fetches(&database);
+    whole_range();
+    let materialised = fetches(&database).saturating_sub(after);
+    let start = between.saturating_sub(before);
+    let end = after.saturating_sub(between);
+
     assert!(
-        ratio <= 4.0,
-        "across five paired rounds a page at the start of the table cost \
-         {ratio:.1}x one at the end; the work is proportional to the rows after \
-         the key rather than to the limit"
+        end > 0,
+        "the page near the end of the table fetched no pages at all, so the \
+         comparison below would be against nothing"
+    );
+    // The instrument is live. Reading the range costs 20,014 fetches here
+    // against the page's 502, so the bound below is one a pipeline breaker
+    // crosses by forty times rather than one nothing in this fixture can reach.
+    assert!(
+        materialised >= start.saturating_mul(4),
+        "reading the whole range fetched {materialised} page(s) and reading one \
+         page of {page} rows from the same key fetched {start}; the two are \
+         close enough that the bound below could not tell them apart"
+    );
+    assert!(
+        start <= end.saturating_mul(4),
+        "a page of {page} rows at the start of a {ROWS}-row table fetched \
+         {start} page(s) and one near the end fetched {end}, against \
+         {materialised} for the whole range; the guard asks the start for at \
+         most four times the end"
     );
 }

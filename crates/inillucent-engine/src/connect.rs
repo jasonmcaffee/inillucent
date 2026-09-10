@@ -530,6 +530,17 @@ impl<'d> Connection<'d> {
         self.engine().cached_plan_count()
     }
 
+    /// Returns how many statements this connection has compiled since it opened.
+    ///
+    /// What a plan cache is for is that the second prepare of a statement does
+    /// not compile it again, and this is the number that says whether it did.
+    /// It is here rather than only in the engine because
+    /// `crates/inillucent/tests/budget.rs` asserts on it, and that file writes
+    /// against this facade.
+    pub fn compiled_statement_count(&self) -> u64 {
+        self.engine().compiled_statement_count()
+    }
+
     /// Turns off one or more planner optimizations for this connection.
     ///
     /// @param mask - the levers to switch off

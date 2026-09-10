@@ -476,6 +476,17 @@ fn a_rollback_after_a_flush_is_not_replayed() {
 ///
 /// The same contention, twice, with only the timeout different - which is what
 /// "shows the behaviour changing" means.
+///
+/// **Which of the two happened is read off the slot's own counters rather than
+/// off a stopwatch.** Both arms used to assert an elapsed time as well - under
+/// 50 ms for the refusal, under 350 ms for the wait - and neither reading says
+/// anything the counters do not: `timed_out` rising with `waited` unmoved *is*
+/// a refusal, and `waited` rising on an acquisition that succeeded *is* a wait
+/// that ended when the slot freed. What a wall-clock bound adds is a way for
+/// the test to fail on a busy machine, which task-1886 saw a bound of the same
+/// kind do in `inillucent-compat::new_engine_vtab_stream`. The durations are
+/// still measured, and they are reported in the failure messages, where a
+/// number that cannot decide anything belongs.
 #[test]
 fn busy_timeout_decides_whether_a_second_writer_waits() {
     let (_, _, engine) = fresh(Synchronous::Full);
@@ -489,7 +500,16 @@ fn busy_timeout_decides_whether_a_second_writer_waits() {
         .expect_err("a second writer must be refused");
     let waited = started.elapsed();
     assert_eq!(refused.code(), inillucent_base::PrimaryCode::Busy);
-    assert!(waited < std::time::Duration::from_millis(50));
+    let refusal = engine.slot().stats();
+    assert_eq!(
+        (refusal.waited, refusal.timed_out),
+        (0, 1),
+        "with `busy_timeout` at zero the second writer waited {} time(s) and \
+         gave up {} time(s) after {waited:?}; it should have given up once \
+         without waiting at all",
+        refusal.waited,
+        refusal.timed_out
+    );
 
     // A deferred transaction still begins: it takes no slot until it writes.
     let mut deferred = engine.begin(Begin::Deferred).expect("a reader begins");
@@ -521,14 +541,21 @@ fn busy_timeout_decides_whether_a_second_writer_waits() {
     let waited = started.elapsed();
     releaser.join().expect("the releasing thread");
     assert!(taken.is_writer());
-    assert!(
-        waited < std::time::Duration::from_millis(350),
-        "the waiter took {waited:?} to notice a slot freed after 50 ms"
+    // One acquisition waited and got the slot, and the two refusals above are
+    // the only ones that gave up. An acquisition that had sat out the whole
+    // 400 ms would have returned BUSY instead of a writer, so the `expect`
+    // above is what rules that out and this is what says it waited at all
+    // rather than finding the slot already free.
+    let contended = engine.slot().stats();
+    assert_eq!(
+        (contended.waited, contended.timed_out),
+        (1, 2),
+        "with `busy_timeout` at 400 ms and the slot freed after 50, the slot \
+         recorded {} wait(s) and {} timeout(s) over {waited:?}",
+        contended.waited,
+        contended.timed_out
     );
-    assert_eq!(engine.slot().stats().waited, 1);
-    assert_eq!(engine.slot().stats().timed_out, 2);
 }
-
 /// A savepoint through a transaction rolls back exactly what came after it.
 #[test]
 fn a_savepoint_through_a_transaction_rolls_back_what_came_after_it() {
